@@ -8,6 +8,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .harness_profiles import harness_profile
+
 
 @dataclass(frozen=True)
 class HarborRunSpec:
@@ -22,6 +24,8 @@ class HarborRunSpec:
     prepared_cache_root: Path
     jobs_dir: Path
     model: str = "deepseek-v4-flash-meituan"
+    harness: str = "tofu"
+    allow_guest_credentials: bool = False
     python_runtime_image: str | None = None
     job_name: str | None = None
     oracle: bool = False
@@ -56,6 +60,21 @@ def _resolved_executable(value: str) -> str:
 
 
 def harbor_argv(spec: HarborRunSpec) -> list[str]:
+    profile = harness_profile(spec.harness)
+    if profile.profile_id == "codex-kimi":
+        raise ValueError(
+            "codex-kimi requires the formal evaluations.swebench launcher so "
+            "the host-only proxy lifecycle and evidence shards are enforced"
+        )
+    if (
+        not spec.oracle
+        and profile.requires_guest_credentials
+        and not spec.allow_guest_credentials
+    ):
+        raise PermissionError(
+            f"harness {profile.profile_id!r} requires explicitly authorized, "
+            "short-lived guest credentials"
+        )
     task_path = spec.task_path.expanduser().resolve(strict=True)
     if not task_path.is_dir():
         raise ValueError(f"task path must be a directory: {task_path}")
@@ -75,7 +94,7 @@ def harbor_argv(spec: HarborRunSpec) -> list[str]:
         (
             "oracle"
             if spec.oracle
-            else "rootless_vm.harbor_tofu_agent:TofuHostAgent"
+            else profile.harbor_agent
         ),
         "--env",
         "rootless_vm.harbor_environment:RootlessQemuEnvironment",

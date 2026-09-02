@@ -30,6 +30,9 @@ from tests._nc_harness import patch_restore as _patch_restore
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _CHARTER_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_charter.py')
@@ -37,22 +40,11 @@ _CONTEXT_PROVIDERS_SRC = os.path.join(
     ROOT, 'lib', 'tasks_pkg', 'context_composer', '_providers.py')
 
 
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
-
-
 @pytest.fixture(autouse=True)
-def _clean(flask_app):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_charter')
-        db.execute('DELETE FROM project_events')
-        db.commit()
+def _clean(chat_sidecar):
+    import tests._seed as seed
+    seed.clear_records('project_charter')
+    seed.clear_events()
     yield
 
 
@@ -71,18 +63,17 @@ def _stub_derived_background_lanes(monkeypatch):
     monkeypatch.setattr(project_watch, 'address_open_items', lambda *a, **k: None)
 
 
-def _charter_rows(flask_app, project_path):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        return db.execute('SELECT * FROM project_charter WHERE project_path=?',
-                          (project_path,)).fetchall()
+def _charter_exists(project_path):
+    """Sidecar-mode replacement for the legacy raw ``SELECT project_charter``
+    probe: asks the public read path whether a charter record exists."""
+    from lib.conversations.project_charter import read_charter
+    return read_charter(project_path, user_id=TEST_OWNER_USER_ID)['exists']
 
 
 def _feed_kinds(flask_app, project_path):
     from lib.conversations.project_feed import read_project_feed
     with flask_app.app_context():
-        feed = read_project_feed(project_path, limit=500)
+        feed = read_project_feed(project_path, limit=500, user_id=TEST_OWNER_USER_ID)
     return [e['kind'] for e in feed['events']]
 
 
@@ -96,11 +87,11 @@ def test_commit_then_read(flask_app):
         # content and add_decision are mutually exclusive (one call = one
         # operation), so the north star and the decision are two commits.
         assert commit_charter('/p/c', content='Ship Pillar 2.',
-                              updated_by_conv='cA')['ok']
+                              updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)['ok']
         r = commit_charter('/p/c', add_decision='Use soft leases.',
-                           summary='Use soft leases.', updated_by_conv='cA')
+                           summary='Use soft leases.', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
         assert r['ok'] and r['version'] == 2
-        rec = read_charter('/p/c')
+        rec = read_charter('/p/c', user_id=TEST_OWNER_USER_ID)
     assert rec['content'] == 'Ship Pillar 2.'
     assert rec['version'] == 2
     assert any(d['text'] == 'Use soft leases.' for d in rec['decisions'])
@@ -110,26 +101,26 @@ def test_commit_then_read(flask_app):
 def test_empty_read(flask_app):
     from lib.conversations.project_charter import read_charter
     with flask_app.app_context():
-        rec = read_charter('/p/empty')
+        rec = read_charter('/p/empty', user_id=TEST_OWNER_USER_ID)
     assert rec['exists'] is False and rec['version'] == 0 and rec['content'] == ''
 
 
 def test_optimistic_lock_rejects_stale_commit(flask_app):
     from lib.conversations.project_charter import commit_charter
     with flask_app.app_context():
-        assert commit_charter('/p/lock', content='v1', updated_by_conv='cA')['ok']
+        assert commit_charter('/p/lock', content='v1', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)['ok']
         # version is now 1. A commit expecting version 0 must be REJECTED.
         stale = commit_charter('/p/lock', content='clobber',
-                               expected_version=0, updated_by_conv='cB')
+                               expected_version=0, updated_by_conv='cB', user_id=TEST_OWNER_USER_ID)
         assert stale['ok'] is False
         assert stale['error'] == 'version_conflict'
         assert stale['current_version'] == 1
         # A commit with the CORRECT expected_version succeeds.
         ok = commit_charter('/p/lock', content='v2',
-                            expected_version=1, updated_by_conv='cB')
+                            expected_version=1, updated_by_conv='cB', user_id=TEST_OWNER_USER_ID)
         assert ok['ok'] and ok['version'] == 2
         from lib.conversations.project_charter import read_charter
-        assert read_charter('/p/lock')['content'] == 'v2'
+        assert read_charter('/p/lock', user_id=TEST_OWNER_USER_ID)['content'] == 'v2'
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -139,10 +130,10 @@ def test_optimistic_lock_rejects_stale_commit(flask_app):
 def test_propose_writes_feed_not_table(flask_app):
     from lib.conversations.project_charter import propose_amendment
     with flask_app.app_context():
-        res = propose_amendment('/p/prop', 'cA', 'We should adopt X.')
+        res = propose_amendment('/p/prop', 'cA', 'We should adopt X.', user_id=TEST_OWNER_USER_ID)
     assert res['ok']
     # The charter table must have NO row for this project — proposal ≠ commit.
-    assert _charter_rows(flask_app, '/p/prop') == []
+    assert not _charter_exists('/p/prop')
     # Exactly one proposed_decision event in the feed.
     kinds = _feed_kinds(flask_app, '/p/prop')
     assert kinds.count('proposed_decision') == 1
@@ -171,10 +162,10 @@ def test_decided_only_from_commit(flask_app):
         commit_charter, propose_amendment, read_charter,
     )
     with flask_app.app_context():
-        propose_amendment('/p/d', 'cA', 'proposal one')
-        read_charter('/p/d')
+        propose_amendment('/p/d', 'cA', 'proposal one', user_id=TEST_OWNER_USER_ID)
+        read_charter('/p/d', user_id=TEST_OWNER_USER_ID)
         assert 'decided' not in _feed_kinds(flask_app, '/p/d')
-        commit_charter('/p/d', add_decision='committed one', updated_by_conv='cA')
+        commit_charter('/p/d', add_decision='committed one', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
     kinds = _feed_kinds(flask_app, '/p/d')
     assert kinds.count('decided') == 1
 
@@ -186,39 +177,38 @@ def test_decided_only_from_commit(flask_app):
 def test_render_block_present_and_absent(flask_app):
     from lib.conversations.project_charter import commit_charter, render_charter_block
     with flask_app.app_context():
-        assert render_charter_block('/p/none') == ''
-        commit_charter('/p/has', content='North star here.', updated_by_conv='cA')
+        assert render_charter_block('/p/none', user_id=TEST_OWNER_USER_ID) == ''
+        commit_charter('/p/has', content='North star here.', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
         commit_charter('/p/has', add_decision='Decision A.',
-                       summary='Decision A.', updated_by_conv='cA')
-        block = render_charter_block('/p/has')
+                       summary='Decision A.', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
+        block = render_charter_block('/p/has', user_id=TEST_OWNER_USER_ID)
     assert '[PROJECT CHARTER]' in block
     assert 'North star here.' in block
     assert 'Decision A.' in block
 
 
 def _run_inject(flask_app, project_path, has_charter):
-    """Drive the system_context charter-injection seam and return the assembled
-    system text. Builds a minimal messages list + calls the public injector."""
+    """Compose project context and return the assembled system text."""
     from lib.conversations.project_charter import commit_charter
-    # Resolve the injector through the _inject SUBMODULE (not the package
-    # re-export): the NC neuter swaps sys.modules[...system_context._inject]
-    # for a patched copy, but the package __init__'s re-exported
-    # _inject_system_contexts name still points at the ORIGINAL function, so
-    # calling it via the package would bypass the neuter. Look it up on the
-    # submodule at call time so the swapped (neutered) copy is what runs.
-    import importlib
-    sc_inject = importlib.import_module('lib.tasks_pkg.system_context._inject')
+    from lib.tasks_pkg.context_composer import compose_task_context
     with flask_app.app_context():
         if has_charter:
             commit_charter(project_path, content='Injected north star.',
-                           updated_by_conv='cA')
+                           updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
             commit_charter(project_path, add_decision='Inj decision.',
-                           summary='Inj decision.', updated_by_conv='cA')
+                           summary='Inj decision.', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
         messages = [{'role': 'user', 'content': 'hello'}]
-        sc_inject._inject_system_contexts(
-            messages, project_path, True,   # project_path, project_enabled
-            False, False, False, True,      # memory, search, swarm, has_real_tools
-            conv_id='cTest', task=None)
+        compose_task_context(
+            messages,
+            user_id=TEST_OWNER_USER_ID,
+            project_path=project_path,
+            project_enabled=True,
+            memory_enabled=False,
+            search_enabled=False,
+            has_real_tools=True,
+            conv_id='cTest',
+            task={'_userId': TEST_OWNER_USER_ID, 'config': {}},
+        )
     # The charter lands as a separate cache-stable block (system message or a
     # <system-reminder>-wrapped user tail). Flatten EVERY message's content
     # (string or multimodal list) so the scan can't miss it.
@@ -303,15 +293,15 @@ def test_pending_excludes_committed_proposal(flask_app):
     from lib.conversations.project_brain_summary import build_brain_summary
     p = os.path.abspath('/p/pending-commit')
     with flask_app.app_context():
-        res = propose_amendment(p, 'cA', 'Adopt the soft-lease board')
+        res = propose_amendment(p, 'cA', 'Adopt the soft-lease board', user_id=TEST_OWNER_USER_ID)
         pid = res['proposalId']
-        assert len(pending_proposals(p)) == 1
-        assert build_brain_summary(p)['pendingDecisions'] == 1
+        assert len(pending_proposals(p, user_id=TEST_OWNER_USER_ID)) == 1
+        assert build_brain_summary(p, user_id=TEST_OWNER_USER_ID)['pendingDecisions'] == 1
         # Commit resolving THIS proposal → it drops out of pending.
         commit_charter(p, add_decision='Adopt the soft-lease board',
-                       updated_by_conv='human', resolves_proposal=pid)
-        assert pending_proposals(p) == [], 'committed proposal must not stay pending'
-        assert build_brain_summary(p)['pendingDecisions'] == 0, \
+                       updated_by_conv='human', resolves_proposal=pid, user_id=TEST_OWNER_USER_ID)
+        assert pending_proposals(p, user_id=TEST_OWNER_USER_ID) == [], 'committed proposal must not stay pending'
+        assert build_brain_summary(p, user_id=TEST_OWNER_USER_ID)['pendingDecisions'] == 0, \
             'the collab-bar count must decrement after commit'
 
 
@@ -324,12 +314,12 @@ def test_pending_excludes_dismissed_proposal(flask_app):
     from lib.conversations.project_brain_summary import build_brain_summary
     p = os.path.abspath('/p/pending-dismiss')
     with flask_app.app_context():
-        res = propose_amendment(p, 'cA', 'A proposal to reject')
+        res = propose_amendment(p, 'cA', 'A proposal to reject', user_id=TEST_OWNER_USER_ID)
         pid = res['proposalId']
-        assert len(pending_proposals(p)) == 1
-        dismiss_proposal(p, 'human', pid)
-        assert pending_proposals(p) == [], 'dismissed proposal must not stay pending'
-        assert build_brain_summary(p)['pendingDecisions'] == 0
+        assert len(pending_proposals(p, user_id=TEST_OWNER_USER_ID)) == 1
+        dismiss_proposal(p, 'human', pid, user_id=TEST_OWNER_USER_ID)
+        assert pending_proposals(p, user_id=TEST_OWNER_USER_ID) == [], 'dismissed proposal must not stay pending'
+        assert build_brain_summary(p, user_id=TEST_OWNER_USER_ID)['pendingDecisions'] == 0
 
 
 def test_pending_keeps_unrelated_proposal(flask_app):
@@ -340,11 +330,11 @@ def test_pending_keeps_unrelated_proposal(flask_app):
     )
     p = os.path.abspath('/p/pending-two')
     with flask_app.app_context():
-        a = propose_amendment(p, 'cA', 'Proposal A')['proposalId']
-        propose_amendment(p, 'cB', 'Proposal B')  # B stays pending
+        a = propose_amendment(p, 'cA', 'Proposal A', user_id=TEST_OWNER_USER_ID)['proposalId']
+        propose_amendment(p, 'cB', 'Proposal B', user_id=TEST_OWNER_USER_ID)  # B stays pending
         commit_charter(p, add_decision='Proposal A', updated_by_conv='human',
-                       resolves_proposal=a)
-        pend = pending_proposals(p)
+                       resolves_proposal=a, user_id=TEST_OWNER_USER_ID)
+        pend = pending_proposals(p, user_id=TEST_OWNER_USER_ID)
     texts = [x['summary'] for x in pend]
     assert len(pend) == 1 and 'Proposal B' in texts[0], \
         'only the committed proposal drops; the unrelated one remains pending'
@@ -355,7 +345,7 @@ def test_route_charter_pending_and_dismiss(flask_app, flask_client):
     from lib.conversations.project_charter import propose_amendment
     p = os.path.abspath('/p/route-pending')
     with flask_app.app_context():
-        pid = propose_amendment(p, 'cA', 'Route proposal')['proposalId']
+        pid = propose_amendment(p, 'cA', 'Route proposal', user_id=TEST_OWNER_USER_ID)['proposalId']
     r = flask_client.get('/api/v1/project/charter/pending?path=' + p)
     assert r.status_code == 200
     data = _json.loads(r.get_data(as_text=True))
@@ -377,15 +367,10 @@ def test_NC3_no_exclude_filter_overcounts(flask_app):
         import lib.conversations.project_charter as pc
         p = os.path.abspath('/p/nc3')
         with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            db = get_thread_db(DOMAIN_CHAT)
-            db.execute("DELETE FROM project_events WHERE project_path=?", (p,))
-            db.execute("DELETE FROM project_charter WHERE project_path=?", (p,))
-            db.commit()
-            pid = pc.propose_amendment(p, 'cA', 'Proposal X')['proposalId']
+            pid = pc.propose_amendment(p, 'cA', 'Proposal X', user_id=TEST_OWNER_USER_ID)['proposalId']
             pc.commit_charter(p, add_decision='Proposal X',
-                              updated_by_conv='human', resolves_proposal=pid)
-            pend = pc.pending_proposals(p)
+                              updated_by_conv='human', resolves_proposal=pid, user_id=TEST_OWNER_USER_ID)
+            pend = pc.pending_proposals(p, user_id=TEST_OWNER_USER_ID)
         # With the exclude-filter disabled, the committed proposal WRONGLY
         # remains pending → the over-count bug.
         assert len(pend) == 1, \
@@ -419,8 +404,8 @@ def test_pending_returns_full_proposal_not_feed_summary(flask_app):
     )
     p = os.path.abspath('/p/full-pending')
     with flask_app.app_context():
-        propose_amendment(p, 'cA', _LONG_PROPOSAL)
-        pend = pending_proposals(p)
+        propose_amendment(p, 'cA', _LONG_PROPOSAL, user_id=TEST_OWNER_USER_ID)
+        pend = pending_proposals(p, user_id=TEST_OWNER_USER_ID)
     assert len(pend) == 1
     # The full text survives end-to-end (both sentinels + full length), not the
     # 280-char feed summary.
@@ -439,12 +424,12 @@ def test_commit_from_full_pending_stores_full_decision(flask_app):
     )
     p = os.path.abspath('/p/full-commit')
     with flask_app.app_context():
-        pid = propose_amendment(p, 'cA', _LONG_PROPOSAL)['proposalId']
-        full = pending_proposals(p)[0]['summary']
+        pid = propose_amendment(p, 'cA', _LONG_PROPOSAL, user_id=TEST_OWNER_USER_ID)['proposalId']
+        full = pending_proposals(p, user_id=TEST_OWNER_USER_ID)[0]['summary']
         commit_charter(p, add_decision=full, updated_by_conv='human',
-                       resolves_proposal=pid)
-        rec = read_charter(p)
-        block = render_charter_block(p)
+                       resolves_proposal=pid, user_id=TEST_OWNER_USER_ID)
+        rec = read_charter(p, user_id=TEST_OWNER_USER_ID)
+        block = render_charter_block(p, user_id=TEST_OWNER_USER_ID)
     stored = rec['decisions'][0]['text']
     assert len(stored) > 280 and len(stored) == len(_LONG_PROPOSAL[:2400])
     assert 'END-SENTINEL-TAIL.' in stored
@@ -467,38 +452,32 @@ def test_repair_resources_truncated_decision_from_feed(flask_app):
     from lib.conversations.project_charter import (
         propose_amendment, read_charter, repair_truncated_decisions,
     )
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    import json as _json
+    import tests._seed as seed
     import time as _time
     p = os.path.abspath('/p/repair')
     with flask_app.app_context():
         # Seed a feed proposal with the FULL text (payload.proposal).
-        propose_amendment(p, 'cA', _LONG_PROPOSAL)
+        propose_amendment(p, 'cA', _LONG_PROPOSAL, user_id=TEST_OWNER_USER_ID)
         # Simulate the OLD bug: a committed decision stored as the 280-char
         # PREFIX of that proposal (exactly what the feed-summary commit did).
         truncated = _LONG_PROPOSAL[:280]
-        db = get_thread_db(DOMAIN_CHAT)
         decisions = [{'text': truncated, 'by_conv': 'human',
                       'ts': int(_time.time() * 1000)}]
-        db.execute(
-            'INSERT INTO project_charter (project_path, content, decisions, '
-            'updated_by_conv, updated_at, version) VALUES (?, ?, ?, ?, ?, ?) '
-            'ON CONFLICT(project_path) DO UPDATE SET decisions=excluded.decisions, '
-            'version=excluded.version',
-            (p, '', _json.dumps(decisions), 'human', 1, 1))
-        db.commit()
-        assert len(read_charter(p)['decisions'][0]['text']) == 280
+        seed.seed_charter(
+            p, decisions=decisions, user_id=TEST_OWNER_USER_ID,
+        )
+        assert len(read_charter(p, user_id=TEST_OWNER_USER_ID)['decisions'][0]['text']) == 280
 
-        res = repair_truncated_decisions(p)
+        res = repair_truncated_decisions(p, user_id=TEST_OWNER_USER_ID)
         assert res['ok'] and res['repaired'] == 1
-        rec = read_charter(p)
+        rec = read_charter(p, user_id=TEST_OWNER_USER_ID)
         fixed = rec['decisions'][0]['text']
         assert len(fixed) == len(_LONG_PROPOSAL[:2400]) > 280
         assert 'END-SENTINEL-TAIL.' in fixed
         assert rec['version'] == 2  # bumped once
 
         # Idempotent: nothing left to repair.
-        res2 = repair_truncated_decisions(p)
+        res2 = repair_truncated_decisions(p, user_id=TEST_OWNER_USER_ID)
         assert res2['ok'] and res2['repaired'] == 0
 
 
@@ -511,12 +490,8 @@ def test_NC_pending_summary_first_reintroduces_truncation(flask_app):
         import lib.conversations.project_charter as pc
         p = os.path.abspath('/p/nc-trunc')
         with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            db = get_thread_db(DOMAIN_CHAT)
-            db.execute('DELETE FROM project_events WHERE project_path=?', (p,))
-            db.commit()
-            pc.propose_amendment(p, 'cA', _LONG_PROPOSAL)
-            pend = pc.pending_proposals(p)
+            pc.propose_amendment(p, 'cA', _LONG_PROPOSAL, user_id=TEST_OWNER_USER_ID)
+            pend = pc.pending_proposals(p, user_id=TEST_OWNER_USER_ID)
         # With summary-first restored, the returned text is the 280-char cap.
         assert len(pend[0]['summary']) == 280, \
             'NC: summary-first must reintroduce the 280-char truncation'
@@ -541,13 +516,13 @@ def test_update_decision_edits_in_place(flask_app):
     )
     p = os.path.abspath('/p/edit-dec')
     with flask_app.app_context():
-        commit_charter(p, add_decision='Original A', updated_by_conv='cA')
-        commit_charter(p, add_decision='Original B', updated_by_conv='cA')
-        ver = read_charter(p)['version']
+        commit_charter(p, add_decision='Original A', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
+        commit_charter(p, add_decision='Original B', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
+        ver = read_charter(p, user_id=TEST_OWNER_USER_ID)['version']
         r = update_decision(p, 0, 'Edited A', expected_version=ver,
-                            updated_by_conv='human')
+                            updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
         assert r['ok'] and r['version'] == ver + 1
-        rec = read_charter(p)
+        rec = read_charter(p, user_id=TEST_OWNER_USER_ID)
     texts = [d['text'] for d in rec['decisions']]
     assert texts == ['Edited A', 'Original B']
     # The edit is auditable as a 'decided' event.
@@ -576,14 +551,14 @@ def test_editing_a_decision_changes_what_agents_ACTUALLY_READ(flask_app):
         commit_charter(p, add_decision='OLD BODY with its evidence chain',
                        decision_kind='invariant',
                        summary='OLD RULE that is now wrong',
-                       updated_by_conv='cA')
-        assert 'OLD RULE that is now wrong' in render_charter_injection_block(p)
+                       updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
+        assert 'OLD RULE that is now wrong' in render_charter_injection_block(p, user_id=TEST_OWNER_USER_ID)
 
         r = update_decision(p, 0, 'NEW BODY: the corrected rule',
                             summary='NEW RULE that is correct',
-                            updated_by_conv='human')
+                            updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
         assert r['ok'], r
-        block = render_charter_injection_block(p)
+        block = render_charter_injection_block(p, user_id=TEST_OWNER_USER_ID)
 
     assert 'NEW RULE that is correct' in block, (
         'the human edited the decision and agents still read the old rule')
@@ -611,13 +586,13 @@ def test_omitting_summary_on_an_entry_that_has_one_is_REFUSED(flask_app):
     p = os.path.abspath('/p/edit-summary-required')
     with flask_app.app_context():
         commit_charter(p, add_decision='BODY', decision_kind='invariant',
-                       summary='THE RULE', updated_by_conv='cA')
-        before = read_charter(p)['version']
+                       summary='THE RULE', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
+        before = read_charter(p, user_id=TEST_OWNER_USER_ID)['version']
 
-        r = update_decision(p, 0, 'NEW BODY', updated_by_conv='human')
+        r = update_decision(p, 0, 'NEW BODY', updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
         assert r['ok'] is False, 'omitting summary must not silently succeed'
         assert r['error'] == 'summary_required', r
-        rec = read_charter(p)
+        rec = read_charter(p, user_id=TEST_OWNER_USER_ID)
 
     # A refusal must change NOTHING — not the text, not the version.
     assert rec['decisions'][0]['text'] == 'BODY'
@@ -626,9 +601,9 @@ def test_omitting_summary_on_an_entry_that_has_one_is_REFUSED(flask_app):
 
     with flask_app.app_context():
         cleared = update_decision(p, 0, 'NEW BODY explicitly unsummarised',
-                                  summary='', updated_by_conv='human')
+                                  summary='', updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
         assert cleared['ok'], cleared
-        block = render_charter_injection_block(p)
+        block = render_charter_injection_block(p, user_id=TEST_OWNER_USER_ID)
     assert 'THE RULE' not in block, 'summary="" must really drop the summary'
     assert 'NEW BODY explicitly unsummarised' in block, (
         'after clearing, the headline must fall back to the fresh text')
@@ -647,11 +622,11 @@ def test_a_legacy_entry_without_a_summary_edits_without_ceremony(flask_app):
     p = os.path.abspath('/p/edit-legacy')
     with flask_app.app_context():
         commit_charter(p, add_decision='LEGACY first line\nand a long tail',
-                       updated_by_conv='cA')
+                       updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
         r = update_decision(p, 0, 'CORRECTED first line\nand a long tail',
-                            updated_by_conv='human')
+                            updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
         assert r['ok'], r
-        block = render_charter_injection_block(p)
+        block = render_charter_injection_block(p, user_id=TEST_OWNER_USER_ID)
     assert 'CORRECTED first line' in block
     assert 'LEGACY first line' not in block
 
@@ -675,7 +650,7 @@ def test_the_REST_route_can_change_what_agents_read(flask_app, flask_client):
     p = os.path.abspath('/p/route-summary')
     with flask_app.app_context():
         commit_charter(p, add_decision='BODY', decision_kind='invariant',
-                       summary='OLD RULE via route', updated_by_conv='cA')
+                       summary='OLD RULE via route', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
 
     # 1) Omitted key → refused, nothing changed.
     r = flask_client.post('/api/v1/project/charter/decision/update',
@@ -684,7 +659,7 @@ def test_the_REST_route_can_change_what_agents_read(flask_app, flask_client):
     import json as _json
     assert _json.loads(r.get_data(as_text=True)).get('error') == 'summary_required'
     with flask_app.app_context():
-        assert 'OLD RULE via route' in render_charter_injection_block(p)
+        assert 'OLD RULE via route' in render_charter_injection_block(p, user_id=TEST_OWNER_USER_ID)
 
     # 2) Explicit summary → the injected line really changes.
     r = flask_client.post('/api/v1/project/charter/decision/update',
@@ -692,7 +667,7 @@ def test_the_REST_route_can_change_what_agents_read(flask_app, flask_client):
                                 'summary': 'NEW RULE via route'})
     assert r.status_code == 200, r.get_data(as_text=True)
     with flask_app.app_context():
-        block = render_charter_injection_block(p)
+        block = render_charter_injection_block(p, user_id=TEST_OWNER_USER_ID)
     assert 'NEW RULE via route' in block
     assert 'OLD RULE via route' not in block
 
@@ -702,7 +677,7 @@ def test_the_REST_route_can_change_what_agents_read(flask_app, flask_client):
                                 'text': 'BODY IS THE HEADLINE', 'summary': ''})
     assert r.status_code == 200, r.get_data(as_text=True)
     with flask_app.app_context():
-        block = render_charter_injection_block(p)
+        block = render_charter_injection_block(p, user_id=TEST_OWNER_USER_ID)
     assert 'BODY IS THE HEADLINE' in block
     assert 'NEW RULE via route' not in block
 
@@ -751,8 +726,8 @@ def test_update_decision_optimistic_lock(flask_app):
     from lib.conversations.project_charter import commit_charter, update_decision
     p = os.path.abspath('/p/edit-lock')
     with flask_app.app_context():
-        commit_charter(p, add_decision='D', updated_by_conv='cA')  # version 1
-        stale = update_decision(p, 0, 'X', expected_version=0)
+        commit_charter(p, add_decision='D', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)  # version 1
+        stale = update_decision(p, 0, 'X', expected_version=0, user_id=TEST_OWNER_USER_ID)
         assert stale['ok'] is False and stale['error'] == 'version_conflict'
         assert stale['current_version'] == 1
 
@@ -761,8 +736,8 @@ def test_update_decision_index_out_of_range(flask_app):
     from lib.conversations.project_charter import commit_charter, update_decision
     p = os.path.abspath('/p/edit-oor')
     with flask_app.app_context():
-        commit_charter(p, add_decision='D', updated_by_conv='cA')
-        r = update_decision(p, 5, 'X')
+        commit_charter(p, add_decision='D', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
+        r = update_decision(p, 5, 'X', user_id=TEST_OWNER_USER_ID)
     assert r['ok'] is False and r['error'] == 'index_out_of_range'
 
 
@@ -772,13 +747,13 @@ def test_delete_decision_removes_only_that_one(flask_app):
     )
     p = os.path.abspath('/p/del-dec')
     with flask_app.app_context():
-        commit_charter(p, add_decision='Keep 1', updated_by_conv='cA')
-        commit_charter(p, add_decision='Drop', updated_by_conv='cA')
-        commit_charter(p, add_decision='Keep 2', updated_by_conv='cA')
-        ver = read_charter(p)['version']
-        r = delete_decision(p, 1, expected_version=ver, updated_by_conv='human')
+        commit_charter(p, add_decision='Keep 1', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
+        commit_charter(p, add_decision='Drop', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
+        commit_charter(p, add_decision='Keep 2', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
+        ver = read_charter(p, user_id=TEST_OWNER_USER_ID)['version']
+        r = delete_decision(p, 1, expected_version=ver, updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
         assert r['ok'] and r['version'] == ver + 1
-        rec = read_charter(p)
+        rec = read_charter(p, user_id=TEST_OWNER_USER_ID)
     texts = [d['text'] for d in rec['decisions']]
     assert texts == ['Keep 1', 'Keep 2'], 'only the addressed decision is removed'
 
@@ -787,8 +762,8 @@ def test_delete_decision_optimistic_lock(flask_app):
     from lib.conversations.project_charter import commit_charter, delete_decision
     p = os.path.abspath('/p/del-lock')
     with flask_app.app_context():
-        commit_charter(p, add_decision='D', updated_by_conv='cA')  # version 1
-        stale = delete_decision(p, 0, expected_version=0)
+        commit_charter(p, add_decision='D', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)  # version 1
+        stale = delete_decision(p, 0, expected_version=0, user_id=TEST_OWNER_USER_ID)
         assert stale['ok'] is False and stale['error'] == 'version_conflict'
 
 
@@ -798,33 +773,33 @@ def test_delete_charter_removes_row(flask_app):
     )
     p = os.path.abspath('/p/del-all')
     with flask_app.app_context():
-        commit_charter(p, content='NS', updated_by_conv='cA')
-        commit_charter(p, add_decision='D', summary='D', updated_by_conv='cA')
-        ver = read_charter(p)['version']
-        r = delete_charter(p, expected_version=ver, updated_by_conv='human')
+        commit_charter(p, content='NS', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
+        commit_charter(p, add_decision='D', summary='D', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
+        ver = read_charter(p, user_id=TEST_OWNER_USER_ID)['version']
+        r = delete_charter(p, expected_version=ver, updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
         assert r['ok'] and r.get('deleted') is True
-        rec = read_charter(p)
+        rec = read_charter(p, user_id=TEST_OWNER_USER_ID)
     assert rec['exists'] is False and rec['version'] == 0
-    assert _charter_rows(flask_app, p) == []
+    assert not _charter_exists(p)
 
 
 def test_delete_charter_optimistic_lock(flask_app):
     from lib.conversations.project_charter import commit_charter, delete_charter
     p = os.path.abspath('/p/del-all-lock')
     with flask_app.app_context():
-        commit_charter(p, content='NS', updated_by_conv='cA')  # version 1
-        stale = delete_charter(p, expected_version=0)
+        commit_charter(p, content='NS', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)  # version 1
+        stale = delete_charter(p, expected_version=0, user_id=TEST_OWNER_USER_ID)
         assert stale['ok'] is False and stale['error'] == 'version_conflict'
         # The row must still be intact after a rejected delete.
         from lib.conversations.project_charter import read_charter
         with flask_app.app_context():
-            assert read_charter(p)['exists'] is True
+            assert read_charter(p, user_id=TEST_OWNER_USER_ID)['exists'] is True
 
 
 def test_delete_missing_charter_is_noop_success(flask_app):
     from lib.conversations.project_charter import delete_charter
     with flask_app.app_context():
-        r = delete_charter(os.path.abspath('/p/del-none'))
+        r = delete_charter(os.path.abspath('/p/del-none'), user_id=TEST_OWNER_USER_ID)
     assert r['ok'] is True and r.get('deleted') is False
 
 
@@ -927,24 +902,22 @@ def test_NC_delete_decision_ignores_index_deletes_wrong_row(flask_app):
         import lib.conversations.project_charter as pc
         p = os.path.abspath('/p/nc-del')
         with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            db = get_thread_db(DOMAIN_CHAT)
-            db.execute('DELETE FROM project_charter WHERE project_path=?', (p,))
-            db.commit()
-            pc.commit_charter(p, add_decision='Keep 1', updated_by_conv='cA')
-            pc.commit_charter(p, add_decision='Drop', updated_by_conv='cA')
-            ver = pc.read_charter(p)['version']
-            pc.delete_decision(p, 1, expected_version=ver)
-            rec = pc.read_charter(p)
+            pc.commit_charter(p, add_decision='Keep 1', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
+            pc.commit_charter(p, add_decision='Drop', updated_by_conv='cA', user_id=TEST_OWNER_USER_ID)
+            ver = pc.read_charter(p, user_id=TEST_OWNER_USER_ID)['version']
+            pc.delete_decision(p, 1, expected_version=ver, user_id=TEST_OWNER_USER_ID)
+            rec = pc.read_charter(p, user_id=TEST_OWNER_USER_ID)
         texts = [d['text'] for d in rec['decisions']]
         # With the index ignored, index 0 ('Keep 1') is wrongly removed.
         assert texts == ['Drop'], \
             'NC: ignoring the index must delete the wrong decision'
 
+    # The anchor is the SIDECAR branch's removal lines (the suite runs
+    # sidecar-only; the legacy branch's pop(index) never executes here).
     _patch_restore(
         _CHARTER_SRC,
-        "        removed = decisions.pop(index)",
-        "        removed = decisions.pop(0)  # NC (ignore index)",
+        "            removed = decisions.pop(index)",
+        "            removed = decisions.pop(0)  # NC: ignore requested index",
         run,
     )
 
@@ -958,7 +931,7 @@ def test_NC_delete_decision_ignores_index_deletes_wrong_row(flask_app):
 def _charter_tool(fn_name, fn_args, *, conv='cAgent', project_path):
     from lib.conversations.project_charter import execute_charter_tool
     return execute_charter_tool(fn_name, fn_args,
-                                current_conv_id=conv, project_path=project_path)
+                                current_conv_id=conv, project_path=project_path, user_id=TEST_OWNER_USER_ID)
 
 
 def _human_commit(project_path, decision, summary=None, **kw):
@@ -975,7 +948,7 @@ def _human_commit(project_path, decision, summary=None, **kw):
     return commit_charter(project_path, add_decision=decision,
                           decision_kind='invariant',
                           summary=(summary if summary is not None else decision),
-                          **kw)
+                          **kw, user_id=TEST_OWNER_USER_ID)
 
 
 def test_agent_commit_appends_decision_and_bumps_version(flask_app):
@@ -987,8 +960,8 @@ def test_agent_commit_appends_decision_and_bumps_version(flask_app):
         res = _human_commit(p, 'Adopt AST boundaries in lib/.',
                             updated_by_conv='human')
         assert res['ok'] and res['version'] == 1, res
-        rec = read_charter(p)
-        block = render_charter_block(p)
+        rec = read_charter(p, user_id=TEST_OWNER_USER_ID)
+        block = render_charter_block(p, user_id=TEST_OWNER_USER_ID)
     assert rec['version'] == 1
     assert any(d['text'] == 'Adopt AST boundaries in lib/.' for d in rec['decisions'])
     # The decision reaches the model via the injected block.
@@ -1004,12 +977,12 @@ def test_agent_commit_resolves_proposal_dequeues(flask_app):
     from lib.conversations.project_charter import pending_proposals, propose_amendment
     p = os.path.abspath('/p/agent-resolve')
     with flask_app.app_context():
-        pid = propose_amendment(p, 'cAgent', 'Move logic into lib/.')['proposalId']
-        assert len(pending_proposals(p)) == 1
+        pid = propose_amendment(p, 'cAgent', 'Move logic into lib/.', user_id=TEST_OWNER_USER_ID)['proposalId']
+        assert len(pending_proposals(p, user_id=TEST_OWNER_USER_ID)) == 1
         res = _human_commit(p, 'Move logic into lib/.',
                             resolves_proposal=pid, updated_by_conv='human')
         assert res['ok'], res
-        pend = pending_proposals(p)
+        pend = pending_proposals(p, user_id=TEST_OWNER_USER_ID)
     assert pend == [], 'a resolved proposal must not stay pending'
 
 
@@ -1023,7 +996,7 @@ def test_agent_commit_cannot_write_content_NC(flask_app):
     p = os.path.abspath('/p/agent-no-content')
     with flask_app.app_context():
         # A human sets the north star.
-        commit_charter(p, content='HUMAN NORTH STAR', updated_by_conv='human')
+        commit_charter(p, content='HUMAN NORTH STAR', updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
         # The agent commits a decision AND maliciously tries to smuggle a
         # `content` arg — the tool must ignore it entirely.
         out = _charter_tool('project_charter_commit',
@@ -1032,7 +1005,7 @@ def test_agent_commit_cannot_write_content_NC(flask_app):
                              'summary': 'agent decision',
                              'content': 'AGENT-HIJACKED GOAL'},
                             project_path=p)
-        rec = read_charter(p)
+        rec = read_charter(p, user_id=TEST_OWNER_USER_ID)
     assert 'project_charter_propose' in out, out
     assert rec['content'] == 'HUMAN NORTH STAR', \
         'the withdrawn tool must not be able to change the north-star content'
@@ -1078,12 +1051,12 @@ def test_agent_commit_survives_a_stale_version(flask_app):
     p = os.path.abspath('/p/agent-conflict')
     with flask_app.app_context():
         commit_charter(p, add_decision='v1', summary='v1',
-                       updated_by_conv='human')          # version 1
+                       updated_by_conv='human', user_id=TEST_OWNER_USER_ID)          # version 1
         commit_charter(p, add_decision='sibling', summary='sibling',
-                       updated_by_conv='sibB')           # version 2 — moved on
+                       updated_by_conv='sibB', user_id=TEST_OWNER_USER_ID)           # version 2 — moved on
         res = _human_commit(p, 'mine', expected_version=0,
                             updated_by_conv='human')
-        texts = [d['text'] for d in read_charter(p)['decisions']]
+        texts = [d['text'] for d in read_charter(p, user_id=TEST_OWNER_USER_ID)['decisions']]
     assert res['ok'], res
     assert texts == ['v1', 'sibling', 'mine'], \
         f'the append must land and no sibling decision may be lost; {texts}'
@@ -1101,7 +1074,7 @@ def test_agent_commit_hits_max_decisions_truncation(flask_app):
     with flask_app.app_context():
         for i in range(cap + 5):
             _human_commit(p, f'decision #{i}', updated_by_conv='human')
-        rec = read_charter(p)
+        rec = read_charter(p, user_id=TEST_OWNER_USER_ID)
     texts = [d['text'] for d in rec['decisions']]
     assert len(texts) == cap, 'rolling truncation must cap at _MAX_DECISIONS'
     # The 5 oldest were dropped; the newest is retained.
@@ -1132,12 +1105,12 @@ def test_promote_watch_item_still_routes_through_commit(flask_app):
     p = os.path.abspath('/p/promote')
     with flask_app.app_context():
         item = add_watch_item(p, 'concern', 'Keep the DB layer dual-backend',
-                              created_by_conv='human')
+                              created_by_conv='human', user_id=TEST_OWNER_USER_ID)
         assert item['ok'], item
         iid = item['item']['item_id']
-        res = promote_watch_item(iid, updated_by_conv='human')
+        res = promote_watch_item(iid, updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
         assert res['ok'], res
-        rec = read_charter(p)
+        rec = read_charter(p, user_id=TEST_OWNER_USER_ID)
     assert any('Keep the DB layer dual-backend' in d['text']
                for d in rec['decisions']), \
         'promote must land the item as a committed decision via commit_charter'
@@ -1149,29 +1122,22 @@ def test_promote_watch_item_still_routes_through_commit(flask_app):
 
 
 def test_NC1_propose_writing_table_breaks_isolation(flask_app):
-    """NC-1: make propose_amendment ALSO write the charter table → the
-    'propose never writes the table' behavioral test FAILS."""
+    """NC-1: make propose_amendment ALSO write the charter store → the
+    'propose never writes the charter' behavioral test FAILS."""
     def run():
         import lib.conversations.project_charter as pc
         with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            get_thread_db(DOMAIN_CHAT).execute("DELETE FROM project_charter WHERE project_path='/nc1'")
-            get_thread_db(DOMAIN_CHAT).commit()
-            pc.propose_amendment('/nc1', 'cA', 'leaky proposal')
-            rows = get_thread_db(DOMAIN_CHAT).execute(
-                "SELECT * FROM project_charter WHERE project_path='/nc1'").fetchall()
-        # With the NC patch, propose wrote a row → isolation broken.
-        assert len(rows) > 0, 'NC-1 should have caused propose to write the table'
+            pc.propose_amendment('/nc1', 'cA', 'leaky proposal', user_id=TEST_OWNER_USER_ID)
+            exists = pc.read_charter('/nc1', user_id=TEST_OWNER_USER_ID)['exists']
+        # With the NC patch, propose wrote the charter record → broken.
+        assert exists, 'NC-1 should have caused propose to write the charter store'
 
     _patch_restore(
         _CHARTER_SRC,
         "    audit_log('charter_proposed', project_path=project_path,",
-        ("    get_thread_db(DOMAIN_CHAT).execute(\n"
-         "        'INSERT INTO project_charter (project_path, content, decisions, "
-         "updated_by_conv, updated_at, version) VALUES (?, ?, ?, ?, ?, ?) "
-         "ON CONFLICT(project_path) DO UPDATE SET content=excluded.content',\n"
-         "        (project_path, proposal, '[]', conv_id or '', 0, 0))  # NC-1\n"
-         "    get_thread_db(DOMAIN_CHAT).commit()  # NC-1\n"
+        ("    commit_charter(\n"
+         "        project_path, content=proposal, updated_by_conv=conv_id,\n"
+         "        user_id=user_id)  # NC-1: proposal mutates charter\n"
          "    audit_log('charter_proposed', project_path=project_path,"),
         run,
     )
@@ -1196,7 +1162,8 @@ def test_NC2_injection_noop_breaks_injection(flask_app):
 
     _patch_restore(
         _CONTEXT_PROVIDERS_SRC,
-        '        charter = render_charter_injection_block(path)',
+        ("        charter = render_charter_injection_block(\n"
+         "            path, user_id=request.user_id)"),
         "        charter = ''  # NC-2: provider no-op",
         run,
     )

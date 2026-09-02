@@ -1,6 +1,6 @@
 """Per-round tool dispatch: parse → sanitize → emit → heartbeat → execute.
 
-Extracted 2026-07-31 (pt_03f4cdf1 slice 22) from
+Extracted 2026-07-31 ( slice 22) from
 ``lib/tasks_pkg/orchestrator/_run.py`` run_task stream loop.
 
 Runs after the abort-before-tools gate and before the
@@ -37,11 +37,11 @@ import time
 from typing import Any
 
 from lib.log import get_logger
-from lib.tasks_pkg.tool_dispatch import (
-    emit_tool_exec_phase,
+from lib.tasks_pkg.tool_dispatch.api import (
     execute_tool_pipeline,
     parse_tool_calls,
 )
+from lib.tasks_pkg.tool_dispatch._labels import emit_tool_exec_phase
 from lib.tasks_pkg.orchestrator._sanitize_tool_call_args import (
     sanitize_malformed_tool_call_args,
 )
@@ -108,7 +108,7 @@ def run_tool_dispatch(
 
     # ── Phase 1b: Sanitize tool_calls in messages so the next API
     #   round doesn't carry malformed JSON args back to the gateway.
-    #   Extracted 2026-07-31 (pt_03f4cdf1 slice 14) into
+    #   Extracted 2026-07-31 ( slice 14) into
     #   lib.tasks_pkg.orchestrator._sanitize_tool_call_args — see
     #   that module's docstring for the HTTP-400 recovery rationale
     #   and the RAW-args log-line evidence trail.
@@ -120,7 +120,7 @@ def run_tool_dispatch(
     emit_tool_exec_phase(task, parsed_tcs)
 
     # ── Phase 3: Execute tools (approval + parallel + result append) ──
-    # ★ Reaper heartbeat: a long tool run (or a human-guidance/approval
+    # Reaper heartbeat: a long tool run (or a human-guidance/approval
     #   block inside it) emits no delta, so refresh the positive-
     #   liveness clock before entering the pipeline. See
     #   manager.reap_stuck_running_tasks.
@@ -128,11 +128,11 @@ def run_tool_dispatch(
     # The full executable catalog is the execution/validation authority.  The
     # provider-specific wire surface may contain only eager tools plus the
     # local gateways, or native deferred namespaces.
-    _enabled_catalog = task.get(
-        '_executable_tool_catalog', task.get('_enabled_tool_catalog'))
+    _executable_catalog = task.get('_executable_tool_catalog')
     _execution_catalog = list(
         tool_list or []
-        if not isinstance(_enabled_catalog, list) else _enabled_catalog)
+        if not isinstance(_executable_catalog, list)
+        else _executable_catalog)
     _tool_timed_out = execute_tool_pipeline(
         task, parsed_tcs, cfg, project_path, project_enabled,
         _execution_catalog, messages, all_search_results_text, round_num,

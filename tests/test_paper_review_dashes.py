@@ -31,6 +31,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
+
+TEST_OWNER_USER_ID = 1
 sys.modules.setdefault('flask', _quart)
 
 EMDASH, ENDASH, HBAR = '\u2014', '\u2013', '\u2015'
@@ -45,7 +47,7 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 # ─── Pure de-slopper ─────────────────────────────────────────────
 
 def test_prose_dashes_become_commas():
-    from lib.paper import strip_slop_dashes
+    from lib.paper.review import strip_slop_dashes
     assert strip_slop_dashes('The method is novel ' + EMDASH + ' it improves X.') \
         == 'The method is novel, it improves X.'
     # No surrounding spaces.
@@ -56,7 +58,7 @@ def test_prose_dashes_become_commas():
 
 
 def test_cjk_dashes_become_fullwidth_comma():
-    from lib.paper import strip_slop_dashes
+    from lib.paper.review import strip_slop_dashes
     # Chinese double em-dash slop.
     assert strip_slop_dashes('方法新颖' + EMDASH + EMDASH + '它改进了X。') \
         == '方法新颖' + FW_COMMA + '它改进了X。'
@@ -66,7 +68,7 @@ def test_cjk_dashes_become_fullwidth_comma():
 
 
 def test_ranges_hyphens_and_markdown_preserved():
-    from lib.paper import strip_slop_dashes
+    from lib.paper.review import strip_slop_dashes
     # Numeric en-dash range — legitimate typography, kept.
     assert strip_slop_dashes('Overall Rating: 1' + ENDASH + '10 range') \
         == 'Overall Rating: 1' + ENDASH + '10 range'
@@ -82,7 +84,7 @@ def test_ranges_hyphens_and_markdown_preserved():
 
 
 def test_math_code_urls_preserved():
-    from lib.paper import strip_slop_dashes
+    from lib.paper.review import strip_slop_dashes
     # Em-dash inside code / math is syntax-adjacent — preserved; prose around it deslopped.
     assert strip_slop_dashes('Code `a' + EMDASH + 'b` here' + EMDASH + 'there.') \
         == 'Code `a' + EMDASH + 'b` here, there.'
@@ -95,7 +97,7 @@ def test_math_code_urls_preserved():
 
 
 def test_idempotent_and_noop():
-    from lib.paper import strip_slop_dashes
+    from lib.paper.review import strip_slop_dashes
     once = strip_slop_dashes('novel ' + EMDASH + ' useful ' + EMDASH + ' fast.')
     assert strip_slop_dashes(once) == once, 'not idempotent'
     assert strip_slop_dashes('no dashes here') == 'no dashes here'
@@ -106,7 +108,7 @@ def test_idempotent_and_noop():
 # ─── Engine wiring: review deslops, plain report does not ────────
 
 def _patch_dispatch(body):
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
 
     def _fake(messages, on_content=None, on_thinking=None, **kw):
         if on_content:
@@ -129,13 +131,13 @@ REVIEW_BODY = ('# Review\n\n## Summary\nThe method is novel ' + EMDASH + ' it im
 
 
 def _run(lang_key, ui_lang, phash):
-    import lib.paper.report_engine as re_mod
-    from lib.paper import _new_report_task
+    import lib.paper.report_engine.worker as re_mod
+    from lib.paper.report_runtime import _new_report_task
     re_mod2, orig, orig_insight = _patch_dispatch(REVIEW_BODY)
     try:
         task = _new_report_task('t_' + phash[:6], phash, lang_key, None,
-                                client_title='P', ui_lang=ui_lang)
-        re_mod2._run_report_task(task, [
+                                client_title='P', ui_lang=ui_lang, user_id=TEST_OWNER_USER_ID)
+        re_mod2.run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper'},
         ], [])
@@ -146,7 +148,7 @@ def _run(lang_key, ui_lang, phash):
 
 
 def test_engine_review_deslops_dashes():
-    from lib.paper import make_review_lang
+    from lib.paper.review import make_review_lang
     task = _run(make_review_lang('neurips', 'en'), 'en',
                'phashds0000000000000000000000rev1')
     assert task['status'] == 'done', task.get('error')
@@ -172,11 +174,11 @@ def test_engine_plain_report_keeps_dashes():
 def test_negative_control_deslopper_is_loadbearing():
     """Neuter strip_slop_dashes to a pass-through → the engine review body keeps
     the em-dash and the positive assertion FAILS. Restore → passes."""
-    import lib.paper.review as rv
-    from lib.paper import make_review_lang
-    saved = rv.strip_slop_dashes
+    import lib.paper.report_engine.worker as report_worker
+    from lib.paper.review import make_review_lang
+    saved = report_worker.strip_slop_dashes
 
-    rv.strip_slop_dashes = lambda text: text or ''  # pass-through
+    report_worker.strip_slop_dashes = lambda text: text or ''  # pass-through
     try:
         task = _run(make_review_lang('neurips', 'en'), 'en',
                    'phashds0000000000000000000000nc01')
@@ -184,7 +186,7 @@ def test_negative_control_deslopper_is_loadbearing():
         assert ('novel ' + EMDASH + ' it') in broken, \
             'with the de-slopper neutered, the review must keep the em-dash'
     finally:
-        rv.strip_slop_dashes = saved
+        report_worker.strip_slop_dashes = saved
 
     task2 = _run(make_review_lang('neurips', 'en'), 'en',
                 'phashds0000000000000000000000nc02')

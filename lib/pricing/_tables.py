@@ -3,6 +3,7 @@ Pricing — static model pricing tables.
 
 Holds the hardcoded fallback pricing constants:
     DEFAULT_USD_CNY_RATE  — USD→CNY conversion rate used across cost paths.
+    DEFAULT_USD_DISPLAY_RATES — display-only currency units per USD.
     MODEL_PRICING         — {model_id: {input, output, cacheWriteMul, cacheReadMul, name}}
     QWEN_PRICING_CNY      — {model_id: {input: [(threshold, cny_price)], output: [...]}}
 
@@ -10,6 +11,8 @@ These are the single source of truth for the flat/tiered price tables; the
 provider registry (._provider) and the online refresher (._refresh) both
 read MODEL_PRICING from here by import.
 """
+
+from types import MappingProxyType
 
 from lib.log import get_logger
 from lib.model_info._openai_gpt56 import gpt56_pricing_rows
@@ -24,7 +27,21 @@ logger = get_logger(__name__)
 
 DEFAULT_USD_CNY_RATE = 7.24
 
-# ── Model pricing (USD per 1M tokens) — hardcoded fallback ──
+# Offline display-only fallbacks for Settings price localization. Billing keeps
+# using the declared model currency and DEFAULT_USD_CNY_RATE above; JPY/KRW are
+# presentation pivots and are refreshed by the same bounded exchange-rate
+# worker when online. Values are currency units per USD.
+DEFAULT_USD_DISPLAY_RATES = MappingProxyType({
+    'USD': 1.0,
+    'CNY': DEFAULT_USD_CNY_RATE,
+    'JPY': 159.0,
+    'KRW': 1385.0,
+})
+
+# Source reference for the rounded JPY/KRW fallbacks (retrieved 2026-08-24):
+# https://open.er-api.com/v6/latest/USD
+
+# ── Canonical model pricing (USD per 1M tokens) — hardcoded fallback ──
 # cacheWriteMul / cacheReadMul are multipliers of the base input price:
 #   Anthropic Claude: write=1.25x, read=0.10x (5-min TTL)
 #   OpenAI GPT-5.6:   write=1.25x, read=0.10x
@@ -136,6 +153,8 @@ MODEL_PRICING = {
     'gemini-3-flash-preview':    {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3 Flash'},
     'gemini-3.5-flash':          {'input': 1.49, 'output': 8.95, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.5 Flash'},  # ¥10.80/¥64.80 per 1M
     'gemini-3.6-flash':          {'input': 1.49, 'output': 7.46, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.6 Flash'},  # ¥10.80/¥54.00 per 1M
+    # Intro pricing $0.75/$3.75 through 2026-12-31, then $1.50/$7.50 standard.
+    'gemini-3.7-flash':          {'input': 0.75, 'output': 3.75, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.7 Flash'},
     'gemini-3.5-flash-lite':     {'input': 0.30, 'output': 2.49, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.5 Flash-Lite'},  # ¥2.16/¥18 per 1M
     'gemini-3.1-flash-image-preview': {'input': 0.25, 'output': 1.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.1 Flash Image'},
     'gemini-3-pro-image-preview':    {'input': 2.50, 'output': 12.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3 Pro Image'},

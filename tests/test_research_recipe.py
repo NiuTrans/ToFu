@@ -83,8 +83,12 @@ class _Seams:
         return {'ok': True, 'open_gaps': gm, 'survey_md': '# Survey\narXiv:2305.11111',
                 'inputs_used': len(arxiv_ids), 'citation_audit': None}
 
-    def generate_ideas(self, direction, open_gaps, *, lang, n_ideas, abort=None):
-        self.ideate_calls.append({'direction': direction, 'open_gaps': open_gaps})
+    def generate_ideas(self, direction, open_gaps, *, lang, n_ideas, user_id,
+                       abort=None):
+        self.ideate_calls.append({
+            'direction': direction, 'open_gaps': open_gaps,
+            'user_id': user_id,
+        })
         return {'ok': True, 'threshold': 4.0,
                 'accepted': [{'id': 'idea_1', 'title': 'Good', 'overall': 4.6}],
                 'rejected': [{'id': 'idea_2', 'title': 'Stitch',
@@ -117,7 +121,7 @@ def _install(seams, *, fail_ideate=False):
     rc._search_arxiv = seams.search_arxiv
     rc._evaluate_result = seams.evaluate
     if fail_ideate:
-        def _boom(direction, open_gaps, *, lang, n_ideas, abort=None):
+        def _boom(direction, open_gaps, *, lang, n_ideas, user_id, abort=None):
             seams.ideate_calls.append({'direction': direction, 'open_gaps': open_gaps})
             raise RuntimeError('simulated crash inside ideate')
         rc._generate_ideas = _boom
@@ -135,7 +139,7 @@ def test_four_stage_graph_and_data_contract():
     wd = tempfile.mkdtemp(prefix='research_test_')
     try:
         res = rc.build_research_from_direction('long-context KV compression', wd,
-                                               lang='en', harvest_n=20)
+                                               lang='en', user_id=1, harvest_n=20)
         # graph ran all four, once each
         assert len(seams.harvest_calls) == 1, seams.harvest_calls
         assert len(seams.survey_calls) == 1
@@ -148,6 +152,8 @@ def test_four_stage_graph_and_data_contract():
         # data contract: ideate got survey's open_gaps object
         assert seams.ideate_calls[0]['open_gaps']['library_folder_id'] == folder, \
             'ideate did not receive survey open_gaps'
+        assert seams.ideate_calls[0]['user_id'] == 1, \
+            'ideate artifact owner was not threaded'
         # final result shape
         assert len(res['accepted']) == 1 and len(res['rejected']) == 1
         assert res['open_gaps']['open_gaps'][0]['id'] == 'gap_1'
@@ -177,7 +183,7 @@ def test_crash_resume_reruns_only_unfinished_stage():
         try:
             crashed = False
             try:
-                rc.build_research_from_direction('dir', wd, lang='en')
+                rc.build_research_from_direction('dir', wd, lang='en', user_id=1)
             except Exception:
                 crashed = True
             assert crashed, 'pass 1 should have raised from ideate'
@@ -193,7 +199,7 @@ def test_crash_resume_reruns_only_unfinished_stage():
         seams2 = _Seams()
         restore2 = _install(seams2)
         try:
-            res = rc.build_research_from_direction('dir', wd, lang='en')
+            res = rc.build_research_from_direction('dir', wd, lang='en', user_id=1)
         finally:
             restore2()
         assert len(seams2.harvest_calls) == 0, 'harvest MUST NOT re-run on resume'
@@ -216,7 +222,7 @@ def test_delete_mid_checkpoint_reruns_that_stage_NEUTER():
         # Full successful pass.
         restore = _install(seams)
         try:
-            rc.build_research_from_direction('dir', wd, lang='en')
+            rc.build_research_from_direction('dir', wd, lang='en', user_id=1)
         finally:
             restore()
         assert len(seams.harvest_calls) == 1 and len(seams.survey_calls) == 1
@@ -232,7 +238,7 @@ def test_delete_mid_checkpoint_reruns_that_stage_NEUTER():
         seams2 = _Seams()
         restore2 = _install(seams2)
         try:
-            rc.build_research_from_direction('dir', wd, lang='en')
+            rc.build_research_from_direction('dir', wd, lang='en', user_id=1)
         finally:
             restore2()
         assert len(seams2.harvest_calls) == 0, 'harvest still committed → must NOT re-run'
@@ -252,14 +258,14 @@ def test_fully_complete_job_redoes_nothing():
     try:
         restore = _install(seams)
         try:
-            rc.build_research_from_direction('dir', wd, lang='en')
+            rc.build_research_from_direction('dir', wd, lang='en', user_id=1)
         finally:
             restore()
         # Re-invoke on the completed checkpoint — zero seam calls.
         seams2 = _Seams()
         restore2 = _install(seams2)
         try:
-            res = rc.build_research_from_direction('dir', wd, lang='en')
+            res = rc.build_research_from_direction('dir', wd, lang='en', user_id=1)
         finally:
             restore2()
         assert len(seams2.harvest_calls) == 0 and len(seams2.survey_calls) == 0 \
@@ -284,7 +290,7 @@ def test_harvest_gate_fails_on_thin_corpus():
         try:
             failed = False
             try:
-                rc.build_research_from_direction('dir', wd, lang='en')
+                rc.build_research_from_direction('dir', wd, lang='en', user_id=1)
             except StageFailed as e:
                 failed = (e.stage == 'harvest')
             assert failed, 'thin corpus should fail the harvest gate'
@@ -320,9 +326,11 @@ def test_evaluation_failure_is_committed_as_degraded_without_losing_ideas(monkey
         rc, '_evaluate_result',
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError('judge offline')))
     monkeypatch.setattr(rc, '_persist_ideate',
-                        lambda direction, lang, art: persisted.append(art) or True)
+                        lambda direction, lang, art, *, user_id:
+                        persisted.append((user_id, art)) or True)
     ctx = {
-        'direction': 'd', 'lang': 'en', 'abort': lambda: False,
+        'direction': 'd', 'lang': 'en', 'user_id': 1,
+        'abort': lambda: False,
         'artifacts': {
             'harvest': {'arxiv_ids': ['2301.00001']},
             'survey': {'survey_md': '# S', 'open_gaps': {'open_gaps': []}},
@@ -332,8 +340,9 @@ def test_evaluation_failure_is_committed_as_degraded_without_losing_ideas(monkey
     }
     result = rc._run_evaluate(ctx)
     assert result['degraded'] is True and result['judge_count'] == 0
-    assert persisted[0]['accepted'][0]['title'] == 'kept'
-    assert persisted[0]['evaluation']['degraded'] is True
+    assert persisted[0][0] == 1
+    assert persisted[0][1]['accepted'][0]['title'] == 'kept'
+    assert persisted[0][1]['evaluation']['degraded'] is True
 
 
 # ── Test 7-10: pipeline-pathology propagation (END-TO-END, not per-function) ──
@@ -349,7 +358,7 @@ def _seams_returning(ideate_result):
     """A _Seams whose generate_ideas returns a fixed ideate result body."""
     seams = _Seams()
 
-    def _gen(direction, open_gaps, *, lang, n_ideas, abort=None):
+    def _gen(direction, open_gaps, *, lang, n_ideas, user_id, abort=None):
         seams.ideate_calls.append({'direction': direction, 'open_gaps': open_gaps})
         return dict(ideate_result)
     seams.generate_ideas = _gen
@@ -382,7 +391,7 @@ def test_degraded_reaches_the_final_result_body():
     rc._generate_ideas = seams.generate_ideas
     wd = tempfile.mkdtemp(prefix='research_degraded_')
     try:
-        res = rc.build_research_from_direction('dir', wd, lang='en')
+        res = rc.build_research_from_direction('dir', wd, lang='en', user_id=1)
         assert res.get('degraded') is True, \
             f'degraded must reach the final result body, got keys {sorted(res)}'
         assert res.get('degraded_reason'), 'degraded_reason must reach the caller'
@@ -406,7 +415,7 @@ def test_degraded_is_committed_to_the_checkpoint():
     rc._generate_ideas = seams.generate_ideas
     wd = tempfile.mkdtemp(prefix='research_degraded_ckpt_')
     try:
-        rc.build_research_from_direction('dir', wd, lang='en')
+        rc.build_research_from_direction('dir', wd, lang='en', user_id=1)
         art = _state(wd)['stages']['ideate']['artifact']
         assert art.get('degraded') is True, \
             f'degraded missing from the committed ideate artifact: {sorted(art)}'
@@ -415,7 +424,7 @@ def test_degraded_is_committed_to_the_checkpoint():
         seams2 = _Seams()
         restore2 = _install(seams2)
         try:
-            res2 = rc.build_research_from_direction('dir', wd, lang='en')
+            res2 = rc.build_research_from_direction('dir', wd, lang='en', user_id=1)
         finally:
             restore2()
         assert len(seams2.ideate_calls) == 0, 'completed job must not redo ideate'
@@ -437,7 +446,7 @@ def test_honest_zero_is_not_degraded_but_reports_gate_depth():
     rc._generate_ideas = seams.generate_ideas
     wd = tempfile.mkdtemp(prefix='research_honest_')
     try:
-        res = rc.build_research_from_direction('dir', wd, lang='en')
+        res = rc.build_research_from_direction('dir', wd, lang='en', user_id=1)
         assert not res.get('degraded'), \
             'a rubric-based zero must NOT be flagged degraded (宁缺毋滥 preserved)'
         assert res.get('gate_reached') == 'rubric', \
@@ -478,7 +487,7 @@ def test_degraded_propagation_NEUTER():
     rc.research_recipe_stages = _stages
     wd = tempfile.mkdtemp(prefix='research_neuter_deg_')
     try:
-        res = rc.build_research_from_direction('dir', wd, lang='en')
+        res = rc.build_research_from_direction('dir', wd, lang='en', user_id=1)
         leaked = not res.get('degraded')
     finally:
         rc._run_ideate = orig_run_ideate

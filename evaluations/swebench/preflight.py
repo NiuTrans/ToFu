@@ -21,9 +21,11 @@ from .constants import (
     ISOLATED_BACKENDS,
     PROJECT_ROOT,
     SWEBENCH_VERSION,
+    swebench_verified_task_digests,
     terminal_bench_21_task_digests,
 )
 from .process import resolve_executable, singularity_runtime
+from .rootless_qemu import RootlessQemuSettings
 
 
 @dataclass(frozen=True)
@@ -55,9 +57,37 @@ def _tool_version(executable: str) -> tuple[tuple[int, int, int] | None, str]:
     return _version_tuple(rendered), rendered
 
 
-def _backend_check(backend: str) -> Check:
+def _backend_check(
+    backend: str,
+    *,
+    rootless_qemu: RootlessQemuSettings | None = None,
+    benchmark: str = DEFAULT_BENCHMARK,
+    required_tasks: tuple[str, ...] = (),
+) -> Check:
     if backend not in ISOLATED_BACKENDS:
         return Check("isolation_backend", "fail", f"unsupported or non-isolating backend: {backend}")
+    if backend == "rootless-qemu":
+        if rootless_qemu is None:
+            return Check(
+                "local_runtime",
+                "fail",
+                "rootless-qemu requires --rootless-base-disk and --rootless-image-store",
+            )
+        try:
+            detail = rootless_qemu.validate(
+                BENCHMARKS[benchmark],
+                runtime_probe=True,
+                required_tasks=required_tasks,
+            )
+        except (OSError, PermissionError, RuntimeError, ValueError) as exc:
+            return Check("local_runtime", "fail", str(exc))
+        report = detail.get("runtime_preflight") or {}
+        return Check(
+            "local_runtime",
+            "pass",
+            f"QEMU {report.get('qmp_version') or report.get('version')}; "
+            f"TCG + user namespace + seccomp; images={detail['image_count']}",
+        )
     if backend == "docker":
         docker = shutil.which("docker")
         if not docker:
@@ -224,12 +254,6 @@ def _benchmark_check(benchmark: str) -> Check:
     definition = BENCHMARKS.get(benchmark)
     if definition is None:
         return Check("benchmark", "fail", f"unsupported benchmark: {benchmark!r}")
-    if benchmark != "terminal-bench-2.1":
-        return Check(
-            "benchmark",
-            "pass",
-            f"{definition.dataset} ({definition.task_count} tasks, audited source)",
-        )
     try:
         from harbor.registry.client.package import PackageDatasetClient
 
@@ -241,25 +265,23 @@ def _benchmark_check(benchmark: str) -> Check:
         return Check(
             "benchmark",
             "fail",
-            f"cannot resolve pinned Terminal-Bench 2.1 metadata: {exc}",
+            f"cannot resolve pinned {definition.key} metadata: {exc}",
         )
-    actual_digests = {
-        task_id.get_name(): str(task_id.ref)
-        for task_id in metadata.task_ids
-    }
-    locked_digests = terminal_bench_21_task_digests()
-    actual_count = len(actual_digests)
+    actual_digests = {task_id.get_name(): str(task_id.ref) for task_id in metadata.task_ids}
+    actual_count = len(metadata.task_ids)
     actual_ref = str(metadata.version)
-    valid = (
-        actual_count == definition.task_count
-        and actual_ref == definition.dataset_source_revision
-        and actual_digests == locked_digests
+    expected_digests = (
+        swebench_verified_task_digests()
+        if benchmark == "swebench-verified"
+        else terminal_bench_21_task_digests()
     )
+    task_digest_match = actual_digests == expected_digests
+    valid = actual_count == definition.task_count and actual_ref == definition.dataset_source_revision and task_digest_match
     return Check(
         "benchmark",
         "pass" if valid else "fail",
         f"{metadata.name}@{actual_ref}: {actual_count} tasks, task digests "
-        + ("match" if actual_digests == locked_digests else "DO NOT MATCH"),
+        + ("match" if task_digest_match else "DO NOT MATCH"),
     )
 
 
@@ -269,6 +291,8 @@ def harbor_checks(
     output_root: Path,
     benchmark: str = DEFAULT_BENCHMARK,
     harbor_bin: str = "harbor",
+    rootless_qemu: RootlessQemuSettings | None = None,
+    required_tasks: tuple[str, ...] = (),
 ) -> list[Check]:
     checks: list[Check] = []
     executable = resolve_executable(harbor_bin)
@@ -289,11 +313,18 @@ def harbor_checks(
         else:
             checks.append(Check("harbor", "pass", rendered))
     checks.append(_benchmark_check(benchmark))
-    checks.append(_backend_check(backend))
+    checks.append(
+        _backend_check(
+            backend,
+            rootless_qemu=rootless_qemu,
+            benchmark=benchmark,
+            required_tasks=required_tasks,
+        )
+    )
     guarded, detail = output_guard_status(output_root, PROJECT_ROOT)
     checks.append(Check("artifact_location", "pass" if guarded else "fail", detail))
     free = _free_bytes_for(output_root)
-    threshold = 120 * 1024**3 if backend in {"docker", "singularity"} else 2 * 1024**3
+    threshold = 120 * 1024**3 if backend in {"docker", "singularity", "rootless-qemu"} else 2 * 1024**3
     checks.append(
         Check(
             "free_space",

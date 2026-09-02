@@ -260,7 +260,7 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
                     and r.get('_anthropicContentBlocks')):
                 assistant_anthropic_blocks = r['_anthropicContentBlocks']
 
-        # ★ SINGLE SOURCE: field assembly goes through
+        # SINGLE SOURCE: field assembly goes through
         #   build_assistant_tool_call_message so this replay path and the live
         #   tail (_run.py clean_msg) can never re-diverge on a field. All the
         #   historical gates (.strip() content, reasoning_content-when-thinking,

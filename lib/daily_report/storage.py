@@ -1,8 +1,9 @@
 """Report storage + active-job tracking.
 
-Reports persist to ``<project>/data/config/daily_reports/YYYY-MM-DD.json``
+Reports persist to
+``<project>/data/config/daily_reports/<owner_user_id>/YYYY-MM-DD.json``
 (see :mod:`lib.config_dir`). Active background generation jobs live in
-an in-process dict keyed by date string.
+an in-process dict keyed by owner and date.
 """
 
 import copy
@@ -13,15 +14,15 @@ import threading
 import time
 
 from lib.config_dir import config_path as _config_path
-from lib.json_store import JsonStoreReadError, read_json, update_json_atomic
+from lib.identity import require_user_id
+from lib.json_store import (
+    JsonStoreReadError,
+    read_json,
+    update_json_atomic,
+)
 from lib.log import get_logger
 
 logger = get_logger(__name__)
-
-
-# Shared default user id — single-user deployment. Mirrors
-# ``routes.common.DEFAULT_USER_ID`` to avoid a routes→lib import cycle.
-DEFAULT_USER_ID = 1
 
 
 # ── Report storage ──────────────────────────────────────────
@@ -31,16 +32,28 @@ _REPORT_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 
 # ── Active generation jobs ──────────────────────────────────
-_active_jobs: dict = {}     # date_str → {status, progress, error, started_at}
+_active_jobs: dict[tuple[int, str], dict] = {}
 _jobs_lock = threading.Lock()
 
 
-def _update_job(date_str, status, progress=None, error=None):
+def _owner_id(owner_user_id, *, context):
+    return require_user_id(owner_user_id, context=context)
+
+
+def _job_key(date_str, *, owner_user_id):
+    return (
+        _owner_id(owner_user_id, context='daily report job'),
+        _parse_report_date(date_str).isoformat(),
+    )
+
+
+def _update_job(date_str, status, *, owner_user_id, progress=None, error=None):
     """Thread-safe update of background generation job status."""
+    key = _job_key(date_str, owner_user_id=owner_user_id)
     with _jobs_lock:
-        if date_str not in _active_jobs:
-            _active_jobs[date_str] = {'started_at': time.time()}
-        job = _active_jobs[date_str]
+        if key not in _active_jobs:
+            _active_jobs[key] = {'started_at': time.time()}
+        job = _active_jobs[key]
         job['status'] = status
         if progress is not None:
             job['progress'] = progress
@@ -48,23 +61,32 @@ def _update_job(date_str, status, progress=None, error=None):
             job['error'] = error
 
 
-def _get_job(date_str):
+def _get_job(date_str, *, owner_user_id):
     """Thread-safe read of job status.  Returns dict copy or None."""
+    key = _job_key(date_str, owner_user_id=owner_user_id)
     with _jobs_lock:
-        job = _active_jobs.get(date_str)
+        job = _active_jobs.get(key)
         return dict(job) if job else None
 
 
-def _clear_job(date_str):
+def _clear_job(date_str, *, owner_user_id):
     """Remove finished job from tracking dict."""
+    key = _job_key(date_str, owner_user_id=owner_user_id)
     with _jobs_lock:
-        _active_jobs.pop(date_str, None)
+        _active_jobs.pop(key, None)
 
 
-def _report_path(date_str):
+def _reports_dir_for_owner(*, owner_user_id):
+    """Return the report directory for one explicit repository owner."""
+    owner_id = _owner_id(owner_user_id, context='daily report storage')
+    return os.path.join(_REPORTS_DIR, str(owner_id))
+
+
+def _report_path(date_str, *, owner_user_id):
     """File path for a daily report.  date_str = 'YYYY-MM-DD'."""
     _parse_report_date(date_str)
-    return os.path.join(_REPORTS_DIR, f'{date_str}.json')
+    reports_dir = _reports_dir_for_owner(owner_user_id=owner_user_id)
+    return os.path.join(reports_dir, f'{date_str}.json')
 
 
 def _parse_report_date(date_str):
@@ -121,21 +143,26 @@ def _prepare_payload(date_str, report_data):
     return payload
 
 
-def _invalidate_calendar(date_str):
+def _invalidate_calendar(date_str, *, owner_user_id):
     # Local import avoids a circular import at module-load time.
     from .cost import _calendar_cache
 
     parsed = _parse_report_date(date_str)
-    _calendar_cache.pop((parsed.year, parsed.month), None)
+    owner_id = _owner_id(owner_user_id, context='daily report calendar')
+    _calendar_cache.pop((owner_id, parsed.year, parsed.month), None)
 
 
-def _log_saved(date_str, payload):
+def _log_saved(date_str, payload, *, owner_user_id):
     n = len(payload.get('streams', payload.get('tasks', [])))
-    logger.info('[DailyReport] Saved report for %s (%d items)', date_str, n)
-    _invalidate_calendar(date_str)
+    owner_id = _owner_id(owner_user_id, context='daily report storage')
+    logger.info(
+        '[DailyReport] Saved report for owner=%d date=%s (%d items)',
+        owner_id, date_str, n,
+    )
+    _invalidate_calendar(date_str, owner_user_id=owner_id)
 
 
-def _save_report(date_str, report_data):
+def _save_report(date_str, report_data, *, owner_user_id):
     """Atomically replace a daily report and return the stored payload.
 
     Side effect: invalidates the calendar TTL cache for the report's
@@ -146,7 +173,9 @@ def _save_report(date_str, report_data):
     overwritten, and write failures propagate so callers cannot report a
     successful edit that was not persisted.
     """
-    path = _report_path(date_str)
+    owner_id = _owner_id(owner_user_id, context='daily report save')
+    path = _report_path(date_str, owner_user_id=owner_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     candidate = copy.deepcopy(report_data)
 
     def _replace(_current):
@@ -154,18 +183,20 @@ def _save_report(date_str, report_data):
 
     payload = update_json_atomic(
         path, _replace, default=None, strict=True, indent=2)
-    _log_saved(date_str, payload)
+    _log_saved(date_str, payload, owner_user_id=owner_id)
     return payload
 
 
-def _save_generated_report(date_str, report_data):
+def _save_generated_report(date_str, report_data, *, owner_user_id):
     """Commit a generated report without clobbering concurrent user edits.
 
     LLM analysis can take minutes. Manual state is therefore merged from the
     latest on-disk report *inside* the same locked read-modify-write cycle as
     the final replace, rather than from a stale pre-analysis snapshot.
     """
-    path = _report_path(date_str)
+    owner_id = _owner_id(owner_user_id, context='daily report generated save')
+    path = _report_path(date_str, owner_user_id=owner_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
 
     def _merge_latest(current):
         candidate = copy.deepcopy(report_data)
@@ -180,18 +211,20 @@ def _save_generated_report(date_str, report_data):
 
     payload = update_json_atomic(
         path, _merge_latest, default=None, strict=True, indent=2)
-    _log_saved(date_str, payload)
+    _log_saved(date_str, payload, owner_user_id=owner_id)
     return payload
 
 
-def _update_report(date_str, mutator, *, default=None):
+def _update_report(date_str, mutator, *, owner_user_id, default=None):
     """Conditionally mutate one report in a locked atomic transaction.
 
     ``mutator`` receives the latest report (or a copy of ``default`` when the
     file is absent). Returning ``None`` performs no write; otherwise the
     returned dict is normalized with storage-owned metadata and persisted.
     """
-    path = _report_path(date_str)
+    owner_id = _owner_id(owner_user_id, context='daily report update')
+    path = _report_path(date_str, owner_user_id=owner_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
 
     def _mutate(current):
         if current is not None and not isinstance(current, dict):
@@ -206,17 +239,19 @@ def _update_report(date_str, mutator, *, default=None):
     payload = update_json_atomic(
         path, _mutate, default=copy.deepcopy(default), strict=True, indent=2)
     if payload is not None:
-        _log_saved(date_str, payload)
+        _log_saved(date_str, payload, owner_user_id=owner_id)
     return payload
 
 
-def _load_report(date_str):
+def _load_report(date_str, *, owner_user_id):
     """Load a cached report.  Returns dict or None.
 
     Handles both legacy per-conversation format (tasks) and new
     work-stream format (streams).
     """
-    report = read_json(_report_path(date_str), default=None)
+    owner_id = _owner_id(owner_user_id, context='daily report load')
+    report = read_json(
+        _report_path(date_str, owner_user_id=owner_id), default=None)
     if report is not None and not isinstance(report, dict):
         logger.warning('[DailyReport] Ignoring non-object report for %s', date_str)
         return None

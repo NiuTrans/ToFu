@@ -1,3 +1,16 @@
+import type {
+  I18nArgs,
+  I18nKey,
+  Translator,
+} from './contract.generated';
+
+export type {
+  I18nArgs,
+  I18nKey,
+  I18nParamsFor,
+  Translator,
+} from './contract.generated';
+
 export type UiLanguage = 'zh' | 'en';
 
 type Messages = Readonly<Record<string, string>>;
@@ -10,13 +23,6 @@ const localeLoaders: Record<UiLanguage, () => Promise<{ default: Messages }>> = 
 
 const loaded = new Map<UiLanguage, Messages>();
 const missing = new Set<string>();
-// Tiny runtime-only labels whose state is delivered out-of-band from tool
-// content. Keeping them here avoids making the generated locale chunks part
-// of the model/tool protocol surface.
-const internalMessages: Record<UiLanguage, Messages> = {
-  zh: { 'toolCmd.grepSearchIntercepted': 'grep_search 接管' },
-  en: { 'toolCmd.grepSearchIntercepted': 'grep_search takeover' },
-};
 
 function preferredLanguage(): UiLanguage {
   try {
@@ -68,11 +74,10 @@ export async function ready(): Promise<void> {
   }));
 }
 
-export function t(key: string, params?: TranslationParams): string {
+function translateMessage(key: string, params?: TranslationParams): string {
   const primary = loaded.get(_i18nLang);
   const fallback = loaded.get('zh');
-  let value = primary?.[key] ?? fallback?.[key]
-    ?? internalMessages[_i18nLang]?.[key] ?? internalMessages.zh[key];
+  let value = primary?.[key] ?? fallback?.[key];
   if (value === undefined) {
     const fingerprint = `${_i18nLang}:${key}`;
     if (!missing.has(fingerprint)) {
@@ -86,6 +91,16 @@ export function t(key: string, params?: TranslationParams): string {
     Object.prototype.hasOwnProperty.call(params, name) ? String(params[name] ?? '') : token
   ));
 }
+
+/**
+ * The only application-facing translation interface. Its key and placeholder
+ * vocabulary is generated from both locale authorities; untyped DOM/runtime
+ * adapters stay inside this module and call translateMessage directly.
+ */
+export const t: Translator = <K extends I18nKey>(
+  key: K,
+  ...args: I18nArgs<K>
+): string => translateMessage(key, args[0] as TranslationParams | undefined);
 
 export async function setLanguage(language: string): Promise<void> {
   if (language !== 'zh' && language !== 'en') return;
@@ -106,20 +121,28 @@ export async function setLanguage(language: string): Promise<void> {
 export function _applyI18n(root: ParentNode = document): void {
   root.querySelectorAll<HTMLElement>('[data-i18n]').forEach((element) => {
     const key = element.dataset.i18n;
-    if (key) element.textContent = t(key);
+    if (key) element.textContent = translateMessage(key);
+    if (element.hasAttribute('data-i18n-once')) {
+      element.removeAttribute('data-i18n');
+      element.removeAttribute('data-i18n-once');
+    }
   });
   root.querySelectorAll<HTMLElement>('[data-i18n-html]').forEach((element) => {
     const key = element.dataset.i18nHtml;
-    if (key) element.innerHTML = t(key);
+    if (key) element.innerHTML = translateMessage(key);
   });
   root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('[data-i18n-placeholder]')
     .forEach((element) => {
       const key = element.dataset.i18nPlaceholder;
-      if (key) element.placeholder = t(key);
+      if (key) element.placeholder = translateMessage(key);
     });
   root.querySelectorAll<HTMLElement>('[data-i18n-title]').forEach((element) => {
     const key = element.dataset.i18nTitle;
-    if (key) element.title = t(key);
+    if (key) element.title = translateMessage(key);
+  });
+  root.querySelectorAll<HTMLElement>('[data-i18n-aria-label]').forEach((element) => {
+    const key = element.dataset.i18nAriaLabel;
+    if (key) element.setAttribute('aria-label', translateMessage(key));
   });
   document.documentElement.lang = _i18nLang === 'zh' ? 'zh-CN' : 'en';
   const select = document.getElementById('settingLanguage') as HTMLSelectElement | null;

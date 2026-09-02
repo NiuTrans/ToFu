@@ -1,4 +1,4 @@
-"""Section 3 context injection — extracted from ``_run.py`` (pt_03f4cdf1 slice 7).
+"""Section 3 context injection — extracted from ``_run.py`` ( slice 7).
 
 The block this module replaces was the ~83-line "Section 3: Context Injection"
 region of ``run_task``, sitting between tool-history restoration and the pre-loop
@@ -15,7 +15,7 @@ caller keeps the local for use in the pre-loop init that follows.
 
   1. Emit VU phase ``Autopilot：注入系统上下文（项目结构、记忆检索）…``.
   2. Build ``_tool_names`` set from ``tool_list``.
-  3. Call ``_inject_system_contexts(...)`` with the resolved
+  3. Call ``compose_task_context(...)`` with the resolved
      project/memory/search/swarm capabilities and disabled prompt blocks.
   4. Emit ``PREFERENCES_APPLIED`` SSE if ``task['_appliedPreferences']`` was
      populated by the injection (the chip that lets the user see which
@@ -38,10 +38,10 @@ from typing import Any
 
 from lib.agent_core.events import EventType, build_event
 from lib.log import get_logger
-from lib.tasks_pkg.manager import append_event
-from lib.tasks_pkg.system_context import (
-    _disabled_prompt_blocks,
-    _inject_system_contexts,
+from lib.tasks_pkg.manager import append_event, task_user_id
+from lib.tasks_pkg.context_composer import (
+    compose_task_context,
+    disabled_context_blocks,
 )
 
 logger = get_logger(__name__)
@@ -72,7 +72,6 @@ def inject_context_and_emit_chips(
     project_enabled: bool,
     memory_enabled: bool,
     search_enabled: bool,
-    swarm_enabled: bool,
     has_real_tools: bool,
     model: str,
     tool_list: list | None,
@@ -85,12 +84,11 @@ def inject_context_and_emit_chips(
 
     Args:
         task: The live task dict (mutable — this function stashes fields on it).
-        messages: The current messages list (mutable — _inject_system_contexts
+        messages: The current messages list (mutable — compose_task_context
             splices meta turns into it).
         cfg: The run's config dict.
         project_path / project_enabled / memory_enabled / search_enabled /
-            swarm_enabled / has_real_tools: resolved capability locals from
-            Section 1.
+            has_real_tools: resolved capability locals from Section 1.
         model: The resolved model id.
         tool_list: The assembled tool list from Section 2 (used to derive
             ``_tool_names``).
@@ -128,16 +126,20 @@ def inject_context_and_emit_chips(
 
     # 3. Do the injection (mutates messages in place; stashes chip metadata
     #    on task).
-    _inject_system_contexts(
-        messages, project_path, project_enabled,
-        memory_enabled, search_enabled, swarm_enabled,
-        has_real_tools,
+    compose_task_context(
+        messages,
+        user_id=task_user_id(task),
+        project_path=project_path,
+        project_enabled=project_enabled,
+        memory_enabled=memory_enabled,
+        search_enabled=search_enabled,
+        has_real_tools=has_real_tools,
         conv_id=task.get('convId', ''),
         task=task,
         model=model,
         system_prompt_mode=cfg.get('systemPromptMode', 'append'),
         tool_names=_tool_names or None,
-        disabled_blocks=_disabled_prompt_blocks(cfg),
+        disabled_blocks=disabled_context_blocks(cfg),
     )
 
     # 4. Preferences-applied chip.
@@ -148,8 +150,6 @@ def inject_context_and_emit_chips(
                 EventType.PREFERENCES_APPLIED,
                 chars=_applied_prefs.get('chars', 0),
                 items=_applied_prefs.get('items', []),
-                core=_applied_prefs.get('core', []),
-                detail=_applied_prefs.get('detail', []),
             ))
             task['_preferencesApplied'] = dict(_applied_prefs)
         except Exception as _e:

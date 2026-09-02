@@ -28,7 +28,7 @@ from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import optional_list, optional_str, parse_body
 
-from .auth import require_auth
+from .auth import request_user_id, require_auth
 
 logger = get_logger(__name__)
 
@@ -47,15 +47,8 @@ def _new_folder_id() -> str:
     return 'f_' + hex(int(time.time() * 1000))[2:] + secrets.token_hex(2)
 
 
-# Single-user default — mirrors lib/conversations/meta_cache.py::DEFAULT_USER_ID.
-# folders.json is a global per-install store today; the userId on the frame is
-# forward-safety for when auth lands (the client drops a frame whose userId is
-# not its own — see cross_tab_sync.js::_onFoldersChangedPush).
-_FOLDERS_USER_ID = 1
-
-
 def _notify_folders_changed(*, deleted_folder_id: str | None = None,
-                            user_id: int = _FOLDERS_USER_ID) -> None:
+                            user_id: int) -> None:
     """Push a real-time ``folders_changed`` frame to connected clients.
 
     Folders are NOT a ``conversations`` row, so this does NOT reuse
@@ -80,7 +73,7 @@ def _notify_folders_changed(*, deleted_folder_id: str | None = None,
             payload['deletedFolderId'] = deleted_folder_id
         # taskId is a routing key only; folders aren't task-scoped, so a stable
         # sentinel is fine — the client subscribes notify:* (channel-wide).
-        push_event('notify', '__folders__', payload)
+        push_event('notify', '__folders__', payload, user_id=user_id)
     except Exception as e:
         logger.debug('[Folders] folders_changed push skipped: %s', e)
 
@@ -129,6 +122,7 @@ def list_folders():
             'color': {'type': 'string', 'maxLength': 32}}}}}},
 )
 def create_folder():
+    user_id = int(request_user_id())
     body = parse_body()
     name = optional_str(body, 'name', default='', max_len=80).strip()
     if not name:
@@ -153,7 +147,7 @@ def create_folder():
 
     update_json_atomic(_FOLDERS_PATH, _mutate, default=[])
     logger.info('[Folders] created id=%s name=%r', new_folder['id'], name)
-    _notify_folders_changed()
+    _notify_folders_changed(user_id=user_id)
     return api_created(new_folder)
 
 
@@ -171,6 +165,7 @@ def create_folder():
             'order': {'type': 'integer'}}}}}},
 )
 def update_folder(folder_id):
+    user_id = int(request_user_id())
     body = parse_body()
     found: list[dict] = []
 
@@ -204,7 +199,7 @@ def update_folder(folder_id):
         return api_not_found('Folder not found')
     logger.info('[Folders] updated id=%s name=%r', folder_id,
                 found[0].get('name'))
-    _notify_folders_changed()
+    _notify_folders_changed(user_id=user_id)
     return api_ok(found[0])
 
 
@@ -220,6 +215,7 @@ def update_folder(folder_id):
     tags=['conversations'],
 )
 def delete_folder(folder_id):
+    user_id = int(request_user_id())
     deleted = {'flag': False}
 
     def _mutate(folders):
@@ -233,7 +229,8 @@ def delete_folder(folder_id):
     if not deleted['flag']:
         return api_not_found('Folder not found')
     logger.info('[Folders] deleted id=%s', folder_id)
-    _notify_folders_changed(deleted_folder_id=folder_id)
+    _notify_folders_changed(
+        deleted_folder_id=folder_id, user_id=user_id)
     return api_ok()
 
 
@@ -251,6 +248,7 @@ def delete_folder(folder_id):
                                    'items': {'type': 'string'}}}}}}},
 )
 def reorder_folders():
+    user_id = int(request_user_id())
     body = parse_body()
     order = optional_list(body, 'order', item_type=str, default=[]) or []
 
@@ -265,7 +263,7 @@ def reorder_folders():
         return folders
 
     update_json_atomic(_FOLDERS_PATH, _mutate, default=[])
-    _notify_folders_changed()
+    _notify_folders_changed(user_id=user_id)
     return api_ok()
 
 

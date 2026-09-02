@@ -8,14 +8,14 @@ registry + the per-facet tables — nothing here is hand-maintained.
 Third-party plugin tools vary per deployment and are listed in the
 diagnostic section at the end, which `--check` ignores.
 
-Built-in tools: **93**
+Built-in tools: **102**
 
 ## Gaps
 
 | gap | count | meaning |
 |---|---|---|
 | write tool with no approval enricher | 0 | the approval dialog renders a bare tool name — the user approves blind, which the approval module itself calls "worse than not prompting at all" |
-| no UI label | 77 | the raw tool name is shown in the activity line |
+| no UI label | 84 | the raw tool name is shown in the activity line |
 | no reachable handler | 0 | schema advertised to the model but nothing executes it |
 | description cannot disambiguate | 4 | the model cannot tell this tool apart from its neighbours and picks the wrong one |
 | confusable tool pairs | 2 | two same-category tools open with near-identical sentences, so the model picks the wrong one |
@@ -37,33 +37,40 @@ Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 
 | tool | category | spec | dispatch | write | idempotent | label | approval_enricher | serial | read_gate | fresh_gate | streamable | arg_repair | describes_ok |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| browser_click | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
-| browser_close_tab | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
-| browser_execute_js | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
+| read_tool_artifact | artifacts | tool_result_artifacts | SET |  | ✓ |  |  |  |  |  |  | ✓ | ? |
+| search_tool_artifact | artifacts | tool_result_artifacts | SET |  | ✓ |  |  |  |  |  |  | ✓ | ? |
+| browser_click | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ? |
+| browser_close_tab | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ? |
+| browser_devtools | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ? |
+| browser_execute_js | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ? |
 | browser_fill_form | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
-| browser_get_cookies | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
-| browser_get_history | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
-| browser_list_tabs | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
+| browser_get_cookies | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ? |
+| browser_get_history | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ? |
+| browser_list_tabs | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ? |
 | browser_menu_click | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
-| browser_navigate | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
-| browser_press_key | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
+| browser_navigate | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ? |
+| browser_press_key | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ? |
 | browser_preview_page | browser | page_preview | SET |  |  |  |  |  |  |  |  |  | ✓ |
-| browser_read_page | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
-| browser_screenshot | browser | browser | SET |  |  |  |  |  |  |  |  |  | ✓ |
-| browser_type | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
-| get_conversation | conversation | conv_ref | SET |  | ✓ |  |  |  |  |  |  |  | ? |
-| list_conversations | conversation | conv_ref | SET |  | ✓ |  |  |  |  |  |  |  | ? |
-| project_board_block | conversation | conv_ref | SET |  |  |  |  |  |  |  |  |  | ? |
-| project_board_claim | conversation | conv_ref | SET |  |  |  |  |  |  |  |  |  | ? |
-| project_board_complete | conversation | conv_ref | SET |  |  |  |  |  |  |  |  |  | ? |
-| project_board_post | conversation | conv_ref | SET |  |  |  |  |  |  |  |  |  | ? |
-| project_board_read | conversation | conv_ref | SET |  | ✓ |  |  |  |  |  |  |  | ? |
-| project_charter_propose | conversation | conv_ref | SET |  |  |  |  |  |  |  |  |  | ? |
-| project_charter_read | conversation | conv_ref | SET |  | ✓ |  |  |  |  |  |  |  | ? |
-| project_feed_read | conversation | conv_ref | SET |  | ✓ |  |  |  |  |  |  |  | ? |
-| project_intervene | conversation | conv_ref | SET |  |  |  |  |  |  |  |  |  | ? |
-| project_message | conversation | conv_ref | SET |  |  |  |  |  |  |  |  |  | ? |
-| project_peer_status | conversation | conv_ref | SET |  | ✓ |  |  |  |  |  |  |  | ? |
+| browser_read_page | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ? |
+| browser_research_page | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ? |
+| browser_screenshot | browser | browser | SET |  |  |  |  |  |  |  |  |  | ? |
+| browser_type | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ? |
+| get_conversation | conversation | conv_ref | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
+| integration_checkpoint | conversation | project_brain_write | SET |  |  |  |  |  |  |  |  |  | ✓ |
+| integration_status | conversation | project_brain | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
+| integration_submit | conversation | project_brain_write | SET |  |  |  |  |  |  |  |  |  | ✓ |
+| list_conversations | conversation | conv_ref | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
+| project_board_block | conversation | project_brain_write | SET |  |  |  |  |  |  |  |  |  | ✓ |
+| project_board_claim | conversation | project_brain_write | SET |  |  |  |  |  |  |  |  |  | ✓ |
+| project_board_complete | conversation | project_brain_write | SET |  |  |  |  |  |  |  |  |  | ✓ |
+| project_board_post | conversation | project_brain_write | SET |  |  |  |  |  |  |  |  |  | ✓ |
+| project_board_read | conversation | project_brain | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
+| project_charter_propose | conversation | project_brain_write | SET |  |  |  |  |  |  |  |  |  | ✓ |
+| project_charter_read | conversation | project_brain | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
+| project_feed_read | conversation | project_brain | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
+| project_intervene | conversation | project_brain_write | SET |  |  |  |  |  |  |  |  |  | ✓ |
+| project_message | conversation | project_brain_write | SET |  |  |  |  |  |  |  |  |  | ✓ |
+| project_peer_status | conversation | project_brain | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
 | desktop_clipboard | desktop | desktop | SET |  |  |  |  |  |  |  |  |  | ✓ |
 | desktop_gui_action | desktop | desktop | SET |  |  |  |  |  |  |  |  |  | ✓ |
 | desktop_list_files | desktop | desktop | SET |  |  |  |  |  |  |  |  |  | ✓ |
@@ -87,14 +94,12 @@ Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 | update_memory | memory | memory | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
 | apply_diff | project | project | SET | ✓ |  | ✓ | ✓ |  | ✓ | ✓ |  | ✓ | ? |
 | apply_diffs | project | project | SET | ✓ |  | ✓ | ✓ |  | ✓ | ✓ |  | ✓ | ? |
-| create_project | project | project | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
 | edit_file | project | project | SET | ✓ |  | ✓ | ✓ |  | ✓ | ✓ |  |  | ✓ |
 | find_files | project | project | SET |  | ✓ | ✓ |  |  |  |  | ✓ | ✓ | ✓ |
 | grep_search | project | project | SET |  | ✓ | ✓ |  |  |  |  | ✓ | ✓ | ✓ |
 | insert_content | project | project | SET | ✓ |  | ✓ | ✓ |  | ✓ | ✓ |  | ✓ | ? |
 | insert_contents | project | project | SET | ✓ |  | ✓ | ✓ |  | ✓ | ✓ |  | ✓ | ? |
 | inspect_image | project | inspect_image | EXACT |  | ✓ |  |  |  |  |  |  |  | ✓ |
-| list_dir | project | project | SET |  | ✓ | ✓ |  |  |  |  | ✓ | ✓ | ✓ |
 | read_files | project | read_files | EXACT |  | ✓ | ✓ |  |  |  |  | ✓ | ✓ | ✓ |
 | run_command | project | project | SET | ✓ |  |  | ✓ |  |  |  |  | ✓ | ✓ |
 | write_file | project | project | SET | ✓ |  | ✓ | ✓ |  |  | ✓ |  | ✓ | ✓ |
@@ -102,12 +107,16 @@ Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 | schedule_create | scheduler | scheduler | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
 | schedule_list | scheduler | scheduler | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
 | schedule_manage | scheduler | scheduler | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
-| timer_create | scheduler | scheduler | SET | ✓ |  |  | ✓ | ✓ |  |  |  |  | ✓ |
+| timer_create | scheduler | scheduler | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
 | timer_manage | scheduler | scheduler | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
+| download_url_to_server | search | server_download | EXACT |  | ✓ |  |  |  |  |  |  |  | ? |
 | fetch_url | search | fetch | EXACT |  | ✓ | ✓ |  |  |  |  | ✓ | ✓ | ✓ |
 | update_search_settings | search | search_settings | EXACT | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
 | web_search | search | search | EXACT |  | ✓ | ✓ |  |  |  |  | ✓ |  | ✓ |
-| load_skill | skills | skills | SET |  | ✓ | ✓ |  |  |  |  |  |  | ? |
+| load_skill | skills | skills | SET |  | ✓ | ✓ |  |  |  |  |  |  | ✓ |
+| read_skill_resource | skills | skills | SET |  | ✓ | ✓ |  |  |  |  |  |  | ✓ |
+| request_skill_install | skills | skill_install | SET | ✓ |  | ✓ | ✓ |  |  |  |  |  | ? |
+| search_skills | skills | skills | SET |  | ✓ | ✓ |  |  |  |  |  |  | ✓ |
 | await_agents | swarm | swarm | SET |  |  |  |  |  |  |  |  |  | ✓ |
 | get_agent_result | swarm | swarm | SET |  |  |  |  |  |  |  |  |  | ✓ |
 | list_artifacts | swarm | swarm | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |

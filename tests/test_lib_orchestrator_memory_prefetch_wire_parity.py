@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Incident anchor: born in commit 7780fd50 — refactor(orchestrator): pt_03f4cdf1 slice 9 — extract Section 3.5 (Me...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity for pt_03f4cdf1 slice 9 — Section 3.5 memory prefetch gate.
 
 Scope: run_task's Section 3.5 block — local metadata BM25 + deterministic

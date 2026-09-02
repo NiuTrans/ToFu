@@ -20,6 +20,7 @@ _PAGE = r"""
 <!doctype html><html data-theme="__THEME__"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="file://__ROOT__/static/styles.css">
+<link rel="stylesheet" href="file://__ROOT__/static/request-inspector-trace.css">
 </head><body>
 <div class="ri-drawer" id="riDrawer" style="display:none">
   <div class="ri-side">

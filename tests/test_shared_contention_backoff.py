@@ -1,37 +1,36 @@
 #!/usr/bin/env python3
-"""tests/test_shared_contention_backoff.py — shared-project 429 contention:
-IMMEDIATE RETRY, no family backoff (owner directive 2026-08-03).
+"""tests/test_shared_contention_backoff.py — shared-project 429 probe control.
 
 History: 2026-07-28 (pt_1a72b708098d446f) introduced a jittered, escalating
 family parking (2s → doubling → 60s cap) for contention 429s, on the theory
 that rotating our own keys is futile when the whole upstream project is
-saturated by other tenants. 2026-08-03 the owner reversed the policy: a 429
-gets NO backoff — the loop retries immediately and grabs the rate-limit
-window the instant it resets (the bounded saturation escalation default was
-retired the same day). ``note_shared_contention`` is now PURE TELEMETRY:
-a per-(provider, model) streak counter plus a throttled log line.
+saturated by other tenants. 2026-08-03 that policy was retired in favor of a
+fixed 0.3s retry. Production evidence on 2026-08-26 then found 239 project TPM
+rejections across 87 rounds: 152 repeat probes, including 12 in 14 seconds.
+The replacement coordinates pre-request admission per provider/model: one probe
+per second, with bounded three-second recheck slices and no slot parking.
 
 Pinned here:
 
-  1. note_shared_contention NEVER cools any slot and always returns 0.0 —
-     repeated strikes can never resurrect the retired 2s→60s escalation
-     (NEUTER: re-adding parking flips these red).
-  2. The streak counter accumulates within the grace window and resets
-     after a quiet window (30s).
-  3. Log throttle: strikes 1-3 + every 100th at INFO, the rest DEBUG —
+  1. The first strike arms the 0.3s baseline; every later task reserves a
+     one-second probe slot before network I/O. Deep queues recheck after three
+     seconds instead of collapsing onto the same capped wake-up time.
+  2. Coordination NEVER cools a slot or contaminates health. Quiet recovery
+     resets state; one lucky success does not, while sustained recovery does.
+  3. Provider/model families coordinate independently.
+  4. Log throttle: strikes 1-3 + every 100th at INFO, the rest DEBUG —
      a sustained storm costs ~1 line/30s, not ~3 lines/s.
-  4. End-to-end through dispatch_stream: a contention 429 leaves the
-     family unparked (the only cooldown is the slot's own 0.5s
-     'rate_limit' steering) and the loop retries immediately.
-  5. The per-cycle 429 loop log is DEBUG after the first 3 cycles
-     (log-bloat guard for the immediate-retry era).
-  6. Wait-label precedence + rpm-decay contracts UNCHANGED (the label
+  5. Sync chat/stream and native-async stream consume the coordinator delay;
+     the wait remains abortable and is included in queue-wait accounting.
+  6. The per-cycle 429 loop log is DEBUG after the first 3 cycles.
+  7. Wait-label precedence + rpm-decay contracts UNCHANGED (the label
      function and the slot accounting are isolation-tested as before).
 
 Run:  pytest tests/test_shared_contention_backoff.py -m unit
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import threading
@@ -65,42 +64,108 @@ def _dispatcher(slots):
 
 
 @pytest.mark.unit
-class TestNoFamilyBackoff:
+class TestProjectProbeCoordination:
 
-    def test_no_parking_and_zero_window(self):
+    def test_first_strike_keeps_baseline_without_parking(self):
         s1, s2, other = (_slot('kimi-k3', 'k0'), _slot('kimi-k3', 'k1'),
                          _slot('qwen3.5-plus', 'k2'))
         disp = _dispatcher([s1, s2, other])
-        window = disp.note_shared_contention(s1)
-        assert window == 0.0, 'owner directive 2026-08-03: NO backoff'
+        assert disp.note_shared_contention(s1) == pytest.approx(0.3)
         for s in (s1, s2, other):
             assert s.cooldown_until == 0.0, (
-                'a contention note must never park ANY slot — immediate '
-                'retry is the policy')
+                'probe coordination must never park ANY slot')
             assert s.cooldown_reason == ''
 
-    def test_repeated_strikes_never_escalate(self):
-        """NEUTER pin: the retired 2s→60s doubling cannot sneak back —
-        25 consecutive strikes must park nothing, ever."""
+    def test_pre_request_admission_serializes_without_capped_herd(
+            self, monkeypatch):
+        """A deep queue rechecks after 3s; it is not admitted as one herd."""
         s = _slot('kimi-k3', 'k0')
         disp = _dispatcher([s])
-        for _ in range(25):
-            assert disp.note_shared_contention(s) == 0.0
-            assert s.cooldown_until == 0.0
-            assert s.cooldown_reason == ''
-        assert disp._contention_strikes[(PROV, 'kimi-k3')][0] == 25
+        now = [100.0]
+        monkeypatch.setattr(
+            'lib.llm_dispatch.dispatcher.time.monotonic', lambda: now[0])
+        assert disp.note_shared_contention(s) == pytest.approx(0.3)
+        decisions = [disp.reserve_shared_contention_probe(s)
+                     for _ in range(4)]
+        assert [decision.delay_s for decision in decisions] == pytest.approx(
+            [0.3, 1.3, 2.3, 3.0])
+        assert [decision.admitted for decision in decisions] == [
+            True, True, True, False]
+        assert disp._contention_strikes[(PROV, 'kimi-k3')].next_probe_at == \
+            pytest.approx(103.3)
 
-    def test_strikes_reset_after_quiet_window(self):
+        now[0] = 103.0
+        later = [disp.reserve_shared_contention_probe(s) for _ in range(2)]
+        assert [decision.delay_s for decision in later] == pytest.approx(
+            [0.3, 1.3])
+        assert all(decision.admitted for decision in later)
+        assert s.cooldown_until == 0.0
+        assert s.cooldown_reason == ''
+
+    def test_families_coordinate_independently(self, monkeypatch):
+        kimi = _slot('kimi-k3', 'k0')
+        qwen = _slot('qwen3.5-plus', 'k1')
+        disp = _dispatcher([kimi, qwen])
+        monkeypatch.setattr(
+            'lib.llm_dispatch.dispatcher.time.monotonic', lambda: 100.0)
+        assert disp.note_shared_contention(kimi) == pytest.approx(0.3)
+        assert disp.note_shared_contention(qwen) == pytest.approx(0.3)
+        assert disp.reserve_shared_contention_probe(kimi).delay_s == \
+            pytest.approx(0.3)
+        assert disp.reserve_shared_contention_probe(qwen).delay_s == \
+            pytest.approx(0.3)
+
+    def test_strikes_reset_after_quiet_window(self, monkeypatch):
         s = _slot('kimi-k3', 'k0')
         disp = _dispatcher([s])
+        now = [100.0]
+        monkeypatch.setattr(
+            'lib.llm_dispatch.dispatcher.time.monotonic', lambda: now[0])
         for _ in range(3):
             disp.note_shared_contention(s)
         key = (PROV, 'kimi-k3')
-        assert disp._contention_strikes[key][0] == 3
-        # Simulate a healed project: quiet window + grace elapsed.
-        disp._contention_strikes[key] = (3, time.time() - 31.0)
+        assert disp._contention_strikes[key].strikes == 3
+        now[0] += 31.0
+        assert disp.note_shared_contention(s) == pytest.approx(0.3)
+        assert disp._contention_strikes[key].strikes == 1
+
+    def test_sustained_success_resets_probe_reservations(self, monkeypatch):
+        s = _slot('kimi-k3', 'k0')
+        disp = _dispatcher([s])
+        monkeypatch.setattr(
+            'lib.llm_dispatch.dispatcher.time.monotonic', lambda: 100.0)
         disp.note_shared_contention(s)
-        assert disp._contention_strikes[key][0] == 1
+        assert disp.note_shared_success(s) is False
+        state = disp._contention_strikes[(PROV, 'kimi-k3')]
+        assert state.recovery_successes == 1
+        assert disp.note_shared_success(s) is True
+        assert (PROV, 'kimi-k3') not in disp._contention_strikes
+        assert disp.note_shared_contention(s) == pytest.approx(0.3)
+
+    def test_new_contention_cancels_partial_recovery(self, monkeypatch):
+        s = _slot('kimi-k3', 'k0')
+        disp = _dispatcher([s])
+        monkeypatch.setattr(
+            'lib.llm_dispatch.dispatcher.time.monotonic', lambda: 100.0)
+        disp.note_shared_contention(s)
+        assert disp.note_shared_success(s) is False
+        disp.note_shared_contention(s)
+        state = disp._contention_strikes[(PROV, 'kimi-k3')]
+        assert state.recovery_successes == 0
+        assert state.strikes == 2
+
+    def test_family_state_table_has_hard_bound(self, monkeypatch):
+        disp = _dispatcher([])
+        disp._CONTENTION_MAX_FAMILIES = 3
+        now = [100.0]
+        monkeypatch.setattr(
+            'lib.llm_dispatch.dispatcher.time.monotonic', lambda: now[0])
+        for index in range(4):
+            disp.note_shared_contention(_slot(f'model-{index}', f'k{index}'))
+            now[0] += 0.1
+        assert len(disp._contention_strikes) == 3
+        assert (PROV, 'model-0') not in disp._contention_strikes
+        assert (PROV, 'model-3') in disp._contention_strikes
 
     def test_log_is_throttled(self, monkeypatch):
         """First 3 strikes + every 100th at INFO; the other 96 DEBUG."""
@@ -125,8 +190,7 @@ class TestNoFamilyBackoff:
         assert 'contention' not in disp.cooling_cause_summary('text')
 
     def test_picker_not_steered_away_from_family(self):
-        """Immediate retry: the picker keeps landing on the contended
-        family — no parking means no fallback steering."""
+        """Admission timing is not hidden slot parking or health steering."""
         s1, other = _slot('kimi-k3', 'k0'), _slot('qwen3.5-plus', 'k1')
         other.latency_ema = 99999.0  # kimi wins on score deterministically
         disp = _dispatcher([s1, other])
@@ -182,9 +246,10 @@ class TestWaitLabel:
         f = retry_phase_fields(
             model='kimi-k3', attempt=1,
             reason='Waiting for model (shared project limit)', status_code=0)
-        assert f['detailKey'] == 'stream.phase.retryReason'
+        assert f['detailKey'] == 'stream.phase.retryCooldownWait'
         assert f['detailArgs']['reasonKey'] == \
             'stream.retryReason.waitingSharedProject'
+        assert 'attempt' not in f['detailArgs']
 
 
 @pytest.mark.unit
@@ -211,25 +276,33 @@ class TestRpmLimitNotDecayed:
 @pytest.mark.unit
 class TestDispatchIntegration:
 
-    def test_contention_429_retries_immediately_without_parking(
+    def test_first_contention_uses_baseline_without_parking(
             self, monkeypatch):
-        """End-to-end through dispatch_stream: one contention 429 → NO
-        family parking (only the slot's own 0.5s 'rate_limit' steering) →
-        the loop retries immediately and succeeds."""
+        """One contention 429 keeps the existing 0.3s retry contract."""
         from lib.llm_dispatch import api
         from lib.llm_errors import RateLimitError
         from tests.test_vendor_transient_dispatch import _FakeDispatcher
 
-        s1, other = _slot('kimi-k3', 'k0'), _slot('qwen3.5-plus', 'k1')
+        s1, other = _slot('kimi-k3', 'k0'), _slot('kimi-k3', 'k1')
         disp = _FakeDispatcher([s1, other])
         # The fake hands out queued slots; give it a real registry so the
         # loop's note_shared_contention call has somewhere to land.
         real = _dispatcher([s1, other])
         disp.note_shared_contention = real.note_shared_contention
+        disp.reserve_shared_contention_probe = \
+            real.reserve_shared_contention_probe
+        recoveries = []
+
+        def _note_success(slot):
+            recoveries.append(slot)
+            return real.note_shared_success(slot)
+
+        disp.note_shared_success = _note_success
         monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
         monkeypatch.setattr('lib.key_stats.is_key_enabled', lambda *a, **k: True)
+        sleeps = []
         monkeypatch.setattr('lib.llm_dispatch.api.time.sleep',
-                            lambda *_a, **_k: None)
+                            lambda seconds: sleeps.append(seconds))
         monkeypatch.setattr('lib.key_stats.record_outcome',
                             lambda *a, **k: None)
         monkeypatch.setattr('lib.key_stats.record_rate_limit',
@@ -252,15 +325,199 @@ class TestDispatchIntegration:
             [{'role': 'user', 'content': 'hi'}], log_prefix='[t]')
 
         assert msg == 'ok'
+        assert sleeps == pytest.approx([0.3], abs=0.02)
+        assert recoveries == [other]
         assert s1.cooldown_reason != 'contention', (
-            'immediate-retry policy: contention must NOT park the family')
+            'probe coordination must NOT park the family')
         assert s1.cooldown_until <= time.time() + 0.6, (
             'the only cooldown left is the 0.5s per-slot steering from '
             'record_error — never a family window')
 
+    def test_dispatch_chat_consumes_coordinator_delay(self, monkeypatch):
+        from lib.llm_dispatch import api
+        from lib.llm_errors import RateLimitError
+        from tests.test_vendor_transient_dispatch import _FakeDispatcher
+
+        first, second = _slot('kimi-k3', 'k0'), _slot('kimi-k3', 'k1')
+        disp = _FakeDispatcher([first, second], all_slots=[first, second])
+        real = _dispatcher([first, second])
+        disp.note_shared_contention = real.note_shared_contention
+        disp.reserve_shared_contention_probe = \
+            real.reserve_shared_contention_probe
+        recoveries = []
+
+        def _note_success(slot):
+            recoveries.append(slot)
+            return real.note_shared_success(slot)
+
+        disp.note_shared_success = _note_success
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+        monkeypatch.setattr('lib.key_stats.is_key_enabled', lambda *a, **k: True)
+        monkeypatch.setattr('lib.key_stats.record_outcome', lambda *a, **k: None)
+        monkeypatch.setattr('lib.key_stats.record_rate_limit',
+                            lambda *a, **k: False)
+        sleeps = []
+        monkeypatch.setattr(api.time, 'sleep', sleeps.append)
+        calls = {'n': 0}
+
+        def _fake_chat(*args, **kwargs):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise RateLimitError(
+                    'reached project TPM rate limit', status_code=429,
+                    is_shared_contention=True)
+            return 'ok', {}
+
+        monkeypatch.setattr('lib.llm.chat', _fake_chat)
+        content, _usage = api.dispatch_chat(
+            [{'role': 'user', 'content': 'hi'}], log_prefix='[t]')
+
+        assert content == 'ok'
+        assert sleeps == pytest.approx([0.3], abs=0.02)
+        assert recoveries == [second]
+
+    def test_existing_family_gate_precedes_first_network_call(
+            self, monkeypatch):
+        """A different dispatch sees contention before spending one request."""
+        from lib.llm_dispatch import api
+        from tests.test_vendor_transient_dispatch import _FakeDispatcher
+
+        slot = _slot('kimi-k3', 'k0')
+        real = _dispatcher([slot])
+        real.note_shared_contention(slot)
+        disp = _FakeDispatcher([slot], all_slots=[slot])
+        disp.reserve_shared_contention_probe = \
+            real.reserve_shared_contention_probe
+        disp.note_shared_success = real.note_shared_success
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+        monkeypatch.setattr('lib.key_stats.is_key_enabled', lambda *a, **k: True)
+        monkeypatch.setattr('lib.key_stats.record_outcome', lambda *a, **k: None)
+        sleeps = []
+        monkeypatch.setattr(api.time, 'sleep', sleeps.append)
+        sent_after_wait = []
+
+        def _fake_chat(*args, **kwargs):
+            sent_after_wait.append(bool(sleeps))
+            return 'ok', {}
+
+        monkeypatch.setattr('lib.llm.chat', _fake_chat)
+        content, _usage = api.dispatch_chat(
+            [{'role': 'user', 'content': 'hi'}], log_prefix='[new-task]')
+
+        assert content == 'ok'
+        assert sleeps == pytest.approx([0.3], abs=0.02)
+        assert sent_after_wait == [True]
+
+    def test_local_cache_gate_precedes_project_probe(self, monkeypatch):
+        """A probe reservation must describe an actual request start."""
+        from lib.llm_dispatch import api
+        from tests.test_vendor_transient_dispatch import _FakeDispatcher
+
+        slot = _slot('kimi-k3', 'k0')
+        real = _dispatcher([slot])
+        real.note_shared_contention(slot)
+        disp = _FakeDispatcher([slot], all_slots=[slot])
+        order = []
+
+        def _reserve(candidate):
+            order.append('project-admission')
+            return real.reserve_shared_contention_probe(candidate)
+
+        disp.reserve_shared_contention_probe = _reserve
+        disp.note_shared_success = real.note_shared_success
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+        monkeypatch.setattr('lib.key_stats.is_key_enabled', lambda *a, **k: True)
+        monkeypatch.setattr('lib.key_stats.record_outcome', lambda *a, **k: None)
+        monkeypatch.setattr(api.time, 'sleep', lambda _seconds: None)
+        monkeypatch.setattr(
+            'lib.llm_dispatch.cache_settle.settle_before_send',
+            lambda *a, **k: order.append('cache-settle'),
+        )
+
+        def _fake_stream(*args, **kwargs):
+            order.append('network')
+            return 'ok', 'stop', {}
+
+        monkeypatch.setattr('lib.llm.stream_chat', _fake_stream)
+        result = api.dispatch_stream(
+            [{'role': 'user', 'content': 'hi'}], log_prefix='[ordering]')
+
+        assert result[0] == 'ok'
+        assert order[:3] == ['cache-settle', 'project-admission', 'network']
+
+    def test_abort_during_project_wait_releases_reserved_slot(
+            self, monkeypatch):
+        from lib.llm import AbortedError
+        from lib.llm_dispatch import api
+        from tests.test_vendor_transient_dispatch import _FakeDispatcher
+
+        slot = _slot('kimi-k3', 'k0')
+        real = _dispatcher([slot])
+        real.note_shared_contention(slot)
+        disp = _FakeDispatcher([slot], all_slots=[slot])
+        disp.reserve_shared_contention_probe = \
+            real.reserve_shared_contention_probe
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+        monkeypatch.setattr(
+            'lib.llm_dispatch.cache_settle.settle_before_send',
+            lambda *a, **k: 0.0,
+        )
+        checks = iter([False, True])
+
+        with pytest.raises(AbortedError):
+            api.dispatch_stream(
+                [{'role': 'user', 'content': 'hi'}],
+                abort_check=lambda: next(checks, True),
+                log_prefix='[abort-admission]',
+            )
+
+        assert slot.inflight == 0
+        assert slot.total_errors == 0
+
+    def test_async_stream_consumes_coordinator_delay(self, monkeypatch):
+        from lib.llm_dispatch import api
+        from lib.llm_errors import RateLimitError
+        from tests.test_async_dispatch_stream import _FakeDispatcher
+
+        first, second = _slot('kimi-k3', 'k0'), _slot('kimi-k3', 'k1')
+        disp = _FakeDispatcher([first, second])
+        real = _dispatcher([first, second])
+        disp.note_shared_contention = real.note_shared_contention
+        disp.reserve_shared_contention_probe = \
+            real.reserve_shared_contention_probe
+        recoveries = []
+
+        def _note_success(slot):
+            recoveries.append(slot)
+            return real.note_shared_success(slot)
+
+        disp.note_shared_success = _note_success
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+        sleeps = []
+
+        async def _fake_sleep(seconds, abort_check=None):
+            sleeps.append(seconds)
+
+        async def _fake_stream(*args, **kwargs):
+            if not sleeps:
+                raise RateLimitError(
+                    'reached project TPM rate limit', status_code=429,
+                    is_shared_contention=True)
+            return 'ok', 'stop', {}
+
+        monkeypatch.setattr(
+            'lib.llm._transport.async_abortable_sleep', _fake_sleep)
+        monkeypatch.setattr('lib.llm.astream.async_stream_chat', _fake_stream)
+        result = asyncio.run(api.async_dispatch_stream(
+            [{'role': 'user', 'content': 'hi'}], log_prefix='[t]'))
+
+        assert result[0] == 'ok'
+        assert sleeps == pytest.approx([0.3], abs=0.02)
+        assert recoveries == [second]
+
     def test_per_cycle_429_log_throttled_after_first_three(
             self, monkeypatch):
-        """Log-bloat guard for the immediate-retry era: cycles 1-3 log at
+        """Log-bloat guard for a sustained retry era: cycles 1-3 log at
         INFO, cycles 4+ at DEBUG (every 100th still surfaces at INFO)."""
         from lib.llm_dispatch import api
         from lib.llm_errors import RateLimitError

@@ -43,8 +43,8 @@ _BOARD_TTL_SEC = 10.0
 _WARNED_MAX = 2048
 
 _lock = threading.Lock()
-_board_cache: dict = {}          # project_path -> (fetched_ts, {conv_id: [entries]})
-_warned: OrderedDict = OrderedDict()  # (conv_id, rel_path) -> True
+_board_cache: dict = {}  # (user_id, project_path) -> (ts, {conv_id: [entries]})
+_warned: OrderedDict = OrderedDict()  # (user_id, conv_id, rel_path) -> True
 
 
 def _looks_like_path(entry: str) -> bool:
@@ -90,12 +90,13 @@ def _matches(entry: str, rel: str) -> bool:
     return fnmatch.fnmatch(rel, e)
 
 
-def _claimed_write_sets(project_path: str) -> dict:
+def _claimed_write_sets(project_path: str, *, user_id: int) -> dict:
     """{conv_id: [write_set entries]} of currently-claimed epics, TTL-cached."""
     proj = (project_path or '').rstrip('/\\')
     now = time.time()
     with _lock:
-        hit = _board_cache.get(proj)
+        cache_key = (int(user_id), proj)
+        hit = _board_cache.get(cache_key)
         if hit and (now - hit[0]) < _BOARD_TTL_SEC:
             return hit[1]
     out: dict = {}
@@ -103,7 +104,7 @@ def _claimed_write_sets(project_path: str) -> dict:
         # Lazy import: keeps this module dependency-light for lib/project_mod
         # callers and lets tests monkeypatch the board seam directly.
         from lib.conversations.project_board import read_board
-        board = read_board(proj)
+        board = read_board(proj, user_id=user_id)
         for t in (board.get('tasks') or []):
             if t.get('kind') == 'lease':
                 continue
@@ -121,7 +122,7 @@ def _claimed_write_sets(project_path: str) -> dict:
                        proj, e)
         out = {}
     with _lock:
-        _board_cache[proj] = (now, out)
+        _board_cache[cache_key] = (now, out)
         if len(_board_cache) > 32:
             # Bounded: projects per process are few, but never grow unbounded.
             oldest = min(_board_cache, key=lambda k: _board_cache[k][0])
@@ -129,7 +130,13 @@ def _claimed_write_sets(project_path: str) -> dict:
     return out
 
 
-def note_project_write(conv_id: str, project_path: str, raw_path: str) -> bool:
+def note_project_write(
+    conv_id: str,
+    project_path: str,
+    raw_path: str,
+    *,
+    user_id: int,
+) -> bool:
     """Advisory hook for one successful write. Returns True when it warned.
 
     Never raises into the caller; every failure degrades to silence (a
@@ -138,7 +145,7 @@ def note_project_write(conv_id: str, project_path: str, raw_path: str) -> bool:
     try:
         if not conv_id or not project_path:
             return False
-        sets = _claimed_write_sets(project_path)
+        sets = _claimed_write_sets(project_path, user_id=user_id)
         entries = sets.get(conv_id)
         if not entries:
             return False  # this conv claims nothing → nothing to drift from
@@ -150,7 +157,7 @@ def note_project_write(conv_id: str, project_path: str, raw_path: str) -> bool:
             return False
         if any(_matches(e, rel) for e in path_entries):
             return False
-        key = (conv_id, rel)
+        key = (int(user_id), conv_id, rel)
         with _lock:
             if key in _warned:
                 return False
@@ -171,6 +178,7 @@ def note_project_write(conv_id: str, project_path: str, raw_path: str) -> bool:
                 project_path, conv_id, 'note',
                 f'Write outside declared write_set: {rel} '
                 f'(claimed epic(s) declare: {declared})',
+                user_id=user_id,
                 payload={'path': rel, 'declared': declared,
                          'guard': 'write_set_advisory'})
         except Exception as e:

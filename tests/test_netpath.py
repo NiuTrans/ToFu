@@ -1,4 +1,4 @@
-"""Tests for lib/netpath.py — adaptive per-host route selection (N-path).
+"""Tests for lib/netpath.py — adaptive direct-vs-proxy path selection.
 
 Covers:
   * scorer mechanics (EWMA latency contest, consecutive-failure failover,
@@ -92,34 +92,31 @@ class TestScorer:
         _feed('fast-proxy.example.com', 'direct', lat=300, n=2)
         # Initially direct is the only measured path → pinned.
         assert _decision('fast-proxy.example.com') == 'direct'
-        _feed('fast-proxy.example.com', 'env', lat=100, n=2)
-        assert _decision('fast-proxy.example.com') == 'env'
-        # A pinned env route resolves to the explicit env proxy dict.
-        assert lib_proxy.proxies_for('https://fast-proxy.example.com/x') == {
-            'http': 'http://netpath-test-proxy.invalid:3128',
-            'https': 'http://netpath-test-proxy.invalid:3128'}
+        _feed('fast-proxy.example.com', 'proxy', lat=100, n=2)
+        assert _decision('fast-proxy.example.com') == 'proxy'
+        assert lib_proxy.proxies_for('https://fast-proxy.example.com/x') == {}
 
     def test_consecutive_failures_fail_over(self):
         _note('flaky.example.com')
         _feed('flaky.example.com', 'direct', lat=100, n=2)
-        _feed('flaky.example.com', 'env', lat=300, n=2)
+        _feed('flaky.example.com', 'proxy', lat=300, n=2)
         assert _decision('flaky.example.com') == 'direct'
         _feed('flaky.example.com', 'direct', ok=False, n=2)
-        assert _decision('flaky.example.com') == 'env'
+        assert _decision('flaky.example.com') == 'proxy'
 
     def test_single_failure_does_not_flip(self):
         _note('one-flap.example.com')
         _feed('one-flap.example.com', 'direct', lat=100, n=2)
-        _feed('one-flap.example.com', 'env', lat=300, n=2)
+        _feed('one-flap.example.com', 'proxy', lat=300, n=2)
         _feed('one-flap.example.com', 'direct', ok=False, n=1)
         assert _decision('one-flap.example.com') == 'direct'
 
     def test_healed_path_is_rediscovered(self):
         _note('heal.example.com')
         _feed('heal.example.com', 'direct', lat=100, n=2)
-        _feed('heal.example.com', 'env', lat=300, n=2)
+        _feed('heal.example.com', 'proxy', lat=300, n=2)
         _feed('heal.example.com', 'direct', ok=False, n=2)
-        assert _decision('heal.example.com') == 'env'
+        assert _decision('heal.example.com') == 'proxy'
         # Direct recovers — after fresh measurements it wins the contest.
         _feed('heal.example.com', 'direct', lat=100, n=2)
         assert _decision('heal.example.com') == 'direct'
@@ -128,20 +125,20 @@ class TestScorer:
         _note('hyst.example.com')
         _feed('hyst.example.com', 'direct', lat=100, n=2)
         # Proxy is only 10% faster — NOT enough to unseat the incumbent.
-        _feed('hyst.example.com', 'env', lat=90, n=2)
+        _feed('hyst.example.com', 'proxy', lat=90, n=2)
         assert _decision('hyst.example.com') == 'direct'
         # 50ms EWMA after two samples: 78 then 69.6 < 75 → switch.
-        _feed('hyst.example.com', 'env', lat=50, n=2)
-        assert _decision('hyst.example.com') == 'env'
+        _feed('hyst.example.com', 'proxy', lat=50, n=2)
+        assert _decision('hyst.example.com') == 'proxy'
 
     def test_both_paths_bad_falls_back_to_default(self):
         _note('both-bad.example.com')
         _feed('both-bad.example.com', 'direct', lat=100, n=2)
-        _feed('both-bad.example.com', 'env', lat=300, n=2)
+        _feed('both-bad.example.com', 'proxy', lat=300, n=2)
         assert _decision('both-bad.example.com') == 'direct'
         _feed('both-bad.example.com', 'direct', ok=False, n=2)
-        assert _decision('both-bad.example.com') == 'env'
-        _feed('both-bad.example.com', 'env', ok=False, n=2)
+        assert _decision('both-bad.example.com') == 'proxy'
+        _feed('both-bad.example.com', 'proxy', ok=False, n=2)
         assert netpath.decide('both-bad.example.com') is None
 
     def test_no_proxy_env_never_picks_proxy(self, monkeypatch):
@@ -171,12 +168,12 @@ class TestScorer:
     def test_reset_proxy_stats(self):
         _note('reset.example.com')
         _feed('reset.example.com', 'direct', lat=300, n=2)
-        _feed('reset.example.com', 'env', lat=100, n=2)
-        assert _decision('reset.example.com') == 'env'
+        _feed('reset.example.com', 'proxy', lat=100, n=2)
+        assert _decision('reset.example.com') == 'proxy'
         netpath.reset_proxy_stats()
         st = netpath._states['reset.example.com']
         assert st['decision'] is None
-        assert st['paths']['env']['ewma_ms'] is None
+        assert st['paths']['proxy']['ewma_ms'] is None
         assert st['paths']['direct']['ewma_ms'] == 300
 
 
@@ -190,8 +187,8 @@ class TestProxyIntegration:
         # Learned state says proxy is better…
         _note('bypass-me.example.com')
         _feed('bypass-me.example.com', 'direct', lat=300, n=2)
-        _feed('bypass-me.example.com', 'env', lat=100, n=2)
-        assert _decision('bypass-me.example.com') == 'env'
+        _feed('bypass-me.example.com', 'proxy', lat=100, n=2)
+        assert _decision('bypass-me.example.com') == 'proxy'
         # …but an explicit bypass-domain suffix still forces direct.
         lib_proxy.set_bypass_domains(['bypass-me.example.com'])
         assert lib_proxy.proxies_for('https://bypass-me.example.com/') == {
@@ -200,8 +197,8 @@ class TestProxyIntegration:
     def test_registered_no_proxy_host_wins_over_learned_proxy(self):
         _note('registered.example.com')
         _feed('registered.example.com', 'direct', lat=300, n=2)
-        _feed('registered.example.com', 'env', lat=100, n=2)
-        assert _decision('registered.example.com') == 'env'
+        _feed('registered.example.com', 'proxy', lat=100, n=2)
+        assert _decision('registered.example.com') == 'proxy'
         lib_proxy.register_no_proxy_host('registered.example.com')
         try:
             assert lib_proxy.proxies_for('https://registered.example.com/') == {
@@ -275,17 +272,17 @@ class TestPersistence:
 
     def test_proxy_reset_is_persisted_before_restart(self):
         _note('proxy-reset.example.com')
-        _feed('proxy-reset.example.com', 'env', lat=20, n=2)
+        _feed('proxy-reset.example.com', 'proxy', lat=20, n=2)
         assert netpath._states['proxy-reset.example.com']['paths'][
-            'env']['ewma_ms'] == 20
+            'proxy']['ewma_ms'] == 20
 
         netpath.reset_proxy_stats()
         netpath.reset_for_test()
         netpath._load()
 
         restored = netpath._states['proxy-reset.example.com']
-        assert restored['paths']['env']['ewma_ms'] is None
-        assert restored['paths']['env']['samples'] == 0
+        assert restored['paths']['proxy']['ewma_ms'] is None
+        assert restored['paths']['proxy']['samples'] == 0
 
     def test_load_never_probes_a_sample_url_for_a_different_host(
             self, tmp_path, monkeypatch):
@@ -307,6 +304,36 @@ class TestPersistence:
         restored = netpath._states['api.example.org']
         assert restored['sample_url'] == 'https://api.example.org/'
         assert restored['decision'] is None
+
+    def test_load_preserves_stale_last_use_instead_of_rearming_host(
+            self, tmp_path, monkeypatch):
+        import json
+
+        now = 1_000_000.0
+        stale_last_seen = now - netpath._HOST_TTL - 1
+        store = tmp_path / 'netpath.json'
+        store.write_text(json.dumps({
+            'version': netpath._STORE_VERSION,
+            'hosts': [{
+                'host': 'stale.example.org',
+                'sample_url': 'https://stale.example.org/',
+                'last_seen': stale_last_seen,
+                'decision': 'proxy',
+                'paths': {
+                    'direct': {'fails': 8},
+                    'proxy': {'samples': 3, 'ewma_ms': 40},
+                },
+            }],
+        }))
+        monkeypatch.setattr(netpath, '_STORE_PATH', str(store))
+        monkeypatch.setattr(netpath.time, 'time', lambda: now)
+
+        netpath._load()
+
+        restored = netpath._states['stale.example.org']
+        assert restored['last_seen'] == stale_last_seen
+        assert restored['paths']['direct']['probe_failures'] == 8
+        assert netpath._eligible_probe_paths(now) == []
 
 
 # ═══════════════════════════════════════════════════════════
@@ -352,7 +379,7 @@ class TestExemptHosts:
         store.write_text(json.dumps({'version': netpath._STORE_VERSION,
                                      'hosts': [
                                          {'host': '127.0.0.1',
-                                          'decision': 'env'},
+                                          'decision': 'proxy'},
                                          {'host': 'localhost',
                                           'decision': 'direct'},
                                          {'host': 'real.example.com',
@@ -402,14 +429,142 @@ _FAKE_HOST = 'probe-fake.test'
 def fake_dns(monkeypatch):
     real_probe = netpath._probe_once
 
-    def _swapped(url, proxies):
-        return real_probe(url.replace(_FAKE_HOST, '127.0.0.1'), proxies)
+    def _swapped(url, use_proxy):
+        return real_probe(url.replace(_FAKE_HOST, '127.0.0.1'), use_proxy)
 
     monkeypatch.setattr(netpath, '_probe_once', _swapped)
 
 
 @pytest.mark.unit
 class TestProber:
+    def test_probe_intervals_have_a_hard_floor_and_ceiling(self):
+        assert netpath._bounded_probe_interval(1) == 30
+        assert netpath._bounded_probe_interval(float('inf')) == 180
+        assert netpath._bounded_probe_interval(99_999) == 6 * 3600
+        assert netpath._failed_probe_delay(180, 1) == 180
+        assert netpath._failed_probe_delay(180, 2) == 360
+        assert netpath._failed_probe_delay(180, 99) == 3600
+
+    def test_probe_round_backs_off_failed_and_stable_paths(
+            self, monkeypatch):
+        now = [1_000.0]
+        calls = []
+        monkeypatch.setattr(netpath.time, 'time', lambda: now[0])
+        monkeypatch.setattr(netpath, '_PROBE_INTERVAL', 180.0)
+        monkeypatch.setattr(netpath, '_PROBE_MAX_INTERVAL', 3600.0)
+        monkeypatch.setattr(
+            netpath,
+            '_probe_once',
+            lambda _url, use_proxy: (
+                calls.append('proxy' if use_proxy else 'direct')
+                or ((True, 40.0) if use_proxy else (False, None))),
+        )
+        netpath._prober_stop.clear()
+        _note('adaptive.example.com')
+
+        assert netpath._probe_round(period=180) == pytest.approx(180)
+        assert calls == ['direct', 'proxy']
+        state = netpath._states['adaptive.example.com']['paths']
+        assert state['direct']['next_probe'] == 1_180
+        assert state['proxy']['next_probe'] == 4_600
+
+        now[0] = 1_179
+        assert netpath._probe_round(period=180) == pytest.approx(1)
+        assert calls == ['direct', 'proxy']
+
+        now[0] = 1_180
+        assert netpath._probe_round(period=180) == pytest.approx(360)
+        assert calls == ['direct', 'proxy', 'direct']
+        assert state['direct']['next_probe'] == 1_540
+        assert state['proxy']['next_probe'] == 4_600
+
+    def test_stable_host_uses_at_most_55_active_requests_per_day(
+            self, monkeypatch):
+        now = [10_000.0]
+        end = now[0] + 24 * 3600
+        calls = []
+        monkeypatch.setattr(netpath.time, 'time', lambda: now[0])
+        monkeypatch.setattr(netpath, '_PROBE_INTERVAL', 180.0)
+        monkeypatch.setattr(netpath, '_PROBE_MAX_INTERVAL', 3600.0)
+        monkeypatch.setattr(netpath, '_save', lambda: None)
+        monkeypatch.setattr(
+            netpath,
+            '_probe_once',
+            lambda _url, use_proxy: (
+                calls.append('proxy' if use_proxy else 'direct')
+                or ((True, 40.0) if use_proxy else (False, None))),
+        )
+        netpath._prober_stop.clear()
+        _note('daily-budget.example.com')
+
+        while now[0] < end:
+            delay = netpath._probe_round(period=180)
+            assert delay >= 0.05
+            now[0] += delay
+
+        # The previous fixed three-minute dual-path loop issued 960 requests
+        # for this host/day. Adaptive probing preserves hourly recovery checks
+        # while cutting the deterministic steady-state budget by over 94%.
+        assert len(calls) <= 55
+        assert calls.count('proxy') <= 25
+
+    def test_proxy_reset_wakes_even_without_old_proxy_measurements(self):
+        _note('new-proxy.example.com')
+        netpath._prober_wake.clear()
+
+        netpath.reset_proxy_stats()
+
+        assert netpath._prober_wake.is_set()
+
+    def test_unexpected_probe_fault_waits_base_interval(self, monkeypatch):
+        now = 7_000.0
+        monkeypatch.setattr(netpath.time, 'time', lambda: now)
+        monkeypatch.setattr(netpath, '_PROBE_INTERVAL', 180.0)
+        monkeypatch.setattr(netpath, '_PROBE_MAX_INTERVAL', 3600.0)
+        monkeypatch.setattr(
+            netpath,
+            '_probe_path',
+            lambda *_args: (_ for _ in ()).throw(RuntimeError('injected')),
+        )
+        netpath._prober_stop.clear()
+        _note('fault.example.com')
+
+        assert netpath._probe_round(period=180) == pytest.approx(180)
+        paths = netpath._states['fault.example.com']['paths']
+        assert paths['direct']['next_probe'] == 7_180
+        assert paths['proxy']['next_probe'] == 7_180
+
+    def test_passive_failure_wakes_alternate_path_immediately(
+            self, monkeypatch):
+        now = 2_000.0
+        monkeypatch.setattr(netpath.time, 'time', lambda: now)
+        monkeypatch.setattr(netpath, '_PROBE_INTERVAL', 180.0)
+        monkeypatch.setattr(netpath, '_PROBE_MAX_INTERVAL', 3600.0)
+        url = _note('wake.example.com')
+        assert netpath.decide('wake.example.com') is None
+        netpath._prober_wake.clear()
+
+        netpath.report_outcome(url, False)
+
+        paths = netpath._states['wake.example.com']['paths']
+        assert paths['proxy']['next_probe'] == 2_180
+        assert paths['direct']['next_probe'] == 2_000
+        assert netpath._prober_wake.is_set()
+
+    def test_passive_success_postpones_redundant_probe(self, monkeypatch):
+        now = 3_000.0
+        monkeypatch.setattr(netpath.time, 'time', lambda: now)
+        monkeypatch.setattr(netpath, '_PROBE_INTERVAL', 180.0)
+        monkeypatch.setattr(netpath, '_PROBE_MAX_INTERVAL', 3600.0)
+        url = _note('traffic.example.com')
+
+        netpath.report_outcome(url, True, 30.0, path='proxy')
+
+        proxy_path = netpath._states['traffic.example.com']['paths']['proxy']
+        assert proxy_path['next_probe'] == 6_600
+        assert ('traffic.example.com', 'proxy') not in (
+            netpath._eligible_probe_paths(now))
+
     def test_probe_host_dead_proxy_marks_proxy_bad(
             self, local_server, monkeypatch, fake_dns):
         # Proxy points at a closed port → only the direct path can work.
@@ -435,7 +590,7 @@ class TestProber:
         summary = netpath.status_summary()['hosts'][_FAKE_HOST]
         assert summary['direct_ms'] is not None
         assert summary['proxy_ms'] is not None
-        assert summary['decision'] in ('direct', 'env')
+        assert summary['decision'] in ('direct', 'proxy')
 
     def test_prober_thread_start_stop(self):
         assert netpath.start_prober(interval=60) is True
@@ -446,111 +601,32 @@ class TestProber:
         netpath.stop_prober()
         assert not first.is_alive()
 
+    def test_timed_out_stop_retains_owner_and_blocks_duplicate(self):
+        class StuckThread:
+            def __init__(self):
+                self.join_timeouts = []
+
+            @staticmethod
+            def is_alive():
+                return True
+
+            def join(self, timeout):
+                self.join_timeouts.append(timeout)
+
+        old_owner = StuckThread()
+        netpath._prober_thread = old_owner
+        netpath._prober_stop.clear()
+        try:
+            netpath.stop_prober()
+
+            assert netpath._prober_thread is old_owner
+            assert netpath._prober_stop.is_set()
+            assert old_owner.join_timeouts[0] <= 15
+            assert netpath.start_prober(interval=60) is False
+            assert netpath._prober_thread is old_owner
+        finally:
+            netpath._prober_thread = None
+
     def test_prober_respects_off_switch(self, monkeypatch):
         monkeypatch.setenv('TOFU_NETPATH', 'off')
         assert netpath.start_prober(interval=60) is False
-
-
-# ═══════════════════════════════════════════════════════════
-#  Pool routes (N-path: direct + pool entries + env)
-# ═══════════════════════════════════════════════════════════
-
-_POOL_ENTRY = {
-    'id': 'hk-gw', 'name': 'HK GW',
-    'url': 'http://hk-gw.invalid:8080', 'scope': 'global', 'enabled': True,
-}
-
-
-@pytest.mark.unit
-class TestPoolRoutes:
-    @pytest.fixture(autouse=True)
-    def _pool(self):
-        lib_proxy.set_proxy_pool([dict(_POOL_ENTRY)])
-        try:
-            yield
-        finally:
-            lib_proxy.set_proxy_pool([])
-
-    def test_provider_enumerates_all_routes(self):
-        _note('pool-enum.example.com')
-        st = netpath._states['pool-enum.example.com']
-        assert st['routes'] == ['direct', 'pool:hk-gw', 'env']
-
-    def test_pool_route_wins_latency_contest(self):
-        _note('pool-win.example.com')
-        _feed('pool-win.example.com', 'direct', lat=400, n=2)
-        _feed('pool-win.example.com', 'env', lat=300, n=2)
-        _feed('pool-win.example.com', 'pool:hk-gw', lat=50, n=2)
-        assert _decision('pool-win.example.com') == 'pool:hk-gw'
-        # proxies_for honours the pinned pool entry explicitly.
-        assert lib_proxy.proxies_for('https://pool-win.example.com/x') == {
-            'http': 'http://hk-gw.invalid:8080',
-            'https': 'http://hk-gw.invalid:8080'}
-
-    def test_pool_route_bad_fails_over_to_next_best(self):
-        _note('pool-flap.example.com')
-        _feed('pool-flap.example.com', 'direct', lat=400, n=2)
-        _feed('pool-flap.example.com', 'env', lat=300, n=2)
-        _feed('pool-flap.example.com', 'pool:hk-gw', lat=50, n=2)
-        assert _decision('pool-flap.example.com') == 'pool:hk-gw'
-        _feed('pool-flap.example.com', 'pool:hk-gw', ok=False, n=2)
-        # Next best measured healthy route is env (300 < direct 400).
-        assert _decision('pool-flap.example.com') == 'env'
-
-    def test_removed_pool_entry_releases_pin(self):
-        _note('pool-gone.example.com')
-        _feed('pool-gone.example.com', 'pool:hk-gw', lat=50, n=2)
-        _feed('pool-gone.example.com', 'env', lat=300, n=2)
-        assert _decision('pool-gone.example.com') == 'pool:hk-gw'
-        lib_proxy.set_proxy_pool([])   # topology change: entry removed
-        netpath._states['pool-gone.example.com']['routes_ts'] = 0.0
-        # The pin must release to the best remaining route, not resurrect
-        # a pool entry that no longer exists.
-        assert _decision('pool-gone.example.com') == 'env'
-        assert lib_proxy.proxies_for('https://pool-gone.example.com/x') == {
-            'http': 'http://netpath-test-proxy.invalid:3128',
-            'https': 'http://netpath-test-proxy.invalid:3128'}
-
-    def test_bypass_rules_reduce_routes_to_direct(self):
-        lib_proxy.set_bypass_domains(['pool-bypass.example.com'])
-        _note('pool-bypass.example.com')
-        st = netpath._states['pool-bypass.example.com']
-        assert st['routes'] == ['direct']
-
-    def test_reset_proxy_stats_clears_pool_routes_keeps_direct(self):
-        _note('pool-reset.example.com')
-        _feed('pool-reset.example.com', 'pool:hk-gw', lat=50, n=2)
-        _feed('pool-reset.example.com', 'direct', lat=400, n=2)
-        assert _decision('pool-reset.example.com') == 'pool:hk-gw'
-        netpath.reset_proxy_stats()
-        st = netpath._states['pool-reset.example.com']
-        assert st['decision'] is None
-        assert st['paths']['pool:hk-gw']['ewma_ms'] is None
-        assert st['paths']['direct']['ewma_ms'] == 400
-
-
-@pytest.mark.unit
-class TestV1Migration:
-    def test_v1_store_migrates_proxy_path_to_env(
-            self, tmp_path, monkeypatch):
-        import json
-        store = tmp_path / 'netpath.json'
-        store.write_text(json.dumps({
-            'version': 1,
-            'hosts': [{
-                'host': 'legacy.example.com',
-                'sample_url': 'https://legacy.example.com/',
-                'decision': 'proxy',
-                'paths': {
-                    'direct': {'ewma_ms': 300.0, 'samples': 4, 'fails': 0},
-                    'proxy': {'ewma_ms': 80.0, 'samples': 4, 'fails': 0},
-                },
-            }],
-        }))
-        monkeypatch.setattr(netpath, '_STORE_PATH', str(store))
-        netpath._load()
-        st = netpath._states['legacy.example.com']
-        assert st['decision'] == 'env'
-        assert st['paths']['env']['ewma_ms'] == 80.0
-        assert 'proxy' not in st['paths']
-        assert st['paths']['direct']['ewma_ms'] == 300.0

@@ -1,35 +1,203 @@
-"""Authoritative Turn / Attempt lifecycle for the v2 chat protocol.
+"""Authoritative Turn / Attempt lifecycle for the turn-native chat protocol.
 
-One visible row owns one stable ``turn_id``.  Every execution against that
-row owns a distinct ``attempt_id``.  This module is the only write path for
-the three v2 tables and deliberately keeps task ids as an internal bridge to
-the existing model/tool executor.
+One visible row owns one stable ``turn_id`` and each execution owns one
+``attempt_id``. This module is a stateless domain facade over the semantic
+storage protocol; backend transactions live exclusively in the sidecar. Task
+ids remain an internal bridge to the model/tool executor.
 """
 
 from __future__ import annotations
 
-import json
+import threading
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from lib.database import (
-    DOMAIN_CHAT,
-    allocate_scoped_sequence,
-    assert_write_transaction,
-    lock_scoped_sequence,
-    pooled_db,
-    pooled_write_transaction,
-)
+from lib.error_envelope import make_envelope, normalize_envelope
+from lib.identity import PrincipalContext, require_user_id
 from lib.log import get_logger
+from lib.storage.errors import StorageError
+from lib.storage_projection import (
+    sanitize_api_rounds_for_persist,
+    trim_tool_round_for_persist,
+)
+from lib.turn_verdict import (
+    derive_turn_verdict,
+    task_terminal_evidence,
+)
+from lib.turn_projection_segments import (
+    projection_with_stable_segments,
+    public_turn_with_stable_segments,
+    public_value_with_stable_segments,
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 logger = get_logger(__name__)
+
+
+
+
+def _turn_client(*, write: bool = False):
+    from lib.storage import get_storage_client
+    return get_storage_client(write=write)
+
+
 
 ACTORS = frozenset({'human', 'assistant', 'planner', 'critic', 'virtual_user'})
 OPERATIONS = frozenset({'generate', 'continue', 'checkpoint_resume', 'regenerate'})
 TERMINAL_STATUSES = frozenset({'completed', 'interrupted', 'truncated', 'failed'})
 LIVE_ATTEMPT_STATUSES = frozenset({'pending', 'running'})
+_PROJECTION_INJECTION_LANES = (
+    ('_inboxInjects', '_inboxInjects', 'inbox'),
+    ('_peerInjects', '_peerInjects', 'peer'),
+    ('_userSteerInjects', '_userSteerInjects', 'user-steer'),
+    ('_stallNudges', '_stallNudges', 'stall-nudge'),
+)
+_PROJECTION_PROVENANCE_FIELDS = (
+    ('_memoryPrefetch', 'memoryPrefetch'),
+    ('_mcpLoginHint', 'mcpLoginHint'),
+    ('_preferencesApplied', 'preferencesApplied'),
+    ('_preferencesLearned', 'preferencesLearned'),
+    ('_relatedConversations', 'relatedConversations'),
+)
+
+_turn_search_backfill_lock = threading.Lock()
+_turn_search_backfill_started = False
+_TURN_SEARCH_BACKFILL_INITIAL_DELAY_SECONDS = 60.0
+
+
+# ── Text-delta write coalescing ──────────────────────────────────────────
+# ``record_task_event`` is on the per-token hot path: every streamed ``delta``
+# used to commit a FULL-projection write transaction (CAS + event row +
+# conversation revision bump) through the single storage writer. At token
+# rate that saturates the writer lane; the acquisition deadline then trips
+# and the caller WITHHOLDS the frame from clients — the live stream starves
+# until the next conversation switch forces a snapshot (owner incident
+# 2026-08-17: "agent bubble only appears after switching conversations").
+#
+# A projection is cumulative (last write wins) and every structural event
+# (phase/tool lifecycle/interaction/terminal) still persists immediately,
+# carrying any coalesced progress with it. Coalescing pure PROGRESS frames
+# (token deltas, streaming program output, tool progress ticks) therefore
+# loses nothing: replay/snapshot readers converge to the same state, just
+# without the intermediate 10ms slices. ``TOFU_TURN_DELTA_RECORD_MS=0``
+# restores the old write-every-frame behaviour.
+_COALESCIBLE_EVENT_KINDS = frozenset({'delta', 'program_output', 'tool_progress'})
+def _delta_record_min_interval_s() -> float:
+    import os
+    try:
+        return max(0.0, float(os.environ.get(
+            'TOFU_TURN_DELTA_RECORD_MS', '300')) / 1000.0)
+    except (TypeError, ValueError):
+        return 0.3
+
+
+
+_delta_throttle_lock = threading.Lock()
+_delta_last_recorded: dict[str, float] = {}
+_DELTA_THROTTLE_MAX_KEYS = 4096
+
+
+def _delta_throttle_allows(attempt_id: str) -> bool:
+    """Peek: True when a delta projection write is due for this attempt."""
+    if _delta_record_min_interval_s() <= 0:
+        return True
+    with _delta_throttle_lock:
+        last = _delta_last_recorded.get(attempt_id)
+        return last is None or (time.monotonic() - last) >= _delta_record_min_interval_s()
+
+
+def _delta_throttle_stamp(attempt_id: str) -> None:
+    with _delta_throttle_lock:
+        if len(_delta_last_recorded) >= _DELTA_THROTTLE_MAX_KEYS:
+            _delta_last_recorded.clear()
+        _delta_last_recorded[attempt_id] = time.monotonic()
+
+
+def _delta_throttle_clear(attempt_id: str) -> None:
+    with _delta_throttle_lock:
+        _delta_last_recorded.pop(attempt_id, None)
+
+
+# ── Structural-fold cadence for DELTA-class writes ────────────────────────
+# Pure PROGRESS frames (delta / program_output / tool_progress) must only
+# advance the cumulative ``content``/``thinking`` text, not re-fold the
+# growing ``toolRounds`` list on every allowed write — that made the
+# authority write grow O(toolRounds) as the turn lengthened.  The full
+# structural fold (``_task_projection``) still runs on every structural /
+# terminal frame AND, for the restart-recovery consumer that computes resume
+# options from the DURABLE projection, at a slower cadence
+# (``TOFU_TURN_STRUCTURAL_RECORD_MS``, default 3s) so ``toolRounds`` freshness
+# stays bounded even if the attempt dies mid-delta-stream with no intervening
+# tool event.  Tradeoff: a crash during a long pure-delta burst can lose at
+# most one cadence window of toolRounds (in practice none — tool rounds
+# mutate through tool_start / tool_result, which are structural and fold
+# immediately).
+def _structural_record_min_interval_s() -> float:
+    import os
+    try:
+        return max(0.0, float(os.environ.get(
+            'TOFU_TURN_STRUCTURAL_RECORD_MS', '3000')) / 1000.0)
+    except (TypeError, ValueError):
+        return 3.0
+
+
+_structural_fold_lock = threading.Lock()
+_structural_last_fold: dict[str, float] = {}
+_STRUCTURAL_FOLD_MAX_KEYS = 4096
+_OVERSIZE_PROJECTION_RETRY_SECONDS = 30.0
+
+
+def _structural_fold_due(attempt_id: str) -> bool:
+    """True when a DELTA-class write should also re-fold the full projection."""
+    if _structural_record_min_interval_s() <= 0:
+        return True
+    with _structural_fold_lock:
+        last = _structural_last_fold.get(attempt_id)
+        return last is None or (
+            time.monotonic() - last) >= _structural_record_min_interval_s()
+
+
+def _structural_fold_stamp(attempt_id: str) -> None:
+    with _structural_fold_lock:
+        if len(_structural_last_fold) >= _STRUCTURAL_FOLD_MAX_KEYS:
+            _structural_last_fold.clear()
+        _structural_last_fold[attempt_id] = time.monotonic()
+
+
+def _structural_fold_clear(attempt_id: str) -> None:
+    with _structural_fold_lock:
+        _structural_last_fold.pop(attempt_id, None)
+
+
+def _delta_text_fields(task: dict[str, Any],
+                       previous: dict[str, Any]) -> tuple[str, str]:
+    """Cumulative content/thinking for a DELTA-class write.
+
+    Mirrors the content/thinking rules of ``_task_projection`` without the
+    structural fold (no toolRounds / segments / usage recomputation).
+    """
+    cfg = task.get('config') or {}
+    owns_visible_run_turns = bool(task.get('_turnVisibleRunTurnIds'))
+    content = (previous.get('content', '') if owns_visible_run_turns else
+               (task.get('content') or cfg.get('contentPrefix') or ''))
+    thinking = (task.get('thinking') if task.get('thinking') is not None
+                else previous.get('thinking', ''))
+    return content, thinking
 
 
 @dataclass
@@ -50,230 +218,47 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _uuid() -> str:
-    return str(uuid.uuid4())
+# Delta-sync watermark sanity bound: a ``since_ms`` further into the future
+# than this is client/server clock confusion, and the read degrades to a full
+# snapshot instead of trusting it.
+_DELTA_MAX_SKEW_MS = 300_000
 
 
-def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
 
 
-def _decoded(value: Any, default: Any) -> Any:
-    if value is None:
-        return default
-    if isinstance(value, (dict, list)):
-        return value
-    try:
-        return json.loads(value)
-    except (TypeError, ValueError) as exc:
-        logger.debug('[TurnLifecycle] invalid JSON projection: %s', exc)
-        return default
 
 
-def _row_value(row: Any, key: str, default: Any = None) -> Any:
-    if row is None:
-        return default
-    try:
-        return row[key]
-    except (KeyError, TypeError, IndexError) as exc:
-        logger.debug('[TurnLifecycle] row key %r unavailable: %s', key, exc)
-        return default
 
 
-def _public_turn(row: Any, *, light: bool = False) -> dict[str, Any]:
-    projection = _decoded(_row_value(row, 'projection'), {})
-    if light:
-        projection = {
-            key: projection[key]
-            for key in ('content', 'thinking', 'segments', 'model', 'usage')
-            if key in projection
-        }
-    return {
-        'turnId': _row_value(row, 'turn_id', ''),
-        'conversationId': _row_value(row, 'conversation_id', ''),
-        'laneId': _row_value(row, 'lane_id', 'main'),
-        'parentTurnId': _row_value(row, 'parent_turn_id'),
-        'ordinal': int(_row_value(row, 'ordinal', 0) or 0),
-        'actor': _row_value(row, 'actor', ''),
-        'kind': _row_value(row, 'kind', 'reply'),
-        'runId': _row_value(row, 'run_id', ''),
-        'status': _row_value(row, 'status', 'pending'),
-        'currentAttemptId': _row_value(row, 'current_attempt_id'),
-        'projection': projection,
-        'projectionRevision': int(
-            _row_value(row, 'projection_revision', 0) or 0),
-        'settlement': _decoded(_row_value(row, 'settlement'), {}),
-        'createdAt': int(_row_value(row, 'created_at', 0) or 0),
-        'updatedAt': int(_row_value(row, 'updated_at', 0) or 0),
-    }
 
 
-def _public_attempt(row: Any) -> dict[str, Any]:
-    return {
-        'attemptId': _row_value(row, 'attempt_id', ''),
-        'conversationId': _row_value(row, 'conversation_id', ''),
-        'turnId': _row_value(row, 'turn_id', ''),
-        'commandId': _row_value(row, 'command_id', ''),
-        'operation': _row_value(row, 'operation', ''),
-        'status': _row_value(row, 'status', ''),
-        'baseProjectionRevision': int(
-            _row_value(row, 'base_projection_revision', 0) or 0),
-        'resumeAnchor': _decoded(_row_value(row, 'resume_anchor'), {}),
-        'createdAt': int(_row_value(row, 'created_at', 0) or 0),
-        'startedAt': _row_value(row, 'started_at'),
-        'settledAt': _row_value(row, 'settled_at'),
-    }
 
 
-def _turn_row(db: Any, conversation_id: str, turn_id: str, user_id: Any):
-    return db.execute(
-        'SELECT * FROM conversation_turns WHERE conversation_id=? '
-        'AND turn_id=? AND user_id=?',
-        (conversation_id, turn_id, user_id),
-    ).fetchone()
 
 
-def _attempt_row(db: Any, attempt_id: str):
-    return db.execute(
-        'SELECT * FROM generation_attempts WHERE attempt_id=?',
-        (attempt_id,),
-    ).fetchone()
 
 
-def _command_result(db: Any, conversation_id: str, command_id: str,
-                    user_id: Any) -> dict[str, Any] | None:
-    row = db.execute(
-        'SELECT a.*, t.user_id AS owner_user_id FROM generation_attempts a '
-        'JOIN conversation_turns t ON t.turn_id=a.turn_id '
-        'WHERE a.conversation_id=? AND a.command_id=?',
-        (conversation_id, command_id),
-    ).fetchone()
-    if row is None or str(_row_value(row, 'owner_user_id')) != str(user_id):
-        return None
-    turn = _turn_row(db, conversation_id, _row_value(row, 'turn_id'), user_id)
-    submitted = None
-    if turn is not None:
-        parent_id = _row_value(turn, 'parent_turn_id')
-        if parent_id:
-            submitted = _turn_row(db, conversation_id, parent_id, user_id)
-    rev_row = db.execute(
-        'SELECT rev FROM conversations WHERE id=? AND user_id=?',
-        (conversation_id, user_id),
-    ).fetchone()
-    result = {
-        'turn': _public_turn(turn),
-        'attempt': _public_attempt(row),
-        'conversationRevision': int(_row_value(rev_row, 'rev', 0) or 0),
-        # Cursor immediately after durable command acceptance. A lost-ACK
-        # retry must replay every execution event (especially an interaction
-        # request), not jump to the latest sequence merely because the command
-        # row already exists.
-        'streamCursor': 1,
-        'idempotentReplay': True,
-        '_needsStart': (_row_value(row, 'status') == 'pending'
-                        and not _row_value(row, 'task_id', '')),
-    }
-    if submitted is not None:
-        result['submittedTurn'] = _public_turn(submitted)
-    return result
 
 
-def latest_event_seq(db: Any, attempt_id: str) -> int:
-    row = db.execute(
-        'SELECT COALESCE(MAX(seq), 0) AS seq FROM attempt_events '
-        'WHERE attempt_id=?', (attempt_id,),
-    ).fetchone()
-    return int(_row_value(row, 'seq', 0) or 0)
 
 
-def _append_event(db: Any, *, attempt_id: str, conversation_id: str,
-                  turn_id: str, projection_revision: int, event_type: str,
-                  payload: dict[str, Any]) -> int:
-    assert_write_transaction(db, label='append v2 attempt event')
-    seq = allocate_scoped_sequence(
-        db, 'attempt_events', attempt_id)
-    envelope = {
-        'conversationId': conversation_id,
-        'turnId': turn_id,
-        'attemptId': attempt_id,
-        'seq': seq,
-        'projectionRevision': int(projection_revision),
-        'type': event_type,
-        'payload': payload,
-    }
-    db.execute(
-        'INSERT INTO attempt_events(attempt_id,seq,conversation_id,turn_id,'
-        'projection_revision,type,payload,created_at) VALUES (?,?,?,?,?,?,?,?)',
-        (attempt_id, seq, conversation_id, turn_id,
-         int(projection_revision), event_type, _json(envelope), _now_ms()),
-    )
-    return seq
 
 
-def _bump_conversation(db: Any, conversation_id: str, user_id: Any,
-                       now: int) -> int:
-    assert_write_transaction(db, label='bump v2 conversation revision')
-    # ``conversations.rev`` is shared by the legacy message protocol and v2
-    # turn metadata.  Under normalized-row authority, messages_rows_rev must
-    # stay equal to it even when this particular bump changes only v2 tables;
-    # otherwise every projection event makes the canonical transcript look
-    # stale and the next server boot correctly fails its authority preflight.
-    # Keep the equality as a CAS precondition: never bless an already-stale
-    # row set merely because a v2 event happened afterwards.
-    from lib.database.conversation_repository import (
-        conversation_rows_authoritative,
-    )
-    if conversation_rows_authoritative():
-        cursor = db.execute(
-            'UPDATE conversations SET rev=rev+1, messages_rows_rev=rev+1, '
-            'updated_at=? WHERE id=? AND user_id=? '
-            'AND messages_rows_rev=rev',
-            (now, conversation_id, user_id),
-        )
-        if getattr(cursor, 'rowcount', None) != 1:
-            raise LifecycleConflict(
-                'transcript_authority_stale',
-                'Canonical conversation message rows are not current.',
-            )
-    else:
-        db.execute(
-            'UPDATE conversations SET rev=rev+1, updated_at=? '
-            'WHERE id=? AND user_id=?', (now, conversation_id, user_id))
-    row = db.execute(
-        'SELECT rev FROM conversations WHERE id=? AND user_id=?',
-        (conversation_id, user_id),
-    ).fetchone()
-    return int(_row_value(row, 'rev', 0) or 0)
 
 
-def _normalize_projection(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, str):
-        return {'content': raw}
-    if not isinstance(raw, dict):
-        return {'content': ''}
-    result = dict(raw)
-    for identity_key in ('turnId', 'attemptId', '_turnId', '_attemptId',
-                         '_msgId', '_taskId', 'activeTaskId', 'role',
-                         '_turnActor', '_turnKind', '_turnLaneId',
-                         '_turnStatus', '_turnSettlement',
-                         '_projectionRevision', '_commandPending', 'branches'):
-        result.pop(identity_key, None)
-    if 'content' not in result and 'text' in result:
-        result['content'] = result.get('text') or ''
-    result.setdefault('content', '')
-    return result
 
 
 def create_turn_pair(conversation_id: str, *, command_id: str,
                      input_projection: Any, config: dict[str, Any] | None,
                      lane_id: str = 'main', parent_turn_id: str | None = None,
                      kind: str = 'reply', output_actor: str = 'assistant',
-                     run_id: str = '', user_id: Any = 1,
+                     run_id: str = '', user_id: Any,
                      input_actor: str = 'human', input_kind: str = 'input',
                      require_parent_is_lane_tail: bool = False,
                      conversation_defaults: dict[str, Any] | None = None,
                      ) -> dict[str, Any]:
     """Atomically create the input turn, output turn and first attempt."""
+    user_id = require_user_id(user_id, context='create turn pair')
     if not command_id:
         raise ValueError('commandId is required')
     if output_actor not in ACTORS or output_actor == 'human':
@@ -281,254 +266,127 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
     if input_actor not in {'human', 'virtual_user', 'critic'}:
         raise ValueError('invalid input actor')
     lane_id = lane_id or 'main'
-    now = _now_ms()
-    with pooled_write_transaction(DOMAIN_CHAT, label='create v2 turn pair') as db:
-        # Serialize both first-message conversation creation and later ordinal
-        # allocation. This is intentionally acquired before probing the parent
-        # row: two tabs creating the same client-minted conv id cannot both
-        # observe "missing" and race an INSERT.
-        lock_scoped_sequence(db, 'conversation_turns', conversation_id)
-        lock_scoped_sequence(
-            db, 'turn_commands', f'{conversation_id}:{command_id}')
-        conv = db.execute(
-            'SELECT rev FROM conversations WHERE id=? AND user_id=?',
-            (conversation_id, user_id),
-        ).fetchone()
-        if conv is None:
-            defaults = dict(conversation_defaults or {})
-            if not defaults.get('allowCreate'):
-                raise LifecycleNotFound('Conversation not found')
-            title = str(defaults.get('title') or 'New Chat')[:500]
-            settings = defaults.get('settings')
-            if not isinstance(settings, dict):
-                settings = {}
-            else:
-                settings = dict(settings)
-            settings.pop('activeTaskId', None)
-            settings['_turnProtocolV2'] = True
-            created_at = int(defaults.get('createdAt') or now)
-            # Conversation creation must cross the transcript repository even
-            # for v2's empty message array.  In row-authority mode it is the
-            # one sanctioned initializer for the frozen archive and atomically
-            # stamps the empty normalized row set current at rev 0.
-            from lib.database.conversation_repository import upsert_conversation
-            upsert_conversation(
-                db, conversation_id, [], title=title,
-                created_at=created_at, updated_at=now, user_id=user_id,
-                settings=_json(settings), full=True,
-            )
-            conv = db.execute(
-                'SELECT rev FROM conversations WHERE id=? AND user_id=?',
-                (conversation_id, user_id),
-            ).fetchone()
-        # The command row is the cross-process idempotency boundary.  The
-        # conversation row serializes ordinal allocation for distinct commands
-        # that arrive concurrently from separate tabs or server workers.
-        replay = _command_result(db, conversation_id, command_id, user_id)
-        if replay:
-            return replay
-        if conversation_defaults:
-            # Per-conversation UI choices belong to the accepted command
-            # transaction; they are metadata, never a second transcript
-            # authority. Apply only after the replay check so a lost-ACK retry
-            # with a mutated body cannot smuggle in a second settings write.
-            settings = conversation_defaults.get('settings')
-            if isinstance(settings, dict):
-                settings = dict(settings)
-                settings.pop('activeTaskId', None)
-                settings['_turnProtocolV2'] = True
-                db.execute(
-                    'UPDATE conversations SET settings=?,updated_at=? '
-                    'WHERE id=? AND user_id=?',
-                    (_json(settings), now, conversation_id, user_id),
-                )
-        if parent_turn_id:
-            parent = _turn_row(db, conversation_id, parent_turn_id, user_id)
-            if parent is None:
-                raise LifecycleConflict(
-                    'invalid_parent_turn', 'Parent turn does not exist')
-        if input_actor == 'human':
-            live = db.execute(
-                'SELECT t.* FROM conversation_turns t '
-                'JOIN generation_attempts a '
-                'ON a.attempt_id=t.current_attempt_id '
-                'WHERE t.conversation_id=? AND t.user_id=? AND t.lane_id=? '
-                "AND a.status IN ('pending','running') "
-                'ORDER BY t.ordinal DESC LIMIT 1',
-                (conversation_id, user_id, lane_id),
-            ).fetchone()
-            if live is not None:
-                raise LifecycleConflict(
-                    'lane_busy',
-                    'This lane already has a live generation attempt.',
-                    _public_turn(live),
-                )
-        ord_row = db.execute(
-            'SELECT COALESCE(MAX(ordinal), -1) AS ordinal '
-            'FROM conversation_turns WHERE conversation_id=? AND lane_id=?',
-            (conversation_id, lane_id),
-        ).fetchone()
-        if require_parent_is_lane_tail:
-            tail = db.execute(
-                'SELECT turn_id FROM conversation_turns WHERE conversation_id=? '
-                'AND lane_id=? ORDER BY ordinal DESC LIMIT 1',
-                (conversation_id, lane_id),
-            ).fetchone()
-            if tail is None or _row_value(tail, 'turn_id') != parent_turn_id:
-                raise LifecycleConflict(
-                    'lane_advanced',
-                    'The lane advanced while the automatic continuation was prepared.',
-                    _public_turn(parent) if parent is not None else None,
-                )
-        input_ordinal = int(_row_value(ord_row, 'ordinal', -1)) + 1
-        input_turn_id, output_turn_id, attempt_id = _uuid(), _uuid(), _uuid()
-        input_attempt_id = _uuid() if input_actor != 'human' else None
-        submitted_projection = _normalize_projection(input_projection)
-        submitted_settlement = {
-            'outcome': 'completed',
-            'cause': ('submitted' if input_actor == 'human'
-                      else 'orchestration_generated'),
+    from lib.storage import StorageError
+    normalized_input_projection = projection_with_stable_segments(
+        input_projection,
+        actor=input_actor,
+        status='completed',
+    )
+    payload = {
+        'conversation_id': conversation_id, 'user_id': user_id,
+        'command_id': command_id, 'input_projection': normalized_input_projection,
+        'config': config or {}, 'lane_id': lane_id,
+        'parent_turn_id': parent_turn_id, 'kind': kind or 'reply',
+        'output_actor': output_actor, 'run_id': run_id,
+        'input_actor': input_actor, 'input_kind': input_kind or 'input',
+        'require_parent_is_lane_tail': bool(require_parent_is_lane_tail),
+        'conversation_defaults': conversation_defaults or {},
+    }
+    try:
+        return public_value_with_stable_segments(_turn_client(write=True).command(
+            'turn.create_pair', payload, command_id)
+        )
+    except StorageError as exc:
+        if exc.code == 'database_not_found':
+            raise LifecycleNotFound(str(exc)) from exc
+        if exc.code == 'turn_in_progress':
+            latest = None
+            try:
+                rows = _turn_client().query(
+                    'turn.list', {
+                        'conversation_id': conversation_id,
+                        'user_id': user_id,
+                        'lane_id': lane_id,
+                    })
+                latest = rows[-1] if rows else None
+            except Exception:
+                logger.debug(
+                    'Could not hydrate lane-busy turn conv=%s',
+                    conversation_id[:12], exc_info=True)
+            raise LifecycleConflict(
+                'lane_busy', str(exc), latest) from exc
+        if exc.code == 'turn_parent_invalid':
+            raise LifecycleConflict(
+                'invalid_parent_turn', str(exc)) from exc
+        if exc.code == 'turn_lane_advanced':
+            raise LifecycleConflict('lane_advanced', str(exc)) from exc
+        if exc.code == 'database_conflict':
+            raise LifecycleConflict(exc.code, str(exc)) from exc
+        raise
+
+
+def append_settled_turn(
+    conversation_id: str,
+    *,
+    command_id: str,
+    actor: str,
+    projection: dict[str, Any],
+    user_id: Any,
+    kind: str = 'ingested',
+    status: str = 'completed',
+    settlement: dict[str, Any] | None = None,
+    created_at: int | None = None,
+    lane_id: str = 'main',
+    run_id: str = '',
+    conversation_defaults: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Append one terminal turn through the canonical ingestion boundary."""
+    user_id = require_user_id(user_id, context='append settled turn')
+    payload: dict[str, Any] = {
+        'conversation_id': conversation_id,
+        'user_id': user_id,
+        'command_id': command_id,
+        'actor': actor,
+        'projection': projection_with_stable_segments(
+            projection, actor=actor, status=status,
+        ),
+        'kind': kind,
+        'status': status,
+        'lane_id': lane_id or 'main',
+        'run_id': run_id,
+        'conversation_defaults': conversation_defaults or {},
+        'settlement': settlement or {
+            'outcome': status,
+            'cause': 'ingested',
             'resumeOptions': [],
-        }
-        db.execute(
-            'INSERT INTO conversation_turns(turn_id,conversation_id,user_id,'
-            'lane_id,parent_turn_id,ordinal,actor,kind,run_id,status,'
-            'current_attempt_id,projection,projection_revision,settlement,'
-            'created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-            (input_turn_id, conversation_id, user_id, lane_id, parent_turn_id,
-             input_ordinal, input_actor, input_kind or 'input', run_id,
-             'completed', input_attempt_id, _json(submitted_projection), 1,
-             _json(submitted_settlement), now, now),
+        },
+    }
+    if created_at is not None:
+        payload['created_at'] = int(created_at)
+    from lib.storage import StorageError
+    try:
+        return public_value_with_stable_segments(
+            _turn_client(write=True).command(
+                'turn.append_settled', payload, command_id)
         )
-        if input_attempt_id:
-            db.execute(
-                'INSERT INTO generation_attempts(attempt_id,conversation_id,turn_id,'
-                'command_id,task_id,operation,status,base_projection_revision,'
-                'resume_anchor,config,error,created_at,started_at,settled_at) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                (input_attempt_id, conversation_id, input_turn_id,
-                 f'{command_id}:input', '', 'generate', 'completed', 0,
-                 _json({}), _json({'runId': run_id}), _json({}), now, now, now),
-            )
-            _append_event(
-                db, attempt_id=input_attempt_id,
-                conversation_id=conversation_id, turn_id=input_turn_id,
-                projection_revision=1, event_type='terminal_settlement',
-                payload={'status': 'completed',
-                         'settlement': submitted_settlement,
-                         'projection': submitted_projection},
-            )
-        db.execute(
-            'INSERT INTO conversation_turns(turn_id,conversation_id,user_id,'
-            'lane_id,parent_turn_id,ordinal,actor,kind,run_id,status,'
-            'current_attempt_id,projection,projection_revision,settlement,'
-            'created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-            (output_turn_id, conversation_id, user_id, lane_id, input_turn_id,
-             input_ordinal + 1, output_actor, kind or 'reply', run_id,
-             'pending', attempt_id, _json({'content': '', 'thinking': '',
-                                           'segments': [], 'toolRounds': []}),
-             1, _json({}), now, now),
-        )
-        db.execute(
-            'INSERT INTO generation_attempts(attempt_id,conversation_id,turn_id,'
-            'command_id,task_id,operation,status,base_projection_revision,'
-            'resume_anchor,config,error,created_at) '
-            'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-            (attempt_id, conversation_id, output_turn_id, command_id, '',
-             'generate', 'pending', 0, _json({}), _json(config or {}),
-             _json({}), now),
-        )
-        _append_event(
-            db, attempt_id=attempt_id, conversation_id=conversation_id,
-            turn_id=output_turn_id, projection_revision=1,
-            event_type='status_changed', payload={'status': 'pending'},
-        )
-        revision = _bump_conversation(db, conversation_id, user_id, now)
-        turn = _turn_row(db, conversation_id, output_turn_id, user_id)
-        attempt = _attempt_row(db, attempt_id)
-        return {
-            'submittedTurn': _public_turn(_turn_row(
-                db, conversation_id, input_turn_id, user_id)),
-            'turn': _public_turn(turn),
-            'attempt': _public_attempt(attempt),
-            'conversationRevision': revision,
-            'streamCursor': 1,
-            'idempotentReplay': False,
-            '_needsStart': True,
-        }
+    except StorageError as exc:
+        if exc.code == 'database_not_found':
+            raise LifecycleNotFound(str(exc)) from exc
+        if exc.code == 'database_conflict':
+            raise LifecycleConflict(exc.code, str(exc)) from exc
+        raise
 
 
-def announce_related_turns(attempt_id: str, turn_ids: list[str]) -> bool:
+def announce_related_turns(
+    attempt_id: str, turn_ids: list[str], *, user_id: Any,
+) -> bool:
     """Publish server-created orchestration identities on a parent stream."""
+    user_id = require_user_id(user_id, context='announce related turns')
     if not attempt_id or not turn_ids:
         return False
     now = _now_ms()
-    with pooled_write_transaction(DOMAIN_CHAT, label='announce related v2 turns') as db:
-        lock_scoped_sequence(db, 'attempt_events', attempt_id)
-        attempt = _attempt_row(db, attempt_id)
-        if attempt is None or _row_value(attempt, 'status') not in LIVE_ATTEMPT_STATUSES:
-            return False
-        root = db.execute(
-            'SELECT * FROM conversation_turns WHERE turn_id=?',
-            (_row_value(attempt, 'turn_id'),),
-        ).fetchone()
-        if root is None or _row_value(root, 'current_attempt_id') != attempt_id:
-            return False
-        related = []
-        related_attempts = []
-        for turn_id in turn_ids:
-            row = db.execute(
-                'SELECT * FROM conversation_turns WHERE turn_id=? AND '
-                'conversation_id=?',
-                (turn_id, _row_value(attempt, 'conversation_id')),
-            ).fetchone()
-            if row is None:
-                continue
-            related.append(_public_turn(row))
-            current_attempt_id = _row_value(row, 'current_attempt_id')
-            if current_attempt_id:
-                current_attempt = _attempt_row(db, current_attempt_id)
-                if current_attempt is not None:
-                    related_attempts.append(_public_attempt(current_attempt))
-        if not related:
-            return False
-        old_revision = int(_row_value(root, 'projection_revision', 0) or 0)
-        new_revision = old_revision + 1
-        db.execute(
-            'UPDATE conversation_turns SET projection_revision=?,updated_at=? '
-            'WHERE turn_id=? AND current_attempt_id=?',
-            (new_revision, now, _row_value(root, 'turn_id'), attempt_id),
-        )
-        _append_event(
-            db, attempt_id=attempt_id,
-            conversation_id=_row_value(attempt, 'conversation_id'),
-            turn_id=_row_value(root, 'turn_id'),
-            projection_revision=new_revision,
-            event_type='projection_updated',
-            payload={'projection': _decoded(_row_value(root, 'projection'), {}),
-                     'turns': related, 'attempts': related_attempts,
-                     'updateKind': 'related_turns_created'},
-        )
-        _bump_conversation(
-            db, _row_value(attempt, 'conversation_id'),
-            _row_value(root, 'user_id'), now)
-        return True
+    result = _turn_client(write=True).command(
+        'turn.related.announce', {
+            'attempt_id': attempt_id,
+            'turn_ids': turn_ids,
+            'user_id': user_id,
+        },
+        f'turn-related:{attempt_id}:{now}')
+    return bool(result.get('changed')) if isinstance(result, dict) else bool(result)
 
 
-def _resume_options(settlement: dict[str, Any]) -> set[str]:
-    result: set[str] = set()
-    for item in settlement.get('resumeOptions') or []:
-        operation = item if isinstance(item, str) else item.get('operation')
-        if operation:
-            result.add(operation)
-    return result
 
 
-def _option_anchor(settlement: dict[str, Any], operation: str) -> dict[str, Any]:
-    for item in settlement.get('resumeOptions') or []:
-        if isinstance(item, dict) and item.get('operation') == operation:
-            return item.get('anchor') or {}
-    return {}
 
 
 def create_attempt(conversation_id: str, turn_id: str, *, command_id: str,
@@ -537,183 +395,87 @@ def create_attempt(conversation_id: str, turn_id: str, *, command_id: str,
                    resume_anchor: dict[str, Any] | None = None,
                    input_update: dict[str, Any] | None = None,
                    expected_input_projection_revision: int | None = None,
-                   user_id: Any = 1) -> dict[str, Any]:
+                   user_id: Any) -> dict[str, Any]:
+    user_id = require_user_id(user_id, context='create turn attempt')
     if not command_id:
         raise ValueError('commandId is required')
     if operation not in OPERATIONS - {'generate'}:
         raise ValueError('operation must be continue, checkpoint_resume, or regenerate')
-    now = _now_ms()
-    with pooled_write_transaction(DOMAIN_CHAT, label='create v2 attempt') as db:
-        row = _turn_row(db, conversation_id, turn_id, user_id)
-        if row is None:
-            raise LifecycleNotFound('Turn not found')
-        lock_scoped_sequence(
-            db, 'turn_commands', f'{conversation_id}:{command_id}')
-        replay = _command_result(db, conversation_id, command_id, user_id)
-        if replay:
-            return replay
-        # Revision validation and attempt replacement form one per-turn CAS.
-        lock_scoped_sequence(db, 'conversation_turn_attempts', turn_id)
-        row = _turn_row(db, conversation_id, turn_id, user_id)
-        turn = _public_turn(row)
-        if int(expected_projection_revision) != turn['projectionRevision']:
+    from lib.storage import StorageError
+    try:
+        return _turn_client(write=True).command(
+            'turn.attempt.create', {
+                'conversation_id': conversation_id, 'user_id': user_id,
+                'turn_id': turn_id, 'command_id': command_id,
+                'operation': operation,
+                'expected_projection_revision': expected_projection_revision,
+                'config': config or {}, 'resume_anchor': resume_anchor,
+                'input_update': input_update,
+                'expected_input_projection_revision': expected_input_projection_revision,
+            }, command_id)
+    except StorageError as exc:
+        if exc.code == 'database_not_found':
+            raise LifecycleNotFound(str(exc)) from exc
+        if exc.code == 'turn_projection_stale':
+            latest = None
+            try:
+                latest = get_turn(
+                    conversation_id, turn_id, user_id=user_id)
+            except LifecycleNotFound:
+                pass
             raise LifecycleConflict(
-                'stale_projection',
-                'The turn changed since this command was prepared.', turn)
-        current_id = turn.get('currentAttemptId')
-        if current_id:
-            current = _attempt_row(db, current_id)
-            if current and _row_value(current, 'status') in LIVE_ATTEMPT_STATUSES:
-                raise LifecycleConflict(
-                    'attempt_in_progress', 'This turn already has a live attempt.', turn)
-        available = _resume_options(turn['settlement'])
-        if operation != 'regenerate' and operation not in available:
-            raise LifecycleConflict(
-                'operation_not_available',
-                f'{operation} is not available for the current settlement.', turn)
-        authoritative_anchor = _option_anchor(turn['settlement'], operation)
-        if (resume_anchor is not None
-                and dict(resume_anchor) != dict(authoritative_anchor)):
-            raise LifecycleConflict(
-                'invalid_resume_anchor',
-                'The requested resume anchor is not the current server checkpoint.',
-                turn,
-            )
-        # A checkpoint is an authority fact, not client-provided prefill.  A
-        # client may echo it for conflict detection but cannot select/modify it.
-        anchor = dict(authoritative_anchor)
-        submitted_turn = None
-        if input_update is not None:
-            if operation != 'regenerate':
-                raise LifecycleConflict(
-                    'input_update_not_allowed',
-                    'Only regenerate may atomically edit its submitted turn.', turn)
-            parent_id = _row_value(row, 'parent_turn_id')
-            parent = (_turn_row(db, conversation_id, parent_id, user_id)
-                      if parent_id else None)
-            if parent is None or _row_value(parent, 'actor') not in {
-                    'human', 'virtual_user', 'critic'}:
-                raise LifecycleConflict(
-                    'invalid_input_turn',
-                    'The generated turn has no editable submitted parent.', turn)
-            parent_revision = int(_row_value(parent, 'projection_revision', 0) or 0)
-            if (expected_input_projection_revision is None or
-                    int(expected_input_projection_revision) != parent_revision):
-                raise LifecycleConflict(
-                    'stale_input_projection',
-                    'The submitted turn changed since editing began.',
-                    _public_turn(parent))
-            updated_input = _normalize_projection(input_update)
-            db.execute(
-                'UPDATE conversation_turns SET projection=?,projection_revision=?, '
-                'updated_at=? WHERE turn_id=? AND projection_revision=?',
-                (_json(updated_input), parent_revision + 1, now, parent_id,
-                 parent_revision),
-            )
-            submitted_turn = _public_turn(
-                _turn_row(db, conversation_id, parent_id, user_id))
-        projection = dict(turn['projection'])
-        if operation == 'regenerate':
-            projection = {'content': '', 'thinking': '', 'segments': [],
-                          'toolRounds': []}
-        elif operation == 'checkpoint_resume':
-            projection['content'] = anchor.get('content', '')
-            projection['thinking'] = anchor.get('thinking', '')
-            kept = int(anchor.get('keptToolRounds', 0) or 0)
-            projection['toolRounds'] = list(
-                (projection.get('toolRounds') or [])[:kept])
-            projection['segments'] = list(anchor.get('segments') or [])
-        new_revision = turn['projectionRevision'] + 1
-        attempt_id = _uuid()
-        if current_id:
-            db.execute(
-                "UPDATE generation_attempts SET status='superseded', "
-                'superseded_at=? WHERE attempt_id=? AND status NOT IN '
-                "('pending','running')", (now, current_id))
-        db.execute(
-            'INSERT INTO generation_attempts(attempt_id,conversation_id,turn_id,'
-            'command_id,task_id,operation,status,base_projection_revision,'
-            'resume_anchor,config,error,created_at) '
-            'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-            (attempt_id, conversation_id, turn_id, command_id, '', operation,
-             'pending', turn['projectionRevision'], _json(anchor),
-             _json(config or {}), _json({}), now),
-        )
-        db.execute(
-            "UPDATE conversation_turns SET status='pending', current_attempt_id=?, "
-            'projection=?, projection_revision=?, settlement=?, updated_at=? '
-            'WHERE turn_id=? AND projection_revision=?',
-            (attempt_id, _json(projection), new_revision, _json({}), now,
-             turn_id, turn['projectionRevision']),
-        )
-        _append_event(
-            db, attempt_id=attempt_id, conversation_id=conversation_id,
-            turn_id=turn_id, projection_revision=new_revision,
-            event_type='status_changed',
-            payload={'status': 'pending', 'operation': operation,
-                     **({'turns': [submitted_turn]} if submitted_turn else {})},
-        )
-        revision = _bump_conversation(db, conversation_id, user_id, now)
-        result = {
-            'turn': _public_turn(_turn_row(
-                db, conversation_id, turn_id, user_id)),
-            'attempt': _public_attempt(_attempt_row(db, attempt_id)),
-            'conversationRevision': revision,
-            'streamCursor': 1,
-            'idempotentReplay': False,
-            '_needsStart': True,
-        }
-        if submitted_turn is not None:
-            result['submittedTurn'] = submitted_turn
-        return result
+                'stale_projection', str(exc), latest) from exc
+        if exc.code == 'database_conflict':
+            raise LifecycleConflict(exc.code, str(exc)) from exc
+        raise
 
 
-def bind_task(attempt_id: str, task_id: str) -> dict[str, Any] | None:
+def bind_task(
+    attempt_id: str, task_id: str, *, user_id: Any,
+) -> dict[str, Any] | None:
     """Bind the internal executor task and expose the attempt as running."""
-    now = _now_ms()
-    with pooled_write_transaction(DOMAIN_CHAT, label='bind v2 attempt task') as db:
-        attempt = _attempt_row(db, attempt_id)
-        if attempt is None:
-            return None
-        turn_id = _row_value(attempt, 'turn_id')
-        conversation_id = _row_value(attempt, 'conversation_id')
-        turn = db.execute(
-            'SELECT * FROM conversation_turns WHERE turn_id=?',
-            (turn_id,),
-        ).fetchone()
-        if turn is None or _row_value(turn, 'current_attempt_id') != attempt_id:
-            return None
-        # A very fast task may have settled before the HTTP starter binds it.
-        # Persist task_id, but never regress a terminal attempt to running.
-        db.execute(
-            'UPDATE generation_attempts SET task_id=?, status=CASE '
-            "WHEN status='pending' THEN 'running' ELSE status END, "
-            'started_at=COALESCE(started_at,?) WHERE attempt_id=?',
-            (task_id, now, attempt_id),
-        )
-        if _row_value(attempt, 'status') != 'pending':
-            return _public_attempt(_attempt_row(db, attempt_id))
-        old_revision = int(_row_value(turn, 'projection_revision', 0) or 0)
-        new_revision = old_revision + 1
-        updated = db.execute(
-            "UPDATE conversation_turns SET status='running', "
-            'projection_revision=?, updated_at=? WHERE turn_id=? '
-            "AND current_attempt_id=? AND status='pending' "
-            'AND projection_revision=?',
-            (new_revision, now, turn_id, attempt_id, old_revision),
-        )
-        if getattr(updated, 'rowcount', 0):
-            _append_event(
-                db, attempt_id=attempt_id, conversation_id=conversation_id,
-                turn_id=turn_id, projection_revision=new_revision,
-                event_type='status_changed', payload={'status': 'running'},
-            )
-            _bump_conversation(
-                db, conversation_id, _row_value(turn, 'user_id'), now)
-        return _public_attempt(_attempt_row(db, attempt_id))
+    user_id = require_user_id(user_id, context='bind turn task')
+    return _turn_client(write=True).command(
+        'turn.attempt.bind', {'attempt_id': attempt_id,
+                              'task_id': task_id,
+                              'user_id': user_id},
+        f'turn-bind:{attempt_id}:{task_id}')
 
 
-def claim_attempt_start(attempt_id: str) -> bool:
+def dispatch_attempt_to_worker(
+    principal: PrincipalContext,
+    attempt_id: str,
+    *,
+    priority: int = 100,
+    now_ms: int | None = None,
+) -> dict[str, Any] | None:
+    """Atomically bind an accepted attempt to one durable worker job.
+
+    This is a storage foundation, not the in-process executor switch.  The job
+    contains durable turn references and the explicit principal only; a
+    production handler must still prove event replay, terminal accounting, and
+    external side-effect fencing before its kind is eligible for claims.
+    """
+    if not isinstance(principal, PrincipalContext):
+        raise TypeError('worker dispatch requires PrincipalContext')
+    owner_user_id = principal.require_owner(
+        context='conversation worker dispatch')
+    if not attempt_id:
+        raise ValueError('attempt_id is required')
+    effective_now_ms = _now_ms() if now_ms is None else int(now_ms)
+    return _turn_client(write=True).command(
+        'turn.attempt.dispatch_worker', {
+            'attempt_id': attempt_id,
+            'user_id': owner_user_id,
+            'principal': principal.to_payload(),
+            'priority': int(priority),
+            'now_ms': effective_now_ms,
+        },
+        f'turn-worker-dispatch:{attempt_id}',
+    )
+
+
+def claim_attempt_start(attempt_id: str, *, user_id: Any) -> bool:
     """Acquire the one-shot executor-dispatch lease for an accepted attempt.
 
     This closes the commit-to-task-bind window: a concurrent lost-ACK retry
@@ -721,48 +483,225 @@ def claim_attempt_start(attempt_id: str) -> bool:
     launching a second billable request.  A process crash after the claim is
     intentionally recovered as ``interrupted`` on boot, never auto-retried.
     """
-    with pooled_write_transaction(DOMAIN_CHAT, label='claim v2 attempt start') as db:
-        lock_scoped_sequence(db, 'attempt_dispatch', attempt_id)
-        updated = db.execute(
-            "UPDATE generation_attempts SET task_id=? WHERE attempt_id=? "
-            "AND status='pending' AND task_id=''",
-            (f'@dispatching:{attempt_id}', attempt_id),
-        )
-        return bool(getattr(updated, 'rowcount', 0))
+    user_id = require_user_id(user_id, context='claim turn attempt')
+    return bool(_turn_client(write=True).command(
+        'turn.attempt.claim', {
+            'attempt_id': attempt_id, 'user_id': user_id,
+        },
+        f'turn-claim:{attempt_id}'))
 
 
-def fail_start(attempt_id: str, error: Any) -> None:
-    task = {'_attemptId': attempt_id, 'id': '', 'status': 'error',
+def fail_start(attempt_id: str, error: Any, *, user_id: Any) -> None:
+    # Validate ownership before constructing an internal task carrier. Worker
+    # event recording derives scope from the durable attempt, but callers at
+    # the command boundary must still name the authenticated owner explicitly.
+    user_id = require_user_id(user_id, context='fail turn attempt start')
+    get_attempt(attempt_id, user_id=user_id)
+    task = {'_attemptId': attempt_id, '_userId': user_id,
+            'id': '', 'status': 'error',
             'error': error, 'content': '', 'thinking': '', 'toolRounds': []}
     record_task_event(task, {'type': 'error', 'error': error})
 
 
-def _task_projection(task: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+def _projection_injection_records(records: Any, channel: str) -> Any:
+    """Copy a display-only injection lane and assign durable block identity.
+
+    Task dictionaries remain executor-owned and are never mutated here.  The
+    projection boundary is the first shared authority seen by reconnects and
+    every frontend, so it is also the only safe place to repair legacy records
+    that predate ``blockId``.  Duplicate producer IDs are disambiguated in
+    lane order instead of leaving DOM identity up to a renderer.
+    """
+    if not isinstance(records, list):
+        return records
+    claimed_ids: dict[str, int] = {}
+    projected_records: list[Any] = []
+    for record in records:
+        if not isinstance(record, dict):
+            projected_records.append(record)
+            continue
+        projected = dict(record)
+        round_value = projected.get('round')
+        round_token = (str(round_value) if isinstance(round_value, int)
+                       and not isinstance(round_value, bool)
+                       and round_value >= 0 else 'unknown')
+        declared_id = projected.get('blockId')
+        preferred_id = (declared_id.strip()
+                        if isinstance(declared_id, str) and declared_id.strip()
+                        else f'injection:{channel}:round-{round_token}')
+        occurrence = claimed_ids.get(preferred_id, 0) + 1
+        claimed_ids[preferred_id] = occurrence
+        projected['blockId'] = (preferred_id if occurrence == 1
+                                else f'{preferred_id}~{occurrence}')
+        projected_records.append(projected)
+    return projected_records
+
+
+def _projection_provenance(task: dict[str, Any], previous: Any) -> Any:
+    provenance = dict(previous) if isinstance(previous, dict) else {}
+    for source, target in _PROJECTION_PROVENANCE_FIELDS:
+        if task.get(source) is not None:
+            value = task[source]
+            if isinstance(value, dict):
+                provenance[target] = dict(value)
+            elif isinstance(value, list):
+                provenance[target] = [
+                    dict(item) if isinstance(item, dict) else item
+                    for item in value
+                ]
+            else:
+                provenance[target] = value
+    if len(provenance) <= (1 if provenance.get('blockId') else 0):
+        return previous
+    provenance['blockId'] = 'provenance'
+    return provenance
+
+
+def _file_changes_block(
+    task_id: str,
+    projection: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Derive the stable ``fileChanges`` block from a projection's file list.
+
+    Shared by ``_task_projection`` (live/terminal fold) and
+    ``apply_commit_round_file_changes`` (post-settlement fold) so both paths
+    produce the identical block identity, count rule, and undo/redo state
+    carry-over.
+    """
+    modified_file_list = projection.get('modifiedFileList')
+    if not isinstance(modified_file_list, list):
+        return None
+    modified_file_count = projection.get('modifiedFiles')
+    if (not isinstance(modified_file_count, int)
+            or isinstance(modified_file_count, bool)
+            or modified_file_count < 0):
+        modified_file_count = 0
+    previous_file_changes = projection.get('fileChanges')
+    previous_file_changes = (
+        previous_file_changes
+        if isinstance(previous_file_changes, dict) else {}
+    )
+    next_files = [dict(item) if isinstance(item, dict) else item
+                  for item in modified_file_list]
+    same_operation = bool(
+        task_id
+        and previous_file_changes.get('taskId') == task_id
+        and previous_file_changes.get('files') == next_files
+    )
+    file_changes = {
+        'blockId': 'file-changes',
+        **({'taskId': task_id} if task_id else {}),
+        'count': max(modified_file_count, len(modified_file_list)),
+        'state': 'applied',
+        'files': next_files,
+    }
+    if same_operation:
+        for key in ('state', 'commandId', 'error', 'effect'):
+            if key in previous_file_changes:
+                file_changes[key] = previous_file_changes[key]
+    return file_changes
+
+
+def _task_projection(
+    task: dict[str, Any],
+    previous: dict[str, Any],
+    raw_event: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     projection = dict(previous)
     cfg = task.get('config') or {}
-    # Endpoint/Flow phases commit their visible rows independently through
+    # Flow phases commit their visible rows independently through
     # ``sync_visible_run_turns``.  Later orchestration bookkeeping events must
     # not fold the aggregate task buffer back over the first phase's bubble.
-    owns_visible_run_turns = bool(task.get('_v2VisibleRunTurnIds'))
+    owns_visible_run_turns = bool(task.get('_turnVisibleRunTurnIds'))
     content = (projection.get('content', '') if owns_visible_run_turns else
                (task.get('content') or cfg.get('contentPrefix') or ''))
     checkpoint_rounds = (task.get('_checkpointToolRounds')
                          or cfg.get('checkpointToolRounds') or [])
+    merged_rounds = list(checkpoint_rounds) + list(task.get('toolRounds') or [])
+    projected_rounds = [
+        trim_tool_round_for_persist(dict(item))
+        if isinstance(item, dict) else item
+        for item in merged_rounds
+    ]
     projection.update({
         'content': content,
         'thinking': (task.get('thinking') if task.get('thinking') is not None
                      else projection.get('thinking', '')),
-        'toolRounds': list(checkpoint_rounds) + list(task.get('toolRounds') or []),
+        'toolRounds': projected_rounds,
     })
     for source, target in (
         ('segments', 'segments'), ('usage', 'usage'), ('model', 'model'),
         ('preset', 'preset'), ('thinkingDepth', 'thinkingDepth'),
         ('modifiedFiles', 'modifiedFiles'),
         ('modifiedFileList', 'modifiedFileList'), ('todoState', 'todoState'),
+        # Fallback metadata must survive into the turn-native projection so the
+        # finish tag can show "requested → actual" instead of silently
+        # displaying only the fallback model.  Without these fields the
+        # user sees e.g. "gpt-5.3-codex-spark" when they picked glm-5.3
+        # and the dispatcher fell back after a 402 credit-exhausted error.
+        # The task stores them with underscore prefix (_fallback_model);
+        # the projection exposes them as camelCase (fallbackModel) to
+        # match the frontend finish-tag contract.
+        ('_fallback_model', 'fallbackModel'),
+        ('_fallback_from', 'fallbackFrom'),
+        ('_fallback_reason', 'fallbackReason'),
+        ('_fallback_kind', 'fallbackKind'),
+        # Live "size of the prompt JUST sent" reading, stashed by
+        # llm_fallback._emit_round_usage on EVERY LLM round.  This is the turn-native
+        # successor of the v1 SSE ``round_usage`` → ``_liveLastRoundUsage``
+        # feed: riding the durable turn projection (instead of a session-only
+        # SSE frame) means the context-health gauge keeps moving per round
+        # under the turn-native lane AND survives reconnect replay / slim-delta
+        # windows for free (slim frames patch only content/thinking on the
+        # turn row; tail hydration re-serves this row).
+        ('_lastRoundUsage', 'lastRoundUsage'),
     ):
         if task.get(source) is not None:
             projection[target] = task[source]
-    return projection
+    # Display-only injection records are copied and normalized independently:
+    # unlike content/tool facts, their stable render identity is part of the
+    # projection contract and must survive hydration.  Normalize previous
+    # projections too so the next event upgrades rows written before blockId.
+    for source, target, channel in _PROJECTION_INJECTION_LANES:
+        records = (task[source] if task.get(source) is not None
+                   else projection.get(target))
+        if records is not None:
+            projection[target] = _projection_injection_records(records, channel)
+    provenance = _projection_provenance(task, projection.get('provenance'))
+    if provenance is not None:
+        projection['provenance'] = provenance
+    # The legacy counter/list remain readable during migration, but the
+    # renderer consumes one explicit, stable content block.  Derive it at the
+    # projection authority so every client sees the same identity and list.
+    file_changes = _file_changes_block(str(task.get('id') or ''), projection)
+    if file_changes is not None:
+        projection['fileChanges'] = file_changes
+    # Per-round usage breakdown. The context-health gauge's "last round
+    # prompt" reading is only honest when per-round usage survives a reload;
+    # without it the frontend can only divide the turn's ACCUMULATED bill by
+    # one and presents the whole turn's cost as a single prompt
+    # (2026-08-20 fake "1.3M / 1.1M = 100%" reading on a ~170k prompt).
+    # Sanitize like the legacy persist path so ``_wire_*`` diagnostics never
+    # reach durable rows (measured GiB-class bloat in round_usage storage).
+    if task.get('apiRounds'):
+        projection['apiRounds'] = sanitize_api_rounds_for_persist(
+            task['apiRounds'])
+    if raw_event is not None:
+        # Runtime events remain the canonical facts.  The public Turn owns one
+        # bounded, replay-safe presentation projection so a refresh preserves
+        # exactly when a tool was isolated, a model switched, or an error
+        # occurred without putting any of those diagnostics into LLM context.
+        from lib.turn_activity_timeline import fold_activity_timeline
+        activity_timeline = fold_activity_timeline(
+            projection.get('activityTimeline'), raw_event, task,
+        )
+        if activity_timeline is not None:
+            projection['activityTimeline'] = activity_timeline
+    return projection_with_stable_segments(
+        projection,
+        actor=str(task.get('_turnActor') or 'assistant'),
+        status=str(task.get('_turnStatus') or task.get('status') or 'running'),
+    )
 
 
 def _has_checkpoint(projection: dict[str, Any]) -> tuple[bool, int]:
@@ -792,17 +731,50 @@ def _supports_lossless_prefill(task: dict[str, Any], projection: dict[str, Any])
 
 def _settlement(task: dict[str, Any], raw_event: dict[str, Any],
                 projection: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    event_type = str(raw_event.get('type') or '')
-    finish = (raw_event.get('finishReason') or task.get('finishReason') or '')
-    error = raw_event.get('error') or task.get('error')
-    if event_type == 'aborted' or task.get('aborted') or task.get('status') == 'aborted':
-        status, outcome, cause = 'interrupted', 'interrupted', 'user_abort'
-    elif error or event_type == 'error' or task.get('status') == 'error':
-        status, outcome, cause = 'failed', 'failed', 'generation_error'
-    elif finish in {'length', 'max_tokens', 'context_length', 'content_filter'}:
-        status, outcome, cause = 'truncated', 'truncated', finish
-    else:
-        status, outcome, cause = 'completed', 'completed', 'provider_finished'
+    terminal_evidence = task_terminal_evidence(task, raw_event)
+    finish = terminal_evidence.finish_reason
+    raw_error = raw_event.get('error') or task.get('error')
+    stream_state = terminal_evidence.stream_state
+    verdict = derive_turn_verdict(terminal_evidence)
+    status = verdict.status.value
+    outcome = verdict.outcome.value
+    cause = verdict.cause
+    error = None
+    if status == 'failed':
+        error = normalize_envelope(
+            raw_error,
+            context='turn-settlement',
+            source='turn-lifecycle',
+            require_complete=True,
+        )
+        if error is None:
+            # A terminal error frame without its payload is itself a contract
+            # failure. Persist an actionable envelope here at the authority
+            # boundary so neither snapshots nor reconnect replay can degrade
+            # to the opaque policy cause ``generation_error``.
+            detail = str(
+                raw_event.get('detail')
+                or raw_event.get('content')
+                or finish
+                or 'Terminal generation event contained no error detail.'
+            )[:300]
+            model = str(
+                task.get('model') or (task.get('config') or {}).get('model') or '')
+            stream_error_kind = (
+                str(finish)
+                if finish in {'premature_close', 'abnormal_stop'}
+                else 'premature_close'
+                if cause == 'provider_stream_error'
+                else 'internal'
+                if cause == 'completion_evidence_missing'
+                else 'generic'
+            )
+            error = make_envelope(
+                stream_error_kind,
+                detail=detail, model=model,
+                context='turn-settlement', source='turn-lifecycle',
+                raw=detail,
+            )
     options: list[dict[str, Any]] = []
     if status in {'interrupted', 'truncated', 'failed'} and _supports_lossless_prefill(task, projection):
         options.append({
@@ -826,14 +798,16 @@ def _settlement(task: dict[str, Any], raw_event: dict[str, Any],
     settlement = {
         'outcome': outcome,
         'cause': cause,
+        'evidence': verdict.evidence.value,
+        'streamState': stream_state.value if stream_state is not None else None,
         'providerFinishReason': finish or None,
-        'error': error or None,
+        'error': error,
         'resumeOptions': options,
     }
-    if task.get('_v2NextAttemptId'):
+    if task.get('_nextAttemptId'):
         settlement['continuation'] = {
-            'turnId': task.get('_v2NextTurnId') or '',
-            'attemptId': task['_v2NextAttemptId'],
+            'turnId': task.get('_nextTurnId') or '',
+            'attemptId': task['_nextAttemptId'],
         }
     return status, settlement
 
@@ -845,135 +819,285 @@ _INTERACTION_EVENTS = frozenset({
 _TERMINAL_EVENTS = frozenset({'done', 'error', 'aborted'})
 
 
-def record_task_event(task: dict[str, Any], raw_event: dict[str, Any]) -> bool:
+def _signal_stale_attempt_abort(task: dict[str, Any], attempt_id: str,
+                                reason: str) -> None:
+    """Plant the cooperative abort triple when a turn-native event is rejected because
+    its attempt is definitively stale (settled or superseded).
+
+    Without this the worker (agent round loop / LLM stream / tool heartbeat)
+    never learns its writes are being discarded and keeps emitting events for
+    days — each one a rejected authoritative write + an ERROR log row (the
+    120k-row 'turn-native event rejected: attempt is stale' flood). CAS-contention
+    rejections are transient and must NOT come through here; only call this on
+    the branches where the attempt row itself proves staleness.
+
+    The stamp is EXACTLY the one the append_event fence
+    (lib/tasks_pkg/manager/_events.py::_persist_before_push) plants and the
+    round-start gate / abort_check consume: ``aborted`` + ``_abort_timestamp``
+    + ``_abort_reason='turn_attempt_stale_fence'``. A divergent key set would
+    both break that contract and, by pre-setting ``aborted``, suppress the
+    fence's own stamp. First stamp wins — a prior user abort must never be
+    clobbered.
+    """
+    if task.get('aborted'):
+        return
+    logger.warning('[TurnLifecycle] turn-native attempt stale (%s); signaling abort '
+                   'task=%s attempt=%s', reason,
+                   (task.get('id') or '?')[:8], (attempt_id or '?')[:8])
+    try:
+        task['aborted'] = True
+        task['_abort_timestamp'] = time.time()
+        task['_abort_reason'] = 'turn_attempt_stale_fence'
+        abort_event = task.get('abort_event')
+        if abort_event is not None:
+            abort_event.set()
+    except Exception:
+        logger.debug('[TurnLifecycle] stale-attempt abort signal failed '
+                     '(non-fatal)', exc_info=True)
+
+
+def _drain_queue_after_settlement(task: dict[str, Any], conversation_id: str,
+                                  status: str) -> None:
+    """Drain the conversation's durable message queue once a turn-native attempt
+    settles and its lane is provably free.
+
+    The legacy (v1) drain rides persist_task_result → _dispatch_queued_message,
+    which fires BEFORE the done event — the turn-native attempt row is still live at
+    that point, so a create_turn_pair there would lane_busy-fail. turn-native
+    conversations therefore drain HERE, immediately after the terminal
+    settlement commits. Best-effort: any failure leaves the row leased for
+    the reaper's next tick, never dropped.
+    """
+    try:
+        # 'failed' mirrors the v1 skip-on-error discipline (the human may
+        # want to fix something before the queued message runs); aborts and
+        # truncations drain, exactly like v1.
+        if status not in ('completed', 'interrupted', 'truncated'):
+            return
+        if not conversation_id:
+            return
+        # An autopilot/continuation successor already owns the lane — the
+        # queued human turn drains when THAT successor settles instead.
+        if (task.get('_autopilot_spawned_followup')
+                or task.get('_autopilotNextAttempt')):
+            return
+        from lib.tasks_pkg.manager import task_user_id
+        owner_user_id = int(task_user_id(task))
+        from lib.message_queue import get_queue_depth
+        if get_queue_depth(
+                conversation_id, user_id=owner_user_id) == 0:
+            return
+        import threading
+
+        def _drain():
+            try:
+                from lib.message_queue import dispatch_next_queued
+                new_task_id = dispatch_next_queued(
+                    conversation_id, user_id=owner_user_id)
+                if new_task_id:
+                    logger.info('[Queue] turn-native settlement drain dispatched '
+                                'queued message → task %s for conv=%s',
+                                new_task_id[:8], conversation_id[:8])
+            except Exception as exc:
+                logger.debug('[Queue] turn-native settlement drain failed conv=%s: %s',
+                             conversation_id[:8], exc)
+
+        threading.Thread(
+            target=_drain, daemon=True,
+            name=f'turn-native-queue-drain-{conversation_id[:8]}').start()
+    except Exception:
+        logger.debug('[Queue] turn-native settlement drain hook failed', exc_info=True)
+
+
+def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
+                      task_event: dict[str, Any] | None = None):
     """Persist one task projection/event before it becomes client-visible.
 
-    Returns False for a legacy task, stale attempt, duplicate terminal event,
-    or superseded executor.  Those events must not mutate v2 authority.
+    Returns False for a task without a turn attempt, a stale attempt, a
+    duplicate terminal event,
+    or superseded executor.  Those events must not mutate turn-native authority.
+
+    Returns the string ``'coalesced'`` (truthy, NOT a rejection) when a pure
+    text ``delta`` is folded into the next durable write by the coalescing
+    window — see the module-level note.  The frame's content is not lost:
+    the next persisted event (any structural frame, the window's first due
+    delta, or the terminal settlement) carries the cumulative projection.
+
+    When ``task_event`` (``{task_id, sequence, event}``) is attached and the
+    sidecar path applies, the frame's storage_events row commits INSIDE the
+    turn authority transaction and the return is the string ``'carried'`` —
+    one frame = one authority transaction (2026-08-20 double-write root
+    fix).  Every other outcome leaves the event row to the caller's
+    standalone append.
     """
     attempt_id = task.get('_attemptId') or task.get('attemptId')
     if not attempt_id:
         return False
+    from lib.tasks_pkg.manager._registry import task_user_id
+    user_id = task_user_id(task)
     now = _now_ms()
-    with pooled_write_transaction(DOMAIN_CHAT, label='record v2 attempt event') as db:
-        attempt = _attempt_row(db, attempt_id)
-        if attempt is None or _row_value(attempt, 'status') not in LIVE_ATTEMPT_STATUSES:
-            return False
-        # Cross-thread/process event producers serialize on one durable row.
-        # This makes the projection CAS + seq allocation one ordered unit.
-        lock_scoped_sequence(db, 'attempt_events', attempt_id)
-        attempt = _attempt_row(db, attempt_id)
-        if attempt is None or _row_value(attempt, 'status') not in LIVE_ATTEMPT_STATUSES:
-            return False
-        turn_id = _row_value(attempt, 'turn_id')
-        turn = db.execute(
-            'SELECT * FROM conversation_turns WHERE turn_id=?',
-            (turn_id,),
-        ).fetchone()
-        if turn is None or _row_value(turn, 'current_attempt_id') != attempt_id:
-            return False
-        previous = _decoded(_row_value(turn, 'projection'), {})
-        projection = _task_projection(task, previous)
-        old_revision = int(_row_value(turn, 'projection_revision', 0) or 0)
-        new_revision = old_revision + 1
-        event_kind = str(raw_event.get('type') or 'projection')
-        terminal = event_kind in _TERMINAL_EVENTS
-        if terminal:
-            status, settlement = _settlement(task, raw_event, projection)
-            attempt_status = status
-            error = settlement.get('error') or {}
-            updated = db.execute(
-                'UPDATE conversation_turns SET status=?, projection=?, '
-                'projection_revision=?, settlement=?, updated_at=? '
-                'WHERE turn_id=? AND current_attempt_id=? '
-                'AND projection_revision=?',
-                (status, _json(projection), new_revision, _json(settlement), now,
-                 turn_id, attempt_id, old_revision),
-            )
-            if not getattr(updated, 'rowcount', 0):
-                return False
-            db.execute(
-                'UPDATE generation_attempts SET status=?, error=?, settled_at=? '
-                'WHERE attempt_id=? AND status IN (\'pending\',\'running\')',
-                (attempt_status, _json(error), now, attempt_id),
-            )
-            event_type = 'terminal_settlement'
-            payload = {'status': status, 'settlement': settlement,
-                       'projection': projection}
-        else:
-            updated = db.execute(
-                "UPDATE conversation_turns SET status='running', projection=?, "
-                'projection_revision=?, updated_at=? WHERE turn_id=? '
-                'AND current_attempt_id=? AND projection_revision=?',
-                (_json(projection), new_revision, now, turn_id, attempt_id,
-                 old_revision),
-            )
-            if not getattr(updated, 'rowcount', 0):
-                return False
-            db.execute(
-                "UPDATE generation_attempts SET status='running', "
-                'started_at=COALESCE(started_at,?) WHERE attempt_id=? '
-                "AND status='pending'", (now, attempt_id))
-            event_type = ('interaction_request' if event_kind in _INTERACTION_EVENTS
-                          else 'projection_updated')
-            payload = {'projection': projection}
-            if event_type == 'interaction_request':
-                payload['request'] = raw_event
-            else:
-                payload['updateKind'] = event_kind
-        _append_event(
-            db, attempt_id=attempt_id,
-            conversation_id=_row_value(attempt, 'conversation_id'),
-            turn_id=turn_id, projection_revision=new_revision,
-            event_type=event_type, payload=payload,
+    attempt = get_attempt(attempt_id, user_id=user_id)
+    if attempt['status'] not in LIVE_ATTEMPT_STATUSES:
+        _signal_stale_attempt_abort(task, attempt_id, 'attempt-not-live')
+        return False
+    event_kind = str(raw_event.get('type') or 'projection')
+    if (event_kind in _COALESCIBLE_EVENT_KINDS
+            and not _delta_throttle_allows(attempt_id)):
+        return 'coalesced'
+    turn = get_turn(
+        attempt['conversationId'], attempt['turnId'], user_id=user_id)
+    previous = turn.get('projection') or {}
+    terminal = event_kind in _TERMINAL_EVENTS
+    try:
+        oversize_retry_at = float(
+            task.get('_turnProjectionOversizeRetryAt') or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        oversize_retry_at = 0.0
+    oversize_circuit_open = bool(
+        task_event is not None
+        and not terminal
+        and time.monotonic() < oversize_retry_at
+    )
+    slim = not terminal and (
+        oversize_circuit_open
+        or (
+            event_kind in _COALESCIBLE_EVENT_KINDS
+            and not _structural_fold_due(attempt_id)
         )
-        _bump_conversation(
-            db, _row_value(attempt, 'conversation_id'),
-            _row_value(turn, 'user_id'), now)
-        return True
-
-
-def _visible_turn_shape(message: dict[str, Any], default_kind: str
-                        ) -> tuple[str, str, dict[str, Any]]:
-    """Translate one orchestration message without exposing marker fields."""
-    role = message.get('role')
-    if message.get('_isVirtualUser'):
-        actor, kind = 'virtual_user', 'autopilot_virtual_user'
-    elif message.get('_isEndpointReview'):
-        actor, kind = 'critic', 'endpoint_critic'
-    elif message.get('_isEndpointPlanner'):
-        actor, kind = 'planner', 'endpoint_planner'
-    elif message.get('_flowNodeId') or message.get('_flowRunId'):
-        actor = 'critic' if role == 'user' else 'assistant'
-        kind = 'flow_node'
+    )
+    if slim:
+        content, thinking = _delta_text_fields(task, previous)
+        projection = {'content': content, 'thinking': thinking}
     else:
-        actor = 'critic' if role == 'user' else 'assistant'
-        kind = default_kind or 'endpoint_worker'
-    projection = {
-        key: value for key, value in message.items()
-        if key != 'role' and not key.startswith('_')
+        projection = _task_projection(task, previous, raw_event)
+    settlement = {}
+    status = 'running'
+    error = {}
+    if terminal:
+        status, settlement = _settlement(task, raw_event, projection)
+        error = settlement.get('error') or {}
+        # Only a successfully completed Plan-mode executor may mint executable
+        # plan authority. Never infer it from arbitrary assistant prose at the
+        # generic projection normalizer. A retry that fails, truncates, or no
+        # longer runs in Plan Mode also clears any prior attempt's sidecar.
+        projection.pop('proposedPlan', None)
+        from lib.tasks_pkg.plan_mode import plan_mode_enabled
+        if status == 'completed' and plan_mode_enabled(task.get('config')):
+            from lib.plan_contract import proposed_plan_document
+            proposed_plan = proposed_plan_document(
+                content=projection.get('content'))
+            if proposed_plan is not None:
+                projection['proposedPlan'] = proposed_plan
+        projection = projection_with_stable_segments(
+            projection,
+            actor=str(turn.get('actor') or task.get('_turnActor') or 'assistant'),
+            status=status,
+        )
+    event_type = 'terminal_settlement' if terminal else (
+        'interaction_request' if event_kind in _INTERACTION_EVENTS
+        else 'projection_updated')
+    # Live phase rides the EVENT payload, never the persisted turn
+    #   projection: the projection is the durable document (a stale phase
+    #   must never survive into a settled turn), while the event payload
+    #   is the wire frame the frontend folds into its session slice
+    #   (streamSessions) — the same discipline as v1, where task['phase']
+    #   is tracked in _emit BEFORE this call so every frame carries the
+    #   CURRENT phase (phase events their own, delta/terminal frames
+    #   None).  None is sent explicitly so replay clears the HUD.
+    _live_phase = None if terminal else task.get('phase')
+    event_payload = {'projection': projection, 'phase': _live_phase}
+    if terminal:
+        event_payload = {'status': status, 'settlement': settlement,
+                         'projection': projection, 'phase': None}
+    elif event_type == 'interaction_request':
+        event_payload['request'] = raw_event
+    else:
+        event_payload['updateKind'] = event_kind
+    command_payload = {
+        'attempt_id': attempt_id, 'user_id': user_id,
+        'projection': projection,
+        'terminal': terminal, 'status': status, 'settlement': settlement,
+        'error': error, 'event_type': event_type,
+        'event_payload': event_payload, 'now': now,
     }
-    projection.setdefault('content', '')
-    projection.setdefault('thinking', '')
-    projection.setdefault('segments', [])
-    projection.setdefault('toolRounds', [])
-    phase = {
-        'iteration': (message.get('_epIteration')
-                      or message.get('_epPlannerIteration')),
-        'approved': message.get('_epApproved'),
-        'nextPhase': message.get('_epNextPhase'),
-        'flowNodeId': message.get('_flowNodeId'),
-        'flowRunId': message.get('_flowRunId'),
-    }
-    projection['orchestration'] = {
-        key: value for key, value in phase.items() if value is not None
-    }
-    return actor, kind, projection
+    if slim:
+        command_payload['slim'] = True
+        command_payload['content'] = content
+        command_payload['thinking'] = thinking
+    if task_event is not None:
+        command_payload['task_event'] = task_event
+    client = _turn_client(write=True)
+    command_id = f'turn-event:{attempt_id}:{now}:{event_kind}'
+    try:
+        result = client.command(
+            'turn.event.record', command_payload, command_id,
+            # Projection frames are high-rate executor output, not interactive
+            # commands.  Putting them on the default user lane let a fleet of
+            # live turns occupy all eight user-weighted queue slots and starve
+            # Send / Regenerate behind multi-MiB projection writes.
+            priority='event')
+    except StorageError as exc:
+        # A payload-cap rejection is deterministic. Retrying the same full
+        # projection on every subsequent progress frame once turned one
+        # 10.3M-character command log into hundreds of multi-MiB serializations
+        # and an 8 GiB RSS kill. If the exact raw task event is carried in this
+        # transaction, retry once with the cumulative text-only projection and
+        # keep a bounded probe circuit open. The raw structural fact remains
+        # durable; a later full probe or terminal settlement converges the turn
+        # document. Calls without a carrier still fail closed because slimming
+        # those would discard their only structural fact.
+        if (exc.code != 'storage_payload_too_large'
+                or terminal or task_event is None or slim):
+            raise
+        retry_count = int(task.get('_turnProjectionOversizeCount') or 0) + 1
+        task['_turnProjectionOversizeCount'] = retry_count
+        task['_turnProjectionOversizeRetryAt'] = (
+            time.monotonic() + _OVERSIZE_PROJECTION_RETRY_SECONDS)
+        logger.warning(
+            '[TurnLifecycle] oversized projection for task=%s attempt=%s '
+            'event=%s; carrying the exact task event with a slim projection '
+            'and probing full state again in %.0fs (count=%d)',
+            str(task.get('id') or '?')[:8], str(attempt_id)[:8], event_kind,
+            _OVERSIZE_PROJECTION_RETRY_SECONDS, retry_count,
+        )
+        content, thinking = _delta_text_fields(task, previous)
+        projection = {'content': content, 'thinking': thinking}
+        event_payload['projection'] = projection
+        command_payload.update({
+            'projection': projection,
+            'event_payload': event_payload,
+            'slim': True,
+            'content': content,
+            'thinking': thinking,
+        })
+        slim = True
+        result = client.command(
+            'turn.event.record', command_payload, command_id,
+            priority='event')
+    applied = bool(result.get('applied'))
+    if applied and event_kind in _COALESCIBLE_EVENT_KINDS:
+        _delta_throttle_stamp(attempt_id)
+    if applied and not slim and not terminal:
+        _structural_fold_stamp(attempt_id)
+    if applied and (terminal or not slim):
+        task.pop('_turnProjectionOversizeRetryAt', None)
+        task.pop('_turnProjectionOversizeCount', None)
+    if terminal:
+        _delta_throttle_clear(attempt_id)
+        _structural_fold_clear(attempt_id)
+    if applied and terminal:
+        _drain_queue_after_settlement(
+            task, str(attempt.get('conversationId') or ''), status)
+    if applied and task_event is not None and result.get('task_event') is not None:
+        return 'carried'
+    return applied
+
+
 
 
 def sync_visible_run_turns(task: dict[str, Any], messages: list[dict[str, Any]],
-                           *, default_kind: str = 'endpoint_worker') -> int | None:
-    """Commit Endpoint/Flow/Autopilot visible messages as explicit turns.
+                           *, default_kind: str = 'flow_node') -> int | None:
+    """Commit Flow/Autopilot visible messages as explicit turns.
 
     The first generated row reuses the output ``turn_id`` allocated by the
     command.  Later phase rows use deterministic identities and terminal
@@ -983,599 +1107,664 @@ def sync_visible_run_turns(task: dict[str, Any], messages: list[dict[str, Any]],
     attempt_id = task.get('_attemptId')
     root_turn_id = task.get('_turnId')
     conversation_id = task.get('convId')
-    if not (task.get('_turnProtocolV2') and attempt_id and root_turn_id
+    if not (attempt_id and root_turn_id
             and conversation_id and messages):
         return None
     now = _now_ms()
-    visible_ids: list[str] = []
-    with pooled_write_transaction(DOMAIN_CHAT, label='sync v2 visible run turns') as db:
-        lock_scoped_sequence(db, 'attempt_events', attempt_id)
-        attempt = _attempt_row(db, attempt_id)
-        root = db.execute(
-            'SELECT * FROM conversation_turns WHERE turn_id=? '
-            'AND conversation_id=?', (root_turn_id, conversation_id),
-        ).fetchone()
-        if attempt is None or root is None:
-            return None
-        if _row_value(root, 'current_attempt_id') != attempt_id:
-            return None
-        run_id = (_row_value(root, 'run_id') or
-                  (task.get('config') or {}).get('runId') or attempt_id)
-        changed = False
-        previous_turn_id = _row_value(root, 'parent_turn_id')
-        related: list[dict[str, Any]] = []
-        for index, message in enumerate(messages):
-            actor, kind, projection = _visible_turn_shape(
-                message, default_kind)
-            if index == 0:
-                turn_id = root_turn_id
-                visible_ids.append(turn_id)
-                previous_turn_id = turn_id
-                if not str(_row_value(root, 'kind', '')).startswith(
-                        ('endpoint_', 'flow_', 'autopilot_')):
-                    old_revision = int(
-                        _row_value(root, 'projection_revision', 0) or 0)
-                    db.execute(
-                        'UPDATE conversation_turns SET actor=?,kind=?,run_id=?, '
-                        'projection=?,projection_revision=?,updated_at=? '
-                        'WHERE turn_id=? AND current_attempt_id=?',
-                        (actor, kind, run_id, _json(projection),
-                         old_revision + 1, now, root_turn_id, attempt_id),
-                    )
-                    root = db.execute(
-                        'SELECT * FROM conversation_turns WHERE turn_id=?',
-                        (root_turn_id,),
-                    ).fetchone()
-                    changed = True
-                related.append(_public_turn(root))
-                continue
-
-            turn_id = str(uuid.uuid5(
-                uuid.NAMESPACE_URL, f'turn-attempt:{attempt_id}:visible:{index}'))
-            child_attempt_id = str(uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f'turn-attempt:{attempt_id}:visible-attempt:{index}'))
-            visible_ids.append(turn_id)
-            existing = db.execute(
-                'SELECT * FROM conversation_turns WHERE turn_id=?',
-                (turn_id,),
-            ).fetchone()
-            if existing is None:
-                ordinal_row = db.execute(
-                    'SELECT COALESCE(MAX(ordinal),-1) AS ordinal '
-                    'FROM conversation_turns WHERE conversation_id=? AND lane_id=?',
-                    (conversation_id, _row_value(root, 'lane_id', 'main')),
-                ).fetchone()
-                ordinal = int(_row_value(ordinal_row, 'ordinal', -1)) + 1
-                settlement = {
-                    'outcome': 'completed', 'cause': 'phase_completed',
-                    'providerFinishReason': None, 'error': None,
-                    'resumeOptions': [
-                        {'operation': 'regenerate',
-                         'anchor': {'type': 'turn_start'}},
-                    ],
-                }
-                db.execute(
-                    'INSERT INTO conversation_turns(turn_id,conversation_id,user_id,'
-                    'lane_id,parent_turn_id,ordinal,actor,kind,run_id,status,'
-                    'current_attempt_id,projection,projection_revision,settlement,'
-                    'created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                    (turn_id, conversation_id, _row_value(root, 'user_id'),
-                     _row_value(root, 'lane_id', 'main'), previous_turn_id,
-                     ordinal, actor, kind, run_id, 'completed', child_attempt_id,
-                     _json(projection), 1, _json(settlement), now, now),
-                )
-                db.execute(
-                    'INSERT INTO generation_attempts(attempt_id,conversation_id,'
-                    'turn_id,command_id,task_id,operation,status,'
-                    'base_projection_revision,resume_anchor,config,error,'
-                    'created_at,started_at,settled_at) '
-                    'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                    (child_attempt_id, conversation_id, turn_id,
-                     f'run:{attempt_id}:visible:{index}', '', 'generate',
-                     'completed', 0, _json({}), _json({'runId': run_id}),
-                     _json({}), now, now, now),
-                )
-                _append_event(
-                    db, attempt_id=child_attempt_id,
-                    conversation_id=conversation_id, turn_id=turn_id,
-                    projection_revision=1, event_type='terminal_settlement',
-                    payload={'status': 'completed', 'settlement': settlement,
-                             'projection': projection},
-                )
-                existing = db.execute(
-                    'SELECT * FROM conversation_turns WHERE turn_id=?',
-                    (turn_id,),
-                ).fetchone()
-                changed = True
-            related.append(_public_turn(existing))
-            previous_turn_id = turn_id
-
-        if changed:
-            root = db.execute(
-                'SELECT * FROM conversation_turns WHERE turn_id=?',
-                (root_turn_id,),
-            ).fetchone()
-            old_revision = int(_row_value(root, 'projection_revision', 0) or 0)
-            new_revision = old_revision + 1
-            db.execute(
-                'UPDATE conversation_turns SET projection_revision=?,updated_at=? '
-                'WHERE turn_id=? AND current_attempt_id=?',
-                (new_revision, now, root_turn_id, attempt_id),
-            )
-            root = db.execute(
-                'SELECT * FROM conversation_turns WHERE turn_id=?',
-                (root_turn_id,),
-            ).fetchone()
-            related[0] = _public_turn(root)
-            _append_event(
-                db, attempt_id=attempt_id, conversation_id=conversation_id,
-                turn_id=root_turn_id, projection_revision=new_revision,
-                event_type='projection_updated',
-                payload={'projection': _decoded(_row_value(root, 'projection'), {}),
-                         'turns': related, 'updateKind': 'visible_turns_committed'},
-            )
-            _bump_conversation(
-                db, conversation_id, _row_value(root, 'user_id'), now)
-    task['_v2VisibleRunTurnIds'] = visible_ids
-    # Legacy callers expect a message-array index only for translation.  V2
-    # translation will address a turn id and must never write via that index.
+    from lib.tasks_pkg.manager._registry import task_user_id
+    user_id = task_user_id(task)
+    visible_result = _turn_client(write=True).command(
+        'turn.visible.sync', {
+            'conversation_id': conversation_id, 'attempt_id': attempt_id,
+            'root_turn_id': root_turn_id, 'messages': messages,
+            'user_id': user_id,
+            'default_kind': default_kind,
+            'run_id': (task.get('config') or {}).get('runId') or attempt_id,
+        }, f'turn-visible:{attempt_id}:{len(messages)}:{now}')
+    visible_ids = (
+        visible_result.get('visibleTurnIds')
+        if isinstance(visible_result, dict)
+        else visible_result
+    )
+    if visible_ids:
+        task['_turnVisibleRunTurnIds'] = visible_ids
     return None
 
 
-def list_turns(conversation_id: str, *, user_id: Any = 1,
+def list_turns(conversation_id: str, *, user_id: Any,
                lane_id: str | None = None, after_ordinal: int | None = None,
-               limit: int = 500, light: bool = False) -> dict[str, Any]:
+               limit: int = 500, light: bool = False,
+               since_ms: int | None = None,
+               known_revisions: dict[str, int] | None = None) -> dict[str, Any]:
+    user_id = require_user_id(user_id, context='list conversation turns')
     limit = min(max(int(limit or 500), 1), 2000)
-    clauses = ['conversation_id=?', 'user_id=?']
-    params: list[Any] = [conversation_id, user_id]
-    if lane_id:
-        clauses.append('lane_id=?')
-        params.append(lane_id)
+    client = _turn_client()
+    # Delta sync (the resync-storm fix): a watermark-bearing client asks
+    # for ONLY the rows changed since its last sync instead of re-
+    # receiving the full multi-MB projection per conv_changed frame.
+    # Filtered reads (lane/window) retain full-snapshot semantics.
+    if (since_ms is not None and lane_id is None
+            and after_ordinal is None):
+        now_entry = _now_ms()
+        # A non-positive or far-future watermark is clock confusion —
+        # degrade to a full snapshot rather than trusting it.
+        if 0 < int(since_ms) <= now_entry + _DELTA_MAX_SKEW_MS:
+            delta = client.query(
+                'turn.list_delta', {
+                    'conversation_id': conversation_id,
+                    'user_id': user_id,
+                    'since_ms': int(since_ms),
+                    **({'known_revisions': known_revisions}
+                       if known_revisions else {}),
+                })
+            rows = [
+                public_turn_with_stable_segments(row)
+                for row in (delta.get('turns') or [])
+            ]
+            if len(rows) > limit:
+                # A delta this large means the client is far behind
+                # (first sync after a mass update).  Truncating would
+                # silently drop rows the client never re-fetches — the
+                # watermark advances past them — so degrade to the full
+                # snapshot below instead.
+                logger.warning(
+                    '[turns] delta overflow conv=%s rows=%d limit=%d — '
+                    'falling back to full snapshot',
+                    conversation_id[:8], len(rows), limit)
+            else:
+                if light:
+                    for row in rows:
+                        row['projection'] = {
+                            key: row['projection'][key]
+                            for key in ('content', 'thinking', 'segments',
+                                        'model', 'usage')
+                            if key in row.get('projection', {})}
+                revision = client.query(
+                    'turn.revision', {'conversation_id': conversation_id,
+                                      'user_id': user_id})
+                if client.query('conversation.get', {
+                        'conv_id': conversation_id,
+                        'user_id': user_id}) is None:
+                    raise LifecycleNotFound('Conversation not found')
+                return {
+                    'conversationId': conversation_id,
+                    'conversationRevision': int(revision),
+                    'turns': rows,
+                    'deletedTurnIds': list(
+                        delta.get('deletedTurnIds') or []),
+                    'serverNowMs': int(
+                        delta.get('serverNowMs') or now_entry),
+                    'delta': True,
+                    'cutoverActive': True,
+                    # A delta is never a deletion authority on its own;
+                    # the tombstone list carries removals explicitly.
+                    'authoritativeFull': False,
+                }
+    turns = [
+        public_turn_with_stable_segments(row)
+        for row in client.query(
+        'turn.list', {
+            'conversation_id': conversation_id, 'user_id': user_id,
+            **({'lane_id': lane_id} if lane_id else {}),
+        })
+    ]
     if after_ordinal is not None:
-        clauses.append('ordinal>?')
-        params.append(int(after_ordinal))
-    with pooled_db(DOMAIN_CHAT) as db:
-        conv = db.execute(
-            'SELECT rev FROM conversations WHERE id=? AND user_id=?',
-            (conversation_id, user_id),
-        ).fetchone()
-        if conv is None:
+        turns = [row for row in turns
+                 if int(row.get('ordinal', 0)) > int(after_ordinal)]
+    turns = turns[:limit]
+    if light:
+        for row in turns:
+            row['projection'] = {
+                key: row['projection'][key]
+                for key in ('content', 'thinking', 'segments', 'model', 'usage')
+                if key in row.get('projection', {})}
+    revision = client.query(
+        'turn.revision', {'conversation_id': conversation_id, 'user_id': user_id})
+    if client.query('conversation.get', {
+            'conv_id': conversation_id, 'user_id': user_id}) is None:
+        raise LifecycleNotFound('Conversation not found')
+    return {
+        'conversationId': conversation_id,
+        'conversationRevision': int(revision), 'turns': turns,
+        'cutoverActive': True,
+        # Watermark seed: the client's first delta sync anchors here.
+        'serverNowMs': _now_ms(),
+        'authoritativeFull': bool(lane_id is None and after_ordinal is None
+                                  and len(turns) < limit),
+    }
+
+
+def get_turn(conversation_id: str, turn_id: str, *, user_id: Any) -> dict[str, Any]:
+    user_id = require_user_id(user_id, context='get conversation turn')
+    row = _turn_client().query(
+        'turn.get', {'conversation_id': conversation_id,
+                     'turn_id': turn_id, 'user_id': user_id})
+    if row is None:
+        raise LifecycleNotFound('Turn not found')
+    return public_turn_with_stable_segments(row)
+
+
+def get_attempt(attempt_id: str, *, user_id: Any) -> dict[str, Any]:
+    user_id = require_user_id(user_id, context='get turn attempt')
+    row = _turn_client().query(
+        'turn.attempt.get', {'attempt_id': attempt_id, 'user_id': user_id})
+    if row is None:
+        raise LifecycleNotFound('Attempt not found')
+    return row
+
+
+def get_conversation_revision(conversation_id: str, *, user_id: Any) -> int:
+    user_id = require_user_id(user_id, context='get conversation revision')
+    revision = _turn_client().query(
+        'turn.revision', {'conversation_id': conversation_id,
+                          'user_id': user_id})
+    if revision == 0:
+        # A zero revision is valid for a newly created conversation; use
+        # the conversation domain to distinguish missing from empty.
+        if _turn_client().query(
+                'conversation.get', {'conv_id': conversation_id,
+                                     'user_id': user_id}) is None:
             raise LifecycleNotFound('Conversation not found')
-        rows = db.execute(
-            'SELECT * FROM conversation_turns WHERE ' + ' AND '.join(clauses) +
-            ' ORDER BY lane_id, ordinal LIMIT ?', (*params, limit),
-        ).fetchall()
-        marker = db.execute(
-            "SELECT value FROM schema_meta WHERE key='_turn_schema_version'"
-        ).fetchone()
-        return {
-            'conversationId': conversation_id,
-            'conversationRevision': int(_row_value(conv, 'rev', 0) or 0),
-            'turns': [_public_turn(row, light=light) for row in rows],
-            'cutoverActive': str(_row_value(marker, 'value', '')) == '2',
-            # Only an unfiltered, unwindowed result can authorize deletion of
-            # local identities that are absent from the snapshot.
-            'authoritativeFull': bool(
-                lane_id is None and after_ordinal is None and len(rows) < limit),
-        }
-
-
-def get_turn(conversation_id: str, turn_id: str, *, user_id: Any = 1) -> dict[str, Any]:
-    with pooled_db(DOMAIN_CHAT) as db:
-        row = _turn_row(db, conversation_id, turn_id, user_id)
-        if row is None:
-            raise LifecycleNotFound('Turn not found')
-        return _public_turn(row)
-
-
-def get_attempt(attempt_id: str, *, user_id: Any = 1) -> dict[str, Any]:
-    with pooled_db(DOMAIN_CHAT) as db:
-        row = db.execute(
-            'SELECT a.*,t.user_id FROM generation_attempts a '
-            'JOIN conversation_turns t ON t.turn_id=a.turn_id '
-            'WHERE a.attempt_id=?', (attempt_id,),
-        ).fetchone()
-        if row is None or str(_row_value(row, 'user_id')) != str(user_id):
-            raise LifecycleNotFound('Attempt not found')
-        return _public_attempt(row)
-
-
-def get_conversation_revision(conversation_id: str, *, user_id: Any = 1) -> int:
-    with pooled_db(DOMAIN_CHAT) as db:
-        row = db.execute(
-            'SELECT rev FROM conversations WHERE id=? AND user_id=?',
-            (conversation_id, user_id),
-        ).fetchone()
-        if row is None:
-            raise LifecycleNotFound('Conversation not found')
-        return int(_row_value(row, 'rev', 0) or 0)
+    return int(revision)
 
 
 def update_turn_projection(conversation_id: str, turn_id: str, *,
                            projection: dict[str, Any],
                            expected_projection_revision: int,
-                           user_id: Any = 1) -> dict[str, Any]:
+                           user_id: Any) -> dict[str, Any]:
     """CAS-edit one settled visible turn without creating an attempt."""
-    now = _now_ms()
-    with pooled_write_transaction(DOMAIN_CHAT, label='edit v2 turn projection') as db:
-        lock_scoped_sequence(db, 'conversation_turn_attempts', turn_id)
-        row = _turn_row(db, conversation_id, turn_id, user_id)
-        if row is None:
-            raise LifecycleNotFound('Turn not found')
-        turn = _public_turn(row)
-        if turn['status'] in LIVE_ATTEMPT_STATUSES:
-            raise LifecycleConflict(
-                'turn_in_progress', 'A running turn cannot be edited.', turn)
-        if int(expected_projection_revision) != turn['projectionRevision']:
-            raise LifecycleConflict(
-                'stale_projection', 'The turn changed since editing began.', turn)
-        normalized = _normalize_projection(projection)
-        new_revision = turn['projectionRevision'] + 1
-        updated = db.execute(
-            'UPDATE conversation_turns SET projection=?,projection_revision=?, '
-            'updated_at=? WHERE turn_id=? AND projection_revision=?',
-            (_json(normalized), new_revision, now, turn_id,
-             turn['projectionRevision']),
-        )
-        if not getattr(updated, 'rowcount', 0):
-            latest = _public_turn(_turn_row(
-                db, conversation_id, turn_id, user_id))
-            raise LifecycleConflict(
-                'stale_projection', 'The turn changed while the edit was applied.', latest)
-        revision = _bump_conversation(db, conversation_id, user_id, now)
-        return {
-            'turn': _public_turn(_turn_row(
-                db, conversation_id, turn_id, user_id)),
-            'conversationRevision': revision,
-        }
+    user_id = require_user_id(user_id, context='update turn projection')
+    # Identity and renderer-only fields never enter the durable projection.
+    from lib.turn_projection_patch import normalize_projection_document
+    current = get_turn(conversation_id, turn_id, user_id=user_id)
+    normalized = projection_with_stable_segments(
+        normalize_projection_document(projection),
+        actor=str(current.get('actor') or 'assistant'),
+        status=str(current.get('status') or 'completed'),
+    )
+    from lib.storage import StorageError
+    try:
+        return _turn_client(write=True).command(
+            'turn.projection.update', {
+                'conversation_id': conversation_id, 'user_id': user_id,
+                'turn_id': turn_id, 'projection': normalized,
+                'expected_projection_revision': expected_projection_revision,
+            }, f'turn-projection:{turn_id}:{expected_projection_revision}')
+    except StorageError as exc:
+        if exc.code == 'database_not_found':
+            raise LifecycleNotFound(str(exc)) from exc
+        if exc.code == 'turn_projection_stale':
+            raise LifecycleConflict('stale_projection', str(exc)) from exc
+        if exc.code == 'turn_in_progress':
+            raise LifecycleConflict('turn_in_progress', str(exc)) from exc
+        if exc.code == 'database_conflict':
+            raise LifecycleConflict(exc.code, str(exc)) from exc
+        raise
+
+
+def apply_commit_round_file_changes(
+    conversation_id: str,
+    turn_id: str,
+    *,
+    files: list[Any],
+    modified_count: Any,
+    task_id: str,
+    user_id: Any,
+    attempts: int = 4,
+) -> dict[str, Any] | None:
+    """Fold the async commit-round's modified-file list into a settled turn.
+
+    The commit round (``lib.tasks_pkg.commit_round``) derives the list AFTER
+    the terminal settlement, so the done-time projection lacks it and
+    ``record_task_event`` correctly refuses the post-settlement
+    ``round_committed`` frame.  This is the dedicated post-settlement seam:
+    CAS-patch only the file-change fields through the same
+    ``turn.projection.update`` authority the undo/redo commands use (which
+    also emits the live ``turn.patch`` push), carrying every other projection
+    byte through unchanged.  Without it the turn-native UI never renders the
+    files-changed card (2026-08-26 regression from moving the derivation off
+    the done hot path).
+
+    Returns the update result, or None when the fold is unnecessary (no
+    files, or the commit thread had already won the settlement race and the
+    identical block is present).
+    """
+    user_id = require_user_id(user_id, context='commit-round file changes')
+    if not files:
+        return None
+    task_id = str(task_id or '')
+    for attempt in range(max(1, attempts)):
+        current = get_turn(conversation_id, turn_id, user_id=user_id)
+        projection = dict(current.get('projection') or {})
+        existing = projection.get('fileChanges')
+        if (isinstance(existing, dict)
+                and str(existing.get('taskId') or '') == task_id
+                and existing.get('files') == files):
+            return None
+        projection['modifiedFileList'] = [
+            dict(item) if isinstance(item, dict) else item for item in files
+        ]
+        if isinstance(modified_count, int) and not isinstance(
+                modified_count, bool) and modified_count >= 0:
+            projection['modifiedFiles'] = modified_count
+        block = _file_changes_block(task_id, projection)
+        if block is None:
+            return None
+        projection['fileChanges'] = block
+        try:
+            return update_turn_projection(
+                conversation_id,
+                turn_id,
+                projection=projection,
+                expected_projection_revision=int(
+                    current.get('projectionRevision') or 0),
+                user_id=user_id,
+            )
+        except LifecycleConflict as conflict:
+            if conflict.args and conflict.args[0] == 'turn_in_progress':
+                # The Flow-managed path can race the terminal settlement;
+                # give the done fold a brief moment to land, then retry.
+                if attempt + 1 < max(1, attempts):
+                    time.sleep(0.2)
+            continue
+    raise LifecycleConflict(
+        'stale_projection',
+        'commit-round file changes could not be folded into the turn',
+    )
 
 
 def create_branch_lane(conversation_id: str, parent_turn_id: str, *,
                        title: str, anchor_text: str = '',
                        parent_selection: str = '', kind: str = 'branch',
                        expected_projection_revision: int,
-                       user_id: Any = 1) -> dict[str, Any]:
+                       user_id: Any) -> dict[str, Any]:
     """Create server-issued branch lane metadata on its parent turn."""
-    now = _now_ms()
-    with pooled_write_transaction(DOMAIN_CHAT, label='create v2 branch lane') as db:
-        lock_scoped_sequence(db, 'conversation_turn_attempts', parent_turn_id)
-        row = _turn_row(db, conversation_id, parent_turn_id, user_id)
-        if row is None:
-            raise LifecycleNotFound('Parent turn not found')
-        parent = _public_turn(row)
-        if parent['status'] in LIVE_ATTEMPT_STATUSES:
-            raise LifecycleConflict(
-                'parent_in_progress', 'A running parent turn cannot be branched.', parent)
-        if int(expected_projection_revision) != parent['projectionRevision']:
-            raise LifecycleConflict(
-                'stale_projection', 'The parent turn changed before branch creation.', parent)
-        lane_id = f'lane_{_uuid()}'
-        lane = {
-            'laneId': lane_id,
-            'parentTurnId': parent_turn_id,
-            'title': str(title or 'Branch')[:200],
-            'icon': '⑂',
-            'kind': str(kind or 'branch')[:80],
-            'anchorText': str(anchor_text or '')[:1000],
-            'parentSelection': str(parent_selection or '')[:10000],
-            'createdAt': now,
-        }
-        projection = dict(parent['projection'])
-        descriptors = list(projection.get('_branchLanes') or [])
-        descriptors.append(lane)
-        projection['_branchLanes'] = descriptors
-        new_revision = parent['projectionRevision'] + 1
-        db.execute(
-            'UPDATE conversation_turns SET projection=?,projection_revision=?, '
-            'updated_at=? WHERE turn_id=? AND projection_revision=?',
-            (_json(projection), new_revision, now, parent_turn_id,
-             parent['projectionRevision']),
-        )
-        revision = _bump_conversation(db, conversation_id, user_id, now)
-        return {
-            'turn': _public_turn(_turn_row(
-                db, conversation_id, parent_turn_id, user_id)),
-            'lane': lane,
-            'conversationRevision': revision,
-        }
+    user_id = require_user_id(user_id, context='create branch lane')
+    from lib.storage import StorageError
+    try:
+        return _turn_client(write=True).command(
+            'turn.branch.create', {
+                'conversation_id': conversation_id, 'user_id': user_id,
+                'parent_turn_id': parent_turn_id, 'title': title,
+                'anchor_text': anchor_text, 'parent_selection': parent_selection,
+                'kind': kind, 'expected_projection_revision': expected_projection_revision,
+            }, f'turn-branch:{parent_turn_id}:{expected_projection_revision}')
+    except StorageError as exc:
+        if exc.code == 'database_not_found':
+            raise LifecycleNotFound(str(exc)) from exc
+        if exc.code == 'database_conflict':
+            raise LifecycleConflict(exc.code, str(exc)) from exc
+        raise
 
 
 def delete_branch_lane(conversation_id: str, parent_turn_id: str,
-                       lane_id: str, *, user_id: Any = 1) -> dict[str, Any]:
+                       lane_id: str, *, user_id: Any) -> dict[str, Any]:
     """Delete one explicit branch lane and all of its diagnostic attempts."""
-    now = _now_ms()
-    with pooled_write_transaction(DOMAIN_CHAT, label='delete v2 branch lane') as db:
-        lock_scoped_sequence(db, 'conversation_turns', conversation_id)
-        parent_row = _turn_row(db, conversation_id, parent_turn_id, user_id)
-        if parent_row is None:
-            raise LifecycleNotFound('Parent turn not found')
-        live = db.execute(
-            'SELECT t.* FROM conversation_turns t JOIN generation_attempts a '
-            'ON a.attempt_id=t.current_attempt_id WHERE t.conversation_id=? '
-            'AND t.lane_id=? AND a.status IN (\'pending\',\'running\') LIMIT 1',
-            (conversation_id, lane_id),
-        ).fetchone()
-        if live is not None:
-            raise LifecycleConflict(
-                'lane_busy', 'Stop the branch attempt before deleting its lane.',
-                _public_turn(live))
-        parent = _public_turn(parent_row)
-        projection = dict(parent['projection'])
-        descriptors = list(projection.get('_branchLanes') or [])
-        kept = [item for item in descriptors if item.get('laneId') != lane_id]
-        if len(kept) == len(descriptors):
-            raise LifecycleNotFound('Branch lane not found')
-        projection['_branchLanes'] = kept
-        attempt_rows = db.execute(
-            'SELECT a.attempt_id FROM generation_attempts a '
-            'JOIN conversation_turns t ON t.turn_id=a.turn_id '
-            'WHERE t.conversation_id=? AND t.lane_id=?',
-            (conversation_id, lane_id),
-        ).fetchall()
-        for attempt_row in attempt_rows:
-            attempt_id = _row_value(attempt_row, 'attempt_id')
-            db.execute('DELETE FROM attempt_events WHERE attempt_id=?', (attempt_id,))
-            db.execute(
-                "DELETE FROM scoped_sequences WHERE namespace='attempt_events' "
-                'AND scope_key=?', (attempt_id,))
-        db.execute(
-            'DELETE FROM generation_attempts WHERE turn_id IN ('
-            'SELECT turn_id FROM conversation_turns WHERE conversation_id=? '
-            'AND lane_id=?)', (conversation_id, lane_id))
-        db.execute(
-            'DELETE FROM conversation_turns WHERE conversation_id=? AND lane_id=?',
-            (conversation_id, lane_id))
-        new_revision = parent['projectionRevision'] + 1
-        db.execute(
-            'UPDATE conversation_turns SET projection=?,projection_revision=?, '
-            'updated_at=? WHERE turn_id=?',
-            (_json(projection), new_revision, now, parent_turn_id),
-        )
-        revision = _bump_conversation(db, conversation_id, user_id, now)
-        return {
-            'turn': _public_turn(_turn_row(
-                db, conversation_id, parent_turn_id, user_id)),
-            'deletedLaneId': lane_id,
-            'conversationRevision': revision,
-        }
+    user_id = require_user_id(user_id, context='delete branch lane')
+    from lib.storage import StorageError
+    try:
+        return _turn_client(write=True).command(
+            'turn.branch.delete', {'conversation_id': conversation_id,
+                'user_id': user_id, 'parent_turn_id': parent_turn_id,
+                'lane_id': lane_id}, f'turn-branch-delete:{parent_turn_id}:{lane_id}')
+    except StorageError as exc:
+        if exc.code == 'database_not_found':
+            raise LifecycleNotFound(str(exc)) from exc
+        if exc.code == 'database_conflict':
+            raise LifecycleConflict(exc.code, str(exc)) from exc
+        raise
 
 
 def delete_turns(conversation_id: str, turn_ids: list[str], *,
-                 user_id: Any = 1) -> dict[str, Any]:
+                 user_id: Any) -> dict[str, Any]:
     """Delete explicitly named settled visible turns by stable identity."""
+    user_id = require_user_id(user_id, context='delete conversation turns')
     wanted = list(dict.fromkeys(str(item) for item in turn_ids if item))
     if not wanted:
         raise ValueError('turnIds required')
-    now = _now_ms()
-    with pooled_write_transaction(DOMAIN_CHAT, label='delete v2 turns') as db:
-        lock_scoped_sequence(db, 'conversation_turns', conversation_id)
-        rows = []
-        for turn_id in wanted:
-            row = _turn_row(db, conversation_id, turn_id, user_id)
-            if row is None:
-                raise LifecycleNotFound('Turn not found')
-            rows.append(row)
-        for row in rows:
-            attempt_id = _row_value(row, 'current_attempt_id')
-            attempt = _attempt_row(db, attempt_id) if attempt_id else None
-            if attempt is not None and _row_value(attempt, 'status') in LIVE_ATTEMPT_STATUSES:
-                raise LifecycleConflict(
-                    'turn_in_progress', 'A running turn cannot be deleted.',
-                    _public_turn(row))
-        delete_ids = set(wanted)
-        lane_ids = set()
-        for row in rows:
-            projection = _decoded(_row_value(row, 'projection'), {})
-            lane_ids.update(
-                item.get('laneId') for item in projection.get('_branchLanes') or []
-                if isinstance(item, dict) and item.get('laneId'))
-        for lane_id in lane_ids:
-            lane_rows = db.execute(
-                'SELECT * FROM conversation_turns WHERE conversation_id=? '
-                'AND user_id=? AND lane_id=?',
-                (conversation_id, user_id, lane_id),
-            ).fetchall()
-            for lane_row in lane_rows:
-                attempt_id = _row_value(lane_row, 'current_attempt_id')
-                attempt = _attempt_row(db, attempt_id) if attempt_id else None
-                if attempt is not None and _row_value(attempt, 'status') in LIVE_ATTEMPT_STATUSES:
-                    raise LifecycleConflict(
-                        'lane_busy', 'A child branch is still running.',
-                        _public_turn(lane_row))
-                delete_ids.add(_row_value(lane_row, 'turn_id'))
-        for turn_id in delete_ids:
-            attempt_rows = db.execute(
-                'SELECT attempt_id FROM generation_attempts WHERE turn_id=?',
-                (turn_id,),
-            ).fetchall()
-            for attempt_row in attempt_rows:
-                attempt_id = _row_value(attempt_row, 'attempt_id')
-                db.execute('DELETE FROM attempt_events WHERE attempt_id=?', (attempt_id,))
-                db.execute(
-                    "DELETE FROM scoped_sequences WHERE namespace='attempt_events' "
-                    'AND scope_key=?', (attempt_id,))
-            db.execute('DELETE FROM generation_attempts WHERE turn_id=?', (turn_id,))
-        for turn_id in delete_ids:
-            db.execute('DELETE FROM conversation_turns WHERE turn_id=?', (turn_id,))
-        revision = _bump_conversation(db, conversation_id, user_id, now)
-        return {
-            'deletedTurnIds': sorted(delete_ids),
-            'conversationRevision': revision,
-        }
+    from lib.storage import StorageError
+    try:
+        return _turn_client(write=True).command(
+            'turn.delete', {'conversation_id': conversation_id,
+                'user_id': user_id, 'turn_ids': wanted},
+            f'turn-delete:{conversation_id}:{",".join(sorted(wanted))}')
+    except StorageError as exc:
+        if exc.code == 'database_not_found':
+            raise LifecycleNotFound(str(exc)) from exc
+        if exc.code == 'database_conflict':
+            raise LifecycleConflict(exc.code, str(exc)) from exc
+        raise
 
 
 def read_events(attempt_id: str, *, after: int = 0,
-                user_id: Any = 1, limit: int = 1000) -> list[dict[str, Any]]:
-    with pooled_db(DOMAIN_CHAT) as db:
-        owner = db.execute(
-            'SELECT t.user_id FROM generation_attempts a '
-            'JOIN conversation_turns t ON t.turn_id=a.turn_id '
-            'WHERE a.attempt_id=?', (attempt_id,),
-        ).fetchone()
-        if owner is None or str(_row_value(owner, 'user_id')) != str(user_id):
-            raise LifecycleNotFound('Attempt not found')
-        rows = db.execute(
-            'SELECT payload FROM attempt_events WHERE attempt_id=? AND seq>? '
-            'ORDER BY seq LIMIT ?',
-            (attempt_id, int(after or 0), min(max(limit, 1), 5000)),
-        ).fetchall()
-        return [_decoded(_row_value(row, 'payload'), {}) for row in rows]
+                user_id: Any, limit: int = 1000,
+                projection_mode: str = 'full') -> list[dict[str, Any]]:
+    user_id = require_user_id(user_id, context='read turn events')
+    events = _turn_client().query(
+        'turn.events.list', {'attempt_id': attempt_id, 'after': int(after or 0),
+                             'user_id': user_id,
+                             'limit': min(max(int(limit), 1), 5000),
+                             'projection_mode': (
+                                 'patch' if projection_mode == 'patch'
+                                 else 'full')})
+    if events is None:
+        raise LifecycleNotFound('Attempt not found')
+    return events
 
 
-def attempt_is_terminal(attempt_id: str, *, user_id: Any = 1) -> bool:
-    with pooled_db(DOMAIN_CHAT) as db:
-        row = db.execute(
-            'SELECT a.status,t.user_id FROM generation_attempts a '
-            'JOIN conversation_turns t ON t.turn_id=a.turn_id '
-            'WHERE a.attempt_id=?', (attempt_id,),
-        ).fetchone()
-        if row is None or str(_row_value(row, 'user_id')) != str(user_id):
-            raise LifecycleNotFound('Attempt not found')
-        return _row_value(row, 'status') not in LIVE_ATTEMPT_STATUSES
+def attempt_is_terminal(attempt_id: str, *, user_id: Any) -> bool:
+    user_id = require_user_id(user_id, context='read turn attempt status')
+    row = _turn_client().query(
+        'turn.attempt.get', {'attempt_id': attempt_id, 'user_id': user_id})
+    if row is None:
+        raise LifecycleNotFound('Attempt not found')
+    return row['status'] not in LIVE_ATTEMPT_STATUSES
 
 
-def abort_attempt(attempt_id: str, *, user_id: Any = 1) -> dict[str, Any]:
-    with pooled_db(DOMAIN_CHAT) as db:
-        row = db.execute(
-            'SELECT a.*,t.user_id FROM generation_attempts a '
-            'JOIN conversation_turns t ON t.turn_id=a.turn_id '
-            'WHERE a.attempt_id=?', (attempt_id,),
-        ).fetchone()
-        if row is None or str(_row_value(row, 'user_id')) != str(user_id):
-            raise LifecycleNotFound('Attempt not found')
-        task_id = _row_value(row, 'task_id', '')
-        status = _row_value(row, 'status')
+def _notify_abort_busy_projection(conversation_id: Any, user_id: Any) -> None:
+    """Re-broadcast the conv busy projection the instant a turn-native abort lands.
+
+    Parity with the v1 ``/api/v1/chat/abort/<task_id>`` handler (which emits
+    ``notify_conv_changed`` unconditionally — see routes/chat_poll_abort.py's
+    "User-Stop busy-projection broadcast"). The busy projection already
+    EXCLUDES an aborted task by design, but a frame only leaves the server
+    when someone emits it; without this emit the sidebar dot / sibling tabs
+    keep reading busy until the task fully unwinds (up to a whole prep stage
+    or tool call later). Fail-open: a notify error must never break abort.
+    """
+    if not conversation_id:
+        return
+    try:
+        from lib.conversations.change_notifications import notify_conv_changed
+        notify_conv_changed(str(conversation_id), rev=None, user_id=user_id)
+    except Exception as exc:  # noqa: BLE001 - fail-open by contract
+        logger.debug('[turns] abort busy-notify failed: %s', exc)
+
+
+def abort_attempt(attempt_id: str, *, user_id: Any) -> dict[str, Any]:
+    user_id = require_user_id(user_id, context='abort turn attempt')
+    row = _turn_client().query(
+        'turn.attempt.get', {'attempt_id': attempt_id, 'user_id': user_id})
+    if row is None:
+        raise LifecycleNotFound('Attempt not found')
+    # The bound executor task id rides the attempt row (written by
+    # ``bind_task``); without it the cooperative abort below can never
+    # reach the registry and the worker keeps cycling for hours while
+    # every event persistence is rejected as stale (2026-08-17 flood).
+    task_id = str(row.get('taskId') or '')
+    status = row['status']
     if status not in LIVE_ATTEMPT_STATUSES:
         return {'attemptId': attempt_id, 'status': status, 'alreadyTerminal': True}
     task = None
     if task_id:
-        from lib.tasks_pkg import tasks, tasks_lock
-        with tasks_lock:
-            task = tasks.get(task_id)
-        if task is not None:
-            task['aborted'] = True
-            task['_abort_timestamp'] = time.time()
-            task['_abort_reason'] = 'v2_attempt_abort'
-    if task is None:
-        turn = get_turn(
-            _row_value(row, 'conversation_id'), _row_value(row, 'turn_id'),
-            user_id=user_id)
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+        task = chat_task_runtime.get_owned(task_id, user_id=int(user_id))
+    if task is not None:
+        chat_task_runtime.abort_owned(task_id, user_id=int(user_id))
+        chat_task_runtime.update_fields(
+            task_id,
+            fields={
+                'aborted': True,
+                '_abort_timestamp': time.time(),
+                '_abort_reason': 'turn_attempt_abort',
+            },
+        )
+    else:
+        # Registry miss (or no task bound yet): plant the durable abort
+        # tombstone so a live-but-evicted worker's abort_check consumes it
+        # at its next poll, then settle the attempt row.
+        if task_id:
+            try:
+                from lib.tasks_pkg.manager import plant_abort_tombstone
+                plant_abort_tombstone(
+                    task_id, source='turn_attempt_abort', user_id=int(user_id))
+            except Exception as e:
+                logger.debug('[TurnLifecycle] abort tombstone plant failed '
+                             'attempt=%s task=%s: %s', attempt_id, task_id, e)
+        turn = get_turn(row['conversationId'], row['turnId'], user_id=user_id)
         projection = turn.get('projection') or {}
         record_task_event(
-            {'_attemptId': attempt_id, 'id': task_id, 'status': 'aborted',
+            {'_attemptId': attempt_id, '_userId': user_id,
+             'id': '', 'status': 'aborted',
              'aborted': True, 'content': projection.get('content') or '',
              'thinking': projection.get('thinking') or '',
              'toolRounds': projection.get('toolRounds') or [],
              'segments': projection.get('segments') or [],
-             'model': projection.get('model') or ''},
-            {'type': 'aborted'},
-        )
+             'model': projection.get('model') or ''}, {'type': 'aborted'})
+    _notify_abort_busy_projection(row.get('conversationId'), user_id)
     return {'attemptId': attempt_id, 'status': 'abort_signaled'}
 
 
-def build_api_messages(conversation_id: str, turn_id: str,
-                       config: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """Project v2 turns into the existing executor's API-ready message form."""
-    with pooled_db(DOMAIN_CHAT) as db:
-        target = db.execute(
-            'SELECT * FROM conversation_turns WHERE conversation_id=? '
-            'AND turn_id=?', (conversation_id, turn_id),
-        ).fetchone()
-        if target is None:
-            return None
-        lane_id = _row_value(target, 'lane_id', 'main')
-        rows: list[Any] = []
+def build_api_messages(
+    conversation_id: str,
+    turn_id: str,
+    config: dict[str, Any],
+    *,
+    user_id: int,
+) -> list[dict[str, Any]] | None:
+    """Project turn-native turns into the existing executor's API-ready message form."""
+    owner_user_id = require_user_id(
+        user_id, context='turn message projection')
+    turns = _turn_client().query(
+        'turn.list', {
+            'conversation_id': conversation_id,
+            'user_id': owner_user_id,
+        })
+    target = next((item for item in turns if item['turnId'] == turn_id), None)
+    if target is None:
+        return None
+    lane_id = target.get('laneId') or 'main'
+    direct_parent = next(
+        (item for item in turns
+         if item['turnId'] == target.get('parentTurnId')),
+        None,
+    )
+    parent_projection = (
+        direct_parent.get('projection')
+        if isinstance(direct_parent, dict) else None
+    )
+    plan_execution = (
+        parent_projection.get('planExecution')
+        if isinstance(parent_projection, dict) else None
+    )
+    if (isinstance(plan_execution, dict)
+            and plan_execution.get('contextMode') == 'fresh'):
+        # Fresh execution is a model-context boundary, not a destructive
+        # history mutation. Keep the exact accepted handoff plus the empty
+        # target turn; workspace/system constraints are composed normally.
+        selected = [direct_parent, target]
+    else:
+        selected = []
         if lane_id != 'main':
-            first = db.execute(
-                'SELECT parent_turn_id FROM conversation_turns '
-                'WHERE conversation_id=? AND lane_id=? ORDER BY ordinal LIMIT 1',
-                (conversation_id, lane_id),
-            ).fetchone()
-            parent_id = _row_value(first, 'parent_turn_id')
-            parent = db.execute(
-                'SELECT ordinal,lane_id FROM conversation_turns WHERE turn_id=?',
-                (parent_id,),
-            ).fetchone() if parent_id else None
+            lane_rows = [item for item in turns if item.get('laneId') == lane_id]
+            parent_id = lane_rows[0].get('parentTurnId') if lane_rows else None
+            parent = next(
+                (item for item in turns if item['turnId'] == parent_id), None)
             if parent is not None:
-                rows.extend(db.execute(
-                    'SELECT * FROM conversation_turns WHERE conversation_id=? '
-                    'AND lane_id=? AND ordinal<=? ORDER BY ordinal',
-                    (conversation_id, _row_value(parent, 'lane_id', 'main'),
-                     int(_row_value(parent, 'ordinal', 0))),
-                ).fetchall())
-        rows.extend(db.execute(
-            'SELECT * FROM conversation_turns WHERE conversation_id=? '
-            'AND lane_id=? AND ordinal<=? ORDER BY ordinal',
-            (conversation_id, lane_id, int(_row_value(target, 'ordinal', 0))),
-        ).fetchall())
-    raw: list[dict[str, Any]] = []
-    for row in rows:
-        projection = _decoded(_row_value(row, 'projection'), {})
-        actor = _row_value(row, 'actor')
-        role = 'user' if actor in {'human', 'virtual_user', 'critic'} else 'assistant'
-        msg = dict(projection)
-        msg['role'] = role
-        msg['_turnId'] = _row_value(row, 'turn_id')
-        raw.append(msg)
-    from lib.tasks_pkg.conv_message_builder import _transform_messages
-    exclude_last = bool(config.get('excludeLast'))
-    return _transform_messages(raw, config, exclude_last=exclude_last)
+                selected.extend(
+                    item for item in turns
+                    if item.get('laneId') == parent.get('laneId', 'main')
+                    and item['ordinal'] <= parent['ordinal'])
+        selected.extend(
+            item for item in turns
+            if item.get('laneId') == lane_id
+            and item['ordinal'] <= target['ordinal'])
+    raw = []
+    for row in selected:
+        projection = dict(row.get('projection') or {})
+        role = 'user' if row.get('actor') in {'human', 'virtual_user', 'critic'} else 'assistant'
+        projection['role'] = role
+        projection['_turnId'] = row['turnId']
+        raw.append(projection)
+    from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
+    return _transform_messages(raw, config, exclude_last=bool(config.get('excludeLast')))
 
 
-def recover_running_attempts() -> int:
-    """Atomically settle pre-boot attempts; never starts billable work."""
+def backfill_turn_search_index(*, max_rounds: int = 100_000) -> dict[str, Any]:
+    """Converge historical turn-native search projections off the hot path.
+
+    Each sidecar command scans a cursor-bounded authority slice and writes on
+    the maintenance lane, so a large existing store cannot block readiness or
+    starve user writes.  New/changed turns are maintained by their own atomic
+    lifecycle transactions; this sweep exists only for rows created before the
+    per-turn index shipped.
+    """
+    cursor = ''
+    totals = {'scanned': 0, 'indexed': 0, 'failed': 0}
+    sweep_id = f'{_now_ms()}:{uuid.uuid4().hex[:12]}'
+    for round_no in range(max(1, int(max_rounds))):
+        result = _turn_client(write=True).command(
+            'turn.search.backfill', {
+                'cursor': cursor,
+                'max_rows': 8,
+                'max_bytes': 2_000_000,
+            },
+            f'turn-search-backfill:{sweep_id}:{round_no}',
+            priority='maintenance', deadline=60.0)
+        if not isinstance(result, dict):
+            raise RuntimeError('turn search backfill returned an invalid result')
+        for key in totals:
+            totals[key] += int(result.get(key) or 0)
+        next_cursor = str(result.get('nextCursor') or cursor)
+        if not bool(result.get('remaining')):
+            return {**totals, 'complete': True}
+        if next_cursor == cursor:
+            raise RuntimeError('turn search backfill cursor made no progress')
+        cursor = next_cursor
+        # Fair scheduling already prioritizes user/event lanes.  A tiny yield
+        # also prevents a fast empty-fragment corpus from monopolizing the
+        # client connection between maintenance chunks.
+        time.sleep(0.01)
+    return {**totals, 'complete': False, 'nextCursor': cursor}
+
+
+def start_turn_search_backfill(
+    *, initial_delay_seconds: float = _TURN_SEARCH_BACKFILL_INITIAL_DELAY_SECONDS,
+) -> bool:
+    """Start one historical search-index worker after the startup hot window.
+
+    Newly settled turns maintain their own search rows transactionally. The
+    sweep only repairs historical derived rows, so it may yield the first
+    minute to browser hydration and recovery writers without weakening
+    durability or current search correctness.
+    """
+    global _turn_search_backfill_started
+    with _turn_search_backfill_lock:
+        if _turn_search_backfill_started:
+            return False
+        _turn_search_backfill_started = True
+
+    threading.Thread(
+        target=_run_turn_search_backfill_worker,
+        kwargs={
+            'initial_delay_seconds': max(0.0, float(initial_delay_seconds)),
+        },
+        name='turn-search-backfill', daemon=True).start()
+    return True
+
+
+def _run_turn_search_backfill_worker(
+    *, initial_delay_seconds: float = 0.0,
+) -> None:
+    """Converge the derived index despite transient Sidecar pressure.
+
+    Startup maintenance is intentionally outside readiness.  A one-shot
+    worker therefore cannot treat the first ``database_busy``/timeout after
+    readiness as terminal: doing so leaves historical turn conversations
+    unsearchable until the whole web process restarts.  Retry only classified
+    transient storage failures; malformed responses and protocol/data errors
+    remain loud, terminal failures.
+    """
+    from lib.storage import StorageError
+
+    delay = max(0.0, float(initial_delay_seconds))
+    if delay:
+        logger.info(
+            '[turn-search] historical projection backfill deferred %.0fs '
+            'past the startup hot window', delay)
+        time.sleep(delay)
+
+    transient_failures = 0
+    while True:
+        try:
+            stats = backfill_turn_search_index()
+        except Exception as exc:
+            if not isinstance(exc, StorageError) or not exc.retryable:
+                logger.warning(
+                    '[turn-search] historical projection backfill stopped: %s',
+                    exc, exc_info=True)
+                return
+            transient_failures += 1
+            retry_hint = max(0.0, float(exc.retry_after_ms or 0) / 1000.0)
+            exponential = 0.25 * (2 ** min(transient_failures - 1, 7))
+            delay = min(30.0, max(retry_hint, exponential))
+            # Keep the first and exponentially-spaced failures visible without
+            # turning a prolonged outage into a periodic warning flood.
+            log = (logger.warning
+                   if transient_failures & (transient_failures - 1) == 0
+                   else logger.debug)
+            log('[turn-search] historical projection backfill transient '
+                'failure code=%s; retrying in %.2fs (attempt=%d)',
+                exc.code, delay, transient_failures)
+            time.sleep(delay)
+            continue
+
+        if transient_failures:
+            logger.info('[turn-search] historical projection backfill '
+                        'recovered after %d transient failure(s)',
+                        transient_failures)
+            transient_failures = 0
+        if stats.get('complete'):
+            logger.info('[turn-search] historical projection backfill '
+                        'finished: %s', stats)
+            return
+
+        # The per-sweep round cap is a safety valve, not a semantic stopping
+        # condition.  A very large authority must continue in another bounded
+        # sweep instead of remaining partially searchable until next boot.
+        logger.warning('[turn-search] historical projection backfill reached '
+                       'the per-sweep cap; continuing: %s', stats)
+        time.sleep(0.25)
+
+
+def recover_running_attempts(*, created_before_ms: int | None = None,
+                             exclude_task_ids=None) -> int:
+    """Atomically settle pre-boot attempts; never starts billable work.
+
+    The sidecar ``turn.recover`` operation settles a BOUNDED chunk per call
+    (multi-MiB projections rewrite whole rows and can individually approach
+    the writer watchdog — one unbounded transaction used to roll the whole
+    recovery back and leave 'running' zombies forever, the 2026-08-19
+    "回答中/重连中" incident). Loop the chunks until none remain.
+
+    ``created_before_ms`` / ``exclude_task_ids`` are the liveness guards for
+    the POST-SERVING backstop (serving_loop_lifecycle): only attempts older
+    than the serving gate and not bound to a live in-registry task may be
+    settled. Boot recovery passes neither (nothing is live at boot).
+    """
     now = _now_ms()
+    payload: dict[str, Any] = {}
+    if created_before_ms is not None:
+        payload['created_before_ms'] = int(created_before_ms)
+    if exclude_task_ids:
+        payload['exclude_task_ids'] = sorted(str(t) for t in exclude_task_ids if t)
     recovered = 0
-    with pooled_write_transaction(DOMAIN_CHAT, label='recover v2 attempts') as db:
-        rows = db.execute(
-            "SELECT a.*,t.user_id,t.projection,t.projection_revision "
-            'FROM generation_attempts a JOIN conversation_turns t '
-            'ON t.turn_id=a.turn_id AND t.current_attempt_id=a.attempt_id '
-            "WHERE a.status IN ('pending','running')",
-        ).fetchall()
-        for row in rows:
-            attempt_id = _row_value(row, 'attempt_id')
-            turn_id = _row_value(row, 'turn_id')
-            conversation_id = _row_value(row, 'conversation_id')
-            projection = _decoded(_row_value(row, 'projection'), {})
-            old_revision = int(_row_value(row, 'projection_revision', 0) or 0)
-            new_revision = old_revision + 1
-            fake_task = {
-                'model': _decoded(_row_value(row, 'config'), {}).get('model', ''),
-                'content': projection.get('content', ''),
-                'thinking': projection.get('thinking', ''),
-                'toolRounds': projection.get('toolRounds', []),
-            }
-            _, settlement = _settlement(
-                fake_task, {'type': 'aborted', 'finishReason': 'interrupted'},
-                projection)
-            settlement['cause'] = 'server_restart'
-            db.execute(
-                "UPDATE generation_attempts SET status='interrupted', "
-                'settled_at=? WHERE attempt_id=? AND status IN '
-                "('pending','running')", (now, attempt_id))
-            db.execute(
-                "UPDATE conversation_turns SET status='interrupted', "
-                'projection_revision=?,settlement=?,updated_at=? '
-                'WHERE turn_id=? AND current_attempt_id=? '
-                'AND projection_revision=?',
-                (new_revision, _json(settlement), now, turn_id, attempt_id,
-                 old_revision),
-            )
-            _append_event(
-                db, attempt_id=attempt_id, conversation_id=conversation_id,
-                turn_id=turn_id, projection_revision=new_revision,
-                event_type='terminal_settlement',
-                payload={'status': 'interrupted', 'settlement': settlement,
-                         'projection': projection},
-            )
-            _bump_conversation(
-                db, conversation_id, _row_value(row, 'user_id'), now)
-            recovered += 1
+    # Each round is one bounded sidecar transaction; the hard cap only
+    # guards against a pathological producer re-creating rows mid-sweep.
+    for round_no in range(64):
+        result = _turn_client(write=True).command(
+            'turn.recover', payload, f'turn-recover:{now}:{round_no}',
+            deadline=30.0)
+        if isinstance(result, dict):
+            recovered += int(result.get('recovered') or 0)
+            if int(result.get('remaining') or 0) <= 0:
+                break
+        else:
+            # Pre-chunking sidecar build returned a bare count.
+            recovered += int(result or 0)
+            break
     if recovered:
-        logger.warning('[TurnLifecycle] settled %d pre-boot attempt(s) as interrupted',
-                       recovered)
+        logger.warning('[TurnLifecycle] settled %d pre-boot attempt(s) as interrupted', recovered)
     return recovered
 
 
@@ -1583,33 +1772,16 @@ def cleanup_superseded_attempts(*, retention_ms: int = 6 * 60 * 60 * 1000,
                                 limit: int = 500) -> int:
     """Bounded diagnostic-retention cleanup for replaced attempts."""
     cutoff = _now_ms() - max(int(retention_ms), 0)
-    with pooled_write_transaction(
-            DOMAIN_CHAT, label='cleanup superseded v2 attempts') as db:
-        rows = db.execute(
-            "SELECT a.attempt_id FROM generation_attempts a "
-            "WHERE a.status='superseded' AND a.superseded_at IS NOT NULL "
-            'AND a.superseded_at<? AND NOT EXISTS ('
-            'SELECT 1 FROM conversation_turns t '
-            'WHERE t.current_attempt_id=a.attempt_id) '
-            'ORDER BY a.superseded_at LIMIT ?',
-            (cutoff, min(max(int(limit), 1), 5000)),
-        ).fetchall()
-        ids = [_row_value(row, 'attempt_id') for row in rows]
-        for attempt_id in ids:
-            db.execute('DELETE FROM attempt_events WHERE attempt_id=?',
-                       (attempt_id,))
-            db.execute(
-                "DELETE FROM scoped_sequences WHERE namespace='attempt_events' "
-                'AND scope_key=?', (attempt_id,))
-            db.execute('DELETE FROM generation_attempts WHERE attempt_id=?',
-                       (attempt_id,))
-        return len(ids)
+    return int(_turn_client(write=True).command(
+        'turn.cleanup', {'retention_ms': retention_ms, 'limit': limit},
+        f'turn-cleanup:{cutoff}:{limit}'))
+
 
 
 __all__ = [
     'LifecycleConflict', 'LifecycleNotFound', 'TERMINAL_STATUSES',
-    'create_turn_pair', 'announce_related_turns',
-    'create_attempt', 'claim_attempt_start',
+    'create_turn_pair', 'append_settled_turn', 'announce_related_turns',
+    'create_attempt', 'claim_attempt_start', 'dispatch_attempt_to_worker',
     'bind_task', 'fail_start',
     'record_task_event', 'sync_visible_run_turns',
     'list_turns', 'get_turn', 'get_attempt', 'update_turn_projection',
@@ -1617,5 +1789,6 @@ __all__ = [
     'delete_turns',
     'get_conversation_revision', 'read_events',
     'attempt_is_terminal', 'abort_attempt', 'build_api_messages',
+    'backfill_turn_search_index', 'start_turn_search_backfill',
     'recover_running_attempts', 'cleanup_superseded_attempts',
 ]

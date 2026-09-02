@@ -19,6 +19,7 @@ proving the line is load-bearing.
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -166,13 +167,16 @@ def test_NC_retry_pill_phasemap_line_is_load_bearing(tmp_path):
 
 
 def test_i18n_key_registered():
-    """The REAL i18n table carries the new key in both languages (the harness
-    stubs t(), so pin the shipped table statically)."""
-    with open(os.path.join(JS_DIR, 'i18n.js'), encoding='utf-8') as f:
-        src = f.read()
-    assert "'swarm.phase.retrying'" in src
-    assert "'重试中…'" in src
-    assert "'Retrying…'" in src
+    """The REAL i18n tables carry the new key in both languages (the harness
+    stubs t(), so pin the shipped tables statically). Post-Vite the tables
+    are the locale JSONs under frontend/src/i18n/locales/."""
+    locales = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales')
+    with open(os.path.join(locales, 'zh.json'), encoding='utf-8') as f:
+        zh = json.load(f)
+    with open(os.path.join(locales, 'en.json'), encoding='utf-8') as f:
+        en = json.load(f)
+    assert zh['swarm.phase.retrying'] == '重试中…'
+    assert en['swarm.phase.retrying'] == 'Retrying…'
 
 
 def test_phasemap_consumes_the_key():

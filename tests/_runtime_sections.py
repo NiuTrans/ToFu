@@ -1,9 +1,10 @@
-"""Resolve migrated vanilla-JS owners from the retained Vite runtime.
+"""Resolve retained vanilla-JS owners from model-readable runtime sections.
 
 Node/jsdom guards should ask for a logical migrated source name instead of
-reaching into the deleted ``static/js`` tree.  The helper materializes only
-the requested section, preserving the old harness isolation boundary while
-keeping ``frontend/src/runtime/app-runtime.js`` as the sole source of truth.
+reaching into either the deleted ``static/js`` tree or the generated 5 MiB
+delivery artifact. The ordered files below ``runtime/sections`` are the source
+of truth; the composer proves their concatenation is byte-identical to what
+Vite receives.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import atexit
 from functools import lru_cache
 import hashlib
+import json
 from pathlib import Path
 import re
 import shutil
@@ -20,6 +22,39 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / 'frontend' / 'src' / 'runtime' / 'app-runtime.js'
+SECTIONS = ROOT / 'frontend' / 'src' / 'runtime' / 'sections'
+MANIFEST = SECTIONS / 'manifest.json'
+# Lazy chunks carved out of the retained runtime keep their
+# `migrated source:` marker so section contracts stay byte-visible here.
+RUNTIME_EXTRA = (
+    ROOT / 'frontend' / 'src' / 'runtime' / 'scene' / 'tofu-scene.js',
+    ROOT / 'frontend' / 'src' / 'runtime' / 'scene' / 'tofu-pet.js',
+)
+
+
+@lru_cache(maxsize=1)
+def _manifest_rows() -> tuple[dict[str, str], ...]:
+    payload = json.loads(MANIFEST.read_text(encoding='utf-8'))
+    rows = payload.get('sections')
+    if payload.get('version') != 1 or not isinstance(rows, list):
+        raise AssertionError('invalid retained-runtime section manifest')
+    return tuple(rows)
+
+
+def _section_source(name: str) -> str:
+    row = next((item for item in _manifest_rows()
+                if item.get('source') == name), None)
+    if row is not None:
+        path = (SECTIONS / str(row.get('path') or '')).resolve()
+        if SECTIONS.resolve() not in path.parents:
+            raise AssertionError(f'unsafe migrated runtime section path: {name}')
+        return path.read_text(encoding='utf-8')
+    marker = f'/* ===== migrated source: {name} ===== */'
+    for extra in RUNTIME_EXTRA:
+        source = extra.read_text(encoding='utf-8')
+        if marker in source:
+            return source
+    raise AssertionError(f'migrated runtime section not found: {name}')
 _DIRECTORY = Path(tempfile.mkdtemp(prefix='tofu-runtime-sections-'))
 _LEGACY_ROOT = Path(tempfile.mkdtemp(prefix='tofu-frontend-test-root-'))
 _CACHE: dict[str, Path] = {}
@@ -33,20 +68,7 @@ def _cleanup() -> None:
 
 @lru_cache(maxsize=None)
 def runtime_section(name: str, *, scope_prelude: bool = True) -> str:
-    source = RUNTIME.read_text(encoding='utf-8')
-    marker = f'/* ===== migrated source: {name} ===== */'
-    start = source.find(marker)
-    if start < 0:
-        raise AssertionError(f'migrated runtime section not found: {name}')
-    candidates = [source.find('/* ===== migrated source:', start + len(marker))]
-    # The final migrated section is followed by the typed runtime shell rather
-    # than another source marker.  Keep isolated classic-script harnesses out
-    # of that ESM-only epilogue (which contains ``export`` declarations).
-    candidates.append(source.find('\nexport async function loadFeatureFlags()',
-                                  start + len(marker)))
-    ends = [candidate for candidate in candidates if candidate >= 0]
-    end = min(ends) if ends else len(source)
-    body = source[start:end]
+    body = _section_source(name)
     if scope_prelude:
         body = (
             'var runtimeScope = typeof window !== "undefined" '
@@ -55,8 +77,13 @@ def runtime_section(name: str, *, scope_prelude: bool = True) -> str:
 
 
 def runtime_section_names() -> list[str]:
-    source = RUNTIME.read_text(encoding='utf-8')
-    return re.findall(r'/\* ===== migrated source: (.+?) ===== \*/', source)
+    names = [str(row['source']) for row in _manifest_rows()]
+    for extra in RUNTIME_EXTRA:
+        names.extend(re.findall(
+            r'/\* ===== migrated source: (.+?) ===== \*/',
+            extra.read_text(encoding='utf-8'),
+        ))
+    return names
 
 
 def runtime_section_path(name: str, *, scope_prelude: bool = True) -> str:
@@ -65,6 +92,21 @@ def runtime_section_path(name: str, *, scope_prelude: bool = True) -> str:
     if cached is not None:
         return str(cached)
     body = runtime_section(name, scope_prelude=scope_prelude)
+    if name == 'api.js' and scope_prelude:
+        # Production imports the required transport statically. Older Node
+        # fixtures still execute the endpoint-registry section as a classic
+        # script, so materialize that same typed owner ahead of the section;
+        # never resurrect the deleted in-registry transport fallback just to
+        # keep an isolated test harness alive.
+        transport_path = Path(native_module_path(
+            '.native/api-transport.js',
+            ROOT / 'frontend/src/api/transport.ts',
+        ))
+        body = (
+            transport_path.read_text(encoding='utf-8')
+            + '\nvar requiredApiTransport = globalThis.apiTransport;\n'
+            + body
+        )
     if scope_prelude:
         path = _DIRECTORY / name
     else:
@@ -98,9 +140,10 @@ def native_module_path(name: str, source: str | Path) -> str:
     cached = _CACHE.get(key)
     if cached is not None:
         return str(cached)
-    esbuild = ROOT / 'node_modules' / '.bin' / 'esbuild'
-    if not esbuild.is_file():
-        raise AssertionError('esbuild is required to materialize native test modules')
+    test_bundler = ROOT / 'scripts' / 'vite_test_bundle.mjs'
+    if not test_bundler.is_file():
+        raise AssertionError(
+            'vite_test_bundle.mjs is required to materialize native test modules')
     path = _DIRECTORY / name
     path.parent.mkdir(parents=True, exist_ok=True)
     global_name = 'TofuNativeTest_' + hashlib.sha256(key.encode()).hexdigest()[:12]
@@ -137,7 +180,7 @@ def native_module_path(name: str, source: str | Path) -> str:
             f'Object.assign(globalThis,{global_name}.owner,'
             f'{global_name}.featureRegistry);')
     result = subprocess.run(
-        [str(esbuild), str(compile_source), '--bundle', '--format=iife',
+        [str(test_bundler), str(compile_source), '--bundle', '--format=iife',
          '--platform=browser', f'--global-name={global_name}',
          f'--footer:js={footer}',
          f'--outfile={path}'],
@@ -150,7 +193,7 @@ def native_module_path(name: str, source: str | Path) -> str:
     return str(path)
 
 
-def native_module_graph(entries: list[tuple[str, str | Path]]) -> None:
+def native_module_graph(entries: list[tuple[str, str | Path]]) -> str:
     """Materialize several native owners as one shared classic-script graph.
 
     Some legacy fixtures still evaluate logical owners one file at a time.  A
@@ -160,18 +203,20 @@ def native_module_graph(entries: list[tuple[str, str | Path]]) -> None:
     accidentally creating one registry per owner.
     """
     if not entries:
-        return
+        raise AssertionError('native module graph requires at least one entry')
     resolved = [
         (name, source if Path(source).is_absolute() else ROOT / source)
         for name, source in entries
     ]
     key = 'native-graph:' + '|'.join(
         f'{name}:{Path(source)}' for name, source in resolved)
-    if _CACHE.get(key) is not None:
-        return
-    esbuild = ROOT / 'node_modules' / '.bin' / 'esbuild'
-    if not esbuild.is_file():
-        raise AssertionError('esbuild is required to materialize native test modules')
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return str(cached)
+    test_bundler = ROOT / 'scripts' / 'vite_test_bundle.mjs'
+    if not test_bundler.is_file():
+        raise AssertionError(
+            'vite_test_bundle.mjs is required to materialize native test modules')
     digest = hashlib.sha256(key.encode()).hexdigest()[:12]
     global_name = f'TofuNativeGraph_{digest}'
     entry = _DIRECTORY / '.native-entry' / f'{global_name}.ts'
@@ -199,7 +244,7 @@ def native_module_graph(entries: list[tuple[str, str | Path]]) -> None:
         f'Object.assign(globalThis,{owners},{global_name}.orchestrationRegistry);'
         f'globalThis.orchestrationRegistry={global_name}.orchestrationRegistry;')
     result = subprocess.run(
-        [str(esbuild), str(entry), '--bundle', '--format=iife',
+        [str(test_bundler), str(entry), '--bundle', '--format=iife',
          '--platform=browser', f'--global-name={global_name}',
          f'--footer:js={footer}', f'--outfile={first}'],
         cwd=ROOT, capture_output=True, text=True, timeout=60,
@@ -215,6 +260,7 @@ def native_module_graph(entries: list[tuple[str, str | Path]]) -> None:
             encoding='utf-8',
         )
     _CACHE[key] = first
+    return str(first)
 
 
 def orchestration_legacy_test_root() -> str:
@@ -222,16 +268,17 @@ def orchestration_legacy_test_root() -> str:
 
     This exists solely for older Node fixtures whose harness code still joins
     ``ROOT/static/js``.  Retained sources are materialized from app-runtime;
-    native orchestration entries are bundled in one esbuild invocation.  No
+    native orchestration entries are bundled in one bounded-concurrency Vite invocation.  No
     compatibility files are created in the repository or shipped bundle.
     """
     key = 'orchestration-legacy-test-root'
     if _CACHE.get(key) is not None:
         return str(_LEGACY_ROOT)
     runtime_sections_dir()
-    esbuild = ROOT / 'node_modules' / '.bin' / 'esbuild'
-    if not esbuild.is_file():
-        raise AssertionError('esbuild is required to materialize native test modules')
+    test_bundler = ROOT / 'scripts' / 'vite_test_bundle.mjs'
+    if not test_bundler.is_file():
+        raise AssertionError(
+            'vite_test_bundle.mjs is required to materialize native test modules')
     orchestration_dir = ROOT / 'frontend' / 'src' / 'features' / 'orchestration'
     entry_dir = _DIRECTORY / '.native-batch-entry'
     entry_dir.mkdir(parents=True, exist_ok=True)
@@ -257,7 +304,7 @@ def orchestration_legacy_test_root() -> str:
         entries.append(entry)
     if entries:
         result = subprocess.run(
-            [str(esbuild), *map(str, entries), '--bundle', '--format=iife',
+            [str(test_bundler), *map(str, entries), '--bundle', '--format=iife',
              '--platform=browser', f'--outdir={_DIRECTORY}',
              '--log-level=warning'],
             cwd=ROOT, capture_output=True, text=True, timeout=120,

@@ -419,6 +419,227 @@ def test_on_round_end_fires_only_after_executed_tool_rounds():
     _ok('on_round_end: fires per tools round, not on the final-answer round')
 
 
+def test_typed_decision_continues_provider_protocol_without_tools():
+    """A protocol continuation is not mistaken for natural completion."""
+    from lib.agent_loop import AbortSignal, LoopDirective, run_agent_loop
+
+    dispatched = []
+
+    def dispatch(rnd, tools):
+        dispatched.append(rnd)
+        return _mk_msg(None)
+
+    out = run_agent_loop(
+        abort=AbortSignal.never(),
+        round_tools=['T'],
+        dispatch=dispatch,
+        decide_round=(
+            lambda rnd, *_: LoopDirective.continue_round()
+            if rnd == 0 else None),
+        execute_tool=lambda rnd, tc: None,
+    )
+
+    assert out.completed and out.exit_reason == 'completed'
+    assert out.rounds == 2 and dispatched == [0, 1]
+    _ok('typed decision preserves a no-tool provider continuation')
+
+
+def test_unverified_typed_stream_cannot_complete_or_execute_tools():
+    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.llm.stream_result import (
+        ProviderStreamResult,
+        ProviderStreamState,
+        UnverifiedProviderStreamError,
+    )
+
+    result = ProviderStreamResult(
+        message={'role': 'assistant', 'content': 'safe prefix'},
+        compatibility_finish_reason='stop',
+        usage={},
+        state=ProviderStreamState.PREMATURE_CLOSE,
+    )
+    executed = []
+
+    with pytest.raises(UnverifiedProviderStreamError):
+        run_agent_loop(
+            abort=AbortSignal.never(),
+            round_tools=['T'],
+            dispatch=lambda _rnd, _tools: result,
+            execute_tool=lambda _rnd, call: executed.append(call),
+        )
+
+    assert executed == []
+    _ok('typed stream evidence gates generic completion and tool execution')
+
+
+def test_typed_decision_can_recover_before_stream_evidence_gate():
+    from lib.agent_loop import AbortSignal, LoopDirective, run_agent_loop
+    from lib.llm.stream_result import ProviderStreamResult, ProviderStreamState
+
+    partial = ProviderStreamResult(
+        message={'role': 'assistant', 'content': 'safe prefix'},
+        compatibility_finish_reason='stop',
+        usage={},
+        state=ProviderStreamState.PREMATURE_CLOSE,
+    )
+    complete = ProviderStreamResult(
+        message={'role': 'assistant', 'content': 'safe prefix continued'},
+        compatibility_finish_reason='stop',
+        usage={},
+        state=ProviderStreamState.PROVIDER_FINISHED,
+        provider_finish_reason='stop',
+        saw_finish_reason=True,
+    )
+    attempts = iter([partial, complete])
+
+    out = run_agent_loop(
+        abort=AbortSignal.never(),
+        round_tools=['T'],
+        dispatch=lambda _rnd, _tools: next(attempts),
+        decide_round=lambda rnd, *_: (
+            LoopDirective.continue_round() if rnd == 0 else None),
+    )
+
+    assert out.completed and out.rounds == 2
+    _ok('caller recovery decision runs before the generic evidence gate')
+
+
+def test_before_and_after_tool_directives_own_control_sites():
+    """Typed gates stop at their declared placement and skip later hooks."""
+    from lib.agent_loop import AbortSignal, LoopDirective, run_agent_loop
+
+    tc = [{'id': 't', 'function': {'name': 'web_search', 'arguments': '{}'}}]
+    executed = []
+    ended = []
+    before_out = run_agent_loop(
+        abort=AbortSignal.never(),
+        round_tools=['T'],
+        dispatch=lambda rnd, tools: _mk_msg(tc),
+        on_tool_round=lambda rnd, msg: ended.append(('opened', rnd)),
+        before_tools=lambda rnd, msg: LoopDirective.abort('root_abort_cleanup'),
+        execute_tool=lambda rnd, call: executed.append(call),
+        on_round_end=lambda rnd: ended.append(('ended', rnd)),
+    )
+    assert before_out.aborted and before_out.exit_reason == 'root_abort_cleanup'
+    assert executed == [] and ended == [('opened', 0)]
+
+    calls = {'dispatch': 0, 'tools': 0}
+    ended.clear()
+
+    def dispatch(rnd, tools):
+        calls['dispatch'] += 1
+        return _mk_msg(tc)
+
+    after_out = run_agent_loop(
+        abort=AbortSignal.never(),
+        round_tools=['T'],
+        dispatch=dispatch,
+        execute_tools=lambda rnd, tcs: calls.__setitem__(
+            'tools', calls['tools'] + len(tcs)),
+        after_tools=lambda rnd, msg, note: (
+            LoopDirective.halt('semantic_no_progress') if rnd == 1 else None),
+        on_round_end=lambda rnd: ended.append(('ended', rnd)),
+    )
+    assert after_out.halted
+    assert after_out.exit_reason == 'semantic_no_progress'
+    assert calls == {'dispatch': 2, 'tools': 2}
+    assert ended == [('ended', 0)]
+    _ok('before/after tool directives stop at exact lifecycle boundaries')
+
+
+def test_timeout_state_observer_mirrors_chassis_counter():
+    """Caller presentation sees, but does not own, the timeout counter."""
+    from lib.agent_loop import AbortSignal, run_agent_loop
+
+    notes = iter([
+        {'timed_out': True}, None,
+        {'timed_out': True}, {'timed_out': True},
+    ])
+    seen = []
+    out = run_agent_loop(
+        abort=AbortSignal.never(),
+        round_tools=['T'],
+        dispatch=lambda rnd, tools: _mk_msg([
+            {'id': str(rnd),
+             'function': {'name': 'web_search', 'arguments': '{}'}},
+        ]),
+        execute_tools=lambda rnd, tcs: next(notes),
+        max_consecutive_tool_timeouts=2,
+        on_tool_timeout_state=(
+            lambda rnd, timed_out, count, limit:
+            seen.append((rnd, timed_out, count, limit))),
+    )
+    assert out.halted and out.exit_reason == 'tool_timeout'
+    assert seen == [
+        (0, True, 1, 2), (1, False, 0, 2),
+        (2, True, 1, 2), (3, True, 2, 2),
+    ]
+    _ok('timeout observer mirrors chassis-owned reset/increment/threshold')
+
+
+def test_abort_observer_can_preserve_caller_wire_reason():
+    from lib.agent_loop import AbortSignal, run_agent_loop
+
+    stopped = {'value': False}
+    phases = []
+
+    def dispatch(rnd, tools):
+        stopped['value'] = True
+        return _mk_msg([{
+            'id': 't',
+            'function': {'name': 'web_search', 'arguments': '{}'},
+        }])
+
+    def observe_abort(phase, rnd, msg):
+        phases.append((phase, rnd, bool(msg and msg.get('tool_calls'))))
+        return f'caller_{phase}_{rnd}'
+
+    out = run_agent_loop(
+        abort=AbortSignal(lambda: stopped['value']),
+        round_tools=['T'],
+        dispatch=dispatch,
+        execute_tool=lambda rnd, tc: pytest.fail('tool must not execute'),
+        on_abort=observe_abort,
+    )
+    assert out.aborted and out.exit_reason == 'caller_post_stream_0'
+    assert phases == [('post_stream', 0, True)]
+    _ok('abort observer preserves caller-specific wire reason')
+
+
+def test_policy_hooks_reject_untyped_magic_actions():
+    from lib.agent_loop import AbortSignal, LoopDirective, run_agent_loop
+
+    with pytest.raises(TypeError, match='LoopDirective'):
+        run_agent_loop(
+            abort=AbortSignal.never(),
+            round_tools=['T'],
+            dispatch=lambda rnd, tools: _mk_msg(None),
+            decide_round=lambda *args: 'continue',
+            execute_tool=lambda rnd, tc: None,
+        )
+    tool_message = _mk_msg([{
+        'id': 't',
+        'function': {'name': 'web_search', 'arguments': '{}'},
+    }])
+    with pytest.raises(ValueError, match='before_tools cannot continue'):
+        run_agent_loop(
+            abort=AbortSignal.never(),
+            round_tools=['T'],
+            dispatch=lambda rnd, tools: tool_message,
+            before_tools=lambda *args: LoopDirective.continue_round(),
+            execute_tool=lambda rnd, tc: None,
+        )
+    with pytest.raises(ValueError, match='after_tools cannot continue'):
+        run_agent_loop(
+            abort=AbortSignal.never(),
+            round_tools=['T'],
+            dispatch=lambda rnd, tools: tool_message,
+            after_tools=lambda *args: LoopDirective.continue_round(),
+            execute_tool=lambda rnd, tc: None,
+        )
+    _ok('policy hooks reject untyped magic actions')
+
+
 def main():
     print('\n\033[36m═══ agent_loop.py Unit Tests ═══\033[0m\n')
     tests = [
@@ -443,6 +664,13 @@ def main():
         test_tool_timeout_breaker_halts_at_threshold,
         test_tool_timeout_breaker_resets_on_clean_round,
         test_on_round_end_fires_only_after_executed_tool_rounds,
+        test_typed_decision_continues_provider_protocol_without_tools,
+        test_unverified_typed_stream_cannot_complete_or_execute_tools,
+        test_typed_decision_can_recover_before_stream_evidence_gate,
+        test_before_and_after_tool_directives_own_control_sites,
+        test_timeout_state_observer_mirrors_chassis_counter,
+        test_abort_observer_can_preserve_caller_wire_reason,
+        test_policy_hooks_reject_untyped_magic_actions,
     ]
     for fn in tests:
         fn()

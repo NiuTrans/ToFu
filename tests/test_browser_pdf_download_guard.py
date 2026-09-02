@@ -1,5 +1,3 @@
-# Incident anchor: born in commit ab99ef8b — checkpoint: accumulated work since last commit
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Guard: the browser-bridge provider must REFUSE binary/PDF URLs.
 
 Background — real bug: when Browser Bridge mode is on, a server-side fetch
@@ -7,8 +5,9 @@ failure on a PDF (403/429/timeout/oversize) fell through to the browser
 fallback, which opens the URL in a real Chrome tab. Navigating a tab to a PDF
 makes Chrome's download manager save the file to the USER's machine (the
 mysterious ``sfbookvNr.pdf`` downloads) AND returns no scrapable text, so the
-server couldn't parse it anyway. PDFs/binaries must be fetched server-side
-only (``_extract_pdf_text`` in-memory), never routed through the extension.
+server couldn't parse it anyway. PDFs/binaries must never use the extension's
+tab-navigation text path. They use direct server HTTP or the separate bounded
+browser-response → server-staging transfer.
 
 These tests pin ``_ChatuiBrowserProvider.fetch_url`` / ``fetch_html``: for a
 binary URL they must short-circuit to ``None`` WITHOUT ever calling the
@@ -57,11 +56,8 @@ class TestProviderRefusesBinaryUrls:
             called['transport'] = True
             raise AssertionError('extension transport must NOT be called for a PDF')
 
-        # If the guard is removed, fetch_url does
-        # `from lib.browser import fetch_url_via_browser` and calls this — the
-        # NC bite. Patch the package-facade name it binds.
-        import lib.browser as browser_pkg
-        monkeypatch.setattr(browser_pkg, 'fetch_url_via_browser', _boom, raising=False)
+        import lib.browser.fetch as browser_fetch
+        monkeypatch.setattr(browser_fetch, 'fetch_url_via_browser', _boom)
 
         prov = sb._ChatuiBrowserProvider()
         out = prov.fetch_url('https://example.com/papers/sfbookv7r.pdf')
@@ -75,9 +71,13 @@ class TestProviderRefusesBinaryUrls:
             called['transport'] = True
             raise AssertionError('send_browser_command must NOT be called for a PDF')
 
-        import lib.browser as browser_pkg
-        monkeypatch.setattr(browser_pkg, 'send_browser_command', _boom, raising=False)
-        monkeypatch.setattr(browser_pkg, 'is_extension_connected', lambda *a, **k: True, raising=False)
+        import lib.browser.queue as browser_queue
+        monkeypatch.setattr(browser_queue, 'send_browser_command', _boom)
+        monkeypatch.setattr(
+            browser_queue,
+            'is_extension_connected',
+            lambda *a, **k: True,
+        )
 
         prov = sb._ChatuiBrowserProvider()
         out = prov.fetch_html('https://example.com/papers/sfbookv7r.pdf')
@@ -91,19 +91,22 @@ class TestProviderRefusesBinaryUrls:
         def _fake(url, **k):
             seen['url'] = url
             seen['client_id'] = k.get('client_id')
+            seen['owner_user_id'] = k.get('owner_user_id')
             return 'extracted article text'
 
-        # The provider does `from lib.browser import fetch_url_via_browser`,
-        # so patch the package-facade name it actually binds.
-        import lib.browser as browser_pkg
-        monkeypatch.setattr(browser_pkg, 'fetch_url_via_browser', _fake, raising=False)
+        import lib.browser.fetch as browser_fetch
+        import lib.browser.queue as browser_queue
+        monkeypatch.setattr(browser_fetch, 'fetch_url_via_browser', _fake)
         monkeypatch.setattr(
-            browser_pkg, 'is_extension_connected',
-            lambda client_id=None: client_id == 'client-html', raising=False)
+            browser_queue, 'is_extension_connected',
+            lambda client_id, *, owner_user_id: (
+                client_id == 'client-html' and owner_user_id == '41'),
+        )
 
         prov = sb._ChatuiBrowserProvider(
-            user_id='user-html', client_id='client-html', bound=True)
+            user_id='41', client_id='client-html', bound=True)
         out = prov.fetch_url('https://example.com/article')
         assert out == 'extracted article text'
         assert seen['url'] == 'https://example.com/article'
         assert seen['client_id'] == 'client-html'
+        assert seen['owner_user_id'] == '41'

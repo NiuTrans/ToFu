@@ -81,6 +81,15 @@ _EXTRA_KEEPERS = {
                                        # tests/test_cache_waste_report.py
     'scripts/cache_ab_probe.py',       # second-path A/B control; names our own
                                        # gateway + an internal report doc
+    # Maintainer-only settings panel (cost A/B experiment —
+    # lib/settings_panels.MAINTAINER_ONLY_TABS). Export-excluded so the public
+    # tree never carries the markup, but it MUST stay tracked here: it is the
+    # panel the maintainer's own builds render every day, and
+    # tests/test_settings_panels_parity.py guards its marker↔fragment loop.
+    # The render-time strip (TOFU_OPENSOURCE_BUILD) is the second line of
+    # defense if the file ever ships, same contract as the MCP internal_only
+    # catalog filter.
+    'static/settings_panels/experiments.html',
 }
 
 # ── The pet's RAW MASTER ART: tracked on purpose, never published ────────────
@@ -111,11 +120,19 @@ _KEEPER_PREFIXES = (
 
 
 def _tracked_files():
-    """Every git-tracked path (project-root-relative, '/'-separated)."""
+    """Every tracked path present in this worktree.
+
+    ``git ls-files`` retains an unstaged deletion, but that path is absent from
+    both the worktree being tested and the eventual commit. Ignore only those
+    absent paths so local release gates match clean-checkout behavior.
+    """
     out = subprocess.run(
         ['git', 'ls-files', '-z'], cwd=_ROOT,
         capture_output=True, text=True)
-    return [p for p in out.stdout.split('\0') if p]
+    return [
+        path for path in out.stdout.split('\0')
+        if path and os.path.isfile(os.path.join(_ROOT, path))
+    ]
 
 
 def _keeper_set(export):

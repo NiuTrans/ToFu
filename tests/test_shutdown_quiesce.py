@@ -42,11 +42,11 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 def _mk_running(conv_id):
     from lib.tasks_pkg.manager import create_task
     return create_task(conv_id, [{'role': 'user', 'content': 'q'}], {},
-                       supersede=False)
+                       supersede=False, user_id=1)
 
 
 def _cleanup(*task_ids):
-    from lib.tasks_pkg.manager import tasks, tasks_lock
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
     with tasks_lock:
         for tid in task_ids:
             tasks.pop(tid, None)
@@ -108,8 +108,8 @@ def test_NC_neutered_quiesce_leaves_task_running():
 
 
 def main():
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_shutdown_quiesce.__main__')
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_shutdown_quiesce.__main__')
     print()
     print(_color('═══ shutdown quiesce tests ═══', '36'))
     print()

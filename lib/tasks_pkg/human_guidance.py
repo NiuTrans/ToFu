@@ -59,7 +59,7 @@ def request_human_guidance(guidance_id, task=None):
         resolved = evt.wait(timeout=_ABORT_POLL_INTERVAL)
         if resolved:
             break
-        # ★ Reaper heartbeat: a task blocked on human input is ALIVE (waiting on
+        # Reaper heartbeat: a task blocked on human input is ALIVE (waiting on
         #   the user, not wedged). This indefinite wait emits no event, so keep
         #   the positive-liveness clock fresh so reap_stuck_running_tasks never
         #   force-fails a legitimately human-waiting turn. (import-free: set the

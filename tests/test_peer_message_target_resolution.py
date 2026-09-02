@@ -23,14 +23,35 @@ no-match. This suite proves — against a REAL seeded DB — that:
 from __future__ import annotations
 
 import contextlib
-import os
-import tempfile
-import time
 import unittest
+from unittest.mock import patch
 
 import pytest
 
 pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._chat_sidecar',)
+
+TEST_OWNER_USER_ID = 1
+
+_CONVERSATION_IDS = (
+    'mr7hh5n6llzwnm',
+    'mr7hn42qp518zu',
+    'dupdupab1111aa',
+    'dupdupab2222bb',
+)
+
+
+@pytest.fixture(autouse=True)
+def _conversation_authority(chat_sidecar):
+    """Give each resolution test an isolated owned conversation catalog."""
+    from tests._seed import delete_conversation, seed_conversation
+    for conversation_id in _CONVERSATION_IDS:
+        seed_conversation(conversation_id, title='Peer resolution test')
+    try:
+        yield
+    finally:
+        for conversation_id in _CONVERSATION_IDS:
+            delete_conversation(conversation_id)
 
 
 @contextlib.contextmanager
@@ -40,9 +61,10 @@ def _fake_live_task(conv_id, *, task_id='livetask00001x'):
     (the fast-path twin + completion hook own delivery) — the shape these
     resolution tests assert. Without it the event-channel send-time idle
     drain would deliver immediately and consume the row."""
-    from lib.tasks_pkg.manager import tasks, tasks_lock
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
     t = {'id': task_id, 'convId': conv_id, 'status': 'running',
-         'aborted': False, 'config': {'model': 'm'}, 'toolRounds': []}
+         '_userId': TEST_OWNER_USER_ID, 'aborted': False,
+         'config': {'model': 'm'}, 'toolRounds': []}
     with tasks_lock:
         tasks[task_id] = t
     try:
@@ -56,37 +78,9 @@ class PeerMessageTargetResolutionTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._tmp = tempfile.TemporaryDirectory()
-        from lib.database import reset_sqlite_for_tests
-        cls._db_snapshot = reset_sqlite_for_tests(
-            os.path.join(cls._tmp.name, 'tofu.db'))
-
-        from lib.database import get_thread_db, DOMAIN_CHAT
-        db = get_thread_db(DOMAIN_CHAT)
-        now = int(time.time() * 1000)
-
-        def _mk(cid):
-            db.execute(
-                'INSERT INTO conversations '
-                '(id, user_id, title, messages, created_at, updated_at, '
-                ' settings, msg_count, search_text) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                (cid, 1, 'T', '[]', now, now, '{}', 0, ''))
-
-        _mk('mr7hh5n6llzwnm')          # the real target
-        _mk('mr7hn42qp518zu')          # the sender
-        _mk('dupdupab1111aa')          # ambiguous pair …
-        _mk('dupdupab2222bb')          # … shares 8-char prefix 'dupdupab'
-        db.commit()
         cls._sender = 'mr7hn42qp518zu'
         cls._target_full = 'mr7hh5n6llzwnm'
         cls._target_short = 'mr7hh5n6'
-
-    @classmethod
-    def tearDownClass(cls):
-        from lib.database import restore_db_state
-        restore_db_state(getattr(cls, '_db_snapshot', None))
-        cls._tmp.cleanup()
 
     def setUp(self):
         # Clear the per-(sender,target) rate window + any queued rows between
@@ -97,7 +91,7 @@ class PeerMessageTargetResolutionTest(unittest.TestCase):
         from lib.message_queue import clear_queue
         for cid in ('mr7hh5n6llzwnm', 'mr7hn42qp518zu',
                     'dupdupab1111aa', 'dupdupab2222bb'):
-            clear_queue(cid)
+            clear_queue(cid, user_id=TEST_OWNER_USER_ID)
         # The busy-target path enqueues fast-path inbox twins — reset them too.
         from lib import agent_inbox
         for cid in ('mr7hh5n6llzwnm', 'mr7hn42qp518zu'):
@@ -106,23 +100,23 @@ class PeerMessageTargetResolutionTest(unittest.TestCase):
     # ── the resolver itself ──────────────────────────────────────────
     def test_resolve_exact(self):
         from lib.conversations.project_peer import _resolve_target_conv_id
-        self.assertEqual(_resolve_target_conv_id(self._target_full),
+        self.assertEqual(_resolve_target_conv_id(self._target_full, user_id=TEST_OWNER_USER_ID),
                          (self._target_full, ''))
 
     def test_resolve_short_prefix(self):
         from lib.conversations.project_peer import _resolve_target_conv_id
-        self.assertEqual(_resolve_target_conv_id(self._target_short),
+        self.assertEqual(_resolve_target_conv_id(self._target_short, user_id=TEST_OWNER_USER_ID),
                          (self._target_full, ''))
 
     def test_resolve_ambiguous(self):
         from lib.conversations.project_peer import _resolve_target_conv_id
-        full, err = _resolve_target_conv_id('dupdupab')
+        full, err = _resolve_target_conv_id('dupdupab', user_id=TEST_OWNER_USER_ID)
         self.assertEqual(err, 'ambiguous_target')
         self.assertEqual(full, '')
 
     def test_resolve_unknown(self):
         from lib.conversations.project_peer import _resolve_target_conv_id
-        full, err = _resolve_target_conv_id('nosuchconv99')
+        full, err = _resolve_target_conv_id('nosuchconv99', user_id=TEST_OWNER_USER_ID)
         self.assertEqual(err, 'unknown_target')
         self.assertEqual(full, '')
 
@@ -133,15 +127,11 @@ class PeerMessageTargetResolutionTest(unittest.TestCase):
         (silent loss). It must fail closed with 'resolve_failed'."""
         import lib.conversations.project_peer as pp
 
-        def _boom(_domain):
-            raise RuntimeError('db down')
-        import lib.database as _db
-        orig = _db.get_thread_db
-        _db.get_thread_db = _boom
-        try:
-            full, err = pp._resolve_target_conv_id(self._target_short)  # 8-char
-        finally:
-            _db.get_thread_db = orig
+        with patch(
+            'lib.conversations.repository.get_conversation',
+            side_effect=RuntimeError('storage unavailable'),
+        ):
+            full, err = pp._resolve_target_conv_id(self._target_short, user_id=TEST_OWNER_USER_ID)  # 8-char
         self.assertEqual(full, '')
         self.assertEqual(err, 'resolve_failed')
 
@@ -150,15 +140,11 @@ class PeerMessageTargetResolutionTest(unittest.TestCase):
         drop a valid send. It passes through unchanged (no error)."""
         import lib.conversations.project_peer as pp
 
-        def _boom(_domain):
-            raise RuntimeError('db down')
-        import lib.database as _db
-        orig = _db.get_thread_db
-        _db.get_thread_db = _boom
-        try:
-            full, err = pp._resolve_target_conv_id(self._target_full)  # 14-char
-        finally:
-            _db.get_thread_db = orig
+        with patch(
+            'lib.conversations.repository.get_conversation',
+            side_effect=RuntimeError('storage unavailable'),
+        ):
+            full, err = pp._resolve_target_conv_id(self._target_full, user_id=TEST_OWNER_USER_ID)  # 14-char
         self.assertEqual(full, self._target_full)
         self.assertEqual(err, '')
 
@@ -172,16 +158,16 @@ class PeerMessageTargetResolutionTest(unittest.TestCase):
         # the resolution-keyed shape this test asserts.
         with _fake_live_task(self._target_full):
             res = send_peer_message('/proj', self._sender, self._target_short,
-                                    'watch the parser epic')
+                                    'watch the parser epic', user_id=TEST_OWNER_USER_ID)
         self.assertTrue(res.get('ok'), f'send failed: {res}')
 
         # The queue must be keyed on the FULL id (what dequeue_next reads) …
-        full_q = get_queue(self._target_full)
+        full_q = get_queue(self._target_full, user_id=TEST_OWNER_USER_ID)
         self.assertEqual(len(full_q), 1,
                          'peer message must be enqueued under the FULL conv_id')
         self.assertIn('watch the parser epic', full_q[0]['text'])
         # … and NOT under the truncated phantom id.
-        short_q = get_queue(self._target_short)
+        short_q = get_queue(self._target_short, user_id=TEST_OWNER_USER_ID)
         self.assertEqual(len(short_q), 0,
                          'nothing may be enqueued under the truncated phantom id')
 
@@ -189,23 +175,23 @@ class PeerMessageTargetResolutionTest(unittest.TestCase):
         from lib.conversations.project_peer import send_peer_message
         from lib.message_queue import get_queue
         with _fake_live_task(self._target_full):
-            res = send_peer_message('/proj', self._sender, self._target_full, 'hi')
+            res = send_peer_message('/proj', self._sender, self._target_full, 'hi', user_id=TEST_OWNER_USER_ID)
         self.assertTrue(res.get('ok'))
-        self.assertEqual(len(get_queue(self._target_full)), 1)
+        self.assertEqual(len(get_queue(self._target_full, user_id=TEST_OWNER_USER_ID)), 1)
 
     def test_ambiguous_target_refused_not_delivered(self):
         from lib.conversations.project_peer import send_peer_message
         from lib.message_queue import get_queue
-        res = send_peer_message('/proj', self._sender, 'dupdupab', 'x')
+        res = send_peer_message('/proj', self._sender, 'dupdupab', 'x', user_id=TEST_OWNER_USER_ID)
         self.assertFalse(res.get('ok'))
         self.assertEqual(res.get('error'), 'ambiguous_target')
         # Neither ambiguous row may receive the message.
-        self.assertEqual(len(get_queue('dupdupab1111aa')), 0)
-        self.assertEqual(len(get_queue('dupdupab2222bb')), 0)
+        self.assertEqual(len(get_queue('dupdupab1111aa', user_id=TEST_OWNER_USER_ID)), 0)
+        self.assertEqual(len(get_queue('dupdupab2222bb', user_id=TEST_OWNER_USER_ID)), 0)
 
     def test_unknown_target_refused(self):
         from lib.conversations.project_peer import send_peer_message
-        res = send_peer_message('/proj', self._sender, 'nosuchconv99', 'x')
+        res = send_peer_message('/proj', self._sender, 'nosuchconv99', 'x', user_id=TEST_OWNER_USER_ID)
         self.assertFalse(res.get('ok'))
         self.assertEqual(res.get('error'), 'unknown_target')
 
@@ -213,10 +199,12 @@ class PeerMessageTargetResolutionTest(unittest.TestCase):
         # Sender addresses ITS OWN conversation by an 8-char prefix → the
         # self-check must fire on the RESOLVED full id.
         from lib.conversations.project_peer import send_peer_message
-        res = send_peer_message('/proj', self._target_full, 'mr7hh5n6', 'x')
+        res = send_peer_message('/proj', self._target_full, 'mr7hh5n6', 'x', user_id=TEST_OWNER_USER_ID)
         self.assertFalse(res.get('ok'))
         self.assertEqual(res.get('error'), 'cannot_message_self')
 
 
 if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_peer_message_target_resolution.__main__')
     unittest.main()

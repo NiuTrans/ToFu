@@ -18,7 +18,7 @@ machinery was built single-tenant:
 |---|---|---|
 | Tool **schemas** (what the LLM sees) | ✅ yes | `assemble_tool_list(ctx)` builds a fresh `list[dict]` per task |
 | Sub-agent **state** (messages/model) | ✅ yes | `SubAgent.__init__` (`lib/swarm/agent.py`) |
-| Tool **handler resolution** (name → executable) | ❌ **no — process-global** | `tool_registry.lookup()` (`lib/tasks_pkg/executor.py`) |
+| Tool **handler resolution** (name → executable) | ❌ **no — process-global** | `tool_registry.lookup()` (`lib/tasks_pkg/executor/_execute.py`) |
 
 Both reference subsystems prove the gap:
 
@@ -68,7 +68,7 @@ request can mix client-handoff, webhook, and sandbox tools freely.
 
 ## 3. The inverted handler lookup (the one core change)
 
-`_execute_tool_one` (`lib/tasks_pkg/executor.py`) already receives the live
+`_execute_tool_one` (`lib/tasks_pkg/executor/_execute.py`) already receives the live
 `task` dict. The only behavioural change is to consult the task-local
 resolver **before** the global registry:
 
@@ -255,9 +255,9 @@ POST /api/v1/tasks/{task_id}/tool_result
 | File | Change |
 |---|---|
 | `lib/tools/tool_env.py` | **new** — `ToolEnvironment`, `_CustomTool`, `ToolLimits`, three backends, `mint_tool_env` / `dispose_tool_env` / `dispose_tool_env_after_terminal`, client-result registry, validation |
-| `lib/tools/registry.py` | `ToolSpec('custom', _build_custom, …)` registered last |
-| `lib/tasks_pkg/executor.py` | per-task resolver consulted before global lookup in `_execute_tool_one` |
-| `lib/tasks_pkg/tool_dispatch.py` | `_task_partitions(task)` — per-task write/idempotent union |
+| `lib/tools/registry/_build.py` | `ToolSpec('custom', _build_custom, …)` registered last |
+| `lib/tasks_pkg/executor/_execute.py` | per-task resolver consulted before global lookup in `_execute_tool_one` |
+| `lib/tasks_pkg/tool_dispatch/_flags.py` | `_task_partitions(task)` — per-task write/idempotent union |
 | `lib/swarm/agent.py` | thread `_tool_env` onto the sub-agent `task_proxy` |
 | `routes/api_v1/agent_run.py` | parse `tools`, mint env, attach to task, dispose on terminal + every error path |
 | `routes/api_v1/tasks.py` | `POST /api/v1/tasks/{id}/tool_result` callback |

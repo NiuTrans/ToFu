@@ -108,8 +108,7 @@ def test_todo_identifiers_can_raise_confidence(monkeypatch):
 
 def test_orchestrator_runs_inline_and_does_not_mutate_messages(monkeypatch):
     import lib.memory.prefetch as prefetch
-    from lib.tasks_pkg.orchestrator import _memory_prefetch as seam
-
+    import lib.tasks_pkg.orchestrator._memory_prefetch as seam
     calls = []
 
     def fake(messages, **kwargs):
@@ -140,8 +139,7 @@ def test_orchestrator_runs_inline_and_does_not_mutate_messages(monkeypatch):
 ])
 def test_orchestrator_gates_local_prefetch(monkeypatch, override):
     import lib.memory.prefetch as prefetch
-    from lib.tasks_pkg.orchestrator import _memory_prefetch as seam
-
+    import lib.tasks_pkg.orchestrator._memory_prefetch as seam
     monkeypatch.setattr(
         prefetch, 'run_memory_prefetch',
         lambda *a, **k: (_ for _ in ()).throw(

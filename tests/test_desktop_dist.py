@@ -24,6 +24,8 @@ Run:  pytest tests/test_desktop_dist.py -q
 
 from __future__ import annotations
 
+pytest_plugins = ('tests._credential_sidecar',)
+
 import os
 import threading
 import time
@@ -636,8 +638,8 @@ _UA_WIN = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0'
 
 def _bearer():
     from lib.api_keys import create_key
-    _row, token = create_key(name='dist-test', scopes=['chat'],
-                             user_id='u-dist')
+    _row, token = create_key(
+        owner_user_id=1, name='dist-test', scopes=['chat'])
     return {'Authorization': f'Bearer {token}'}
 
 
@@ -755,20 +757,31 @@ def test_the_status_payload_advertises_only_usable_preseeds(
 
 
 @pytest.mark.api
-def test_the_status_payload_projects_bridge_token_requirement(
+def test_the_status_payload_names_the_visitor_platform(
         tmp_store, flask_client, monkeypatch):
-    """bridge_token_required mirrors TOFU_BRIDGE_SECRET: unset ⇒ open
-    bridge (a preseeded agent connects with zero input); set ⇒ the
-    panel must keep the mint-and-paste step."""
-    monkeypatch.delenv('TOFU_BRIDGE_SECRET', raising=False)
+    """The panel's primary controlled-end offer keys on visitor_os: the
+    personalized .exe is Windows-only by construction (NSIS trailer), so
+    the backend must SAY which platform is visiting — a Mac steered to
+    that button downloads a package it cannot run (the measured defect).
+    The frontend renders; it must never re-derive the platform itself."""
     monkeypatch.setattr(mirror, 'ensure_fresh', lambda *a, **k: False)
     r = flask_client.get('/api/v1/desktop/status',
                          headers={**_bearer(), 'User-Agent': _UA_WIN})
-    assert r.get_json()['bridge_token_required'] is False
-    monkeypatch.setenv('TOFU_BRIDGE_SECRET', 's3cret')
+    assert r.status_code == 200
+    assert r.get_json()['visitor_os'] == 'windows'
+    r = flask_client.get(
+        '/api/v1/desktop/status',
+        headers={**_bearer(),
+                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X '
+                               '10_15_7) Safari/605'})
+    assert r.get_json()['visitor_os'] == 'macos'
     r = flask_client.get('/api/v1/desktop/status',
-                         headers={**_bearer(), 'User-Agent': _UA_WIN})
-    assert r.get_json()['bridge_token_required'] is True
+                         headers={**_bearer(),
+                                  'User-Agent': 'Mozilla/5.0 (iPhone; CPU '
+                                                'iPhone OS 17_0 like Mac '
+                                                'OS X) Safari/605'})
+    assert r.get_json()['visitor_os'] == '', (
+        'a phone gets no direct offer — never a guessed installer')
 
 
 @pytest.mark.api
@@ -783,11 +796,11 @@ def test_the_status_payload_flags_outdated_agents(
     with db.command_queue_lock:
         db._agents.clear()
     db.register_agent('agent-old', {'name': 'old', 'version': '0.14.2'},
-                      user_id='u-dist')
+                      user_id='1')
     db.register_agent('agent-cur', {'name': 'cur', 'version': sv.strip()},
-                      user_id='u-dist')
+                      user_id='1')
     db.register_agent('agent-legacy', {'name': 'legacy'},
-                      user_id='u-dist')
+                      user_id='1')
     monkeypatch.setattr(mirror, 'ensure_fresh', lambda *a, **k: False)
     r = flask_client.get('/api/v1/desktop/status',
                          headers={**_bearer(), 'User-Agent': _UA_WIN})

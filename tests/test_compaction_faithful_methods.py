@@ -39,7 +39,7 @@ def _n_with(msgs, marker):
 
 @pytest.mark.unit
 def test_per_system_steps_registered():
-    from lib.tasks_pkg.compaction import get_step_spec, list_steps
+    from lib.tasks_pkg.compaction.api import get_step_spec, list_steps
     steps = list_steps()
     for name in ('prune_tool_outputs_opencode', 'prune_tool_outputs_hermes',
                  'summarize_opencode', 'summarize_hermes', 'summarize_openclaw'):
@@ -54,7 +54,7 @@ def test_per_system_steps_registered():
 
 @pytest.mark.unit
 def test_opencode_prune_constants_and_skip_recent():
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
     # 30 tool results × ~3k tokens (12k chars). Protect 40k tail + skip the
     # 2 most-recent turns; prune older (reclaim >> 20k).
     msgs = _mk_tools(30, 12_000)
@@ -67,7 +67,7 @@ def test_opencode_prune_constants_and_skip_recent():
 
 @pytest.mark.unit
 def test_opencode_prune_skips_below_20k_minimum():
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
     msgs = _mk_tools(10, 12_000)  # ~30k total < 40k protect → reclaim<20k
     micro_compact(msgs, conv_id='', steps=['prune_tool_outputs_opencode'])
     assert _n_with(msgs, 'pruned') == 0
@@ -75,7 +75,7 @@ def test_opencode_prune_skips_below_20k_minimum():
 
 @pytest.mark.unit
 def test_opencode_prune_respects_2000_char_threshold():
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
     # Many SMALL (<2000 char) tool results — none should be pruned even if cold.
     msgs = _mk_tools(60, 500)
     micro_compact(msgs, conv_id='', steps=['prune_tool_outputs_opencode'])
@@ -86,7 +86,7 @@ def test_opencode_prune_respects_2000_char_threshold():
 
 @pytest.mark.unit
 def test_hermes_prune_informative_stub():
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
     msgs = _mk_tools(40, 5000, name='grep_search')
     micro_compact(msgs, conv_id='', steps=['prune_tool_outputs_hermes'],
                   constant_overrides={'HERMES_PRUNE_PROTECT': 5_000})
@@ -104,6 +104,7 @@ def test_triggers_are_per_system_not_shared(monkeypatch):
     """OpenCode/Hermes/OpenClaw must compute DIFFERENT trigger thresholds
     from the same 128k context — proving they're not collapsed into one."""
     import lib.tasks_pkg.compaction._faithful_methods as fm
+    import lib.tasks_pkg.compaction._faithful_methods._opencode as opencode
 
     class FakeCtx:
         task = {'config': {'model': 'deepseek-v4-flash'}}
@@ -111,8 +112,8 @@ def test_triggers_are_per_system_not_shared(monkeypatch):
         messages = []
         conv_id = 'x'
     ctx = FakeCtx()
-    monkeypatch.setattr(fm, '_raw_context_limit', lambda c: 128_000)
-    monkeypatch.setattr(fm, '_max_output_tokens', lambda c: 8192)
+    monkeypatch.setattr(opencode, '_raw_context_limit', lambda c: 128_000)
+    monkeypatch.setattr(opencode, '_max_output_tokens', lambda c: 8192)
 
     oc = fm._oc_usable(ctx)                       # 128k - min(20k,8192)=8192 → 119808
     hermes = int(128_000 * fm._HERMES_THRESHOLD_PCT)   # 64000
@@ -127,10 +128,17 @@ def test_triggers_are_per_system_not_shared(monkeypatch):
 
 @pytest.mark.unit
 def test_summarizers_skip_under_threshold(monkeypatch):
-    from lib.tasks_pkg.compaction import advanced_compact
-    import lib.tasks_pkg.compaction._faithful_methods as fm
-    monkeypatch.setattr(fm, '_raw_context_limit', lambda c: 128_000)
-    monkeypatch.setattr(fm, '_tok', lambda m, t: 5_000)  # well under all thresholds
+    from lib.tasks_pkg.compaction.api import advanced_compact
+    from lib.tasks_pkg.compaction._faithful_methods import (
+        _hermes,
+        _opencode,
+        _openclaw,
+    )
+    for method_module in (_opencode, _hermes, _openclaw):
+        monkeypatch.setattr(
+            method_module, '_raw_context_limit', lambda c: 128_000)
+        monkeypatch.setattr(
+            method_module, '_tok', lambda m, t: 5_000)
     for step in ('summarize_opencode', 'summarize_hermes', 'summarize_openclaw'):
         msgs = _mk_tools(3, 200)
         saved = advanced_compact(msgs, conv_id=f'u-{step}', task={'convId': 'u'},
@@ -142,15 +150,17 @@ def test_summarizers_skip_under_threshold(monkeypatch):
 
 @pytest.mark.unit
 def test_hermes_iterative_summary_updates(monkeypatch):
-    from lib.tasks_pkg.compaction import advanced_compact
+    from lib.tasks_pkg.compaction.api import advanced_compact
     import lib.tasks_pkg.compaction._faithful_methods as fm
+    import lib.tasks_pkg.compaction._faithful_methods._hermes as hermes
+    import lib.tasks_pkg.compaction._faithful_methods._state as state
     import lib.tasks_pkg.compaction._advanced as adv
 
     fm.reset_running_summary('c-it')
-    monkeypatch.setattr(fm, '_raw_context_limit', lambda c: 10_000)  # threshold 5k
-    monkeypatch.setattr(fm, '_tok', lambda m, t: 9_999)
-    monkeypatch.setattr(fm, '_cooldown_ok', lambda cid: True)
-    monkeypatch.setattr(fm, '_select_middle_turns',
+    monkeypatch.setattr(hermes, '_raw_context_limit', lambda c: 10_000)
+    monkeypatch.setattr(hermes, '_tok', lambda m, t: 9_999)
+    monkeypatch.setattr(hermes, '_cooldown_ok', lambda cid: True)
+    monkeypatch.setattr(hermes, '_select_middle_turns',
                         lambda ctx, keep_recent_tokens, protect_first_n, protect_last_n=0:
                         ([t for t in ctx.edit.turns()[1:-1]], 'MIDDLE ' * 100))
     seen = []
@@ -168,12 +178,12 @@ def test_hermes_iterative_summary_updates(monkeypatch):
 
     advanced_compact(mk(), conv_id='c-it', task={'convId': 'c-it'},
                      advanced_steps=['summarize_hermes'])
-    assert fm._running_summaries['c-it'] == 'SUMMARY v1'
+    assert state._running_summaries['c-it'] == 'SUMMARY v1'
     assert 'CURRENT RUNNING SUMMARY' not in seen[0]
 
     advanced_compact(mk(), conv_id='c-it', task={'convId': 'c-it'},
                      advanced_steps=['summarize_hermes'])
-    assert fm._running_summaries['c-it'] == 'SUMMARY v2'
+    assert state._running_summaries['c-it'] == 'SUMMARY v2'
     assert any('UPDATE the running summary' in s for s in seen[1:])
     fm.reset_running_summary('c-it')
 

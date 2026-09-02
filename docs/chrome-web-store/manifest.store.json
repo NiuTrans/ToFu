@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Tofu Browser Bridge",
-  "version": "5.0.0",
-  "description": "Bridge between your self-hosted Tofu server and your browser — lets the AI read tabs, extract content, fill forms, and capture full-page screenshots.",
+  "version": "5.4.1",
+  "description": "Connect Tofu to your browser so AI can research logged-in sites, automate pages, inspect console errors, and debug JavaScript.",
 
   "permissions": [
     "tabs",
@@ -15,7 +15,8 @@
     "notifications",
     "alarms",
     "downloads",
-    "webRequest"
+    "webRequest",
+    "webNavigation"
   ],
 
   "host_permissions": [

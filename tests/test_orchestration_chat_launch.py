@@ -6,9 +6,8 @@ from threading import Event
 
 import pytest
 
-from lib.orchestration import (
+from lib.orchestration._builtin_definitions import (
     build_autopilot_definition,
-    build_endpoint_definition,
 )
 from lib.orchestration_chat_launch import (
     OrchestrationChatHistoryPorts,
@@ -16,6 +15,9 @@ from lib.orchestration_chat_launch import (
     build_flow_initial_context,
     build_orchestration_chat_flow_launch,
     build_tools_for_chat_task,
+)
+from tests.support.orchestration_definitions import (
+    build_verifier_loop_definition,
 )
 
 
@@ -36,7 +38,7 @@ def test_launch_input_ports_are_explicit_and_immutable():
             'search_mode': 'off', 'search_enabled': False,
             'fetch_enabled': False, 'code_exec_enabled': False,
             'browser_enabled': False, 'desktop_enabled': False,
-            'swarm_enabled': False, 'image_gen_enabled': False,
+            'image_gen_enabled': False,
             'human_guidance_enabled': False, 'scheduler_enabled': False,
             'model': 'model-x',
         },
@@ -75,7 +77,7 @@ def test_launch_input_cores_only_consume_ports():
 @pytest.mark.parametrize(
     ('definition', 'projection', 'phase'),
     [
-        (build_endpoint_definition(), 'endpoint', 'planning'),
+        (build_verifier_loop_definition(), 'critic', 'planning'),
         (build_autopilot_definition(), 'autopilot', 'working'),
     ],
 )
@@ -139,18 +141,17 @@ def test_task_projection_and_default_thinking_policy_have_one_owner():
     assert task == {
         'id': 'task-two',
         'config': {},
-        'endpoint_mode': True,
         'flow_mode': True,
         '_flow_projection': 'autopilot',
-        '_endpoint_phase': 'working',
-        '_endpoint_iteration': 0,
-        '_endpoint_via_flow': True,
+        '_flow_phase': 'working',
+        '_flow_iteration': 0,
         '_flow_label': 'autopilot',
     }
 
 
-def test_endpoint_runner_only_assembles_the_launch_spec():
-    runner = (ROOT / 'lib' / 'orchestration_endpoint_runner.py').read_text()
+def test_flow_runner_only_assembles_the_launch_spec():
+    runner = (
+        ROOT / 'lib' / 'orchestration_chat_flow_runner.py').read_text()
     runtime = (
         ROOT / 'lib' / 'orchestration_chat_flow_runtime.py').read_text()
 
@@ -164,11 +165,10 @@ def test_endpoint_runner_only_assembles_the_launch_spec():
 
 
 def test_task_starter_uses_provisional_flow_state_without_resolving_twice():
-    starter = (ROOT / 'routes' / 'chat_task_start.py').read_text()
+    starter = (ROOT / 'lib' / 'conversation_sync' / 'task_start.py').read_text()
 
     assert 'resolve_chat_flow_definition' not in starter
     assert 'initial_phase_for_flow' not in starter
     assert 'chat_projection_for_flow' not in starter
-    assert "_initial_phase = 'working' if _flow_selected else 'planning'" \
-        in starter
+    assert "task['_flow_phase'] = 'working'" in starter
     assert "task['_flow_projection'] = 'flow'" in starter

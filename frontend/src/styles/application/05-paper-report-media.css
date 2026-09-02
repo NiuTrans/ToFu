@@ -1,0 +1,620 @@
+/* ═══════════════════════════════════════════
+   ★ Paper Report — Enhanced render layer
+   (TOC sidebar · callouts · framed figures)
+   Source stays Markdown; this styles the
+   post-processed DOM built by _renderFinalReport().
+   ═══════════════════════════════════════════ */
+.paper-report-content.paper-report-enhanced,
+.paper-report-body.paper-report-enhanced{padding:0}
+
+/* ── Reading-time estimate + scroll-progress bar (sticky report header) ── */
+.paper-read-time{position:sticky;top:0;z-index:5;padding:9px 30px 0;
+  margin:0 auto;max-width:1180px;
+  background:linear-gradient(to bottom,var(--bg-primary) 72%,transparent);
+  backdrop-filter:saturate(1.1) blur(6px);-webkit-backdrop-filter:saturate(1.1) blur(6px);
+  user-select:none}
+.paper-read-time-row{display:flex;align-items:center;gap:7px;font-size:12px;
+  color:var(--text-tertiary);line-height:1;padding-bottom:7px}
+.paper-read-time-icon{display:inline-flex;color:var(--text-tertiary);opacity:.85}
+.paper-read-time-total{color:var(--text-secondary);font-weight:600;letter-spacing:.1px}
+.paper-read-time-sep{opacity:.45}
+.paper-read-time-left{color:var(--text-tertiary);font-variant-numeric:tabular-nums;
+  transition:color .25s}
+.paper-read-time.done .paper-read-time-left{color:var(--accent);font-weight:600}
+.paper-read-time-badge{display:inline-flex;align-items:center;justify-content:center;
+  width:15px;height:15px;border-radius:50%;margin-left:auto;flex-shrink:0;
+  color:#fff;background:var(--accent);opacity:.9}
+.paper-read-time-track{height:3px;border-radius:3px;overflow:hidden;
+  background:var(--border);position:relative}
+.paper-read-time-fill{height:100%;width:0;border-radius:3px;
+  background:linear-gradient(90deg,var(--accent),color-mix(in srgb,var(--accent) 55%,#22d3ee));
+  box-shadow:0 0 6px -1px var(--accent);
+  transition:width .35s cubic-bezier(.4,0,.2,1)}
+.paper-read-time.done .paper-read-time-fill{background:var(--accent)}
+@media(max-width:900px){
+  .paper-read-time{padding-left:18px;padding-right:18px}
+}
+.paper-report-doc{display:grid;grid-template-columns:1fr minmax(168px,216px);gap:30px;align-items:start;max-width:1180px;margin:0 auto;padding:24px 30px 64px}
+/* Both children MUST be pinned to row 1: the TOC <nav> precedes the
+   <article> in DOM order, so without an explicit row, CSS grid's sparse
+   auto-placement parks the TOC in row1/col2 and bumps the article to
+   row2/col1 — leaving an empty row1/col1 cell as tall as the TOC (a large
+   blank gap above the report title). */
+.paper-report-article{grid-column:1;grid-row:1;min-width:0}
+.paper-report-doc > .paper-report-toc{grid-column:2;grid-row:1}
+
+/* Article reuses the existing .paper-report-body/-content typography because
+   those selectors target descendants; we only need to ensure spacing reads
+   well as a standalone column. */
+.paper-report-article > :first-child{margin-top:0}
+.paper-report-article h2{scroll-margin-top:16px}
+.paper-report-article h3{scroll-margin-top:16px}
+
+/* ── Sticky TOC sidebar ── */
+.paper-report-toc{position:sticky;top:12px;align-self:start;max-height:calc(100vh - 160px);overflow-y:auto;font-size:12.5px;line-height:1.4;border-left:2px solid var(--border);padding:2px 0 2px 14px}
+.paper-report-toc-title{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-tertiary);margin-bottom:8px}
+.paper-report-toc ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:1px}
+.paper-report-toc li{margin:0}
+.paper-report-toc a{display:block;padding:4px 8px;border-radius:6px;color:var(--text-secondary);text-decoration:none;border-left:2px solid transparent;margin-left:-16px;padding-left:14px;transition:color .15s,background .15s,border-color .15s;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.paper-report-toc a:hover{color:var(--text-primary);background:var(--bg-hover)}
+.paper-report-toc a.active{color:var(--accent);border-left-color:var(--accent);background:rgba(99,102,241,.08);font-weight:600}
+
+/* ── Callout boxes (decorated blockquotes) ── */
+.paper-report-article blockquote.paper-callout{border-left:none;padding:12px 14px 12px 42px;margin:16px 0;border-radius:8px;position:relative;color:var(--text-secondary);background:var(--bg-secondary);border:1px solid var(--border)}
+.paper-report-article blockquote.paper-callout > :first-child{margin-top:0}
+.paper-report-article blockquote.paper-callout > :last-child{margin-bottom:0}
+.paper-report-article blockquote.paper-callout::before{content:"";position:absolute;left:14px;top:14px;width:16px;height:16px;background-repeat:no-repeat;background-position:center;background-size:contain;opacity:.9}
+.paper-callout-note{background:rgba(99,102,241,.07);border-color:rgba(99,102,241,.28)}
+.paper-callout-note::before{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236366f1' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cline x1='12' y1='16' x2='12' y2='12'/%3E%3Cline x1='12' y1='8' x2='12.01' y2='8'/%3E%3C/svg%3E")}
+.paper-callout-tip{background:rgba(34,197,94,.07);border-color:rgba(34,197,94,.3)}
+.paper-callout-tip::before{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2322c55e' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18h6'/%3E%3Cpath d='M10 22h4'/%3E%3Cpath d='M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.3h6c0-1 .4-1.8 1-2.3A7 7 0 0 0 12 2z'/%3E%3C/svg%3E")}
+.paper-callout-warning{background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.34)}
+.paper-callout-warning::before{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f59e0b' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z'/%3E%3Cline x1='12' y1='9' x2='12' y2='13'/%3E%3Cline x1='12' y1='17' x2='12.01' y2='17'/%3E%3C/svg%3E")}
+.paper-callout-important{background:rgba(239,68,68,.07);border-color:rgba(239,68,68,.32)}
+.paper-callout-important::before{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ef4444' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 9v4'/%3E%3Cpath d='M12 17h.01'/%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3C/svg%3E")}
+.paper-callout-takeaway{background:rgba(168,85,247,.08);border-color:rgba(168,85,247,.32)}
+.paper-callout-takeaway::before{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a855f7' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 11l3 3L22 4'/%3E%3Cpath d='M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11'/%3E%3C/svg%3E")}
+
+/* ── Glossary hover-definitions ── */
+/* Later mentions of a Core-Terminology term get a subtle dotted underline and
+   reveal their definition on hover/focus, so the report stays self-contained
+   wherever the reader is. */
+.paper-report-article .paper-term{border-bottom:1px dashed var(--text-tertiary);cursor:help;position:relative;outline:none;transition:border-color .15s,color .15s}
+.paper-report-article .paper-term:hover,.paper-report-article .paper-term:focus-visible{border-bottom-color:var(--accent);color:var(--accent)}
+/* Real DOM hover card (a child .paper-term-card span) so the definition can
+   render its Markdown/KaTeX — a CSS attr() ::after could only show plain text. */
+.paper-report-article .paper-term-card{
+  position:absolute;left:0;bottom:calc(100% + 8px);z-index:40;
+  user-select:none;-webkit-user-select:none;
+  width:max-content;max-width:320px;padding:9px 12px;border-radius:8px;
+  background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-light);
+  box-shadow:0 6px 24px rgba(0,0,0,.35);font-size:12.5px;font-weight:400;line-height:1.5;
+  white-space:normal;text-align:left;pointer-events:none;opacity:0;transform:translateY(3px);
+  transition:opacity .15s ease,transform .15s ease}
+.paper-report-article .paper-term:hover .paper-term-card,
+.paper-report-article .paper-term:focus-visible .paper-term-card{opacity:1;transform:translateY(0)}
+/* The card carries rendered report HTML — tame block spacing + math size. */
+.paper-report-article .paper-term-card p{margin:0}
+.paper-report-article .paper-term-card p+p{margin-top:.4em}
+.paper-report-article .paper-term-card .katex{font-size:1em}
+.paper-report-article .paper-term-card .katex-display{margin:.3em 0}
+/* Keep the popover from spilling off the right edge of narrow viewports. */
+@media(max-width:640px){.paper-report-article .paper-term-card{max-width:240px}}
+
+/* ── Framed figures ── */
+.paper-report-article figure.paper-figure{margin:20px 0;text-align:center}
+.paper-report-article figure.paper-figure img{margin:0 auto}
+.paper-report-article figure.paper-figure figcaption{margin-top:8px;font-size:12px;color:var(--text-tertiary);line-height:1.5;max-width:90%;margin-left:auto;margin-right:auto}
+
+@media(max-width:900px){
+  .paper-report-doc{grid-template-columns:1fr;padding:18px 18px 48px}
+  .paper-report-doc > .paper-report-toc{display:none}
+}
+
+/* On a portrait tablet the reader single-panes to the FULL viewport width, so
+ * unlike a true phone there is ample room for the sticky sidebar TOC. The
+ * `max-width:900px` collapse above (which correctly drops the TOC on a narrow
+ * handset) also swallows a ~820px portrait tablet — this block runs AFTER it
+ * (source order) to re-grid the doc + re-show the TOC for the coarse-pointer
+ * tablet band only. Keeps a slightly narrower sidebar than desktop's 216px. */
+@media(min-width:769px) and (max-width:1024px) and (pointer:coarse){
+  .paper-report-doc{grid-template-columns:1fr minmax(150px,190px);gap:24px;padding:20px 22px 56px}
+  .paper-report-doc > .paper-report-toc{display:block}
+}
+
+/* ── Finish tag (model + cost badge, appended at report end) ── */
+.paper-report-finish-tag{display:flex;flex-wrap:wrap;align-items:center;gap:8px;
+  margin:36px 0 8px;padding:10px 14px;border-top:1px solid var(--border);
+  font-size:12px;color:var(--text-tertiary);line-height:1.4}
+.paper-report-finish-tag .paper-finish-label{font-size:11px;text-transform:uppercase;
+  letter-spacing:.5px;opacity:.7;margin-right:2px}
+.paper-report-finish-tag span:not(.paper-finish-label){display:inline-flex;align-items:center;gap:5px;
+  padding:3px 9px;border-radius:999px;background:var(--bg-secondary);border:1px solid var(--border)}
+.paper-report-finish-tag .paper-finish-model{color:var(--text-secondary);font-weight:600}
+.paper-report-finish-tag .paper-finish-model svg{opacity:.75}
+.paper-report-finish-tag .paper-finish-cost{color:#16a34a;border-color:rgba(22,163,74,.32);background:rgba(22,163,74,.08)}
+.paper-report-finish-tag .paper-finish-tokens{font-variant-numeric:tabular-nums}
+
+/* ── Citation-integrity card (shown only when suspicious citations found) ── */
+.paper-citation-audit{margin:0 0 24px;padding:14px 16px;border-radius:10px;
+  border:1px solid rgba(217,119,6,.42);background:rgba(217,119,6,.07);
+  color:var(--text-secondary)}
+.paper-citation-audit .paper-cite-head{display:flex;align-items:center;gap:9px;
+  color:#b45309;font-weight:700;font-size:14.5px}
+.paper-citation-audit .paper-cite-head svg{flex:0 0 auto;color:#d97706}
+.paper-citation-audit .paper-cite-sub{margin:8px 0 12px;font-size:12.5px;
+  color:var(--text-tertiary);line-height:1.5}
+.paper-citation-audit .paper-cite-list{list-style:none;margin:0;padding:0;
+  display:flex;flex-direction:column;gap:10px}
+.paper-citation-audit .paper-cite-item{display:flex;flex-wrap:wrap;align-items:center;
+  gap:6px 10px;padding:9px 11px;border-radius:8px;background:var(--bg-secondary);
+  border:1px solid var(--border);font-size:13px}
+.paper-citation-audit .paper-cite-id{font-family:var(--mono,monospace);font-size:12px;
+  font-weight:600;color:#b45309;background:rgba(217,119,6,.1);
+  padding:2px 7px;border-radius:6px}
+.paper-citation-audit .paper-cite-reason{color:var(--text-secondary)}
+.paper-citation-audit .paper-cite-checked{color:var(--accent);font-size:12px;text-decoration:none}
+.paper-citation-audit .paper-cite-checked:hover{text-decoration:underline}
+.paper-citation-audit .paper-cite-titles{flex-basis:100%;display:flex;flex-direction:column;
+  gap:2px;margin-top:3px;font-size:12px;color:var(--text-tertiary)}
+.paper-citation-audit .paper-cite-matched{color:var(--text-secondary)}
+[data-theme="tofu"] .paper-citation-audit{border-radius:var(--radius-sm);border-width:2px}
+
+/* ── Terminology-completeness card (shown only when a glossary gap is found) ── */
+.paper-terminology-audit{margin:0 0 24px;padding:14px 16px;border-radius:10px;
+  border:1px solid rgba(37,99,235,.38);background:rgba(37,99,235,.06);
+  color:var(--text-secondary)}
+.paper-terminology-audit .paper-cite-head{display:flex;align-items:center;gap:9px;
+  color:#1d4ed8;font-weight:700;font-size:14.5px}
+.paper-terminology-audit .paper-cite-head svg{flex:0 0 auto;color:#2563eb}
+.paper-terminology-audit .paper-cite-sub{margin:8px 0 12px;font-size:12.5px;
+  color:var(--text-tertiary);line-height:1.5}
+.paper-terminology-audit .paper-cite-list{list-style:none;margin:0;padding:0;
+  display:flex;flex-direction:column;gap:10px}
+.paper-terminology-audit .paper-term-item{display:flex;flex-wrap:wrap;align-items:center;
+  gap:6px 10px;padding:9px 11px;border-radius:8px;background:var(--bg-secondary);
+  border:1px solid var(--border);font-size:13px}
+.paper-terminology-audit .paper-term-id{font-family:var(--mono,monospace);font-size:12px;
+  font-weight:600;color:#1d4ed8;background:rgba(37,99,235,.1);
+  padding:2px 7px;border-radius:6px}
+.paper-terminology-audit .paper-term-reason{color:var(--text-secondary)}
+.paper-terminology-audit .paper-term-where{color:var(--text-tertiary);font-size:12px}
+.paper-terminology-audit .paper-term-evidence{flex-basis:100%;margin-top:3px;font-size:12px;
+  color:var(--text-tertiary);font-style:italic}
+[data-theme="tofu"] .paper-terminology-audit{border-radius:var(--radius-sm);border-width:2px}
+
+/* ── Per-theme flourishes ── */
+[data-theme="light"] .paper-report-toc-title{color:#9a8f7a}
+[data-theme="light"] .paper-report-article figure.paper-figure figcaption{font-family:'Source Serif Pro','Georgia',serif;font-style:italic}
+[data-theme="tofu"] .paper-report-toc{border-left:2px dashed #C4B89E}
+[data-theme="tofu"] .paper-report-toc a.active{background:rgba(187,149,114,.14);color:#8A6A48;border-left-color:#BB9572}
+[data-theme="tofu"] .paper-report-article blockquote.paper-callout{border-radius:var(--radius-sm);border-width:2px}
+[data-theme="tofu"] .paper-report-finish-tag .paper-finish-cost{color:#5a7d3a;border-color:rgba(90,125,58,.3);background:rgba(90,125,58,.08)}
+
+/* ═══════════════════════════════════════════
+   ★ Image Generation (legacy tool results)
+   ═══════════════════════════════════════════ */
+/* ── Image Gen Result card (used in tool results) ── */
+.imagegen-card{border-radius:12px;overflow:hidden;margin:8px 0;max-width:512px;background:var(--bg-tertiary);border:1px solid var(--border)}
+.imagegen-card img{display:block;width:100%;height:auto;cursor:zoom-in;transition:filter .2s}
+.imagegen-card img:hover{filter:brightness(1.05)}
+/* ★ Defence-in-depth: legacy img rule now excludes these via :not(), but keep overrides just in case */
+.message-body .imagegen-card img{max-width:none;max-height:none;border:none;border-radius:0;margin-bottom:0}
+.imagegen-card-footer{display:flex;align-items:flex-start;gap:8px;padding:8px 12px;font-size:11px;color:var(--text-tertiary)}
+.imagegen-card-footer .ig-prompt{flex:1;min-width:0;overflow-wrap:break-word;word-break:break-word;white-space:pre-wrap;font-style:italic}
+.imagegen-card-footer .ig-actions{display:flex;gap:4px}
+.imagegen-card-footer .ig-action-btn{background:none;border:none;color:var(--text-tertiary);cursor:pointer;padding:4px 6px;border-radius:6px;font-size:11px;transition:all .15s}
+.imagegen-card-footer .ig-action-btn:hover{color:var(--text-primary);background:var(--bg-hover)}
+/* Image gen loading spinner */
+.imagegen-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;gap:16px;min-height:200px;background:var(--bg-tertiary);border-radius:12px;border:1px solid var(--border);max-width:512px;margin:8px 0}
+.imagegen-loading .ig-loading-text{font-size:13px;color:var(--text-secondary);font-weight:500}
+.imagegen-loading .ig-loading-sub{font-size:11px;color:var(--text-tertiary)}
+@keyframes spin{to{transform:rotate(360deg)}}
+/* Image gen error */
+.imagegen-error{padding:16px;background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.2);border-radius:12px;max-width:512px;margin:8px 0}
+.imagegen-error .ig-error-title{font-size:13px;font-weight:600;color:#ef4444;margin-bottom:6px;display:flex;align-items:center;gap:6px}
+.imagegen-error .ig-error-text{font-size:12px;color:var(--text-secondary);line-height:1.4}
+/* Fullscreen image overlay */
+/* ★ Perf: removed backdrop-filter:blur(8px) — blur forces GPU re-composite on scroll.
+ * Solid rgba(0,0,0,0.95) is visually equivalent on dark bg. */
+.imagegen-fullscreen{position:fixed;inset:0;height:var(--vh100,100vh);z-index:9999;background:rgba(0,0,0,0.95);display:flex;align-items:center;justify-content:center;cursor:zoom-out;animation:fadeIn .2s ease}
+.imagegen-fullscreen img{max-width:95vw;max-height:95vh;max-height:calc(var(--vh100,100vh)*0.95);object-fit:contain;border-radius:8px;box-shadow:0 0 60px rgba(0,0,0,0.5)}
+/* Image gen inside tool panel */
+.ptool-imagegen-block{margin:4px 0}
+.ptool-imagegen-block .imagegen-card{margin:6px 12px 4px 28px;max-width:min(720px,calc(100% - 40px));width:auto}
+.ptool-imagegen-block .imagegen-error{margin:6px 12px 4px 28px;max-width:min(720px,calc(100% - 40px))}
+.ptool-imagegen-header{cursor:default}
+.ptool-imagegen-header .ig-params{font-size:10px;opacity:.8;font-family:var(--font-mono,monospace)}
+
+/* ── read_files image results (compact thumbnail grid) ── */
+.ptool-readimg-block{margin:4px 0}
+.ptool-readimg-header{cursor:default}
+.rf-img-grid{display:flex;flex-wrap:wrap;gap:8px;margin:6px 12px 4px 28px}
+.rf-img-tile{margin:0;display:flex;flex-direction:column;gap:3px;max-width:200px}
+.rf-img-tile img{display:block;max-width:200px;max-height:160px;width:auto;height:auto;object-fit:contain;border-radius:8px;border:1px solid var(--border);background:var(--bg-tertiary);cursor:zoom-in;transition:filter .15s,transform .15s}
+.rf-img-tile img:hover{filter:brightness(1.06);transform:translateY(-1px)}
+.rf-img-cap{font-size:10px;color:var(--text-tertiary);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono,monospace)}
+/* Single image: allow a bit larger */
+.rf-img-grid:not(.rf-img-grid-multi) .rf-img-tile,
+.rf-img-grid:not(.rf-img-grid-multi) .rf-img-tile img{max-width:340px}
+.rf-img-grid:not(.rf-img-grid-multi) .rf-img-tile img{max-height:260px}
+.rf-img-grid:not(.rf-img-grid-multi) .rf-img-cap{max-width:340px}
+.message-body .rf-img-tile img{margin-bottom:0}
+@media (max-width:560px){.rf-img-tile,.rf-img-tile img,.rf-img-cap{max-width:140px}.rf-img-tile img{max-height:120px}}
+/* ── inspect_image (zoom/rotate/crop viewer) — cyan accent + ops chip ── */
+.ptool-inspectimg-block .ptool-icon{color:#22d3ee}
+.rf-inspect-chip{color:#22d3ee;background:rgba(34,211,238,0.12);border:1px solid rgba(34,211,238,0.32);font-family:var(--font-mono,monospace);font-size:10px;letter-spacing:.02em}
+/* A deliberate inspection deserves more room than a thumbnail — show it larger. */
+.rf-img-grid-inspect .rf-img-tile,
+.rf-img-grid-inspect .rf-img-tile img{max-width:420px}
+.rf-img-grid-inspect .rf-img-tile img{max-height:340px;border-color:rgba(34,211,238,0.3)}
+.rf-img-grid-inspect .rf-img-cap{max-width:420px}
+@media (max-width:560px){.rf-img-grid-inspect .rf-img-tile,.rf-img-grid-inspect .rf-img-tile img,.rf-img-grid-inspect .rf-img-cap{max-width:160px}.rf-img-grid-inspect .rf-img-tile img{max-height:140px}}
+.ig-svg-badge{font-family:var(--font-mono,monospace);font-size:10px;letter-spacing:.04em;font-weight:600}
+/* Saved-path chips below the generated image */
+.ig-path-bar{display:flex;flex-wrap:wrap;gap:6px;padding:6px 12px 10px;border-top:1px solid var(--border)}
+.ig-path-chip{display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:3px 8px;border-radius:6px;background:var(--bg-hover);font-size:11px;color:var(--text-secondary);overflow-wrap:anywhere;word-break:break-word;font-family:var(--font-mono,monospace)}
+.ig-path-chip .ig-path-icon{flex:none;font-family:initial}
+.ig-path-chip-svg{color:#e879f9;background:rgba(232,121,249,0.1)}
+/* ── Generate vs Edit visual distinction ──
+ * generate → magenta accent ("✨ Generated"); edit → cyan accent ("🖌 Edited").
+ * The mode chip sits in the header line; the card border + footer pick up a
+ * tinted accent so the two functions read differently at a glance. */
+.ig-mode-chip{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;letter-spacing:.02em;padding:2px 8px;border-radius:999px;line-height:1.4;white-space:nowrap}
+.ig-mode-chip-gen{color:#e879f9;background:rgba(232,121,249,0.12);border:1px solid rgba(232,121,249,0.35)}
+.ig-mode-chip-edit{color:#22d3ee;background:rgba(34,211,238,0.12);border:1px solid rgba(34,211,238,0.35)}
+.ig-mode-generate .imagegen-card{border-color:rgba(232,121,249,0.35);box-shadow:0 0 0 1px rgba(232,121,249,0.12),0 4px 18px rgba(232,121,249,0.10)}
+.ig-mode-edit .imagegen-card{border-color:rgba(34,211,238,0.35);box-shadow:0 0 0 1px rgba(34,211,238,0.12),0 4px 18px rgba(34,211,238,0.10)}
+.ig-mode-generate .imagegen-card-footer{border-top:1px solid rgba(232,121,249,0.18)}
+.ig-mode-edit .imagegen-card-footer{border-top:1px solid rgba(34,211,238,0.18)}
+.ig-mode-edit .ptool-icon{color:#22d3ee}
+.ig-mode-generate .ptool-icon{color:#e879f9}
+/* Before → after strip for image edits */
+.ig-beforeafter{display:flex;align-items:center;gap:10px;padding:12px;background:linear-gradient(135deg,rgba(34,211,238,0.05),rgba(34,211,238,0.02))}
+.ig-ba-item{flex:1 1 0;min-width:0;margin:0;display:flex;flex-direction:column;align-items:center;gap:6px}
+.ig-ba-item img{display:block;width:100%;height:auto;max-height:340px;object-fit:contain;border-radius:8px;border:1px solid var(--border);cursor:zoom-in;transition:filter .2s,transform .2s;background:var(--bg-secondary)}
+.ig-ba-item img:hover{filter:brightness(1.05);transform:scale(1.01)}
+.ig-ba-item figcaption{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-tertiary)}
+.ig-ba-item:first-child figcaption{color:var(--text-tertiary)}
+.ig-ba-item:last-child figcaption{color:#22d3ee}
+.ig-ba-arrow{flex:none;font-size:20px;font-weight:700;color:#22d3ee;opacity:.85}
+.message-body .ig-beforeafter img{max-width:none;margin-bottom:0}
+@media (max-width:560px){.ig-beforeafter{flex-direction:column}.ig-ba-arrow{transform:rotate(90deg)}}
+[data-theme="light"] .ig-mode-generate .imagegen-card{box-shadow:0 0 0 1px rgba(232,121,249,0.10),0 4px 14px rgba(232,121,249,0.08)}
+[data-theme="light"] .ig-mode-edit .imagegen-card{box-shadow:0 0 0 1px rgba(34,211,238,0.10),0 4px 14px rgba(34,211,238,0.08)}
+.search-mode-toggle{display:flex;align-items:center;gap:6px;padding:5px 11px 5px 8px;min-height:32px;box-sizing:border-box;border-radius:20px;cursor:pointer;user-select:none;position:relative;z-index:0;background:var(--bg-tertiary);border:1.5px solid var(--border);transition:border-color .4s,background .4s,color .3s,box-shadow .4s;color:var(--text-tertiary);font-size:12px;font-weight:600;font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;white-space:nowrap}.search-mode-toggle::before{content:'';position:absolute;inset:-2px;border-radius:22px;padding:2px;background:conic-gradient(from var(--search-angle),var(--search-blue),var(--search-purple),var(--search-cyan),var(--search-blue));-webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);-webkit-mask-composite:xor;mask-composite:exclude;opacity:0;transition:opacity .5s ease;pointer-events:none;animation:none}.search-mode-toggle:hover{border-color:var(--border-light);background:var(--bg-hover)}.search-mode-toggle[data-mode="single"]{color:#93c5fd;border-color:transparent;background:rgba(59,130,246,0.08);animation:searchGlow 2.5s ease-in-out infinite}.search-mode-toggle[data-mode="single"]::before{opacity:1;animation:searchBorderSpin 2.5s linear infinite}.search-mode-toggle[data-mode="single"]:hover{background:rgba(59,130,246,0.12)}.search-mode-toggle[data-mode="single"] .sm-icon{color:#60a5fa;animation:searchIconPulse .5s ease forwards}.search-mode-toggle[data-mode="multi"]{color:#c4b5fd;border-color:transparent;background:rgba(139,92,246,0.1);animation:searchGlowPurple 2.5s ease-in-out infinite}.search-mode-toggle[data-mode="multi"]::before{opacity:1;background:conic-gradient(from var(--search-angle),var(--search-purple),#c084fc,var(--search-cyan),var(--search-purple));animation:searchBorderSpin 2.5s linear infinite}.search-mode-toggle[data-mode="multi"]:hover{background:rgba(139,92,246,0.15)}.search-mode-toggle[data-mode="multi"] .sm-icon{color:#a78bfa;animation:searchIconPulse .5s ease forwards}.sm-icon{display:flex;align-items:center;justify-content:center;transition:transform .4s cubic-bezier(.34,1.56,.64,1),color .3s}.sm-label{letter-spacing:.02em;max-width:60px;overflow:hidden;text-overflow:ellipsis}.sm-mode-pill{font-size:9px;font-weight:800;font-family:'JetBrains Mono',monospace;padding:2px 6px;border-radius:8px;letter-spacing:.04em;line-height:1}.search-mode-toggle[data-mode="off"] .sm-mode-pill{background:var(--border);color:var(--text-tertiary)}.search-mode-toggle[data-mode="single"] .sm-mode-pill{background:rgba(59,130,246,0.25);color:#93c5fd}.search-mode-toggle[data-mode="multi"] .sm-mode-pill{background:rgba(139,92,246,0.25);color:#c4b5fd}
+
+/* ═══ Human-steer inbox-injection row (mid-turn) — reuses .sw-inbox-row/.sw-card
+   styling; a distinct left accent so it reads as "the operator", not a peer. */
+.sw-steer-row .sw-inbox-row-header .ptool-icon{color:#34d399}
+.sw-steer-card-item{border-left:2px solid rgba(16,185,129,0.35)}
+/* ═══ Intent-stall nudge row — the LOOP re-driving a stalled model. Amber
+   because this is an INTERCEPTION that recovered the turn: red would read as a
+   crash, green is already the operator's colour. Reuses .sw-inbox-row/.sw-card. */
+.sw-stall-row .sw-inbox-row-header .ptool-icon{color:#f59e0b}
+.sw-stall-card-item{border-left:2px solid rgba(245,158,11,0.35)}
+.sw-stall-reason{font-size:11px;color:var(--text-secondary);line-height:1.5;padding:2px 0}
+.sw-stall-bound{font-size:10px;color:var(--text-tertiary);line-height:1.5;padding:0 0 4px}
+/* ═══════════════════════════════════════════
+   ★ Effort Toggle (input bar)
+   ═══════════════════════════════════════════ */
+/* Effort toggle wrapper + dropdown */
+.preset-toggle-wrapper{position:relative;min-width:0;flex:0 1 auto}
+.preset-toggle{display:flex;align-items:center;gap:5px;padding:5px 10px 5px 7px;min-height:32px;box-sizing:border-box;border-radius:20px;cursor:pointer;user-select:none;background:var(--bg-tertiary);border:1.5px solid var(--border);transition:border-color .3s,background-color .3s,color .3s;color:var(--text-tertiary);font-size:12px;font-weight:600;font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;white-space:nowrap;min-width:0;overflow:hidden}
+.preset-toggle:hover{border-color:var(--border-light);background:var(--bg-hover)}
+.preset-toggle .ps-icon{font-size:14px;transition:transform .3s;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex-shrink:0}
+.preset-toggle .ps-icon:empty{display:none}
+.preset-toggle .ps-label{font-size:11px;font-weight:700;font-family:'JetBrains Mono',monospace;letter-spacing:.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.preset-toggle .ps-arrow{display:inline-flex;align-items:center;opacity:0.45;transition:transform .2s;flex-shrink:0}
+.preset-toggle-wrapper.open .ps-arrow{transform:rotate(180deg)}
+.preset-toggle[data-brand="generic"]{color:var(--text-tertiary);border-color:var(--border);background:var(--bg-tertiary)}
+.preset-toggle[data-brand="claude"]{color:#D97706;border-color:rgba(217,119,6,0.3);background:rgba(217,119,6,0.06)}
+.preset-toggle[data-brand="openai"]{color:#10a37f;border-color:rgba(16,163,127,0.3);background:rgba(16,163,127,0.06)}
+.preset-toggle[data-brand="gemini"]{color:#4285f4;border-color:rgba(66,133,244,0.3);background:rgba(66,133,244,0.06)}
+.preset-toggle[data-brand="qwen"]{color:#6F42C1;border-color:rgba(111,66,193,0.3);background:rgba(111,66,193,0.06)}
+.preset-toggle[data-brand="doubao"]{color:#3B82F6;border-color:rgba(59,130,246,0.3);background:rgba(59,130,246,0.06)}
+.preset-toggle[data-brand="minimax"]{color:#ef4444;border-color:rgba(239,68,68,0.3);background:rgba(239,68,68,0.06)}
+.preset-toggle[data-brand="deepseek"]{color:#4D6BFE;border-color:rgba(77,107,254,0.3);background:rgba(77,107,254,0.06)}
+.preset-toggle[data-brand="grok"]{color:#aaa;border-color:rgba(170,170,170,0.3);background:rgba(170,170,170,0.06)}
+.preset-toggle[data-brand="mistral"]{color:#F7D046;border-color:rgba(247,208,70,0.3);background:rgba(247,208,70,0.06)}
+.preset-toggle[data-brand="glm"]{color:#3859FF;border-color:rgba(56,89,255,0.3);background:rgba(56,89,255,0.06)}
+.preset-toggle[data-brand="meituan"]{color:#FFC300;border-color:rgba(255,195,0,0.3);background:rgba(255,195,0,0.06)}
+.preset-toggle[data-brand="tsinghua"]{color:#82318E;border-color:rgba(130,49,142,0.3);background:rgba(130,49,142,0.06)}
+@keyframes presetGlow{0%,100%{box-shadow:0 0 8px rgba(245,158,11,0.1)}50%{box-shadow:0 0 16px rgba(245,158,11,0.25)}}
+/* Preset dropdown */
+.preset-dropdown{display:none;position:absolute;bottom:calc(100% + 6px);left:0;transform:none;background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;padding:5px;min-width:280px;box-shadow:0 8px 32px rgba(0,0,0,0.3);z-index:1000;animation:presetDropIn .15s ease;max-height:50vh;overflow-y:auto}
+.preset-toggle-wrapper.open .preset-dropdown{display:block}
+@keyframes presetDropIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+.preset-dropdown-item{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;cursor:pointer;transition:background .15s;font-size:12px}
+.preset-dropdown-item:hover{background:var(--bg-hover)}
+.preset-dropdown-item.active{background:var(--bg-hover);outline:1.5px solid var(--border-light)}
+.preset-dropdown-item .ps-dd-icon{font-size:16px;width:22px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.preset-dropdown-item .ps-dd-label{font-weight:700;font-family:'JetBrains Mono',monospace;font-size:11px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.preset-dropdown-item[data-value="off"] .ps-dd-label{color:var(--text-tertiary)}
+.preset-dropdown-item[data-value="qwen"] .ps-dd-label{color:#a78bfa}
+.preset-dropdown-item[data-value="medium"] .ps-dd-label{color:#60a5fa}
+.preset-dropdown-item[data-value="high"] .ps-dd-label{color:#c084fc}
+.preset-dropdown-item[data-value="max"] .ps-dd-label{color:#f59e0b}
+/* Preset dropdown section labels & divider */
+.ps-dd-section-label{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-tertiary);opacity:0.6;padding:6px 12px 2px;user-select:none}
+
+/* Hint footer when too many models in dropdown */
+.ps-dd-hint{display:flex;align-items:center;gap:6px;padding:8px 12px 6px;margin-top:4px;border-top:1px solid var(--border);font-size:10px;color:var(--text-tertiary);cursor:pointer;transition:color .15s;user-select:none}
+.ps-dd-hint:hover{color:var(--text-secondary)}
+.ps-dd-hint svg{flex-shrink:0;opacity:0.5}
+/* Model-picker search box — sticky to the dropdown's top edge so it stays
+ * reachable while the list scrolls (mirrors the sticky-bottom depth wrap). */
+.ps-dd-search{display:flex;align-items:center;gap:6px;padding:6px 10px;margin:-5px -5px 5px;border-bottom:1px solid var(--border);position:sticky;top:-5px;background:var(--bg-secondary);z-index:2;color:var(--text-tertiary)}
+.ps-dd-search svg{flex-shrink:0;opacity:0.5}
+.ps-dd-search input{flex:1;min-width:0;border:none;outline:none;background:transparent;color:var(--text-primary);font-size:12px;font-family:inherit;padding:2px 0}
+.ps-dd-search input::placeholder{color:var(--text-tertiary);opacity:0.7}
+/* Fold badge (alias mirrors) — count of interchangeable deployments. */
+.ps-dd-fold-badge{flex-shrink:0;font-size:9px;font-weight:700;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary);border:1px solid var(--border);border-radius:6px;padding:1px 5px;cursor:pointer;transition:color .15s,border-color .15s;user-select:none}
+.ps-dd-fold-badge:hover{color:var(--text-secondary);border-color:var(--border-light)}
+.ps-dd-fold-badge.open{color:var(--accent,#7aa2f7);border-color:var(--accent,#7aa2f7)}
+/* Family expander row — "还有 N 个版本 ▸". */
+.ps-dd-expander{display:flex;align-items:center;gap:4px;padding:4px 12px 4px 42px;font-size:10px;color:var(--text-tertiary);cursor:pointer;transition:color .15s;user-select:none}
+.ps-dd-expander:hover{color:var(--text-secondary)}
+.ps-dd-expander .ps-dd-expander-arrow{transition:transform .15s;opacity:0.6}
+.ps-dd-expander.open .ps-dd-expander-arrow{transform:rotate(180deg)}
+/* Fold sub-container — collapsed by default; .open (user toggle) or
+ * .search-open (search hit) reveals the member rows. */
+.ps-dd-sub{display:none}
+.ps-dd-sub.open,.ps-dd-sub.search-open{display:block}
+.ps-dd-sub-item{padding-left:26px}
+.ps-dd-sub-item .ps-dd-label{font-weight:500;opacity:0.85}
+/* Scrollbar styling for preset dropdown */
+.preset-dropdown::-webkit-scrollbar{width:4px}
+.preset-dropdown::-webkit-scrollbar-track{background:transparent}
+.preset-dropdown::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.preset-dropdown::-webkit-scrollbar-thumb:hover{background:var(--border-light)}
+/* Preset badge in topbar */
+/* preset-badge removed — model-badge in topbar is the single source of truth */
+/* Effort tag in message finish info */
+.finish-tag.preset{font-size:9px;font-weight:700;letter-spacing:.03em;padding:1px 6px;max-width:220px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+.finish-tag.preset[data-preset="off"]{color:var(--text-tertiary);background:var(--bg-tertiary);border-color:var(--border)}
+.finish-tag.preset[data-preset="opus"]{color:#e8a55d;background:rgba(232,165,93,0.08);border-color:rgba(232,165,93,0.2)}
+.finish-tag.preset[data-preset="qwen"]{color:#a78bfa;background:rgba(167,139,250,0.08);border-color:rgba(167,139,250,0.2)}
+.finish-tag.preset[data-preset="gemini"]{color:#4285f4;background:rgba(66,133,244,0.08);border-color:rgba(66,133,244,0.2)}
+.finish-tag.preset[data-preset="minimax"]{color:#f23f5d;background:rgba(242,63,93,0.08);border-color:rgba(242,63,93,0.2)}
+.finish-tag.preset[data-preset="doubao"]{color:#1E37FC;background:rgba(30,55,252,0.08);border-color:rgba(30,55,252,0.2)}
+.finish-tag.preset[data-preset="medium"]{color:#60a5fa;background:rgba(96,165,250,0.08);border-color:rgba(96,165,250,0.2)}
+.finish-tag.preset[data-preset="high"]{color:#a78bfa;background:rgba(167,139,250,0.08);border-color:rgba(167,139,250,0.2)}
+.finish-tag.preset[data-preset="max"]{color:#f59e0b;background:rgba(245,158,11,0.08);border-color:rgba(245,158,11,0.2)}
+/* Route tag — actual provider · API-key slot that served the turn */
+.finish-tag.route{font-size:9px;font-weight:600;letter-spacing:.02em;padding:1px 6px;max-width:240px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;color:var(--text-tertiary);background:var(--bg-tertiary);border-color:var(--border);opacity:.85}
+
+/* Fallback cause tag — the settled counterpart of the streaming banner's
+   .fb-reason. Renders WHY the fallback happened as visible text; the verbatim
+   (possibly whole-HTML-page) cause stays in the title. Wraps rather than
+   truncating hard, since a distilled cause is short but not fixed-width. */
+.finish-tag.warn.fb-cause{display:inline-flex;align-items:baseline;gap:5px;max-width:100%;min-width:0;font-weight:500;white-space:normal;text-align:left}
+.finish-tag.warn.fb-cause .fb-cause-kind{font-weight:700;letter-spacing:.02em;flex-shrink:0}
+.finish-tag.warn.fb-cause .fb-cause-detail{font-family:'JetBrains Mono',monospace;opacity:.9;word-break:break-word;overflow-wrap:anywhere}
+
+/* ═══════════════════════════════════════════
+   ★ Full-page Drop Overlay
+   ═══════════════════════════════════════════ */
+/* ★ Perf: removed backdrop-filter:blur(8px) from drop overlay */
+.drop-overlay{display:none;position:fixed;inset:0;height:var(--vh100,100vh);z-index:200;background:rgba(10,10,12,0.92);align-items:center;justify-content:center}
+.drop-overlay.visible{display:flex}
+.drop-overlay-inner{text-align:center;animation:fadeIn .2s ease}
+.drop-icon{margin-bottom:16px;animation:dropBounce 1s ease-in-out infinite;color:var(--text-secondary)}
+.drop-icon svg{width:56px;height:56px}
+.drop-text{font-size:20px;font-weight:600;color:var(--text-primary);margin-bottom:6px}
+.drop-hint{font-size:13px;color:var(--text-tertiary)}
+@keyframes dropBounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+
+/* ★ Perf: removed backdrop-filter:blur(4px) — solid bg is visually equivalent, no GPU cost */
+.modal-overlay{display:none;position:fixed;inset:0;height:var(--vh100,100vh);background:rgba(0,0,0,0.7);z-index:100;align-items:center;justify-content:center}.modal-overlay.open{display:flex}.modal{background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);padding:28px 32px;width:600px;max-width:92vw;max-height:85vh;max-height:calc(var(--vh100, 100vh) * 0.85);overflow-y:auto;box-shadow:var(--shadow)}.modal h3{font-size:18px;font-weight:700;margin-bottom:22px;letter-spacing:-0.01em}.modal label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em}.modal input,.modal select{width:100%;padding:10px 12px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:13px;margin-bottom:16px;outline:none}.modal input:focus{border-color:var(--accent)}.modal .modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)}.modal .btn{padding:9px 24px;border-radius:var(--radius-sm);border:none;font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:background-color var(--transition),color var(--transition)}.modal .btn-primary{background:var(--accent);color:white}.modal .btn-primary:hover{background:var(--accent-hover)}.modal .btn-secondary{background:var(--bg-tertiary);color:var(--text-secondary)}.modal .btn-secondary:hover{background:var(--bg-hover)}.modal .range-row{display:flex;align-items:center;gap:12px;margin-bottom:16px}.modal input[type="range"]{flex:1;margin:0;padding:0;height:4px;-webkit-appearance:none;appearance:none;background:var(--border);border-radius:2px;border:none}.modal input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--accent);cursor:pointer}.modal .range-value{font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-secondary);min-width:48px;text-align:right}
+.message-actions{display:flex;gap:4px;flex-wrap:wrap;opacity:0;transition:opacity var(--transition);margin-top:10px;padding-top:6px;border-top:1px solid transparent;contain:layout style;will-change:opacity}.message:hover .message-actions{opacity:1;border-top-color:var(--border)}
+
+/* ★ Failed / interrupted turn: reveal the bottom action bar WITHOUT hover so
+ *   Continue / Retry is discoverable on the exact turn that needs it (a coarse
+ *   pointer never fires :hover; a long errored conversation forces scroll +
+ *   hover-hunt at the very bottom otherwise). Stamped by renderMessage as
+ *   `.message.turn-failed`. The divider line shows too, so the bar reads as a
+ *   deliberate footer, not a stray hover artifact. */
+.message.turn-failed .message-actions{opacity:1;border-top-color:var(--border)}
+.msg-action-btn{background:none;border:none;color:var(--text-tertiary);cursor:pointer;padding:3px 8px;border-radius:4px;transition:color var(--transition),background-color var(--transition);display:flex;align-items:center;gap:4px;font-size:11px;font-family:inherit}.msg-action-btn:hover{color:var(--text-primary);background:var(--bg-hover)}.msg-action-btn.copied{color:#34d399}.msg-regen-btn:hover{color:#f59e0b;background:rgba(245,158,11,0.1)}.msg-continue-btn{color:var(--accent)!important;opacity:0.7;transition:opacity var(--transition),background-color var(--transition)}.msg-continue-btn:hover{opacity:1;color:var(--accent)!important;background:rgba(99,102,241,0.1)!important}.msg-translate-btn:hover{color:#38bdf8;background:rgba(56,189,248,0.1)}.msg-translate-btn.translated{color:#38bdf8}.edit-area{margin-top:4px}.edit-textarea{width:100%;min-height:60px;max-height:300px;padding:10px 12px;background:var(--bg-tertiary);border:1px solid var(--accent);border-radius:var(--radius-sm);color:var(--text-primary);font-family:inherit;font-size:14px;line-height:1.5;resize:none;outline:none}.edit-actions{display:flex;gap:8px;margin-top:8px;justify-content:flex-end;flex-wrap:wrap}.edit-actions button{padding:6px 16px;border-radius:var(--radius-sm);border:none;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:color var(--transition),background-color var(--transition)}.edit-save-btn{background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border)!important}.edit-save-btn:hover{background:var(--bg-hover);color:var(--text-primary)}.edit-resend-btn{background:var(--accent);color:white}.edit-resend-btn:hover{background:var(--accent-hover)}.edit-cancel-btn{background:transparent;color:var(--text-tertiary)}.edit-cancel-btn:hover{color:var(--text-primary)}.edit-hint{font-size:11px;color:var(--text-tertiary);width:100%;text-align:right;margin-top:4px}
+
+/* ── Delete message button & confirmation popup ── */
+.msg-delete-btn{opacity:0.5}.msg-delete-btn:hover{color:#ef4444!important;background:rgba(239,68,68,0.1)!important;opacity:1}
+.delete-turn-popup{position:absolute;bottom:calc(100% + 4px);right:0;z-index:50;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);padding:8px;box-shadow:0 4px 16px rgba(0,0,0,0.25);display:flex;flex-direction:column;gap:4px;min-width:150px;animation:fadeIn .15s ease}
+.delete-popup-title{font-size:11px;font-weight:600;color:var(--text-secondary);padding:0 4px 4px;border-bottom:1px solid var(--border);margin-bottom:2px}
+.delete-popup-btn{display:flex;align-items:center;gap:6px;padding:6px 10px;border:none;border-radius:var(--radius-sm);background:none;color:var(--text-primary);font-size:12px;font-family:inherit;cursor:pointer;transition:background .15s,color .15s;white-space:nowrap}
+.delete-popup-btn:hover{background:var(--bg-hover)}
+.delete-popup-turn:hover{color:#ef4444;background:rgba(239,68,68,0.1)}
+.delete-popup-single:hover{color:#f59e0b;background:rgba(245,158,11,0.1)}
+.delete-popup-cancel{color:var(--text-tertiary);font-size:11px}.delete-popup-cancel:hover{color:var(--text-primary)}
+.md-content .katex-display{margin:16px 0;overflow-x:auto;overflow-y:hidden;padding:8px 0;text-align:center}.md-content .katex{font-size:1.08em}.math-error{color:var(--error-text);font-size:12px;font-family:'JetBrains Mono',monospace;background:var(--error-bg);padding:2px 6px;border-radius:4px}
+/* ── Narrow DESKTOP window (pointer:fine): compact toolbar items ──
+ * `and (pointer:fine)` is load-bearing: a portrait TABLET (769–1024px, coarse
+ * pointer) has room and must keep the Search label + full submenu padding, so
+ * this compaction must not reach it. Coarse phones (≤768) restructure the whole
+ * toolbar in the phone @media block (submenus → “···” sheet, sm-label hidden).
+ * NOTE: .submenu-label is deliberately NOT hidden even on desktop — the
+ * 增强/工具/模式 triggers have NO icon, so hiding it leaves a bare number badge. */
+@media(max-width:1024px) and (pointer:fine){.depth-btn{padding:3px 6px;font-size:10px}.thinking-depth-bar{gap:1px}.search-mode-toggle .sm-label{display:none}.submenu-arrow{display:none}.submenu-trigger{padding:4px 8px;gap:3px}}
+/* ── Mobile breakpoint — see comprehensive version at end of file ── */
+.animation-slideUp{animation:slideUp .3s ease}
+.message-finish{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);user-select:none}.finish-tag,.token-tag{font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace;padding:2px 8px;border-radius:10px;line-height:1.4;white-space:nowrap}.finish-tag{color:var(--text-tertiary);background:var(--bg-tertiary);border:1px solid var(--border)}.finish-tag.ok{color:#34d399;background:rgba(52,211,153,0.08);border-color:rgba(52,211,153,0.2)}.finish-tag.warn{color:var(--thinking-text);background:var(--thinking-bg);border-color:var(--thinking-border)}.finish-tag.err{color:var(--error-text);background:var(--error-bg);border-color:var(--error-border)}.finish-tag.terminal-failure{display:inline-flex;align-items:center;gap:4px;max-width:100%;white-space:normal;overflow-wrap:anywhere;cursor:help}.token-tag{color:var(--text-tertiary);background:transparent;border:1px solid var(--border);font-weight:500;letter-spacing:.02em}
+.subscription-quota-tag{font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace;padding:2px 8px;border-radius:10px;line-height:1.4;white-space:nowrap;color:#22c55e;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.22);cursor:help}
+
+/* ═══════════════════════════════════════════
+   ★ Cost popover — styled click-to-open breakdown
+   (replaces the old raw title="" tooltip on .cost-tag)
+   ═══════════════════════════════════════════ */
+.cost-tag-detail{cursor:pointer;position:relative}
+.cost-tag-detail:hover{text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px}
+.cost-savings{color:#34d399;font-size:0.85em;margin-left:2px}
+.cost-popover{
+  z-index:10000;
+  width:max-content;max-width:min(360px,calc(100vw - 16px));
+  max-height:calc(100vh - 16px);
+  max-height:calc(var(--vh100,100vh) - 16px);
+  overflow-y:auto;overflow-x:hidden;
+  overscroll-behavior:contain;
+  background:var(--bg-secondary);
+  border:1px solid var(--border-light,var(--border));
+  border-radius:10px;
+  box-shadow:0 8px 28px rgba(0,0,0,0.35),0 2px 6px rgba(0,0,0,0.2);
+  padding:12px 14px;
+  font-family:'JetBrains Mono',ui-monospace,monospace;
+  font-size:11px;line-height:1.5;
+  color:var(--text-secondary);
+  user-select:text;
+  animation:cpFade .12s ease-out
+}
+/* Thin, theme-aware scrollbar so the panel scrolls cleanly */
+.cost-popover::-webkit-scrollbar{width:8px}
+.cost-popover::-webkit-scrollbar-thumb{
+  background:var(--border-light,var(--border));border-radius:4px
+}
+.cost-popover::-webkit-scrollbar-track{background:transparent}
+.cost-popover{scrollbar-width:thin}
+@keyframes cpFade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+.cost-popover .cp-section-title{
+  font-size:11px;font-weight:700;color:var(--text-primary);
+  letter-spacing:.02em;margin-bottom:8px
+}
+.cost-popover .cp-rounds{
+  display:flex;flex-direction:column;gap:7px;
+  margin-bottom:10px;padding-bottom:10px;
+  border-bottom:1px dashed var(--border)
+}
+.cost-popover .cp-round{
+  padding:6px 8px;border-radius:6px;
+  background:var(--bg-tertiary);
+  border-left:2px solid var(--border-light,var(--border))
+}
+.cost-popover .cp-round-head{
+  display:flex;justify-content:space-between;align-items:baseline;gap:10px
+}
+.cost-popover .cp-round-label{font-weight:600;color:var(--text-primary)}
+.cost-popover .cp-round-cost{color:var(--accent);font-weight:600}
+.cost-popover .cp-round-tokens{
+  display:flex;flex-wrap:wrap;gap:8px;margin-top:3px;color:var(--text-tertiary)
+}
+.cost-popover .cp-round-tokens .cp-think{color:#a78bfa}
+.cost-popover .cp-round-tokens .cp-hit{color:#34d399}
+.cost-popover .cp-round-tokens .cp-write{color:#e8a55d}
+.cost-popover .cp-round-meta{
+  display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;align-items:center
+}
+.cost-popover .cp-key{
+  display:inline-flex;align-items:center;gap:3px;
+  color:var(--text-secondary);
+  background:var(--bg-hover,rgba(127,127,127,0.12));
+  padding:1px 6px;border-radius:4px;font-size:10px
+}
+.cost-popover .cp-ico{flex:none;opacity:.85}
+.cost-popover .cp-trace{color:var(--text-tertiary);opacity:.7;font-size:10px}
+.cost-popover .cp-round-break{
+  margin-top:4px;display:flex;align-items:flex-start;gap:4px;flex-wrap:wrap;
+  color:#e8a55d;font-size:10px;line-height:1.45
+}
+/* Long reason prose next to the state badge. flex basis 12em + parent wrap:
+   when the badge leaves < 12em on the first line, the prose drops to a
+   full-width second line instead of shrinking to its 1-CJK-char min-content. */
+.cost-popover .cp-break-text{flex:1 1 12em;min-width:0}
+.cost-popover .cp-round-break .cp-ico{margin-top:1px}
+/* Fault-state colouring (wire-fingerprint verdict, 2026-07): proven-server =
+   teal (not our fault), unproven = amber (unknown), culprit = red (our fault,
+   actionable). Overrides the default amber .cp-round-break colour. */
+.cost-popover .cp-round-break.cp-break-proven{color:#34d399}
+.cost-popover .cp-round-break.cp-break-upstream{color:#34d399}
+.cost-popover .cp-round-break.cp-break-eviction{color:#e8a55d}
+.cost-popover .cp-round-break.cp-break-unproven{color:#e8a55d}
+.cost-popover .cp-round-break.cp-break-culprit{color:#f87171}
+.cost-popover .cp-round-break.cp-break-namespace{color:#f87171}
+.cost-popover .cp-round-break.cp-break-boundary{color:#e8a55d}
+.cost-popover .cp-break-badge{
+  flex:none;font-size:9px;font-weight:600;padding:0 5px;border-radius:8px;
+  line-height:1.5;border:1px solid currentColor;opacity:.95
+}
+.cost-popover .cp-break-badge-proven{color:#34d399}
+.cost-popover .cp-break-badge-upstream{color:#34d399}
+.cost-popover .cp-break-badge-eviction{color:#e8a55d}
+.cost-popover .cp-break-badge-unproven{color:#e8a55d}
+.cost-popover .cp-break-badge-culprit{color:#f87171}
+.cost-popover .cp-break-badge-namespace{color:#f87171}
+.cost-popover .cp-break-badge-boundary{color:#e8a55d}
+/* The named culprit — WHICH message broke cache. Monospace so the msg.field
+   keys read clearly; red to match the 'our fault' state. */
+.cost-popover .cp-break-culprit{
+  margin-top:2px;margin-left:15px;color:#f87171;opacity:.92;
+  font-size:10px;line-height:1.45;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  word-break:break-all
+}
+/* What the model did this round (its tool calls). */
+.cost-popover .cp-round-act{
+  margin-top:3px;color:var(--text-secondary);opacity:.85;
+  font-size:10px;line-height:1.4;word-break:break-word
+}
+/* Concrete tool-result inflow into this round (drives its write). The
+   write-colored accent ties it visually to the `write` chip above. */
+.cost-popover .cp-round-inflow{color:#e8a55d;opacity:.95;cursor:help}
+/* Final-answer round (no tools) — muted, italic so it reads as a terminal note. */
+.cost-popover .cp-round-final{color:var(--text-tertiary);font-style:italic;cursor:help}
+/* "write = previous output + tool results" explanation note. */
+.cost-popover .cp-round-note{
+  margin-top:3px;color:var(--text-tertiary);font-size:10px;
+  line-height:1.4;cursor:help;opacity:.85
+}
+/* Re-cache WASTE line: part of this round's write was already-cached body
+   re-billed (recacheBody), surfaced even when the banner detector was silent.
+   Amber like the miss verdict — it IS lost money — but lighter than a full
+   cp-round-break banner since no fault-state verdict accompanies it. */
+.cost-popover .cp-round-waste{
+  margin-top:3px;color:#e8a55d;font-size:10px;
+  line-height:1.4;cursor:help;opacity:.9
+}
+/* Legend at the bottom of the per-round table. */
+.cost-popover .cp-legend{
+  margin-top:7px;padding-top:7px;border-top:1px dashed var(--border);
+  display:flex;flex-direction:column;gap:2px;
+  color:var(--text-tertiary);font-size:9.5px;line-height:1.45
+}
+.cost-popover .cp-legend-item b{font-weight:600;color:var(--text-secondary)}
+.cost-popover .cp-legend-item b.cp-hit{color:#34d399}
+.cost-popover .cp-legend-item b.cp-write{color:#e8a55d}
+/* At-a-glance cache-miss marker on the collapsed cost tag. */
+.cost-cache-warn{
+  display:inline-flex;align-items:center;color:#e8a55d;
+  vertical-align:middle;margin-left:1px;opacity:.9
+}
+.cost-cache-warn .cp-ico{width:11px;height:11px}
+.cost-tag-warn{border-bottom:1px dotted #e8a55d}
+.cost-popover .cp-totals{display:flex;flex-direction:column;gap:3px}
+.cost-popover .cp-row{display:flex;justify-content:space-between;gap:14px}
+.cost-popover .cp-row-label{color:var(--text-tertiary)}
+.cost-popover .cp-row-val{color:var(--text-secondary);white-space:nowrap}
+.cost-popover .cp-row-sub .cp-row-label,
+.cost-popover .cp-row-sub .cp-row-val{opacity:.7;font-size:10px}
+.cost-popover .cp-row-save .cp-row-val{color:#34d399}
+.cost-popover .cp-total-row{
+  display:flex;justify-content:space-between;align-items:baseline;gap:14px;
+  margin-top:9px;padding-top:8px;border-top:1px solid var(--border);
+  font-weight:700;color:var(--text-primary)
+}
+.cost-popover .cp-total-val{color:var(--accent);font-size:13px}
+.cost-popover .cp-trace-row{
+  margin-top:8px;color:var(--text-tertiary);opacity:.65;
+  font-size:10px;word-break:break-all
+}
+/* Task ID row — the id the user quotes for log lookup; click to copy. */
+.cost-popover .cp-taskid-row{
+  margin-top:8px;padding-top:7px;border-top:1px solid var(--border);
+  color:var(--text-tertiary);font-size:10px;word-break:break-all;cursor:pointer;
+  transition:color .2s
+}
+.cost-popover .cp-taskid-row:hover{color:var(--text-secondary)}
+.cost-popover .cp-taskid-val{
+  font-family:var(--mono,monospace);color:var(--text-secondary);
+  user-select:all
+}
+.cost-popover .cp-taskid-row.cp-copied .cp-taskid-val::after{
+  content:' ✓ copied';color:#34d399;font-family:inherit
+}

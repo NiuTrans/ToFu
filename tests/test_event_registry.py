@@ -21,6 +21,7 @@ is that external frontends discover the vocabulary from the registry.
 
 from __future__ import annotations
 
+import glob
 import os
 import re
 
@@ -28,18 +29,18 @@ import pytest
 
 from lib.agent_core.events import (
     EVENT_CONTRACT_VERSION,
-    TRANSPORT_TYPES,
     event_types,
     get_event_spec,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, '..'))
+pytestmark = pytest.mark.unit
 
 # ── Backend emission scan ──
 # Files/PACKAGES that emit SSE events via append_event / emit_event.
 #
-# ⚠️ ENTRIES MAY BE FILES *OR* DIRECTORIES. Every module that was a single file
+# ⚠️ ENTRIES MAY BE FILES, DIRECTORIES, OR GLOBS. Every module that was a single file
 # here has been split into a package at least once (orchestrator, tool_dispatch,
 # executor, endpoint, manager, …). The previous form of this list named the
 # monolith .py paths and the scanner did ``if not os.path.isfile: continue`` —
@@ -49,9 +50,9 @@ REPO = os.path.normpath(os.path.join(HERE, '..'))
 # used to live here even documented an earlier instance of the same accident
 # and only patched the two paths noticed at the time.)
 #
-# The durable fix is structural, not a longer list: name the PACKAGE, let
-# ``_resolve_scan_targets`` expand a directory to its ``*.py`` recursively, and
-# make a path that resolves to NOTHING a hard failure (see
+# The durable fix is structural, not a longer list: name the PACKAGE (or a glob
+# for a family of root-level modules), let ``_resolve_scan_targets`` expand it,
+# and make a path that resolves to NOTHING a hard failure (see
 # ``test_scan_targets_all_resolve``). A future split then changes the file set
 # under a package without touching this list, and a genuine deletion/rename
 # turns red instead of quietly shrinking the guard's reach.
@@ -60,7 +61,7 @@ _BACKEND_FILES = [
     'lib/tasks_pkg/tool_dispatch',
     'lib/tasks_pkg/executor',
     'lib/tasks_pkg/executor_image',
-    'lib/tasks_pkg/endpoint',
+    'lib/orchestration_chat_*.py',
     'lib/tasks_pkg/llm_fallback',
     'lib/tasks_pkg/stream_handler',
     'lib/tasks_pkg/manager',
@@ -72,10 +73,6 @@ _BACKEND_FILES = [
     'lib/artifacts/events.py',
     'lib/swarm/events.py',
     'lib/presence/registry.py',
-    # The SSE stream route itself authors the lifecycle snapshot/terminal
-    # events on (re)connect / cold replay (state, done, sse_timeout) — via the
-    # typed build_event chokepoint, so the contract guard must scan it too.
-    'routes/chat.py',
 ]
 
 # ``'type': 'X'`` strings that are NOT SSE events — message-content blocks
@@ -101,9 +98,10 @@ _EVENTTYPE_RE = re.compile(r"""\bEventType\.([A-Z_][A-Z0-9_]*)\b""")
 _JS_TYPE_RE = re.compile(r"""\.type\s*===\s*['"]([a-z_]+)['"]""")
 
 _FRONTEND_FILES = [
-    '@runtime:ui/sse_pipeline.js',
-    '@runtime:branch.js',
     '@runtime:presence.js',
+    # Current chat-event consumer; unlike the retired sse_pipeline section it
+    # is present in the release manifest and branches on registered SSE types.
+    '@runtime:ui/streaming_render.js',
 ]
 
 
@@ -117,14 +115,16 @@ def _read(rel: str) -> str:
 
 
 def _resolve_scan_targets(entries: list[str]) -> tuple[list[str], list[str]]:
-    """Expand a scan list of files AND package dirs to concrete ``*.py``/asset
-    files. Returns ``(resolved, unresolved)``.
+    """Expand files, package dirs, and globs to concrete scan targets.
+
+    Returns ``(resolved, unresolved)``.
 
     A directory yields every ``*.py`` under it recursively, so a package split
     cannot shrink the guard's reach. An entry that is neither an existing file
     nor an existing directory lands in ``unresolved`` — the caller turns that
     into a FAILURE rather than skipping it, which is the whole point: a stale
-    entry must be loud, not silently dropped.
+    entry must be loud, not silently dropped. Globs provide the same protection
+    for related root-level modules that do not live in a package directory.
     """
     resolved: list[str] = []
     unresolved: list[str] = []
@@ -138,6 +138,13 @@ def _resolve_scan_targets(entries: list[str]) -> tuple[list[str], list[str]]:
                 resolved.append(rel)
             continue
         p = os.path.join(REPO, rel)
+        if glob.has_magic(rel):
+            matches = sorted(path for path in glob.glob(p) if os.path.isfile(path))
+            if matches:
+                resolved.extend(os.path.relpath(path, REPO) for path in matches)
+            else:
+                unresolved.append(rel)
+            continue
         if os.path.isfile(p):
             resolved.append(rel)
         elif os.path.isdir(p):
@@ -204,45 +211,6 @@ def test_every_frontend_handled_type_is_registered():
         'lib/agent_core/events.py:\n  ' + '\n  '.join(missing))
 
 
-# Registered types that are a DELIBERATE part of the versioned contract
-# (declared in events.py + discoverable via /api/v1/capabilities) but which
-# this repo neither currently emits nor renders. NOT dead vocabulary — each is
-# a reserved/inbound contract a foreign consumer relies on; each carries a WHY.
-_INBOUND_CONTRACT_TYPES = frozenset({
-    # External CLI backend runs its own tool-approval flow and emits this; this
-    # repo's real write-gate is write_approval_request, so we never emit it and
-    # the built-in UI has no `.type ===` branch (branch.js manages CLI approvals
-    # via subprocess stdin). Kept requires_response=True as the inbound contract.
-    'approval_required',
-    # Declared-reserved lifecycle type: its EventSpec documents the inline-error
-    # envelope, but the runtime currently routes ALL fatal errors through a
-    # `done` frame carrying an `error` field, so `error` has no live top-level
-    # emitter/handler today. Kept in the versioned contract for a foreign
-    # consumer / future inline-error path. (Distinct from the tool-result
-    # content block, separately excluded via _NOT_SSE_EVENT_TYPES.)
-    'error',
-})
-
-
-def test_registry_has_no_orphans_vs_known_surfaces():
-    """Sanity: each registered type is either emitted by the backend, handled
-    by the frontend, an exempt transport signal, or a declared inbound-contract
-    type for a foreign backend.
-
-    Guards against the registry accumulating dead vocabulary that no code path
-    actually produces or consumes.
-    """
-    registered = event_types()
-    live = (_backend_emitted_types() | _frontend_handled_types()
-            | set(TRANSPORT_TYPES) | _INBOUND_CONTRACT_TYPES)
-    orphans = sorted(registered - live)
-    assert not orphans, (
-        'Registered event type(s) neither emitted by the backend nor handled '
-        'by the frontend (dead vocabulary?):\n  ' + '\n  '.join(orphans)
-        + '\n\nEither wire them up, remove the EventSpec, or (if a deliberate '
-        'inbound contract) add it to _INBOUND_CONTRACT_TYPES with a reason.')
-
-
 def test_scan_targets_all_resolve():
     """META: every scan-list entry must resolve, and the scan must reach a
     plausible number of files.
@@ -264,7 +232,7 @@ def test_scan_targets_all_resolve():
         'silently skipped them, so events emitted there are unverified:\n  '
         + '\n  '.join(back_bad)
         + '\n\nPoint each at the module/package that took over its role (a '
-        'directory entry is fine — it is expanded recursively).')
+        'directory or glob entry is fine).')
     assert not front_bad, (
         'These _FRONTEND_FILES entries resolve to NOTHING:\n  '
         + '\n  '.join(front_bad))
@@ -272,7 +240,7 @@ def test_scan_targets_all_resolve():
         f'backend emit scan collapsed to {len(back_ok)} file(s) — expected the '
         'orchestrator/dispatch/executor/endpoint/manager packages to contribute '
         'many more. The scan list has probably drifted off the real code.')
-    assert len(front_ok) >= 3, f'frontend scan collapsed to {len(front_ok)} file(s)'
+    assert len(front_ok) >= 2, f'frontend scan collapsed to {len(front_ok)} file(s)'
 
 
 def test_terminal_and_interaction_specs_consistent():

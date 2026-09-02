@@ -16,6 +16,9 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
+# TODO(enterprise, R3): in-process wait registry — a response routed to the
+# wrong replica hangs the turn; persist request/response as DB rows using the
+# message_queue lease pattern. docs/ENTERPRISE_READINESS_AUDIT.md
 _stdin_requests = {}
 _stdin_lock = threading.Lock()
 

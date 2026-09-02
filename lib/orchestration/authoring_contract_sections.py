@@ -24,7 +24,7 @@ from lib.orchestration._runtime_params import node_runtime_defaults
 from lib.orchestration.authoring_contract_registry import (
     AUTHORING_OBJECT_SECTION_NAMES,
 )
-from lib.orchestration.definition_wire_contracts import (
+from lib.orchestration.definition_contract_registry import (
     definition_entry_contract,
     definition_list_contract,
     definition_write_contract,

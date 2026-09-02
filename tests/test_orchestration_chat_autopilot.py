@@ -74,8 +74,9 @@ def test_one_cleanup_failure_does_not_skip_the_other_controls():
     assert [call[0] for call in calls] == ['concluded', 'marker', 'run_id']
 
 
-def test_endpoint_runner_only_selects_the_autopilot_completion_port():
-    runner = (ROOT / 'lib' / 'orchestration_endpoint_runner.py').read_text()
+def test_flow_runner_only_selects_the_autopilot_completion_port():
+    runner = (
+        ROOT / 'lib' / 'orchestration_chat_flow_runner.py').read_text()
     runtime = (
         ROOT / 'lib' / 'orchestration_chat_flow_runtime.py').read_text()
 

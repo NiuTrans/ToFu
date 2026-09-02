@@ -2,7 +2,7 @@
 the model does not HAVE must say so, instead of reporting success.
 
 Root incident (epic pt_88791cb08cb2495c; measured in
-docs/INTENT_STALL_MEASUREMENT.md §4, 7-day scan): 3 tasks in conv
+docs/modules/task_engine.md §4, 7-day scan): 3 tasks in conv
 mrvpzoih636mdx (aws.claude-opus-4.8) repeatedly called
 ``project_board_complete`` / ``code_exec`` — tools NOT in that turn's dispatched
 toolset. Each call was hard-rejected without executing, the model then finished
@@ -36,6 +36,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 
 _KIND = 'tool_not_available'
+_BLOCKED_KIND = 'tool_call_rejected'
 
 
 def _task(**over):
@@ -77,7 +78,7 @@ def _drive(task, tool_name, *, repeats=1):
     ``code_exec`` (which does get near-miss suggestions), so gating there would
     have missed 2 of the 3 real incident cases.
     """
-    from lib.tasks_pkg.tool_dispatch import parse_tool_calls
+    from lib.tasks_pkg.tool_dispatch.api import parse_tool_calls
     from lib.tool_input_repair import clear_rejection
     clear_rejection(task['convId'], tool_name)
     trn = 0
@@ -225,3 +226,87 @@ def test_recovery_after_the_rejection_is_not_reported_as_a_failure(flask_app):
         'a turn that recovered (real tool ran AFTER the rejection) was still '
         'reported as an unavailable-tool failure — the criterion is scanning '
         'for any rejection instead of a turn that ENDED on one')
+
+
+def test_policy_rejection_keeps_its_real_cause(flask_app):
+    """A valid run_command blocked by project policy is not a fake tool."""
+    reason = 'Project write blocked: approval required by project policy.'
+    descriptor = {
+        'kind': 'project_write_authorization_required',
+        'tool': 'run_command',
+        'reason': reason,
+        'retryable': False,
+    }
+    task = _task(toolRounds=[{
+        'roundNum': 1,
+        'toolName': 'run_command',
+        'query': 'python3 fix.py',
+        'status': 'rejected',
+        'toolContent': reason,
+        'rejection': descriptor,
+        '_rejected': descriptor,
+    }])
+
+    _classify_on_finalize(task)
+
+    assert _kind_of(task) == _BLOCKED_KIND
+    envelope = task['error']
+    assert envelope['retryable'] is False
+    assert 'run_command' in envelope['raw']
+    assert 'approval required' in envelope['detail']
+
+
+def test_retryable_policy_rejection_preserves_retryability(flask_app):
+    descriptor = {
+        'kind': 'project_authority_temporarily_busy',
+        'tool': 'write_file',
+        'reason': 'Project authority is temporarily busy.',
+        'retryable': True,
+    }
+    task = _task(toolRounds=[{
+        'roundNum': 1,
+        'toolName': 'write_file',
+        'status': 'rejected',
+        # Legacy-only descriptor proves persisted conversations still classify.
+        '_rejected': descriptor,
+    }])
+
+    _classify_on_finalize(task)
+
+    assert _kind_of(task) == _BLOCKED_KIND
+    assert task['error']['retryable'] is True
+    assert task['error']['detail'] == 'Project authority is temporarily busy.'
+
+
+@pytest.mark.parametrize('status_field,status_value', [
+    ('aborted', True),
+    ('status', 'interrupted'),
+    ('finishReason', 'user_abort'),
+])
+def test_abort_outcome_outranks_prior_rejection(
+        flask_app, status_field, status_value):
+    descriptor = {
+        'kind': 'project_write_authorization_required',
+        'tool': 'run_command',
+        'reason': 'approval required',
+    }
+    task = _task(toolRounds=[{
+        'roundNum': 1,
+        'toolName': 'run_command',
+        'status': 'rejected',
+        'rejection': descriptor,
+    }])
+    task[status_field] = status_value
+
+    _classify_on_finalize(task)
+
+    assert 'error' not in task, (
+        'finalization rewrote an explicit Stop/interruption into a tool error')
+
+
+def test_tool_call_rejected_kind_is_registered(flask_app):
+    from lib.error_envelope import make_envelope
+    from lib.error_envelope._constants import KINDS
+
+    assert _BLOCKED_KIND in KINDS
+    assert make_envelope(_BLOCKED_KIND)['kind'] == _BLOCKED_KIND

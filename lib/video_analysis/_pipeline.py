@@ -44,13 +44,14 @@ def videos_dir() -> str:
     return path
 
 
-def start_processing(video_id: str, scratch_path: str, original_name: str) -> None:
+def start_processing(video_id: str, scratch_path: str, original_name: str,
+                     *, user_id: int) -> None:
     """Spawn the background processing thread (daemon — dies with the process;
     a killed server leaves the record in ``processing``, which the status
     endpoint reports as failed-after-the-fact via the stale sweep)."""
     t = threading.Thread(
         target=_process_guarded,
-        args=(video_id, scratch_path, original_name),
+        args=(video_id, scratch_path, original_name, user_id),
         name=f'video-analysis-{video_id[-8:]}',
         daemon=True,
     )
@@ -58,9 +59,10 @@ def start_processing(video_id: str, scratch_path: str, original_name: str) -> No
     logger.info('[VideoPipeline] %s started for %s', video_id, original_name)
 
 
-def _process_guarded(video_id: str, scratch_path: str, original_name: str) -> None:
+def _process_guarded(video_id: str, scratch_path: str, original_name: str,
+                     user_id: int) -> None:
     try:
-        _process(video_id, scratch_path, original_name)
+        _process(video_id, scratch_path, original_name, user_id=user_id)
     except Exception as e:
         logger.error('[VideoPipeline] %s crashed: %s', video_id, e, exc_info=True)
         _store.fail_record(video_id, f'internal error: {e}')
@@ -72,7 +74,8 @@ def _process_guarded(video_id: str, scratch_path: str, original_name: str) -> No
             logger.warning('[VideoPipeline] scratch cleanup failed (%s): %s', scratch_dir, e)
 
 
-def _process(video_id: str, scratch_path: str, original_name: str) -> None:
+def _process(video_id: str, scratch_path: str, original_name: str, *,
+             user_id: int) -> None:
     from lib.motion_video._gates import probe_video
 
     # ── probe ──
@@ -98,7 +101,16 @@ def _process(video_id: str, scratch_path: str, original_name: str) -> None:
     stored_path = os.path.join(videos_dir(), stored_name)
     try:
         shutil.copyfile(scratch_path, stored_path)
+        _store.register_video_asset(
+            stored_name,
+            video_id=video_id,
+            user_id=user_id,
+        )
     except Exception as e:
+        try:
+            os.unlink(stored_path)
+        except OSError:
+            pass
         logger.error('[VideoPipeline] persist original failed: %s', e, exc_info=True)
         _store.fail_record(video_id, 'could not store the video file')
         return

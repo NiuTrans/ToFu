@@ -197,9 +197,6 @@ def oauth_logout():
         result = logout_oauth(provider)
         if not result.get('ok'):
             return api_internal_error(result.get('error', 'internal_error'))
-        if provider == 'codex':
-            from lib.subscription_quota import clear_subscription_quota
-            clear_subscription_quota(provider, cache_key='oauth_codex')
         return api_ok(result)
 
     except Exception as e:

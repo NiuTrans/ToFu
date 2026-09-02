@@ -1,8 +1,8 @@
 """lib/llm_dispatch/health_local.py — Background health checker for local endpoints.
 
 Self-hosted vLLM / SGLang / Ollama boxes have no SLA — they restart, swap
-models, and die. This module runs a small background thread that, for every
-provider tagged as a local endpoint:
+models, and die. This module owns the single local-endpoint monitor thread.
+For every provider tagged as a local endpoint it:
 
   1. Probes ``{endpoint}/models`` every ``HEALTH_INTERVAL`` seconds for each
      URL in the provider's ``endpoints`` list (or the single ``base_url``
@@ -15,7 +15,9 @@ provider tagged as a local endpoint:
      unions the served-model sets, patches ``server_config.json``, and
      rebuilds the dispatcher's slot pool.
 
-Cloud providers are NOT polled — that would waste quota and leak hosts.
+Cloud providers are NOT polled — that would waste quota and leak hosts. The
+same cancellable loop also schedules the well-known-port discovery job in
+``autodiscover_local.py``; discovery no longer retains a second idle thread.
 """
 
 import os
@@ -39,6 +41,7 @@ logger = get_logger(__name__)
 __all__ = [
     'start_local_health_checker',
     'stop_local_health_checker',
+    'wake_local_health_checker',
     'check_once',
 ]
 
@@ -51,6 +54,7 @@ RESYNC_EVERY = int(os.environ.get('TOFU_LOCAL_HEALTH_RESYNC', '10'))
 
 _thread = None
 _stop_event = threading.Event()
+_wake_event = threading.Event()
 _thread_lock = threading.Lock()
 # Per (provider_id, endpoint_url) counter so RESYNC_EVERY is local to
 # the box, not global.
@@ -566,37 +570,71 @@ def check_once() -> dict:
 
 
 def _loop():
-    logger.info('[HealthLocal] Worker started (interval=%ds, timeout=%ds)',
-                HEALTH_INTERVAL, PROBE_TIMEOUT)
-    if _stop_event.wait(5):
-        return
+    logger.info(
+        '[HealthLocal] local-endpoint monitor started '
+        '(health_interval=%ds, timeout=%ds)',
+        HEALTH_INTERVAL, PROBE_TIMEOUT)
+    next_health_at = time.monotonic() + 5.0
     while not _stop_event.is_set():
+        now = time.monotonic()
+        if now >= next_health_at:
+            try:
+                check_once()
+            except Exception as e:
+                logger.error('[HealthLocal] Cycle failed: %s', e, exc_info=True)
+            next_health_at = time.monotonic() + max(1.0, HEALTH_INTERVAL)
+
+        discovery_delay = None
         try:
-            check_once()
+            from .autodiscover_local import poll_if_due
+            discovery_stats = poll_if_due(now=now)
+            raw_delay = discovery_stats.get('next_poll_s')
+            if raw_delay is not None:
+                discovery_delay = max(0.0, float(raw_delay))
         except Exception as e:
-            logger.error('[HealthLocal] Cycle failed: %s', e, exc_info=True)
-        if _stop_event.wait(HEALTH_INTERVAL):
-            break
-    logger.info('[HealthLocal] Worker stopped')
+            # Local-provider health must continue even if the optional
+            # well-known-port pass has a programmer or network failure.
+            logger.error('[AutoDiscover] sweep failed: %s', e, exc_info=True)
+
+        now = time.monotonic()
+        waits = [max(0.0, next_health_at - now)]
+        if discovery_delay is not None:
+            waits.append(discovery_delay)
+        timeout = max(0.01, min(waits))
+        if _wake_event.wait(timeout):
+            _wake_event.clear()
+    logger.info('[HealthLocal] local-endpoint monitor stopped')
+
+
+def wake_local_health_checker() -> bool:
+    """Wake the shared monitor after an explicit local/provider change."""
+    with _thread_lock:
+        thread = _thread
+    if thread is None or not thread.is_alive():
+        return False
+    _wake_event.set()
+    return True
 
 
 def start_local_health_checker() -> bool:
-    """Idempotent: spawn the background health-check thread (no-op if running)."""
+    """Idempotently start the shared local health/discovery monitor."""
     global _thread
     with _thread_lock:
         if _thread is not None and _thread.is_alive():
             return False
         _stop_event.clear()
+        _wake_event.clear()
         _thread = threading.Thread(
-            target=_loop, name='local-health', daemon=True)
+            target=_loop, name='local-endpoint-monitor', daemon=True)
         _thread.start()
     return True
 
 
 def stop_local_health_checker(timeout: float = 2.0) -> bool:
-    """Signal and bounded-join the checker, retaining a live owner on timeout."""
+    """Signal and bounded-join the monitor, retaining a live owner on timeout."""
     global _thread
     _stop_event.set()
+    _wake_event.set()
     with _thread_lock:
         thread = _thread
     if thread is None:

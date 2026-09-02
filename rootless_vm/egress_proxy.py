@@ -33,6 +33,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 _MAX_HEADER_BYTES = 64 * 1024
 _CONNECT_TIMEOUT_SEC = 15.0
+_RELAY_WRITE_TIMEOUT_SEC = 120.0
 _IDLE_TIMEOUT_SEC = 90.0
 _MAX_CONNECTIONS = 48
 _GLOBAL_CONNECTIONS = 16
@@ -252,6 +253,23 @@ def _read_head(client: socket.socket) -> tuple[bytes, bytes]:
     return head, body
 
 
+def _send_with_backpressure(target: socket.socket, chunk: bytes) -> None:
+    """Bound a relay write without reusing the short connect timeout.
+
+    A TCG guest can temporarily stop draining its forwarded socket while it
+    verifies or unpacks a downloaded wheel. Treat that as ordinary transport
+    backpressure rather than tearing down an otherwise healthy TLS tunnel.
+    """
+
+    target.setblocking(True)
+    target.settimeout(_RELAY_WRITE_TIMEOUT_SEC)
+    try:
+        target.sendall(chunk)
+    finally:
+        target.settimeout(None)
+        target.setblocking(False)
+
+
 def _headers(lines: list[bytes]) -> list[tuple[bytes, bytes]]:
     parsed: list[tuple[bytes, bytes]] = []
     for line in lines:
@@ -310,11 +328,7 @@ def _relay(left: socket.socket, right: socket.socket, budget: "_Budget") -> None
                         pass
                     continue
                 budget.consume(len(chunk))
-                target.setblocking(True)
-                target.settimeout(_CONNECT_TIMEOUT_SEC)
-                target.sendall(chunk)
-                target.settimeout(None)
-                target.setblocking(False)
+                _send_with_backpressure(target, chunk)
                 last_activity = time.monotonic()
     finally:
         selector.close()

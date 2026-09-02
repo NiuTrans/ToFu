@@ -39,6 +39,27 @@ def create_base_app(
     if config:
         app.config.update(dict(config))
     register_app_lifecycle(app)
+
+    @app.errorhandler(PermissionError)
+    async def _permission_error(exc: PermissionError):
+        # routes/common.py:_request_user_id fails CLOSED with PermissionError
+        # when multi-user mode meets a user_id-less credential.  Without this
+        # mapping the request surfaced as Quart's bare 500, drifting from the
+        # 'permission' closed-kind envelope every other authz rejection uses.
+        from quart import request
+
+        from lib.api_v4 import is_api_v4_path, problem_response
+        if is_api_v4_path(request.path):
+            return problem_response(
+                status=403,
+                code='permission_denied',
+                title='Permission denied',
+                detail=str(exc) or 'This principal cannot access the resource.',
+                instance=request.path,
+            )
+        from lib.api_response import api_typed_error
+        return api_typed_error('permission', status=403, message=str(exc))
+
     return app
 
 

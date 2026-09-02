@@ -81,19 +81,20 @@ _ROOT = Path(__file__).resolve().parent.parent
 _REQUIREMENTS = _ROOT / 'requirements.txt'
 
 _PACKAGE = 'tofu-search'
-_PINNED_VERSION = '0.9.0'
+_PINNED_VERSION = '0.10.3'
 
-# Measured 2026-08-14 from the artifacts built off tofu-search 5993f3a (tag
-# v0.9.0) via clean `git archive HEAD` + python-build, twine check PASSED on both
-# files, isolated --target install imported from a neutral cwd with all 37
-# facade __all__ symbols resolving; the digests below are PyPI's own
-# /pypi/tofu-search/0.9.0/json values AND match the local sha256 of the
-# uploaded files byte-for-byte.
+# Measured 2026-08-21 from the artifacts built off tofu-search e2cbcfc (tag
+# v0.10.3) via clean `git archive HEAD` + `python -m build --no-isolation`,
+# twine check PASSED on both files, isolated import probe from a neutral cwd
+# (wheel unpacked by hand — this env's pip enforces require-virtualenv) with
+# __file__ asserted inside the probe dir and all 37 facade __all__ symbols
+# resolving; the digests below are PyPI's own /pypi/tofu-search/0.10.3/json
+# values AND match the local sha256 of the uploaded files byte-for-byte.
 _EXPECTED_DIGESTS = {
-    'tofu_search-0.9.0-py3-none-any.whl':
-        '8aaf9a9f5ed294017e2c6eaf1b13d2c996f7091d64f88eed0984992d297a0f42',
-    'tofu_search-0.9.0.tar.gz':
-        '30daa085c18bbeee1b2073d796602540c99ee6f984bda22a3d16ed8121125b19',
+    'tofu_search-0.10.3-py3-none-any.whl':
+        '7af4ef7ffec6c384407cf05fdac2034890813dc5aa5ddc9094f7a850a1c76f52',
+    'tofu_search-0.10.3.tar.gz':
+        '10c6c177c4fce22ac1af93e87c4f3c3b07cc1e77e2acfad030773595bd3d08bf',
 }
 
 _PYPI_VERSION_JSON = 'https://pypi.org/pypi/{name}/{version}/json'

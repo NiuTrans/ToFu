@@ -8,9 +8,10 @@ OpenAPI viewers).
 
 This test enumerates every URL rule registered on ``server.app`` and
 fails if any unversioned ``/api/`` route falls outside the allow-list. New
-JSON routes should land under ``/api/v1/...`` or ``/api/v2/...``; if a new carve-out is
-genuinely needed, add it to ``ALLOWED_NON_V1`` here AND document it in
-``docs/legacy_api_migration.md`` §1.
+JSON routes belong to the current v1 headless API, the v3 conversation-sync
+contract, or the staged v4 contract. If a new carve-out is genuinely needed, add it to
+``ALLOWED_UNVERSIONED`` here AND document it in
+``docs/API_CONTRACT.md`` §1.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import pytest
 # below, and the conftest.py default of ``private`` would 401 every
 # request (we don't actually fire requests here, but we still want a
 # clean import).
-pytestmark = pytest.mark.auth_mode('open')
+pytestmark = [pytest.mark.unit, pytest.mark.auth_mode('open')]
 
 
 # ── Configuration ────────────────────────────────────────────────────
@@ -33,9 +34,12 @@ pytestmark = pytest.mark.auth_mode('open')
 # Each entry includes the full URL rule string. Path parameters use Flask
 # converter syntax (``<task_id>``, ``<int:hid>``, etc.) so the rule string
 # matches what ``app.url_map.iter_rules()`` reports.
-ALLOWED_NON_V1 = frozenset({
-    # Liveness / OpenAPI
+ALLOWED_UNVERSIONED = frozenset({
+    # Liveness/readiness / OpenAPI
     '/api/health',
+    # Readiness probe (process-memory only, no DB touch) — same
+    # infra-consumer family as /api/health (load balancers, installers).
+    '/api/ready',
     '/api/openapi.json',
     '/api/openapi.yaml',
     '/api/openapi.refresh',
@@ -56,9 +60,7 @@ ALLOWED_NON_V1 = frozenset({
     # POSTs a token it exchanged itself. Browser-flow carve-out, like above.
     '/api/oauth/store-token',
     # SSE / long-poll streams
-    '/api/chat/stream/<task_id>',
     '/api/paper/fetch-arxiv-stream',
-    '/api/paper/chat',
     # Multipart uploads
     '/api/paper/upload',
     '/api/pdf/parse',
@@ -77,9 +79,11 @@ ALLOWED_NON_V1 = frozenset({
     '/api/artifacts/<artifact_id>/export',
     # Bridge-Secret long-poll RPC (browser extension + desktop agent)
     '/api/browser/poll',
-    '/api/browser/commands',
-    '/api/browser/result',
     '/api/browser/download',
+    '/api/browser/file-transfers/<transfer_id>/start',
+    '/api/browser/file-transfers/<transfer_id>/chunks/<int:sequence>',
+    '/api/browser/file-transfers/<transfer_id>/complete',
+    '/api/browser/file-transfers/<transfer_id>',
     '/api/desktop/poll',
     # Pairing-code exchange for the desktop agent (RWA P4a): the 6-digit
     # one-time code IS the credential (code + audit, no bearer), and the
@@ -89,9 +93,6 @@ ALLOWED_NON_V1 = frozenset({
     # Static video-bytes serving (frontend playback / re-download) — same
     # static-asset carve-out family as /api/images/<filename>.
     '/api/videos/<filename>',
-    # 308 redirect shim for stale browser tabs still on the pre-migration
-    # /api/optimizer/* polling URL — see routes/legacy_redirects.py.
-    '/api/optimizer/<path:rest>',
 })
 
 
@@ -117,14 +118,13 @@ def _build_app_open_mode():
 
 
 def test_no_legacy_api_routes_remain():
-    """Every ``/api/<x>`` route must be either ``/api/v1/<x>`` or in the
-    carve-out allow-list.
+    """Every API route must belong to a current contract or carve-out.
 
-    Failure mode: a new route was added at ``/api/foo`` instead of
-    ``/api/v1/foo``. Either (a) move it to v1, or (b) if it's
+    Failure mode: a new route was added at ``/api/foo`` instead of under a
+    current contract. Either move it there, or, if it is
     legitimately a non-JSON route (multipart upload, SSE stream,
-    browser-redirect, static asset, etc.), add it to ``ALLOWED_NON_V1``
-    in this file AND to ``docs/legacy_api_migration.md`` §1.
+    browser-redirect, static asset, etc.), add it to ``ALLOWED_UNVERSIONED``
+    in this file AND to ``docs/API_CONTRACT.md`` §1.
     """
     app = _build_app_open_mode()
 
@@ -141,9 +141,9 @@ def test_no_legacy_api_routes_remain():
         path = rule.rule
         if not path.startswith('/api/'):
             continue
-        if path.startswith(('/api/v1/', '/api/v2/')):
+        if path.startswith(('/api/v1/', '/api/v3/', '/api/v4/')):
             continue
-        if path in ALLOWED_NON_V1:
+        if path in ALLOWED_UNVERSIONED:
             continue
         bp_name = rule.endpoint.split('.')[0] if '.' in rule.endpoint else ''
         if bp_name and bp_name not in core_bp_names:
@@ -154,19 +154,19 @@ def test_no_legacy_api_routes_remain():
         'Legacy /api/* routes remain outside the carve-out allow-list:\n'
         + '\n'.join(f'  - {p}' for p in sorted(set(legacy)))
         + '\n\nIf any of these are legitimately non-JSON (multipart/SSE/'
-          'static/redirect/beacon), add them to ALLOWED_NON_V1 in '
+          'static/redirect/beacon), add them to ALLOWED_UNVERSIONED in '
           'tests/test_legacy_api_removed.py and document in '
-          'docs/legacy_api_migration.md §1. Otherwise migrate them to '
-          'a versioned /api/v1/<...> or /api/v2/<...> namespace.'
+          'docs/API_CONTRACT.md §1. Otherwise migrate them to '
+          'the current /api/v1/<...>, conversation-sync v3, or v4 namespace.'
     )
 
 
 def test_carve_out_list_is_exhaustive():
-    """Every entry in ``ALLOWED_NON_V1`` must actually be registered.
+    """Every entry in ``ALLOWED_UNVERSIONED`` must actually be registered.
 
     Catches drift in the other direction: an allow-listed path that no
     longer exists in the route map indicates either (a) a stale
-    carve-out entry (delete from ALLOWED_NON_V1), or (b) a route that
+    carve-out entry (delete from ALLOWED_UNVERSIONED), or (b) a route that
     was renamed without updating this test.
 
     Trading routes are conditional on ``lib.TRADING_ENABLED``; this
@@ -176,10 +176,10 @@ def test_carve_out_list_is_exhaustive():
     """
     app = _build_app_open_mode()
     registered = {rule.rule for rule in app.url_map.iter_rules()}
-    stale = [p for p in ALLOWED_NON_V1 if p not in registered]
+    stale = [p for p in ALLOWED_UNVERSIONED if p not in registered]
     assert not stale, (
-        'ALLOWED_NON_V1 contains paths that are NOT registered on '
+        'ALLOWED_UNVERSIONED contains paths that are NOT registered on '
         'the app:\n' + '\n'.join(f'  - {p}' for p in sorted(stale))
         + '\n\nEither restore the route or remove the entry from '
-          'ALLOWED_NON_V1.'
+          'ALLOWED_UNVERSIONED.'
     )

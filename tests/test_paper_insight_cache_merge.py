@@ -7,7 +7,7 @@ this helper must LEFT-JOIN the sibling insight row and append its markdown so th
 section survives a return visit (the "reader actually gains insight" objective in
 the common reopen case), WITHOUT triggering a new generation.
 
-Proven fully offline by stubbing the DB fetch (so we don't drag the Quart route
+Proven fully offline by stubbing the owner-scoped repository (so we don't drag the Quart route
 stack / websocket shim):
   1. plain report + a persisted insight row → reopen merges the section ONCE;
   2. no insight row → body byte-identical to today (no-op);
@@ -33,24 +33,26 @@ except ImportError:  # standalone runner path
 
 
 if pytest is not None:
-    @pytest.fixture(autouse=True)
-    def _restore_paper_async_fetchone():
-        """_install_stub_db raw-assigns ``rp.async_fetchone`` with no restore.
+    pytestmark = pytest.mark.unit
 
-        Without this fixture the stub LEAKS into every later suite in the
-        same xdist worker — its tiny rows map answers None to ANY (phash,
-        lang) it doesn't know, so e.g. test_paper_export_double_encode's
-        seeded review row 404s despite a fresh connection seeing it
-        (CI-only, ordering-dependent — the 2026-08-06 multi-run hunt).
+
+if pytest is not None:
+    @pytest.fixture(autouse=True)
+    def _restore_paper_artifact_repository():
+        """Restore the semantic repository seam after every test.
+
+        The stub is installed on the route module because that is where the
+        production helper resolves ``PaperArtifactRepository``. Restoring it
+        prevents an ordering-dependent leak into neighboring paper suites.
         """
         try:
-            import routes.paper as rp
+            import routes.paper_pkg._common as rp
         except Exception:
             yield
             return
-        orig = rp.async_fetchone
+        orig = rp.PaperArtifactRepository
         yield
-        rp.async_fetchone = orig
+        rp.PaperArtifactRepository = orig
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -62,23 +64,37 @@ _REPORT_BODY = '# dUltra: Ultra-Fast Diffusion Decoding\n\n## TL;DR\nA fast diff
 _INSIGHT_BODY = ('## 💡 Insight & Ideas\n\n### The Bet\n\n> Key takeaway: Removing '
                  'recurrence is the bet.\n\n### Connections to Your Reading\n\n'
                  '- Same move as EvoLM ([EvoLM](https://arxiv.org/abs/2605.03871))\n')
+_TEST_OWNER_USER_ID = 1
 
 
-def _install_stub_db(rows):
-    """Patch routes.paper.async_fetchone to serve ``rows`` keyed by (phash, lang).
+def _install_stub_repository(rows):
+    """Serve ``rows`` through the owner-scoped artifact repository seam.
 
     Imports routes.paper lazily and tolerates the known bare-import websocket
     shim issue by importing the MODULE object via importlib after registering a
     minimal shim if needed.
     """
-    import routes.paper as rp
+    import routes.paper_pkg._common as rp
 
-    async def _fake_fetchone(sql, params, **kw):
-        # params = (phash, lang)
-        key = (params[0], params[1])
-        return rows.get(key)
+    from lib.paper.artifact_repository import PaperReport
 
-    rp.async_fetchone = _fake_fetchone
+    class _FakePaperArtifactRepository:
+        def __init__(self, owner_user_id):
+            assert owner_user_id == _TEST_OWNER_USER_ID
+
+        def get_report(self, paper_hash, lang):
+            row = rows.get((paper_hash, lang))
+            if row is None:
+                return None
+            return PaperReport(
+                paper_hash=paper_hash,
+                lang=lang,
+                report=row.get('report') or '',
+                model=row.get('model') or '',
+                meta=row.get('meta') or {},
+            )
+
+    rp.PaperArtifactRepository = _FakePaperArtifactRepository
     return rp
 
 
@@ -98,7 +114,7 @@ def _import_routes_paper():
                 mod.Blueprint.websocket = lambda self, *a, **k: (lambda f: f)
         except Exception:
             pass
-    import routes.paper as rp
+    import routes.paper_pkg._common as rp
     return rp
 
 
@@ -109,13 +125,14 @@ def _run(coro):
 def test_reopen_merges_insight_once():
     rp = _import_routes_paper()
     phash = 'abc123'
-    from lib.paper.insight_engine import insight_lang_key
+    from lib.paper.insight_engine._config import insight_lang_key
     rows = {
         (phash, 'en'): {'report': _REPORT_BODY},
         (phash, insight_lang_key('en')): {'report': _INSIGHT_BODY},
     }
-    _install_stub_db(rows)
-    out = _run(rp._append_cached_insight(_REPORT_BODY, phash, 'en'))
+    _install_stub_repository(rows)
+    out = _run(rp._append_cached_insight(
+        _REPORT_BODY, phash, 'en', user_id=_TEST_OWNER_USER_ID))
     assert '## 💡 Insight & Ideas' in out, 'insight section not merged on reopen'
     assert out.count('## 💡 Insight & Ideas') == 1, 'insight section appended more than once'
     assert out.startswith('# dUltra'), 'report body was mangled'
@@ -125,8 +142,9 @@ def test_reopen_merges_insight_once():
 def test_no_insight_row_is_noop():
     rp = _import_routes_paper()
     phash = 'noins'
-    _install_stub_db({(phash, 'en'): {'report': _REPORT_BODY}})
-    out = _run(rp._append_cached_insight(_REPORT_BODY, phash, 'en'))
+    _install_stub_repository({(phash, 'en'): {'report': _REPORT_BODY}})
+    out = _run(rp._append_cached_insight(
+        _REPORT_BODY, phash, 'en', user_id=_TEST_OWNER_USER_ID))
     assert out == _REPORT_BODY, 'body not byte-identical when no insight row exists'
     _ok('no insight row → body byte-identical to today (no-op)')
 
@@ -134,13 +152,14 @@ def test_no_insight_row_is_noop():
 def test_idempotent_when_body_already_has_section():
     rp = _import_routes_paper()
     phash = 'baked'
-    from lib.paper.insight_engine import insight_lang_key
+    from lib.paper.insight_engine._config import insight_lang_key
     already = _REPORT_BODY.rstrip() + '\n\n' + _INSIGHT_BODY
-    _install_stub_db({
+    _install_stub_repository({
         (phash, 'en'): {'report': already},
         (phash, insight_lang_key('en')): {'report': _INSIGHT_BODY},
     })
-    out = _run(rp._append_cached_insight(already, phash, 'en'))
+    out = _run(rp._append_cached_insight(
+        already, phash, 'en', user_id=_TEST_OWNER_USER_ID))
     assert out.count('## 💡 Insight & Ideas') == 1, 'double-appended an already-present section'
     _ok('idempotent: no double-append when body already carries the section')
 
@@ -148,13 +167,15 @@ def test_idempotent_when_body_already_has_section():
 def test_review_mode_never_merges():
     rp = _import_routes_paper()
     phash = 'rev1'
-    from lib.paper.insight_engine import insight_lang_key
+    from lib.paper.insight_engine._config import insight_lang_key
     # Even if an insight row somehow existed, a review key must not merge.
-    _install_stub_db({
+    _install_stub_repository({
         (phash, insight_lang_key('en')): {'report': _INSIGHT_BODY},
     })
     review_body = '# Peer Review\n\nScorecard…\n'
-    out = _run(rp._append_cached_insight(review_body, phash, 'review:neurips:en'))
+    out = _run(rp._append_cached_insight(
+        review_body, phash, 'review:neurips:en',
+        user_id=_TEST_OWNER_USER_ID))
     assert out == review_body, 'insight leaked into a Review Mode reopen'
     _ok('review mode → insight never merged (plain-report only)')
 
@@ -164,26 +185,28 @@ def test_neuter_break_join_section_absent():
     section, proving _append_cached_insight is what surfaces it."""
     rp = _import_routes_paper()
     phash = 'abc123'
-    from lib.paper.insight_engine import insight_lang_key
+    from lib.paper.insight_engine._config import insight_lang_key
     rows = {
         (phash, 'en'): {'report': _REPORT_BODY},
         (phash, insight_lang_key('en')): {'report': _INSIGHT_BODY},
     }
-    _install_stub_db(rows)
+    _install_stub_repository(rows)
     orig = rp._append_cached_insight
 
-    async def _neutered(body, phash_, lang):
+    async def _neutered(body, phash_, lang, *, user_id):
         return body  # join removed
 
     rp._append_cached_insight = _neutered
     try:
-        out = _run(rp._append_cached_insight(_REPORT_BODY, phash, 'en'))
+        out = _run(rp._append_cached_insight(
+            _REPORT_BODY, phash, 'en', user_id=_TEST_OWNER_USER_ID))
         assert '## 💡 Insight & Ideas' not in out, \
             'NEUTER failed — section present with the join removed (test is false-confident)'
     finally:
         rp._append_cached_insight = orig
     # And the real helper DOES surface it (control).
-    out2 = _run(rp._append_cached_insight(_REPORT_BODY, phash, 'en'))
+    out2 = _run(rp._append_cached_insight(
+        _REPORT_BODY, phash, 'en', user_id=_TEST_OWNER_USER_ID))
     assert '## 💡 Insight & Ideas' in out2, 'control: real helper must merge'
     _ok('NEUTER: breaking the join drops the section (merge is load-bearing)')
 

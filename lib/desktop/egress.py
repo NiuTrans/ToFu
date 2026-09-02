@@ -20,7 +20,7 @@ modules barely notice the detour. The domain whitelist is enforced BOTH
 here (before enqueueing) and in the agent executor (before opening the
 socket) — defense in depth, exact host match only.
 
-Design: docs/DESKTOP_EGRESS_DESIGN.md §6.1.
+Architecture: docs/modules/remote_execution.md.
 """
 
 from __future__ import annotations
@@ -301,7 +301,8 @@ class EgressStreamReader:
     ``meta`` (status/headers), ``body`` (base64 chunks), ``error``
     (mid-stream failure). Presents the subset of the Response surface the
     sync LLM transport uses: ``.status_code`` / ``.headers`` /
-    ``.iter_lines(decode_unicode=True)`` / ``.close()`` (+ arbitrary
+    ``.iter_content(chunk_size=...)`` / ``.close()`` (+ the historical
+    ``iter_lines`` compatibility surface and arbitrary
     attribute assignment like ``.encoding``).
     """
 
@@ -408,6 +409,23 @@ class EgressStreamReader:
                 if self._buf:
                     tail, self._buf = self._buf, b''
                     yield tail.decode('utf-8', errors='replace')
+                return
+            self._check_watchdog()
+            time.sleep(_CONSUME_POLL_S)
+
+    def iter_content(self, chunk_size=64 << 10):
+        """Yield raw upstream bytes without performing SSE line parsing."""
+        try:
+            limit = max(1, int(chunk_size or (64 << 10)))
+        except (TypeError, ValueError, OverflowError):
+            limit = 64 << 10
+        while True:
+            self._poll_frames()
+            while self._buf:
+                chunk = self._buf[:limit]
+                self._buf = self._buf[len(chunk):]
+                yield chunk
+            if self._done:
                 return
             self._check_watchdog()
             time.sleep(_CONSUME_POLL_S)
@@ -573,10 +591,36 @@ def egress_status(host: str, *, user_id: str = '') -> dict:
     host = (host or '').lower()
     from lib.subscription_routes import manager as route_manager
     route_status = route_manager.status()
+    preferred_route_id = route_status.get('preferred', {}).get(host, '')
+    route_rows = {
+        route_id: dict(row)
+        for route_id, row in route_status.get('routes', {}).get(host, {}).items()
+    }
+    preferred_route_label = ''
+    preferred_route_mode = ''
+    # RouteManager intentionally stores credential-free ids only. Rehydrate
+    # the equally credential-free label/mode from the current proxy topology
+    # so Settings can say whether the working SERVER path is direct or a
+    # named proxy. Never expose proxy_url (it may contain credentials).
+    try:
+        from lib.proxy import subscription_route_specs
+        probe_url = _BG_PROBE_URL.get(host, f'https://{host}/')
+        for route in subscription_route_specs(probe_url):
+            if route.route_id in route_rows:
+                route_rows[route.route_id].update({
+                    'label': route.label,
+                    'mode': route.mode,
+                })
+            if route.route_id == preferred_route_id:
+                preferred_route_label = route.label
+                preferred_route_mode = route.mode
+    except Exception as e:
+        logger.debug('[Egress] route diagnostics failed for %s: %s', host, e)
     diagnostics = {
-        'preferred_server_route':
-            route_status.get('preferred', {}).get(host, ''),
-        'server_routes': route_status.get('routes', {}).get(host, {}),
+        'preferred_server_route': preferred_route_id,
+        'preferred_server_route_label': preferred_route_label,
+        'preferred_server_route_mode': preferred_route_mode,
+        'server_routes': route_rows,
     }
     verdict = _cached_probe_verdict(host)
     if not verdict:

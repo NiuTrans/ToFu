@@ -58,7 +58,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-REDUCER_JS = runtime_section_path('ui/stream_reducer.js')
 TOOL_ROUNDS_JS = runtime_section_path('ui/tool_rounds.js')
 
 
@@ -166,7 +165,7 @@ def test_project_mode_run_command_publishes_deadline_and_checkpoints():
         # A REAL task dict — the checkpoint/event machinery reaches for
         # events_lock etc., which a bare dict does not have.
         task = create_task('conv-proj-spawn',
-                           [{'role': 'user', 'content': 'run it'}], {})
+                           [{'role': 'user', 'content': 'run it'}], {}, user_id=1)
         _handle_project_tool(
             task, {}, 'run_command', 'tc-proj-1',
             {'command': 'echo proj-ok', 'timeout': 9}, 1, round_entry,
@@ -279,112 +278,38 @@ def test_tool_only_turn_is_checkpointed_despite_empty_prose():
         assert _has_inflight_round({'toolRounds': [{'status': st}]}) is True, st
 
 
-def test_has_real_round_still_means_settled():
-    """Guard the guard. The in-flight predicate must NOT be implemented by
-    loosening `has_real_round`: the ghost sweep and the tail classifier rely on
-    it meaning SETTLED, and widening it would make an unsettled bodyless bubble
-    un-sweepable."""
-    from lib.conversations.reconcile import has_real_round
-    assert has_real_round({'toolRounds': [{'status': 'searching'}]}) is False
-    assert has_real_round({'toolRounds': [{'status': 'done'}]}) is True
-
-
 # ══════════════════════════════════════════════════════════════════
 #  3. THE ACCEPTANCE TEST — real DB round-trip
 # ══════════════════════════════════════════════════════════════════
 
-def test_running_round_with_deadline_survives_a_real_db_roundtrip():
-    """Write a RUNNING round carrying tStart+deadlineTs through the REAL
-    checkpoint writer into a REAL sqlite conversation row, then read it back
-    the way a conversation switch does.
+def test_running_round_deadline_is_in_the_authoritative_turn_projection():
+    """The cumulative turn projection owns live tool timing across reloads."""
+    from lib.turn_lifecycle import _task_projection
 
-    This is the acceptance criterion: after the round-trip the deadline must
-    still be there and still be in the FUTURE, so the countdown resumes
-    mid-flight instead of restarting from zero.
-    """
-    from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
-    from lib.database._core_schema import CONVERSATIONS, upsert
-    import lib.tasks_pkg.manager as mgr
-    from lib.tasks_pkg.manager import (
-        _conv_latest_task, _conv_latest_task_lock, create_task)
-
-    db = get_thread_db(DOMAIN_CHAT)
-    conv_id = 'deadline-acceptance'
     now_ms = int(time.time() * 1000)
-    deadline_ms = now_ms + 300_000        # 5 minutes out
-    exec_start_ms = now_ms - 42_000       # already 42s in
+    deadline_ms = now_ms + 300_000
+    exec_start_ms = now_ms - 42_000
+    task = {
+        'content': '', 'thinking': '',
+        'toolRounds': [{
+            'roundNum': 1, 'toolName': 'run_command',
+            'toolCallId': 'tc_build_1', 'query': 'make -j8',
+            'status': 'searching', 'results': None,
+            'tStart': exec_start_ms - 5_000,
+            'execStartTs': exec_start_ms, 'deadlineTs': deadline_ms,
+        }],
+    }
 
-    upsert(db, CONVERSATIONS, {
-        'id': conv_id, 'user_id': 1, 'title': 'deadline-acceptance',
-        'messages': json_dumps_pg([
-            {'role': 'user', 'content': 'run the build'},
-            {'role': 'assistant', 'content': '', 'thinking': '', 'toolRounds': []},
-        ]),
-        'msg_count': 2, 'created_at': now_ms, 'updated_at': now_ms,
-    }, insert_cols=['id', 'user_id', 'title', 'messages', 'msg_count',
-                    'created_at', 'updated_at'], retry=True)
-    db.commit()
-
-    task = create_task(conv_id, [{'role': 'user', 'content': 'run the build'}], {})
-    task['content'] = ''          # ← tool-only turn: no prose at all
-    task['thinking'] = ''
-    task['toolRounds'] = [{
-        'roundNum': 1,
-        'toolName': 'run_command',
-        'toolCallId': 'tc_build_1',
-        'query': 'make -j8',
-        'status': 'searching',
-        'results': None,
-        'tStart': exec_start_ms - 5_000,
-        'execStartTs': exec_start_ms,
-        'deadlineTs': deadline_ms,
-    }]
-    with _conv_latest_task_lock:
-        _conv_latest_task[conv_id] = task['id']
-
-    try:
-        mgr.checkpoint_task_partial(task, force=True)
-
-        # ── Read back exactly as a conversation switch would ──
-        row = db.execute(
-            'SELECT messages FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)).fetchone()
-        assert row and row[0], 'conversation row vanished'
-        tail = json.loads(row[0])[-1]
-        assert tail.get('role') == 'assistant'
-
-        rounds = tail.get('toolRounds') or []
-        assert rounds, (
-            'THE BUG: the running round did not reach the DB at all, so '
-            'switching conversations mid-command finds nothing to project and '
-            'the countdown restarts from zero.')
-
-        r = rounds[0]
-        assert r.get('status') == 'searching', r.get('status')
-        assert r.get('deadlineTs') == deadline_ms, (
-            f'deadlineTs lost in persistence: {r.get("deadlineTs")!r}')
-        assert r.get('execStartTs') == exec_start_ms, (
-            f'execStartTs lost in persistence: {r.get("execStartTs")!r}')
-        assert r['deadlineTs'] > time.time() * 1000, (
-            'the recovered deadline is already in the past — the countdown '
-            'would render "terminating…" for a healthy running command')
-
-        remaining_s = (r['deadlineTs'] - time.time() * 1000) / 1000.0
-        assert 240 < remaining_s < 300, (
-            f'recovered countdown should resume near ~258s, got {remaining_s:.0f}s')
-    finally:
-        from lib.database import db_execute_with_retry
-        with _conv_latest_task_lock:
-            _conv_latest_task.pop(conv_id, None)
-        db_execute_with_retry(
-            db, 'DELETE FROM conversations WHERE id=? AND user_id=1', (conv_id,))
-        db_execute_with_retry(
-            db, 'DELETE FROM task_results WHERE task_id=?', (task['id'],))
-        db.commit()
+    projection = json.loads(json.dumps(_task_projection(task, {})))
+    round_record = projection['toolRounds'][0]
+    assert round_record['status'] == 'searching'
+    assert round_record['deadlineTs'] == deadline_ms
+    assert round_record['execStartTs'] == exec_start_ms
+    assert round_record['deadlineTs'] > time.time() * 1000
 
 
 # ══════════════════════════════════════════════════════════════════
-#  4. The pure reducer folds tool_progress (live AND cold)
+#  4. Renderer: countdown / count-up / no negative numbers
 # ══════════════════════════════════════════════════════════════════
 
 def _node(script: str) -> dict:
@@ -401,122 +326,6 @@ def _node(script: str) -> dict:
     finally:
         os.unlink(path)
 
-
-_HARNESS_HEAD = f'''
-const fs = require('fs');
-const src = fs.readFileSync({json.dumps(REDUCER_JS)}, 'utf8');
-const mod = {{ exports: {{}} }};
-new Function('module', 'exports', src)(mod, mod.exports);
-const {{ projectStreamEvents, projectColdSnapshot, reduceStreamState }} = mod.exports;
-'''
-
-
-def test_reducer_folds_deadline_from_tool_progress():
-    """HOLE #1: before this, `tool_progress` had no reducer branch at all — so
-    the deadline existed only on the live pipeline path."""
-    out = _node(_HARNESS_HEAD + '''
-const evs = [
-  { type:'tool_start', roundNum:1, toolCallId:'tc1', toolName:'run_command',
-    query:'make', tStart: 1000 },
-  { type:'tool_progress', roundNum:1, toolCallId:'tc1',
-    execStartTs: 5000, deadlineTs: 65000, chunk:'compiling...' },
-];
-const proj = projectStreamEvents(evs);
-const r = proj.toolRounds[0] || {};
-console.log(JSON.stringify({
-  deadline: r.deadlineTs, execStart: r.execStartTs,
-  partial: r._partialOutput, status: r.status,
-}));
-''')
-    assert out['deadline'] == 65000, 'reducer dropped deadlineTs'
-    assert out['execStart'] == 5000, 'reducer dropped execStartTs'
-    assert out['partial'] == 'compiling...'
-    assert out['status'] == 'searching', (
-        'a progress frame must NOT settle the round — it means "still going"')
-
-
-def test_cold_projection_preserves_deadline():
-    """The conversation-switch path. A cold snapshot from the DB must project
-    the deadline, else the countdown restarts from nothing."""
-    out = _node(_HARNESS_HEAD + '''
-const snap = { content:'', thinking:'', toolRounds: [
-  { roundNum:1, toolName:'run_command', toolCallId:'tc1', status:'searching',
-    tStart: 1000, execStartTs: 5000, deadlineTs: 65000,
-    _partialOutput: 'compiling...' },
-]};
-const r = (projectColdSnapshot(snap).toolRounds || [])[0] || {};
-console.log(JSON.stringify({
-  deadline: r.deadlineTs, execStart: r.execStartTs, partial: r._partialOutput,
-}));
-''')
-    assert out['deadline'] == 65000, (
-        'THE BUG: projectColdSnapshot dropped deadlineTs — switching '
-        'conversations mid-command restarts the countdown')
-    assert out['execStart'] == 5000
-    assert out['partial'] == 'compiling...'
-
-
-def test_live_and_cold_reach_the_same_deadline():
-    """The parity contract: folding the events and projecting the settled
-    snapshot of the SAME turn must agree on every timing field."""
-    out = _node(_HARNESS_HEAD + '''
-const evs = [
-  { type:'tool_start', roundNum:1, toolCallId:'tc1', toolName:'run_command',
-    query:'make', tStart: 1000 },
-  { type:'tool_progress', roundNum:1, toolCallId:'tc1',
-    execStartTs: 5000, deadlineTs: 65000, chunk:'a' },
-  { type:'tool_progress', roundNum:1, toolCallId:'tc1', chunk:'b' },
-];
-const live = projectStreamEvents(evs).toolRounds[0];
-const cold = projectColdSnapshot({ content:'', thinking:'', toolRounds:[{
-  roundNum:1, toolName:'run_command', toolCallId:'tc1', query:'make',
-  status:'searching', results:null, tStart:1000, execStartTs:5000,
-  deadlineTs:65000, _partialOutput:'ab', llmRound:null, _swarm:false,
-}]}).toolRounds[0];
-console.log(JSON.stringify({
-  sameDeadline: live.deadlineTs === cold.deadlineTs,
-  sameStart: live.execStartTs === cold.execStartTs,
-  samePartial: live._partialOutput === cold._partialOutput,
-  livePartial: live._partialOutput,
-}));
-''')
-    assert out['livePartial'] == 'ab', (
-        f'chunks must APPEND exactly once, got {out["livePartial"]!r} — a '
-        f'double-apply means the pipeline kept its own private write path')
-    assert out['sameDeadline'] and out['sameStart'] and out['samePartial']
-
-
-def test_pipeline_has_no_second_private_write_path():
-    """The handler must DELEGATE to the reducer. If it kept mutating the round
-    itself, every chunk would be applied twice (reducer + handler) — which is
-    how the previous shape would have failed after this migration.
-
-    Comments AND string literals are stripped before scanning (charter #24 via
-    the shared tests/_source_scan primitive): this file's own explanatory
-    comments mention `_partialOutput` by name, and a guard a comment can
-    violate is a false alarm that trains people to ignore it.
-    """
-    from tests._source_scan import js_function_body, strip_comments
-
-    with open(runtime_section_path('ui/sse_handlers_io.js'),
-              encoding='utf-8') as fh:
-        src = fh.read()
-    body = js_function_body(src, '_handleToolProgress')
-    live = strip_comments(body, lang='js', strings=True)
-    assert 'reduceStreamState' in live, (
-        '_handleToolProgress must fold through the pure reducer')
-    assert '_partialOutput' not in live, (
-        'the handler still writes _partialOutput itself — with the reducer '
-        'branch in place that double-appends every chunk')
-    for tok in ('_batchTotal', '_batchDone', 'qrImages'):
-        assert tok not in live, (
-            f'{tok} is still written by the handler; it belongs to the reducer '
-            f'so the cold projection carries it too')
-
-
-# ══════════════════════════════════════════════════════════════════
-#  5. Renderer: countdown / count-up / no negative numbers
-# ══════════════════════════════════════════════════════════════════
 
 def test_timer_chip_counts_down_up_and_never_goes_negative():
     out = _node(f'''

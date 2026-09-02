@@ -1,36 +1,10 @@
 """Every path in the READMEs' Project Structure tree must exist on disk.
 
-Why this suite exists (measured 2026-07-31)
--------------------------------------------
-The ``## Project Structure`` block is the onboarding map: README.md's
-``## For AI Agents & Developers`` section points readers straight at it, and it
-is the first thing both a new contributor and an AI assistant read to find
-their way around. Seven of its paths named files that no longer exist:
-
-    lib/tasks_pkg/orchestrator.py   -> orchestrator/ (package)
-    lib/tasks_pkg/executor.py       -> executor/     (package)
-    lib/tasks_pkg/endpoint.py       -> endpoint/     (package)
-    lib/image_gen.py                -> image_gen/    (package)
-    lib/mt_provider.py              -> mt_provider/  (package)
-    lib/fetch/                      -> removed (external `tofu_search`)
-    lib/search/                     -> removed (external `tofu_search`)
-
-Three of those were the headline entries — "Main LLM ↔ tool loop", "Tool
-execution engine", "Planner → Worker → Critic loop" — so the map sent every
-new reader to files that are not there. Identical drift in BOTH language
-files, because they are kept in lockstep.
-
-Nothing could notice. The `.py` -> package promotions are invisible to any
-check that greps for a name, and the two removed packages left with a
-subsystem extraction months earlier. Documentation drift of this kind is only
-ever caught by a human happening to click through — which is to say, not
-caught.
-
-The rule is deliberately structural, not textual: parse the fenced tree, walk
-the box-drawing indentation back to a real repo-relative path, and stat it.
-A guard that merely grepped for known-bad names would need updating every time
-a different path rotted; this one cannot go stale, because it re-derives the
-path set from the document each run.
+The onboarding map is parsed structurally: box-drawing indentation is resolved
+to repository-relative paths and every resulting entry is checked on disk.
+English and Chinese maps must expose the same path set. This catches any later
+file-to-package promotion, move, or removal without retaining old layouts in
+the test itself.
 """
 
 import re

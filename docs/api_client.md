@@ -1,202 +1,132 @@
-# `static/js/api.js` — Unified Frontend API Client
+# Frontend API ownership
 
-> **Status (2026-05-28)**: ✅ **Migration complete.** All 18 frontend JS
-> files now route every backend HTTP call through `window.Api.<domain>.<method>(...)`.
-> The regression guard `tests/test_frontend_api_isolation.py` runs with
-> `BASELINE = {}` — any new raw `fetch('/api/...')` outside `api.js`
-> fails CI immediately.
->
-> **Domain count**: 24 (`folders`, `memory`, `timer`, `scheduler`,
-> `optimizer`, `agentBackends`, `compactions`, `conversations`, `text`,
-> `translate`, `chat`, `images`, `pdf`, `doc`, `health`, `pricing`,
-> `clientError`, `serverConfig`, `browser`, `project`, `daily`, `paper`,
-> `features`, `providers`, `dispatch`, `oauth`, `mcp`).
+> **Current state (2026-08-23):** browser HTTP has one transport owner:
+> [`frontend/src/api/transport.ts`](../frontend/src/api/transport.ts).
+> There is no classic-file or no-Vite transport fallback. The logical
+> `api.js` section retained inside `frontend/src/runtime/app-runtime.js` owns
+> endpoint names only and delegates every request to the typed transport.
 
----
+## 1. Request path
 
-## 1. Why
+```text
+feature / retained UI
+  -> retained Api.<domain> method OR generated typed client
+  -> frontend/src/api/transport.ts
+  -> fetch
+```
 
-Before this module the frontend made 180+ raw `fetch('/api/...')` calls
-across 18+ JS files, each rebuilding URL handling, JSON parsing, error
-handling, and timeout logic. That made it impossible to:
+The transport is the only owner of:
 
-- Migrate any single endpoint to `/api/v1` without touching every call
-  site.
-- Add cross-cutting concerns (auth headers, retries, telemetry) in one
-  place.
-- Enforce the **separation of concerns** rule from CLAUDE.md (see also
-  `.tofu/memories/separation-of-concerns-directive.md`): the frontend
-  should only render and call the backend, never duplicate backend
-  logic. Talking through one client makes that boundary obvious.
+- page-relative URL resolution;
+- query encoding, request bodies, timeouts, and response parsing;
+- `X-Request-ID` correlation;
+- task/conversation affinity headers and their lifecycle;
+- `ApiError` construction and backend error-envelope normalization.
 
-`api.js` is the long-term answer. Every backend HTTP call from the
-frontend goes through `window.Api.<domain>.<method>(...)`. The client
-owns URL choice — when an endpoint moves from legacy to `/api/v1`, only
-`api.js` changes.
+The retained `window.Api` registry provides thin domain methods for UI that has
+not yet become a typed feature. Its `request`, verb, and stream helpers all
+delegate to the same transport; they are not an independent implementation.
 
-## 2. Public API
+Conversation sync is contract generated. Its source of truth is
+`contracts/conversation_sync_v3.yaml`; running
+`npm run generate:conversation-sync` emits
+`frontend/src/api/conversation-sync.generated.ts`. Do not hand-edit generated
+schemas or recreate those endpoints in the retained registry.
 
-All on `window.Api`:
+## 2. Calling an endpoint
+
+Prefer the narrowest existing owner:
+
+```ts
+const snapshot = await conversationSyncApi.snapshot(conversationId);
+```
 
 ```js
-// Low-level (use sparingly — prefer domain methods)
-Api.request(path, opts)        // {method, query, json, body, headers,
-                               //  timeout, parse, signal, onError}
-Api.get(path, opts)
-Api.post(path, json, opts)
-Api.put(path, json, opts)
-Api.patch(path, json, opts)
-Api.del(path, opts)
-Api.stream(path, opts)         // returns Response for SSE / chunked
-
-// Errors
-Api.ApiError                   // { status, code, body, url }
-
-// Domains (grow as we migrate)
-Api.folders.list()
-Api.folders.create(name, color)
-Api.folders.update(id, updates)
-Api.folders.remove(id)
+const folders = await window.Api.folders.list();
 ```
 
-### Options reference
+Direct use of `request()` is reserved for defining one of those owners, not
+feature call sites. A new `fetch('/api/...')` anywhere outside
+`frontend/src/api/transport.ts` is a contract violation.
 
-| Option   | Default     | Meaning |
-|----------|-------------|---------|
-| `method` | `'GET'`     | HTTP verb |
-| `query`  | `null`      | `{k:v}` → encoded query string |
-| `json`   | `undefined` | Object → JSON body, sets Content-Type |
-| `body`   | `undefined` | Raw body (string / FormData / Blob) |
-| `headers`| `{}`        | Extra request headers |
-| `timeout`| `30000`     | Milliseconds; `0` = no timeout |
-| `parse`  | `'json'`    | `'json'` / `'text'` / `'blob'` / `'response'` / `'none'` |
-| `signal` | `null`      | Caller-supplied `AbortSignal` |
-| `onError`| `'throw'`   | `'throw'` (default) or `'null'` (return null on failure, log warn) |
+`onError: 'null'` is only for genuinely best-effort reads whose absence has an
+explicit UI meaning. Mutations and failures that users need to act on must
+throw `ApiError`.
 
-### Errors
+## 3. Errors
 
-`ApiError`:
+`ApiError` preserves HTTP status, a stable machine `code`, request identifiers,
+parsed response body, URL, and exactly one applicable server error channel:
 
-- `status`  — HTTP status (0 = network/abort)
-- `code`    — `'network'` / `'timeout'` / `'parse'` / backend `error` field
-- `body`    — parsed body (json or text) when available
-- `url`     — full request URL
+- `problem` is a validated RFC 7807 body from
+  `application/problem+json` (API v4);
+- `envelope` is the normalized task/domain error envelope used by v1/v3;
+- transport failures have neither and use `code: "timeout" | "aborted" |
+  "network" | "parse"`.
 
-By default callers must catch `ApiError`. For "best-effort" fetches use
-`{ onError: 'null' }` — failures resolve to `null` and are logged at
-`console.warn`. **Never** swallow errors silently; mirror the backend's
-"zero silent catches" rule (CLAUDE.md §2.2).
+The complete task/domain envelope shape is:
 
-## 3. Architecture rule
-
-> **No JS file other than `api.js` may call `fetch('/api/...')` or
-> `fetch(apiUrl('/api/...'))` directly.**
-
-This is enforced by `tests/test_frontend_api_isolation.py`. The test
-maintains a per-file ratchet (`BASELINE`) of currently-known legacy
-calls, and fails CI if any file's count grows. The end-state target is
-an empty `BASELINE`.
-
-The same lint applies to:
-
-- `WebSocket('/api/...')`  — use `pushSubscribe(...)` from `push.js`.
-- New `EventSource('/api/...')`  — use `Api.stream(...)`.
-
-## 4. Migration recipe
-
-When you migrate the calls in a JS file:
-
-### Step 1 — Add the domain to `api.js`
-
-Group all calls for one feature under a single domain object near the
-bottom of `api.js`. Keep methods thin (URL + verb + minimal shape).
-
-```js
-// In api.js
-const memory = {
-  list:   (scope)        => get('/api/v1/memory', { query: { scope }, onError: 'null' }),
-  create: (entry)        => post('/api/v1/memory', entry),
-  remove: (id)           => del(`/api/v1/memory/${encodeURIComponent(id)}`),
-  toggle: (id, enabled)  => post(`/api/v1/memory/${encodeURIComponent(id)}/toggle`, { enabled }),
-};
-
-const Api = { ..., memory };
+```ts
+{
+  kind: string;
+  message: string;
+  severity: string;
+  retryable: boolean;
+  hint: string;
+  detail: string;
+  model: string;
+  context: string;
+  source: string;
+  raw: unknown;
+}
 ```
 
-### Step 2 — Replace the call sites
+For HTTP/transport policy, branch on `error.code` and/or HTTP status. For a
+task/domain failure, branch on `error.envelope.kind`. Never branch on display
+text. Render `problem.detail` for v4 or envelope `message`/`hint` for task
+errors; keep `requestId` available for support. The transport completes older
+partial `{kind, message}` payloads at the boundary so downstream task code has
+one shape, but it never re-labels an RFC problem as a task envelope. HTTP 500
+details remain only in correlated backend logs; the browser receives the
+stable internal category and request ID.
 
-```js
-// Before
-const resp = await fetch(apiUrl('/api/v1/memory?scope=' + scope));
-if (resp.ok) data = await resp.json();
+## 4. Streaming and non-JSON traffic
 
-// After
-const data = (await Api.memory.list(scope)) || [];
-```
+- Turn-native chat state uses `ConversationSyncCoordinator`: one authoritative
+  snapshot plus the conversation-scoped `/api/v3/.../events` stream. Its
+  cursor is opaque and must not be interpreted as an attempt sequence.
+- Push/WebSocket notifications are invalidation hints. They do not write
+  conversation projections directly.
+- Binary downloads, external OAuth endpoints, image hydration, and the desktop
+  loopback broker are documented transport carve-outs. A carve-out must not be
+  widened to same-origin JSON API traffic.
 
-### Step 3 — Run the regression guard
+## 5. Adding or changing an endpoint
 
-```sh
-pytest tests/test_frontend_api_isolation.py -v
-```
+1. Define the backend request and response in the canonical API contract.
+2. For a generated domain, update its machine-readable contract and regenerate
+   the client. Otherwise add one thin method to the retained `Api.<domain>`
+   registry in `frontend/src/runtime/app-runtime.js`.
+3. Call the owner from features; do not assemble the URL or parse the response
+   again at the call site.
+4. Add success, typed-failure, and retry/idempotency coverage appropriate to
+   the operation.
+5. Run `npm run check:conversation-sync` when that contract is touched,
+   `tests/test_frontend_api_isolation.py`, module typechecking, and the frontend
+   production build.
 
-If `test_baseline_reflects_real_counts` reports the file is below
-baseline, paste the new (smaller) count into `BASELINE`. **Numbers must
-only ever decrease.**
+## 6. Enforcement
 
-### Step 4 — Bump the cache-busting version
+- `tests/test_frontend_api_isolation.py` proves the typed transport is the only
+  native `fetch` owner and scans every retained runtime section, including the
+  logical `api.js` registry.
+- `tests/test_api_transport_cutover.py` prevents a shadow transport or fallback
+  from returning.
+- `tests/test_frontend_api_transport_vite.py` covers correlation, affinity,
+  structured failures, and idempotent command retries.
+- `tests/test_conversation_sync_v3.py` verifies generated-contract freshness,
+  snapshot/event semantics, opaque cursor recovery, and shipped-source
+  visibility.
 
-Bump the `?v=...` querystring on the touched JS file in `index.html`
-(matches existing convention).
-
-## 5. Mapping legacy → v1
-
-When `/api/v1/<domain>/...` exists and is feature-complete, switch the
-domain methods to point at v1:
-
-```js
-// Before: legacy
-list: () => get('/api/foo'),
-// After: v1 with no caller change
-list: () => get('/api/v1/foo'),
-```
-
-This is the long-term cleanup — done one domain at a time after each
-v1 endpoint is verified. The point of this module is that **callers
-don't care**.
-
-The `agent_backends` and `folders` domains have already been switched
-to `/api/v1/*` (commits 1 and 2 of `docs/legacy_api_migration.md`).
-The remaining domains follow the same pattern.
-
-## 6. Streaming / WebSocket
-
-- **Server-push events** (paper progress, translate done, image gen
-  progress, etc.) → use `pushSubscribe(channel, taskId, handler)` from
-  `push.js`. Do not poll.
-- **SSE chat stream** (`/api/chat/stream/<id>`) → currently uses raw
-  `fetch` with chunk reading. A future `Api.chat.stream(taskId)` will
-  wrap this; until then, the chat stream remains the lone exception
-  documented in `BASELINE['main.js']`.
-- **Outbound WebSocket** other than `/api/push` should not exist.
-
-## 7. Anti-patterns to avoid
-
-- ❌ `fetch('/api/...')` outside `api.js`.
-- ❌ Re-implementing URL building, query encoding, or JSON parse error
-  handling in feature modules.
-- ❌ Adding a `try/catch` that swallows the error and returns `null`
-  silently — pass `{onError:'null'}` instead so the warn lands in the
-  console.
-- ❌ Backend-style logic (validation, defaulting, transformation) in the
-  feature module. If the backend should compute it, add a backend
-  endpoint and call it through `api.js`.
-
-## 8. References
-
-- `frontend/src/api/transport.ts`                       — implementation
-- `tests/test_frontend_api_isolation.py`                — ratchet guard
-- `.tofu/memories/separation-of-concerns-directive.md`  — frontend/backend boundary
-- `routes/api_v1/`                                      — v1 backend surface (long-term target)
-- `frontend/src/runtime/app-runtime.js`                 — server-push client
-- `lib/vite_assets.py`                                  — validated manifest loading
+The full wire-envelope and backend checklist live in
+[`docs/API_CONTRACT.md`](API_CONTRACT.md).

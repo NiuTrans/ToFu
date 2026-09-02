@@ -36,7 +36,8 @@ def http_get(*args, **kwargs):
 _DISCOVER_TIMEOUT = 10
 
 
-def _fetch_models_json(models_url: str, headers: dict, timeout: int):
+def _fetch_models_json(models_url: str, headers: dict, timeout: int,
+                       *, quiet_not_found: bool = False):
     """GET {models_url} once. Returns ``(data_dict, None)`` or ``(None, err)`.
 
     ``err`` is one of ``'http-<status>'`` / ``'timeout'`` / ``'conn'`` /
@@ -44,7 +45,8 @@ def _fetch_models_json(models_url: str, headers: dict, timeout: int):
     on a bare origin justifies the /v1 fallback retry; a timeout means the
     box is down and retrying would just double the wait).
     """
-    logger.info('[Discovery] Fetching models from %s', models_url)
+    routine_log = logger.debug if quiet_not_found else logger.info
+    routine_log('[Discovery] Fetching models from %s', models_url)
     try:
         resp = http_get(
             models_url,
@@ -60,8 +62,16 @@ def _fetch_models_json(models_url: str, headers: dict, timeout: int):
         return None, 'conn'
 
     if not resp.ok:
-        logger.warning('[Discovery] GET %s returned HTTP %d: %.500s',
-                      models_url, resp.status_code, resp.text)
+        # A periodic well-known-port sweep first proves that TCP is open, but
+        # the listener can legitimately be an unrelated local service. Its
+        # /models + /v1/models 404 pair means "not an LLM engine", not an
+        # operational incident. Interactive/provider-config discovery still
+        # defaults to WARNING so a user's bad URL remains visible; only the
+        # explicit background-sweep context opts into DEBUG for clean 404s.
+        log = logger.debug if quiet_not_found and resp.status_code == 404 \
+            else logger.warning
+        log('[Discovery] GET %s returned HTTP %d: %.500s',
+            models_url, resp.status_code, resp.text)
         return None, 'http-%d' % resp.status_code
 
     try:
@@ -75,7 +85,7 @@ def _fetch_models_json(models_url: str, headers: dict, timeout: int):
                       type(data.get('data')).__name__ if isinstance(data, dict)
                       else type(data).__name__)
         return None, 'bad-json'
-    logger.info('[Discovery] Received %d models from API', len(data['data']))
+    routine_log('[Discovery] Received %d models from API', len(data['data']))
     return data, None
 
 
@@ -86,7 +96,8 @@ def _fetch_models_json(models_url: str, headers: dict, timeout: int):
 def discover_models(base_url: str, api_key: str,
                     timeout: int = _DISCOVER_TIMEOUT,
                     models_path: str = '',
-                    return_effective: bool = False):
+                    return_effective: bool = False,
+                    quiet_not_found: bool = False):
     """Auto-discover models from an OpenAI-compatible /v1/models endpoint.
 
     Calls GET {models_url}, parses the response, infers capabilities,
@@ -107,6 +118,10 @@ def discover_models(base_url: str, api_key: str,
         return_effective: When True, return ``(models, effective_base_url)``
             so the caller can persist the URL that ACTUALLY worked (the
             /v1 fallback variant) instead of the raw user input.
+        quiet_not_found: Log HTTP 404 and routine request/success details at
+            DEBUG instead of WARNING/INFO. Reserved for periodic best-effort
+            probes where an open well-known port may belong to an unrelated
+            service. All other failures stay WARNING.
 
     Returns:
         List of model dicts suitable for server_config providers.models:
@@ -147,7 +162,8 @@ def discover_models(base_url: str, api_key: str,
         headers['Authorization'] = 'Bearer %s' % api_key
 
     effective_base = base_url.rstrip('/')
-    data, err = _fetch_models_json(models_url, headers, timeout)
+    data, err = _fetch_models_json(
+        models_url, headers, timeout, quiet_not_found=quiet_not_found)
 
     # ── /v1 fallback: bare-origin URL + plain 404 → retry under /v1 ──
     # Gated on a CUSTOM models_path being absent (an explicit path is
@@ -164,11 +180,14 @@ def discover_models(base_url: str, api_key: str,
                               alt_url, e)
                 alt_url = ''
             if alt_url:
-                data, err = _fetch_models_json(alt_url, headers, timeout)
+                data, err = _fetch_models_json(
+                    alt_url, headers, timeout,
+                    quiet_not_found=quiet_not_found)
                 if data is not None:
                     effective_base = alt_base
-                    logger.info('[Discovery] bare-origin /models 404 — '
-                                'fell back to %s', alt_url)
+                    fallback_log = logger.debug if quiet_not_found else logger.info
+                    fallback_log('[Discovery] bare-origin /models 404 — '
+                                 'fell back to %s', alt_url)
 
     if data is None:
         return _ret([], effective_base)
@@ -242,7 +261,8 @@ def discover_models(base_url: str, api_key: str,
     n_cheap = sum(1 for m in result if 'cheap' in m['capabilities'])
     n_img = sum(1 for m in result if 'image_gen' in m['capabilities'])
     n_emb = sum(1 for m in result if 'embedding' in m['capabilities'])
-    logger.info('[Discovery] %d usable models: %d text (%d cheap), '
+    result_log = logger.debug if quiet_not_found else logger.info
+    result_log('[Discovery] %d usable models: %d text (%d cheap), '
                '%d image_gen, %d embedding',
                len(result), n_text, n_cheap, n_img, n_emb)
     return _ret(result, effective_base)

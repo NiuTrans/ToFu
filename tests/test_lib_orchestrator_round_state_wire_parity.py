@@ -2,7 +2,8 @@
 """Wire-parity for pt_862771477a86 slice 1 — _RoundState container swap.
 
 Scope: run_task's stream main loop historically carried 14 cross-iteration
-locals as bare function locals. Slice 1 moves them onto ONE flat dataclass,
+locals as bare function locals. Slice 1 moved them onto ONE flat dataclass;
+the structured provider-stream result later became the 15th explicit value in
 ``lib/tasks_pkg/orchestrator/_round_state.py::RoundState``, as a PURE
 CONTAINER SWAP (the fields and event contract stay centralized here).
 
@@ -15,7 +16,7 @@ Owner rulings baked into the shape (2026-07-27):
 
 Failing-first / NEUTER — this test asserts:
   1. The module exists, ``RoundState`` is a dataclass exposing EXACTLY the
-     14 sanctioned fields (delete or rename one → RED; this is the
+     15 sanctioned fields (delete or rename one → RED; this is the
      delete-field NEUTER guard).
   2. ``_run.py`` imports RoundState AND constructs it.
   3. The historical inline initializers and bare-local mutation pivots are
@@ -45,23 +46,22 @@ def _unit(fn):
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# The 14 sanctioned flat fields (owner ruling: 16 cross-iteration locals
-# minus round_num + premature_retry_count, both chassis-owned at cutover).
+# The 15 sanctioned flat fields: the original 14 plus the versioned provider
+# stream result required by terminal-state projection.
 _FIELDS = {
     'model', 'preset', 'thinking_enabled',
     'exit_reason', 'abort_phase', 'consecutive_tool_timeouts',
     'last_checkpoint_ts',
     'assistant_msg', 'last_finish_reason', 'last_usage',
+    'last_stream_result',
     'accumulated_usage', 'api_rounds',
     'tool_call_happened', 'tool_round_num',
 }
 
 
 @_unit
-def test_round_state_module_exposes_exactly_the_14_fields():
-    """Slice 1 NEUTER guard: RoundState is a dataclass with EXACTLY the 14
-    sanctioned fields — deleting one turns this red; adding a 15th (e.g.
-    smuggling round_num in) also turns it red (owner ruling: flat, 14)."""
+def test_round_state_module_exposes_exactly_the_15_fields():
+    """RoundState exposes exactly the 15 owner-sanctioned flat fields."""
     import dataclasses
     import importlib
     mod = importlib.import_module(
@@ -129,6 +129,7 @@ def test_round_state_defaults_match_pre_slice_initializers():
     assert rs.assistant_msg is None
     assert rs.last_finish_reason is None
     assert rs.last_usage is None
+    assert rs.last_stream_result is None
     assert rs.accumulated_usage == {} and rs.api_rounds == []
     assert rs.tool_call_happened is False
     assert rs.tool_round_num == 0
@@ -140,7 +141,7 @@ def test_round_state_defaults_match_pre_slice_initializers():
 
 if __name__ == '__main__':
     for fn in [
-        test_round_state_module_exposes_exactly_the_14_fields,
+        test_round_state_module_exposes_exactly_the_15_fields,
         test_run_task_constructs_round_state,
         test_inline_loop_state_initializers_gone,
         test_round_state_defaults_match_pre_slice_initializers,

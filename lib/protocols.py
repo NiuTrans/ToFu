@@ -49,6 +49,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Protocol, runtime_checkable
 
+from lib.llm.stream_result import ProviderStreamResult
+
 __all__ = [
     'LLMService',
     'FetchService',
@@ -75,7 +77,8 @@ class LLMService(Protocol):
 
     The two core methods mirror the dispatch API:
       - ``chat()`` for non-streaming (returns content + usage)
-      - ``stream()`` for streaming (returns msg + finish_reason + usage)
+      - ``stream()`` for streaming (returns a ``ProviderStreamResult`` whose
+        state carries the provider's terminal evidence)
     """
 
     def chat(
@@ -110,11 +113,13 @@ class LLMService(Protocol):
         capability: str = 'text',
         prefer_model: str | None = None,
         log_prefix: str = '',
-    ) -> tuple[dict[str, Any], str | None, dict[str, Any]]:
+    ) -> ProviderStreamResult:
         """Streaming chat completion.
 
         Returns:
-            (message_dict, finish_reason, usage_dict)
+            One typed provider attempt.  Legacy tuple-unpacking remains
+            available on the result only as a compatibility seam; callers
+            must use ``state`` / ``is_verified_complete`` for semantics.
         """
         ...
 
@@ -274,183 +279,74 @@ class TaskEventSink(Protocol):
 
 @runtime_checkable
 class ConversationStore(Protocol):
-    """Protocol for the agent base's persistence boundary.
+    """Owner-scoped persistence boundary for the reusable agent core.
 
-    The reusable agent base (orchestrator, endpoint, compaction,
-    task_runtime — see ``lib/agent_core_manifest.py``) must NOT import
-    ``lib.database`` / ``lib.conversations`` directly.  It reaches all
-    persistence through this protocol, obtained via
-    ``lib.agent_core.store.get_conversation_store()``.
-
-    Satisfied by ``lib.tasks_pkg.persistence_store.DefaultConversationStore``
-    (chatui's PostgreSQL/SQLite host adapter), or any host that wants to run
-    the agent against a different store (test mocks, an embedded app with no
-    conversations table, etc.).
-
-    Methods are added stage-by-stage as core call sites are migrated behind
-    the seam; each one mirrors an operation the base used to perform inline.
+    The transcript body is a projection of normalized turns. Implementations
+    expose only semantic turn mutations; a whole-transcript overwrite is not
+    part of this protocol.
     """
 
-    def release_connection(self) -> None:
-        """Release this worker thread's pooled DB connection(s).
-
-        Called in a ``finally`` at the end of a unit of work on a long-lived
-        worker thread (the ``asyncio.to_thread`` pool, daemon task threads),
-        so a per-thread connection isn't pinned for the thread's lifetime.
-        A no-op for stores that don't pool per-thread connections.
-        """
-        ...
-
     def next_task_event_id(self, task_id: str, *, floor: int = 0) -> int:
-        """Return an unused task-event id at or above ``floor``.
-
-        The host adapter must account for both durable rows and any local
-        write-behind shadow so a core caller cannot reuse an id while the
-        newest row is still awaiting its database commit.
-        """
+        """Return an unused durable task-event sequence at or above ``floor``."""
         ...
 
-    def load_conversation_messages(self, conv_id: str) -> tuple[list, int] | None:
-        """Return ``(messages, updated_at)`` for a conversation, or ``None``.
-
-        ``messages`` is the parsed message list (possibly empty); ``updated_at``
-        is the row's last-modified timestamp in epoch-ms (0 if unknown).
-        Returns ``None`` when no conversation row exists.  Parse failures are
-        logged by the store and yield an empty list rather than raising.
-        """
+    def load_transcript(
+        self, conv_id: str, *, user_id: Any,
+    ) -> tuple[list, int, int] | None:
+        """Return ``(derived_messages, updated_at_ms, revision)`` or ``None``."""
         ...
 
-    def save_conversation_messages(self, conv_id: str, messages: list) -> int:
-        """Persist ``messages`` for a conversation under a rev-CAS guard.
-
-        Returns the new ``updated_at`` timestamp (epoch-ms) written.  Does NOT
-        touch any full-text search index — callers that need FTS use the
-        search-aware sync path on the host adapter.
-
-        The transcript is ONE blob, so every caller read-modify-writes it.  An
-        unconditional overwrite silently erases rows a concurrent writer
-        appended between the read and the write, so this method writes only
-        while the row's ``rev`` is unchanged and raises
-        ``ConcurrentWriteConflict`` on a lost race instead of clobbering.
-        Prefer :meth:`patch_message_fields_by_task` when you are only setting
-        fields on one message — it replays the mutation after a lost race.
-        """
+    def compact_turn_transcript(
+        self, conv_id: str, current_messages: list, compacted_messages: list,
+        expected_revision: int, *, command_id: str, user_id: Any,
+    ) -> int:
+        """Apply one atomic semantic compaction; return 1 or 0 on CAS loss."""
         ...
 
-    def overwrite_conversation_messages_unconditional(self, conv_id: str,
-                                                      messages: list) -> int:
-        """DANGEROUS: overwrite the transcript, ignoring concurrent writers.
-
-        Rows another thread appended after this caller's read are LOST.  Only
-        correct where the caller is provably the sole writer (boot-time crash
-        recovery, before any task or client is attached).  Named explicitly so
-        choosing it is a visible decision, never the accidental default.
-        """
+    def archive_transcript(
+        self, conv_id: str, messages: list, *, user_id: Any,
+        summary: str = '', trigger: str = 'force', task_id: str = '',
+        round_num: int = 0, model: str = '', tokens_before: int = 0,
+        tokens_after: int = 0, msgs_before: int = 0, msgs_after: int = 0,
+        reason: str = '', receipt: dict | None = None,
+    ) -> str | None:
+        """Create an owner-scoped pre-compaction archive."""
         ...
 
-    def patch_message_fields_by_task(self, conv_id: str, task_id: str,
-                                     fields: dict,
-                                     *, max_attempts: int = 5) -> bool:
-        """Set ``fields`` on the assistant message tagged ``_taskId == task_id``.
-
-        The narrow-write path for post-settle enrichment (snapshot id, learned
-        preferences): re-read, mutate the single owned message, commit under a
-        rev-CAS, retry on a lost race — so concurrent appends survive.  Returns
-        True when the patch landed; False when no message carries that task id
-        (deliberately NO positional fallback — guessing stamps one task's data
-        onto another task's turn) or the race could not be won.
-        """
+    def list_compaction_archives(
+        self, conv_id: str, *, user_id: Any, limit: int = 200,
+    ) -> list[dict]:
+        """List compact archive metadata without loading transcript payloads."""
         ...
 
-    def cas_update_conversation_messages(self, conv_id: str, messages: list,
-                                         expected_updated_at: int) -> int:
-        """Compare-and-swap overwrite of a conversation's messages.
-
-        Writes only if the row's current ``updated_at`` still equals
-        ``expected_updated_at``.  Returns the number of rows affected (0 when a
-        concurrent writer bumped the row — the caller treats that as a skip).
-        """
+    def get_compaction_archive(
+        self, conv_id: str, archive_id: str, *, user_id: Any,
+        include_messages: bool = True,
+    ) -> dict | None:
+        """Load owner-scoped archive metadata and optionally its transcript."""
         ...
 
-    def cas_sync_conversation_with_search(self, conv_id: str, messages: list,
-                                          expected_updated_at: int) -> int:
-        """CAS overwrite that ALSO refreshes ``msg_count`` + ``search_text`` +
-        the FTS index (the CAS-guarded sibling of
-        :meth:`sync_conversation_with_search`).
-
-        Writes only if the row's ``updated_at`` still equals
-        ``expected_updated_at`` (0 rows affected → a concurrent writer won → the
-        caller treats it as a skip), and updates FTS ONLY on a landed write.
-        Use it — not :meth:`cas_update_conversation_messages` — whenever a write
-        CHANGES THE MESSAGE SET (e.g. manual compaction removes whole messages),
-        so the sidebar count and full-text search stay consistent with the
-        rewritten body.  Returns affected-row count.
-        """
+    def update_archive_summary(
+        self, archive_id: str, summary: str, tokens_after: int,
+        msgs_after: int, *, user_id: Any, receipt: dict | None = None,
+    ) -> Any:
+        """Set final summary, result receipt, and post-compaction counts."""
         ...
 
-    def ensure_compaction_schema(self) -> None:
-        """Create the ``transcript_archive`` table/index if absent (idempotent).
-
-        Safety net for installs whose DDL migration hasn't run; the canonical
-        schema lives in the host's migration layer.
-        """
+    def delete_archives(self, conv_id: str, *, user_id: Any) -> Any:
+        """Delete every archive owned by one conversation."""
         ...
 
-    def archive_transcript(self, conv_id: str, messages: list, *,
-                           trigger: str = 'force', task_id: str = '',
-                           round_num: int = 0, model: str = '',
-                           tokens_before: int = 0, tokens_after: int = 0,
-                           msgs_before: int = 0, msgs_after: int = 0,
-                           reason: str = '') -> 'int | None':
-        """Insert a pre-compaction transcript archive row; return its id.
-
-        The store serialises ``messages`` itself.  Returns the new row id, or
-        ``None`` on failure (logged by the store).
-        """
+    def prune_archives(
+        self, conv_id: str, keep: int, *, user_id: Any,
+    ) -> int:
+        """Keep the newest ``keep`` archives and return the deletion count."""
         ...
 
-    def update_archive_summary(self, archive_id: int, summary: str,
-                               tokens_after: int, msgs_after: int) -> None:
-        """Fill in the summary + post-compaction counts on an archive row."""
+    def notify_conversation_changed(self, conv_id: str, *, user_id: Any) -> None:
+        """Emit an owner-scoped wake hint carrying the current revision."""
         ...
 
-    def delete_archives(self, conv_id: str) -> None:
-        """Delete all transcript-archive rows for a conversation."""
-        ...
-
-    def prune_archives(self, conv_id: str, keep: int) -> int:
-        """Ring-buffer retention: keep the ``keep`` newest archive rows, drop
-        the rest.  ``keep <= 0`` is a no-op.  Returns rows deleted.  Called as
-        a GC-on-insert so ``transcript_archive`` can't grow unbounded on a
-        long-lived conversation.
-        """
-        ...
-
-    def sync_conversation_with_search(self, conv_id: str, messages: list) -> int:
-        """Overwrite a conversation's messages AND refresh its search index.
-
-        Unlike :meth:`save_conversation_messages`, this also writes
-        ``msg_count`` + ``search_text`` and updates the full-text-search
-        index — the persistence path endpoint mode uses so multi-turn
-        Planner/Worker/Critic output survives an SSE disconnect and stays
-        searchable.  Returns the new ``updated_at`` (epoch-ms).
-        """
-        ...
-
-    def notify_conversation_changed(self, conv_id: str) -> None:
-        """Emit a cross-device "conversation changed" notification.
-
-        Looks up the conversation's current ``rev`` and fires the host's
-        conv-changed push so a sibling tab with this conversation open
-        refetches its body without a manual refresh.  Best-effort — the store
-        swallows/logs its own failures; callers invoke it after a landed write.
-        """
-        ...
-
-
-# ═══════════════════════════════════════════════════════════
-#  Tool Handler Protocol
-# ═══════════════════════════════════════════════════════════
 
 @runtime_checkable
 class ToolHandler(Protocol):

@@ -33,6 +33,10 @@ Failing-first / NEUTER:
 from __future__ import annotations
 
 import os
+from tests.support.chat_tasks import (
+    chat_task_fixture_guard,
+    chat_task_registry,
+)
 import sys
 import threading as _thr
 
@@ -131,7 +135,9 @@ def test_stream_chat_does_not_fire_after_final_exhausted_failure(monkeypatch):
 
 def _mk_task(content='', thinking=''):
     return {'id': 'task-ar-1', 'convId': 'ar-conv', 'content': content,
-            'thinking': thinking, 'config': {}, 'events': [], 'toolRounds': [],
+            '_userId': 1, 'status': 'running',
+            'thinking': thinking, 'config': {'userId': 1},
+            'events': [], 'toolRounds': [],
             'content_lock': _thr.Lock(), 'events_lock': _thr.Lock()}
 
 
@@ -139,7 +145,7 @@ def _drive_with_restart(task, monkeypatch, partial, restored):
     """Scripted dispatch: attempt 1 streams ``partial``, a restart is
     announced, attempt 2 streams ``restored``. Tolerates a MISSING
     on_attempt_restart kwarg (the NEUTER state) by simply not firing."""
-    import lib.tasks_pkg.manager as _mgr
+    import lib.tasks_pkg.manager._stream as _mgr
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY', '0')
 
     def _fake_dispatch(body, **kwargs):
@@ -156,12 +162,16 @@ def _drive_with_restart(task, monkeypatch, partial, restored):
 
     _orig = _mgr.dispatch_stream
     _mgr.dispatch_stream = _fake_dispatch
+    with chat_task_fixture_guard:
+        chat_task_registry[task['id']] = task
     try:
         return _mgr.stream_llm_response(
             task, {'model': 'm',
                    'messages': [{'role': 'user', 'content': 'go'}]}, tag='R1')
     finally:
         _mgr.dispatch_stream = _orig
+        with chat_task_fixture_guard:
+            chat_task_registry.pop(task['id'], None)
 
 
 def test_task_truncates_to_round_base_on_restart(monkeypatch):
@@ -188,7 +198,7 @@ def test_truncation_preserves_prior_round_base(monkeypatch):
 def test_no_restart_no_truncation(monkeypatch):
     """Without a restart fire, streaming appends normally (the truncation
     closure must not eat content on the happy path)."""
-    import lib.tasks_pkg.manager as _mgr
+    import lib.tasks_pkg.manager._stream as _mgr
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY', '0')
 
     def _fake_dispatch(body, **kwargs):
@@ -201,13 +211,17 @@ def test_no_restart_no_truncation(monkeypatch):
 
     _orig = _mgr.dispatch_stream
     _mgr.dispatch_stream = _fake_dispatch
+    task = _mk_task()
+    with chat_task_fixture_guard:
+        chat_task_registry[task['id']] = task
     try:
-        task = _mk_task()
         _mgr.stream_llm_response(
             task, {'model': 'm',
                    'messages': [{'role': 'user', 'content': 'go'}]}, tag='R1')
     finally:
         _mgr.dispatch_stream = _orig
+        with chat_task_fixture_guard:
+            chat_task_registry.pop(task['id'], None)
     assert task['content'] == 'hello world'
 
 

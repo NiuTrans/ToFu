@@ -3,7 +3,7 @@
 """Sanitize malformed ``tool_call.arguments`` JSON before the next
 gateway roundtrip.
 
-Extracted 2026-07-31 (pt_03f4cdf1 slice 14) from
+Extracted 2026-07-31 ( slice 14) from
 ``lib/tasks_pkg/orchestrator/_run.py``'s stream loop.
 
 **Why this exists**
@@ -85,7 +85,7 @@ def sanitize_malformed_tool_call_args(
                 'model in matching tool_result; gateway sees valid JSON',
                 tid, conv_id, fn_name, tc_id[:12],
                 len(bad_args) if isinstance(bad_args, str) else 0)
-            # ★ Keep the RAW args text, not just its length. It is the
+            # Keep the RAW args text, not just its length. It is the
             #   decisive cross-check on how a malformed call was
             #   produced (2026-07-27 concatenated-tool-name inquiry):
             #     * two concatenated valid JSON objects (``{...}{...}``)

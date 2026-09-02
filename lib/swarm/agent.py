@@ -27,7 +27,10 @@ from lib.agent_core.events import Phase
 from lib.agent_core.store import get_conversation_store
 from lib.llm import build_body as _default_build_body
 from lib.llm_dispatch import dispatch_stream as _default_dispatch_stream
-from lib.llm_dispatch.retry_i18n import retry_phase_fields
+from lib.llm_dispatch.retry_i18n import (
+    RetryPhaseEventBudget,
+    retry_phase_fields,
+)
 from lib.log import audit_log, get_logger
 from lib.project_mod import format_tool_args_brief
 from lib.protocols import BodyBuilder
@@ -48,6 +51,12 @@ from lib.swarm.registry import (
 )
 from lib.swarm.tools import ARTIFACT_TOOLS
 from lib.tool_input_repair import ingest_tool_call
+from lib.tools.contracts import compile_execution_contract_documents
+from lib.tools.result_envelope import (
+    nonretryable_tool_error_code,
+    tool_result_error,
+)
+from runtime_guards import deployment_resource_default
 
 logger = get_logger(__name__)
 
@@ -58,6 +67,17 @@ logger = get_logger(__name__)
 # writer's pending shadow make the sequence survive both server restarts and
 # write-behind lag.
 _REQUEST_SNAPSHOT_SEQ_LOCK = threading.Lock()
+
+
+def _nonretryable_failure_signatures(results) -> list[str]:
+    """Return stable codes only when every result is terminal and typed."""
+    codes = []
+    for result in results:
+        code = nonretryable_tool_error_code(result)
+        if not code:
+            return []
+        codes.append(code)
+    return sorted(set(codes))
 
 
 def _next_request_snapshot_event_id(inspector_id: str,
@@ -80,7 +100,7 @@ def _next_request_snapshot_event_id(inspector_id: str,
 def _emit_request_snapshot(agent, round_num: int) -> str:
     """Persist a Request Inspector snapshot for ONE sub-agent LLM round.
 
-    Epic pt_e3dc7198e7e34bb1 (P4): sub-agent LLM calls bypass ``run_task``
+    Epic  (P4): sub-agent LLM calls bypass ``run_task``
     (no ``messages_snapshot``) and their proxy tasks set ``_suppressEvents``
     — so the parent stream must stay clean. We persist DIRECTLY to the
     durable ``task_events`` log under the agent's own inspector id
@@ -90,7 +110,7 @@ def _emit_request_snapshot(agent, round_num: int) -> str:
     id without any live emission.
 
     ``kind='request'`` + the frozen params schema
-    (docs/DEBUG_PANEL_REDESIGN.md §3.3) + ``turn='swarm-agent'``.
+    (docs/FRONTEND_ARCHITECTURE.md §3.3) + ``turn='swarm-agent'``.
     Returns the inspector id ('' on failure — NEVER raises:
     observability must not break the agent loop).
     """
@@ -100,8 +120,8 @@ def _emit_request_snapshot(agent, round_num: int) -> str:
     inspector_id = f'{parent_id}#agent:{agent.agent_id}'
     try:
         from lib.agent_core.events import EventType, build_event
-        from lib.tasks_pkg.event_log import append_persistent_event
-        from lib.tasks_pkg.manager import _strip_base64_for_snapshot
+        from lib.tasks_pkg.event_log import append_persistent_event, flush_pending
+        from lib.tasks_pkg.manager._events import _strip_base64_for_snapshot
         from lib.tasks_pkg.wire_messages import apply_wire_sanitize
         _wire = apply_wire_sanitize(
             [dict(m) for m in agent.messages],
@@ -132,11 +152,13 @@ def _emit_request_snapshot(agent, round_num: int) -> str:
         # This child stream has no TaskRuntime sequence owner.  Keep the tail
         # lookup and enqueue together so a resumed/duplicated in-process
         # worker cannot mint the same id.  The database tail makes this survive
-        # process restart; pending_event_rows covers the asynchronous writer.
+        # process restart. Persistence is acknowledged before this returns.
         with _REQUEST_SNAPSHOT_SEQ_LOCK:
             event_id = _next_request_snapshot_event_id(
                 inspector_id, round_num)
             append_persistent_event(inspector_id, event_id, event)
+            if flush_pending(inspector_id) is False:
+                raise RuntimeError('request snapshot did not become durable')
         return inspector_id
     except Exception as e:
         logger.debug('[Agent:%s] request-inspector snapshot failed '
@@ -155,7 +177,7 @@ def _build_dispatch_retry_phase(attempt: int, reason: str,
     dispatcher reason tokens) come from the SHARED helper
     (lib/llm_dispatch/retry_i18n.retry_phase_fields) so this emitter can
     never drift from the main chat bubble's mapping
-    (pt_18ebee9c9ea64cf3 — the "Retrying… Endpoint unreachable" raw-token
+    ( — the "Retrying… Endpoint unreachable" raw-token
     leak family).
     """
     _r = reason or 'Retrying'
@@ -186,8 +208,17 @@ DEFAULT_TOOL_RESULT_MAX_CHARS = 30_000
 #: it; this bound only governs the live wire frame.
 _SSE_TOOL_PREVIEW_CHARS = 4000
 
-# Max parallel tool calls per round
-MAX_PARALLEL_TOOLS = int(os.environ.get('TOOL_MAX_PARALLEL_WORKERS', '16'))
+# Max parallel tool calls per round. Keep the swarm path on the same
+# deployment profile as the primary agent tool dispatcher.
+try:
+    MAX_PARALLEL_TOOLS = int(
+        os.environ.get('TOOL_MAX_PARALLEL_WORKERS', '')
+        or deployment_resource_default(
+            'TOOL_MAX_PARALLEL_WORKERS', os.environ))
+except (TypeError, ValueError, OverflowError):
+    MAX_PARALLEL_TOOLS = deployment_resource_default(
+        'TOOL_MAX_PARALLEL_WORKERS', os.environ)
+MAX_PARALLEL_TOOLS = max(1, min(32, MAX_PARALLEL_TOOLS))
 
 # File-edit tools whose touched path is recorded on this sub-agent's presence
 # peer (→ cross-peer overlap detection). Maps tool name → the action label
@@ -262,11 +293,26 @@ class SubAgent:
         self._build_body = build_body_fn or _default_build_body
         self._dispatch_stream = dispatch_stream_fn or _default_dispatch_stream
 
-        # Build scoped tool list
+        # Build scoped tool list.  A provider-neutral orchestration decision
+        # may further restrict it to read-only and add the local ToolScript
+        # surface; both are authority-preserving intersections.
+        orchestration = ((self.parent_task.get('config') or {}).get(
+            '_toolOrchestration'))
+        self._tool_orchestration = (
+            dict(orchestration) if isinstance(orchestration, dict) else {})
+        self._ptc_local: dict | None = None
         self.tools = scope_tools_for_role(spec.role, all_tools)
         # Inject artifact tools if an artifact store is available
         if self.artifact_store is not None:
             self._inject_artifact_tools()
+        self._apply_tool_orchestration()
+        self._tool_contract_documents_by_name = (
+            compile_execution_contract_documents(
+                self.tools,
+                authoritative_documents_by_name=(
+                    self.parent_task.get('_toolContractDocumentsByName')
+                    if isinstance(self.parent_task, dict) else None),
+                namespace='swarm'))
 
         # Result tracking
         self.result = SubAgentResult()
@@ -356,6 +402,34 @@ class SubAgent:
             if name not in existing_names:
                 self.tools.append(at)
 
+    def _apply_tool_orchestration(self) -> None:
+        """Enforce local-worker authority and compose bounded ToolScript."""
+        decision = self._tool_orchestration
+        if str(decision.get('multiAgent') or '').lower() == 'read_only':
+            from lib.swarm.routing import read_only_swarm_tools
+            self.tools = read_only_swarm_tools(self.parent_task, self.tools)
+
+        from lib.tools.programmatic import ACTIVE_PROGRAMMATIC_MODES
+        if (str(decision.get('programmaticCalling') or '').lower()
+                not in ACTIVE_PROGRAMMATIC_MODES):
+            return
+        eligible = {
+            str(name) for name in (
+                decision.get('programmaticEligibleTools') or ()) if name
+        }
+        visible = {
+            str((tool.get('function') or {}).get('name') or '')
+            for tool in self.tools if isinstance(tool, dict)
+        }
+        worker_eligible = sorted(eligible.intersection(visible))
+        if not worker_eligible:
+            return
+        tier = str(decision.get('programmaticTier') or 'program')
+        from lib.tools.gateway import ptc_local_wire_tools
+        self.tools = ptc_local_wire_tools(
+            self.tools, tier=tier, eligible=worker_eligible)
+        self._ptc_local = {'tier': tier, 'eligible': worker_eligible}
+
     # ─────────────────────────────────────────────────
     #  Message construction
     # ─────────────────────────────────────────────────
@@ -392,6 +466,32 @@ class SubAgent:
             'plainly in your final answer.\n'
             f'Available tools: {", ".join(available_tools) or "(none)"}.'
         )
+
+        # Shared-workspace constitution (borrowed from Codex's multi-agent
+        # usage hints): the orchestrator and every sibling agent share one
+        # filesystem — never revert or overwrite work you did not make.
+        system_content += (
+            '\n\n## Shared workspace\n'
+            'The orchestrator and all sibling agents share the same working '
+            'directory and filesystem. Their edits are visible to you '
+            'immediately, and yours are visible to them. Never revert or '
+            'overwrite changes you did not make; if a file changed '
+            'unexpectedly under you, read it and adapt your work to coexist '
+            'with the new state.'
+        )
+
+        if (str(self._tool_orchestration.get('multiAgent') or '').lower()
+                == 'read_only'):
+            system_content += (
+                '\n\n## Read-only worker authority\n'
+                'This delegated workstream is enforced read-only. Inspect, '
+                'search, compare, and validate, then return findings to the '
+                'root agent. Do not attempt to edit files, run mutating '
+                'commands, change project/external state, schedule work, or '
+                'delegate again. If execute_tools advertises programmatic '
+                'mode, use it only to reduce repeated eligible reads inside '
+                'this workstream.'
+            )
 
         # Artifact store instructions
         if self.artifact_store is not None:
@@ -495,7 +595,7 @@ class SubAgent:
         Used to surface "waiting for the model…" / "retrying…" on the live
         chat bubble while this agent's dispatch is in flight (e.g. blocked on
         a rate-limited strict_model). The engine's stream_sink maps it to a
-        ``step_phase`` event → the EndpointEventAdapter emits a wire ``phase``
+        ``step_phase`` event → the FlowEventAdapter emits a wire ``phase``
         event (transient UI, per the retry-notification-phase-not-delta
         convention — NEVER a delta, so it can't pollute the assistant content).
         No-op when no stream_sink is wired (swarm / unit tests). Never raises.
@@ -520,6 +620,11 @@ class SubAgent:
     def _presence_conv_id(self) -> str:
         return (self.parent_task or {}).get('convId') or ''
 
+    def _presence_user_id(self) -> int:
+        from lib.tasks_pkg.manager import task_user_id
+
+        return int(task_user_id(self.parent_task))
+
     def _presence_announce(self, phase: str = 'working') -> None:
         """Register this sub-agent as a live presence peer of the project root.
 
@@ -535,6 +640,7 @@ class SubAgent:
             from lib.presence import announce as _announce
             _announce(
                 self.project_path, conv_id,
+                user_id=self._presence_user_id(),
                 agent_id=self.agent_id,
                 task_id=self.parent_task.get('id', ''),
                 title=self.spec.role,
@@ -551,7 +657,13 @@ class SubAgent:
             return
         try:
             from lib.presence import heartbeat as _heartbeat
-            _heartbeat(self.project_path, conv_id, agent_id=self.agent_id, phase=phase)
+            _heartbeat(
+                self.project_path,
+                conv_id,
+                user_id=self._presence_user_id(),
+                agent_id=self.agent_id,
+                phase=phase,
+            )
         except Exception as _pe:
             logger.debug('[%s] presence heartbeat failed: %s', self.agent_id, _pe)
 
@@ -563,6 +675,7 @@ class SubAgent:
             from lib.presence import record_files as _record_files
             _record_files(self.project_path, conv_id,
                           [{'path': rel_path, 'action': action}],
+                          user_id=self._presence_user_id(),
                           agent_id=self.agent_id)
         except Exception as _pe:
             logger.debug('[%s] presence record_file failed: %s', self.agent_id, _pe)
@@ -573,7 +686,12 @@ class SubAgent:
             return
         try:
             from lib.presence import mark_idle as _mark_idle
-            _mark_idle(self.project_path, conv_id, agent_id=self.agent_id)
+            _mark_idle(
+                self.project_path,
+                conv_id,
+                user_id=self._presence_user_id(),
+                agent_id=self.agent_id,
+            )
         except Exception as _pe:
             logger.debug('[%s] presence idle failed: %s', self.agent_id, _pe)
 
@@ -621,13 +739,7 @@ class SubAgent:
         self._started = True
         self.result.status = SubAgentStatus.RUNNING.value
 
-        # ★ Per-client browser routing: set thread-local for this sub-agent thread
-        _browser_cid = self.parent_task.get('config', {}).get('browserClientId')
-        if _browser_cid:
-            from lib.browser import _set_active_client
-            _set_active_client(_browser_cid)
-
-        # ★ Presence: register this sub-agent as a live peer (groups under the
+        # Presence: register this sub-agent as a live peer (groups under the
         #   parent conversation). Mirror of the orchestrator's announce@start.
         self._presence_announce(phase='working')
 
@@ -695,7 +807,7 @@ class SubAgent:
         # Cleanup
         self._cleanup()
 
-        # ★ Presence: this sub-agent finished — transition its peer to IDLE
+        # Presence: this sub-agent finished — transition its peer to IDLE
         #   (kept, then faded by the sweep). Mirror of the orchestrator's
         #   mark_idle@done in run_task's finally.
         self._presence_idle()
@@ -738,10 +850,15 @@ class SubAgent:
     # retry (a flaky fetch re-tried a few times) while bounding the runaway
     # shape at a cost of ~10 rounds instead of 26.7 million.
     _MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS = 10
+    # Three equal all-tools terminal failures are enough evidence that another
+    # model round cannot make the unavailable capability succeed. The first
+    # two leave room for the model to recover or choose another tool.
+    _MAX_CONSECUTIVE_NONRETRYABLE_FAILURE_ROUNDS = 3
 
     def _round_safety_label(self) -> str:
         """Render semantic safety breakers for the per-round log line."""
-        bounds = [f'np={self._MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS}']
+        bounds = [f'np={self._MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS}',
+                  f'nf={self._MAX_CONSECUTIVE_NONRETRYABLE_FAILURE_ROUNDS}']
         timeout_seconds = getattr(self.spec, 'timeout_seconds', 0) or 0
         if timeout_seconds > 0:
             bounds.append(f't={timeout_seconds}s')
@@ -826,13 +943,25 @@ class SubAgent:
                 thinking_enabled=self.thinking_enabled,
                 temperature=1.0,
             )
-            # ★ Attach a session-stable id so add_cache_breakpoints latches the
+            # Attach a session-stable id so add_cache_breakpoints latches the
             #   extended-TTL (1h) decision for this agent's whole multi-round
             #   loop — matches the main orchestrator (orchestrator.py:_task_id).
             #   agent_id is constant across rounds, so the prefix cache key
             #   never shifts mid-session. Released in _cleanup().
             body['_task_id'] = self.agent_id
-            # ★ Request Inspector (P4): persist THIS round's LLM request
+            if self._ptc_local:
+                # Force the nested lane onto the local interpreter even when
+                # this worker's model supports hosted PTC.  The worker keeps
+                # one role-scoped catalog and one continuation protocol.
+                body['_programmatic_tool_calling'] = 'on'
+                body['_programmatic_tier'] = self._ptc_local['tier']
+                body['_programmatic_eligible_tools'] = list(
+                    self._ptc_local['eligible'])
+                body['_force_local_programmatic'] = True
+                body['_tool_search_mode'] = 'off'
+                body['_executable_tool_catalog'] = list(self.tools)
+                body['_tool_wire_catalog'] = list(self.tools)
+            # Request Inspector (P4): persist THIS round's LLM request
             #   under the agent's own inspector id — makes sub-agent calls
             #   visible without touching the parent stream (see helper).
             _emit_request_snapshot(self, round_num)
@@ -863,13 +992,13 @@ class SubAgent:
                 _log_buffer.clear()
 
             def _beat_on_stream():
-                # ★ Liveness: EVERY token proves the agent is working, so the
+                # Liveness: EVERY token proves the agent is working, so the
                 #   beacon is touched unthrottled (a dict write under a short
                 #   lock). The presence heartbeat below stays throttled at ~5s
                 #   because it does real work; conflating the two would let a
                 #   fast-token agent read as silent for up to 5s at a time.
                 self._touch_progress('token')
-                # ★ Presence heartbeat (throttled, ~5s — mirrors the
+                # Presence heartbeat (throttled, ~5s — mirrors the
                 #   conversation path's checkpoint-throttle). Token flow IS
                 #   work, so a long single-LLM sub-agent generation with no
                 #   tool rounds keeps its peer ACTIVE instead of flapping to
@@ -917,21 +1046,39 @@ class SubAgent:
             self._emit_stream_phase(Phase.WAITING_MODEL,
                                     'Sent to the model, waiting for it to '
                                     'start replying…')
+            _retry_phase_budget = RetryPhaseEventBudget()
 
             def _on_dispatch_retry(attempt=0, reason='', status_code=0):
                 # Surface dispatch retries / cooldown waits as a transient
-                # 'retrying' phase on the worker bubble. Bounded by the
-                # dispatcher itself (fires on the 1st cooldown cycle, then
-                # every ~20 cycles ≈ 6s), so no per-cycle spam here.
+                # 'retrying' phase on the worker bubble. Direct 429 callbacks
+                # arrive on every cycle, so keep liveness exact but sample the
+                # stream/durable frame with the same hard budget as main chat.
                 # Structured detailKey/detailArgs ride the **meta passthrough
-                # (engine _stream_sink → step_phase → EndpointEventAdapter)
+                # (engine _stream_sink → step_phase → FlowEventAdapter)
                 # so the frontend HUD localizes the cause.
+                self._touch_progress('dispatch_retry')
+                _reason_class = reason if reason in (
+                    'Upstream error',
+                    'Endpoint unreachable',
+                    'Request timed out',
+                    'Waiting for model (rate-limited)',
+                    'Waiting for model (retry backoff)',
+                    'Waiting for model (shared project limit)',
+                    'Key balance exhausted',
+                    'Subscription quota reached',
+                    'Rate limited (429)',
+                ) else ('other' if reason else '')
+                if not _retry_phase_budget.should_emit(
+                        ('dispatch_retry', _reason_class,
+                         int(status_code or 0))):
+                    return
                 _d, _meta = _build_dispatch_retry_phase(
                     attempt, reason, status_code, self.model)
                 self._emit_stream_phase(Phase.RETRYING, _d, **_meta)
 
             try:
-                msg, stop_reason, usage = self._dispatch_stream(
+                from lib.llm.stream_result import ensure_provider_stream_result
+                stream_result = ensure_provider_stream_result(self._dispatch_stream(
                     body,
                     on_content=on_content,
                     on_thinking=on_thinking,
@@ -939,7 +1086,10 @@ class SubAgent:
                     prefer_model=body.get('model', ''),
                     log_prefix=f'[{self.agent_id}]',
                     on_retry=_on_dispatch_retry,
-                )
+                ))
+                msg = stream_result.message
+                stop_reason = stream_result.finish_reason
+                usage = stream_result.usage
             except Exception as e:
                 logger.error('[%s] LLM call failed round %d: %s', self.agent_id, round_num, e, exc_info=True)
                 # Flush whatever we managed to stream before the error so
@@ -1013,7 +1163,7 @@ class SubAgent:
                             f'⚠️ 上游断流（{_why}），正在自动重试 '
                             f'({self._poison_strikes}/2)…')
                         _flush_log()
-                        return msg, stop_reason, usage  # unappended → retry
+                        return stream_result  # unappended → retry
                     if _bad_tcs:
                         msg['tool_calls'] = [
                             tc for tc in (msg.get('tool_calls') or [])
@@ -1024,6 +1174,13 @@ class SubAgent:
                             'proceeding with %d valid one(s)',
                             self.agent_id, round_num, len(_bad_tcs),
                             len(msg['tool_calls']))
+
+            # Every other unverified shape (notably a content-bearing cut)
+            # fails before history append, tool execution, or the
+            # SubAgentStatus.COMPLETED assignment below. The root conversation
+            # owns lossless prefix continuation; a swarm worker currently has
+            # no byte-retraction/prefill protocol and must fail honestly.
+            stream_result.require_verified(context='swarm provider round')
 
             # Append assistant message
             self.messages.append(msg)
@@ -1053,7 +1210,7 @@ class SubAgent:
                     preview=(content or ''),
                 )
 
-            return msg, stop_reason, usage
+            return stream_result
 
         def _execute_round_tools(rnd, tool_calls):
             """Batch hook (chassis ``execute_tools``): progress event →
@@ -1083,7 +1240,7 @@ class SubAgent:
                 toolNames=tool_names,
             )
 
-            self._execute_tool_calls(tool_calls, round_num)
+            return self._execute_tool_calls(tool_calls, round_num)
 
             # ── Round-boundary checkpoint ──
             # Persist the full message history (assistant turn + tool results)
@@ -1109,6 +1266,8 @@ class SubAgent:
                 # content_len==0 — that is just a pure tool-calling turn).
                 max_consecutive_no_progress_rounds=(
                     self._MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS),
+                max_consecutive_nonretryable_failure_rounds=(
+                    self._MAX_CONSECUTIVE_NONRETRYABLE_FAILURE_ROUNDS),
                 # Premature-close retry: a severed stream (missing [DONE])
                 # with truncated tool args / no usable output earns ONE bonus
                 # round per poison, capped — the dispatch hook above discards
@@ -1222,6 +1381,39 @@ class SubAgent:
             )
             return
 
+        if (outcome.halted
+                and outcome.exit_reason == 'nonretryable_tool_failure'):
+            consecutive = outcome.consecutive_nonretryable_failure_rounds
+            logger.warning(
+                '[%s] Terminal tool-failure breaker: %d rounds with the same '
+                'non-retryable failure at round %d — forcing a tool-less '
+                'wrap-up', self.agent_id, consecutive, completed_rounds)
+            audit_log(
+                'agent_loop_nonretryable_failure',
+                agent_id=self.agent_id,
+                role=self.spec.role,
+                model=self.model,
+                rounds=completed_rounds,
+                consecutive_failures=consecutive,
+                objective=(self.spec.objective or '')[:200],
+            )
+            self.result.status = SubAgentStatus.COMPLETED.value
+            self._finalize_with_wrapup(
+                f'the same non-retryable tool failure persisted for '
+                f'{consecutive} consecutive rounds '
+                f'(stopped at round {completed_rounds})',
+                guidance=(
+                    'The required capability is unavailable until the user '
+                    'changes its authorization. Do not retry it with different '
+                    'arguments; report the capability limitation plainly.'))
+            self._emit_event(
+                'progress',
+                f'🛑 [{self.spec.role}] Stopped: tool capability unavailable',
+                status='running', phase=Phase.TOOL_AUTHORITY,
+                round_num=completed_rounds,
+            )
+            return
+
         if outcome.halted and outcome.exit_reason == 'tool_authority':
             with self._tool_authority_lock:
                 rejected = self._tool_authority_rejections
@@ -1313,14 +1505,20 @@ class SubAgent:
             )
             body['_task_id'] = self.agent_id
             parts: list[str] = []
-            msg, _stop, usage = self._dispatch_stream(
+            from lib.llm.stream_result import (
+                require_verified_provider_stream_result,
+            )
+            stream_result = require_verified_provider_stream_result(
+                self._dispatch_stream(
                 body,
                 on_content=parts.append,
                 on_thinking=lambda _c: None,
                 abort_check=self.abort_check,
                 prefer_model=body.get('model', ''),
                 log_prefix=f'[{self.agent_id}:wrapup]',
-            )
+                ), context='swarm wrap-up')
+            msg = stream_result.message
+            usage = stream_result.usage
             if usage:
                 self.result.prompt_tokens += usage.get('prompt_tokens', 0)
                 self.result.completion_tokens += usage.get('completion_tokens', 0)
@@ -1369,7 +1567,7 @@ class SubAgent:
     # ─────────────────────────────────────────────────
 
     def _execute_tool_calls(self, tool_calls: list, round_num: int):
-        """Execute one or more tool calls, potentially in parallel."""
+        """Execute tools and summarize explicit terminal failures for chassis."""
 
         if len(tool_calls) == 1:
             # Single tool call — run directly (no thread overhead)
@@ -1384,6 +1582,10 @@ class SubAgent:
                 'tool_call_id': tc.get('id') or str(uuid.uuid4())[:8],
                 'content': result,
             })
+            return {
+                'nonretryable_failure_signatures':
+                    _nonretryable_failure_signatures([result]),
+            }
         else:
             # Multiple tool calls — run in parallel.
             #
@@ -1455,6 +1657,14 @@ class SubAgent:
                     'tool_call_id': tc.get('id') or str(uuid.uuid4())[:8],
                     'content': results.get(idx, '(no result)'),
                 })
+            ordered_results = [
+                results.get(idx, '(no result)')
+                for idx in range(len(tool_calls))
+            ]
+            return {
+                'nonretryable_failure_signatures':
+                    _nonretryable_failure_signatures(ordered_results),
+            }
 
     def _known_tool_names(self) -> set[str]:
         """Live set of REAL tool names available to THIS sub-agent this turn.
@@ -1468,8 +1678,6 @@ class SubAgent:
         the backing store and schemas for them.
         """
         names: set[str] = set()
-        if self.artifact_store is not None:
-            names.update({'store_artifact', 'read_artifact', 'list_artifacts'})
         for t in (self.tools or []):
             if isinstance(t, dict):
                 n = (t.get('function') or {}).get('name')
@@ -1498,6 +1706,8 @@ class SubAgent:
             known_tools=self._known_tool_names(),
             model=self.model or '',
             conv_id=self._presence_conv_id(),
+            contract_documents_by_name=(
+                self._tool_contract_documents_by_name),
         )
         if _ingested.dropped:
             logger.warning('[Agent:%s] Dropping tool call %r (%s)',
@@ -1625,7 +1835,15 @@ class SubAgent:
                          self.agent_id, fn_name, tool_elapsed, len(truncated))
             logger.debug('[Agent:%s] Tool %s result preview: %s',
                          self.agent_id, fn_name, truncated[:300])
-            # ★ Presence: if this was a file-edit tool, record the touched path
+            typed_error = tool_result_error(truncated)
+            if typed_error is not None:
+                _emit_finish(
+                    'failed',
+                    preview=truncated,
+                    error=typed_error.message or typed_error.code,
+                )
+                return truncated
+            # Presence: if this was a file-edit tool, record the touched path
             #   on this sub-agent's peer so cross-peer overlap detection can flag
             #   two sub-agents (or a sub-agent + a sibling conversation)
             #   clobbering the same file. We read the path straight from the
@@ -1762,7 +1980,7 @@ class SubAgent:
         # half-built inner round onto the parent conversation. The sub-agent's
         # durable transcript and UI timeline are owned by its own checkpoint /
         # on_event paths, so the executor proxy must stay local.
-        # ★ _suppressEvents: tool handlers call _finalize_tool_round →
+        # _suppressEvents: tool handlers call _finalize_tool_round →
         #   append_event, which would otherwise push tool_start/tool_result
         #   SSE events onto the PARENT's stream (task id is shared). Those
         #   events carry this sub-agent's own small roundNum and an empty
@@ -1774,6 +1992,10 @@ class SubAgent:
         task_proxy = {
             'id': self.parent_task.get('id', 'unknown'),
             'convId': self.parent_task.get('convId', 'unknown'),
+            # Owner identity must survive into the isolated proxy: browser
+            # dispatch (lib/browser/dispatch.py) fail-closes on a missing or
+            # non-numeric owner before it ever touches the extension queue.
+            '_userId': self.parent_task.get('_userId'),
             'status': 'running',
             'aborted': _tool_abort_requested(),
             'content': '',
@@ -1790,10 +2012,16 @@ class SubAgent:
             # non-interactive subprocess path instead of waiting forever on a
             # stdin request that no UI can answer.
             '_unattended': True,
-            # ★ Inherit per-request custom tools (handlers resolve task-locally
+            # Inherit per-request custom tools (handlers resolve task-locally
             #   in _execute_tool_one before the global registry). The schema
             #   side is already role-scoped via scope_tools_for_role.
             '_tool_env': self.parent_task.get('_tool_env'),
+            '_executable_tool_catalog': list(self.tools),
+            '_toolContractDocumentsByName': dict(
+                self._tool_contract_documents_by_name),
+            '_ptc_local': (dict(self._ptc_local)
+                           if isinstance(self._ptc_local, dict) else None),
+            'model': self.model,
         }
 
         tc_id = tool_call.get('id') or str(uuid.uuid4())[:8]
@@ -1838,6 +2066,7 @@ class SubAgent:
                 task_proxy, tool_call, fn_name, tc_id, fn_args,
                 round_num, round_entry, cfg,
                 self.project_path, bool(self.project_path),
+                self.tools,
             )
             if isinstance(tool_content, dict):
                 # Some tools (e.g. browser_screenshot) return dicts
@@ -1871,6 +2100,12 @@ class SubAgent:
         """
         if not result:
             return result or ''
+
+        # Canonical typed errors are already bounded by the V2 constructor.
+        # Cutting their JSON would erase retryability/error-code semantics and
+        # turn an authoritative terminal result into unknown legacy text.
+        if tool_result_error(result) is not None:
+            return result
 
         limit = max_chars if max_chars is not None else self.tool_result_max_chars
         if len(result) <= limit:
@@ -1913,7 +2148,7 @@ class SubAgent:
         # run()), mirroring orchestrator._finalize_and_emit_done — otherwise
         # _ttl_latch leaks one entry per sub-agent for the process lifetime.
         try:
-            from lib.tasks_pkg.cache_tracking import release_ttl_latch
+            from lib.tasks_pkg.cache_tracking._ttl import release_ttl_latch
             release_ttl_latch(self.agent_id)
         except Exception as _e:
             logger.debug('[Agent:%s] TTL latch release skipped: %s',

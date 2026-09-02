@@ -9,8 +9,9 @@
 # siblings, zero swap). SIGKILL is untrappable, so NOTHING inside the
 # process can react — the only correct layer is an OUTSIDE parent that
 # notices the death and relaunches. The durable fix was meant to be the
-# root supervisord program (deploy/supervisor/tofu.conf), but installing
-# it needs sudo, which this container does not grant the tofu user.
+# root supervisord program (rendered from deploy/supervisor/tofu.conf.template),
+# but installing it needs sudo, which this container does not grant the tofu
+# user.
 #
 # This watchdog is the no-root equivalent: a tiny detached loop that
 # checks the :15000 listener every INTERVAL seconds and relaunches the
@@ -64,6 +65,7 @@
 #   deploy/tofu_guard.sh --start       # re-enable
 
 set -u
+umask 077  # crash evidence and inherited stdout may contain private user data
 
 # PATH hardening (2026-07-27, verified live): cron's default PATH is
 # /usr/bin:/bin — /usr/sbin is NOT in it, and `ss` lives at /usr/sbin/ss.
@@ -119,14 +121,55 @@ mkdir -p "${PROJ}/data" "${PROJ}/logs"
 # ── env python, mirroring restart_15000.sh / bootstrap.py (.tofu_env.json) ──
 detect_python() {
   local marker="${PROJ}/.tofu_env.json"
+  local bootstrap='' candidate='' py=''
   if [ -f "${marker}" ]; then
-    local py
-    py="$(sed -n 's/.*"python"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${marker}" | head -n1)"
-    if [ -n "${py}" ] && [ -x "${py}" ]; then printf '%s' "${py}"; return 0; fi
+    for candidate in "${PROJ}/.venv/bin/python" \
+        "$(command -v python3 2>/dev/null)" \
+        "$(command -v python 2>/dev/null)"; do
+      if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
+        bootstrap="${candidate}"
+        break
+      fi
+    done
+    [ -n "${bootstrap}" ] || {
+      echo "FATAL: cannot parse ${marker}; reinstall or set TOFU_RUNTIME_PYTHON." >&2
+      return 1
+    }
+    py="$("${bootstrap}" - "${marker}" <<'PYEOF'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding='utf-8') as stream:
+        value = json.load(stream).get('python')
+except (OSError, TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(value, str) or not value:
+    raise SystemExit(2)
+sys.stdout.write(value)
+PYEOF
+)" || {
+      echo "FATAL: invalid ${marker}; rerun install.sh after moving this checkout." >&2
+      return 1
+    }
+    [ -x "${py}" ] || {
+      echo "FATAL: ${marker} points to missing Python: ${py}" >&2
+      echo "       Rerun install.sh after moving this checkout." >&2
+      return 1
+    }
+    printf '%s' "${py}"
+    return 0
   fi
-  command -v python3 || command -v python
+  if [ -x "${PROJ}/.venv/bin/python" ]; then
+    printf '%s' "${PROJ}/.venv/bin/python"
+    return 0
+  fi
+  command -v python3 || command -v python || {
+    echo "FATAL: no runtime Python found; run install.sh first." >&2
+    return 1
+  }
 }
-PY="$(detect_python)"
+PY="$(detect_python)" || exit 1
 PY_ENV_LIB="$(dirname "$(dirname "${PY}")")/lib"
 
 listener_pids() {
@@ -172,7 +215,17 @@ log() {
 supervisord_owns() {
   # Stand down iff the root supervisord manages tofu AND the live listener
   # traces back to it (conf present is not enough — it may be stale).
-  [ -f /etc/supervisor/conf.d/tofu.conf ] || return 1
+  local supervisor_conf_present=0 supervisor_conf
+  if [ -n "${TOFU_SUPERVISOR_CONF:-}" ]; then
+    [ -f "${TOFU_SUPERVISOR_CONF}" ] && supervisor_conf_present=1
+  else
+    for supervisor_conf in \
+        /etc/supervisor/conf.d/tofu.conf \
+        /etc/supervisord.d/tofu.ini; do
+      [ -f "${supervisor_conf}" ] && supervisor_conf_present=1
+    done
+  fi
+  [ "${supervisor_conf_present}" = "1" ] || return 1
   local pids p comm hops
   pids="$(listener_pids)"
   [ -z "${pids}" ] && return 1
@@ -213,13 +266,12 @@ record_death_evidence_async() {
 }
 
 _heartbeat_file() {
-  # Mirror server.py's _heartbeat_dir(): TOFU_HEARTBEAT_DIR, else
-  # <TOFU_DB_LOCAL_ROOT or /tmp/tofu>/heartbeat/server.heartbeat — a
-  # local-disk sidecar, never FUSE.
+  # Mirror lib.server_boot.lock: explicit heartbeat dir or the dedicated
+  # local runtime path. The heartbeat never lives on the project FUSE mount.
   if [ -n "${TOFU_HEARTBEAT_DIR:-}" ]; then
     printf '%s/server.heartbeat' "${TOFU_HEARTBEAT_DIR}"
   else
-    printf '%s/heartbeat/server.heartbeat' "${TOFU_DB_LOCAL_ROOT:-/tmp/tofu}"
+    printf '%s' '/tmp/tofu/heartbeat/server.heartbeat'
   fi
 }
 
@@ -317,6 +369,7 @@ relaunch() {
   # instantly (2026-08-06 outage: 11 dead relaunches during an OOM crash).
   # env(1) applies the optional VAR=VAL instead; empty stays absent.
   PORT="${PORT}" BIND_HOST="${BIND_HOST:-0.0.0.0}" \
+    TOFU_EXTERNAL_CONSOLE_LOG="${SLOG}" \
     LD_LIBRARY_PATH="${PY_ENV_LIB}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
     env ${tls_env:+"${tls_env}"} \
     setsid nohup "${PY}" server.py >> "${SLOG}" 2>&1 9>&- &

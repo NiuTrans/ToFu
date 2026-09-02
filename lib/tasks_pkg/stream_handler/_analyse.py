@@ -11,11 +11,15 @@ import random
 from lib.agent_core.events import EventType, Phase, build_event, emit_phase
 from lib.log import get_logger
 from lib.tasks_pkg.manager import append_event, reset_task_text
+from lib.tasks_pkg.assistant_messages import PARTIAL_STREAM_PREFILL_MARKER
 
+from lib.tasks_pkg.stream_handler import _budget as retry_budget
 from lib.tasks_pkg.stream_handler._audit import _maybe_audit_phase_scope
 from lib.tasks_pkg.stream_handler._budget import (
     _CANNED_GREETING_RETRY_MAX,
     _EMPTY_STOP_RETRY_MAX,
+    _NO_ACTIONABLE_RETRY_MAX,
+    _PARTIAL_STREAM_RETRY_MAX,
     _PREMATURE_RETRY_MAX_CLASSIC,
     _PREMATURE_RETRY_MAX_ZERO_BYTE,
     _TOOL_CALLS_NO_PAYLOAD_RETRY_MAX,
@@ -28,26 +32,289 @@ from lib.tasks_pkg.stream_handler._canned_greeting import (
 logger = get_logger(__name__)
 
 
-# ── Facade-routed helpers (monkeypatch-friendly) ──
-# ``_interruptible_sleep`` and ``_todo_continuation_max`` are invoked through
-# the package facade module (``lib.tasks_pkg.stream_handler``) rather than by a
-# direct name binding.  Tests monkeypatch these symbols on the facade — e.g.
-# ``monkeypatch.setattr(stream_handler, '_interruptible_sleep', ...)`` and
-# ``monkeypatch.setattr(sh, '_todo_continuation_max', lambda: 0)`` — so routing
-# each call through the live module attribute makes those patches take effect
-# inside ``analyse_stream_result``.  The package module is fetched from
-# ``sys.modules`` at CALL time (not import time) to avoid an import cycle:
-# ``_analyse`` is imported *by* the package ``__init__``.
-import sys as _sys
+_PARTIAL_STREAM_CONTINUATION_NUDGE = (
+    '[SYSTEM: LOSSLESS STREAM CONTINUATION REQUIRED]\n'
+    'The upstream response stream ended unexpectedly after a partial assistant '
+    'reply. Continue exactly where that reply stopped. Output only the missing '
+    'continuation: do not restart, summarize, or repeat the preserved prefix.'
+)
 
 
-def _interruptible_sleep(seconds, task):
-    return _sys.modules['lib.tasks_pkg.stream_handler']._interruptible_sleep(
-        seconds, task)
+def _stream_diagnostics(usage):
+    """Normalize bounded provider/transport diagnostics for one round."""
+    values = usage if isinstance(usage, dict) else {}
+    network_route = values.get('_network_route') or {}
+    if not isinstance(network_route, dict):
+        network_route = {}
+    return (
+        values.get('trace_id', 'N/A'),
+        values.get('resp_trace_id', ''),
+        values.get('stream_elapsed_ms', 0),
+        values.get('_stream_anomaly', False),
+        values.get('_empty_stop', False),
+        str(network_route.get('routeId') or 'unknown')[:160],
+        str(network_route.get('routeMode') or 'unknown')[:24],
+        str(values.get('_failure_stage') or '')[:80],
+        bool(values.get('_semantic_progress_timeout')
+             or values.get('_no_actionable_timeout')),
+        values.get('_chunks_received'),
+    )
 
 
-def _todo_continuation_max():
-    return _sys.modules['lib.tasks_pkg.stream_handler']._todo_continuation_max()
+def _diagnostic_seconds(value, fallback=0.0):
+    """Normalize one untrusted transport duration for display/logging."""
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError, OverflowError):
+        return max(0.0, float(fallback or 0))
+
+
+def _diagnostic_milliseconds(value, fallback_seconds=0.0):
+    """Normalize one typed millisecond duration, then fall back to seconds."""
+    try:
+        return max(0.0, float(value) / 1000)
+    except (TypeError, ValueError, OverflowError):
+        return _diagnostic_seconds(fallback_seconds)
+
+
+def _emit_abnormal_retry_phase(
+    task,
+    *,
+    model,
+    elapsed_ms,
+    route_id,
+    route_mode,
+    failure_stage,
+    semantic_progress_timeout,
+    semantic_stall_s,
+    request_elapsed_s,
+    is_zero_byte,
+    retry_count,
+    retry_cap,
+    retry_bucket,
+    backoff_seconds,
+):
+    """Publish one structured retry status without polluting transcript text."""
+    if semantic_progress_timeout:
+        detail_key = 'stream.phase.semanticProgressTimeoutRetry'
+        detail = (
+            f'{model} produced no new reasoning progress, assistant text, or '
+            f'tool action for {semantic_stall_s:.1f}s '
+            f'(request elapsed {request_elapsed_s:.1f}s); retrying on another '
+            f'slot ({retry_count}/{retry_cap})…'
+        )
+    elif is_zero_byte:
+        detail_key = 'stream.phase.emptyStreamRetry'
+        detail = (
+            f'{model} returned an empty stream over {route_id} after '
+            f'{elapsed_ms / 1000:.1f}s; retrying '
+            f'({retry_count}/{retry_cap})…'
+        )
+    else:
+        route_suffix = {
+            'direct': 'Direct',
+            'proxy': 'Proxy',
+            'env': 'Proxy',
+            'desktop': 'Desktop',
+        }.get(route_mode, 'Unknown')
+        detail_key = 'stream.phase.streamInterruptedRetry' + route_suffix
+        detail = (
+            f'{model} stream ended over {route_id} after '
+            f'{elapsed_ms / 1000:.1f}s; retrying on another slot '
+            f'({retry_count}/{retry_cap})…'
+        )
+    emit_phase(
+        task,
+        Phase.RETRYING,
+        attempt=retry_count,
+        max=retry_cap,
+        bucket=retry_bucket,
+        backoff_s=round(backoff_seconds, 2),
+        errorKind=(
+            'semantic_progress_timeout' if semantic_progress_timeout
+            else 'premature_close'
+        ),
+        routeId=route_id,
+        routeMode=route_mode,
+        failureStage=failure_stage,
+        detail=detail,
+        detailKey=detail_key,
+        detailArgs={
+            'model': model,
+            'elapsed': round(
+                semantic_stall_s if semantic_progress_timeout
+                else elapsed_ms / 1000, 1),
+            **({'requestElapsed': round(request_elapsed_s, 1)}
+               if semantic_progress_timeout else {}),
+            'attempt': retry_count,
+            'max': retry_cap,
+            'backoff': round(backoff_seconds, 1),
+        },
+    )
+
+
+def _append_partial_stream_retry_context(messages, partial_content, model):
+    """Preserve a cut response in model context for the next retry round.
+
+    OpenAI-compatible models receive a trailing assistant prefill. Repeated
+    cuts extend the same private prefill row byte-for-byte, avoiding the
+    newline insertion used by generic same-role merging. Providers that reject
+    assistant prefill receive the preserved assistant row followed by an
+    explicit continuation nudge. Both modes keep ``task['content']`` untouched;
+    the next round's deltas append to the visible prefix.
+    """
+    from lib.model_info import model_supports_assistant_prefill
+
+    if model_supports_assistant_prefill(model):
+        trailing_message = messages[-1] if messages else None
+        if (isinstance(trailing_message, dict)
+                and trailing_message.get('role') == 'assistant'
+                and not trailing_message.get('tool_calls')
+                and isinstance(trailing_message.get('content'), str)):
+            # A task created by the manual Continue command can already end in
+            # a capability-gated assistant prefill. Extend that row directly
+            # too: appending a second assistant row would make the generic wire
+            # sanitizer merge them with ``\n\n``, corrupting the exact prefix.
+            trailing_message['content'] += partial_content
+            trailing_message[PARTIAL_STREAM_PREFILL_MARKER] = True
+        else:
+            messages.append({
+                'role': 'assistant',
+                'content': partial_content,
+                PARTIAL_STREAM_PREFILL_MARKER: True,
+            })
+        return 'assistant_prefill'
+
+    messages.append({'role': 'assistant', 'content': partial_content})
+    messages.append({
+        'role': 'user',
+        'content': _PARTIAL_STREAM_CONTINUATION_NUDGE,
+    })
+    return 'continuation_nudge'
+
+
+def _handle_stream_anomaly(
+    *,
+    task,
+    messages,
+    result,
+    round_content,
+    premature_retry_count,
+    tid,
+    model,
+    round_num,
+    trace_id,
+    empty_stop,
+):
+    """Continue a partial stream losslessly or settle an empty anomaly."""
+    if round_content.strip():
+        # This latch outlives the immediate continuation round. A later
+        # failure must preserve the prefix instead of replaying completed work.
+        task['_suppress_whole_turn_retry_to_preserve_partial'] = True
+        if premature_retry_count < _PARTIAL_STREAM_RETRY_MAX:
+            premature_retry_count += 1
+            result['premature_retry_count'] = premature_retry_count
+            if '_premature_retry_count_phase' in task:
+                task['_premature_retry_count_phase'] = premature_retry_count
+            continuation_mode = _append_partial_stream_retry_context(
+                messages, round_content, model)
+            backoff_seconds = _zero_byte_backoff_seconds(
+                premature_retry_count)
+            logger.warning(
+                '[%s] ⚠️ PARTIAL STREAM ERROR at round %d: gateway stream '
+                'ended without terminal frames after %d content chars. '
+                'Preserving the prefix and continuing losslessly via %s '
+                '(%d/%d) after %.1fs backoff. M-TraceId=%s model=%s',
+                tid, round_num, len(round_content), continuation_mode,
+                premature_retry_count, _PARTIAL_STREAM_RETRY_MAX,
+                backoff_seconds, trace_id, model,
+            )
+            emit_phase(
+                task,
+                Phase.RETRYING,
+                attempt=premature_retry_count,
+                max=_PARTIAL_STREAM_RETRY_MAX,
+                bucket='partial_stream',
+                backoff_s=round(backoff_seconds, 2),
+                errorKind='premature_close',
+                continuationMode=continuation_mode,
+                detail=(
+                    f'⚠️ Upstream stream broke after {len(round_content)} '
+                    'characters; the partial reply is preserved. Continuing '
+                    f'from its exact prefix ({premature_retry_count}/'
+                    f'{_PARTIAL_STREAM_RETRY_MAX})…'
+                ),
+                detailKey='stream.phase.partialStreamRetry',
+                detailArgs={
+                    'chars': len(round_content),
+                    'attempt': premature_retry_count,
+                    'max': _PARTIAL_STREAM_RETRY_MAX,
+                },
+            )
+            retry_budget._interruptible_sleep(backoff_seconds, task)
+            result['action'] = 'continue'
+            return result
+
+        # Bounded continuations were exhausted. Keep the delivered prefix but
+        # expose a terminal error; the latch above prevents destructive replay.
+        result['action'] = 'break'
+        result['last_finish_reason'] = 'premature_close'
+        result['loop_exit_reason'] = (
+            f'partial_stream_retries_exhausted_round_{round_num}'
+        )
+        from lib.error_envelope import make_envelope as _make_env
+        task['error'] = _make_env(
+            'premature_close',
+            detail=(
+                'Upstream stream ended without finish markers after '
+                f'{len(round_content)} content characters; bounded lossless '
+                'continuation retries were exhausted '
+                f'({premature_retry_count}/{_PARTIAL_STREAM_RETRY_MAX}). '
+                f'M-TraceId={trace_id}'
+            ),
+            model=model,
+            context=f'round-{round_num}',
+            source='llm-stream',
+            raw=(
+                'bucket=partial_stream '
+                f'attempts={premature_retry_count}/'
+                f'{_PARTIAL_STREAM_RETRY_MAX} '
+                f'content={len(round_content)}chars M-TraceId={trace_id}'
+            ),
+        )
+        logger.error(
+            '[%s] ⚠️ PARTIAL STREAM ERROR retries exhausted at round %d '
+            '(%d/%d). Preserving %d content chars and settling '
+            'finishReason=premature_close; whole-turn retry suppressed to '
+            'prevent destructive replay. M-TraceId=%s model=%s',
+            tid, round_num, premature_retry_count,
+            _PARTIAL_STREAM_RETRY_MAX, len(round_content), trace_id, model,
+        )
+        return result
+
+    result['action'] = 'break'
+    result['last_finish_reason'] = 'abnormal_stop'
+    result['loop_exit_reason'] = f'stream_anomaly_empty_round_{round_num}'
+    from lib.error_envelope import make_envelope as _make_env
+    task['error'] = _make_env(
+        'abnormal_stop',
+        detail=f'Stream ended without finish marker (M-TraceId: {trace_id})',
+        model=model,
+        context=f'round-{round_num}',
+        source='llm-stream',
+        raw=(
+            f'has_content=False stream_anomaly=True empty_stop={empty_stop} '
+            f'M-TraceId={trace_id}'
+        ),
+    )
+    logger.warning(
+        '[%s] ⚠️ Stream anomaly at round %d (no content). '
+        'stream_anomaly=True empty_stop=%s M-TraceId=%s model=%s '
+        'accumulated_content=%dchars Setting finishReason=abnormal_stop.',
+        tid, round_num, empty_stop, trace_id, model,
+        len(task.get('content') or ''),
+    )
+    return result
 
 
 def _reset_round_to_base(task, round_num):
@@ -79,6 +346,289 @@ def _reset_round_to_base(task, round_num):
     append_event(task, build_event(
         EventType.DELTA_RESET, roundNum=round_num, discard=True,
         contentEpoch=content_epoch))
+
+
+def _handle_pending_program_continuation(
+    task,
+    assistant_msg,
+    messages,
+    result,
+    *,
+    usage,
+    tid,
+    round_num,
+):
+    """Replay one opaque program result or terminate a protocol loop."""
+    if not (usage or {}).get('_program_pending'):
+        return None
+
+    from lib.tasks_pkg.orchestrator._programmatic import (
+        admit_program_continuation,
+    )
+    allowed, continuations, continuation_limit = (
+        admit_program_continuation(task, assistant_msg))
+    if allowed:
+        replay = {
+            'role': 'assistant',
+            'content': assistant_msg.get('content') or '',
+        }
+        for field in (
+            'reasoning_content', '_responses_items',
+            '_anthropic_content_blocks',
+        ):
+            if assistant_msg.get(field):
+                replay[field] = assistant_msg[field]
+        messages.append(replay)
+        logger.info(
+            '[%s] Programmatic tool program completed without final message '
+            'at round %d — replaying program_output and continuing (%d/%d)',
+            tid, round_num, continuations, continuation_limit,
+        )
+        result['action'] = 'program_continue'
+        return result
+
+    logger.error(
+        '[%s] Programmatic continuation exceeded %d rounds at round %d; '
+        'ending to prevent a protocol loop',
+        tid, continuation_limit, round_num,
+    )
+    result['action'] = 'break'
+    result['last_finish_reason'] = 'abnormal_stop'
+    result['loop_exit_reason'] = (
+        f'program_continuation_exhausted_round_{round_num}')
+    return result
+
+
+def _handle_empty_abnormal_stream(
+    *,
+    task,
+    result,
+    usage,
+    tid,
+    model,
+    round_num,
+    phase_retry_count,
+    round_thinking,
+    round_content,
+    trace_id,
+    resp_trace,
+    stream_elapsed_ms,
+    stream_anomaly,
+    empty_stop,
+    route_id,
+    route_mode,
+    failure_stage,
+    semantic_progress_timeout,
+    is_zero_byte,
+):
+    """Handle one empty abnormal stream, or return ``None`` if it is usable."""
+    usage_values = usage if isinstance(usage, dict) else {}
+    no_actionable_window_s = _diagnostic_milliseconds(
+        usage_values.get('_semantic_idle_timeout_ms'),
+        usage_values.get('_no_actionable_timeout_s'))
+    semantic_stall_s = _diagnostic_milliseconds(
+        usage_values.get('_semantic_progress_idle_ms'),
+        _diagnostic_seconds(
+            usage_values.get('_no_actionable_stall_elapsed_s'),
+            no_actionable_window_s or stream_elapsed_ms / 1000))
+    request_elapsed_s = _diagnostic_seconds(
+        usage_values.get('_no_actionable_request_elapsed_s'),
+        stream_elapsed_ms / 1000)
+    try:
+        reasoning_progress_chunks = max(
+            0, int(usage_values.get(
+                '_no_actionable_reasoning_chunks') or 0))
+    except (TypeError, ValueError, OverflowError):
+        reasoning_progress_chunks = 0
+    try:
+        reasoning_progress_chars = max(
+            0, int(usage_values.get(
+                '_no_actionable_reasoning_chars') or len(round_thinking)))
+    except (TypeError, ValueError, OverflowError):
+        reasoning_progress_chars = len(round_thinking)
+    is_classic_premature = (
+        not round_content.strip() and len(round_thinking) > 1000)
+    is_semantic_timeout = (
+        semantic_progress_timeout and not round_content.strip())
+    is_anomaly_empty = (
+        not round_content.strip()
+        and stream_anomaly
+        and (round_num > 0 or is_semantic_timeout)
+        and not is_zero_byte
+    )
+    if not (is_classic_premature or is_anomaly_empty or is_zero_byte):
+        return None
+
+    abnormal_type = (
+        'semantic_progress_timeout' if is_semantic_timeout
+        else 'premature_close' if is_classic_premature
+        else 'zero_byte' if is_zero_byte
+        else 'stream_anomaly'
+    )
+    retry_cap = (
+        _NO_ACTIONABLE_RETRY_MAX if is_semantic_timeout
+        else _PREMATURE_RETRY_MAX_ZERO_BYTE if is_zero_byte
+        else _PREMATURE_RETRY_MAX_CLASSIC
+    )
+    retry_bucket = (
+        'semantic_progress_timeout' if is_semantic_timeout
+        else 'zero_byte' if is_zero_byte
+        else 'classic'
+    )
+
+    # Keep two phase-wide recovery opportunities, but only one alternate-slot
+    # retry in an uninterrupted no-output streak. Real tool/text progress clears
+    # this streak elsewhere, so later isolated failures still get a chance.
+    no_actionable_streak = (
+        retry_budget._no_actionable_retry_streak(task)
+        if is_semantic_timeout else 0
+    )
+    streak_exhausted = (
+        is_semantic_timeout
+        and no_actionable_streak
+        >= retry_budget._NO_ACTIONABLE_CONSECUTIVE_RETRY_MAX
+    )
+
+    if phase_retry_count < retry_cap and not streak_exhausted:
+        phase_retry_count += 1
+        result['premature_retry_count'] = phase_retry_count
+        if is_semantic_timeout:
+            no_actionable_streak = retry_budget._record_no_actionable_retry(task)
+        if '_premature_retry_count_phase' in task:
+            task['_premature_retry_count_phase'] = phase_retry_count
+        backoff_s = (
+            _zero_byte_backoff_seconds(phase_retry_count)
+            if (is_zero_byte or is_classic_premature or is_semantic_timeout)
+            else 0.0
+        )
+
+        # Avoid the just-failed pair once. Dispatch relaxes this hint only when
+        # no same-model alternative exists, preserving strict-model authority.
+        dispatch = (usage or {}).get('_dispatch') or {}
+        key = dispatch.get('key')
+        dispatch_model = dispatch.get('model') or model
+        if key:
+            task['_force_rotate_pair'] = (key, dispatch_model)
+            logger.info(
+                '[%s] %s retry: rotating away from slot %s:%s for the next '
+                'dispatch attempt (route=%s stage=%s)',
+                tid, retry_bucket, key, dispatch_model, route_id,
+                failure_stage or 'unknown',
+            )
+        logger.warning(
+            '[%s] ⚠️ ABNORMAL STOP detected at round %d (type=%s bucket=%s): '
+            'thinking=%dchars content=%dchars, no tool_calls. '
+            'stream_anomaly=%s empty_stop=%s M-TraceId=%s resp_trace=%s '
+            'elapsed=%.1fs model=%s route=%s/%s stage=%s '
+            'Retrying (%d/%d) after %.1fs backoff… '
+            'The upstream stream ended before a usable result.',
+            tid, round_num, abnormal_type, retry_bucket,
+            len(round_thinking), len(round_content), stream_anomaly, empty_stop,
+            trace_id, resp_trace or 'none', stream_elapsed_ms / 1000, model,
+            route_mode, route_id, failure_stage or 'unknown',
+            phase_retry_count, retry_cap, backoff_s,
+        )
+        _emit_abnormal_retry_phase(
+            task,
+            model=model,
+            elapsed_ms=stream_elapsed_ms,
+            route_id=route_id,
+            route_mode=route_mode,
+            failure_stage=failure_stage,
+            semantic_progress_timeout=semantic_progress_timeout,
+            semantic_stall_s=semantic_stall_s,
+            request_elapsed_s=request_elapsed_s,
+            is_zero_byte=is_zero_byte,
+            retry_count=phase_retry_count,
+            retry_cap=retry_cap,
+            retry_bucket=retry_bucket,
+            backoff_seconds=backoff_s,
+        )
+        if backoff_s > 0:
+            retry_budget._interruptible_sleep(backoff_s, task)
+        result['action'] = 'continue'
+        return result
+
+    # The deadline is authoritative even when a large reasoning body overlaps
+    # the classic heuristic. Whole-turn replay is suppressed only for this
+    # costly no-progress signature; manual Retry remains available.
+    finish_reason = (
+        'abnormal_stop' if is_semantic_timeout
+        else 'premature_close' if is_classic_premature
+        else 'abnormal_stop'
+    )
+    result['action'] = 'break'
+    result['last_finish_reason'] = finish_reason
+    result['loop_exit_reason'] = (
+        f'{finish_reason}_retries_exhausted_round_{round_num}')
+    error_extensions = {
+        'failureStage': failure_stage,
+        'routeId': route_id,
+        'routeMode': route_mode,
+    }
+    if is_semantic_timeout:
+        error_extensions['autoRetryExhausted'] = True
+        retry_budget_detail = (
+            f'phase={phase_retry_count}/{retry_cap}; '
+            f'consecutive={no_actionable_streak}/'
+            f'{retry_budget._NO_ACTIONABLE_CONSECUTIVE_RETRY_MAX}'
+        )
+    else:
+        retry_budget_detail = f'phase={phase_retry_count}/{retry_cap}'
+
+    from lib.error_envelope import make_envelope
+    task['error'] = make_envelope(
+        finish_reason,
+        message=(
+            f'⚠️ 模型连续 {semantic_stall_s:.1f} 秒没有新的推理进展、正文或工具动作\n'
+            f'No new reasoning progress, assistant text, or tool action for '
+            f'{semantic_stall_s:.1f}s'
+            if is_semantic_timeout else ''
+        ),
+        hint=(
+            '系统已自动尝试其他同模型槽位；继续自动重放收益很低，已停止避免长时间空耗。\n\n'
+            'Alternate slots for the same model were tried automatically; '
+            'replay stopped to avoid another long no-progress loop.'
+            if is_semantic_timeout else None
+        ),
+        detail=(
+            f'Retry budget exhausted ({retry_budget_detail}). '
+            f'type={abnormal_type} bucket={retry_bucket} M-TraceId={trace_id} '
+            f'request_elapsed={request_elapsed_s:.1f}s '
+            f'last_progress_age={semantic_stall_s:.1f}s '
+            f'reasoning={reasoning_progress_chars}chars/'
+            f'{reasoning_progress_chunks}chunks'
+        ),
+        model=model,
+        context=f'round-{round_num}',
+        source='llm-stream',
+        raw=(
+            f'abnormal_type={abnormal_type} bucket={retry_bucket} '
+            f'retry_budget={retry_budget_detail} '
+            f'thinking={len(round_thinking)}chars '
+            f'reasoning_progress={reasoning_progress_chars}chars/'
+            f'{reasoning_progress_chunks}chunks '
+            f'request_elapsed={request_elapsed_s:.1f}s '
+            f'last_progress_age={semantic_stall_s:.1f}s '
+            f'content={len(round_content)}chars'
+        ),
+        extensions=error_extensions,
+    )
+    logger.error(
+        '[%s] ⚠️ ABNORMAL STOP retries exhausted at round %d '
+        '(type=%s bucket=%s retry_budget=%s). '
+        'thinking=%dchars, content=%dchars. stream_anomaly=%s empty_stop=%s '
+        'M-TraceId=%s resp_trace=%s elapsed=%.1fs semantic_stall=%.1fs '
+        'reasoning_progress=%dchars/%dchunks model=%s '
+        'Setting finishReason=%s.',
+        tid, round_num, abnormal_type, retry_bucket, retry_budget_detail,
+        len(round_thinking), len(round_content), stream_anomaly, empty_stop,
+        trace_id, resp_trace or 'none', stream_elapsed_ms / 1000,
+        semantic_stall_s, reasoning_progress_chars,
+        reasoning_progress_chunks, model,
+        finish_reason,
+    )
+    return result
 
 
 def analyse_stream_result(
@@ -118,8 +668,8 @@ def analyse_stream_result(
         The finish reason reported by the LLM for this round.
     task : dict
         Live task dict (read for ``aborted``, ``error``, ``content``; mutated
-        on premature-close to set ``error`` AND set the per-phase counter
-        and force-rotate signal).
+        on premature-close to update retry state and, on exhaustion, set the
+        terminal error while preserving partial content).
     tid : str
         Short task ID for logging.
     model : str
@@ -132,8 +682,10 @@ def analyse_stream_result(
         is not yet initialised — caller code in the orchestrator that
         sets the phase counter on the task dict overrides this argument.
     messages : list[dict]
-        Conversation message list (kept for API compatibility; no longer
-        mutated — retries re-use the same messages transparently).
+        Conversation message list. Transport retries leave it untouched;
+        partial-stream continuations append or extend an assistant prefill.
+        Providers that reject prefill instead receive the partial assistant
+        row followed by a system-authored user nudge.
     usage : dict | None
         Raw usage dict from the LLM response.  Contains ``trace_id``,
         ``resp_trace_id``, and ``stream_elapsed_ms`` for gateway
@@ -199,36 +751,20 @@ def analyse_stream_result(
         # response. Persist/replay the opaque program state and continue once;
         # treating this protocol-defined empty message as EMPTY_STOP would
         # discard the program result and retry the wrong request.
-        if (usage or {}).get('_program_pending'):
-            from lib.tasks_pkg.orchestrator._programmatic import (
-                admit_program_continuation,
-            )
-            allowed, continuations, continuation_limit = (
-                admit_program_continuation(task, assistant_msg))
-            if allowed:
-                replay = {'role': 'assistant',
-                          'content': assistant_msg.get('content') or ''}
-                for field in ('reasoning_content', '_responses_items',
-                              '_anthropic_content_blocks'):
-                    if assistant_msg.get(field):
-                        replay[field] = assistant_msg[field]
-                messages.append(replay)
-                logger.info(
-                    '[%s] Programmatic tool program completed without final '
-                    'message at round %d — replaying program_output and '
-                    'continuing (%d/%d)', tid, round_num, continuations,
-                    continuation_limit)
-                result['action'] = 'program_continue'
-                return result
-            logger.error(
-                '[%s] Programmatic continuation exceeded %d rounds at round %d; '
-                'ending to prevent a protocol loop', tid, continuation_limit,
-                round_num)
-            result['action'] = 'break'
-            result['last_finish_reason'] = 'abnormal_stop'
-            result['loop_exit_reason'] = (
-                f'program_continuation_exhausted_round_{round_num}')
-            return result
+        program_result = _handle_pending_program_continuation(
+            task,
+            assistant_msg,
+            messages,
+            result,
+            usage=usage,
+            tid=tid,
+            round_num=round_num,
+        )
+        if program_result is not None:
+            # The opaque program state is protocol-level deliverable progress;
+            # a later deadline is isolated rather than part of the prior streak.
+            retry_budget._clear_no_actionable_retry_streak(task)
+            return program_result
 
         # ── Detect PREMATURE STREAM CLOSE / ABNORMAL STOP ──
         # Two signatures:
@@ -238,16 +774,11 @@ def analyse_stream_result(
         round_thinking = assistant_msg.get('reasoning_content', '') or ''
         round_content = assistant_msg.get('content', '') or ''
 
-        # ★ Extract gateway-coordination fields from usage for log enrichment
-        _trace_id = (usage or {}).get('trace_id', 'N/A')
-        _resp_trace = (usage or {}).get('resp_trace_id', '')
-        _stream_elapsed_ms = (usage or {}).get('stream_elapsed_ms', 0)
-        _stream_anomaly = (usage or {}).get('_stream_anomaly', False)
-        _empty_stop = (usage or {}).get('_empty_stop', False)
-        # Real SSE chunk count from the LLM client. Zero == gateway opened
-        # the stream but never delivered a single token (true zero-byte).
-        # Falls back to None when older clients haven't propagated it.
-        _chunks_received = (usage or {}).get('_chunks_received')
+        # Real SSE chunk count distinguishes a true zero-byte stream from a
+        # later transport cut; the remaining fields enrich diagnosis/events.
+        (_trace_id, _resp_trace, _stream_elapsed_ms, _stream_anomaly,
+         _empty_stop, _route_id, _route_mode, _failure_stage,
+         _semantic_progress_timeout, _chunks_received) = _stream_diagnostics(usage)
 
         # Determine if this round looks like an abnormal termination:
         #   - (A) No content + substantial thinking  (classic premature close)
@@ -295,147 +826,29 @@ def analyse_stream_result(
                 and _stream_elapsed_ms < 60000
             )
 
-        # ── Classic premature close: substantial thinking, then cut off ──
-        _is_classic_premature = (not round_content.strip()
-                                 and len(round_thinking) > 1000)
-
-        # ── Other stream-anomaly empty (later rounds only) ──
-        # Without the zero-byte signature we can't be sure the round is
-        # cheap to redo, so we keep the historical ``round_num > 0``
-        # guard to avoid retrying a legitimate empty first-round stop.
-        _is_anomaly_empty = (not round_content.strip()
-                             and _stream_anomaly
-                             and round_num > 0
-                             and not _is_zero_byte)
-
-        _is_abnormal = (_is_classic_premature or _is_anomaly_empty
-                        or _is_zero_byte)
-        _abnormal_type = ('premature_close' if _is_classic_premature
-                          else 'zero_byte' if _is_zero_byte
-                          else 'stream_anomaly' if _is_anomaly_empty
-                          else None)
-
-        # ── Retry budget split by failure signature ──
-        # Zero-byte: gateway never delivered output, retry is ~free,
-        # use the large cap.  Anything else (classic close, late-round
-        # anomaly): tokens were already spent, use the low cap.
-        _retry_cap = (_PREMATURE_RETRY_MAX_ZERO_BYTE if _is_zero_byte
-                      else _PREMATURE_RETRY_MAX_CLASSIC)
-        _retry_bucket = 'zero_byte' if _is_zero_byte else 'classic'
-
-        if _is_abnormal and _premature_retry_count < _retry_cap:
-            _premature_retry_count += 1
-            result['premature_retry_count'] = _premature_retry_count
-            # Persist the per-phase counter back so the next round of
-            # this phase sees the bumped value.
-            if '_premature_retry_count_phase' in task:
-                task['_premature_retry_count_phase'] = _premature_retry_count
-            # Pace abnormal-stop retries with exponential backoff + jitter so
-            # we don't hammer a poisoned upstream pool. Both zero-byte and
-            # classic premature-close use the same backoff schedule; the
-            # late-round stream-anomaly bucket keeps the historical no-backoff
-            # behaviour.
-            _backoff_s = (_zero_byte_backoff_seconds(_premature_retry_count)
-                          if (_is_zero_byte or _is_classic_premature) else 0.0)
-
-            # ── Force slot rotation on zero-byte retries ──
-            # Zero-byte gateway hangs cluster per-pool — production logs
-            # show 34/34 anomalies hit one slot in a 2-minute window.
-            # Signal the next dispatch to avoid re-using the slot that
-            # just zero-byte'd.  ``stream_llm_response`` reads this and
-            # passes ``avoid_pairs`` to ``dispatch_stream``, then clears
-            # the signal.  Best-effort — when ``_dispatch`` metadata is
-            # absent (older gateway path), we fall through without the
-            # rotation hint and the existing 429-style cooldown still
-            # naturally rotates slots. Classic premature-close keeps the
-            # SAME slot (strict_model is on; the slot already produced
-            # output, so it's likely transient and worth retrying as-is).
-            if _is_zero_byte:
-                _disp = (usage or {}).get('_dispatch') or {}
-                _key = _disp.get('key')
-                _mod = _disp.get('model') or model
-                if _key:
-                    task['_force_rotate_pair'] = (_key, _mod)
-                    logger.info(
-                        '[%s] zero-byte retry: force-rotating away from '
-                        'slot %s:%s for next dispatch attempt',
-                        tid, _key, _mod,
-                    )
-            logger.warning(
-                '[%s] ⚠️ ABNORMAL STOP detected at round %d (type=%s bucket=%s): '
-                'thinking=%dchars content=%dchars, no tool_calls. '
-                'stream_anomaly=%s empty_stop=%s '
-                'M-TraceId=%s resp_trace=%s elapsed=%.1fs model=%s '
-                'Retrying (%d/%d) after %.1fs backoff… '
-                'The stream was likely cut off by proxy/gateway.',
-                tid, round_num, _abnormal_type, _retry_bucket,
-                len(round_thinking), len(round_content),
-                _stream_anomaly, _empty_stop,
-                _trace_id, _resp_trace or 'none', _stream_elapsed_ms / 1000,
-                model, _premature_retry_count, _retry_cap, _backoff_s,
-            )
-            # ★ Transparent retry: re-call LLM with the SAME messages.
-            #   No fake assistant+user turns injected — the model starts fresh
-            #   from the original context, just like clicking "Continue".
-            #   Use a phase event (transient UI status) instead of a delta
-            #   (which would permanently pollute the assistant message content).
-            #   'attempt' field lets the frontend dedup/update the retry bubble.
-            if _is_zero_byte:
-                _phase_detail = (
-                    f'⚠️ 网关空流异常（0字节，{_stream_elapsed_ms / 1000:.1f}s），'
-                    f'退避 {_backoff_s:.1f}s 后重试 '
-                    f'({_premature_retry_count}/{_retry_cap})…'
-                )
-            else:
-                _phase_detail = (
-                    f'⚠️ 网络中断（代理超时），正在自动重试 '
-                    f'({_premature_retry_count}/{_retry_cap})…'
-                )
-            emit_phase(task, Phase.RETRYING,
-                       attempt=_premature_retry_count,
-                       max=_retry_cap,
-                       bucket=_retry_bucket,
-                       backoff_s=round(_backoff_s, 2),
-                       detail=_phase_detail)
-            if _backoff_s > 0:
-                _interruptible_sleep(_backoff_s, task)
-            result['action'] = 'continue'
-            return result
-
-        # ABNORMAL STOP: retries exhausted — still no content
-        if _is_abnormal and _premature_retry_count >= _retry_cap:
-            _fr = 'premature_close' if _is_classic_premature else 'abnormal_stop'
-            result['action'] = 'break'
-            result['last_finish_reason'] = _fr
-            result['loop_exit_reason'] = f'{_fr}_retries_exhausted_round_{round_num}'
-            from lib.error_envelope import make_envelope as _make_env
-            task['error'] = _make_env(
-                _fr,
-                detail=(f'Retries exhausted ({_premature_retry_count}/{_retry_cap}). '
-                        f'type={_abnormal_type} bucket={_retry_bucket} '
-                        f'M-TraceId={_trace_id}'),
-                model=model,
-                context=f'round-{round_num}',
-                source='llm-stream',
-                raw=(f'abnormal_type={_abnormal_type} bucket={_retry_bucket} '
-                     f'attempts={_premature_retry_count}/{_retry_cap} '
-                     f'thinking={len(round_thinking)}chars content={len(round_content)}chars'),
-            )
-            logger.error(
-                '[%s] ⚠️ ABNORMAL STOP retries exhausted at round %d '
-                '(type=%s bucket=%s attempts=%d/%d). '
-                'thinking=%dchars, content=%dchars. '
-                'stream_anomaly=%s empty_stop=%s '
-                'M-TraceId=%s resp_trace=%s elapsed=%.1fs model=%s '
-                'Setting finishReason=%s.',
-                tid, round_num, _abnormal_type, _retry_bucket,
-                _premature_retry_count, _retry_cap,
-                len(round_thinking), len(round_content),
-                _stream_anomaly, _empty_stop,
-                _trace_id, _resp_trace or 'none', _stream_elapsed_ms / 1000,
-                model, _fr,
-            )
-            return result
+        abnormal_result = _handle_empty_abnormal_stream(
+            task=task,
+            result=result,
+            usage=usage,
+            tid=tid,
+            model=model,
+            round_num=round_num,
+            phase_retry_count=_premature_retry_count,
+            round_thinking=round_thinking,
+            round_content=round_content,
+            trace_id=_trace_id,
+            resp_trace=_resp_trace,
+            stream_elapsed_ms=_stream_elapsed_ms,
+            stream_anomaly=_stream_anomaly,
+            empty_stop=_empty_stop,
+            route_id=_route_id,
+            route_mode=_route_mode,
+            failure_stage=_failure_stage,
+            semantic_progress_timeout=_semantic_progress_timeout,
+            is_zero_byte=_is_zero_byte,
+        )
+        if abnormal_result is not None:
+            return abnormal_result
 
         # ── Empty-stop retry (model said finish_reason=stop with no
         #    content). Observed on GLM-5.1 (thinking-only response),
@@ -473,7 +886,7 @@ def analyse_stream_result(
                            f'⚠️ 模型空回复（{len(round_thinking)}字符思考但无正文），'
                            f'重试中 ({_premature_retry_count}/{_EMPTY_STOP_RETRY_MAX})…'
                        ))
-            _interruptible_sleep(_backoff_s, task)
+            retry_budget._interruptible_sleep(_backoff_s, task)
             result['action'] = 'continue'
             return result
 
@@ -489,6 +902,8 @@ def analyse_stream_result(
         # intermittent (~50%/round), so a bounded retry recovers most
         # turns. Shares the per-phase counter (runaway-guard discipline).
         _is_canned_greeting = is_canned_greeting_reply(round_content, messages)
+        if round_content.strip() and not _is_canned_greeting:
+            retry_budget._clear_no_actionable_retry_streak(task)
         if (_is_canned_greeting
                 and _premature_retry_count < _CANNED_GREETING_RETRY_MAX):
             _premature_retry_count += 1
@@ -506,7 +921,7 @@ def analyse_stream_result(
                 _premature_retry_count, _CANNED_GREETING_RETRY_MAX,
                 _backoff_s,
             )
-            # ★ Drop the poisoned text BEFORE re-streaming. This is the ONLY
+            # Drop the poisoned text BEFORE re-streaming. This is the ONLY
             #   retry bucket whose discarded round HAS content (zero-byte /
             #   classic / empty-stop all require empty content), so it is also
             #   the only one that must reset the accumulators — otherwise each
@@ -528,7 +943,7 @@ def analyse_stream_result(
                            f'⚠️ 上游返回了与任务无关的模板问候（{len(round_content)}字符），'
                            f'重试中 ({_premature_retry_count}/{_CANNED_GREETING_RETRY_MAX})…'
                        ))
-            _interruptible_sleep(_backoff_s, task)
+            retry_budget._interruptible_sleep(_backoff_s, task)
             result['action'] = 'continue'
             return result
 
@@ -599,7 +1014,7 @@ def analyse_stream_result(
                                f'({_premature_retry_count}/'
                                f'{_TOOL_CALLS_NO_PAYLOAD_RETRY_MAX})…'
                            ))
-                _interruptible_sleep(_backoff_s, task)
+                retry_budget._interruptible_sleep(_backoff_s, task)
                 result['action'] = 'continue'
                 return result
             # Budget exhausted — honest terminal error (same shape as the
@@ -643,58 +1058,18 @@ def analyse_stream_result(
         # _missing_finish_reason, _empty_stop), the response is likely
         # truncated even if some content was produced.
         if _stream_anomaly:
-            _has_content = bool(round_content.strip())
-            if _has_content:
-                # ★ Soft landing (owner directive 2026-08-05): when the stream
-                #   died but a partial answer exists, do NOT fail the turn —
-                #   an error card only offers Retry/Continue anyway, and the
-                #   whole-turn auto-retry would wipe text the user may already
-                #   be reading. Settle as premature_close instead: the
-                #   settlement vocabulary maps that to interrupted/gateway
-                #   (Continue stays available, no error state, no auto-retry),
-                #   and the finish tag renders the persistent visible notice
-                #   ("网关中断 · 内容可能不完整"). The failure stays visible;
-                #   the turn is not interrupted.
-                result['action'] = 'break'
-                result['last_finish_reason'] = 'premature_close'
-                result['loop_exit_reason'] = (
-                    f'stream_anomaly_partial_soft_round_{round_num}'
-                )
-                logger.warning(
-                    '[%s] ⚠️ Stream anomaly at round %d with partial content '
-                    '(%dchars) — soft-landing as premature_close (no error '
-                    'envelope; partial reply kept). stream_anomaly=%s '
-                    'empty_stop=%s M-TraceId=%s model=%s',
-                    tid, round_num, len(round_content),
-                    _stream_anomaly, _empty_stop, _trace_id, model,
-                )
-                return result
-            result['action'] = 'break'
-            result['last_finish_reason'] = 'abnormal_stop'
-            result['loop_exit_reason'] = (
-                f'stream_anomaly_empty_round_{round_num}'
-            )
-            from lib.error_envelope import make_envelope as _make_env
-            task['error'] = _make_env(
-                'abnormal_stop',
-                detail=f'Stream ended without finish marker (M-TraceId: {_trace_id})',
+            return _handle_stream_anomaly(
+                task=task,
+                messages=messages,
+                result=result,
+                round_content=round_content,
+                premature_retry_count=_premature_retry_count,
+                tid=tid,
                 model=model,
-                context=f'round-{round_num}',
-                source='llm-stream',
-                raw=(f'has_content=False '
-                     f'stream_anomaly={_stream_anomaly} empty_stop={_empty_stop} '
-                     f'M-TraceId={_trace_id}'),
+                round_num=round_num,
+                trace_id=_trace_id,
+                empty_stop=_empty_stop,
             )
-            logger.warning(
-                '[%s] ⚠️ Stream anomaly at round %d (no content). '
-                'stream_anomaly=%s empty_stop=%s '
-                'M-TraceId=%s model=%s accumulated_content=%dchars '
-                'Setting finishReason=abnormal_stop.',
-                tid, round_num,
-                _stream_anomaly, _empty_stop,
-                _trace_id, model, len(task.get('content') or ''),
-            )
-            return result
 
         # ── Todo-continuation enforcer (Rec 2) ──
         # The model is about to end its turn with a genuine final answer. If it
@@ -704,7 +1079,7 @@ def analyse_stream_result(
         # zero-deliverable guard (INACTION) and suspicious-completion
         # (content-shape) both structurally miss. Only for a genuine content
         # stop; abort / error / anomaly paths above have already returned.
-        _todo_max = _todo_continuation_max()
+        _todo_max = retry_budget._todo_continuation_max()
         if round_content.strip():
             from lib.tools.todo import incomplete_todos, render_todo_list
             _todos = task.get('_todos') or []
@@ -714,6 +1089,11 @@ def analyse_stream_result(
             _nudges = int(task.get('_todo_continuation_count') or 0)
             if _actionable and _todo_max and _nudges < _todo_max:
                 task['_todo_continuation_count'] = _nudges + 1
+                from lib.tasks_pkg.assistant_messages import (
+                    append_assistant_prose_message,
+                )
+                append_assistant_prose_message(
+                    messages, assistant_msg, task=task)
                 messages.append({
                     'role': 'user',
                     'content': (
@@ -766,7 +1146,7 @@ def analyse_stream_result(
                     f'todo_incomplete_budget_exhausted_round_{round_num}')
                 return result
 
-        # ── Intent-stall nudge (epic pt_33ba079f5cea4841) ──
+        # ── Intent-stall nudge () ──
         # The model's previous tool call was rejected/errored, and this round
         # is prose-only — it said what it would do and then stopped. Ground
         # truth: conv ms34yw0k74o2lq R18 ("Let me use explicit paths only."
@@ -776,7 +1156,7 @@ def analyse_stream_result(
         # Four structural criteria, never wording — the ticket's A∧B pair
         # alone measured 60% false positives over 7 days (5 hand-backs, 4 VU
         # endings, 3 non-retryable), so C and D are load-bearing, not polish.
-        # See docs/INTENT_STALL_MEASUREMENT.md and _intent_stall.py.
+        # See docs/modules/task_engine.md and _intent_stall.py.
         #
         # ONE nudge per task: the counter is checked and bumped here, so a
         # model that stalls again after being nudged is allowed to stop (the
@@ -791,6 +1171,11 @@ def analyse_stream_result(
                 task, assistant_msg, round_content)
             if _do_nudge:
                 task['_intent_stall_nudge_count'] = _stall_nudges + 1
+                from lib.tasks_pkg.assistant_messages import (
+                    append_assistant_prose_message,
+                )
+                append_assistant_prose_message(
+                    messages, assistant_msg, task=task)
                 messages.append({'role': 'user', 'content': _stall_text})
                 # DISPLAY-ONLY sidecar accumulation — the in-timeline chip.
                 # Unlike the peer / steer lanes this is emitted AT INJECTION
@@ -836,7 +1221,7 @@ def analyse_stream_result(
         result['action'] = 'break'
         result['loop_exit_reason'] = f'no_tool_calls_round_{round_num}'
 
-        # ★ Defensive last resort: API reported finish_reason=tool_calls
+        # Defensive last resort: API reported finish_reason=tool_calls
         #   but no tool calls were assembled. The dedicated
         #   tool_calls_no_payload retry bucket above returns first, so this
         #   is only reachable if a future early-return bypasses it. Do NOT
@@ -870,14 +1255,26 @@ def analyse_stream_result(
     # sanitizer's '{}' substitution). Validate BEFORE proceeding: unparseable
     # → retry the round transparently (classic-bucket budget), never execute.
     # A cut that left every arguments string parseable lost only the terminal
-    # frames (JSON is self-delimiting) — proceeding is then provably safe.
-    if (usage or {}).get('_missing_done'):
+    # frames (JSON is self-delimiting) — proceeding is then safe. A malformed
+    # frame is different: it may have contained another tool call or arguments,
+    # so even apparently parseable calls must never execute from that attempt.
+    _malformed_tool_stream = bool((usage or {}).get('_malformed_stream'))
+    if (usage or {}).get('_missing_done') or _malformed_tool_stream:
         from lib.agent_loop import unparseable_tool_calls
         _bad_tcs = unparseable_tool_calls(assistant_msg)
-        if _bad_tcs:
+        if _bad_tcs or _malformed_tool_stream:
             _trace_id = (usage or {}).get('trace_id', 'N/A')
             _bad_names = [(tc.get('function') or {}).get('name', '?')
                           for tc in _bad_tcs]
+            if _malformed_tool_stream and not _bad_names:
+                _bad_names = [
+                    (tc.get('function') or {}).get('name', '?')
+                    for tc in assistant_msg.get('tool_calls') or []
+                ]
+            _tool_stream_issue = (
+                'malformed provider frame' if _malformed_tool_stream
+                else 'truncated tool arguments'
+            )
             if _premature_retry_count < _PREMATURE_RETRY_MAX_CLASSIC:
                 _premature_retry_count += 1
                 result['premature_retry_count'] = _premature_retry_count
@@ -885,12 +1282,12 @@ def analyse_stream_result(
                     task['_premature_retry_count_phase'] = _premature_retry_count
                 _backoff_s = _zero_byte_backoff_seconds(_premature_retry_count)
                 logger.warning(
-                    '[%s] ⚠️ TRUNCATED TOOL CALL at round %d: stream lost '
-                    '[DONE] and %d tool call(s) have unparseable arguments '
-                    '(%s) — the cut landed mid-arguments. Retrying (%d/%d) '
+                    '[%s] ⚠️ UNTRUSTWORTHY TOOL STREAM at round %d: %s; '
+                    '%d affected tool call(s) (%s). Retrying (%d/%d) '
                     'after %.1fs backoff instead of executing corrupt calls. '
                     'M-TraceId=%s model=%s',
-                    tid, round_num, len(_bad_tcs), _bad_names,
+                    tid, round_num, _tool_stream_issue, len(_bad_names),
+                    _bad_names,
                     _premature_retry_count, _PREMATURE_RETRY_MAX_CLASSIC,
                     _backoff_s, _trace_id, model,
                 )
@@ -924,14 +1321,17 @@ def analyse_stream_result(
                 emit_phase(task, Phase.RETRYING,
                            attempt=_premature_retry_count,
                            max=_PREMATURE_RETRY_MAX_CLASSIC,
-                           bucket='truncated_tool_args',
+                           bucket=(
+                               'malformed_tool_stream'
+                               if _malformed_tool_stream
+                               else 'truncated_tool_args'),
                            backoff_s=round(_backoff_s, 2),
                            detail=(
-                               f'⚠️ 网关断流截断了工具参数（{len(_bad_tcs)} 个调用），'
+                               f'⚠️ 上游工具数据流不完整（{len(_bad_names)} 个调用），'
                                f'退避 {_backoff_s:.1f}s 后重试 '
                                f'({_premature_retry_count}/{_PREMATURE_RETRY_MAX_CLASSIC})…'
                            ))
-                _interruptible_sleep(_backoff_s, task)
+                retry_budget._interruptible_sleep(_backoff_s, task)
                 result['action'] = 'continue'
                 return result
             # Budget exhausted — honest terminal error (same shape as the
@@ -945,15 +1345,16 @@ def analyse_stream_result(
             from lib.error_envelope import make_envelope as _make_env
             task['error'] = _make_env(
                 'premature_close',
-                detail=(f'Stream repeatedly cut mid-tool-arguments '
-                        f'({len(_bad_tcs)} corrupt call(s): {_bad_names}); '
+                detail=(f'Provider tool stream repeatedly arrived incomplete '
+                        f'({_tool_stream_issue}; calls={_bad_names}); '
                         f'retries exhausted '
                         f'({_premature_retry_count}/{_PREMATURE_RETRY_MAX_CLASSIC}). '
                         f'M-TraceId={_trace_id}'),
                 model=model,
                 context=f'round-{round_num}',
                 source='llm-stream',
-                raw=(f'bucket=truncated_tool_args bad_calls={_bad_names} '
+                raw=(f'bucket=untrustworthy_tool_stream '
+                     f'issue={_tool_stream_issue} bad_calls={_bad_names} '
                      f'attempts={_premature_retry_count}/'
                      f'{_PREMATURE_RETRY_MAX_CLASSIC} M-TraceId={_trace_id}'),
             )
@@ -965,6 +1366,10 @@ def analyse_stream_result(
                 _PREMATURE_RETRY_MAX_CLASSIC, _bad_names, _trace_id, model,
             )
             return result
+
+    # A validated tool call is deliverable progress. A later no-actionable
+    # incident is isolated and may use the remaining phase-wide recovery budget.
+    retry_budget._clear_no_actionable_retry_streak(task)
 
     # assistant_msg has tool_calls → proceed to tool execution (or check budget)
     return result

@@ -1,11 +1,9 @@
 """tests/test_motion_video_p4.py — Topic→video front-half (P4) unit suite.
 
-Covers docs/PRODUCTION_PIPELINE_DESIGN.md P4 (owner-ratified 2026-07-25):
+Covers the motion-video recipe boundary in docs/modules/production.md:
 
-  * stage-graph contract (:mod:`lib.production.stages`, relocated there from
-    ``lib.motion_video._stages`` in P6): checkpointed resume, retry, gate
-    rejection, abort — the crash-resume correctness contract owner made a
-    hard requirement.
+  * stage-graph contract (:mod:`lib.production.stages`): checkpointed resume,
+    retry, gate rejection, and abort.
   * video recipe (:mod:`lib.motion_video._recipe`): research→script→timeline
     with fakes; the fact-discipline gate (拍板 #4); real-TTS-duration timeline
     vs char-estimate fallback; scene-count cost cap (拍板 #3).
@@ -29,10 +27,8 @@ pytestmark = pytest.mark.unit
 #  Stage-graph contract (relocated to lib.production.stages in P6)
 # ══════════════════════════════════════════════════════════
 
-# NOTE: import the REAL home, not the lib.motion_video._stages back-compat
-# shim. run_stages resolves stage_is_done as a module global of its OWN
-# module, so the NEUTER below must patch it there — patching the shim would
-# silently no-op and the neuter would stop biting.
+# run_stages resolves stage_is_done as a module global, so the NEUTER below
+# patches the owning module directly.
 from lib.production import stages as st
 
 
@@ -334,7 +330,7 @@ def _ctx(*, project, search):
         cfg={}, task_id='t', project_path='/tmp/x' if project else '',
         project_enabled=project, search_mode='multi' if search else 'off',
         search_enabled=search, fetch_enabled=False, code_exec_enabled=False,
-        browser_enabled=False, desktop_enabled=False, swarm_enabled=False)
+        browser_enabled=False, desktop_enabled=False)
 
 
 def test_produce_video_not_project_gated():
@@ -342,7 +338,7 @@ def test_produce_video_not_project_gated():
     from lib.tools.registry import assemble_tool_list
     ctx = _ctx(project=False, search=True)
     assemble_tool_list(ctx)
-    names = {t['function']['name'] for t in ctx.enabled_tool_catalog}
+    names = {t['function']['name'] for t in ctx.executable_tool_catalog}
     assert 'produce_video' in names
     # ...while the low-level motion_video_* family stays project-gated.
     assert not any(n.startswith('motion_video') for n in names)
@@ -372,7 +368,7 @@ def test_produce_research_reachable_and_search_gated():
     from lib.tools.registry import assemble_tool_list
     ctx = _ctx(project=False, search=True)
     assemble_tool_list(ctx)
-    names = [t['function']['name'] for t in ctx.enabled_tool_catalog]
+    names = [t['function']['name'] for t in ctx.executable_tool_catalog]
     assert 'produce_research' in names
     # Appended AFTER the existing pair so the cache-stable prefix is untouched.
     assert ([n for n in names if n.startswith('produce_')]
@@ -382,7 +378,7 @@ def test_produce_research_reachable_and_search_gated():
     off, _ = assemble_tool_list(off_ctx)
     assert 'produce_research' not in {t['function']['name'] for t in off}
     assert 'produce_research' in {
-        t['function']['name'] for t in off_ctx.enabled_tool_catalog
+        t['function']['name'] for t in off_ctx.executable_tool_catalog
     }
 
 
@@ -424,7 +420,7 @@ def test_produce_research_handler_clamps_and_threads_args(monkeypatch):
     """The handler is the arg-validation boundary: clamp n_ideas, require a
     direction, and thread conv_id through so the job can post back."""
     import lib.tasks_pkg.handlers.motion_video as hdl
-    import lib.research as research_pkg
+    import lib.research.api as research_api
 
     captured = {}
 
@@ -433,11 +429,11 @@ def test_produce_research_handler_clamps_and_threads_args(monkeypatch):
         captured.update(kw)
         return {'task_id': 'research_fake1', 'deduped': False}
 
-    monkeypatch.setattr(research_pkg, 'produce_research', fake_produce)
+    monkeypatch.setattr(research_api, 'produce_research', fake_produce)
     monkeypatch.setattr(hdl, '_build_simple_meta', lambda *a, **k: {})
     monkeypatch.setattr(hdl, '_finalize_tool_round', lambda *a, **k: None)
 
-    task = {'events': [], 'conv_id': 'convX'}
+    task = {'events': [], 'conv_id': 'convX', '_userId': 1}
     _, content, _ = hdl._handle_produce_research(
         task, {'id': 'tc1'}, 'produce_research', 'tc1',
         {'direction': 'KV cache compression', 'lang': 'zh', 'n_ideas': 99,
@@ -448,6 +444,7 @@ def test_produce_research_handler_clamps_and_threads_args(monkeypatch):
     assert result['poll'] == '/api/v1/tasks/research_fake1'
     assert result['n_ideas'] == 12          # clamped from 99
     assert captured['conv_id'] == 'convX'
+    assert captured['user_id'] == 1
     assert captured['seed_arxiv_ids'] == ['2312.00752']
 
     # An empty direction is rejected before any job is spawned.
@@ -466,12 +463,14 @@ from lib.motion_video import engine as eng
 
 def test_write_job_manifest_roundtrip(tmp_path):
     task = {'task_id': 'motion_x', 'workdir': str(tmp_path), 'topic': 'sky',
-            'lang': 'zh', 'narration': True, 'width': 1080, 'height': 1440}
+            'lang': 'zh', 'narration': True, 'width': 1080, 'height': 1440,
+            'user_id': 1}
     eng.write_job_manifest(task, kind='topic', state='running')
     from lib.json_store import read_json
     m = read_json(os.path.join(str(tmp_path), 'job.json'))
     assert m['state'] == 'running' and m['kind'] == 'topic'
     assert m['topic'] == 'sky' and m['task_id'] == 'motion_x'
+    assert m['user_id'] == 1
 
 
 def test_resume_interrupted_jobs_respawns_running(monkeypatch, tmp_path):
@@ -482,7 +481,8 @@ def test_resume_interrupted_jobs_respawns_running(monkeypatch, tmp_path):
         d.mkdir(parents=True)
         (d / 'job.json').write_text(json.dumps({
             'task_id': jid, 'state': state, 'kind': 'topic', 'workdir': str(d),
-            'topic': 't', 'width': 1080, 'height': 1440, 'narration': True}))
+            'topic': 't', 'width': 1080, 'height': 1440, 'narration': True,
+            'user_id': 1}))
     monkeypatch.setattr('lib.motion_video._env.motion_root', lambda: str(tmp_path))
     spawned = []
     from lib.motion_video.runtime import _motion_runtime

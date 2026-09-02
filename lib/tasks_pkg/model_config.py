@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 import re
 
 import lib as _lib  # module ref for hot-reload (Settings changes take effect without restart)
-from lib.tools import (
+from lib.tools.registry import (
     ToolContext, all_specs, assemble_tool_list, resolve_enabled_plugins,
 )
 
@@ -77,7 +77,7 @@ def _resolve_model_config(cfg, task_id):
     Returns a dict with keys: model, thinking_enabled, thinking_depth, preset,
     max_tokens, temperature, search_mode, search_enabled, fetch_enabled,
     project_path, project_enabled, code_exec_enabled, memory_enabled,
-    browser_enabled, desktop_enabled, swarm_enabled.
+    browser_enabled, desktop_enabled.
     """
     tid = task_id[:8]
     # ── Two-tier chat mode (chat/studio) → atomic flags ──
@@ -131,7 +131,7 @@ def _resolve_model_config(cfg, task_id):
             thinking_depth = _default_depth
         logger.debug('[Task %s] legacy preset=opus, depth=%s → model=%s', tid, thinking_depth, model)
     else:
-        # ★ New path: preset IS the model_id (sent directly from frontend)
+        # New path: preset IS the model_id (sent directly from frontend)
         if preset:
             model = preset
         thinking_enabled = cfg.get('thinkingEnabled', True)
@@ -167,14 +167,24 @@ def _resolve_model_config(cfg, task_id):
     memory_enabled = cfg.get('memoryEnabled', True)
     browser_enabled = cfg.get('browserEnabled', False)
     desktop_enabled = cfg.get('desktopEnabled', False)
-    swarm_enabled = cfg.get('swarmEnabled', False)
     image_gen_enabled = cfg.get('imageGenEnabled', False)
     human_guidance_enabled = cfg.get('humanGuidanceEnabled', False)
     scheduler_enabled = cfg.get('schedulerEnabled', False)
     lean = is_lean_mode(_chat_mode)
+    # ── Plan Mode (orthogonal toggle, composes with the chat/studio dial) ──
+    # Read-only collaborative planning à la Codex plan.md. Resolution lives
+    # in lib/tasks_pkg/plan_mode; enforcement is assembly filter (below) +
+    # dispatch rejection lane + prompt contract.
+    from lib.tasks_pkg.plan_mode import plan_mode_enabled
+    plan_mode = plan_mode_enabled(cfg)
+    if plan_mode:
+        # Within-turn clarification is intrinsic to Plan Mode rather than a
+        # second feature toggle the user must discover first.
+        human_guidance_enabled = True
     return {
         'model': model,
         'chat_mode': _chat_mode,
+        'plan_mode': plan_mode,
         'lean': lean,
         'thinking_enabled': thinking_enabled,
         'thinking_depth': thinking_depth,
@@ -191,7 +201,6 @@ def _resolve_model_config(cfg, task_id):
         'memory_enabled': memory_enabled,
         'browser_enabled': browser_enabled,
         'desktop_enabled': desktop_enabled,
-        'swarm_enabled': swarm_enabled,
         'image_gen_enabled': image_gen_enabled,
         'human_guidance_enabled': human_guidance_enabled,
         'scheduler_enabled': scheduler_enabled,
@@ -201,7 +210,7 @@ def _resolve_model_config(cfg, task_id):
 def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
                          search_mode, search_enabled, fetch_enabled,
                          code_exec_enabled, browser_enabled, desktop_enabled,
-                         swarm_enabled, image_gen_enabled=False,
+                         image_gen_enabled=False,
                          human_guidance_enabled=False, scheduler_enabled=False,
                          messages=None, conv_id=''):
     """Build the tool_list based on enabled features.
@@ -210,15 +219,27 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
     if no tools are enabled. Tool availability is not coupled to a round
     budget: a model keeps the same tool surface until it naturally stops.
 
-    **Caller-supplied tools take precedence.** When ``cfg['tools']`` is a
-    non-empty list (set by OpenAI/Anthropic compat adapters or by API
-    callers passing ``tools=[...]`` to /api/v1/chat/completions), we
-    use it verbatim — the auto-derived feature toggles
-    (search/fetch/memory/etc.) are ignored. This is the contract
-    documented in docs/COMPAT_OPENAI.md and COMPAT_ANTHROPIC.md.
+    **Caller-supplied tools take precedence.** When
+    ``cfg['_explicitToolSchemas']`` or ``cfg['tools']`` is a non-empty list
+    (set by the embedded runtime or OpenAI/Anthropic compat adapters), the
+    auto-derived feature toggles (search/fetch/memory/etc.) are ignored.
+    Plan Mode is the deliberate exception: it fail-closes unproven schemas and
+    always supplies the canonical ``ask_human`` protocol required for
+    within-turn clarification.
     """
     tid = task_id[:8]
-    explicit_tools = cfg.get('tools')
+    from lib.tasks_pkg.plan_mode import (
+        plan_mode_enabled, plan_mode_filter_tool_schemas,
+    )
+    _plan_mode = plan_mode_enabled(cfg)
+    if _plan_mode:
+        # Keep this invariant at the assembly boundary as well as model-config
+        # resolution so direct/headless assembly callers cannot lose the
+        # within-turn interaction tool by skipping the resolver.
+        human_guidance_enabled = True
+    explicit_tools = cfg.get('_explicitToolSchemas')
+    if not isinstance(explicit_tools, list) or not explicit_tools:
+        explicit_tools = cfg.get('tools')
     if isinstance(explicit_tools, list) and explicit_tools:
         # Validate shape — each tool must be an OpenAI-style
         # {type:'function', function:{name,description,parameters}}.
@@ -230,34 +251,63 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
                 logger.warning('[Task %s] dropping malformed tool[%d]: %r',
                                tid, i, t)
         if ok:
-            # Explicit schemas are the strongest possible caller/frontend
-            # selection.  Native Tool Search must never defer or hide them.
-            _explicit_names = []
-            for _tool in ok:
-                _fn = _tool.get('function') or {}
-                _name = (_fn.get('name') if isinstance(_fn, dict) else '') \
-                    or _tool.get('name') or ''
-                if _name:
-                    _explicit_names.append(str(_name))
-            cfg['_frontendSelectedToolNames'] = sorted(set(_explicit_names))
+            def _schema_name(tool):
+                fn = tool.get('function') or {}
+                return str((fn.get('name') if isinstance(fn, dict) else '')
+                           or tool.get('name') or '')
+
+            caller_names = {_schema_name(tool) for tool in ok
+                            if _schema_name(tool)}
+            if _plan_mode:
+                from lib.tasks_pkg.tool_dispatch._flags import _registry_tool_flags
+                ok, dropped = plan_mode_filter_tool_schemas(
+                    ok, _registry_tool_flags()[0])
+                if dropped:
+                    logger.info(
+                        '[Task %s] Plan Mode — dropped %d unproven '
+                        'caller-supplied tool schema(s): %s',
+                        tid, len(dropped), ', '.join(sorted(dropped)),
+                    )
+                # ``ask_human`` has framework-owned wait/resume semantics. Use
+                # its canonical schema even when the caller supplied a shadow
+                # definition, and add it when explicit-tool precedence would
+                # otherwise suppress automatic feature assembly.
+                from copy import deepcopy
+                from lib.tools.registry import canonical_human_guidance_schema
+                ok = [tool for tool in ok if _schema_name(tool) != 'ask_human']
+                ok.append(deepcopy(canonical_human_guidance_schema()))
+
+            # Build every downstream authority map from the final, filtered
+            # catalog. Dropped caller names must not survive as Tool Search or
+            # dispatch metadata.
+            final_names = [_schema_name(tool) for tool in ok
+                           if _schema_name(tool)]
+            cfg['_frontendSelectedToolNames'] = sorted(
+                caller_names & set(final_names))
             cfg['_toolNamespaceByName'] = {
-                name: 'custom' for name in _explicit_names}
-            cfg['_enabledToolNamespaceByName'] = dict(
+                name: ('builtin' if name == 'ask_human' and _plan_mode
+                       else 'custom')
+                for name in final_names
+            }
+            cfg['_executableToolNamespaceByName'] = dict(
                 cfg['_toolNamespaceByName'])
-            cfg['_enabledToolCatalog'] = list(ok)
             cfg['_executableToolCatalog'] = list(ok)
             cfg['_toolDiscoveryPolicyByName'] = {
-                name: 'eager' for name in _explicit_names}
+                name: 'eager' for name in final_names}
             cfg['_toolScriptSafeByName'] = {
-                name: False for name in _explicit_names}
-            cfg['_enabledToolSearchTextByName'] = {
-                name: 'custom caller supplied tool' for name in _explicit_names}
-            logger.info('[Task %s] using %d caller-supplied tool(s); '
+                name: False for name in final_names}
+            cfg['_executableToolSearchTextByName'] = {
+                name: ('human guidance within the current turn'
+                       if name == 'ask_human' and _plan_mode
+                       else 'custom caller supplied tool')
+                for name in final_names
+            }
+            logger.info('[Task %s] using %d explicit/Plan tool(s); '
                         'auto-derived tools disabled', tid, len(ok))
-            return ok, True
+            return (ok or None), bool(ok)
 
     # ── Declarative assembly — the per-feature if-ladder now lives as
-    #    self-describing ToolSpec objects in lib/tools/registry.py.  Native
+    #    self-describing ToolSpec objects in lib/tools/registry/.  Native
     #    tools AND third-party plugins (tofu.tools entry points) flow through
     #    the same registry, so adding/removing a tool needs ZERO edits here.
     #    The spec registration order reproduces the cache-stable layout the
@@ -266,12 +316,12 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
     # plugin installed in a shared multi-tenant process can't leak its tool
     # schema into unrelated callers. Resolved from cfg['plugins'] →
     # TOFU_DEFAULT_TOOL_PLUGINS env → fail-closed (no plugins). See
-    # lib/tools/registry.py "Plugin isolation" and docs/TOOL_PLUGINS.md.
+    # lib/tools/registry/ "Plugin isolation" and docs/TOOL_PLUGINS.md.
     enabled_plugins = resolve_enabled_plugins(cfg)
     # ``lean`` is a retained seam (is_lean_mode, always False after the air/pro
     # merge) that would drop the always-on capability tools (memory/todo/
     # scheduler). Derived from cfg here so every _assemble_tool_list caller
-    # (orchestrator, swarm rehydrate, endpoint runner, tests) honors it with
+    # (orchestrator, swarm rehydrate, Flow runner, tests) honors it with
     # no signature change — the chatMode key rides on cfg.
     from lib.tasks_pkg.chat_mode import is_lean_mode, normalize_chat_mode
     _lean = is_lean_mode(normalize_chat_mode(cfg))
@@ -281,18 +331,39 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
         search_mode=search_mode, search_enabled=search_enabled,
         fetch_enabled=fetch_enabled, code_exec_enabled=code_exec_enabled,
         browser_enabled=browser_enabled, desktop_enabled=desktop_enabled,
-        swarm_enabled=swarm_enabled, image_gen_enabled=image_gen_enabled,
+        image_gen_enabled=image_gen_enabled,
         human_guidance_enabled=human_guidance_enabled,
         scheduler_enabled=scheduler_enabled, messages=messages,
         enabled_plugins=enabled_plugins, conv_id=conv_id,
+        owner_user_id=int(
+            cfg.get('userId') or cfg.get('_turnOwnerUserId') or 0),
     )
     tool_list, has_real_tools = assemble_tool_list(ctx)
+
+    # ── Plan Mode wire filter (guidance layer, NOT the authority) ──
+    # Drop mutating schemas from both initial exposure and Tool Search's
+    # executable catalog so the model is neither tempted nor charged the
+    # tokens. Dispatch still repeats the exact-call check as the final
+    # authority for late-discovered or malformed calls.
+    if _plan_mode and tool_list:
+        from lib.tasks_pkg.tool_dispatch._flags import _registry_tool_flags
+        _write_names = _registry_tool_flags()[0]
+        _kept, _dropped = plan_mode_filter_tool_schemas(
+            tool_list, _write_names)
+        # Tool Search reads the executable catalog rather than the initially
+        # exposed wire list. Apply the same policy to that authority snapshot.
+        _catalog, _catalog_dropped = plan_mode_filter_tool_schemas(
+            ctx.executable_tool_catalog, _write_names)
+        ctx.executable_tool_catalog = _catalog
+        _dropped = list(dict.fromkeys([*_dropped, *_catalog_dropped]))
+        if _dropped:
+            logger.info('[Task %s] 🗺️ Plan Mode — dropped %d mutating tool '
+                        'schema(s) from wire: %s',
+                        tid, len(_dropped), ', '.join(sorted(_dropped)))
+        tool_list = _kept
     # Preserve the complete task-level execution authority before any routed
-    # exposure is applied. The historical
-    # ``_enabled*`` alias stays during migration; new code should say
-    # executable because composer exposure toggles no longer grant authority.
-    cfg['_enabledToolCatalog'] = list(ctx.enabled_tool_catalog)
-    cfg['_executableToolCatalog'] = list(ctx.enabled_tool_catalog)
+    # exposure is applied. Composer exposure toggles never grant authority.
+    cfg['_executableToolCatalog'] = list(ctx.executable_tool_catalog)
     try:
         from lib.context_experiment_flags import (
             normalize_context_experiment_flags)
@@ -304,8 +375,10 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
     cfg['_toolDiscoveryPolicyByName'] = dict(
         ctx.discovery_policy_by_name)
     cfg['_toolScriptSafeByName'] = dict(ctx.script_safe_by_name)
-    cfg['_enabledToolNamespaceByName'] = dict(ctx.tool_namespace_by_name)
-    cfg['_enabledToolSearchTextByName'] = dict(ctx.search_text_by_name)
+    cfg['_executableToolNamespaceByName'] = dict(ctx.tool_namespace_by_name)
+    cfg['_executableToolSearchTextByName'] = dict(ctx.search_text_by_name)
+    cfg['_toolContractDocumentsByName'] = dict(
+        ctx.tool_contract_documents_by_name)
 
     # Request-local routing telemetry describes this assembly's live surface.
     try:
@@ -354,7 +427,7 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
         ctx.discovery_policy_by_name.get(name, 'eager') == 'searchable'
         for name in {
             str(((tool.get('function') or {}).get('name') or ''))
-            for tool in ctx.enabled_tool_catalog if isinstance(tool, dict)
+            for tool in ctx.executable_tool_catalog if isinstance(tool, dict)
         }
         if name
     )
@@ -369,7 +442,7 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
         if name in _wire_names
     }
     cfg['_toolDiscoveryPolicyByName'] = _live_discovery_policy
-    cfg['_toolSearchCatalogSize'] = len(ctx.enabled_tool_catalog)
+    cfg['_toolSearchCatalogSize'] = len(ctx.executable_tool_catalog)
     cfg['_toolSearchableCount'] = _searchable_count
     cfg['_toolSearchMode'] = _live_tool_search_mode
 

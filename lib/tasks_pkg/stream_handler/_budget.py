@@ -3,7 +3,8 @@
 Groups the tunable knobs that govern abnormal-stream-termination retries:
 
   * ``_PREMATURE_RETRY_MAX_CLASSIC`` / ``_PREMATURE_RETRY_MAX_ZERO_BYTE`` /
-    ``_EMPTY_STOP_RETRY_MAX`` — the per-signature retry caps.
+    ``_NO_ACTIONABLE_RETRY_MAX`` / ``_EMPTY_STOP_RETRY_MAX`` /
+    ``_PARTIAL_STREAM_RETRY_MAX`` — the per-signature retry caps.
   * ``_TODO_CONTINUATION_MAX_DEFAULT`` + ``_todo_continuation_max`` — the
     todo-continuation nudge cap (env-overridable, fail-open).
   * ``_ZERO_BYTE_BACKOFF_BASE_S`` / ``_ZERO_BYTE_BACKOFF_MAX_S`` +
@@ -45,11 +46,26 @@ logger = get_logger(__name__)
 #   so the UI shows a spinner with attempt count.
 _PREMATURE_RETRY_MAX_CLASSIC = 16
 _PREMATURE_RETRY_MAX_ZERO_BYTE = 16
+
+# Historical semantic-timeout records/plugins retain their former bounded
+# recovery budget. Live transports use rolling raw activity and therefore enter
+# the ordinary premature-close budgets on true silence; they cannot increment
+# this bucket.
+_NO_ACTIONABLE_RETRY_MAX = 2
+_NO_ACTIONABLE_CONSECUTIVE_RETRY_MAX = 1
+_NO_ACTIONABLE_RETRY_STREAK_KEY = '_no_actionable_retry_streak'
+
 # Empty-stop retry budget (model emitted thinking / a few chunks but no
 # content, then closed cleanly with finish_reason=stop). Observed on
 # GLM-5.1, MiniMax M2.5/M2.7, and occasionally Claude.  Each retry is
 # moderately expensive (cache reads + new thinking), so the cap is low.
 _EMPTY_STOP_RETRY_MAX = 2
+
+# Content-bearing stream-cut continuation budget. Unlike an empty/classic
+# retry, this path preserves the already streamed prose and asks the model to
+# continue from that exact prefix. Each continuation is still a newly billed
+# request, so keep the cap deliberately small even though no user text is lost.
+_PARTIAL_STREAM_RETRY_MAX = 2
 
 # Canned-greeting retry budget (upstream returns a "successful" canned
 # greeting incongruent with the conversation tail — see _canned_greeting.py).
@@ -68,6 +84,26 @@ _CANNED_GREETING_RETRY_MAX = 2
 # intermittent gateway flakiness, so the cap matches the other
 # "tokens were spent" buckets (empty_stop / canned_greeting).
 _TOOL_CALLS_NO_PAYLOAD_RETRY_MAX = 2
+
+
+def _no_actionable_retry_streak(task) -> int:
+    """Return automatic retries granted in the current no-progress streak."""
+    try:
+        return max(0, int(task.get(_NO_ACTIONABLE_RETRY_STREAK_KEY) or 0))
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _record_no_actionable_retry(task) -> int:
+    """Record one retry without conflating it with the phase-wide budget."""
+    retry_count = _no_actionable_retry_streak(task) + 1
+    task[_NO_ACTIONABLE_RETRY_STREAK_KEY] = retry_count
+    return retry_count
+
+
+def _clear_no_actionable_retry_streak(task) -> None:
+    """Let later isolated failures retry after deliverable progress occurred."""
+    task.pop(_NO_ACTIONABLE_RETRY_STREAK_KEY, None)
 
 # ── Todo-continuation enforcer (OMC/CC backport, Rec 2) ──
 # When the model tries to end its turn (finish_reason=stop, no tool calls) but

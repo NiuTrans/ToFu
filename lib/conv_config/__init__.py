@@ -69,7 +69,6 @@ from lib.conv_config._translate import (  # noqa: E402,F401
 )
 
 from lib.conv_config._flow import (  # noqa: E402,F401
-    _KNOWN_FLOW_BUILTINS,
     _parse_active_flow,
 )
 

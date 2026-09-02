@@ -27,26 +27,36 @@ from lib.error_envelope import from_exception
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import parse_body
-from lib.translate import (
-    TranslationContentRefused,
-    _build_translate_prompt,
-    _cleanup_translate_tasks,
-    _do_translate,
-    _extract_notranslate_blocks,
-    _reattach_notranslate_blocks,
-    _strip_notranslate_tags,
-    _SYNC_TRANSLATE_MAX_CHARS,
-    _translate_freetext,
-    _translate_runtime,
-    _translate_tasks,
-    _translate_tasks_lock,
+from lib.translate.constants import _SYNC_TRANSLATE_MAX_CHARS
+from lib.translate.errors import TranslationContentRefused
+from lib.translate.notranslate import (
+    _extract_notranslate_blocks, _reattach_notranslate_blocks,
 )
+from lib.translate.prompt import _build_translate_prompt, _strip_notranslate_tags
+from lib.translate.runtime._state import (
+    _cleanup_translate_tasks, _translate_runtime,
+)
+from lib.turn_lifecycle import LifecycleNotFound, get_turn
 
-from .auth import require_auth
+from .auth import request_user_id, require_auth
 
 logger = get_logger(__name__)
 
 api_v1_translate_bp = Blueprint('api_v1_translate', __name__)
+
+
+def _translate_freetext(*args, **kwargs):
+    """Load the LLM/MT engine for an explicit synchronous translation."""
+    from lib.translate.engine import _translate_freetext as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def _do_translate(*args, **kwargs):
+    """Load the translation worker inside its TaskRuntime thread."""
+    from lib.translate.runtime._worker import _do_translate as implementation
+
+    return implementation(*args, **kwargs)
 
 
 def _lang_params(data: dict) -> tuple[str, str]:
@@ -144,7 +154,7 @@ def translate_text_v1():
         # Content guards exhausted their retry budget — NOT a server crash.
         # 502 + typed envelope so the frontend shows the real reason
         # ('translation rejected by quality check') instead of a bare
-        # 'INTERNAL SERVER ERROR' (pt_75d8f8c7, 73× 500/day).
+        # 'INTERNAL SERVER ERROR' (, 73× 500/day).
         logger.warning('[Translate.v1] content refused (%d chars, target=%s): %s',
                        input_len, target, e)
         return api_error(
@@ -167,37 +177,54 @@ def translate_text_v1():
 def translate_start_v1():
     _cleanup_translate_tasks()
     data = parse_body()
-    text = (data.get('text') or '').strip()
+    target, source = _lang_params(data)
+    conv_id = str(data.get('convId') or '').strip()
+    turn_id = str(data.get('turnId') or '').strip()
+    msg_id = str(data.get('msgId') or '').strip()
+    field = data.get('field', 'translatedContent')
+    user_id = request_user_id()
+
+    if bool(conv_id) != bool(turn_id):
+        return api_bad_request(
+            'Conversation-bound translation requires convId and turnId')
+    if field not in {'translatedContent', 'content'}:
+        return api_bad_request('Unsupported translation field')
+
+    if conv_id:
+        try:
+            turn = get_turn(conv_id, turn_id, user_id=user_id)
+        except LifecycleNotFound:
+            return api_error('Turn not found', status=404)
+        if turn.get('status') in {'pending', 'running', 'waiting_for_user'}:
+            return api_error('Turn is still running', status=409)
+        # The authoritative projection supplies the source. A stale or forged
+        # browser payload can never translate different bytes into this turn.
+        text = str((turn.get('projection') or {}).get('content') or '').strip()
+    else:
+        text = str(data.get('text') or '').strip()
     if not text:
         return api_bad_request('No text')
-    target, source = _lang_params(data)
-    conv_id = data.get('convId', '')
-    msg_idx = data.get('msgIdx')
-    msg_id = (data.get('msgId') or '').strip() or None
-    field = data.get('field', 'translatedContent')
 
     task = _translate_runtime.create(
+        user_id=int(user_id),
         task_id=str(uuid.uuid4())[:12],
-        meta={'convId': conv_id, 'msgIdx': msg_idx, 'msgId': msg_id,
-              'field': field, 'targetLang': target, 'textLen': len(text)},
+        meta={'convId': conv_id, 'turnId': turn_id, 'msgId': msg_id,
+              'userId': user_id, 'field': field, 'targetLang': target,
+              'textLen': len(text)},
     )
-    task.update({
-        'status': 'running', 'result': None, 'error': None,
-        'model': None, 'progress': None,
-        'convId': conv_id, 'msgIdx': msg_idx, 'msgId': msg_id,
-        'field': field, 'targetLang': target, 'textLen': len(text),
-        'completed_at': None,
-    })
+    _translate_runtime.mark_running(
+        task['id'], fields={'model': None, 'progress': None})
 
     _translate_runtime.spawn(
         task['id'], _do_translate,
-        task['id'], text, target, source, conv_id, msg_idx, field,
-        msg_id=msg_id,
+        task['id'], text, target, source, conv_id, turn_id, field,
+        user_id=user_id, message_id=msg_id,
     )
 
-    logger.info('[Translate.v1] started %s: %d chars → %s, conv=%s field=%s',
+    logger.info('[Translate.v1] started %s: %d chars → %s, conv=%s turn=%s field=%s',
                 task['id'], len(text), target,
-                conv_id[:8] if conv_id else '?', field)
+                conv_id[:8] if conv_id else '-',
+                turn_id[:8] if turn_id else '-', field)
     return api_ok({'taskId': task['id']})
 
 
@@ -205,8 +232,8 @@ def translate_start_v1():
 @require_auth
 @api_meta(summary='Poll a translation task', tags=['translate'])
 def translate_poll_v1(task_id):
-    with _translate_tasks_lock:
-        task = _translate_tasks.get(task_id)
+    user_id = int(request_user_id())
+    task = _translate_runtime.get_owned(task_id, user_id=user_id)
     if not task:
         return api_payload({'error': 'Task not found',
                             'status': 'not_found'}, 404)
@@ -223,14 +250,14 @@ def translate_poll_v1(task_id):
 def translate_poll_batch_v1():
     data = parse_body()
     task_ids = data.get('taskIds', [])
+    user_id = int(request_user_id())
     results = []
-    with _translate_tasks_lock:
-        for tid in task_ids:
-            task = _translate_tasks.get(tid)
-            if not task:
-                results.append({'taskId': tid, 'status': 'not_found'})
-            else:
-                results.append(_build_poll_payload(task))
+    for tid in task_ids:
+        task = _translate_runtime.get_owned(str(tid), user_id=user_id)
+        if not task:
+            results.append({'taskId': tid, 'status': 'not_found'})
+        else:
+            results.append(_build_poll_payload(task))
     # Coordinated bare-array migration (batch 14): the array moves under
     # ``items``; Api.translate.pollBatch unwraps null-preservingly (the
     # caller's !Array.isArray(data) branch is the probe-failure fallback).

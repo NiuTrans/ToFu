@@ -1,4 +1,4 @@
-"""Project write tools — write_file, apply_diff, apply_diffs, create_project.
+"""Project write tools — write_file, edit_file, apply_diff(s), insert_content(s).
 
 Was a single 1565-line ``write_tools.py``; decomposed into function-seam
 submodules behind this facade so every existing import — ``from
@@ -8,7 +8,7 @@ lib.project_mod.write_tools as wt`` + ``wt._temp_roots._cache = …`` — keeps
 working byte-for-byte:
 
   * ``_text``  — pure fuzzy-match / unicode-escape / duplicate-describe / vscode-touch
-  * ``_paths`` — the write-path CORE (temp/root-signal/create_project/resolve/attribution)
+  * ``_paths`` — the write-path CORE (temp/root-signal/resolve/attribution)
   * ``_ops``   — the write/edit operations (write_file / upload / apply_diff(s) / insert_content(s))
 
 Re-exported via ``lib/project_mod/tools.py`` for the historic flat-module
@@ -24,12 +24,10 @@ from ._paths import (
     _nearest_existing_dir,
     _resolve_write_path,
     _root_signal,
-    _save_model_added_root_to_recent,
     _should_record_modification,
     _signal_root_added,
     _temp_roots,
     drain_root_added_signals,
-    tool_create_project,
 )
 from ._text import (
     _UNICODE_ESCAPE_RE,
@@ -53,7 +51,6 @@ from ._ops import (
 )
 
 __all__ = [
-    'tool_create_project',
     'tool_write_file',
     'save_uploaded_file',
     'tool_apply_diff',

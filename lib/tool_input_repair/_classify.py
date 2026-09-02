@@ -96,6 +96,11 @@ _TOOL_NAME_ALIASES: dict[str, str] = {
     'open_url': 'fetch_url',
     'websearch': 'web_search',
     'google': 'web_search',
+    # ── large tool-result continuation ──
+    # ``read_artifact`` is also a real swarm artifact tool. Exact live names
+    # always win above; this alias applies only in a catalog where that tool is
+    # absent and the unambiguous continuation reader is available.
+    'read_artifact': 'read_tool_artifact',
     # ── ask the user ──
     # Claude Code's native tool is ``AskUserQuestion`` (matched
     # case-insensitively). These only resolve when ``ask_human`` is in the

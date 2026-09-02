@@ -1,6 +1,6 @@
 """Engine tests for user-triggered manual compaction (§8 step 1).
 
-Covers design-doc tests 1, 1b, 2, 3, 4, 7, 7b (docs/MANUAL_COMPACTION_DESIGN.md).
+Covers the persistent-compaction contract in docs/modules/context_engineering.md.
 The load-bearing one is 1b: the raw-space index constraint — compaction of a
 conversation whose old region contains a multi-``toolRounds`` assistant row must
 NOT split a tool round (no orphan tool messages once rebuilt to api-form), and
@@ -25,79 +25,100 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ── Fakes ────────────────────────────────────────────────────────────────
 
 class _FakeStore:
-    """In-memory ConversationStore double.  Records archive + CAS calls."""
+    """In-memory turn-authority double with controllable CAS races."""
 
     def __init__(self, messages, updated_at=1000):
-        self.messages = list(messages)
+        self.messages = []
+        for index, message in enumerate(messages):
+            projected = dict(message)
+            projected.setdefault('_turnId', f'turn-{index}')
+            projected.setdefault('_projectionRevision', 1)
+            projected.setdefault(
+                '_turnActor',
+                'human' if message.get('role') == 'user' else 'assistant')
+            self.messages.append(projected)
         self.updated_at = updated_at
-        # The CAS token the production store now uses. Mirrors the DB trigger:
-        # advanced by the store on every genuine messages change, never set by
-        # the caller — which is exactly why it replaced updated_at.
         self.rev = 0
-        self.archives = []          # list of (trigger, snapshot) in call order
+        self.archives = []
         self.archive_summaries = {}
-        self.cas_calls = []         # list of expected_updated_at seen
+        self.archive_receipts = {}
+        self.cas_calls = []
         self._next_archive_id = 100
-        self.saved = None           # the messages passed to CAS (post-rewrite)
+        self.saved = None
         self._fail_cas = False
-        self.search_synced = False  # True iff the search-aware CAS path ran
-        self.notified = False       # True iff conv-changed was pushed
-        # Burst simulation: for the first N CAS attempts, a concurrent sibling
-        # TAIL write lands right BEFORE our CAS (append a msg + bump updated_at),
-        # so our CAS (on the reload-time updated_at) loses. After N it lands.
+        self.notified = False
+        self.native_payload = None
         self._races_remaining = 0
         self._race_seq = 0
 
-    def load_conversation_messages(self, conv_id):
+    def load_transcript(self, conv_id, *, user_id):
+        for index, message in enumerate(self.messages):
+            if not isinstance(message, dict):
+                continue
+            message.setdefault('_turnId', f'turn-dynamic-{index}')
+            message.setdefault('_projectionRevision', 1)
+            message.setdefault(
+                '_turnActor',
+                'human' if message.get('role') == 'user' else 'assistant')
         return (list(self.messages), self.updated_at, self.rev)
 
-    def archive_transcript(self, conv_id, messages, *, trigger='force',
-                           task_id='', round_num=0, model='',
-                           tokens_before=0, tokens_after=0,
-                           msgs_before=0, msgs_after=0, reason=''):
-        aid = self._next_archive_id
+    def archive_transcript(
+            self, conv_id, messages, *, user_id, summary='', trigger='force',
+            task_id='', round_num=0, model='', tokens_before=0,
+            tokens_after=0, msgs_before=0, msgs_after=0, reason='',
+            receipt=None):
+        aid = str(self._next_archive_id)
         self._next_archive_id += 1
-        # snapshot must be captured BEFORE any rewrite (test 3)
-        self.archives.append((trigger, [dict(m) for m in messages]))
+        self.archives.append((trigger, [dict(message) for message in messages]))
         return aid
 
-    def prune_archives(self, conv_id, keep):
+    def prune_archives(self, conv_id, keep, *, user_id):
         return 0
 
-    def update_archive_summary(self, archive_id, summary, tokens_after, msgs_after):
+    def update_archive_summary(
+            self, archive_id, summary, tokens_after, msgs_after, *, user_id,
+            receipt=None):
         self.archive_summaries[archive_id] = (summary, tokens_after, msgs_after)
+        self.archive_receipts[archive_id] = receipt
 
-    def cas_update_conversation_messages(self, conv_id, messages, expected_rev):
-        self.cas_calls.append(expected_rev)
+    def compact_turn_transcript(
+            self, conv_id, current_messages, compacted_messages,
+            expected_revision, *, command_id, user_id):
+        from lib.tasks_pkg.persistence_store import _build_turn_compaction_payload
+
+        self.cas_calls.append(expected_revision)
+        self.native_payload = _build_turn_compaction_payload(
+            conv_id, current_messages, compacted_messages,
+            expected_revision, command_id=command_id, user_id=user_id)
         if self._fail_cas:
             return 0
-        # Burst: a sibling tail write lands just before this CAS, bumping
-        # rev so the caller's expected value is now stale → 0 rows. The
-        # caller must reload and retry; each retry sees the fresher tail.
         if self._races_remaining > 0:
             self._races_remaining -= 1
             self._race_seq += 1
-            self.messages.append(_u(f'BURST tail {self._race_seq}', 90000 + self._race_seq))
+            message = _u(f'BURST tail {self._race_seq}', 90000 + self._race_seq)
+            message.update({
+                '_turnId': f'burst-{self._race_seq}',
+                '_projectionRevision': 1,
+                '_turnActor': 'human',
+            })
+            self.messages.append(message)
             self.updated_at += 1
             self.rev += 1
             return 0
-        if expected_rev != self.rev:
+        if expected_revision != self.rev:
             return 0
-        self.messages = list(messages)
-        self.saved = list(messages)
+        self.messages = list(compacted_messages)
+        self.saved = list(compacted_messages)
         self.updated_at += 1
         self.rev += 1
         return 1
 
-    def cas_sync_conversation_with_search(self, conv_id, messages, expected_rev):
-        # CAS variant that ALSO refreshes msg_count + search_text + FTS. The
-        # engine MUST use this (not the plain cas_update) because compaction
-        # removes whole messages. Record that it was the path taken.
-        self.search_synced = True
-        return self.cas_update_conversation_messages(conv_id, messages, expected_rev)
-
-    def notify_conversation_changed(self, conv_id):
+    def notify_conversation_changed(self, conv_id, *, user_id):
         self.notified = True
+
+
+class _TurnNativeFakeStore(_FakeStore):
+    """Named alias retained for tests that inspect the semantic payload."""
 
 
 def _install(monkeypatch, store, summary='COMPRESSED SUMMARY'):
@@ -106,12 +127,15 @@ def _install(monkeypatch, store, summary='COMPRESSED SUMMARY'):
     monkeypatch.setattr(man, 'get_conversation_store', lambda: store)
     # _archive_transcript imported into _manual — redirect it at the store so
     # we don't touch the DB, but STILL exercise _manual's own ordering.
-    def _fake_archive(conv_id, messages, summary='', *, trigger='force',
+    def _fake_archive(conv_id, messages, summary='', *, user_id,
+                      trigger='force',
                       task=None, round_num=0, tokens_before=0, tokens_after=0,
-                      msgs_before=0, msgs_after=0, reason='', emit_event=True):
+                      msgs_before=0, msgs_after=0, reason='', receipt=None,
+                      emit_event=True):
         return store.archive_transcript(
-            conv_id, messages, trigger=trigger, tokens_before=tokens_before,
-            msgs_before=msgs_before, reason=reason)
+            conv_id, messages, user_id=user_id, summary=summary,
+            trigger=trigger, tokens_before=tokens_before,
+            msgs_before=msgs_before, reason=reason, receipt=receipt)
     monkeypatch.setattr(man, '_archive_transcript', _fake_archive)
     monkeypatch.setattr(man, '_generate_query_aware_summary',
                         lambda *a, **k: summary)
@@ -190,22 +214,49 @@ def test_manual_compaction_persists_summary(monkeypatch):
     man = _install(monkeypatch, store)
     before = len(store.messages)
 
-    res = man.compact_conversation_now('conv1', config={}, task={'convId': 'conv1'})
+    res = man.compact_conversation_now('conv1', user_id=1, config={}, task={'convId': 'conv1'})
 
     assert res['ok'] is True
     assert store.saved is not None, 'CAS write must have happened'
-    # Must use the search-aware CAS path (refreshes msg_count+search_text+FTS)
-    # because compaction removes whole messages; a plain cas_update would leave
-    # the sidebar count stale and search matching compacted-away text.
-    assert store.search_synced is True, 'must persist via cas_sync_conversation_with_search'
+    assert store.native_payload is not None
     assert store.notified is True, 'must notify conv-changed after a landed write'
     assert res['msgsAfter'] < res['msgsBefore'] == before
+    assert res['tokenCountKind'] == 'estimated'
+    assert res['receipt']['schemaVersion'] == 'tofu.compaction-receipt/v1'
+    assert res['receipt']['status'] == 'completed'
+    assert res['receipt']['strategy'] == 'selective_summary'
+    assert store.archive_receipts[res['archiveId']] == res['receipt']
     # summary message present, exactly one
     summaries = [m for m in store.messages if m.get('_isCompactionSummary')]
     assert len(summaries) == 1
     assert man._SUMMARY_HEADER in summaries[0]['content']
     assert summaries[0].get('_compactionArchiveId') is not None
     assert summaries[0].get('_estimatedPromptTokens') == res['tokensAfter']
+    assert summaries[0]['_compactions'][0]['tokenCountKind'] == 'estimated'
+
+
+@pytest.mark.unit
+def test_manual_compaction_uses_atomic_turn_authority(monkeypatch):
+    """A turn-derived conversation never falls through to conversation.replace."""
+    store = _TurnNativeFakeStore(_long_conv())
+    man = _install(monkeypatch, store)
+
+    res = man.compact_conversation_now(
+        'native-conv', user_id=7, config={},
+        task={'convId': 'native-conv', '_userId': 7})
+
+    assert res['ok'] is True
+    payload = store.native_payload
+    assert payload is not None
+    assert payload['user_id'] == 7
+    assert payload['delete_turn_ids']
+    assert payload['insert_before_turn_id'].startswith('turn-')
+    assert payload['summary_projection']['compaction']['blockId'] == 'compaction'
+    assert payload['summary_projection']['compaction']['trigger'] == 'manual'
+    assert '_turnId' not in payload['summary_projection']
+    assert all('_turnId' not in update['projection']
+               for update in payload['projection_updates'])
+    assert store.notified is True
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -215,9 +266,9 @@ def test_manual_compaction_persists_summary(monkeypatch):
 
 @pytest.mark.unit
 def test_raw_turn_boundary_never_splits_tool_round(monkeypatch):
-    from lib.tasks_pkg.compaction import _manual as man
+    import lib.tasks_pkg.compaction._manual as man
     from lib.tasks_pkg.compaction._tokens import _estimate_msg_tokens
-    from lib.tasks_pkg.conv_message_builder import _transform_messages
+    from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
 
     raw = _long_conv()
 
@@ -237,7 +288,7 @@ def test_raw_turn_boundary_never_splits_tool_round(monkeypatch):
     # (c) compact, then rebuild to api-form: no orphan tool / split round.
     store = _FakeStore(raw)
     man2 = _install(monkeypatch, store)
-    res = man2.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    res = man2.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
     assert res['ok'] is True
     api = _transform_messages(store.messages, {})
     ok, why = _api_ok(api)
@@ -254,7 +305,7 @@ def test_manual_compaction_preserves_objective_anchor(monkeypatch):
     man = _install(monkeypatch, store)
     anchor_text = store.messages[0]['content']
 
-    res = man.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    res = man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
     assert res['ok'] is True
 
     roles = [m.get('role') for m in store.messages]
@@ -281,7 +332,7 @@ def test_manual_compaction_archives_before_rewrite(monkeypatch):
     man = _install(monkeypatch, store)
     original = [dict(m) for m in store.messages]
 
-    res = man.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    res = man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
     assert res['ok'] is True
 
     assert len(store.archives) == 1
@@ -307,7 +358,7 @@ def test_manual_compaction_archives_before_rewrite(monkeypatch):
 
 @pytest.mark.unit
 def test_manual_compaction_projects_whole_conv_at_most_once(monkeypatch):
-    import lib.tasks_pkg.conv_message_builder as cmb
+    import lib.tasks_pkg.conv_message_builder._transform as cmb
     store = _FakeStore(_long_conv())
     man = _install(monkeypatch, store)
     full_len = len(store.messages)
@@ -324,7 +375,7 @@ def test_manual_compaction_projects_whole_conv_at_most_once(monkeypatch):
 
     monkeypatch.setattr(cmb, '_transform_messages', _counting_transform)
 
-    res = man.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    res = man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
     assert res['ok'] is True
     assert whole_conv_projections['n'] <= 1, (
         f"manual compaction projected the whole conversation "
@@ -341,7 +392,7 @@ def test_manual_compaction_idempotent(monkeypatch):
     man = _install(monkeypatch, store)
     anchor_text = store.messages[0]['content']
 
-    r1 = man.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    r1 = man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
     assert r1['ok'] is True
     first_summary_count = sum(1 for m in store.messages
                               if m.get('_isCompactionSummary'))
@@ -352,7 +403,7 @@ def test_manual_compaction_idempotent(monkeypatch):
     store.messages.append(_u('再一步', 9010))
     store.messages.append(_a_plain('done ' + ('z' * 400), 9011))
 
-    r2 = man.compact_conversation_now('c', config={}, task={'convId': 'c'},
+    r2 = man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'},
                                       keep_recent_turns=1)
     assert r2['ok'] is True
     # anchor still appears exactly once; structure intact
@@ -368,10 +419,10 @@ def test_manual_compaction_idempotent(monkeypatch):
 
 @pytest.mark.unit
 def test_summary_message_survives_api_rebuild(monkeypatch):
-    from lib.tasks_pkg.conv_message_builder import _transform_messages
+    from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
     store = _FakeStore(_long_conv())
     man = _install(monkeypatch, store)
-    man.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
 
     api = _transform_messages(store.messages, {})
     ok, why = _api_ok(api)
@@ -390,12 +441,12 @@ def test_summary_message_survives_api_rebuild(monkeypatch):
 
 @pytest.mark.unit
 def test_summary_reserve_join_no_double_assistant(monkeypatch):
-    from lib.tasks_pkg.conv_message_builder import _transform_messages
+    from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
     # Because the boundary always lands on a user index, the reserve region
     # begins with a user row → summary (assistant) is always followed by user.
     store = _FakeStore(_long_conv())
     man = _install(monkeypatch, store)
-    man.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
 
     summary_idx = next(i for i, m in enumerate(store.messages)
                        if m.get('_isCompactionSummary'))
@@ -424,7 +475,7 @@ def test_summary_reserve_join_no_double_assistant(monkeypatch):
 def test_manual_compaction_nothing_to_compact(monkeypatch):
     store = _FakeStore([_u('只有一轮', 1), _a_plain('答复', 2)])
     man = _install(monkeypatch, store)
-    res = man.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    res = man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
     assert res['ok'] is False and res['error'] == 'nothing_to_compact'
     assert store.saved is None, 'must not write when nothing to compact'
     assert store.archives == [], 'must not archive when nothing to compact'
@@ -439,31 +490,17 @@ def test_manual_compaction_stale_cas_aborts(monkeypatch):
     store = _FakeStore(_long_conv())
     store._fail_cas = True
     man = _install(monkeypatch, store)
-    res = man.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    res = man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
     assert res['ok'] is False and res['error'] == 'stale'
     assert store.cas_calls, 'must have attempted at least one CAS before giving up'
+    assert res['receipt']['status'] == 'aborted'
+    assert res['receipt']['outcomeReason'] == 'reconcile_budget_exhausted'
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  NEUTER validation — prove the raw-space guards have teeth.
 # ═══════════════════════════════════════════════════════════════════════════
 
-@pytest.mark.unit
-def test_neuter_blind_estimate_would_undercount():
-    """If _raw_estimate_tokens were (wrongly) implemented with the api-form
-    -blind _estimate_msg_tokens on raw rows, a heavy toolRounds turn would be
-    massively under-counted. This test documents the gap the raw-aware
-    estimate closes — it FAILS the '>5x' bar test 1b relies on."""
-    from lib.tasks_pkg.compaction._tokens import _estimate_msg_tokens
-    from lib.tasks_pkg.compaction import _manual as man
-
-    heavy = _a_tools('done', n_rounds=8, ts=5, chars=4000)
-    raw_aware = man._raw_estimate_tokens([heavy], config={})
-    blind = _estimate_msg_tokens(heavy)
-    # The neuter (blind) path is the WRONG one; assert it truly under-counts,
-    # which is exactly why _raw_estimate_tokens must project first.
-    assert blind * 5 < raw_aware
-    assert blind < 200, f'blind estimate {blind} should miss the toolRounds payload'
 
 
 def _early_heavy_conv(n_turns=20):
@@ -480,45 +517,6 @@ def _early_heavy_conv(n_turns=20):
     return msgs
 
 
-@pytest.mark.unit
-def test_neuter_apiform_boundary_would_split():
-    """Simulate the BUG: compute the boundary in api-form index space, then use
-    that index to slice the RAW list (the mixed-space mistake §4.1 forbids).
-
-    Because projection expands each early tool turn into many api messages, the
-    api-space boundary is a LARGER absolute index than the correct raw-space
-    boundary.  Applied to the shorter raw list it cuts too far → the preserved
-    reserve is mis-aligned (does not start on a user row) and/or preserves the
-    WRONG turns.  The correct raw-space boundary does neither.  This proves the
-    discipline is load-bearing, not decorative."""
-    from lib.tasks_pkg.compaction import _manual as man
-    from lib.tasks_pkg.compaction._layer2 import _find_turn_boundary
-    from lib.tasks_pkg.conv_message_builder import _transform_messages
-
-    raw = _early_heavy_conv()
-
-    # CORRECT: boundary in raw space (starts reserve on a user row, keeps 3).
-    raw_b = man._raw_turn_boundary(raw, config={}, task={'c': 1},
-                                   budget_tokens=1, max_turns=3)
-    assert raw[raw_b].get('role') == 'user'
-    correct_reserve = raw[raw_b:]
-
-    # BUGGY: boundary in api space, sliced onto the RAW list.
-    api = _transform_messages(list(raw), {})
-    api_b = _find_turn_boundary(api, budget_tokens=1, max_turns=3)
-    bad_reserve = raw[api_b:]
-
-    # (1) The two index spaces genuinely diverge — the entire reason you may
-    #     not compute in one space and slice in the other.
-    assert api_b != raw_b, (
-        'api and raw boundary coincided — early tool expansion should inflate '
-        'the api index')
-    # (2) The mixed-space slice is demonstrably wrong: it does not start on a
-    #     user row (mid-turn cut) and/or preserves a different reserve than the
-    #     correct raw-space computation.
-    bad_starts_on_user = bool(bad_reserve) and bad_reserve[0].get('role') == 'user'
-    assert (not bad_starts_on_user) or (len(bad_reserve) != len(correct_reserve)), (
-        'the api-space boundary must mis-slice the raw list')
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -539,14 +537,29 @@ def _giant_turn_conv(n_rounds=40, chars=4000):
 
 
 @pytest.mark.unit
+def test_manual_hot_round_count_is_capped_by_preservation_tokens():
+    """Even <=8 raw rounds fold when their complete suffix exceeds budget."""
+    import lib.tasks_pkg.compaction._manual as man
+
+    raw = _giant_turn_conv(n_rounds=4, chars=5_000)
+    folds = man._collect_reserve_folds(
+        raw, config={}, hot_budget_tokens=1)
+
+    assert len(folds) == 1
+    assert len(folds[0]['cold_rounds']) == 3
+    assert len(folds[0]['hot_rounds']) == 1
+    assert folds[0]['hot_rounds'][0] == raw[1]['toolRounds'][-1]
+
+
+@pytest.mark.unit
 def test_intra_turn_folds_single_giant_turn(monkeypatch):
     """POSITIVE guard for 档B: a single giant tool turn is compactable via
     intra-turn folding (mode='intra_turn'), cold rounds are folded out, the
     rebuilt api-form has NO orphan tool, and tokens drop significantly."""
-    from lib.tasks_pkg.compaction import _manual as man
+    import lib.tasks_pkg.compaction._manual as man
     from lib.tasks_pkg.compaction._constants import (
         _MANUAL_INTRA_TURN_HOT_ROUNDS, _MANUAL_COMPACT_MIN_TOKENS)
-    from lib.tasks_pkg.conv_message_builder import _transform_messages
+    from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
 
     raw = _giant_turn_conv(n_rounds=40)
 
@@ -575,7 +588,7 @@ def test_intra_turn_folds_single_giant_turn(monkeypatch):
     # (c) full engine run: tokens drop significantly + NO orphan tool.
     store = _FakeStore(raw)
     man2 = _install(monkeypatch, store)
-    res = man2.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    res = man2.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
     assert res['ok'] is True, res
     assert res['tokensAfter'] < res['tokensBefore'] * 0.5, (
         f"intra-turn fold must cut tokens hard: "
@@ -592,37 +605,6 @@ def test_intra_turn_folds_single_giant_turn(monkeypatch):
     assert ok, f'intra-turn fold split a tool round: {why}'
 
 
-@pytest.mark.unit
-def test_neuter_old_shortcircuit_would_refuse_giant_turn():
-    """NEUTER negative control for 档B, faithful to the exact pre-fix code.
-
-    The old ``plan_manual_compaction`` short-circuited with
-    ``if boundary <= system_end: return None`` — for a single giant turn the
-    boundary IS ``system_end`` (nothing before the sole user row), so the old
-    path returned None → the route mapped it to 422 nothing_to_compact.
-
-    Re-run that removed decision on the same giant-turn fixture and assert it
-    would have refused.  If 档B is reverted, the positive test above regresses
-    to exactly this behaviour — so this pins the fix as load-bearing."""
-    from lib.tasks_pkg.compaction import _manual as man
-
-    raw = _giant_turn_conv(n_rounds=40)
-
-    system_end = man._system_end(raw)
-    boundary = man._raw_turn_boundary(raw, config={}, task={'convId': 'c'})
-
-    # The removed short-circuit: a single preserved turn → boundary==system_end.
-    assert boundary <= system_end, (
-        'single giant turn: boundary must collapse onto system_end (this is '
-        'exactly why the old code refused it)')
-    old_plan_would_be = None if boundary <= system_end else 'turns'
-    assert old_plan_would_be is None, (
-        'the OLD turn-based short-circuit refuses the giant turn (the 422 bug)')
-
-    # And the CURRENT code does the opposite on the identical input — proving
-    # the guard has teeth (revert 档B ⇒ this diverges back to None).
-    new_plan = man.plan_manual_compaction(raw, config={}, task={'convId': 'c'})
-    assert new_plan is not None and new_plan['mode'] == 'intra_turn'
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -656,7 +638,7 @@ def test_reconcile_preserves_tail_appended_during_summary(monkeypatch):
     """A sibling agent appends N new tail turns DURING the summary window. The
     compaction must SUCCEED (not 409), keep ALL N appended messages in the
     preserved region, and still fold the old region into a summary."""
-    from lib.tasks_pkg.conv_message_builder import _transform_messages
+    from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
 
     store = _FakeStore(_long_conv())
     anchor_text = store.messages[0]['content']
@@ -674,11 +656,11 @@ def test_reconcile_preserves_tail_appended_during_summary(monkeypatch):
         st.updated_at += 1
 
     man = _install_with_concurrent_write(monkeypatch, store, _mutate)
-    res = man.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    res = man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
 
     # (1) SUCCESS — not the stale/409 the old single-shot CAS produced.
     assert res['ok'] is True, f'reconcile must succeed, got {res}'
-    assert store.search_synced is True and store.notified is True
+    assert store.native_payload is not None and store.notified is True
 
     # (2) ALL sibling-appended messages survive in the preserved region.
     contents = [m.get('content', '') for m in store.messages]
@@ -714,7 +696,7 @@ def test_reconcile_conflict_in_folded_region_aborts_stale(monkeypatch):
         st.updated_at += 1
 
     man = _install_with_concurrent_write(monkeypatch, store, _mutate)
-    res = man.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    res = man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
 
     assert res['ok'] is False and res['error'] == 'stale', (
         f'a folded-region rewrite is a real conflict → stale, got {res}')
@@ -724,39 +706,6 @@ def test_reconcile_conflict_in_folded_region_aborts_stale(monkeypatch):
         'must not persist a summary when the folded region changed under us')
 
 
-@pytest.mark.unit
-def test_neuter_without_reconcile_tail_append_would_409(monkeypatch):
-    """NEUTER: prove the reconcile is load-bearing. On the SAME tail-append
-    scenario, a single-shot CAS on the LOAD-time updated_at (the pre-fix path)
-    necessarily fails — demonstrating that removing reconcile regresses to the
-    guaranteed-409 behaviour the user reported."""
-    store = _FakeStore(_long_conv())
-    load_time_updated_at = store.updated_at
-
-    # Simulate the sibling tail write that happens during the summary window.
-    store.messages.extend([_u('SIBLING tail', 99000),
-                           _a_plain('sibling done', 99001)])
-    store.updated_at += 1
-
-    # The OLD code CAS-ed on the LOAD-time updated_at → 0 rows (lost race).
-    affected = store.cas_sync_conversation_with_search(
-        'c', list(store.messages), load_time_updated_at)
-    assert affected == 0, (
-        'pre-fix single-shot CAS on the stale load-time updated_at MUST lose '
-        'the race — this is exactly the 409 the reconcile loop eliminates')
-
-    # And the CURRENT engine, on an equivalent fresh scenario, succeeds.
-    store2 = _FakeStore(_long_conv())
-
-    def _mutate(st):
-        st.messages.extend([_u('SIBLING tail', 99000),
-                           _a_plain('sibling done', 99001)])
-        st.updated_at += 1
-
-    man = _install_with_concurrent_write(monkeypatch, store2, _mutate)
-    res = man.compact_conversation_now('c', config={}, task={'convId': 'c'})
-    assert res['ok'] is True, (
-        f'reconcile must turn the same race into a success, got {res}')
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -770,7 +719,7 @@ def test_reconcile_survives_write_burst_beyond_fixed_count(monkeypatch):
     K exceeds any small fixed retry count — must NOT produce a 409. Each pass
     loses the CAS to a fresh tail write; the loop keeps reconciling against the
     ever-fresher tail until it lands (within budget)."""
-    from lib.tasks_pkg.conv_message_builder import _transform_messages
+    from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
 
     # Generous budget; K races far exceeds the old fixed cap (2 → 3 passes).
     monkeypatch.setenv('TOFU_MANUAL_RECONCILE_BUDGET_SEC', '5.0')
@@ -779,7 +728,7 @@ def test_reconcile_survives_write_burst_beyond_fixed_count(monkeypatch):
     store._races_remaining = K
 
     man = _install(monkeypatch, store)
-    res = man.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    res = man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
 
     # (1) SUCCESS despite K races well beyond any fixed retry count.
     assert res['ok'] is True, f'burst of {K} must still land within budget, got {res}'
@@ -799,42 +748,6 @@ def test_reconcile_survives_write_burst_beyond_fixed_count(monkeypatch):
     assert ok, f'burst reconcile split a tool round: {why}'
 
 
-@pytest.mark.unit
-def test_neuter_fixed_count_would_409_on_burst(monkeypatch):
-    """NEUTER: prove the TIME budget (not a fixed count) is what closes the
-    burst hole. Re-simulate the OLD fixed-count policy (cap=2 → 3 passes) on a
-    burst of K=12 races and assert it would have surfaced a 409 — exactly the
-    residual failure the time budget eliminates."""
-    OLD_FIXED_CAP = 2          # the pre-fix _MANUAL_RECONCILE_MAX_RETRIES
-    K = 12
-    store = _FakeStore(_long_conv())
-    store._races_remaining = K
-
-    # Replay the OLD loop shape (fixed attempt count) against the same store.
-    attempts = 0
-    landed = False
-    while True:
-        attempts += 1
-        # each pass: a burst write lands pre-CAS, so cas fails until races drain
-        affected = store.cas_update_conversation_messages(
-            'c', list(store.messages), store.updated_at - 1)  # deliberately stale
-        if affected:
-            landed = True
-            break
-        if attempts > OLD_FIXED_CAP:      # old: give up after cap → 409
-            break
-    assert not landed and attempts == OLD_FIXED_CAP + 1, (
-        'the OLD fixed-count policy exhausts its 3 passes on a 12-race burst '
-        'and 409s — this is exactly the hole the time budget closes')
-
-    # And the CURRENT time-budget engine lands on an equivalent burst.
-    monkeypatch.setenv('TOFU_MANUAL_RECONCILE_BUDGET_SEC', '5.0')
-    store2 = _FakeStore(_long_conv())
-    store2._races_remaining = K
-    man = _install(monkeypatch, store2)
-    res = man.compact_conversation_now('c', config={}, task={'convId': 'c'})
-    assert res['ok'] is True, (
-        f'time-budget engine must land the same {K}-race burst, got {res}')
 
 
 @pytest.mark.unit
@@ -847,7 +760,7 @@ def test_reconcile_budget_exhaustion_is_stale(monkeypatch):
     store._races_remaining = 10 ** 9
 
     man = _install(monkeypatch, store)
-    res = man.compact_conversation_now('c', config={}, task={'convId': 'c'})
+    res = man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
     assert res['ok'] is False and res['error'] == 'stale'
     assert len(store.cas_calls) >= 1, 'must attempt at least one CAS'
     # NOT the infinite-loop guard — the time budget stopped it well under the cap.

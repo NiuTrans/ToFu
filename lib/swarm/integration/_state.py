@@ -4,8 +4,8 @@
 HERE and is shared BY REFERENCE (re-exported from ``__init__``) so there is
 exactly ONE ``_active_sessions`` in the process — a divergent copy would strand
 live swarm sessions. Functions that rebind these module vars via ``global``
-(``_cleanup_stale_sessions`` → ``_last_cleanup``; ``_start_cleanup_timer`` →
-``_cleanup_timer``) MUST live in this same module, so they're here too.
+(``_cleanup_stale_sessions`` → ``_last_cleanup``; cleanup lifecycle functions
+→ ``_cleanup_timer``) MUST live in this same module, so they're here too.
 
 The two ``global``-rebound SCALARS (``_last_cleanup`` / ``_cleanup_timer``)
 cannot be shared with the facade by reference the way the dicts/locks are —
@@ -30,7 +30,6 @@ from lib.swarm.integration._config import (
     MAX_SESSIONS,
     SESSION_TTL_SECONDS,
     _CLEANUP_INTERVAL,
-    swarm_key_for,
 )
 from lib.swarm.master import MasterOrchestrator
 
@@ -65,6 +64,8 @@ _key_aliases: dict[str, str] = {}
 _sessions_lock = threading.Lock()
 _last_cleanup: float = 0.0
 _cleanup_timer: threading.Timer | None = None
+_cleanup_timer_starts = 0
+_cleanup_timer_retirements = 0
 
 
 def _resolve_key(arg: str) -> str:
@@ -90,14 +91,14 @@ def _key_is_live(swarm_key: str) -> bool:
     if not swarm_key:
         return False
     try:
-        from lib.tasks_pkg.manager import tasks as _chat_tasks
-        # Direct task-id hit (legacy task-keyed sessions).
-        t = _chat_tasks.get(swarm_key)
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+        # Direct task-id hit.
+        t = chat_task_runtime.get(swarm_key)
         if t is not None and t.get('status') not in ('done', 'error', 'aborted'):
             return True
         # Conversation-scoped: any live task in this conversation keeps the
         # swarm alive across turns.
-        for t in list(_chat_tasks.values()):
+        for t in chat_task_runtime.snapshot():
             if (t.get('convId') == swarm_key
                     and t.get('status') not in ('done', 'error', 'aborted')):
                 return True
@@ -235,36 +236,123 @@ def _cleanup_stale_sessions():
                                  key, e, exc_info=True)
 
 
-def _background_cleanup():
+def _publish_cleanup_timer(timer: threading.Timer | None) -> None:
+    """Keep the facade's scalar timer seam synchronized with this owner."""
+    try:
+        import lib.swarm.integration as _pkg
+        _pkg._cleanup_timer = timer
+    except Exception as e:
+        logger.debug('[Swarm] facade _cleanup_timer sync skipped: %s', e)
+
+
+def _retire_cleanup_timer_locked(
+    *,
+    expected: threading.Timer | None = None,
+    cancel: bool = True,
+) -> threading.Timer | None:
+    """Detach one exact timer generation. Caller holds ``_sessions_lock``."""
+    global _cleanup_timer, _cleanup_timer_retirements
+    timer = _cleanup_timer
+    if timer is None or (expected is not None and timer is not expected):
+        return None
+    _cleanup_timer = None
+    _cleanup_timer_retirements += 1
+    _publish_cleanup_timer(None)
+    if cancel:
+        timer.cancel()
+    return timer
+
+
+def _start_cleanup_timer_locked() -> bool:
+    """Start one timer iff a session needs it. Caller holds the registry lock."""
+    global _cleanup_timer, _cleanup_timer_starts
+    if not _active_sessions:
+        return False
+    current = _cleanup_timer
+    if current is not None and current.is_alive():
+        return False
+    if current is not None:
+        _retire_cleanup_timer_locked(expected=current)
+
+    timer: threading.Timer
+
+    def _fire() -> None:
+        _background_cleanup(expected_timer=timer)
+
+    timer = threading.Timer(_CLEANUP_INTERVAL, _fire)
+    timer.daemon = True
+    timer.name = 'swarm-session-cleanup'
+    _cleanup_timer = timer
+    _cleanup_timer_starts += 1
+    _publish_cleanup_timer(timer)
+    timer.start()
+    return True
+
+
+def _reconcile_cleanup_timer_locked() -> None:
+    """Match timer residency to whether the registry has live value."""
+    if _active_sessions:
+        _start_cleanup_timer_locked()
+    else:
+        _retire_cleanup_timer_locked()
+
+
+def _background_cleanup(
+    expected_timer: threading.Timer | None = None,
+) -> None:
+    """Sweep one exact timer generation and re-arm only for live sessions."""
     global _last_cleanup
     try:
         import lib.swarm.integration as _pkg
         with _sessions_lock:
+            if (expected_timer is not None
+                    and _cleanup_timer is not expected_timer):
+                return
+            if expected_timer is not None:
+                _retire_cleanup_timer_locked(
+                    expected=expected_timer, cancel=False)
             _last_cleanup = 0.0
             _pkg._last_cleanup = 0.0
-            _cleanup_stale_sessions()
+            try:
+                _cleanup_stale_sessions()
+            finally:
+                _reconcile_cleanup_timer_locked()
     except Exception as e:
         logger.warning('[Swarm] Background cleanup error: %s', e, exc_info=True)
-    finally:
-        _start_cleanup_timer()
 
 
-def _start_cleanup_timer():
-    global _cleanup_timer
-    _cleanup_timer = threading.Timer(_CLEANUP_INTERVAL, _background_cleanup)
-    _cleanup_timer.daemon = True
-    _cleanup_timer.start()
-    # Keep the facade attribute in sync (scalar rebound via ``global`` — not
-    # shareable by reference). Guarded: during the initial module import the
-    # facade package isn't fully constructed yet.
+def _start_cleanup_timer() -> bool:
+    """Lazily start cleanup when at least one registered session exists."""
+    with _sessions_lock:
+        return _start_cleanup_timer_locked()
+
+
+def stop_swarm_cleanup_timer(timeout: float = 2.0) -> bool:
+    """Cancel and bounded-join the current timer without deleting sessions."""
+    with _sessions_lock:
+        timer = _retire_cleanup_timer_locked()
+    if timer is None:
+        return True
     try:
-        import lib.swarm.integration as _pkg
-        _pkg._cleanup_timer = _cleanup_timer
-    except Exception as e:
-        logger.debug('[Swarm] facade _cleanup_timer sync skipped (import incomplete): %s', e)
+        wait_seconds = max(0.0, float(timeout))
+    except (TypeError, ValueError, OverflowError) as exc:
+        logger.debug('[Swarm] invalid cleanup stop timeout; using 2.0: %s', exc)
+        wait_seconds = 2.0
+    if timer is not threading.current_thread():
+        timer.join(timeout=wait_seconds)
+    return not timer.is_alive()
 
 
-_start_cleanup_timer()  # launch on module import
+def swarm_cleanup_snapshot() -> dict:
+    """Return bounded, non-authoritative timer lifecycle diagnostics."""
+    with _sessions_lock:
+        timer = _cleanup_timer
+        return {
+            'activeSessions': len(_active_sessions),
+            'timerAlive': bool(timer is not None and timer.is_alive()),
+            'timerStarts': _cleanup_timer_starts,
+            'timerRetirements': _cleanup_timer_retirements,
+        }
 
 
 # ── Session getters / setters ────────────────────────────
@@ -272,7 +360,9 @@ _start_cleanup_timer()  # launch on module import
 def _get_session(task_id: str) -> MasterOrchestrator | None:
     with _sessions_lock:
         _cleanup_stale_sessions()
-        return _active_sessions.get(_resolve_key(task_id))
+        session = _active_sessions.get(_resolve_key(task_id))
+        _reconcile_cleanup_timer_locked()
+        return session
 
 
 def _set_session(swarm_key: str, session: MasterOrchestrator, *,
@@ -289,6 +379,7 @@ def _set_session(swarm_key: str, session: MasterOrchestrator, *,
         _session_timestamps[swarm_key] = time.time()
         if task_id and task_id != swarm_key:
             _key_aliases[task_id] = swarm_key
+        _reconcile_cleanup_timer_locked()
 
 
 def _remove_session(task_id: str):
@@ -304,6 +395,7 @@ def _remove_session(task_id: str):
         _session_timestamps.pop(key, None)
         for alias in [a for a, k in _key_aliases.items() if k == key]:
             _key_aliases.pop(alias, None)
+        _reconcile_cleanup_timer_locked()
     agent_inbox.clear(key)
     try:
         from lib.swarm import persistence
@@ -331,37 +423,30 @@ def get_active_session(task_id: str) -> MasterOrchestrator | None:
     return _get_session(task_id)
 
 
-def has_live_or_pending_swarm(task: dict | None) -> bool:
-    """True when a swarm is live OR has undrained <swarm-update>s for *task*.
+def get_swarm_status(task_id: str, *, user_id: int) -> dict | None:
+    """Return swarm status for a task — THREE states, never a bare "no".
 
-    The orchestrator calls this each turn to decide whether the swarm
-    follow-up tools (``await_agents`` / ``get_agent_result`` / ``spawn_agents``)
-    MUST be in this turn's schema even when ``swarmEnabled`` is false — so a
-    ``<swarm-update>`` (drained UNGATED) that instructs the model to collect
-    results can never point at a tool the turn wasn't given (the hallucination-
-    rejection desync from conv ``mr2ysg473scxv8``).
+    The frontend reconciler settles a stuck panel on this answer, so the
+    answer must distinguish:
 
-    Resolved off the conversation-scoped swarm key (``swarm_key_for``), so a
-    later "continue" turn with a fresh task_id still sees its own conversation's
-    live session / pending inbox. Best-effort — any lookup error is treated as
-    "no swarm" (fail-open to the normal swarmEnabled gate) and logged.
+      * ``active: True``            — live in memory, still working.
+      * ``active: False, known: True, terminated: True`` — definitively over;
+        ``agents`` carries real per-agent outcomes (in-memory session, or the
+        durable row after a restart/eviction). Safe to settle from.
+      * ``active: None, known: False`` — no record anywhere (or a persisted
+        'running' row the process lost track of: pre-rehydrate window, failed
+        rehydrate). NOT a settle signal — the caller must keep probing.
+
+    Returns None only when there is genuinely no trace of a swarm; the routes
+    translate that into the ``active: None / known: False`` envelope.
     """
-    try:
-        key = swarm_key_for(task)
-        if not key:
-            return False
-        if _get_session(key) is not None:
-            return True
-        return agent_inbox.has_pending(key)
-    except Exception as e:  # never let this break tool assembly
-        logger.warning('[Swarm] has_live_or_pending_swarm probe failed: %s', e)
-        return False
+    from lib.identity import require_user_id
 
-
-def get_swarm_status(task_id: str) -> dict | None:
-    """Return swarm status for a task, or None if no active swarm."""
+    owner_user_id = require_user_id(user_id, context='swarm status')
     session = _get_session(task_id)
     if session is None:
+        return _status_from_persistence(task_id, user_id=owner_user_id)
+    if int(session.user_id) != owner_user_id:
         return None
     try:
         agents_info = []
@@ -369,6 +454,8 @@ def get_swarm_status(task_id: str) -> dict | None:
             agents_info.append({'id': sid, **info})
         return {
             'active':     not session.is_terminated,
+            'known':      True,
+            'terminated': session.is_terminated,
             'task_id':    task_id,
             'agents':     agents_info,
             'agent_count': len(agents_info),
@@ -380,13 +467,73 @@ def get_swarm_status(task_id: str) -> dict | None:
     except Exception as e:
         logger.warning('[swarm] Error getting status for %s: %s',
                        task_id, e, exc_info=True)
-        return {'active': True, 'task_id': task_id, 'error': str(e)}
+        return {'active': True, 'known': True, 'task_id': task_id,
+                'error': str(e)}
 
 
-def abort_swarm(task_id: str) -> dict:
+def _status_from_persistence(task_id: str, *, user_id: int) -> dict | None:
+    """Answer a status probe from the durable record when memory lost the session.
+
+    A terminated row is a definitive answer (settle with its agents' real
+    statuses). A 'running' row with nothing in memory is AMBIGUOUS — the
+    process may be mid-rehydrate after a restart — so it maps to the
+    ``known: False`` envelope (keep probing), with the persisted agent rows
+    attached for display context.
+    """
+    key = _resolve_key(task_id)
+    from lib.swarm import persistence
+    row = persistence.load_session(key)
+    if row is None and key != task_id:
+        # The probe may carry the ORIGINAL spawning task id whose alias was
+        # lost with the process; the durable row is keyed by the swarm key.
+        row = persistence.load_session(task_id)
+    if row is None:
+        return None
+    config = row.get('config') or {}
+    if (not isinstance(config, dict)
+            or int(config.get('user_id') or 0) != int(user_id)):
+        return None
+    agents: list[dict] = []
+    for a in (row.get('agents') or []):
+        if not isinstance(a, dict):
+            continue
+        result = a.get('result') or {}
+        agents.append({
+            'id':        a.get('agent_id'),
+            'role':      a.get('role') or '',
+            'objective': (a.get('objective') or '')[:120],
+            'status':    a.get('status') or 'pending',
+            'error':     (result.get('error_message') or '')
+                         if isinstance(result, dict) else '',
+        })
+    if row.get('status') == 'terminated':
+        return {
+            'active':     False,
+            'known':      True,
+            'terminated': True,
+            'source':     'persisted',
+            'task_id':    task_id,
+            'agents':     agents,
+            'agent_count': len(agents),
+            'created_at': row.get('created_at', 0),
+        }
+    return {
+        'active':           None,
+        'known':            False,
+        'persisted_status': row.get('status'),
+        'task_id':          task_id,
+        'agents':           agents,
+        'agent_count':      len(agents),
+    }
+
+
+def abort_swarm(task_id: str, *, user_id: int) -> dict:
     """Abort a running swarm session (used by routes/api_v1/swarm)."""
+    from lib.identity import require_user_id
+
+    owner_user_id = require_user_id(user_id, context='swarm abort')
     session = _get_session(task_id)
-    if session is None:
+    if session is None or int(session.user_id) != owner_user_id:
         return {'success': False, 'error': 'No active swarm for this task'}
     try:
         session.abort()

@@ -20,13 +20,13 @@ KINDS = frozenset({
     'quota', 'ratelimit', 'permission', 'no_slot', 'dispatch_exhausted',
     'timeout', 'network', 'endpoint_unreachable', 'content_filter', 'invalid_image',
     'prompt_too_long', 'stream_only', 'model_limit',
-    'tool_rounds_exhausted', 'tool_timeout',
+    'tool_rounds_exhausted', 'tool_timeout', 'tool_loop',
     'premature_close', 'abnormal_stop', 'aborted', 'server_offline',
-    'server_busy',
+    'server_busy', 'task_start_failed',
     'internal', 'generic',
     'bad_request', 'upstream_error', 'worker_lost', 'budget_exceeded',
     'content_refused',
-    'tool_not_available',
+    'tool_not_available', 'tool_call_rejected',
 })
 
 # Default severities — warnings are recoverable / user-actionable, errors
@@ -34,10 +34,11 @@ KINDS = frozenset({
 _WARNING_KINDS = frozenset({
     'ratelimit', 'no_slot', 'timeout', 'network', 'endpoint_unreachable',
     'tool_rounds_exhausted', 'tool_timeout',
+ 'tool_loop',
     'premature_close', 'abnormal_stop',
-    'aborted', 'server_offline', 'server_busy',
+    'aborted', 'server_offline', 'server_busy', 'task_start_failed',
     'upstream_error', 'worker_lost', 'budget_exceeded', 'content_refused',
-    'tool_not_available',
+    'tool_not_available', 'tool_call_rejected',
 })
 
 # Kinds where retrying THE SAME REQUEST is genuinely likely to help
@@ -45,7 +46,9 @@ _WARNING_KINDS = frozenset({
 _RETRYABLE_KINDS = frozenset({
     'ratelimit', 'no_slot', 'timeout', 'network', 'endpoint_unreachable',
     'premature_close', 'abnormal_stop', 'server_offline', 'server_busy',
-    'tool_timeout', 'upstream_error', 'worker_lost', 'content_refused',
+    'task_start_failed',
+    'tool_timeout', 'tool_loop', 'upstream_error', 'worker_lost',
+    'content_refused',
 })
 
 
@@ -170,6 +173,20 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
                             '• 工具持续超时，建议简化任务或在 「设置 → 工具」 中调高超时时间。',
                             '• The tool keeps timing out — simplify the request or '
                             'raise the tool-timeout in Settings.'),
+    # Degenerate tool loop (2026-08-21 conv mt1mgza3h7ixje: kimi-k3 emitted
+    # run_command(true/noop) for 10 straight rounds, ≈¥9.4 burned before the
+    # model gave up). Retryable in the tool_timeout sense: a fresh attempt
+    # re-asks the model from a clean loop state — the incident's own retry
+    # recovered immediately.
+    'tool_loop':          ('⚠️ 模型陷入重复工具调用循环，已主动停止',
+                            'Model stuck in a repeated tool-call loop',
+                            '• 模型连续多轮发出**完全相同**的工具调用且结果毫无变化；系统先发送了一次纠偏指令，模型仍然重复后才主动停止，避免继续烧费。\n'
+                            '• 优先点击 Continue 从最近检查点继续；若没有 Continue 再 Retry。反复触发时请换个说法/拆小任务，或在 「设置 → 模型默认」 换一个模型。',
+                            '• The model emitted the **exact same** tool call several rounds in a row with '
+                            'identical results. The system first sent one corrective instruction and stopped '
+                            'only after the model still repeated it, preventing further wasted spend.\n'
+                            '• Prefer Continue to resume from the latest checkpoint; use Retry if Continue is unavailable. If the same task keeps tripping this, rephrase / '
+                            'split the task, or switch models in "Settings → Model defaults".'),
     'premature_close':    ('⚠️ 网关/代理过早关闭流',
                             'Gateway closed the stream prematurely',
                             '• 重试已用完，回复可能不完整。可点击 Retry 重新生成。',
@@ -189,9 +206,16 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
                             'automatically and try to recover any content that was generated.'),
     'server_busy':        ('⚠️ 服务器当前繁忙',
                             'Server is temporarily busy',
-                            '• 当前运行中的任务已达到服务器容量上限。请稍后重试；无需修改 API Key 或模型设置。',
-                            '• The server is at its active-task capacity. Retry shortly; '
-                            'you do not need to change API keys or model settings.'),
+                            '• 服务器当前容量不足（并发任务数或内存余量）。请稍后重试；'
+                            '无需修改 API Key 或模型设置。',
+                            '• The server is temporarily out of capacity (active-task '
+                            'slots or memory headroom). Retry shortly; you do not need to '
+                            'change API keys or model settings.'),
+    'task_start_failed':  ('⚠️ 生成执行器未能启动',
+                            'Generation executor did not start',
+                            '• 本次请求已安全终止，没有后台任务仍在运行。请直接点击 Retry；若反复出现，请查看服务器日志（logs/error.log）。',
+                            '• This request was settled safely and no background task is still running. '
+                            'Click Retry; if it recurs, check logs/error.log.'),
     'internal':           ('⚠️ 内部错误',
                             'Internal error',
                             '• 请查看服务器日志（logs/error.log）了解详情。',
@@ -220,17 +244,16 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
                             'retrying shortly usually recovers.\n'
                             '• If it keeps failing for several minutes, temporarily switch to another '
                             'available model in "Settings → Model defaults".'),
-    # Deliberate stop at the conversation's cost budget cap (orchestrator
-    # budget gate). NOT retryable — the same request hits the same cap;
-    # recovery is a config change (raise cap / cheaper model), not a retry.
-    'budget_exceeded':    ('⚠️ 任务费用已达预算上限，已主动停止',
-                            'Task stopped at the cost budget cap',
-                            '• 本次任务的花费达到会话设置的预算上限（maxBudgetUsd）而主动停止，已生成的内容已保留。\n'
-                            '• 如需继续：提高该会话的预算上限后点击 Continue，或换用更低成本的模型。',
-                            '• The task stopped itself when its spend reached the conversation\'s budget cap '
-                            '(maxBudgetUsd); generated content is preserved.\n'
-                            '• To continue: raise the cap for this conversation and click Continue, '
-                            'or switch to a cheaper model.'),
+    # Deliberate stop at one task resource ceiling. NOT retryable — the same
+    # request hits the same cap; recovery is a config/task change, not retry.
+    'budget_exceeded':    ('⚠️ 任务已达资源预算上限，已主动停止',
+                            'Task stopped at a resource budget cap',
+                            '• 本次任务达到已配置的费用、模型轮次、输入 token、工具输出或时长上限；已生成的内容已保留。\n'
+                            '• 如需继续：检查错误详情中的具体上限，调整对应任务预算后再继续。',
+                            '• The task reached its configured cost, model-round, input-token, '
+                            'tool-output, or elapsed-time limit; generated content is preserved.\n'
+                            '• To continue, inspect the specific limit in the error details and '
+                            'adjust that task budget.'),
     # Translation engine content-quality guards refused every candidate
     # output after the retry budget (wrong-language flip / no-op echo /
     # over-generated contamination). NOT a server crash — the distinction
@@ -255,7 +278,7 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
                             '• If it recurs, check the server logs (logs/error.log) to see whether the process was killed.'),
     # A tool the model kept calling is NOT in this turn's dispatched toolset, so
     # the call could never execute and retrying is guaranteed to fail again
-    # (docs/INTENT_STALL_MEASUREMENT.md §4 measured 3 such tasks in 7 days:
+    # (docs/modules/task_engine.md §4 measured 3 such tasks in 7 days:
     # project_board_complete / code_exec). Before this kind they reported
     # status=done + error=none — a task that substantively FAILED looked like a
     # success and the user only saw the conversation stop mid-thought. The hint
@@ -273,4 +296,11 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
                             '• Usually the capability is switched OFF for this conversation (e.g. code '
                             'execution / browser / project tools). Enable it in the toolbar and retry, or '
                             'tell the model to use a tool it actually has.'),
+    'tool_call_rejected': ('⚠️ 工具调用在执行前被拦截，任务未完成',
+                            'Tool call was blocked before execution',
+                            '• 这不是 Key / 配额问题。工具在执行前被安全、权限、模式、审批或参数校验拦截；'
+                            '展开下方详情可查看具体工具与原因。',
+                            '• This is NOT a key / quota problem. A safety, authority, mode, approval, or '
+                            'argument check blocked the tool before it ran; expand the detail for the exact '
+                            'tool and reason.'),
 }

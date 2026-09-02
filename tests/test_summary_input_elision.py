@@ -3,8 +3,8 @@
 Owner sign-off (§10.1, 2026-07-18): the manual /compact was slow because the
 whole cost is the single summary LLM call, and its input cap was 200k chars —
 ~3× larger than needed. Objective A: lower the cap to ~64k AND elide the
-MIDDLE (not the tail) so section 6 of the summary prompt ("All User Messages —
-MANDATORY") never loses a user instruction.
+MIDDLE (not the tail) so summary-input shaping never loses a real user
+instruction.
 
 Two load-bearing invariants:
   1. When the rendered input exceeds the budget, EVERY ``[user]`` message
@@ -44,11 +44,11 @@ def test_summary_char_budget_ceiling_lowered_to_64k():
     assert budget >= 40_000, f'ceiling too aggressive (would over-elide): {budget}'
 
 
-# ── User messages are MANDATORY — elision must never drop one ──────────────
+# ── User messages are verbatim inputs — elision must never drop one ────────
 
 def test_elision_preserves_every_user_message():
     """When the input exceeds the budget, all [user] messages survive verbatim;
-    only assistant content is elided (summary prompt §6 is MANDATORY)."""
+    only assistant content is elided."""
     from lib.tasks_pkg.compaction._layer2._prompt import _format_messages_for_summary
 
     # 40 turns; each assistant carries a big (5k-char) blob, users are short but

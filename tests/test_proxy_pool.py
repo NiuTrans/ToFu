@@ -43,11 +43,13 @@ def _isolated_pool():
         dict(proxy._pool_health),
         dict(proxy._pool_choice),
         dict(proxy._cred_cache),
+        dict(proxy._reach_probe_cache),
     )
     proxy._proxy_pool = []
     proxy._pool_health = {}
     proxy._pool_choice = {}
     proxy._cred_cache = {}
+    proxy._reach_probe_cache = {}
     saved_probe = dict(egress._probe_cache._data)
     saved_network_fail = dict(egress._probe_network_fail_cache._data)
     egress._probe_cache.clear()
@@ -56,6 +58,7 @@ def _isolated_pool():
     yield proxy
     proxy._proxy_pool, proxy._pool_health = saved[0], saved[1]
     proxy._pool_choice, proxy._cred_cache = saved[2], saved[3]
+    proxy._reach_probe_cache = saved[4]
     with egress._probe_cache._lock:
         egress._probe_cache._data.clear()
         egress._probe_cache._data.update(saved_probe)
@@ -277,6 +280,35 @@ class TestHealthFailover(unittest.TestCase):
                          'http://gw.example.com:8080')
         self.assertEqual(proxy._pool_health['hk']['ewma_ms'], 120.0)
 
+    def test_route_description_is_safe_and_names_concrete_pool(self):
+        proxy.set_proxy_pool([_entry(
+            'g1', scope='global',
+            url='http://user:secret@gw.example.com:8080')])
+        url = 'https://models.example.net/v1/chat/completions'
+        decision = proxy.proxies_for(url)
+        metadata = proxy.describe_route(url, proxies=decision)
+
+        self.assertEqual(metadata['routeMode'], 'proxy')
+        self.assertEqual(metadata['routeId'], 'pool:g1')
+        self.assertEqual(metadata['poolId'], 'g1')
+        self.assertNotIn('secret', repr(metadata))
+        self.assertNotIn('gw.example.com', repr(metadata))
+
+    def test_explicit_pool_outcome_ignores_racy_host_last_choice(self):
+        proxy.set_proxy_pool([
+            _entry('g1', scope='global'),
+            _entry('g2', scope='global',
+                   url='http://gw2.example.com:8080'),
+        ])
+        url = 'https://models.example.net/v1/chat/completions'
+        proxy.proxies_for(url)
+        proxy._pool_choice['models.example.net'] = 'g2'  # concurrent overwrite
+
+        proxy.report_outcome(url, False, pool_id='g1')
+
+        self.assertEqual(proxy._pool_health['g1']['fails'], 1)
+        self.assertNotIn('g2', proxy._pool_health)
+
     def test_unresolvable_credential_fails_over_inline(self):
         proxy.set_proxy_pool([
             _entry('hk', credential_vault='proxy_hk_auth'),
@@ -494,6 +526,123 @@ class TestGlobalProxyUrl(unittest.TestCase):
                              'http://legacy.example.com:3128')
 
 
+class TestReachableGlobalProxyUrl(unittest.TestCase):
+    """first_reachable_global_proxy_url: pool order + TCP + HTTP-tunnel gates.
+
+    Consumers that inject the URL into a subprocess env (MCP launchers)
+    cannot fail over inside the child, so a first-entry-but-useless proxy
+    must be skipped up front. Two measured failure shapes, one per gate:
+    process/port down (TCP refuse) and allowlist gateway that accepts TCP
+    then refuses the CONNECT tunnel (hk-gw vs pypi.org, 2026-08-20).
+    """
+
+    def _patched(self, http_ok):
+        """Patch TCP alive for everything; HTTP tunnel per *http_ok*."""
+        tcp = mock.patch.object(proxy, '_tcp_reachable', return_value=True)
+        http = mock.patch.object(
+            proxy, '_http_probe_ok',
+            side_effect=lambda url, probe, t: http_ok(url))
+        return tcp, http
+
+    def test_first_alive_entry_wins(self):
+        proxy.set_proxy_pool([
+            _entry('g1', scope='global'),
+            _entry('g2', scope='global', url='http://gw2.example.com:8080'),
+        ])
+        tcp, http = self._patched(lambda url: True)
+        with tcp, http:
+            self.assertEqual(proxy.first_reachable_global_proxy_url(),
+                             'http://gw.example.com:8080')
+
+    def test_tunnel_refused_first_entry_fails_over(self):
+        proxy.set_proxy_pool([
+            _entry('g1', scope='global'),
+            _entry('g2', scope='global', url='http://gw2.example.com:8080'),
+        ])
+        tcp, http = self._patched(lambda url: 'gw2' in url)
+        with tcp, http:
+            self.assertEqual(proxy.first_reachable_global_proxy_url(),
+                             'http://gw2.example.com:8080')
+
+    def test_all_dead_returns_empty(self):
+        proxy.set_proxy_pool([_entry('g1', scope='global')])
+        tcp, http = self._patched(lambda url: False)
+        with tcp, http:
+            self.assertEqual(proxy.first_reachable_global_proxy_url(), '')
+
+    def test_tcp_dead_skipped_without_http_probe(self):
+        proxy.set_proxy_pool([
+            _entry('g1', scope='global'),
+            _entry('g2', scope='global', url='http://gw2.example.com:8080'),
+        ])
+        http_probed = []
+        with mock.patch.object(proxy, '_tcp_reachable',
+                               side_effect=lambda url, t: 'gw2' in url), \
+             mock.patch.object(proxy, '_http_probe_ok',
+                               side_effect=lambda url, probe, t:
+                               http_probed.append(url) or True):
+            self.assertEqual(proxy.first_reachable_global_proxy_url(),
+                             'http://gw2.example.com:8080')
+        self.assertEqual(http_probed, ['http://gw2.example.com:8080'])
+
+    def test_cooled_entry_skipped_without_probe(self):
+        proxy.set_proxy_pool([
+            _entry('g1', scope='global'),
+            _entry('g2', scope='global', url='http://gw2.example.com:8080'),
+        ])
+        proxy.pool_note_outcome('g1', False)
+        proxy.pool_note_outcome('g1', False)
+        probed = []
+        with mock.patch.object(proxy, '_tcp_reachable',
+                               side_effect=lambda url, t: probed.append(url) or True), \
+             mock.patch.object(proxy, '_http_probe_ok', return_value=True):
+            self.assertEqual(proxy.first_reachable_global_proxy_url(),
+                             'http://gw2.example.com:8080')
+        self.assertEqual(probed, ['http://gw2.example.com:8080'])
+
+    def test_unresolvable_credential_skipped_without_probe(self):
+        proxy.set_proxy_pool([
+            _entry('g1', scope='global',
+                   credential_vault='proxy_g1_auth'),  # never stored → None
+            _entry('g2', scope='global', url='http://gw2.example.com:8080'),
+        ])
+        probed = []
+        with mock.patch.object(proxy, '_tcp_reachable',
+                               side_effect=lambda url, t: probed.append(url) or True), \
+             mock.patch.object(proxy, '_http_probe_ok', return_value=True):
+            self.assertEqual(proxy.first_reachable_global_proxy_url(),
+                             'http://gw2.example.com:8080')
+        self.assertEqual(probed, ['http://gw2.example.com:8080'])
+
+    def test_pass_cached_for_ttl_window(self):
+        proxy.set_proxy_pool([_entry('g1', scope='global')])
+        calls = {'http': 0}
+        def _http(url, probe, t):
+            calls['http'] += 1
+            return True
+        with mock.patch.object(proxy, '_tcp_reachable', return_value=True), \
+             mock.patch.object(proxy, '_http_probe_ok', side_effect=_http):
+            self.assertEqual(proxy.first_reachable_global_proxy_url(),
+                             'http://gw.example.com:8080')
+            self.assertEqual(proxy.first_reachable_global_proxy_url(),
+                             'http://gw.example.com:8080')
+        self.assertEqual(calls['http'], 1)
+
+    def test_tcp_reachable_real_sockets(self):
+        import socket as _socket
+        listener = _socket.socket()
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        try:
+            self.assertTrue(
+                proxy._tcp_reachable(f'http://127.0.0.1:{port}', 0.5))
+        finally:
+            listener.close()
+        self.assertFalse(
+            proxy._tcp_reachable(f'http://127.0.0.1:{port}', 0.5))
+
+
 # ══════════════════════════════════════════════════════
 #  7. 路由：保存 + proxy-test 端点
 # ══════════════════════════════════════════════════════
@@ -681,6 +830,33 @@ def test_proxy_test_endpoint_geo_block_and_failure(flask_client):
     body = resp.get_json()
     assert body['results'][0]['verdict'] == 'network_fail'
     assert 'refused' in body['results'][0]['error']
+
+
+def test_proxy_test_endpoint_proxy_auth_classification(flask_client):
+    """407 → proxy_auth：凭证失效绝不能报成“网络失败”。
+
+    2026-08-21 事故锚：hk-gw 凭证缺了首字符反引号，Squid 对一切 CONNECT
+    回 407，测试却笼统报 network_fail，排查被误导成“URL 是否过时”。
+    """
+    with mock.patch('requests.post', return_value=mock.Mock(status_code=407)):
+        resp = flask_client.post('/api/v1/network/proxy-test', json={
+            'url': 'http://gw.example.com:8080'})
+    body = resp.get_json()
+    assert body['any_ok'] is False
+    assert body['results'][0]['verdict'] == 'proxy_auth'
+    assert body['results'][0]['status'] == 407
+
+    # Squid 对 HTTPS CONNECT 的 407 在 requests 里是 ProxyError 异常而非响应
+    import requests as _rq
+    tunnel_err = _rq.exceptions.ProxyError(
+        "HTTPSConnectionPool(host='auth.openai.com', port=443): "
+        'Tunnel connection failed: 407 Proxy Authentication Required')
+    with mock.patch('requests.post', side_effect=tunnel_err):
+        resp = flask_client.post('/api/v1/network/proxy-test', json={
+            'url': 'http://gw.example.com:8080'})
+    body = resp.get_json()
+    assert body['any_ok'] is False
+    assert body['results'][0]['verdict'] == 'proxy_auth'
 
 
 def test_proxy_test_never_echoes_credential(flask_client):

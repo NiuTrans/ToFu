@@ -1,7 +1,7 @@
 """Post-LLM streaming-accumulator settle: reconcile + readback + cache inject.
 
-Extracted 2026-07-31 (pt_03f4cdf1 slice 24) from
-``lib/tasks_pkg/orchestrator/_run.py`` run_task stream loop.
+Extracted from ``lib/tasks_pkg/orchestrator/_run.py`` so the post-stream
+settlement boundary remains independently testable.
 
 Runs after the per-round cache accounting and BEFORE the post-stream
 analysis / tool dispatch. Three steps:
@@ -61,7 +61,7 @@ def settle_stream_accumulator(
     tid : str
         8-char task id for logging.
     """
-    # ★ Settle orphan early-announced rounds left by a discarded stream
+    # Settle orphan early-announced rounds left by a discarded stream
     #   retry. stream_chat re-runs the SSE stream on a transient
     #   mid-stream error while reusing the same on_tool_call_ready
     #   callback, so a tool call whose args streamed far enough on an
@@ -75,13 +75,13 @@ def settle_stream_accumulator(
     #   path unsettled.
     stream_acc.reconcile_announced_rounds(rs.assistant_msg)
 
-    # ★ Read back updated tool_round_num from streaming accumulator
+    # Read back updated tool_round_num from streaming accumulator
     #   (tool_start events emitted during streaming already consumed
     #   round numbers, so parse_tool_calls must start from here).
     if stream_acc.announced_tc_map:
         rs.tool_round_num = stream_acc.tool_round_num
 
-    # ★ Inject pre-computed streaming tool results into dedup cache.
+    # Inject pre-computed streaming tool results into dedup cache.
     #   execute_tool_pipeline will find these and skip re-execution.
     if stream_acc.submitted_count > 0:
         _prefetch_hits = stream_acc.inject_into_cache(task)
@@ -95,3 +95,10 @@ def settle_stream_accumulator(
         reconcile_programmatic_items,
     )
     reconcile_programmatic_items(task, rs.assistant_msg, llm_round=round_num)
+
+    # A backend projected onto the request is only availability evidence.
+    # Reconcile the returned provider items separately so native agent calls
+    # and the completed model round become actual adoption evidence.
+    from lib.orchestration_adoption import reconcile_response_orchestration
+    reconcile_response_orchestration(
+        task, rs.assistant_msg, round_index=round_num)

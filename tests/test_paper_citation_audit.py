@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end (offline) test: paper-report citation-hallucination audit.
 
-Drives the REAL report-engine path (`_run_report_task`) with a stubbed LLM
+Drives the REAL report-engine path (`run_report_task`) with a stubbed LLM
 that writes a report citing three identifiers inline:
   - a bad DOI         (CrossRef 404)            → suspicious
   - a good arXiv id   (arXiv Atom has <entry>)  → verified
@@ -15,7 +15,7 @@ false → the card disappears.
 
 NOTHING here hits the network: the verifier's HTTP seam
 (`tofu_search.search.vertical.base.http_get`) is mocked, and the report
-engine's `dispatch_stream` / `_execute_report_tool` are stubbed (mirrors
+engine's `dispatch_stream` / `execute_paper_tool` are stubbed (mirrors
 tests/test_paper_report_dedup.py).
 """
 
@@ -29,7 +29,9 @@ sys.modules.setdefault('flask', _quart)
 
 import pytest  # noqa: E402
 
-pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
+pytestmark = pytest.mark.unit
+
+TEST_OWNER_USER_ID = 1
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -95,7 +97,7 @@ def _install_verifier_http(monkeypatch_target):
 
 
 def _patch_dispatch(monkeyplan):
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     plan = list(monkeyplan)
 
     def _fake_dispatch(messages, on_content=None, on_thinking=None, **kw):
@@ -110,7 +112,7 @@ def _patch_dispatch(monkeyplan):
 
 
 def _make_task(tid):
-    from lib.paper import _new_report_task
+    from lib.paper.report_runtime import _new_report_task
     # Insight+checkpoints OFF: BOTH gated second passes (rubric/synthesize and
     # the checkpoint cards) dispatch a REAL LLM — offline here by contract, and
     # on CI (placeholder key → 401) the dispatcher's cooldown cycle never exits
@@ -119,14 +121,14 @@ def _make_task(tid):
     return _new_report_task(tid, 'phashaudit000000000000000000000', 'en', None,
                             client_title='Attention Is All You Need',
                             config={'paperInsightEnabled': False,
-                                      'paperCheckpointsEnabled': False})
+                                      'paperCheckpointsEnabled': False}, user_id=TEST_OWNER_USER_ID)
 
 
 def _run(tid):
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     _patch_dispatch([(REPORT_BODY, [])])  # single pass, no tools
     task = _make_task(tid)
-    re_mod._run_report_task(task, [
+    re_mod.run_report_task(task, [
         {'role': 'system', 'content': 'sys'},
         {'role': 'user', 'content': 'paper'},
     ], [])
@@ -134,7 +136,7 @@ def _run(tid):
 
 
 def test_card_appears_only_for_suspicious_doi():
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     orig_disp = re_mod.dispatch_stream
     base, orig_http = _install_verifier_http(None)
     try:
@@ -165,7 +167,7 @@ def test_card_appears_only_for_suspicious_doi():
 
 def test_all_clean_attaches_no_card():
     """When every cited id resolves, no card is attached (gating works)."""
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     orig_disp = re_mod.dispatch_stream
 
     def _all_ok(url, **kw):
@@ -193,7 +195,7 @@ def test_negctl_force_no_suspicious_removes_card():
     has_suspicious=False → build_citation_audit returns None → no card,
     proving the gating (not mere presence of identifiers) drives the card."""
     import lib.paper.citation_audit as ca_mod
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     orig_disp = re_mod.dispatch_stream
     from tofu_search.search.vertical import base
     orig_http = base.http_get

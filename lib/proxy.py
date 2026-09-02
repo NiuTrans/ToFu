@@ -24,7 +24,7 @@ Usage in any module::
 The Settings UI (Network tab) lets users configure the proxy address
 and a single unified bypass list without touching environment variables.
 
-**Proxy pool** (2026-08-07, epic pt_bb2389f3): an ordered, scoped list of
+**Proxy pool** (2026-08-07, ): an ordered, scoped list of
 proxy entries persisted as ``proxy_pool`` in server_config.json. Entries
 carry a ``scope`` — ``subscription`` applies ONLY to
 :data:`SUBSCRIPTION_HOSTS` (the OAuth provider endpoints, so a proxy that
@@ -41,6 +41,7 @@ single-proxy/env behaviour byte for byte.
 import ipaddress
 import os
 import re
+import socket
 import threading
 import time
 from urllib.parse import quote, unquote, urlparse, urlsplit, urlunsplit
@@ -50,18 +51,18 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 __all__ = [
-    'proxies_for', 'report_outcome',
+    'proxies_for', 'describe_route', 'report_outcome',
     'get_bypass_domains', 'set_bypass_domains', 'sanitize_bypass_domains',
     'get_proxy_config', 'set_proxy_config',
     'register_no_proxy_host', 'register_no_proxy_url',
-    'async_proxy_for',
+    'async_proxy_for', 'resolve_async_route',
     'SUBSCRIPTION_HOSTS', 'is_subscription_host',
     'sanitize_proxy_pool', 'get_proxy_pool', 'set_proxy_pool',
     'pool_probe_entries', 'pool_note_outcome', 'test_proxy_entry',
-    'first_global_proxy_url',
+    'first_global_proxy_url', 'first_reachable_global_proxy_url',
+    'global_proxy_failover_urls',
     'subscription_route_specs', 'subscription_route_candidates',
     'subscription_route_verdict', 'report_subscription_route',
-    'route_choices_for_host', 'proxies_for_route',
 ]
 
 
@@ -72,6 +73,7 @@ _netpath_mod = None
 # One-shot guard so a broken netpath on the per-request hot path (proxies_for)
 # logs a single warning instead of one line per request.
 _np_decide_warned = False
+_POOL_ATTRIBUTION_UNSET = object()
 
 
 def _np():
@@ -88,7 +90,8 @@ def _np():
     return _netpath_mod or None
 
 
-def report_outcome(url: str, ok: bool, latency_ms=None) -> None:
+def report_outcome(url: str, ok: bool, latency_ms=None, *,
+                   pool_id=_POOL_ATTRIBUTION_UNSET) -> None:
     """Forward a real request outcome to the netpath scorer AND attribute
     it to the pool entry the request actually used (when one did).
 
@@ -106,8 +109,16 @@ def report_outcome(url: str, ok: bool, latency_ms=None) -> None:
             logger.debug('[Proxy] netpath.report_outcome failed for %s: %s', url, e)
     try:
         host = (urlparse(url).hostname or '').lower()
-        with _pool_lock:
-            pid = _pool_choice.get(host) if host else None
+        if pool_id is _POOL_ATTRIBUTION_UNSET:
+            # Legacy callers do not retain the per-request decision. Preserve
+            # their historical best-effort host lookup. New streaming callers
+            # pass the concrete pool id (or an explicit empty string), avoiding
+            # cross-request attribution when concurrent requests to one host
+            # choose different routes.
+            with _pool_lock:
+                pid = _pool_choice.get(host) if host else None
+        else:
+            pid = str(pool_id or '')
         if pid:
             pool_note_outcome(pid, ok, latency_ms)
     except Exception as e:
@@ -194,9 +205,9 @@ def set_proxy_config(http_proxy: str = '', https_proxy: str = ''):
             _proxy_config.get('http_proxy', '') or _ENV_HTTP_PROXY,
             _proxy_config.get('https_proxy', '') or _ENV_HTTPS_PROXY,
         )
-    # A changed proxy address invalidates every env-route measurement.
+    # A changed proxy address invalidates every proxy-path measurement.
     if new_effective != prev_effective:
-        _on_proxy_topology_changed('env')
+        _on_proxy_topology_changed()
 
     logger.info('[Proxy] Config updated: http=%s https=%s',
                 http_proxy.strip() or '(env)', https_proxy.strip() or '(env)')
@@ -216,7 +227,7 @@ def _apply_to_env(key: str, value: str):
 # ═══════════════════════════════════════════════════════
 #  Proxy Pool (ordered, scoped, health-tracked — 2026-08-07)
 # ═══════════════════════════════════════════════════════
-# Motivation (epic pt_bb2389f3, owner directive): a proxy that CAN reach
+# Motivation (, owner directive): a proxy that CAN reach
 # the subscription providers (OpenAI/Anthropic OAuth endpoints) must not
 # bend ALL outbound traffic. The pool is an ordered list of scoped entries
 # persisted as ``proxy_pool`` in server_config.json; an EMPTY pool
@@ -273,18 +284,12 @@ def is_subscription_host(host: str) -> bool:
     return (host or '').lower() in SUBSCRIPTION_HOSTS
 
 
-def _on_proxy_topology_changed(scope: str = 'all') -> None:
-    """A proxy topology change invalidates cached routing verdicts: the
-    egress subscription probe cache (2026-08-07 root fix — a stale
+def _on_proxy_topology_changed() -> None:
+    """A proxy topology change invalidates every cached routing verdict:
+    the egress subscription probe cache (2026-08-07 root fix — a stale
     ``geo_blocked`` verdict kept misrouting subscription traffic to desktop
     agents for up to 300s after the proxy changed) and netpath's per-host
-    proxy stats.
-
-    ``scope`` narrows the netpath wipe so an unrelated change preserves
-    learned measurements: 'env' (environment-proxy address changed) wipes
-    only the env route, 'pool' (pool edited) wipes only pool routes,
-    'all' wipes every proxied route (legacy behaviour).
-    """
+    proxy stats."""
     try:
         from lib.desktop import egress as _eg
         _eg.invalidate_probe_cache()
@@ -298,8 +303,7 @@ def _on_proxy_topology_changed(scope: str = 'all') -> None:
     np = _np()
     if np is not None:
         try:
-            np.reset_proxy_stats(
-                routes={'env': ('env',), 'pool': ('pool:',)}.get(scope))
+            np.reset_proxy_stats()
         except Exception as e:
             logger.warning('[Proxy] netpath.reset_proxy_stats failed after '
                            'proxy topology change: %s', e)
@@ -454,7 +458,7 @@ def set_proxy_pool(entries: list) -> int:
         _pool_health.clear()
         _pool_choice.clear()
         _cred_cache.clear()
-    _on_proxy_topology_changed('pool')
+    _on_proxy_topology_changed()
     logger.info('[Proxy] pool updated: %d entries (%s)', len(clean),
                 ', '.join('%s:%s' % (e.get('id') or '?', e.get('scope'))
                           for e in clean) or 'empty')
@@ -478,13 +482,9 @@ def _pool_candidates(host: str) -> list:
     return [e for e in pool if e.get('scope') == _SCOPE_GLOBAL]
 
 
-def _pick_resolved(entries: list):
-    """First entry not in failure cooldown whose credential resolves,
-    returned as ``(entry, resolved_url)`` — ``(None, None)`` when none
-    qualifies. Pool order is the failover order. An entry whose
-    credential is broken counts one failure inline so the NEXT call
-    skips it without waiting for transport errors.
-    """
+def _healthy_candidates(entries: list) -> list:
+    """Pool-order entries not in failure cooldown (single source for the
+    skip rule shared by ``_pick_resolved`` and the reachability walk)."""
     now = time.monotonic()
     with _pool_lock:
         candidates = []
@@ -494,7 +494,17 @@ def _pick_resolved(entries: list):
                     and now < h.get('cooldown_until', 0.0)):
                 continue
             candidates.append(dict(e))
-    for e in candidates:
+    return candidates
+
+
+def _pick_resolved(entries: list):
+    """First entry not in failure cooldown whose credential resolves,
+    returned as ``(entry, resolved_url)`` — ``(None, None)`` when none
+    qualifies. Pool order is the failover order. An entry whose
+    credential is broken counts one failure inline so the NEXT call
+    skips it without waiting for transport errors.
+    """
+    for e in _healthy_candidates(entries):
         resolved = _resolve_entry(e)
         if resolved:
             return e, resolved
@@ -709,98 +719,142 @@ def first_global_proxy_url() -> str:
     _pick, resolved = _pick_resolved(pool)
     return resolved or ''
 
+def global_proxy_failover_urls(limit: int = 4) -> list:
+    """Resolved URLs of healthy enabled GLOBAL pool entries in failover order.
 
-def route_choices_for_host(host: str) -> list:
-    """Every route eligible for *host*, in failover preference order.
-
-    Returns ``[{'route_id', 'label', 'proxies'}, ...]`` — always a
-    ``direct`` entry first; proxy-pool routes follow in pool order
-    (cooldown-filtered, credentials resolved); the environment proxy
-    closes the list when set and not already represented by a pool row.
-    Explicit bypass rules (always-bypass, registered hosts, bypass
-    domains) reduce the list to direct only.
-
-    This is the single enumeration both netpath's prober and
-    run_command's subprocess env injection use, so app traffic and
-    third-party tools compete on the SAME measured routes.  Resolved
-    URLs may carry vault credentials: never log or display ``proxies``.
+    tofu-search's multi-proxy chain consumes the whole list so a dead primary
+    (hk-gw tunnel-403 outage, 2026-08-20: every engine ProxyError → direct
+    fallback → no direct egress → 0 results misreported as "no matches") no
+    longer empties search — the library races the remaining entries (plus the
+    direct path) in parallel. Health-cooldown filtered but NOT
+    reachability-probed: liveness at request time is the library's job, and
+    probing every entry would multiply boot-time latency. Credentials are
+    resolved in-process only and never logged. Returns [] on an empty pool.
     """
-    host = (host or '').lower()
-    direct = {'route_id': 'direct', 'label': 'direct',
-              'proxies': dict(_NO_PROXY)}
-    if (not host or host in _ALWAYS_BYPASS or host in _registered_hosts
-            or _host_matches_bypass(host, _bypass_domains)):
-        return [direct]
-    choices = [direct]
-    seen_urls = set()
-    now = time.monotonic()
-    entries = _pool_candidates(host)
     with _pool_lock:
-        health = {k: dict(v) for k, v in _pool_health.items()}
-    pool_entries = []
-    for e in entries:
-        h = health.get(e.get('id'))
-        if (h and h.get('fails', 0) >= _POOL_FAIL_THRESHOLD
-                and now < h.get('cooldown_until', 0.0)):
-            continue
-        pool_entries.append(e)
-    for entry in pool_entries:
-        resolved = _resolve_entry(entry)
-        if not resolved or resolved in seen_urls:
-            continue
-        seen_urls.add(resolved)
-        pid = str(entry.get('id') or '')
-        choices.append({
-            'route_id': 'pool:%s' % pid,
-            'label': 'proxy ' + (str(entry.get('name') or pid) or '?'),
-            'proxies': {'http': resolved, 'https': resolved},
-        })
-    env_proxy = (os.environ.get('https_proxy')
-                 or os.environ.get('HTTPS_PROXY')
-                 or os.environ.get('http_proxy')
-                 or os.environ.get('HTTP_PROXY') or '')
-    if env_proxy and env_proxy not in seen_urls:
-        choices.append({
-            'route_id': 'env',
-            'label': 'environment proxy',
-            'proxies': {'http': env_proxy, 'https': env_proxy},
-        })
-    return choices
+        pool = [dict(e) for e in _proxy_pool
+                if e.get('enabled') and e.get('scope') == _SCOPE_GLOBAL]
+    urls = []
+    for e in _healthy_candidates(pool):
+        resolved = _resolve_entry(e)
+        if resolved and resolved not in urls:
+            urls.append(resolved)
+            if len(urls) >= limit:
+                break
+    return urls
 
 
-def proxies_for_route(route_id: str, host: str = '') -> 'dict | None':
-    """Resolve a netpath-pinned route id to a requests proxies dict.
+def _tcp_reachable(url: str, timeout: float) -> bool:
+    """True when the proxy endpoint in *url* accepts a TCP connection.
 
-    Returns None when the route is gone or unusable right now (pool
-    entry removed/disabled/cooling, credential unresolvable, env proxy
-    unset) — callers then fall back to the deployment default.  A stale
-    pin must never resurrect a failing proxy.  The resolved dict may
-    carry vault credentials: never log or display it.
+    Never logs the URL itself — a resolved URL can carry vault-injected
+    credentials; host:port only.
     """
-    if route_id == 'direct':
-        return dict(_NO_PROXY)
-    if route_id == 'env':
-        env_proxy = (os.environ.get('https_proxy')
-                     or os.environ.get('HTTPS_PROXY')
-                     or os.environ.get('http_proxy')
-                     or os.environ.get('HTTP_PROXY') or '')
-        return {'http': env_proxy, 'https': env_proxy} if env_proxy else None
-    if isinstance(route_id, str) and route_id.startswith('pool:'):
-        pid = route_id[5:]
-        with _pool_lock:
-            entry = next((dict(e) for e in _proxy_pool
-                          if e.get('id') == pid and e.get('enabled')), None)
-            health = dict(_pool_health.get(pid) or {})
-        if entry is None:
-            return None
-        if (health.get('fails', 0) >= _POOL_FAIL_THRESHOLD
-                and time.monotonic() < health.get('cooldown_until', 0.0)):
-            return None
-        resolved = _resolve_entry(entry)
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ''
+        if not host:
+            return False
+        port = parts.port or (443 if parts.scheme == 'https' else 80)
+    except ValueError as e:
+        logger.debug('[Proxy] TCP probe: unparseable proxy URL: %s', e)
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError as e:
+        logger.debug('[Proxy] TCP probe %s:%s refused: %s', host, port, e)
+        return False
+
+
+def _http_probe_ok(url: str, probe_url: str, timeout: float) -> bool:
+    """True when an HTTPS fetch THROUGH the proxy gets any HTTP answer.
+
+    A bare TCP accept is NOT proof of service: an allowlist gateway (e.g.
+    a subscription-only egress) accepts the socket and then refuses the
+    CONNECT tunnel for off-list hosts — measured 2026-08-20: hk-gw TCP
+    0.06s OK, ``pypi.org`` tunnel refused every time, while the legacy
+    corporate proxy returned 200. Any HTTP status (even 4xx/5xx) means
+    the tunnel carried a real request, which is the qualifier a launcher
+    subprocess needs. Never logs the resolved URL (vault credentials).
+    """
+    hostport = '?'
+    secrets = [url]
+    try:
+        parts = urlsplit(url)
+        hostport = f'{parts.hostname}:{parts.port or 80}'
+        if parts.password:
+            secrets.append(parts.password)
+    except ValueError:
+        pass
+    try:
+        import requests
+        resp = requests.get(
+            probe_url,
+            proxies={'http': url, 'https': url},
+            timeout=(min(1.5, timeout), timeout),
+            allow_redirects=False, stream=True,
+        )
+        resp.close()
+        return True
+    except Exception as e:
+        logger.debug('[Proxy] reach probe via %s failed: %s: %s',
+                     hostport, type(e).__name__,
+                     _scrub_secret(str(e)[:160], *secrets))
+        return False
+
+
+#: Default target used to qualify a global pool entry for THIRD-PARTY
+#: (subprocess) use — the package index MCP launchers actually fetch.
+#: Override with ``TOFU_PROXY_REACH_PROBE_URL``.
+_DEFAULT_REACH_PROBE_URL = 'https://pypi.org/simple/'
+
+#: Short positive cache so a boot's sequential server connects do not each
+#: re-probe the same endpoint. Negatives are NOT cached (they fail fast
+#: anyway, and an entry that recovers must be picked up immediately).
+_REACH_PROBE_TTL_S = 60.0
+_reach_probe_cache: dict = {}  # resolved url -> monotonic ts of last pass
+
+
+def first_reachable_global_proxy_url(probe_url: str = '',
+                                     timeout: float = 3.0) -> str:
+    """Resolved URL of the first enabled global entry that verifiably works
+    right now ('' = none).
+
+    ``first_global_proxy_url`` trusts pool health, which is fed by real app
+    traffic only — an entry that is DOWN (or refusing non-subscription
+    tunnels) but carries no recent app failures would still be handed out.
+    A consumer that injects the URL into a THIRD-PARTY subprocess env (an
+    MCP launcher: npx/uvx package fetches) cannot fail over inside that
+    child, so it needs proof up front. Candidates are walked in pool order
+    (cooldown-filtered, same as ``_pick_resolved``); each must (1) accept
+    TCP and (2) carry a real HTTPS request to ``probe_url``.
+
+    Blocking cost: up to ~``timeout``s per unproven candidate, once per
+    60s per endpoint (positive cache). Probe results deliberately do NOT
+    feed pool health: health is for real app traffic.
+    """
+    probe = (probe_url
+             or os.environ.get('TOFU_PROXY_REACH_PROBE_URL')
+             or _DEFAULT_REACH_PROBE_URL)
+    with _pool_lock:
+        pool = [dict(e) for e in _proxy_pool
+                if e.get('enabled') and e.get('scope') == _SCOPE_GLOBAL]
+    for e in _healthy_candidates(pool):
+        resolved = _resolve_entry(e)
         if not resolved:
-            return None
-        return {'http': resolved, 'https': resolved}
-    return None
+            continue
+        if not _tcp_reachable(resolved, min(0.8, timeout)):
+            continue
+        with _pool_lock:
+            passed_at = float(_reach_probe_cache.get(resolved) or 0.0)
+        if time.monotonic() - passed_at < _REACH_PROBE_TTL_S:
+            return resolved
+        if _http_probe_ok(resolved, probe, timeout):
+            with _pool_lock:
+                _reach_probe_cache[resolved] = time.monotonic()
+            return resolved
+    return ''
 
 
 def _scrub_secret(text: str, *secrets: str) -> str:
@@ -816,7 +870,8 @@ def test_proxy_entry(entry: dict, credential: 'str | None' = None) -> dict:
 
     POSTs the real OAuth endpoints WITHOUT auth through the entry's proxy —
     any HTTP answer proves the app layer was reached (403 = geo/policy
-    block, anything else = path works). Pure diagnostic: no health state is
+    block, 407 = the proxy itself rejected our credential, anything else =
+    path works). Pure diagnostic: no health state is
     mutated and no credential ever leaves in the result.
     """
     if credential is not None and credential:
@@ -850,14 +905,20 @@ def test_proxy_entry(entry: dict, credential: 'str | None' = None) -> dict:
                 'target': url, 'label': label,
                 'status': resp.status_code,
                 'latency_ms': round(latency),
-                'verdict': 'geo_blocked' if resp.status_code == 403 else 'ok',
+                'verdict': ('proxy_auth' if resp.status_code == 407
+                            else 'geo_blocked' if resp.status_code == 403
+                            else 'ok'),
             })
         except Exception as e:
             latency = (time.monotonic() - t0) * 1000.0
+            # Squid-style gateways refuse the CONNECT tunnel with 407,
+            # surfaced by requests as ProxyError('...407...') — a dead
+            # credential, which is a different fix than a broken network.
+            verdict = 'proxy_auth' if '407' in str(e) else 'network_fail'
             results.append({
                 'target': url, 'label': label, 'status': 0,
                 'latency_ms': round(latency),
-                'verdict': 'network_fail',
+                'verdict': verdict,
                 'error': _scrub_secret(str(e), *secret_bits)[:200],
             })
     ok = any(r['verdict'] == 'ok' for r in results)
@@ -1083,28 +1144,15 @@ def proxies_for(url: str) -> dict:
                 else:
                     _pool_choice.pop(host, None)
             return route.requests_proxies()
-    # ── Learned route decision from lib.netpath ──
+    # ── Learned decision (direct vs proxy) from lib.netpath ──
     # Explicit rules above always win; below here the host is registered
-    # for probing and a measured pin applies: 'direct' bypasses the proxy,
-    # a proxied route (env / pool entry) is honoured explicitly.
+    # for probing and a measured 'direct' pin bypasses the proxy.
     np = _np()
     if np is not None:
         try:
             np.note_url(url)
-            decision = np.decide(host)
-            if decision == 'direct':
+            if np.decide(host) == 'direct':
                 return _NO_PROXY
-            if decision:
-                # A pinned proxied route (env or pool entry) beat the others
-                # on measured latency/reliability — honour it exactly.
-                pinned = proxies_for_route(decision, host)
-                if pinned:
-                    with _pool_lock:
-                        if decision.startswith('pool:'):
-                            _pool_choice[host] = decision[5:]
-                        else:
-                            _pool_choice.pop(host, None)
-                    return pinned
         except Exception as e:
             # Hot path (every request). A persistent netpath failure here means
             # every request silently falls back to the proxy — an LLM dispatch
@@ -1125,6 +1173,120 @@ def proxies_for(url: str) -> dict:
     return {}
 
 
+def describe_route(url: str, *, proxies=None, async_proxy_url=None,
+                   async_resolved: bool = False) -> dict:
+    """Return a credential-free description of one already-resolved route.
+
+    This function never chooses a path. Callers pass the exact ``proxies``
+    dict used by requests, or the exact ``async_proxy_url`` resolved for
+    httpx, so diagnostics describe the request that actually ran instead of
+    performing a second (potentially different) pool decision.
+    """
+    host = (urlparse(url).hostname or '').lower()
+    route_mode = 'direct'
+    route_id = 'direct'
+    decision_reason = 'no_proxy_configured'
+    pool_id = ''
+
+    explicit_proxy = ''
+    if isinstance(proxies, dict):
+        if proxies.get('no_proxy'):
+            explicit_proxy = ''
+        else:
+            explicit_proxy = str(
+                proxies.get('https') or proxies.get('http') or '')
+    if async_resolved:
+        explicit_proxy = str(async_proxy_url or '')
+
+    if explicit_proxy:
+        route_mode = 'proxy'
+        decision_reason = 'configured_proxy'
+        with _pool_lock:
+            pool_id = str(_pool_choice.get(host) or '') if host else ''
+        if pool_id:
+            route_id = 'pool:' + pool_id
+            decision_reason = 'proxy_pool'
+        else:
+            route_id = 'proxy:environment'
+            decision_reason = 'environment_proxy'
+    elif host in _ALWAYS_BYPASS:
+        route_id = 'direct:local'
+        decision_reason = 'local_bypass'
+    elif host in _registered_hosts:
+        route_id = 'direct:registered'
+        decision_reason = 'registered_bypass'
+    elif _host_matches_bypass(host, _bypass_domains):
+        route_id = 'direct:configured-bypass'
+        decision_reason = 'configured_bypass'
+    else:
+        env_bypassed = False
+        try:
+            from requests.utils import should_bypass_proxies
+            env_bypassed = bool(should_bypass_proxies(url, no_proxy=None))
+        except Exception as error:
+            logger.debug('[Proxy] route description bypass check failed for '
+                         '%s: %s', url, error)
+        if env_bypassed:
+            route_id = 'direct:environment-bypass'
+            decision_reason = 'environment_bypass'
+        elif isinstance(proxies, dict) and proxies.get('no_proxy'):
+            route_id = 'direct:adaptive'
+            decision_reason = 'adaptive_direct'
+        elif async_resolved:
+            # httpx receives an explicit None for direct. At this point none of
+            # the declared bypass rules matched, so this is the adaptive/default
+            # direct result rather than an environment proxy.
+            route_id = 'direct:adaptive'
+            decision_reason = 'adaptive_or_default_direct'
+        else:
+            env_proxy = (os.environ.get('https_proxy')
+                         or os.environ.get('HTTPS_PROXY')
+                         or os.environ.get('http_proxy')
+                         or os.environ.get('HTTP_PROXY') or '')
+            if env_proxy:
+                route_mode = 'proxy'
+                route_id = 'proxy:environment'
+                decision_reason = 'environment_proxy'
+
+    result = {
+        'routeId': route_id[:160],
+        'routeMode': route_mode,
+        'decisionReason': decision_reason,
+    }
+    if pool_id:
+        result['poolId'] = pool_id[:160]
+    return result
+
+
+def _async_proxy_from_requests_decision(url: str, proxies: dict) -> 'str | None':
+    """Project one already-made requests proxy decision into httpx shape."""
+    pf = proxies or {}
+    if pf:
+        if pf.get('no_proxy'):
+            return None
+        pooled = pf.get('https') or pf.get('http')
+        if pooled:
+            return pooled
+    try:
+        from requests.utils import should_bypass_proxies
+        if should_bypass_proxies(url, no_proxy=None):
+            return None
+    except Exception as e:
+        logger.debug('[Proxy] env no_proxy check failed for %s: %s', url, e)
+    return (os.environ.get('https_proxy')
+            or os.environ.get('HTTPS_PROXY')
+            or os.environ.get('http_proxy')
+            or os.environ.get('HTTP_PROXY')
+            or None)
+
+
+def resolve_async_route(url: str) -> tuple['str | None', dict]:
+    """Resolve an httpx proxy and safe metadata from one route decision."""
+    proxies = proxies_for(url)
+    proxy_url = _async_proxy_from_requests_decision(url, proxies)
+    return proxy_url, describe_route(url, proxies=proxies)
+
+
 def async_proxy_for(url: str) -> 'str | None':
     """Proxy decision for httpx-style clients that take an explicit ``proxy=``.
 
@@ -1142,28 +1304,7 @@ def async_proxy_for(url: str) -> 'str | None':
 
     Returns ``None`` for a direct connection.
     """
-    pf = proxies_for(url)
-    if pf:
-        if pf.get('no_proxy'):
-            return None
-        # Explicit pool-member URL — honour it (an empty dict would mean
-        # "fall back to env", but a populated dict is a real choice).
-        pooled = pf.get('https') or pf.get('http')
-        if pooled:
-            return pooled
-    try:
-        from requests.utils import should_bypass_proxies
-        if should_bypass_proxies(url, no_proxy=None):
-            return None
-    except Exception as e:
-        # A broken bypass probe must not break the request — fall through to
-        # the env proxy (the pre-fix behaviour), never raise here.
-        logger.debug('[Proxy] env no_proxy check failed for %s: %s', url, e)
-    return (os.environ.get('https_proxy')
-            or os.environ.get('HTTPS_PROXY')
-            or os.environ.get('http_proxy')
-            or os.environ.get('HTTP_PROXY')
-            or None)
+    return resolve_async_route(url)[0]
 
 # Hosts (typically raw IPs of self-hosted LLM endpoints) that must bypass the
 # proxy. Populated at runtime by the dispatcher / probe paths so we don't have
@@ -1252,23 +1393,6 @@ def set_bypass_domains(domains: list):
         logger.debug('[Proxy] Settings bypass domains cleared')
     _on_proxy_topology_changed()
 
-
-# ── Netpath route provider: app traffic, prober and subprocesses all
-# ── compete on the same enumerated routes (2026-08-20, run_command
-# ── network layer).  Registered once at import; a missing netpath
-# ── degrades to the legacy direct+env pair inside lib.netpath itself.
-def _netpath_route_provider(host: str) -> list:
-    return [(c['route_id'], c['proxies'])
-            for c in route_choices_for_host(host)]
-
-
-try:
-    _np_reg = _np()
-    if _np_reg is not None:
-        _np_reg.register_route_provider(_netpath_route_provider)
-except Exception as _np_reg_e:
-    logger.debug('[Proxy] netpath route provider registration skipped: %s',
-                 _np_reg_e)
 
 # ── Initial merge + env sync ──
 _rebuild()

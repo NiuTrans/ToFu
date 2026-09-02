@@ -37,7 +37,7 @@ RESEARCH_RUNTIME_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'research-runtime.ts')
 RESEARCH_VIEW_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'research-view.ts')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 pytestmark = pytest.mark.unit
 

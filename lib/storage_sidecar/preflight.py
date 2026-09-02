@@ -13,6 +13,7 @@ import uuid
 
 from lib.storage.errors import StorageError
 from lib.log import get_logger
+from lib.storage_sidecar.storage_capabilities import describe_mount
 
 
 logger = get_logger('tofu.storage.sidecar.preflight')
@@ -21,6 +22,9 @@ logger = get_logger('tofu.storage.sidecar.preflight')
 @dataclass(slots=True)
 class PreflightReport:
     filesystem: str
+    filesystem_type: str
+    storage_class: str
+    persistence: str
     free_bytes: int
     fsync_ms: float
     atomic_replace: bool
@@ -29,6 +33,9 @@ class PreflightReport:
     def as_dict(self) -> dict[str, object]:
         return {
             'filesystem': self.filesystem,
+            'filesystem_type': self.filesystem_type,
+            'storage_class': self.storage_class,
+            'persistence': self.persistence,
             'free_bytes': self.free_bytes,
             'fsync_ms': round(self.fsync_ms, 3),
             'atomic_replace': self.atomic_replace,
@@ -39,11 +46,66 @@ class PreflightReport:
 class ProjectLease:
     """Process-held lock plus an auditable project-local ownership stamp."""
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        expected_parent_pid: int | None = None,
+        owner_kind: str = 'storage_sidecar',
+        owner_label: str = 'Storage sidecar',
+    ) -> None:
         self._lock_path = data_dir / '.storage-sidecar.lock'
         self._lease_path = data_dir / '.storage-sidecar-lease.json'
+        self._server_lock_path = data_dir / '.server.lock'
+        self._expected_parent_pid = expected_parent_pid
+        normalized_kind = str(owner_kind or '').strip().lower()
+        if (not normalized_kind or len(normalized_kind) > 64
+                or any(character not in 'abcdefghijklmnopqrstuvwxyz0123456789_.'
+                       for character in normalized_kind)):
+            raise ValueError('invalid storage lease owner_kind')
+        normalized_label = ' '.join(str(owner_label or '').split())[:120]
+        if not normalized_label:
+            raise ValueError('invalid storage lease owner_label')
+        self._owner_kind = normalized_kind
+        self._owner_label = normalized_label
         self._handle = None
         self._stamp: dict[str, object] | None = None
+
+    def _assert_server_owner_is_parent(self) -> None:
+        """Reject maintenance/foreign Sidecars while a Web owner is live."""
+        if not self._server_lock_path.exists():
+            return
+        handle = self._server_lock_path.open('rb')
+        try:
+            entry = handle.readline(512).decode('utf-8', 'replace').strip()
+            pid_text, separator, _host = entry.partition('@')
+            owner_pid = int(pid_text) if separator and pid_text.isdigit() else None
+            if (owner_pid is not None
+                    and owner_pid == self._expected_parent_pid):
+                return
+            if os.name == 'nt':  # pragma: no cover - Windows CI
+                if owner_pid is None:
+                    raise StorageError(
+                        'database_unavailable',
+                        'Cannot verify the existing Web storage owner')
+                try:
+                    os.kill(owner_pid, 0)
+                except OSError:
+                    return
+                raise StorageError(
+                    'database_unavailable',
+                    'A Web process still owns project storage')
+            import fcntl
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (OSError, BlockingIOError) as exc:
+                raise StorageError(
+                    'database_unavailable',
+                    'A Web process still owns project storage') from exc
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
     def _write_stamp(self, stamp: dict[str, object]) -> None:
         replacement = self._lease_path.with_suffix('.new')
@@ -54,6 +116,7 @@ class ProjectLease:
         os.replace(replacement, self._lease_path)
 
     def acquire(self) -> None:
+        self._assert_server_owner_is_parent()
         self._lock_path.touch(mode=0o600, exist_ok=True)
         handle = self._lock_path.open('r+b')
         if handle.seek(0, os.SEEK_END) == 0:
@@ -81,9 +144,31 @@ class ProjectLease:
             'started_unix_ms': int(time.time() * 1000),
             'lease_id': uuid.uuid4().hex,
             'status': 'running',
+            'owner_kind': self._owner_kind,
+            'owner_label': self._owner_label,
         }
         self._write_stamp(stamp)
         self._stamp = stamp
+
+    def require_authority(self, authority_path: str | Path) -> Path:
+        """Prove this process holds the lease for one project authority."""
+        resolved = Path(authority_path).resolve()
+        if self._handle is None or self._stamp is None:
+            raise StorageError(
+                'database_unavailable',
+                'Offline storage mutation requires an acquired project lease',
+            )
+        if int(self._stamp.get('pid') or 0) != os.getpid():
+            raise StorageError(
+                'database_unavailable',
+                'Project lease belongs to another process',
+            )
+        if resolved.parent != self._lock_path.parent.resolve():
+            raise StorageError(
+                'database_protocol_error',
+                'Offline mutation target is outside the leased data directory',
+            )
+        return resolved
 
     def release(self) -> None:
         handle, self._handle = self._handle, None
@@ -191,8 +276,13 @@ def run_filesystem_preflight(data_dir: Path) -> PreflightReport:
             'database_unavailable',
             'Project filesystem latency exceeds the configured safety bound',
         )
+    mount = describe_mount(data_dir)
     return PreflightReport(
-        filesystem=str(data_dir), free_bytes=free_bytes, fsync_ms=fsync_ms,
+        filesystem=str(data_dir),
+        filesystem_type=mount.filesystem_type,
+        storage_class=mount.storage_class,
+        persistence=mount.persistence,
+        free_bytes=free_bytes, fsync_ms=fsync_ms,
         atomic_replace=True, file_lock=locked,
     )
 

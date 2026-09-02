@@ -27,11 +27,12 @@ import shutil
 import subprocess
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 REPORT_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'report.js')
 XP_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'reading-xp.ts')
@@ -41,7 +42,7 @@ DEEPEN_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'deepen.ts')
 QA_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'qa.ts')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 def _node_deps_available() -> bool:
@@ -53,7 +54,7 @@ def _node_deps_available() -> bool:
 @pytest.fixture(scope='module')
 def native_reading_owners(tmp_path_factory):
     if not _node_deps_available() or not os.path.isfile(ESBUILD):
-        pytest.skip('node + jsdom + esbuild dev dependencies required')
+        pytest.skip('node + jsdom + vite test bundler dev dependencies required')
     output = tmp_path_factory.mktemp('paper-reading-xp')
     built = {}
     for key, source in {
@@ -577,7 +578,7 @@ def _assert_reading_xp_contract(proc):
     assert not fails, 'reading-xp rail failures:\n' + out
     assert out.count('PASS') >= 71, f'expected >=71 PASS lines, got:\n{out}'
 @pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
-                    reason='node + jsdom + esbuild dev-deps not installed')
+                    reason='node + jsdom + vite test bundler dev-deps not installed')
 def test_vite_reading_xp_satisfies_full_dom_contract(native_reading_owners):
     _assert_reading_xp_contract(_run(REPORT_JS, native_reading_owners))
 

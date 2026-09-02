@@ -6,7 +6,7 @@
 so two shipped capabilities — motion-video and paper-podcast — were invisible
 to every generic endpoint even though both are ordinary ``TaskRuntime``
 instances with the standard task shape. That is the concrete cost the design
-note (docs/PRODUCTION_PIPELINE_DESIGN.md §1.6) names: podcast had to hand-write
+production map (docs/modules/production.md) names: podcast had to hand-write
 its own ``poll_podcast_task`` because the generic poll could not see it.
 
 These tests pin the discovery contract:

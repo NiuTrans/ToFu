@@ -59,7 +59,7 @@ def test_main_routes_every_declared_domain_to_an_explicit_esm_owner():
     expected = {
         'settings', 'memory', 'skills', 'paper', 'image', 'project-brain',
         'myday', 'misc', 'orchestration', 'infrastructure', 'background',
-        'cookie-capture', 'debug', 'diagnostics',
+        'debug', 'diagnostics',
     }
     assert domains == expected
     for domain in domains:
@@ -89,6 +89,19 @@ def test_index_has_one_server_owned_module_asset_slot():
     assert "_APP_ASSET_MARKER = '<!-- TOFU_APP_ASSETS -->'" in route
     assert 'html.count(_APP_ASSET_MARKER) != 1' in route
     assert 'get_vite_asset_tags' in route
+
+
+def test_extracted_trace_stylesheet_is_shipped_after_application_styles():
+    html = _read('index.html')
+    application_style = 'href="static/styles.css'
+    trace_style = 'href="static/request-inspector-trace.css'
+    assert application_style in html
+    assert trace_style in html
+    assert html.index(application_style) < html.index(trace_style)
+
+    trace_css = _read('static/request-inspector-trace.css')
+    assert '.ri-trace-entry{' in trace_css
+    assert '.tr-flame{' in trace_css
 
 
 def test_release_retention_is_driven_only_by_valid_manifest_assets():

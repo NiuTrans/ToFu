@@ -71,6 +71,8 @@ _PARAM_ALIASES: dict[str, dict[str, str]] = {
     'run_command': {'cmd': 'command', 'shell_command': 'command',
                     'script': 'command'},
     'fetch_url': {'link': 'url'},
+    'read_tool_artifact': {'ref': 'artifact_ref'},
+    'search_tool_artifact': {'ref': 'artifact_ref'},
 }
 
 

@@ -1,7 +1,7 @@
 # HOT_PATH — this leaf is called per stream-loop iteration.
 """Per-round prompt cache-round accounting.
 
-Extracted 2026-07-29 (pt_03f4cdf1 slice 13) from
+Extracted 2026-07-29 ( slice 13) from
 ``lib.tasks_pkg.orchestrator._run.run_task``. The cluster runs
 RIGHT AFTER the post-LLM ``flush_deferred_peer_and_steer`` call
 (slice 12) — the LLM call has returned successfully,
@@ -47,12 +47,11 @@ from __future__ import annotations
 from typing import Any
 
 from lib.log import get_logger
-from lib.tasks_pkg.cache_tracking import (
-    detect_cache_break,
-    get_prev_turn_cache_read,
-    log_round_cache_stats,
-)
-from lib.tasks_pkg.orchestrator._finalize import _compute_write_breakdown
+from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+from lib.tasks_pkg.cache_tracking._state import get_prev_turn_cache_read
+from lib.tasks_pkg.cache_tracking._roi import log_round_cache_stats
+from lib.tasks_pkg.manager import task_user_id
+from lib.tasks_pkg.write_breakdown import _compute_write_breakdown
 
 
 logger = get_logger(__name__)
@@ -108,10 +107,13 @@ def stamp_round_cache_accounting(
     if not (task.get('convId') and usage):
         return
 
+    owner_user_id = task_user_id(task)
+
     _cache_break = detect_cache_break(
         task['convId'], messages,
         tools=tools, model=model,
         usage=usage,
+        user_id=owner_user_id,
     )
     # Codex's private Responses endpoint can step back exactly one or more
     # 1,024-token implicit breakpoints while the sent wire remains append-only.
@@ -173,7 +175,8 @@ def stamp_round_cache_accounting(
             # read, recovered across the run_task thread boundary) so
             # round-1 classifies an evicted-tail re-bill as recacheBody.
             _prev_turn_read = (
-                get_prev_turn_cache_read(task['convId'])
+                get_prev_turn_cache_read(
+                    task['convId'], user_id=owner_user_id)
                 if len(api_rounds) < 2 else 0)
             _wb = _compute_write_breakdown(
                 task, api_rounds, round_num,

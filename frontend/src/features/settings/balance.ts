@@ -1,5 +1,6 @@
 import { featureRegistry } from '../../feature-registry';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
+import type { I18nKey } from '../../i18n';
 
 interface BalanceInfo {
   limit_usd?: number;
@@ -70,7 +71,7 @@ function globals(): BalanceWindow {
   return featureRegistry as unknown as BalanceWindow;
 }
 
-function translate(key: string, values?: Record<string, unknown>): string {
+function translate(key: I18nKey, values?: Record<string, unknown>): string {
   return globals().t?.(key, values) || key;
 }
 

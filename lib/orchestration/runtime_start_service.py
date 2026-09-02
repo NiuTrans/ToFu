@@ -36,7 +36,11 @@ class OrchestrationRuntimeStartService:
         self._run_service = run_service
 
     def _subflow_resolver_provider(self):
-        return lambda: self._definition_service().get_definition
+        # Capture the owner-bound repository while the authenticated request
+        # context still exists. The worker receives only a plain lookup
+        # callable and never reaches back into framework globals.
+        definitions = self._definition_service()
+        return lambda: definitions.get_definition
 
     @staticmethod
     def _name(definition: dict) -> str:
@@ -46,6 +50,7 @@ class OrchestrationRuntimeStartService:
         self,
         definition: dict,
         *,
+        owner_user_id: int,
         input_text: str = '',
     ) -> str:
         """Create and spawn a transient Studio run."""
@@ -53,6 +58,7 @@ class OrchestrationRuntimeStartService:
             return spawn_runtime_flow(
                 self._runtime,
                 definition,
+                owner_user_id=owner_user_id,
                 meta={'name': self._name(definition)},
                 initial_context=input_text,
                 subflow_resolver_provider=self._subflow_resolver_provider(),
@@ -65,6 +71,7 @@ class OrchestrationRuntimeStartService:
         self,
         definition: dict,
         *,
+        owner_user_id: int,
         input_text: str = '',
         orchestration_id: str = '',
         created_by: str = '',
@@ -94,6 +101,7 @@ class OrchestrationRuntimeStartService:
             runtime_id = spawn_runtime_flow(
                 self._runtime,
                 definition,
+                owner_user_id=owner_user_id,
                 task_id=run_id,
                 meta={'name': self._name(definition), 'run_id': run_id},
                 initial_context=input_text,
@@ -124,6 +132,7 @@ class OrchestrationRuntimeStartService:
         kind: str,
         definition: dict,
         *,
+        owner_user_id: int,
         input_text: str = '',
         orchestration_id: str = '',
         created_by: str = '',
@@ -132,45 +141,19 @@ class OrchestrationRuntimeStartService:
         if kind == 'ephemeral':
             return self._start_ephemeral(
                 definition,
+                owner_user_id=owner_user_id,
                 input_text=input_text,
             )
         if kind == 'durable':
             return self._start_durable(
                 definition,
+                owner_user_id=owner_user_id,
                 input_text=input_text,
                 orchestration_id=orchestration_id,
                 created_by=created_by,
             )
         raise RuntimeStartError(
             f'Unsupported orchestration runtime start kind: {kind!r}')
-
-    def start_ephemeral(
-        self,
-        definition: dict,
-        *,
-        input_text: str = '',
-    ) -> str:
-        """Compatibility wrapper over the canonical start command."""
-        return self.start(
-            'ephemeral', definition, input_text=input_text)
-
-    def start_durable(
-        self,
-        definition: dict,
-        *,
-        input_text: str = '',
-        orchestration_id: str = '',
-        created_by: str = '',
-    ) -> str:
-        """Compatibility wrapper over the canonical start command."""
-        return self.start(
-            'durable',
-            definition,
-            input_text=input_text,
-            orchestration_id=orchestration_id,
-            created_by=created_by,
-        )
-
 
 __all__ = [
     'RuntimeStartError',

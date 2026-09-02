@@ -11,8 +11,8 @@
     claimed the UI shape is bare while the SDK alias wraps — after this
     batch both are api_ok, so the description is corrected (batch-19
     honesty rule: a shape migration migrates its documentation metadata).
-  * audio.py (1) + translate.py (1) + endpoint.py (2)
-    + conversations_compaction.py (2) + chat_poll_abort.py (2)
+  * audio.py (1) + translate.py (1) + conversations_compaction.py (2)
+    + chat_poll_abort.py (2)
     — plain dicts → api_ok (additive only).
   * _task_routes.py (1) — the generic factory passthrough
     ``jsonify(resp), status_code`` → api_payload(resp, status_code)
@@ -51,7 +51,6 @@ _CONVERTED = (
     'routes/api_v1/audio.py',
     'routes/translate.py',
     'routes/_task_routes.py',
-    'routes/api_v1/endpoint.py',
     'routes/conversations_compaction.py',
     'routes/chat_poll_abort.py',
 )
@@ -102,17 +101,6 @@ def _sites():
         ('task-routes-poll-404', {'error': 'not_found', 'ok': False}, 404,
          lambda: api_payload({'error': 'not_found', 'ok': False}, 404),
          True),
-        ('endpoint-start', {'taskId': 't1', 'convId': 'c1'}, 200,
-         lambda: api_ok({'taskId': 't1', 'convId': 'c1'}), False),
-        ('endpoint-status', {'id': 't1', 'status': 'done',
-                             'endpointMode': True, 'totalIterations': 2,
-                             'reason': 'critic_stop', 'criticMessages': [],
-                             'content': 'c', 'error': None, 'usage': {}},
-         200, lambda: api_ok({'id': 't1', 'status': 'done',
-                              'endpointMode': True, 'totalIterations': 2,
-                              'reason': 'critic_stop', 'criticMessages': [],
-                              'content': 'c', 'error': None, 'usage': {}}),
-         False),
         ('compaction-list', {'compactions': [{'id': 'a1'}], 'count': 1},
          200, lambda: api_ok({'compactions': [{'id': 'a1'}], 'count': 1}),
          False),

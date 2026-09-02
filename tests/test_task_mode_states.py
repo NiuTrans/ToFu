@@ -2,8 +2,7 @@
 
 Two invariants, both proven by rendering the REAL extracted list view plus its
 thin controller adapters under node with a stubbed ``document`` + ``Api``
-AND the REAL i18n runtime (the ``_i18n`` table + ``t()`` extracted from
-static/js/i18n.js):
+AND the generated locale dictionaries consumed by the native i18n owner:
 
   A. STATE DISTINCTION — the run list must tell apart three states that used to
      collapse into a misleading "No runs yet":
@@ -20,6 +19,9 @@ static/js/i18n.js):
 
 Poisoned-fixture NCs prove both the error-branch and the localization are
 load-bearing (not tautologies).
+
+Request-client routing is exercised once through a shared native Vite graph;
+this suite must not reconstruct the deleted per-file IIFE graph.
 """
 
 from __future__ import annotations
@@ -33,13 +35,48 @@ import tempfile
 
 import pytest
 
+from lib.orchestration.run_status import run_status_contract
+from tests._runtime_sections import (
+    native_module_graph,
+    runtime_section_path,
+)
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
-TM_JS = os.path.join(ROOT, 'static', 'js', 'task-mode.js')
-TM_LIST_JS = os.path.join(ROOT, 'static', 'js', 'task-mode-list.js')
-I18N_JS = os.path.join(ROOT, 'static', 'js', 'i18n.js')
+REPO_ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ORCHESTRATION_SOURCES = os.path.join(
+    REPO_ROOT, 'frontend', 'src', 'features', 'orchestration')
+I18N_LOCALE_FILES = {
+    lang: os.path.join(REPO_ROOT, 'frontend', 'src', 'i18n', 'locales',
+                       f'{lang}.json')
+    for lang in ('zh', 'en')
+}
+
+
+def _orchestration_source(name: str) -> str:
+    return _read(os.path.join(ORCHESTRATION_SOURCES, name))
+
+
+def _native_orchestration_graph_path(
+        logical_name: str, *owner_names: str) -> str:
+    return native_module_graph([
+        (
+            f'.native/{logical_name}{"" if index == 0 else f"-{index}"}.js',
+            os.path.join(ORCHESTRATION_SOURCES, owner_name),
+        )
+        for index, owner_name in enumerate(owner_names)
+    ])
+
+
+def _native_request_client_graph_path() -> str:
+    logical_path = '.native/task-mode-request-clients.js'
+    return native_module_graph([(
+        logical_path,
+        os.path.join(
+            REPO_ROOT, 'frontend', 'src', 'features',
+            'orchestration-core-owners.ts'),
+    )])
 
 
 def _read(path: str) -> str:
@@ -71,16 +108,35 @@ def _extract_fn(src: str, fn_name: str) -> str:
 
 
 def _extract_i18n_runtime() -> str:
-    """Extract the real `_i18n` table + `t()` from i18n.js, plus a MUTABLE
-    `_i18nLang` the harness can flip between renders."""
-    src = _read(I18N_JS)
-    m = re.search(r'var\s+_i18n\s*=\s*', src)
-    assert m, '_i18n table not found in i18n.js'
-    brace = src.find('{', m.end())
-    table = src[m.start():_brace_match(src, brace)]      # `var _i18n = {...}`
-    t_fn = _extract_fn(src, 't')
-    # A settable language global (the real file reads it from localStorage).
-    return 'var _i18nLang = "zh";\n' + table + ';\n' + t_fn
+    """Build a mutable-language harness from the production locale inputs.
+
+    The classic ``static/js/i18n.js`` owner was deleted with the Vite cutover;
+    keeping a fake copy just for tests would recreate the migration shadow.
+    The proxy preserves this suite's load-bearing ``var entry = _i18n[key]``
+    poison seam while sourcing every visible string from the real JSON files.
+    """
+    tables = {
+        lang: json.loads(_read(path))
+        for lang, path in I18N_LOCALE_FILES.items()
+    }
+    encoded = json.dumps(tables, ensure_ascii=False)
+    return f'''
+var _i18nLang = "zh";
+var _i18nTables = {encoded};
+var _i18n = new Proxy({{}}, {{get:function(_target,key){{
+  var table = _i18nTables[_i18nLang] || _i18nTables.en || {{}};
+  return table[key];
+}}}});
+function t(key, vars) {{
+  var entry = _i18n[key];
+  if (entry == null) return key;
+  var text = String(entry);
+  Object.keys(vars || {{}}).forEach(function(name) {{
+    text = text.split('{{' + name + '}}').join(String(vars[name]));
+  }});
+  return text;
+}}
+'''
 
 
 def _task_list_success(runs: list[dict]) -> dict:
@@ -102,59 +158,30 @@ def _run(*, task_list_result, lang: str = 'en', poison: str = '') -> dict:
     if not node:
         pytest.skip('node not available for extraction-and-eval')
 
-    src = _read(TM_JS)
-    list_view = _read(TM_LIST_JS)
-    request_runtime = '\n'.join(_read(os.path.join(
-        ROOT, 'static', 'js', name)) for name in (
-            'api/http-result.js',
-            'api/orchestration-http-contract.generated.js',
-            'api/orchestration-response-contracts.js',
-            'api/orchestration-client-methods.js',
-            'api/orchestration-endpoint-transport.js',
-            'api/orchestration-endpoints.js',
-            'orchestration-wire-formats.generated.js',
-            'orchestration-compatibility-defaults.generated.js',
-            'orchestration-compatibility-contracts.js',
-            'orchestration-wire-contract.js',
-            'orchestration-run-status.js',
-            'orchestration-run-filter.js',
-            'orchestration-diagnostic-report.js',
-            'orchestration-result.js',
-            'orchestration-read-core.js',
-            'orchestration-runtime-read.js',
-            'orchestration-durable-run-snapshot.js',
-            'orchestration-durable-list-read.js',
-            'orchestration-durable-read.js',
-            'orchestration-replay-read.js',
-            'orchestration-http-read.js',
-            'orchestration-request-failure.js',
-            'orchestration-api-request.js',
-            'orchestration-request-contract.js',
-            'orchestration-task-request.js',
-            'orchestration-run-session.js',
-            'orchestration-roving-items.js',
-            'task-mode-services.js',
-            'task-mode-run-store.js',
-            'task-mode-run-time.js',
-            'task-mode-list-focus.js',
-            'task-mode-list-paging.js',
-            'task-mode-list-error.js',
-            'task-mode-run-status-presentation.js',
-            'task-mode-list-presentation.js',
-            'orchestration-request-reader.js',
-            'task-mode-list-controller.js',
-            'task-mode-controller-hub.js',
-            'task-mode-root-controller.js',
-        ))
-    fns = [
-        '_tmApiClient', '_tmTaskClient', '_tmReportTaskFailure',
-        '_tmEnsureControllerHub',
-        '_tmT', '_tmEsc', '_tmIsTerminal', '_tmEnsureRunListController',
-        '_tmEnsureRunListView',
-        '_tmSetRunListBusy', '_tmRenderRunList', '_tmRefreshRuns',
-    ]
-    extracted = '\n'.join(_extract_fn(src, f) for f in fns)
+    request_runtime = _read(_native_orchestration_graph_path(
+        'task-mode-list-state',
+        'request-failure.ts',
+        'task-mode-run-store.ts',
+        'task-mode-list.ts',
+        'task-mode-list-controller.ts',
+    ))
     i18n_runtime = _extract_i18n_runtime()
+    normalized_result = task_list_result
+    if isinstance(task_list_result, dict) and task_list_result.get('ok') is True:
+        page = task_list_result.get('page') or {}
+        normalized_result = {
+            'ok': True,
+            'runs': task_list_result.get('runs') or [],
+            'pageLimit': page.get('limit') or 0,
+            'hasMore': page.get('has_more') is True,
+            'nextLimit': page.get('next_limit'),
+        }
+    elif isinstance(task_list_result, dict):
+        normalized_result = {
+            **task_list_result,
+            'ok': False,
+            'reason': task_list_result.get('reason') or 'list-rejected',
+        }
 
     if poison == 'error_branch':
         request_runtime = request_runtime.replace(
@@ -171,61 +198,62 @@ def _run(*, task_list_result, lang: str = 'en', poison: str = '') -> dict:
 
     harness = f'''
 {i18n_runtime}
+{request_runtime}
 _i18nLang = {json.dumps(lang)};
-// ── module-level state the extracted fns read ──
-var _tmRunSession = createOrchestrationRunSession();
-var _tmRunStore = createTaskModeRunStore();
-var _tmRunListController = null;
-var _tmControllerHub = null;
-var _tmContracts = {{snapshot: function() {{ return {{runContract: null}}; }}}};
-// stubs
-function _tmIco(name) {{ return '<svg data-ico="' + name + '"></svg>'; }}
-function _tmOpenRun() {{}}
-function _tmToast() {{}}
-function _tmReconcileRunMutation() {{}}
-function _tmProjectRunTransition() {{}}
-function _tmRenderGraph() {{}}
-function _tmRenderInspector() {{}}
-function _tmRenderTimelineEvent() {{}}
-function _tmSelectPanel() {{}}
-function _tmSyncChip() {{}}
-function orchestrationMutationMessage(_value,_translate,fallback) {{ return fallback; }}
-function _tmEnsureRunController() {{ return {{ id: function() {{
-  return _tmRunSession.id();
-}} }}; }}
 function escapeHtml(s) {{ return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){{
   return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c]; }}); }}
 var _lastHtml = '';
 var _listEl = {{
   set innerHTML(v) {{ _lastHtml = v; }}, get innerHTML() {{ return _lastHtml; }},
   setAttribute: function() {{}},
+  getAttribute: function() {{ return null; }},
+  addEventListener: function() {{}},
+  querySelector: function() {{ return null; }},
   querySelectorAll: function() {{ return []; }}
 }};
 var document = {{ getElementById: function(id) {{ return id === 'tmRunList' ? _listEl : null; }} }};
-var Api = {{ orchestrations: {{ taskList: async function() {{ return {json.dumps(task_list_result)}; }} }} }};
-globalThis.Api = Api;
-
-{list_view}
-{request_runtime}
-var _tmRootController=createTaskModeRootController({{
-  services:function(){{return _tmServices;}},
-  contractSession:_tmContracts,session:_tmRunSession,runStore:_tmRunStore,
-  mutationMessage:orchestrationMutationMessage,
-  resultError:orchestrationResultError,
-  translate:_tmT,reconcileRun:_tmReconcileRunMutation,
-  refreshRuns:_tmRefreshRuns,openRun:_tmOpenRun,
-  renderRunList:function(){{return _tmRenderRunList();}},
-  isTerminal:_tmIsTerminal,projectTransition:_tmProjectRunTransition,
-  renderGraph:_tmRenderGraph,renderInspector:_tmRenderInspector,
-  renderTimelineEvent:_tmRenderTimelineEvent,syncChip:_tmSyncChip,
+var store = createTaskModeRunStore();
+var controller = null;
+var view = createTaskModeRunListView({{
+  document: document,
+  hostId: 'tmRunList',
+  listFocus: {{
+    capture: function() {{ return null; }},
+    restore: function() {{}},
+    clear: function() {{}},
+  }},
+  translate: t,
+  escape: escapeHtml,
+  richCopy: function(value) {{ return String(value == null ? '' : value); }},
+  icon: function(name) {{ return '<svg data-ico="' + name + '"></svg>'; }},
+  isTerminal: function(value) {{ return !!(value && value.terminal === true); }},
+  runContract: function() {{ return null; }},
+  normalizeOutcome: function() {{ return null; }},
+  outcomeMessage: function(_value, fallback) {{ return fallback; }},
+  failureMessage: function(value, fallback) {{
+    return orchestrationRequestFailureMessage(value, t, fallback || '');
+  }},
+  onOpen: function() {{}},
+  onLoadMore: function() {{ return controller.loadMore(); }},
 }});
-{extracted}
+var reader = {{
+  read: async function() {{ return {json.dumps(normalized_result)}; }},
+  report: function() {{ return false; }},
+}};
+controller = createTaskModeRunListController({{
+  store: store,
+  reader: reader,
+  view: view,
+  activeRunId: function() {{ return null; }},
+  projectActionState: function() {{}},
+  report: function() {{ return false; }},
+}});
 
 (async function() {{
-  await _tmRefreshRuns();
+  await controller.refresh();
   process.stdout.write(JSON.stringify({{
     html: _lastHtml,
-    loadError: _tmRunStore.snapshot(_tmRunSession.id()).loadError,
+    loadError: store.snapshot(null).loadError,
   }}));
 }})();
 '''
@@ -305,20 +333,17 @@ def test_server_declared_terminal_status_drives_row_lifecycle():
 
 
 def test_terminal_lifecycle_is_server_projected_without_status_literals():
-    src = _read(TM_JS)
+    src = _orchestration_source('task-mode.ts')
     fn = _extract_fn(src, '_tmIsTerminal')
-    contract = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-contract.js'))
-    mutation_result = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-mutation-result.js'))
-    run_status = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-run-status.js'))
+    contract = _orchestration_source('contracts.ts')
+    mutation_result = _orchestration_source('mutation-result.ts')
+    run_status = _orchestration_source('run-status.ts')
     mutation = _read(os.path.join(
-        ROOT, 'lib', 'orchestration', 'mutation_result.py'))
+        REPO_ROOT, 'lib', 'orchestration', 'mutation_result.py'))
     assert 'orchestrationRunIsTerminal(' in fn
     assert '_orchAuthoring' not in fn
     assert "status === 'done'" not in fn
-    assert 'typeof runOrStatus.terminal' in run_status
+    assert "typeof run.terminal === 'boolean'" in run_status
     assert 'function isTerminalRunStatus(status)' not in contract
     assert "terminal: ['done', 'error', 'aborted']" not in contract
     assert 'resourceTerminal' in mutation_result
@@ -327,26 +352,31 @@ def test_terminal_lifecycle_is_server_projected_without_status_literals():
 
 
 def test_task_mode_refreshes_the_backend_run_contract_on_open():
-    src = _read(TM_JS)
+    src = _read(os.path.join(
+        REPO_ROOT, 'frontend', 'src', 'features', 'orchestration',
+        'task-mode.ts'))
     session = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-contract-session.js'))
+        REPO_ROOT, 'frontend', 'src', 'features', 'orchestration',
+        'task-mode-contract-session.ts'))
     controller = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-contract-controller.js'))
+        REPO_ROOT, 'frontend', 'src', 'features', 'orchestration',
+        'task-mode-contract-controller.ts'))
     opened = _extract_fn(src, 'openTaskMode')
     refresh = _extract_fn(src, '_tmRefreshAuthoringContract')
     closed = _extract_fn(src, '_tmAfterClose')
     assert 'await _tmRefreshAuthoringContract()' in opened
     assert opened.index('await _tmRefreshAuthoringContract()') < \
-        opened.index('var refresh = _tmRefreshRuns()')
-    assert 'var openOwner = shell.captureOpen()' in opened
+        opened.index('const refresh = _tmRefreshRuns()')
+    assert 'const openOwner = shell.captureOpen()' in opened
     assert 'shell.ownsOpen(openOwner)' in opened
     assert '_tmEnsureContractController().refresh()' in refresh
     assert 'await session.refresh(' in controller
-    assert 'capability.refreshAuthoringContract()' in controller
+    assert 'capability.refreshAuthoringContract as' in controller
+    assert 'const contract = await' in controller
     assert 'owner !== generation' in session
-    assert 'options.onAdopt(result.contracts)' in controller
+    assert 'options.onAdopt?.(result.contracts)' in controller
     assert '_tmEnsureContractController().invalidate()' in closed
-    assert '_tmRunListController.invalidate()' in closed
+    assert 'runListController?.invalidate()' in closed
 
 
 # ─────────────────── B. bilingual render ground truth ───────────────────
@@ -457,22 +487,8 @@ def _run_gate(*, ev: dict, lang: str = 'en', poison: str = '') -> str:
     if not node:
         pytest.skip('node not available for extraction-and-eval')
 
-    inspector = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-inspector.js'))
-    disclosure_state = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-disclosure-state.js'))
-    bounded_state = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-bounded-state.js'))
-    inspector_presentation = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-inspector-presentation.js'))
-    gate_view = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-gate-view.js'))
-    gate_presentation = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-gate-presentation.js'))
-    request_limits = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-request-limits.js'))
-    action_lock = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-action-lock.js'))
+    inspector_graph = _read(_native_orchestration_graph_path(
+        'task-mode-inspector', 'task-mode-inspector.ts'))
     i18n_runtime = _extract_i18n_runtime()
     if poison == 'i18n':
         i18n_runtime = i18n_runtime.replace('var entry = _i18n[key];', 'var entry = null;')
@@ -483,14 +499,7 @@ _i18nLang = {json.dumps(lang)};
 function _tmIco(name) {{ return '<svg data-ico="' + name + '"></svg>'; }}
 function escapeHtml(s) {{ return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){{
   return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c]; }}); }}
-{request_limits}
-{action_lock}
-{gate_presentation}
-{gate_view}
-{inspector_presentation}
-{bounded_state}
-{disclosure_state}
-{inspector}
+{inspector_graph}
 var view=createTaskModeInspectorView({{
   translate:t,escape:escapeHtml,icon:_tmIco,
   scrollState:{{capture:function(){{}},restore:function(){{}}}},
@@ -585,21 +594,19 @@ def test_task_failure_reporter_keeps_envelope_failures_diagnosable():
     node = shutil.which('node')
     if not node:
         pytest.skip('node unavailable')
-    root_controller = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-root-controller.js'))
+    root_controller = _read(_native_orchestration_graph_path(
+        'task-mode-root-controller', 'task-mode-root-controller.ts'))
     script = f'''
+global.window=global;
+{root_controller}
 var reports=[];
 var services={{
   reportError:function(){{reports.push(Array.from(arguments));}},
   api:function(){{}},studio:function(){{}},toast:function(){{}},
 }};
-function orchestrationResultError(value){{
-  return value&&value.error&&value.error.message||'';
-}}
-function createTaskModeControllerHub(){{throw new Error('not used');}}
-{root_controller}
 var root=createTaskModeRootController({{
-  services:function(){{return services;}},resultError:orchestrationResultError,
+  services:function(){{return services;}},
+  contractSession:{{}},session:{{}},runStore:{{}},
 }});
 var success=root.reportTaskFailure('list',{{ok:true,status:200}});
 var envelope=root.reportTaskFailure('list',{{ok:false,status:503,
@@ -636,44 +643,40 @@ process.stdout.write(JSON.stringify({{
 
 
 def test_dynamic_task_and_graph_ids_stay_out_of_inline_handlers():
-    src = _read(TM_JS)
-    dialog = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-dialog.js'))
-    task_shell = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-shell.js'))
-    task_shell_template = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-shell-template.js'))
-    run_list = _read(TM_LIST_JS)
-    run_title_view = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-run-title-view.js'))
-    run_view = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-run-view.js'))
-    node_presentation = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-node-presentation.js'))
-    timeline = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-timeline.js'))
-    graph_projection = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-graph-projection.js'))
-    graph = _read(os.path.join(ROOT, 'static', 'js', 'task-mode-graph.js'))
-    inspector = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-inspector.js'))
-    gate_view = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-gate-view.js'))
-    gate_presentation = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-gate-presentation.js'))
-    gate_interaction = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-human-gate-interaction.js'))
+    orchestration_sources = os.path.join(
+        REPO_ROOT, 'frontend', 'src', 'features', 'orchestration')
+    def source(name: str) -> str:
+        return _read(os.path.join(orchestration_sources, name))
+
+    src = source('task-mode.ts')
+    dialog = source('dialog.ts')
+    task_shell = source('task-mode-shell.ts')
+    task_shell_template = source('task-mode-shell-template.ts')
+    run_list = source('task-mode-list.ts')
+    run_title_view = source('task-mode-run-title-view.ts')
+    run_view = source('task-mode-run-view.ts')
+    node_presentation = source('task-mode-node-presentation.ts')
+    timeline = source('task-mode-timeline.ts')
+    graph_projection = source('task-mode-graph-projection.ts')
+    graph = source('task-mode-graph.ts')
+    inspector = source('task-mode-inspector.ts')
+    gate_view = source('task-mode-gate-view.ts')
+    gate_presentation = source('task-mode-gate-presentation.ts')
+    gate_interaction = source('human-gate-interaction.ts')
     mutation_request = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-mutation-request.js'))
+        orchestration_sources, 'mutation-request.ts'))
     task_actions = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-actions.js'))
+        orchestration_sources, 'task-mode-actions.ts'))
     task_commands = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-command-controller.js'))
+        orchestration_sources, 'task-mode-command-controller.ts'))
     task_commands += _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-run-command-controller.js'))
+        orchestration_sources, 'task-mode-run-command-controller.ts'))
     list_controller = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-list-controller.js'))
-    css = _read(os.path.join(ROOT, 'static', 'styles.css'))
+        REPO_ROOT, 'frontend', 'src', 'features', 'orchestration',
+        'task-mode-list-controller.ts'))
+    css = _read(os.path.join(
+        REPO_ROOT, 'frontend', 'src', 'features', 'orchestration',
+        'task-mode.css'))
     assert "onclick=\"_tmOpenRun(" not in src
     assert "onclick=\"_tmDeleteRun(" not in src
     assert "onclick=\"_tmAbortRun(" not in src
@@ -694,9 +697,9 @@ def test_dynamic_task_and_graph_ids_stay_out_of_inline_handlers():
     assert 'onerror=' not in src
     assert 'data-tm-action="open-studio"' in task_shell_template
     assert 'data-tm-action="refresh-runs"' in task_shell_template
-    assert "event.target.closest('[data-tm-action]')" in task_shell
+    assert "target?.closest?.('[data-tm-action]')" in task_shell
     assert 'await Api.orchestrations' not in src
-    assert "await reader.read(\n      'list', ['', '', requestedLimit])" \
+    assert "await reader.read('list', ['', '', requestedLimit])" \
         in list_controller
     assert 'return _tmEnsureRunListController().refresh()' in src
     assert '_tmApiCall' not in src
@@ -705,12 +708,14 @@ def test_dynamic_task_and_graph_ids_stay_out_of_inline_handlers():
     assert "'inputGate', [requestId, value]" in task_actions
     assert "'abortDurable', [runId]" in task_actions
     assert "'removeDurable', [runId]" in task_actions
-    assert '_tmEnsureCommands().approveGate(rid, approved)' in src
-    assert '_tmEnsureCommands().inputGate(rid, input)' in src
-    assert '_tmEnsureCommands().abortRun(runId)' in src
-    assert '_tmEnsureCommands().deleteRun(runId)' in src
-    assert "_gate('inputGate', requestId, value" in task_commands
-    assert "_call('reconcileRun', outcome.mutation, runId)" in task_commands
+    assert "invoke(_tmEnsureCommands(), 'approveGate', requestId, approved)" \
+        in src
+    assert "invoke(_tmEnsureCommands(), 'inputGate', requestId, input)" in src
+    assert "invoke(_tmEnsureCommands(), 'abortRun', runId)" in src
+    assert "invoke(_tmEnsureCommands(), 'deleteRun', runId)" in src
+    assert "return gate('inputGate', requestId, value, '')" in task_commands
+    assert "ports.call('reconcileRun', outcome.mutation, runId)" \
+        in task_commands
     assert "_tmApiCall('humanApprove'" not in src
     assert "_tmApiCall('humanInput'" not in src
     assert "_tmApiCall('taskAbort'" not in src
@@ -722,10 +727,11 @@ def test_dynamic_task_and_graph_ids_stay_out_of_inline_handlers():
     assert 'role="log"' in task_shell_template
     assert 'aria-live="off"' in task_shell_template
     assert 'aria-relevant="additions"' in task_shell_template
-    assert "timeline.setAttribute('aria-busy'" in timeline
-    assert "overlay.addEventListener('keydown', keyDown)" in task_shell
+    assert "host()?.setAttribute('aria-busy'" in timeline
+    assert "overlay.addEventListener('keydown', keyDown as EventListener)" \
+        in task_shell
     assert 'focusManager.trapTab(event, dialog)' in task_shell
-    assert 'previousFocus.focus()' in dialog
+    assert 'focusablePrevious.focus()' in dialog
     assert 'data-tm-run-index' in run_list
     assert "button.addEventListener('click'" in run_list
     assert 'data-tm-title-delete' in run_title_view
@@ -757,15 +763,13 @@ def test_dynamic_task_and_graph_ids_stay_out_of_inline_handlers():
 
 
 def test_visible_task_mode_status_and_event_copy_is_localized():
-    src = _read(TM_JS)
-    run_list = _read(TM_LIST_JS)
-    list_presentation = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-list-presentation.js'))
-    i18n = _read(I18N_JS)
-    event_format = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-event-format.js'))
-    run_time = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-run-time.js'))
+    src = _orchestration_source('task-mode.ts')
+    run_list = _orchestration_source('task-mode-list.ts')
+    list_presentation = _orchestration_source(
+        'task-mode-list-presentation.ts')
+    i18n = '\n'.join(_read(path) for path in I18N_LOCALE_FILES.values())
+    event_format = _orchestration_source('event-format.ts')
+    run_time = _orchestration_source('task-mode-run-time.ts')
     for literal in (
         "' approved'", "' rejected'", "' answered'", "' agents, '",
         'Select a run to view its timeline.', "'(unnamed flow)'",
@@ -775,215 +779,95 @@ def test_visible_task_mode_status_and_event_copy_is_localized():
         'tm.unnamedFlow', 'tm.ago.seconds', 'tm.ago.minutes',
         'tm.ago.hours', 'tm.ago.days', 'orch.ev.gateApproved',
         'orch.ev.gateRejected', 'orch.ev.gateAnswered',
-        'orch.ev.completeSummary', 'tm.status.completed',
+        'orch.ev.completeSummary', 'tm.status.done',
     ):
-        assert f"'{key}'" in i18n
+        assert f'"{key}"' in i18n
         assert (key in src or key in run_list or key in list_presentation
                 or key in run_time
                 or key in event_format
-                or key == 'tm.status.completed')
+                or key == 'tm.status.done')
+
+
+def test_published_task_mode_status_vocabulary_has_bilingual_copy():
+    contract = run_status_contract()
+    required_keys = {
+        *(f'tm.status.{status}' for status in contract['statuses']),
+        'tm.status.incomplete',
+        *(f'tm.statusCategory.{category}'
+          for category in set(contract['categories'].values())),
+    }
+    for language, path in I18N_LOCALE_FILES.items():
+        table = json.loads(_read(path))
+        missing = sorted(key for key in required_keys if not table.get(key))
+        assert not missing, (
+            f'{language} Task Mode status copy missing for {missing}')
 
 
 @pytest.mark.parametrize(
-    ('api_result', 'gate_kept', 'toast_error'),
+    ('action_result', 'gate_kept', 'toast_error'),
     [
-        (None, True, True),
         ({
-            'ok': True,
+            'ok': False,
+            'message': 'transport unavailable',
+        }, True, True),
+        ({
             'mutation': {
-                'format': 'tofu.orchestration.mutation/v1',
                 'ok': True,
-                'action': 'approve_gate',
                 'reason': 'accepted',
-                'target_id': 'gate_1',
-                'resource_status': '',
-                'resource_terminal': None,
-                'target_exists': False,
-                'retryable': False,
-                'reconcile_required': False,
+                'targetExists': True,
             },
         }, False, False),
         ({
             'ok': False,
-            'status': 404,
-            'data': {
+            'message': 'gate no longer exists',
+            'mutation': {
                 'ok': False,
-                'mutation': {
-                    'format': 'tofu.orchestration.mutation/v1',
-                    'ok': False,
-                    'action': 'approve_gate',
-                    'reason': 'not_found',
-                    'target_id': 'gate_1',
-                    'resource_status': '',
-                    'resource_terminal': None,
-                    'target_exists': False,
-                    'retryable': False,
-                    'reconcile_required': True,
-                },
+                'reason': 'not_found',
+                'targetExists': False,
             },
         }, False, True),
     ],
 )
 def test_gate_is_removed_only_after_backend_confirmation(
-        api_result, gate_kept, toast_error):
+        action_result, gate_kept, toast_error):
     node = shutil.which('node')
     if not node:
         pytest.skip('node unavailable')
-    src = _read(TM_JS)
-    wire_formats_src = _read(os.path.join(
-        ROOT, 'static', 'js',
-        'orchestration-wire-formats.generated.js'))
-    compatibility_defaults_src = _read(os.path.join(
-        ROOT, 'static', 'js',
-        'orchestration-compatibility-defaults.generated.js'))
-    compatibility_contracts_src = _read(os.path.join(
-        ROOT, 'static', 'js',
-        'orchestration-compatibility-contracts.js'))
-    wire_contract_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-wire-contract.js'))
-    result_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-result.js'))
-    mutation_payload_src = _read(os.path.join(
-        ROOT, 'static', 'js',
-        'orchestration-mutation-payload-contract.js'))
-    mutation_result_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-mutation-result.js'))
-    read_core_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-read-core.js'))
-    runtime_read_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-runtime-read.js'))
-    http_read_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-http-read.js'))
-    api_result_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'api', 'http-result.js'))
-    http_contract_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'api',
-        'orchestration-http-contract.generated.js'))
-    response_contracts_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'api',
-        'orchestration-response-contracts.js'))
-    client_methods_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'api',
-        'orchestration-client-methods.js'))
-    endpoint_transport_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'api',
-        'orchestration-endpoint-transport.js'))
-    endpoint_registry_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'api', 'orchestration-endpoints.js'))
-    api_request_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-api-request.js'))
-    request_failure_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-request-failure.js'))
-    request_contract_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-request-contract.js'))
-    mutation_request_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-mutation-request.js'))
-    mutation_command_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-mutation-command.js'))
-    diagnostic_report_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-diagnostic-report.js'))
-    single_flight_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'orchestration-single-flight.js'))
-    action_controller_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-actions.js'))
-    command_controller_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-command-controller.js'))
-    run_command_controller_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-run-command-controller.js'))
-    controller_hub_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-controller-hub.js'))
-    root_controller_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-root-controller.js'))
-    task_services_src = _read(os.path.join(
-        ROOT, 'static', 'js', 'task-mode-services.js'))
-    extracted = '\n'.join(
-        _extract_fn(src, name)
-        for name in (
-            '_tmApiClient', '_tmStudioClient', '_tmToast',
-            '_tmTaskClient', '_tmReportTaskFailure',
-            '_tmEnsureControllerHub', '_tmEnsureActions',
-            '_tmEnsureCommands', '_tmHumanApprove',
-        )
-    )
+    controller_path = _native_orchestration_graph_path(
+        'task-mode-command-controller', 'task-mode-command-controller.ts')
     harness = f'''
-var _tmGates={{gate_1:{{mode:'approve'}}}};var renders=0;var toasts=[];
-var _tmControllerHub=null;
-var _tmRunSession={{}};
-var _tmContracts={{snapshot:function(){{return {{}};}}}};
-var Api={{orchestrations:{{humanApprove:async function(){{return {json.dumps(api_result)};}}}}}};
-globalThis.Api=Api;
-function _tmRenderInspector(){{renders++;}}
-var _tmEventController={{dismissGate:function(rid){{
-  if(!_tmGates[rid])return false;delete _tmGates[rid];_tmRenderInspector();return true;
-}}}};
-function createTaskModeEventController(){{return _tmEventController;}}
-function _tmEnsureEventController(){{return _tmEventController;}}
-function _tmReconcileRunMutation(){{}}
-function _tmRefreshRuns(){{}}
-function _tmOpenRun(){{}}
-function _tmProjectRunTransition(){{}}
-function _tmRenderGraph(){{}}
-function _tmRenderTimelineEvent(){{}}
-function _tmSelectPanel(){{}}
-function _tmSyncChip(){{}}
-function _tmIsTerminal(){{return false;}}
-function _tmEnsureRunController(){{return{{id:function(){{return null;}},reset:function(){{}}}};}}
-function _tmT(key){{return key;}}
-var _orchStudioApi={{toast:function(message,isError){{toasts.push([message,isError]);}}}};
-{task_services_src}
-{wire_formats_src}
-{compatibility_defaults_src}
-{compatibility_contracts_src}
-{wire_contract_src}
-{result_src}
-{mutation_payload_src}
-{mutation_result_src}
-{read_core_src}
-{runtime_read_src}
-{http_read_src}
-{api_result_src}
-{http_contract_src}
-{response_contracts_src}
-{client_methods_src}
-{endpoint_transport_src}
-{endpoint_registry_src}
-{request_failure_src}
-{api_request_src}
-{request_contract_src}
-{mutation_request_src}
-{diagnostic_report_src}
-{mutation_command_src}
-{single_flight_src}
-{action_controller_src}
-{run_command_controller_src}
-{command_controller_src}
-{controller_hub_src}
-{root_controller_src}
-var _tmRootController=createTaskModeRootController({{
-  services:function(){{return _tmServices;}},
-  contractSession:_tmContracts,session:_tmRunSession,runStore:{{discard:function(){{}}}},
-  mutationMessage:orchestrationMutationMessage,
-  resultError:orchestrationResultError,translate:_tmT,
-  reconcileRun:_tmReconcileRunMutation,refreshRuns:_tmRefreshRuns,
-  openRun:_tmOpenRun,renderRunList:function(){{}},isTerminal:_tmIsTerminal,
-  projectTransition:_tmProjectRunTransition,renderGraph:_tmRenderGraph,
-  renderInspector:_tmRenderInspector,
-  renderTimelineEvent:_tmRenderTimelineEvent,syncChip:_tmSyncChip,
+const fs=require('fs');
+global.window=global;
+eval(fs.readFileSync({json.dumps(controller_path)},'utf8'));
+const gates={{gate_1:{{mode:'approve'}}}};
+let renders=0;
+const toasts=[];
+const actionResult={json.dumps(action_result)};
+const controller=createTaskModeCommandController({{
+  actions:{{
+    approveGate:async()=>actionResult,
+    failureMessage:(result,fallback)=>result?.message||fallback,
+  }},
+  translate:key=>key,
+  dismissGate:id=>{{
+    if(!gates[id])return false;
+    delete gates[id];
+    renders+=1;
+    return true;
+  }},
+  toast:(message,isError)=>toasts.push([message,isError]),
 }});
-{extracted}
-(async function(){{await _tmHumanApprove('gate_1',true);process.stdout.write(JSON.stringify({{
- kept:!!_tmGates.gate_1,renders:renders,toasts:toasts
-}}));}})();
+(async()=>{{
+  await controller.approveGate('gate_1',true);
+  process.stdout.write(JSON.stringify({{
+    kept:!!gates.gate_1,renders:renders,toasts:toasts,
+  }}));
+}})().catch(error=>{{console.error(error);process.exit(1);}});
 '''
-    with tempfile.NamedTemporaryFile('w', suffix='.mjs', delete=False) as handle:
-        handle.write(harness)
-        tmp = handle.name
-    try:
-        proc = subprocess.run(
-            [node, tmp], capture_output=True, text=True, timeout=20,
-        )
-    finally:
-        os.unlink(tmp)
+    proc = subprocess.run(
+        [node, '-e', harness], cwd=REPO_ROOT,
+        capture_output=True, text=True, timeout=20,
+    )
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
     assert result['kept'] is gate_kept
@@ -991,189 +875,124 @@ var _tmRootController=createTaskModeRootController({{
     assert bool(result['toasts'][-1][1]) is toast_error
 
 
-def test_shared_mutation_client_maps_durable_actions():
+def test_task_request_clients_share_the_native_vite_contract_graph():
     node = shutil.which('node')
     if not node:
         pytest.skip('node unavailable')
+    graph_path = _native_request_client_graph_path()
     script = r'''
 const fs=require('fs');
 global.window=global;
-for(const file of [
-  'api/http-result.js','api/orchestration-http-contract.generated.js',
-  'api/orchestration-response-contracts.js',
-  'api/orchestration-client-methods.js',
-  'api/orchestration-endpoint-transport.js',
-  'api/orchestration-endpoints.js',
-  'orchestration-wire-formats.generated.js',
-  'orchestration-compatibility-defaults.generated.js',
-  'orchestration-compatibility-contracts.js',
-  'orchestration-wire-contract.js','orchestration-result.js',
-  'orchestration-mutation-payload-contract.js',
-  'orchestration-mutation-result.js',
-  'orchestration-read-core.js',
-  'orchestration-runtime-read.js',
-  'orchestration-durable-run-snapshot.js',
-  'orchestration-durable-list-read.js',
-  'orchestration-durable-read.js',
-  'orchestration-replay-read.js',
-  'orchestration-http-read.js',
-  'orchestration-request-failure.js','orchestration-api-request.js',
-  'orchestration-request-contract.js',
-  'orchestration-mutation-request.js',
-])eval(fs.readFileSync('static/js/'+file,'utf8'));
+eval(fs.readFileSync(GRAPH_PATH,'utf8'));
 const calls=[];
-const api={
-  taskAbort:async id=>{calls.push(['abort',id]);return{ok:true,status:200,
-    data:{ok:true,mutation:{format:'tofu.orchestration.mutation/v1',ok:true,
-      action:'abort_run',reason:'accepted',target_id:id,resource_status:'',
-      resource_terminal:null,target_exists:true,retryable:false,
-      reconcile_required:false}}};},
-  taskRemove:async id=>{calls.push(['remove',id]);return{ok:false,status:409,
-    data:{ok:false,error:'run is active',mutation:{
-      format:'tofu.orchestration.mutation/v1',ok:false,
-      action:'delete_run',reason:'active',target_id:id,resource_status:'',
-      resource_terminal:null,target_exists:true,retryable:false,
-      reconcile_required:true}}};},
-};
-(async()=>{
-  const client=createOrchestrationMutationRequestClient({api:()=>api});
-  const aborted=await client.abortDurable('run-a');
-  const removed=await client.removeDurable('run-b');
-  process.stdout.write(JSON.stringify({calls,aborted:{ok:aborted.ok,
-    action:aborted.mutation.action},removed:{ok:removed.ok,
-    reason:removed.reason,error:removed.error}}));
-})().catch(error=>{console.error(error);process.exit(1);});
-'''
-    proc = subprocess.run(
-        [node, '-e', script], cwd=ROOT,
-        capture_output=True, text=True, timeout=20,
-    )
-    assert proc.returncode == 0, (proc.stdout or '') + (proc.stderr or '')
-    assert json.loads(proc.stdout) == {
-        'calls': [['abort', 'run-a'], ['remove', 'run-b']],
-        'aborted': {'ok': True, 'action': 'abort_run'},
-        'removed': {
-            'ok': False, 'reason': 'active', 'error': 'run is active',
-        },
-    }
-
-
-def test_shared_task_request_client_unifies_durable_reads_and_creation():
-    node = shutil.which('node')
-    if not node:
-        pytest.skip('node unavailable')
-    script = r'''
-const fs=require('fs');
-global.window=global;
-eval([
-  'api/http-result.js','api/orchestration-http-contract.generated.js',
-  'api/orchestration-response-contracts.js',
-  'api/orchestration-client-methods.js',
-  'api/orchestration-endpoint-transport.js',
-  'api/orchestration-endpoints.js',
-  'orchestration-wire-formats.generated.js',
-  'orchestration-compatibility-defaults.generated.js',
-  'orchestration-compatibility-contracts.js',
-  'orchestration-wire-contract.js','orchestration-result.js',
-  'orchestration-read-core.js',
-  'orchestration-runtime-read.js',
-  'orchestration-durable-run-snapshot.js',
-  'orchestration-durable-list-read.js',
-  'orchestration-durable-read.js',
-  'orchestration-replay-read.js',
-  'orchestration-http-read.js',
-  'orchestration-request-failure.js','orchestration-api-request.js',
-  'orchestration-request-contract.js',
-  'orchestration-task-request.js',
-].map(file=>fs.readFileSync('static/js/'+file,'utf8')).join('\n'));
-const calls=[];
-const api={
-  taskListResult:async(status,orchId)=>{
-    calls.push(['listResult',status,orchId]);
-    return {ok:true,status:200,data:{ok:true,runs:[{id:'new'}],page:{
-      limit:50,has_more:false,next_limit:null}}};
+const response=(ok,status,data)=>({ok,status,json:async()=>data});
+const inspection={
+  format:'tofu.orchestration.inspection/v1',ok:true,
+  errors:[],warnings:[],diagnostics:[],contract:{
+    schema:'tofu.orchestration/v1',projection:'flow',initialPhase:'start',
+    nodes:0,edges:0,
   },
-  taskList:async()=>{calls.push(['listDirect']);return {ok:true,runs:[]};},
+};
+const mutation=(ok,action,reason,targetId)=>({
+  format:orchestrationWireFormat('mutation'),ok,action,reason,
+  target_id:targetId,resource_status:'',resource_terminal:null,
+  target_exists:reason==='not_found'?false:true,
+  retryable:false,reconcile_required:!ok,
+});
+const api={
+  taskListResult:async(status,orchestrationId,limit)=>{
+    calls.push(['list',status,orchestrationId,limit]);
+    return response(true,200,{ok:true,runs:[],page:{
+      limit,has_more:false,next_limit:null,
+    }});
+  },
   taskGet:async id=>{
     calls.push(['get',id]);
-    return {ok:false,status:404,data:{ok:false,error:'missing'}};
+    return response(false,404,{ok:false,error:'missing'});
   },
-  taskCreate:async()=>{
-    calls.push(['create']);
-    const error=new Error('network down');error.status=0;throw error;
+  taskCreate:async(definition,input,storedId,originId)=>{
+    calls.push(['create',Boolean(definition),input,storedId||null,originId||null]);
+    return response(true,201,{
+      ok:true,run_id:'run-new',start:{
+        format:orchestrationWireFormat('runtime-start'),
+        kind:'durable',id:'run-new',
+      },
+      definitionSource:'inline',inspection,warnings:[],
+      contract:inspection.contract,
+    });
   },
   taskEventsResult:async(id,cursor)=>{
-    calls.push(['eventsResult',id,cursor]);
-    return {ok:true,status:200,data:{
-      format:'tofu.task-replay/v1',ok:true,status:'running',
-      events:[{seq:3,type:'progress'}],next_cursor:4,done:false,
-      caught_up:true,cursor:{requested:3,next:4,reset:false},
-    }};
+    calls.push(['events',id,cursor]);
+    return response(true,200,{
+      format:orchestrationWireFormat('task-replay'),ok:true,
+      status:'running',events:[],next_cursor:cursor+1,done:false,
+      caught_up:true,cursor:{requested:cursor,next:cursor+1,reset:false},
+    });
+  },
+  taskAbort:async id=>{
+    calls.push(['abort',id]);
+    return response(true,200,{ok:true,mutation:
+      mutation(true,'abort_run','accepted',id)});
+  },
+  taskRemove:async id=>{
+    calls.push(['remove',id]);
+    return response(false,409,{ok:false,error:'run is active',mutation:
+      mutation(false,'delete_run','active',id)});
   },
 };
 (async()=>{
-  const client=createOrchestrationTaskRequestClient({api:()=>api});
-  const listed=await client.list('running','orch/one');
-  const missing=await client.get('run/missing');
-  const created=await client.create({nodes:[],edges:[]},'seed','orch/one');
-  const events=await client.events('run/one',3);
-  const legacyCalls=[];
-  const legacy=createOrchestrationTaskRequestClient({api:()=>({
-    taskList:async()=>{legacyCalls.push('list');return{
-      ok:true,runs:[{id:'legacy'}],page:{
-        limit:50,has_more:false,next_limit:null}};},
-  })});
-  const legacyList=await legacy.list();
+  const tasks=createOrchestrationTaskRequestClient({api:()=>api});
+  const mutations=createOrchestrationMutationRequestClient({api:()=>api});
+  const listed=await tasks.list('running','orch/one',25);
+  const missing=await tasks.get('run/missing');
+  const created=await tasks.create({nodes:[],edges:[]},'seed','orch/one');
+  const events=await tasks.events('run/one',3);
+  const aborted=await mutations.abortDurable('run/a');
+  const removed=await mutations.removeDurable('run/b');
   process.stdout.write(JSON.stringify({
-    calls,legacyCalls,
-    listed:{ok:listed.ok,ids:listed.runs.map(run=>run.id),
-      method:listed.requestMethod,usedResult:listed.usedResultMethod},
-    missing:{ok:missing.ok,notFound:missing.notFound,
-      reason:missing.reason,status:missing.status},
-    created:{ok:created.ok,reason:created.reason,
-      cause:created.cause&&created.cause.message},
-    events:{ok:events.ok,status:events.status,httpStatus:events.httpStatus,
-      reason:events.reason,next:events.next_cursor,count:events.events.length,
-      method:events.requestMethod,usedResult:events.usedResultMethod},
-    legacy:{ok:legacyList.ok,ids:legacyList.runs.map(run=>run.id),
-      method:legacyList.requestMethod,usedResult:legacyList.usedResultMethod},
+    calls,
+    listed:{ok:listed.ok,pageLimit:listed.pageLimit,
+      method:listed.requestMethod},
+    missing:{ok:missing.ok,notFound:missing.notFound,status:missing.status},
+    created:{ok:created.ok,runId:created.runId,method:created.requestMethod},
+    events:{ok:events.ok,next:events.next_cursor,method:events.requestMethod},
+    aborted:{ok:aborted.ok,action:aborted.mutation.action,
+      targetId:aborted.mutation.targetId},
+    removed:{ok:removed.ok,reason:removed.reason,error:removed.error},
   }));
 })().catch(error=>{console.error(error);process.exit(1);});
-'''
+'''.replace('GRAPH_PATH', json.dumps(graph_path))
     proc = subprocess.run(
-        [node, '-e', script], cwd=ROOT,
-        capture_output=True, text=True, timeout=20,
+        [node, '-e', script], cwd=REPO_ROOT,
+        capture_output=True, text=True, timeout=30,
     )
     assert proc.returncode == 0, (proc.stdout or '') + (proc.stderr or '')
-    assert json.loads(proc.stdout) == {
-        'calls': [
-            ['listResult', 'running', 'orch/one'],
-            ['get', 'run/missing'],
-            ['create'],
-            ['eventsResult', 'run/one', 3],
-        ],
-        'legacyCalls': ['list'],
-        'listed': {
-            'ok': True, 'ids': ['new'], 'method': 'taskListResult',
-            'usedResult': True,
-        },
-        'missing': {
-            'ok': False, 'notFound': True, 'reason': 'not-found',
-            'status': 404,
-        },
-        'created': {
-            'ok': False, 'reason': 'transport-failed',
-            'cause': 'network down',
-        },
-        'events': {
-            'ok': True, 'status': 'running', 'httpStatus': 200,
-            'reason': 'accepted', 'next': 4, 'count': 1,
-            'method': 'taskEventsResult', 'usedResult': True,
-        },
-        'legacy': {
-            'ok': True, 'ids': ['legacy'], 'method': 'taskList',
-            'usedResult': False,
-        },
+    result = json.loads(proc.stdout)
+    assert result['calls'] == [
+        ['list', 'running', 'orch/one', 25],
+        ['get', 'run/missing'],
+        ['create', True, 'seed', None, 'orch/one'],
+        ['events', 'run/one', 3],
+        ['abort', 'run/a'],
+        ['remove', 'run/b'],
+    ]
+    assert result['listed'] == {
+        'ok': True, 'pageLimit': 25, 'method': 'taskListResult',
+    }
+    assert result['missing'] == {
+        'ok': False, 'notFound': True, 'status': 404,
+    }
+    assert result['created'] == {
+        'ok': True, 'runId': 'run-new', 'method': 'taskCreate',
+    }
+    assert result['events'] == {
+        'ok': True, 'next': 4, 'method': 'taskEventsResult',
+    }
+    assert result['aborted'] == {
+        'ok': True, 'action': 'abort_run', 'targetId': 'run/a',
+    }
+    assert result['removed'] == {
+        'ok': False, 'reason': 'active', 'error': 'run is active',
     }
 
 
@@ -1181,6 +1000,16 @@ def test_api_task_reads_preserve_http_status_and_encode_filters():
     node = shutil.which('node')
     if not node:
         pytest.skip('node unavailable')
+    api_sources = [runtime_section_path(name) for name in (
+        'api.js',
+        'api/http-result.js',
+        'api/orchestration-http-contract.generated.js',
+        'api/orchestration-response-contracts.js',
+        'api/orchestration-client-methods.js',
+        'api/orchestration-endpoint-transport.js',
+        'api/orchestration-endpoints.js',
+        'api/orchestrations.js',
+    )]
     script = r'''
 const fs=require('fs');
 global.window=global;
@@ -1200,22 +1029,15 @@ global.fetch=async(url,init)=>{
     error:'not_found',
   });
 };
-eval(fs.readFileSync('static/js/api.js','utf8'));
-eval(fs.readFileSync('static/js/api/http-result.js','utf8'));
-eval(fs.readFileSync('static/js/api/orchestration-http-contract.generated.js','utf8'));
-eval(fs.readFileSync('static/js/api/orchestration-response-contracts.js','utf8'));
-eval(fs.readFileSync('static/js/api/orchestration-client-methods.js','utf8'));
-eval(fs.readFileSync('static/js/api/orchestration-endpoint-transport.js','utf8'));
-eval(fs.readFileSync('static/js/api/orchestration-endpoints.js','utf8'));
-eval(fs.readFileSync('static/js/api/orchestrations.js','utf8'));
+eval(API_SOURCES.map(path=>fs.readFileSync(path,'utf8')).join('\n'));
 (async()=>{
   const list=await Api.orchestrations.taskListResult('running','orch/one');
   const events=await Api.orchestrations.taskEventsResult('run/one',7);
   process.stdout.write(JSON.stringify({calls,list,events}));
 })().catch(error=>{console.error(error);process.exit(1);});
-'''
+'''.replace('API_SOURCES', json.dumps(api_sources))
     proc = subprocess.run(
-        [node, '-e', script], cwd=ROOT,
+        [node, '-e', script], cwd=REPO_ROOT,
         capture_output=True, text=True, timeout=20,
     )
     assert proc.returncode == 0, (proc.stdout or '') + (proc.stderr or '')

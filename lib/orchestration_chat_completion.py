@@ -16,8 +16,8 @@ class OrchestrationChatFlowCompletion:
     """Prepare and finish one chat task from a normalized flow outcome.
 
     ``prepare`` persists turns and exposes terminal facts before any
-    projection-specific lifecycle work (Autopilot run conclusion/cleanup).
-    ``finish`` emits the common endpoint/done boundary and persists the task.
+    projection-specific lifecycle work (goal-mode run conclusion/cleanup).
+    ``finish`` emits the common flow/done boundary and persists the task.
     Both phases are idempotent so recovery code cannot duplicate side effects.
     """
 
@@ -87,7 +87,6 @@ class OrchestrationChatFlowCompletion:
         if terminal.runtime_error and terminal.chat_status == 'error':
             self._task['error'] = terminal.error_envelope
         self._capture_trace()
-        self._task['_endpoint_turns'] = self._messages
         self._task['_flow_turns'] = self._messages
         self._turn_persistence.finalize()
         self._prepared = True
@@ -107,13 +106,13 @@ class OrchestrationChatFlowCompletion:
             self._task,
             status=terminal.chat_status,
             finish_reason=finish_reason,
-            endpoint_reason=stop_reason,
+            flow_reason=stop_reason,
         ):
             self._finished = True
             return terminal
 
         self._append_event(self._task, build_event(
-            EventType.ENDPOINT_COMPLETE,
+            EventType.FLOW_COMPLETE,
             totalIterations=self.iterations,
             reason=stop_reason,
             replanCount=0,
@@ -124,7 +123,7 @@ class OrchestrationChatFlowCompletion:
             EventType.DONE,
             usage=self._task.get('usage', {}),
             finishReason=finish_reason,
-            endpointReason=stop_reason,
+            flowReason=stop_reason,
             flowMode=True,
             flowProjection=self._projection,
             orchestrationOutcome=outcome,

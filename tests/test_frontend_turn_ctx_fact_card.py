@@ -82,7 +82,6 @@ global.memoryEnabled = false;
 global.imageGenEnabled = false;
 global.humanGuidanceEnabled = false;
 global.autoTranslate = false;
-global.endpointEnabled = false;
 global.autopilotEnabled = false;
 global.swarmEnabled = false;
 global.activeFlow = '';
@@ -207,7 +206,6 @@ function _mkSnap() {
   sandbox.imageGenEnabled = global.imageGenEnabled;
   sandbox.humanGuidanceEnabled = global.humanGuidanceEnabled;
   sandbox.autoTranslate = global.autoTranslate;
-  sandbox.endpointEnabled = global.endpointEnabled;
   sandbox.autopilotEnabled = global.autopilotEnabled;
   sandbox.swarmEnabled = global.swarmEnabled;
   sandbox.activeFlow = global.activeFlow;

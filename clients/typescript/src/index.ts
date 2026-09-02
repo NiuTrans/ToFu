@@ -1,18 +1,20 @@
 // ════════════════════════════════════════════════════════════════
-//  @tofu/sdk — TypeScript client for the Tofu headless API.
+//  @rangehow/tofu-sdk — TypeScript client for the Tofu headless API.
 //
 //  Mirrors the Python SDK 1:1 (clients/python/tofu_sdk/__init__.py).
 //  Uses the standard Web Fetch API — works in Node 18+, browsers,
 //  Cloudflare Workers, Vercel Edge, Deno, Bun.  No external deps.
 // ════════════════════════════════════════════════════════════════
 
-export const VERSION = '1.0.0';
+export const VERSION = '0.17.0';
+export * from './api-v4.generated.js';
 
 // ── Types ───────────────────────────────────────────────────────
 
 export interface TofuOptions {
   baseUrl: string;
-  apiKey: string;
+  /** Optional for a loopback-only headless server; required for remote use. */
+  apiKey?: string;
   timeoutMs?: number;
   userAgent?: string;
   fetchImpl?: typeof fetch;
@@ -40,6 +42,52 @@ export interface ChatRequest {
   conversation_id?: string;
   idempotency_key?: string;
   timeout_s?: number;
+}
+
+export interface AgentProvider {
+  base_url?: string;
+  /** Friendly alias accepted by tofu-agent. */
+  endpoint?: string;
+  api_key?: string;
+  model?: string;
+  extra_headers?: Record<string, string>;
+  thinking_format?: string;
+  capabilities?: string[];
+}
+
+export interface AgentRunRequest {
+  messages: ChatMessage[];
+  /** Optional when the deployment or provider block supplies a default. */
+  model?: string;
+  provider?: AgentProvider;
+  config?: Record<string, unknown>;
+  capabilities?: Record<string, unknown>;
+  /** Request-local OpenAI function schemas. */
+  tools?: Array<Record<string, unknown>>;
+  trajectory?: 'sharegpt' | 'openai-finetune' | 'anthropic' | 'tofu-native';
+  timeout_s?: number;
+  conversation_id?: string;
+  id?: string;
+  [key: string]: unknown;
+}
+
+export interface AgentRunResult {
+  ok: boolean;
+  id: string;
+  object: 'agent.run';
+  task_id: string;
+  status: 'pending' | 'running' | 'done' | 'error' | 'aborted';
+  model: string;
+  finish_reason: string;
+  content: string;
+  thinking: string;
+  usage: Record<string, number>;
+  n_tool_rounds: number;
+  error?: Record<string, unknown>;
+  tool_calls?: Array<Record<string, unknown>>;
+  trajectory_format?: string;
+  trajectory?: unknown;
+  [key: string]: unknown;
 }
 
 export interface ChatCompletion {
@@ -91,6 +139,66 @@ export class TofuError extends Error {
   }
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function responseBody(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text) return null;
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+function newIdempotencyKey(): string {
+  const cryptoValue = globalThis.crypto as Crypto | undefined;
+  if (cryptoValue?.randomUUID) return cryptoValue.randomUUID();
+  return `tofu-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+async function* parseSSE(response: Response): AsyncIterable<Record<string, unknown>> {
+  if (!response.body) throw new Error('streaming requires a Response.body');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    buffer = buffer.replace(/\r\n/g, '\n');
+    let boundary: number;
+    while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+      const frame = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      let eventName = '';
+      let eventId: number | undefined;
+      const dataLines: string[] = [];
+      for (const line of frame.split('\n')) {
+        if (line.startsWith(':')) continue;
+        if (line.startsWith('event:')) eventName = line.slice(6).trim();
+        else if (line.startsWith('id:')) {
+          const parsed = Number(line.slice(3).trim());
+          if (Number.isFinite(parsed)) eventId = parsed;
+        } else if (line.startsWith('data:')) {
+          dataLines.push(line.slice(5).trim());
+        }
+      }
+      const data = dataLines.join('\n');
+      if (!data) continue;
+      if (data === '[DONE]') return;
+      let payload: unknown;
+      try { payload = JSON.parse(data); } catch { continue; }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
+      const event = payload as Record<string, unknown>;
+      if (eventName && event.event === undefined) event.event = eventName;
+      if (eventId !== undefined && event.seq === undefined) event.seq = eventId;
+      yield event;
+      const terminal = ['done', 'error', 'aborted'];
+      if (terminal.includes(String(event.type || ''))
+          || terminal.includes(String(event.event || ''))) return;
+    }
+  }
+}
+
 // ── Core client ─────────────────────────────────────────────────
 
 export class Tofu {
@@ -107,9 +215,8 @@ export class Tofu {
 
   constructor(opts: TofuOptions) {
     if (!opts.baseUrl) throw new Error('baseUrl required');
-    if (!opts.apiKey) throw new Error('apiKey required');
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
-    this.apiKey = opts.apiKey;
+    this.apiKey = opts.apiKey ?? '';
     this.timeoutMs = opts.timeoutMs ?? 600_000;
     this.userAgent = opts.userAgent ?? `tofu-sdk-ts/${VERSION}`;
     this._fetch = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
@@ -133,7 +240,7 @@ export class Tofu {
     init: RequestInit & { json?: unknown } = {},
   ): Promise<Response> {
     const headers = new Headers(init.headers || {});
-    headers.set('Authorization', `Bearer ${this.apiKey}`);
+    if (this.apiKey) headers.set('Authorization', `Bearer ${this.apiKey}`);
     headers.set('User-Agent', this.userAgent);
     if (!headers.has('Accept')) headers.set('Accept', 'application/json');
     let body = init.body;
@@ -159,9 +266,44 @@ export class Tofu {
   /** @internal */
   async _json<T = unknown>(method: string, path: string, init: RequestInit & { json?: unknown } = {}): Promise<T> {
     const resp = await this._request(method, path, init);
-    let body: unknown = null;
-    try { body = await resp.json(); } catch (_) { body = await resp.text(); }
+    const body = await responseBody(resp);
     if (!resp.ok) throw new TofuError(resp.status, body);
+    return body as T;
+  }
+
+  /** @internal — retry only idempotent GETs or POSTs carrying Idempotency-Key. */
+  async _requestWithRetry(
+    method: string,
+    path: string,
+    init: RequestInit & { json?: unknown } = {},
+    maxRetries = 3,
+  ): Promise<Response> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const response = await this._request(method, path, init);
+        const transient = response.status === 429 || response.status >= 500;
+        if (!transient || attempt >= maxRetries) return response;
+        const retryAfter = Number(response.headers.get('Retry-After') || 0);
+        try { await response.body?.cancel(); } catch { /* already consumed */ }
+        await delay(Math.min(Math.max(
+          retryAfter * 1000, 500 * (2 ** attempt)), 30_000));
+      } catch (error) {
+        if (attempt >= maxRetries) throw error;
+        await delay(Math.min(500 * (2 ** attempt), 10_000));
+      }
+    }
+  }
+
+  /** @internal */
+  async _jsonWithRetry<T = unknown>(
+    method: string,
+    path: string,
+    init: RequestInit & { json?: unknown } = {},
+    maxRetries = 3,
+  ): Promise<T> {
+    const response = await this._requestWithRetry(method, path, init, maxRetries);
+    const body = await responseBody(response);
+    if (!response.ok) throw new TofuError(response.status, body);
     return body as T;
   }
 
@@ -185,43 +327,16 @@ export class Tofu {
       headers: { Accept: 'text/event-stream' },
     });
     if (!resp.ok) {
-      let err: unknown;
-      try { err = await resp.json(); } catch { err = await resp.text(); }
+      const err = await responseBody(resp);
       throw new TofuError(resp.status, err);
     }
-    if (!resp.body) throw new Error('streaming requires a Response.body');
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let nl: number;
-      while ((nl = buf.indexOf('\n\n')) >= 0) {
-        const frame = buf.slice(0, nl);
-        buf = buf.slice(nl + 2);
-        for (const line of frame.split('\n')) {
-          if (!line.startsWith('data:')) continue;
-          const data = line.slice(5).trim();
-          if (!data || data === '[DONE]') {
-            if (data === '[DONE]') return;
-            continue;
-          }
-          try {
-            yield JSON.parse(data);
-          } catch (_) {
-            // unparseable chunk — ignore, matches Python SDK behaviour
-          }
-        }
-      }
-    }
+    yield* parseSSE(resp);
   }
 }
 
 // ── Sub-APIs ────────────────────────────────────────────────────
 
-class TasksAPI {
+export class TasksAPI {
   constructor(private c: Tofu) {}
 
   // Public for introspection — what kinds the SDK knows how to start.
@@ -268,7 +383,8 @@ class TasksAPI {
   }
 
   get(taskId: string): Promise<TaskState> {
-    return this.c._json('GET', `/api/v1/tasks/${encodeURIComponent(taskId)}`);
+    return this.c._jsonWithRetry('GET',
+      `/api/v1/tasks/${encodeURIComponent(taskId)}`);
   }
 
   list(opts: { kind?: string; status?: string; limit?: number } = {}): Promise<{ tasks: TaskState[]; total: number }> {
@@ -280,42 +396,57 @@ class TasksAPI {
   }
 
   events(taskId: string, cursor = 0): Promise<{ events: unknown[]; status: string }> {
-    return this.c._json('GET',
+    return this.c._jsonWithRetry('GET',
       `/api/v1/tasks/${encodeURIComponent(taskId)}/events?cursor=${cursor}`);
   }
 
-  async *stream(taskId: string, cursor = 0): AsyncIterable<Record<string, unknown>> {
-    const resp = await this.c._request('GET',
-      `/api/v1/tasks/${encodeURIComponent(taskId)}/stream?cursor=${cursor}`,
-      { headers: { Accept: 'text/event-stream' } });
-    if (!resp.ok) throw new TofuError(resp.status, await resp.text());
-    if (!resp.body) return;
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let nl: number;
-      while ((nl = buf.indexOf('\n\n')) >= 0) {
-        const frame = buf.slice(0, nl);
-        buf = buf.slice(nl + 2);
-        for (const line of frame.split('\n')) {
-          if (!line.startsWith('data:')) continue;
-          const data = line.slice(5).trim();
-          if (!data || data === '[DONE]') {
-            if (data === '[DONE]') return;
-            continue;
-          }
-          try { yield JSON.parse(data); } catch (_) { /* ignore */ }
+  async *stream(
+    taskId: string,
+    cursor = 0,
+    opts: { reconnect?: boolean; maxReconnects?: number } = {},
+  ): AsyncIterable<Record<string, unknown>> {
+    let nextCursor = Math.max(0, Math.trunc(cursor));
+    let attempts = 0;
+    const reconnect = opts.reconnect ?? true;
+    const maxReconnects = Math.max(0, opts.maxReconnects ?? 3);
+    for (;;) {
+      try {
+        const response = await this.c._requestWithRetry('GET',
+          `/api/v1/tasks/${encodeURIComponent(taskId)}/stream?cursor=${nextCursor}`,
+          { headers: { Accept: 'text/event-stream' } }, maxReconnects);
+        if (!response.ok) {
+          const body = await responseBody(response);
+          throw new TofuError(response.status, body);
         }
+        for await (const event of parseSSE(response)) {
+          attempts = 0;
+          const sequence = Number(event.seq);
+          if (Number.isFinite(sequence)) {
+            nextCursor = Math.max(nextCursor, Math.trunc(sequence) + 1);
+          }
+          yield event;
+          if (['done', 'error', 'aborted'].includes(String(event.type || ''))) return;
+        }
+        const state = await this.get(taskId);
+        if (['done', 'error', 'aborted'].includes(state.status)) return;
+      } catch (error) {
+        if (!reconnect || (error instanceof TofuError && error.status < 500
+            && error.status !== 429)) throw error;
       }
+      attempts += 1;
+      if (!reconnect || attempts > maxReconnects) {
+        throw new TofuError(599, {
+          error: { kind: 'stream_disconnected', message: 'task stream reconnect limit exceeded' },
+          task_id: taskId,
+          cursor: nextCursor,
+        });
+      }
+      await delay(Math.min(500 * (2 ** (attempts - 1)), 5_000));
     }
   }
 
   abort(taskId: string): Promise<{ taskId: string; status: string }> {
-    return this.c._json('POST',
+    return this.c._jsonWithRetry('POST',
       `/api/v1/tasks/${encodeURIComponent(taskId)}/abort`);
   }
 
@@ -331,8 +462,72 @@ class TasksAPI {
   }
 }
 
-class AgentsAPI {
+export class AgentsAPI {
   constructor(private c: Tofu) {}
+
+  /** Run the complete Tofu agent loop. Server-managed model is the default. */
+  run(
+    request: AgentRunRequest,
+    opts: { idempotencyKey?: string; maxRetries?: number } = {},
+  ): Promise<AgentRunResult> {
+    const key = opts.idempotencyKey || newIdempotencyKey();
+    return this.c._jsonWithRetry<AgentRunResult>(
+      'POST', '/api/v1/agent/run', {
+        json: { ...request, stream: false },
+        headers: { 'Idempotency-Key': key },
+      }, opts.maxRetries ?? 3);
+  }
+
+  /** Submit the run and return a task handle immediately (HTTP 202). */
+  start(
+    request: AgentRunRequest,
+    opts: { idempotencyKey?: string; maxRetries?: number } = {},
+  ): Promise<{ ok: boolean; id: string; task_id: string; status: string; model: string }> {
+    const key = opts.idempotencyKey || newIdempotencyKey();
+    return this.c._jsonWithRetry(
+      'POST', '/api/v1/agent/run', {
+        json: { ...request, async: true },
+        headers: {
+          'Idempotency-Key': key,
+          Prefer: 'respond-async',
+        },
+      }, opts.maxRetries ?? 3);
+  }
+
+  /** Start once, then resume the task SSE stream after transport drops. */
+  async *stream(
+    request: AgentRunRequest,
+    opts: {
+      idempotencyKey?: string;
+      cursor?: number;
+      reconnect?: boolean;
+      maxReconnects?: number;
+    } = {},
+  ): AsyncIterable<Record<string, unknown>> {
+    const started = await this.start(request, {
+      idempotencyKey: opts.idempotencyKey,
+      maxRetries: opts.maxReconnects,
+    });
+    if (!started.task_id) {
+      throw new Error(`agent.run did not return task_id: ${JSON.stringify(started)}`);
+    }
+    yield* this.c.tasks.stream(started.task_id, opts.cursor ?? 0, {
+      reconnect: opts.reconnect,
+      maxReconnects: opts.maxReconnects,
+    });
+  }
+
+  runStream(
+    request: AgentRunRequest,
+    opts: {
+      idempotencyKey?: string;
+      cursor?: number;
+      reconnect?: boolean;
+      maxReconnects?: number;
+    } = {},
+  ): AsyncIterable<Record<string, unknown>> {
+    return this.stream(request, opts);
+  }
 
   paperReport(params: Record<string, unknown>): Promise<Record<string, unknown>> {
     return this.c._json('POST', '/api/v1/agents/paper/report', { json: params });

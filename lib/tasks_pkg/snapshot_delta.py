@@ -1,6 +1,6 @@
 """Delta projection + rebuild for ``messages_snapshot`` rows.
 
-Design: ``docs/DEBUG_PANEL_REDESIGN.md`` §10 (format FROZEN by the owner
+Design: ``docs/FRONTEND_ARCHITECTURE.md`` §10 (format FROZEN by the owner
 2026-07-25). Measured on a real task (``efb479f6``): full-payload storage
 was 123.2 MB across 167 rounds; the same rounds in delta form are 1.9 MB
 (65.7x). Two redundancies dominate and BOTH must be removed:
@@ -96,8 +96,8 @@ class SnapshotProjector:
 
     @staticmethod
     def _key(task_id: str, payload: dict) -> tuple:
-        # Endpoint phases re-number rounds from 1, so the baseline chain is
-        # per (task, turn) — mixing phases would produce a bogus prefix.
+        # Flow node turns re-number rounds from 1, so the baseline chain is
+        # per (task, turn) — mixing nodes would produce a bogus prefix.
         return (task_id, payload.get('turn') or '', payload.get('kind') or 'request')
 
     def project(self, task_id: str, payload: dict) -> dict:

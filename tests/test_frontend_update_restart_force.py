@@ -34,6 +34,9 @@ showConfirm / DOM / timers, and drives ``restartServer()`` directly:
     call carries force:true.
   • user DECLINES the confirm → NO second (force) call, no restart.
   • idle server (no 409) → single force-less call is accepted, no confirm.
+  • an ordinary update-check 500 still renders its error card.
+  • a pre-restart update check that returns 500 after progress takes ownership
+    cannot replace the restart card, even in the post-health/pre-reload window.
 
 DOUBLE-NEUTER (on a MUTATED copy; shipped file never touched): strip the
 ``e.status === 409`` branch → the confirm-then-force retry no longer happens,
@@ -48,11 +51,12 @@ import shutil
 import subprocess
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 
 
@@ -78,11 +82,30 @@ global.t = (k) => (k === 'update.restartForceConfirm'
   ? '%s other conversation(s) have running tasks — continue?'
   : k === 'update.restartCooldown' ? 'cooldown %ss left' : k);
 global.activeConvId = 'my-own-conv';
-// DOM: getElementById returns a throwaway element with the props the code sets.
+// DOM: keep elements stable so the restart-progress ownership race can assert
+// that a late version-check response did not replace #updateModalBody.
+const domElements = {};
+function domElement(id) {
+  if (!domElements[id]) {
+    const classes = new Set();
+    domElements[id] = {
+      classList: {
+        add(c){ classes.add(c); },
+        remove(c){ classes.delete(c); },
+        toggle(c){ classes.has(c) ? classes.delete(c) : classes.add(c); },
+        contains(c){ return classes.has(c); },
+      },
+      querySelector: () => null,
+      disabled: false,
+      textContent: '',
+      style: {},
+      innerHTML: '',
+    };
+  }
+  return domElements[id];
+}
 global.document = {
-  getElementById: () => ({ classList: { add(){}, remove(){}, toggle(){} },
-                          querySelector: () => null, disabled: false,
-                          textContent: '', style: {}, innerHTML: '' }),
+  getElementById: (id) => domElement(id),
   querySelector: () => null,
   addEventListener: () => {},
 };
@@ -106,10 +129,14 @@ let confirmReturns = true;
 let firstThrows409 = true;
 let pendingFirst = false;   // first restart call answers 202 {pendingApproval}
 let always429 = false;      // every restart call 429s (cooldown)
+let pendingUpdateChecks = [];
 
 global.showToast = (icon, title, body) => { toastCalls.push([icon, title, body]); };
 global.Api = {
   update: {
+    check: () => new Promise((resolve, reject) => {
+      pendingUpdateChecks.push({ resolve, reject });
+    }),
     restart: async (payload) => {
       restartCalls.push(payload || {});
       if (always429) {
@@ -155,12 +182,13 @@ function reset(opts) {
   confirmCalls = [];
   toastCalls = [];
   decideCalls = [];
+  pendingUpdateChecks = [];
   confirmReturns = ('confirmReturns' in opts) ? opts.confirmReturns : true;
   firstThrows409 = ('firstThrows409' in opts) ? opts.firstThrows409 : true;
   pendingFirst = ('pendingFirst' in opts) ? opts.pendingFirst : false;
   always429 = ('always429' in opts) ? opts.always429 : false;
-  // _restartActive is a module-level var; force it false between scenarios.
-  try { _restartActive = false; } catch (_) {}
+  // Restart state is module-level; reset it between independent scenarios.
+  try { _restartActive = false; _restartDone = false; } catch (_) {}
 }
 const flush = () => new Promise((r) => setImmediate(r));
 
@@ -261,6 +289,46 @@ const flush = () => new Promise((r) => setImmediate(r));
     check('neuter2_no_token_retry', !restartCalls.some(c => !!c.approvalId));
   }
 
+  // ══ 8. A genuine update-check 500 remains visible outside restart ══
+  {
+    loadModule(SRC);
+    reset({ firstThrows409: false });
+    const body = domElement('updateModalBody');
+    body.innerHTML = '';
+    const checkRun = _runUpdateCheck();
+    await flush();
+    check('s8_check_started', pendingUpdateChecks.length === 1);
+    const err = new Error('HTTP 500'); err.status = 500;
+    pendingUpdateChecks.shift().reject(err);
+    await checkRun; await flush();
+    check('s8_real_500_visible', body.innerHTML.indexOf('upd-err-card') >= 0);
+  }
+
+  // ══ 9. A late 500 from the pre-restart check cannot own the modal ══
+  {
+    reset({ firstThrows409: false });
+    const body = domElement('updateModalBody');
+    body.innerHTML = '';
+    const staleCheck = _runUpdateCheck();
+    await flush();
+    check('s9_check_started', pendingUpdateChecks.length === 1);
+
+    await restartServer();
+    await flush();
+    check('s9_restart_progress_rendered', body.innerHTML.indexOf('upd-restart') >= 0);
+
+    // Model the narrow post-health/pre-reload window: _restartActive is
+    // already false, so a boolean-only guard is insufficient. The request
+    // generation must still reject this older check response.
+    _restartActive = false;
+    _restartDone = true;
+    const err = new Error('HTTP 500'); err.status = 500;
+    pendingUpdateChecks.shift().reject(err);
+    await staleCheck; await flush();
+    check('s9_late_500_keeps_progress', body.innerHTML.indexOf('upd-restart') >= 0);
+    check('s9_late_500_hidden', body.innerHTML.indexOf('upd-err-card') < 0);
+  }
+
   console.log(out.join('\n'));
   process.exit(0);
 })();
@@ -286,4 +354,4 @@ def test_update_restart_force_confirm_flow():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'update restart force-flow failures:\n' + output
-    assert output.count('PASS') >= 24, f'expected >=24 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 34, f'expected >=34 PASS lines, got:\n{output}'

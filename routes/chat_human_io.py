@@ -35,7 +35,7 @@ def chat_stdin_response():
         logger.warning('[Stdin] Rejected — missing stdinId')
         return api_bad_request('No stdinId')
 
-    from lib.tasks_pkg import resolve_stdin
+    from lib.tasks_pkg.stdin_handler import resolve_stdin
     # EOF → resolve with None to signal stdin close
     resolved_text = None if is_eof else input_text
     try:
@@ -71,7 +71,7 @@ def chat_human_response():
                        'guidanceId=%s', guidance_id)
         return api_bad_request('No response text')
 
-    from lib.tasks_pkg import resolve_human_guidance
+    from lib.tasks_pkg.human_guidance import resolve_human_guidance
     try:
         ok = resolve_human_guidance(guidance_id, response_text)
     except Exception as e:

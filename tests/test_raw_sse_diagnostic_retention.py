@@ -11,7 +11,9 @@ pytestmark = pytest.mark.unit
 
 def test_anomaly_append_rotates_before_crossing_limit(tmp_path, monkeypatch):
     path = tmp_path / 'raw_sse_anomaly.log'
-    path.write_bytes(b'x' * (1 << 20))
+    # Rotation preserves complete records.  Keep the fixture exactly at the
+    # ceiling while ending its one record with a newline.
+    path.write_bytes(b'x' * ((1 << 20) - 1) + b'\n')
     monkeypatch.setenv('TOFU_RAW_SSE_ANOMALY_MAX_BYTES', str(1 << 20))
     monkeypatch.setenv('TOFU_RAW_SSE_ANOMALY_BACKUPS', '2')
 

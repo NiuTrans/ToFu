@@ -1,7 +1,7 @@
 """routes/api_v1/ — Tofu native v1 API surface.
 
 Mounted at ``/api/v1/*``. All routes use:
-  - Bearer-token auth (or ``TUNNEL_TOKEN`` cookie/header for the UI)
+  - Bearer-token auth with an HttpOnly browser session cookie
   - Per-key rate limits + idempotency (where it makes sense)
   - ``@api_meta(...)`` for OpenAPI 3.1 self-description
   - ``@require_scope('...')`` for scope-based access control
@@ -9,7 +9,7 @@ Mounted at ``/api/v1/*``. All routes use:
 Sub-blueprints:
   * ``chat``           — POST /chat/completions (sync/SSE/WS)
   * ``tasks``          — generic task lifecycle for any kind
-  * ``conversations``  — CRUD + branches + search (delegates to legacy)
+  * ``conversations``  — stateless config/label helpers; turn state uses v3
   * ``capabilities``   — self-describing surface (models, tools, presets)
   * ``keys``           — admin-scoped API key management
   * ``agents``         — paper/translate/swarm/scheduler/memory/etc.
@@ -40,7 +40,6 @@ from .folders import api_v1_folders_bp
 from .orchestrations import api_v1_orchestrations_bp
 from .optimizer import api_v1_optimizer_bp
 from .scheduler import api_v1_scheduler_bp
-from .endpoint import api_v1_endpoint_bp
 from .swarm import api_v1_swarm_bp
 from .desktop import api_v1_desktop_bp
 from .browser import api_v1_browser_bp
@@ -70,6 +69,7 @@ from .audio import api_v1_audio_bp
 from .common import api_v1_common_bp
 from .config import api_v1_config_bp
 from .providers import api_v1_providers_bp
+from .model_catalog import api_v1_model_catalog_bp
 from .webhooks import api_v1_webhooks_bp
 from .usage import api_v1_usage_bp
 from .logs import api_v1_logs_bp
@@ -93,7 +93,6 @@ ALL_V1_BLUEPRINTS = [
     api_v1_orchestrations_bp,
     api_v1_optimizer_bp,
     api_v1_scheduler_bp,
-    api_v1_endpoint_bp,
     api_v1_swarm_bp,
     api_v1_desktop_bp,
     api_v1_browser_bp,
@@ -123,6 +122,7 @@ ALL_V1_BLUEPRINTS = [
     api_v1_config_bp,
     api_v1_providers_bp,
     api_v1_webhooks_bp,
+    api_v1_model_catalog_bp,
     api_v1_usage_bp,
     api_v1_logs_bp,
     api_v1_update_bp,

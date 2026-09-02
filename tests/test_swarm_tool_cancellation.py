@@ -52,7 +52,8 @@ def test_rehydration_refreshes_stale_system_authority():
     ]
     spec = SubTaskSpec(id='visual', role='browser', objective='inspect page')
     master = MasterOrchestrator(
-        task_id='parent', conv_id='conv', specs=[spec], all_tools=tools,
+        task_id='parent', conv_id='conv', specs=[spec], user_id=1,
+        all_tools=tools,
         model='test-model', thinking_enabled=False)
     master._resume_messages['visual'] = [
         {'role': 'system',
@@ -198,7 +199,7 @@ def test_unattended_code_exec_does_not_install_stdin_waiter(monkeypatch):
 
 def test_stall_verdict_is_propagated_before_scheduler_shutdown(monkeypatch):
     spec = SubTaskSpec(id='stuck', role='browser', objective='x')
-    master = MasterOrchestrator('task', 'conv', [spec])
+    master = MasterOrchestrator('task', 'conv', [spec], user_id=1)
     master._persist_agent_snapshot = lambda **kwargs: None
     master._beacon = ProgressBeacon(stall_timeout=0.01)
     master._beacon.touch('stuck', 'tool_start')

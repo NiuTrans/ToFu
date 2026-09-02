@@ -10,7 +10,6 @@ from lib.feishu._state import WORKSPACE_ROOT
 from lib.feishu.conversation import (
     clear_history,
     clear_pending,
-    clear_web_messages,
     get_history,
     get_mode,
     get_model,
@@ -77,7 +76,6 @@ def _cmd_history(user_id: str, text_stripped: str) -> str:
 
 def _cmd_clear(user_id: str, text_stripped: str) -> str:
     clear_history(user_id)
-    clear_web_messages(user_id)
     new_conv_id(user_id)
     return '🗑️ 对话已清除，开始新会话'
 

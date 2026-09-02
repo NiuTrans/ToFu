@@ -130,7 +130,6 @@ class SubAgentResult:
     """
     status: str = SubAgentStatus.PENDING.value
     final_answer: str = ''
-    answer: str = ''                             # Alias for backward compat (prefer final_answer)
     reasoning_trace: str = ''                    # Condensed reasoning (for debugging)
     error_message: str = ''
     tool_log: list = field(default_factory=list) # [{round, tool, args_brief}, ...]

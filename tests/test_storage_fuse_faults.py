@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import errno
+import os
 from pathlib import Path
+import shutil
 import subprocess
 from types import SimpleNamespace
+import uuid
 
 import pytest
 
@@ -14,6 +17,19 @@ from lib.storage_sidecar import preflight
 
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture
+def project_fuse_dir():
+    root = Path(__file__).resolve().parents[1]
+    path = (
+        root / 'data' / 'storage-certification' / 'fuse-faults' /
+        f'{os.getpid()}-{uuid.uuid4().hex}')
+    path.mkdir(parents=True, exist_ok=False)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _fs_type(path: Path) -> str:
@@ -26,17 +42,17 @@ def _fs_type(path: Path) -> str:
 
 @pytest.mark.skipif(not __import__('sys').platform.startswith('linux'),
                     reason='Linux FUSE certification')
-def test_real_project_mount_proves_fsync_replace_and_locking(tmp_path):
-    fs_type = _fs_type(tmp_path)
+def test_real_project_mount_proves_fsync_replace_and_locking(project_fuse_dir):
+    fs_type = _fs_type(project_fuse_dir)
     if 'fuse' not in fs_type.lower():
         pytest.skip(f'not running from FUSE (fs_type={fs_type})')
 
-    report = preflight.run_filesystem_preflight(tmp_path / 'data')
+    report = preflight.run_filesystem_preflight(project_fuse_dir / 'data')
 
     assert report.atomic_replace is True
     assert report.file_lock is True
     assert report.fsync_ms > 0
-    assert not list((tmp_path / 'data').glob('.storage-preflight-*'))
+    assert not list((project_fuse_dir / 'data').glob('.storage-preflight-*'))
 
 
 def test_preflight_fails_closed_when_space_probe_reports_full(

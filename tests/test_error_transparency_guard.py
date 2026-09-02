@@ -65,20 +65,12 @@ _TASK_TARGETS = ('task', 'new_task')
 _RAW_EXCEPTION_RE = re.compile(
     r"""^(?:str\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)|e|exc|ex)$""", re.X)
 
-# Grandfathered legacy raw-exception sites, each verified (2026-07-26) to be
-# a DEDICATED non-chat surface whose own UI already presents the string
-# truthfully (OAuth login flow, file-history API, settings probe grid, VLM
-# upload badge, an internal thread result box that is re-raised). The chat
-# envelope contract does not apply to them. Exact-match ratchet: fixing one
-# turns this test red until the entry is removed — the list only shrinks.
+# There are deliberately no grandfathered raw-exception sites. Dedicated
+# non-chat surfaces (OAuth, file history, provider probes and VLM uploads)
+# consume the same envelope contract as chat, so every frontend surface has
+# one normalization boundary and retains kind/retryability/detail metadata.
 #   (relpath, rhs_source) -> allowed occurrence count
-_GRANDFATHERED = {
-    ('lib/oauth/manager/_exchange.py', 'str(e)'): 2,
-    ('lib/file_history/api.py', 'str(e)'): 2,
-    ('lib/pdf_parser/vlm/_tasks.py', 'str(exc)'): 1,
-    ('lib/provider_probe.py', 'str(e)[:300]'): 1,
-    ('routes/paper.py', 'ex'): 1,
-}
+_GRANDFATHERED = {}
 
 
 def _py_files():
@@ -204,7 +196,7 @@ class TestRuntimeEnvelopeCompletion(unittest.TestCase):
 
     def test_finish_completes_incomplete_dict(self):
         rt = self._runtime()
-        task = rt.create()
+        task = rt.create(user_id=1)
         rt.finish(task['id'], error={'kind': 'worker_lost',
                                      'detail': 'stalled 42s'})
         env = rt.get(task['id'])['error']
@@ -219,7 +211,7 @@ class TestRuntimeEnvelopeCompletion(unittest.TestCase):
         """finish(error='worker_lost') — the documented stall contract —
         must produce the worker_lost envelope, not a generic one."""
         rt = self._runtime()
-        task = rt.create()
+        task = rt.create(user_id=1)
         rt.finish(task['id'], error='worker_lost')
         env = rt.get(task['id'])['error']
         self.assertEqual(env['kind'], 'worker_lost')
@@ -228,7 +220,7 @@ class TestRuntimeEnvelopeCompletion(unittest.TestCase):
 
     def test_finish_raw_string_stays_generic_but_complete(self):
         rt = self._runtime()
-        task = rt.create()
+        task = rt.create(user_id=1)
         rt.finish(task['id'], error='something broke')
         env = rt.get(task['id'])['error']
         self.assertEqual(env['kind'], 'generic')
@@ -239,7 +231,7 @@ class TestRuntimeEnvelopeCompletion(unittest.TestCase):
     def test_finish_complete_envelope_passthrough(self):
         from lib.error_envelope import make_envelope
         rt = self._runtime()
-        task = rt.create()
+        task = rt.create(user_id=1)
         original = make_envelope('timeout', detail='slow')
         rt.finish(task['id'], error=original)
         self.assertIs(rt.get(task['id'])['error'], original)
@@ -284,7 +276,7 @@ class TestRuntimeEnvelopeCompletion(unittest.TestCase):
         message — kind alone rendered as 'Unknown error'."""
         rt = self._runtime()
         rt.stall_timeout = 0.01
-        task = rt.create()
+        task = rt.create(user_id=1)
         stale = rt.get(task['id'])
         stale['updated_at'] = time.time() - 100
         resp = rt.poll(task['id'])

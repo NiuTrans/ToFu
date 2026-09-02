@@ -7,6 +7,7 @@ functions mutate the shared dicts in place.
 """
 
 from lib.log import get_logger, audit_log
+from lib.error_envelope import make_envelope
 
 from lib.oauth.manager._state import (
     _active_flows,
@@ -16,6 +17,79 @@ from lib.oauth.manager._state import (
 )
 
 logger = get_logger(__name__)
+
+
+def _exchange_error_envelope(exc: BaseException) -> dict:
+    """Preserve the provider's real OAuth reason in the shared error shape."""
+    status_code = int(getattr(exc, 'status_code', 0) or 0)
+    if status_code == 429:
+        kind = 'ratelimit'
+    elif status_code in (401, 403):
+        kind = 'permission'
+    elif status_code in (400, 404, 409, 422):
+        kind = 'bad_request'
+    elif status_code == 0:
+        kind = 'network'
+    else:
+        kind = 'upstream_error'
+    reason = str(exc)
+    detail = str(getattr(exc, 'detail', '') or reason)
+    return make_envelope(
+        kind,
+        message=reason,
+        detail=detail,
+        context='oauth-exchange',
+        source='oauth-manager',
+        raw=reason,
+    )
+
+
+def _finalize_login_success(provider: str, token: dict, via: str = '') -> dict:
+    """Shared success tail for every login path (code exchange, B1 browser
+    store, device flow): mark the flow, audit, provision the managed
+    provider, and shape the result dict.
+
+    Args:
+        provider: 'claude' or 'codex'.
+        token: Stored token dict (carries email).
+        via: audit trail marker for non-default paths ('browser_exchange',
+            'device_flow').
+
+    Returns:
+        The standard success payload.
+    """
+    with _flows_lock:
+        if provider in _active_flows:
+            _active_flows[provider]['status'] = 'success'
+            _active_flows[provider]['email'] = token.get('email', '')
+    audit_kwargs = {'provider': provider, 'email': token.get('email', '')}
+    if via:
+        audit_kwargs['via'] = via
+    audit_log('oauth_login', **audit_kwargs)
+    provider_ready = False
+    provision_warning = ''
+    try:
+        from lib.oauth.outbound import provision_oauth_provider
+        provision_oauth_provider(provider)
+        from lib.oauth.outbound import managed_oauth_provider_status
+        provider_ready = managed_oauth_provider_status(
+            provider).get('provider_ready', False)
+        if provider == 'codex':
+            from lib.oauth.codex_catalog import trigger_codex_catalog_refresh
+            trigger_codex_catalog_refresh()
+    except Exception as e:
+        provision_warning = str(e)[:300]
+        logger.error('[OAuth] Failed to provision provider for %s: %s',
+                     provider, e, exc_info=True)
+    return {
+        'ok': True,
+        'provider': provider,
+        'email': token.get('email', ''),
+        'status': 'success',
+        'authenticated': True,
+        'provider_ready': provider_ready,
+        'warning': provision_warning,
+    }
 
 
 def exchange_code(provider: str, code: str, state: str = '') -> dict:
@@ -91,47 +165,19 @@ def exchange_code(provider: str, code: str, state: str = '') -> dict:
     except OAuthExchangeError as e:
         # Surface the REAL upstream reason (e.g. a 403 geo/edge block) instead
         # of the misleading generic "code may have expired".
+        envelope = _exchange_error_envelope(e)
         with _flows_lock:
             if provider in _active_flows:
                 _active_flows[provider]['status'] = 'error'
-                _active_flows[provider]['error'] = str(e)
-        return {'error': str(e), 'status_code': e.status_code, 'detail': e.detail}
+                _active_flows[provider]['error'] = envelope
+        return {'error': envelope, 'status_code': e.status_code, 'detail': e.detail}
 
     if token:
-        with _flows_lock:
-            _active_flows[provider]['status'] = 'success'
-            _active_flows[provider]['email'] = token.get('email', '')
-        audit_log('oauth_login', provider=provider, email=token.get('email', ''))
-        provider_ready = False
-        provision_warning = ''
-        try:
-            from lib.oauth.outbound import provision_oauth_provider
-            provision_oauth_provider(provider)
-            from lib.oauth.outbound import managed_oauth_provider_status
-            provider_ready = managed_oauth_provider_status(
-                provider).get('provider_ready', False)
-            if provider == 'codex':
-                from lib.oauth.codex_catalog import trigger_codex_catalog_refresh
-                trigger_codex_catalog_refresh()
-        except Exception as e:
-            provision_warning = str(e)[:300]
-            logger.error('[OAuth] Failed to provision provider for %s: %s',
-                         provider, e, exc_info=True)
-    else:
-        with _flows_lock:
-            _active_flows[provider]['status'] = 'error'
-            _active_flows[provider]['error'] = 'Token exchange failed'
-        return {'error': 'Token exchange failed. The code may have expired.'}
-
-    return {
-        'ok': True,
-        'provider': provider,
-        'email': token.get('email', ''),
-        'status': 'success',
-        'authenticated': True,
-        'provider_ready': provider_ready,
-        'warning': provision_warning,
-    }
+        return _finalize_login_success(provider, token)
+    with _flows_lock:
+        _active_flows[provider]['status'] = 'error'
+        _active_flows[provider]['error'] = 'Token exchange failed'
+    return {'error': 'Token exchange failed. The code may have expired.'}
 
 
 def store_token(provider: str, token_response: dict) -> dict:
@@ -160,60 +206,38 @@ def store_token(provider: str, token_response: dict) -> dict:
         else:
             return {'error': f'Unknown provider: {provider}'}
     except OAuthExchangeError as e:
+        envelope = _exchange_error_envelope(e)
         with _flows_lock:
             if provider in _active_flows:
                 _active_flows[provider]['status'] = 'error'
-                _active_flows[provider]['error'] = str(e)
-        return {'error': str(e), 'status_code': e.status_code, 'detail': e.detail}
+                _active_flows[provider]['error'] = envelope
+        return {'error': envelope, 'status_code': e.status_code, 'detail': e.detail}
 
-    with _flows_lock:
-        if provider in _active_flows:
-            _active_flows[provider]['status'] = 'success'
-            _active_flows[provider]['email'] = token.get('email', '')
-    audit_log('oauth_login', provider=provider, email=token.get('email', ''),
-              via='browser_exchange')
-    provider_ready = False
-    provision_warning = ''
-    try:
-        from lib.oauth.outbound import provision_oauth_provider
-        provision_oauth_provider(provider)
-        from lib.oauth.outbound import managed_oauth_provider_status
-        provider_ready = managed_oauth_provider_status(
-            provider).get('provider_ready', False)
-        if provider == 'codex':
-            from lib.oauth.codex_catalog import trigger_codex_catalog_refresh
-            trigger_codex_catalog_refresh()
-    except Exception as e:
-        provision_warning = str(e)[:300]
-        logger.error('[OAuth] Failed to provision provider for %s: %s',
-                     provider, e, exc_info=True)
-
-    return {
-        'ok': True,
-        'provider': provider,
-        'email': token.get('email', ''),
-        'status': 'success',
-        'authenticated': True,
-        'provider_ready': provider_ready,
-        'warning': provision_warning,
-    }
+    return _finalize_login_success(provider, token, via='browser_exchange')
 
 
 def logout_oauth(provider: str) -> dict:
-    """Logout from an OAuth provider (delete stored token)."""
-    from lib.oauth.token_store import delete_token
+    """Logout and invalidate every projection derived from the credential."""
+    from lib.oauth.token_store import delete_token, load_token
 
+    # Capture the account identity before deleting the credential so derived
+    # account-scoped caches can be invalidated without ever storing the raw id.
+    stored = load_token(provider) or {}
     deleted = delete_token(provider)
 
     try:
         from lib.oauth.outbound import deprovision_oauth_provider
         deprovision_oauth_provider(provider)
-    except Exception as e:
+    except Exception as deprovision_error:
         logger.error('[OAuth] Failed to deprovision provider for %s: %s',
-                     provider, e, exc_info=True)
+                     provider, deprovision_error, exc_info=True)
 
     with _flows_lock:
         _active_flows.pop(provider, None)
+
+    # Signal a running device-flow poll thread to stop (no-op otherwise)
+    from lib.oauth.manager._device import stop_device_flow
+    stop_device_flow(provider)
 
     # Shut down any running relay server
     with _servers_lock:
@@ -235,6 +259,28 @@ def logout_oauth(provider: str) -> dict:
             'error': 'credential_delete_failed',
         }
 
-    audit_log('oauth_logout', provider=provider)
+    if provider == 'codex':
+        # Derived state is invalidated only after credential deletion succeeds;
+        # a failed logout leaves the credential live and must preserve it.
+        try:
+            from lib.subscription_quota import clear_subscription_quota
+            clear_subscription_quota(provider, cache_key='oauth_codex')
+        except Exception as quota_cleanup_error:
+            logger.warning('[OAuth] Codex quota-cache cleanup failed: %s',
+                           quota_cleanup_error)
+        account_id = str(stored.get('account_id') or '').strip()
+        if account_id:
+            try:
+                from lib.oauth.codex_usage import clear_codex_usage_reset_cache
+                clear_codex_usage_reset_cache(account_id=account_id)
+            except Exception as reset_cleanup_error:
+                logger.warning('[OAuth] Codex reset-cache cleanup failed: %s',
+                               reset_cleanup_error)
+        else:
+            logger.debug('[OAuth] Codex reset-cache cleanup skipped: '
+                         'credential had no account identity')
+
+    audit_event = 'oauth_logout'
+    audit_log(audit_event, provider=provider)
     logger.info('[OAuth] Logged out from %s', provider)
     return {'ok': True, 'provider': provider}

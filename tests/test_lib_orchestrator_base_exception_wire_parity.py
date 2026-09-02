@@ -1,5 +1,3 @@
-# Incident anchor: born in commit 530055a5 — refactor(orchestrator): pt_03f4cdf1 slice 34 — extract BaseException ...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 34 — extract the BaseException
 fatal handler from _run.py into
 lib.tasks_pkg.orchestrator._post_loop.handle_task_base_exception().
@@ -17,7 +15,7 @@ Contract preserved byte-for-byte:
   * ERROR log with exc_info first,
   * task['error'] = internal envelope ('Task terminated: <Type>'),
     status/finishReason = 'error',
-  * DONE event + persist_task_result ONLY when NOT _endpoint_managed,
+  * DONE event + persist_task_result ONLY when NOT _flow_managed,
   * every step of the finalize wrapped so a finalize failure logs but
     never masks the original BaseException,
   * always re-raises the ORIGINAL object.
@@ -86,13 +84,13 @@ def test_leaf_carries_envelope_done_persist_reraise_contract():
                    "task['status'] = 'error'",
                    "finishReason",
                    'persist_task_result',
-                   '_endpoint_managed',
+                   '_flow_managed',
                    'exc_info=True'):
         assert needle in src, f'leaf missing {needle}'
 
 
 # ---------------------------------------------------------------------------
-# 4. BEHAVIOURAL: full terminal-persist path + endpoint-managed skip +
+# 4. BEHAVIOURAL: full terminal-persist path + Flow-managed skip +
 #    finalize-failure fail-open (owner directive)
 # ---------------------------------------------------------------------------
 def _drive(leaf, monkeypatch, task, be):
@@ -120,18 +118,18 @@ def test_behaviour_terminal_done_persist_and_reraise(monkeypatch):
     assert 'Task terminated: KeyboardInterrupt' in str(task['error'])
     kinds = [c[0] for c in leaf._calls]
     assert 'done' in kinds and 'persist' in kinds, (
-        'non-endpoint task must emit DONE + persist')
+        'ordinary task must emit DONE + persist')
 
 
-def test_behaviour_endpoint_managed_skips_done_persist(monkeypatch):
+def test_behaviour_flow_managed_skips_done_persist(monkeypatch):
     import lib.tasks_pkg.orchestrator._post_loop as leaf
     leaf._calls = []
-    task = {'id': 'deadbeefcafe', 'config': {}, '_endpoint_managed': True}
+    task = {'id': 'deadbeefcafe', 'config': {}, '_flow_managed': True}
     raised = _drive(leaf, monkeypatch, task, SystemExit(3))
     assert isinstance(raised, SystemExit)
     assert task['status'] == 'error', 'envelope still stamped'
     assert leaf._calls == [], (
-        'endpoint-managed task must NOT emit DONE/persist here (the '
+        'Flow-managed task must NOT emit DONE/persist here (the '
         'endpoint lane owns terminal emission)')
 
 

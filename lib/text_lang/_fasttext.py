@@ -14,11 +14,11 @@ time (facade pattern) — see the ``import lib.text_lang`` inside the function.
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 from typing import Optional
 
-from lib.env_compat import getenv_compat
 from lib.log import get_logger
 
 from lib.text_lang._ratios import (
@@ -113,7 +113,7 @@ def _get_ft_detector(force: bool = False):
                                    'fast_langdetect unavailable (%s) — falling '
                                    'back to script+heuristic path', e)
             return _ft_detect_forced or None
-    desired = (getenv_compat('TOFU_LANGDETECT_BACKEND') or 'script').strip().lower()
+    desired = (os.environ.get('TOFU_LANGDETECT_BACKEND') or 'script').strip().lower()
     with _ft_lock:
         if _ft_detect is not None and _ft_backend == desired:
             return _ft_detect or None

@@ -58,7 +58,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.tasks_pkg.commit_round import derive_round_modified_files  # noqa: E402
+from lib.tasks_pkg.commit_round._derive import derive_round_modified_files  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -287,9 +287,10 @@ def test_same_path_in_two_roots_stays_two_files(journal):
 def test_repeated_writes_to_one_file_collapse_to_the_last_action(journal):
     """Multiple writes to one path yield ONE entry — the final state wins.
 
-    ``count`` still reports the raw number of journal entries, because the
-    caller uses it to distinguish "one file touched five times" from "one file
-    touched once".
+    ``count`` is the UNIQUE-FILE count, not the raw journal-event count: it
+    headlines the "N files changed" card directly above this deduped list, so
+    a file edited twice must read as one changed file, not two (2026-08-27:
+    the card showed "2 files changed" over a one-row list).
     """
     journal['/proj'] = [
         _mod('f.py', mtype='write_file', existed=False),   # created
@@ -298,7 +299,7 @@ def test_repeated_writes_to_one_file_collapse_to_the_last_action(journal):
     files, count, _ = derive_round_modified_files(_task(), '/proj', ['/proj'])
     assert len(files) == 1
     assert _action_of(files, 'f.py') == 'patched', 'last write must win'
-    assert count == 2, 'raw mod count must not be deduped'
+    assert count == 1, 'count must match the deduped list the card renders'
 
 
 def test_unrooted_mod_omits_the_root_key_entirely(journal):

@@ -21,9 +21,8 @@ pytestmark = pytest.mark.unit
 # Boot the Flask→Quart shim BEFORE any of our lib.* imports below.  The
 # shim lives in server.py at module load — without it, importing
 # lib.tasks_pkg.manager pulls in the REAL flask, then later server-backed
-# tests that swap to Quart end up with stale flask.g references in
-# lib/database/_core.py that fire "Working outside of application
-# context" during teardown.
+# tests that swap to Quart can end up with stale ``flask.g`` references that
+# fire "Working outside of application context" during teardown.
 import importlib.util as _importlib_util
 _spec = _importlib_util.spec_from_file_location(
     'server_for_shim_hook_test', 'server.py')
@@ -33,13 +32,16 @@ del _spec, _mod, _importlib_util
 
 from lib.tasks_pkg.tool_hooks import (
     HookResult,
+    _post_compact_hooks,
     _post_hooks,
     _pre_compact_hooks,
     _pre_hooks,
     _user_prompt_hooks,
+    register_post_compact_hook,
     register_pre_compact_hook,
     register_pre_hook,
     register_user_prompt_hook,
+    run_post_compact_hooks,
     run_pre_compact_hooks,
     run_pre_hooks,
     run_user_prompt_hooks,
@@ -48,15 +50,17 @@ from lib.tasks_pkg.tool_hooks import (
 
 def _save_registries():
     return (list(_pre_hooks), list(_post_hooks),
-            list(_user_prompt_hooks), list(_pre_compact_hooks))
+            list(_user_prompt_hooks), list(_pre_compact_hooks),
+            list(_post_compact_hooks))
 
 
 def _restore_registries(snap):
-    pre, post, ups, pc = snap
+    pre, post, ups, pc, poc = snap
     _pre_hooks[:] = pre
     _post_hooks[:] = post
     _user_prompt_hooks[:] = ups
     _pre_compact_hooks[:] = pc
+    _post_compact_hooks[:] = poc
 
 
 class _RegistrySandbox(unittest.TestCase):
@@ -181,6 +185,40 @@ class TestPreCompact(_RegistrySandbox):
         register_pre_compact_hook(boom)
         # Should not raise.
         run_pre_compact_hooks([], {})
+
+
+class TestPostCompact(_RegistrySandbox):
+    """PostCompact hooks fire AFTER a successful compaction (Codex-inspired
+    CompactionAnalytics parity — pipeline emits an info dict, hooks observe).
+    """
+
+    def test_no_hooks_no_op(self):
+        _post_compact_hooks[:] = []
+        result = run_post_compact_hooks({'trigger': 'auto'}, {})
+        self.assertIsNone(result)
+
+    def test_hook_observes_info_and_task(self):
+        captured = []
+        register_post_compact_hook(
+            lambda info, task: captured.append((info['trigger'],
+                                                task.get('id'))))
+        run_post_compact_hooks({'trigger': 'auto', 'tokens_before': 10,
+                                'tokens_after': 5},
+                               {'id': 't-1'})
+        self.assertEqual(captured, [('auto', 't-1')])
+
+    def test_hook_exception_swallowed_and_chain_continues(self):
+        order = []
+
+        def boom(info, task):
+            order.append('boom')
+            raise RuntimeError('intentional')
+
+        register_post_compact_hook(boom)
+        register_post_compact_hook(lambda info, task: order.append('ok'))
+        # Should not raise; the second hook still runs.
+        run_post_compact_hooks({'trigger': 'auto'}, {})
+        self.assertEqual(order, ['boom', 'ok'])
 
 # NOTE: Integration coverage of run_compaction_pipeline calling the
 # PreCompact hook lives in tests/test_sdk_parity_e2e.py

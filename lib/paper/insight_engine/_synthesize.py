@@ -1,17 +1,13 @@
-"""JSON extraction + the agentic synthesis pass.
+"""Extract, repair, and synthesize structured paper insights.
 
-Holds :func:`_parse_llm_json`, the one-shot :func:`_repair_json_reask` recovery,
-and :func:`_research_and_synthesize` — the single seam tests monkeypatch to
-drive the agentic loop offline.
-
-The two patchable dependencies — ``dispatch_stream`` (the LLM) and
-``_execute_report_tool`` (the research tool executor) — are resolved THROUGH the
-package facade at call time (``import lib.paper.insight_engine as _pkg``) so a
-test patching ``ie.dispatch_stream`` / ``ie._execute_report_tool`` bites exactly
-as it did in the original flat module.
+Owns the model/tool loop and the one-shot JSON repair path.  Grounding and
+persistence live in sibling modules.
 """
 
+import hashlib
+
 from lib.agent_loop import AbortSignal, run_agent_loop
+from lib.llm_dispatch.api import dispatch_stream
 from lib.llm_errors import AbortedError
 from lib.log import get_logger
 from lib.llm.json_extract import extract_first_json_object
@@ -21,8 +17,15 @@ from ._config import (
     _REPAIR_MAX_TOKENS,
 )
 from ..insight_prompts import insight_system_prompt
-from ..prompts import _REPORT_TOOLS, date_anchor_clause
-from ..tools import make_research_tool_executor  # noqa: F401
+from ..prompts import date_anchor_clause
+from ..tools import (
+    PaperToolResultBudgetV2,
+    build_research_tool_schemas,
+    execute_paper_tool,
+    freeze_paper_tool_epoch,
+    make_paper_exec_shim,
+    make_research_tool_executor,
+)
 
 logger = get_logger(__name__)
 
@@ -52,9 +55,6 @@ def _repair_json_reask(messages, bad_content, *, model, abort_signal):
     lowered generation temperature; without it a prose-wrapped or truncated
     reply makes the whole feature silently no-op.
     """
-    import lib.paper.insight_engine as _pkg
-    dispatch_stream = _pkg.dispatch_stream
-
     reask = list(messages)
     # Feed back what it actually said so the model reformats THAT, not re-invents.
     reask.append({'role': 'assistant', 'content': (bad_content or '')[:6000]})
@@ -65,7 +65,8 @@ def _repair_json_reask(messages, bad_content, *, model, abort_signal):
         buf['content'] += text
 
     try:
-        msg, _finish, _usage = dispatch_stream(
+        from lib.llm.stream_result import require_verified_provider_stream_result
+        stream_result = require_verified_provider_stream_result(dispatch_stream(
             reask,
             on_content=_on_content,
             abort_check=abort_signal.is_set,
@@ -76,7 +77,8 @@ def _repair_json_reask(messages, bad_content, *, model, abort_signal):
             temperature=0.0,
             thinking_enabled=False,
             log_prefix='[Paper:Insight:Repair]',
-        )
+        ), context='paper insight JSON repair')
+        msg = stream_result.message
     except AbortedError:
         raise
     except Exception as e:
@@ -94,22 +96,19 @@ def _repair_json_reask(messages, bad_content, *, model, abort_signal):
 
 
 def _research_and_synthesize(paper_text, report_md, reader_context, ui_lang, *,
-                             model=None, abort=None, on_tool_event=None):
+                             user_id, model=None, abort=None,
+                             on_tool_event=None):
     """Agentic insight synthesis: research the frontier, then return the model's
     structured insight JSON (ungrounded — the caller grounds it).
 
     Runs the shared tool-calling loop (``web_search`` / ``fetch_url`` via the
-    report engine's ``_execute_report_tool``) at higher temperature with a
+    report engine's ``execute_paper_tool``) at higher temperature with a
     date-anchored system prompt. This is the single seam tests monkeypatch.
 
     Raises:
         AbortedError: loop aborted mid-dispatch (caller treats as clean empty).
         Exception: hard LLM dispatch failure (caller flags an error).
     """
-    import lib.paper.insight_engine as _pkg
-    dispatch_stream = _pkg.dispatch_stream
-    _execute_report_tool = _pkg._execute_report_tool
-
     system = date_anchor_clause(ui_lang) + insight_system_prompt(ui_lang)
     # The paper text is truncated by the caller; the report is the primary
     # material for synthesis (it already distilled the paper).
@@ -128,6 +127,16 @@ def _research_and_synthesize(paper_text, report_md, reader_context, ui_lang, *,
     ]
     abort_signal = AbortSignal.from_callback(abort)
     user_question = (report_md or paper_text or '')[:300]
+    paper_tools, paper_contracts = freeze_paper_tool_epoch(
+        build_research_tool_schemas(), owner_user_id=user_id)
+    _exec_shim = make_paper_exec_shim(
+        task_id=('paper-insight-' + hashlib.sha256(
+            user_question.encode('utf-8')).hexdigest()[:16]),
+        abort=abort_signal.is_set, owner_user_id=user_id,
+        tool_contract_documents_by_name=paper_contracts)
+    _result_budget = PaperToolResultBudgetV2(
+        owner_user_id=user_id, model=model or '')
+    contracts_by_round = {}
 
     _round = {'content': ''}
     _last = {'msg': None}
@@ -156,25 +165,29 @@ def _research_and_synthesize(paper_text, report_md, reader_context, ui_lang, *,
 
     def _dispatch(rnd, tools):
         _round['content'] = ''
+        effective_tools, contracts_by_round[rnd] = freeze_paper_tool_epoch(
+            tools, owner_user_id=user_id)
 
         def _on_content(text):
             _round['content'] += text
 
         logger.info('[Paper:Insight] Synthesis round %d — msgs=%d tools=%s',
-                    rnd + 1, len(messages), 'yes' if tools else 'no')
-        return dispatch_stream(
+                    rnd + 1, len(messages),
+                    'yes' if effective_tools else 'no')
+        from lib.llm.stream_result import ensure_provider_stream_result
+        return ensure_provider_stream_result(dispatch_stream(
             messages,
             on_content=_on_content,
             abort_check=abort_signal.is_set,
             prefer_model=model_name if model else None,
             strict_model=bool(model),
             capability='text',
-            tools=tools,
+            tools=effective_tools,
             max_tokens=8000,
             temperature=_INSIGHT_TEMPERATURE,
             thinking_enabled=False,
             log_prefix='[Paper:Insight]',
-        )
+        ))
 
     def _on_round_result(rnd, msg, finish, usage):
         _last['msg'] = msg
@@ -186,21 +199,22 @@ def _research_and_synthesize(paper_text, report_md, reader_context, ui_lang, *,
         _round['content'] = ''
         messages.append(msg)
 
-    # Shared research tool-round executor (see lib/paper/tools.make_research_tool_executor):
-    # insight uses the model's own vertical choice (no force_vertical). Pass the
-    # facade-resolved _execute_report_tool so ie._execute_report_tool patches bite.
+    # Insight uses the model's own search vertical choice (no forced vertical).
     _execute_tool = make_research_tool_executor(
         messages, user_question=user_question, abort_signal=abort_signal,
-        execute_report_tool=_execute_report_tool,
-        on_tool_event=on_tool_event, log_prefix='[Paper:Insight]')
+        result_budget=_result_budget, exec_shim=_exec_shim,
+        paper_tool_executor=execute_paper_tool,
+        on_tool_event=on_tool_event, log_prefix='[Paper:Insight]',
+        contract_documents_for_round=contracts_by_round.get)
 
     run_agent_loop(
         abort=abort_signal,
-        round_tools=_REPORT_TOOLS,
+        round_tools=paper_tools,
         dispatch=_dispatch,
         execute_tool=_execute_tool,
         on_round_result=_on_round_result,
         on_tool_round=_begin_tool_round,
+        on_round_end=_result_budget.finish_round,
     )
 
     content = _round['content']

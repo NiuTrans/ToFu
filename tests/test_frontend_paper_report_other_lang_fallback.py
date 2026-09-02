@@ -40,11 +40,12 @@ import subprocess
 import pytest
 
 from tests._paper_vite import compiled_typescript
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 # _loadOrGenerateReport (incl. step 3.5) moved to paper/report.js (Epic E split,
 # 2026-07-11); paper-reader.js keeps _reportView + _activeReportLang + helpers.

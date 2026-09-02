@@ -48,7 +48,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-from server_manager import LifecycleManager
+from server_manager import LifecycleManager, project_server_env
+from runtime_guards import install_process_resource_defaults
 
 # The lifecycle manager must stay available when application imports or the DB
 # are broken. Keep its dependency closure strictly standard-library; the shell
@@ -226,6 +227,13 @@ def do_start(project_path, python_exe=None):
         logger.warning('start: could not ensure data dir %s: %s', data_dir, e)
     log_path = os.path.join(data_dir, 'supervisor-server.log')
     try:
+        # Optional in standalone recovery copies; the canonical checkout owns
+        # the shared bounded policy and a periodic copy-truncate worker.
+        try:
+            from lib.log_retention import register_external_log
+            register_external_log(log_path, 'supervisor_server_console')
+        except Exception:
+            pass
         log_fh = open(log_path, 'ab')
     except OSError as e:
         logger.error('start: cannot open server log %s: %s', log_path, e, exc_info=True)
@@ -234,10 +242,16 @@ def do_start(project_path, python_exe=None):
     try:
         # start_new_session detaches the child into its own process group so it
         # survives this request / a supervisor restart. Output → the log file.
+        child_env = os.environ.copy()
+        child_env.update(project_server_env(canon))
+        child_env['TOFU_PROJECT_PATH'] = canon
+        install_process_resource_defaults(child_env)
+        child_env['TOFU_EXTERNAL_CONSOLE_LOG'] = log_path
+        child_env['TOFU_EXTERNAL_CONSOLE_STREAM'] = 'supervisor_server_console'
         proc = subprocess.Popen(
             [py, 'server.py'],
             cwd=canon,
-            env=os.environ.copy(),
+            env=child_env,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,

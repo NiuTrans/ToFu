@@ -17,18 +17,12 @@ agent loops share:
   * the autopilot loop-budget env config (fail-open readers);
   * the shared "cut off by a safety cap, not finished" outcome contract.
 
-Before this module existed, all of the above were hand-copied across
-``lib/tasks_pkg/endpoint_review.py``, ``lib/tasks_pkg/endpoint.py``,
-``lib/orchestration_engine.py`` (and the VU sentinel in
-``lib/tasks_pkg/autopilot.py``) — with explicit "Kept as a local copy …
-update BOTH sets" comments.  The three copies had begun to diverge.  This
-module reconciles them: callers that want the strict endpoint policy and
-callers that want the engine's loose-fallback + virtual-user inversion both
-drive the SAME core, parameterised by ``loose_fallback`` and
-``verifier_role``.
+This module replaced several hand-copied verdict implementations that had
+started to diverge. Verifier flows and virtual-user flows now drive the same
+core, parameterized by ``loose_fallback`` and ``verifier_role``.
 
-The module is pure logic — it imports only ``lib.log`` (audit/log) and
-``lib.env_compat`` (the env config).  No app/runtime coupling.
+The module is pure logic — it imports only the standard library and
+``lib.log`` (audit/log). No app/runtime coupling.
 
 This file is a PURE RE-EXPORT FACADE.  The implementations live in the
 sub-modules (``_handoff``, ``_verdict``, ``_stuck``, ``_rounds``,

@@ -412,10 +412,16 @@ def test_pipeline_end_to_end(tmp_path, monkeypatch):
 
     video = _make_video(tmp_path / 'job' / 'upload.mp4', seconds=2.0,
                         with_audio=True)
-    store.create_record('v_test_e2e', name='clip.mp4', size_bytes=os.path.getsize(video))
-    pipe._process('v_test_e2e', video, 'clip.mp4')
+    store.create_record(
+        'v_test_e2e',
+        name='clip.mp4',
+        size_bytes=os.path.getsize(video),
+        user_id=1,
+    )
+    pipe._process('v_test_e2e', video, 'clip.mp4', user_id=1)
 
-    rec = store.get_record('v_test_e2e')
+    rec = store.get_record('v_test_e2e', user_id=1)
+    assert store.get_record('v_test_e2e', user_id=2) is None
     assert rec['status'] == 'ready', rec.get('error')
     assert rec['phase'] == 'done'
     assert rec['duration_s'] == pytest.approx(2.0, abs=0.3)
@@ -434,6 +440,9 @@ def test_pipeline_end_to_end(tmp_path, monkeypatch):
     # The original was copied into the durable videos dir.
     stored = rec['video_url'].rsplit('/', 1)[-1]
     assert os.path.isfile(tmp_path / 'uploads' / 'videos' / stored)
+    assert store.resolve_owned_video_asset(stored, user_id=1) == str(
+        tmp_path / 'uploads' / 'videos' / stored)
+    assert store.resolve_owned_video_asset(stored, user_id=2) == ''
 
 
 def test_pipeline_rejects_too_long(tmp_path, monkeypatch):
@@ -444,9 +453,10 @@ def test_pipeline_rejects_too_long(tmp_path, monkeypatch):
                         lambda: str(tmp_path / 'registry.json'))
     monkeypatch.setattr(pipe, 'video_max_duration_s', lambda: 1.0)
     video = _make_video(tmp_path / 'job' / 'upload.mp4', seconds=3.0)
-    store.create_record('v_long', name='long.mp4', size_bytes=1)
-    pipe._process('v_long', video, 'long.mp4')
-    rec = store.get_record('v_long')
+    store.create_record(
+        'v_long', name='long.mp4', size_bytes=1, user_id=1)
+    pipe._process('v_long', video, 'long.mp4', user_id=1)
+    rec = store.get_record('v_long', user_id=1)
     assert rec['status'] == 'failed'
     assert 'too long' in rec['error']
 
@@ -455,14 +465,15 @@ def test_stale_processing_record_swept(tmp_path, monkeypatch):
     import lib.video_analysis._store as store
     monkeypatch.setattr(store, '_registry_path',
                         lambda: str(tmp_path / 'registry.json'))
-    store.create_record('v_stale', name='x.mp4', size_bytes=1)
+    store.create_record(
+        'v_stale', name='x.mp4', size_bytes=1, user_id=1)
     # Age the record directly so the stale-processing sweep sees it.
     from lib.json_store import update_json_atomic
     def _age(reg):
         reg['v_stale']['updated_at'] = 0
         return reg
     update_json_atomic(str(tmp_path / 'registry.json'), _age, default={})
-    got = store.get_record('v_stale')
+    got = store.get_record('v_stale', user_id=1)
     assert got['status'] == 'failed'
     assert 'interrupted' in got['error']
 
@@ -495,8 +506,9 @@ def test_upload_route_happy_and_status(client, tmp_path, monkeypatch):
 
     started = {}
 
-    def _fake_start(video_id, scratch_path, name):
+    def _fake_start(video_id, scratch_path, name, *, user_id):
         started['video_id'] = video_id
+        started['user_id'] = user_id
         import shutil
         shutil.rmtree(os.path.dirname(scratch_path), ignore_errors=True)
     monkeypatch.setattr(va, 'start_processing', _fake_start)
@@ -520,6 +532,40 @@ def test_upload_route_happy_and_status(client, tmp_path, monkeypatch):
         return vid
     vid = _run_async(go())
     assert started['video_id'] == vid
+    assert started['user_id'] == 1
+
+    import routes.api_v1.videos as video_routes
+    monkeypatch.setattr(video_routes, 'request_user_id', lambda: 2)
+
+    async def get_as_foreign_owner():
+        return await client.get(f'/api/v1/videos/{vid}')
+
+    assert _run_async(get_as_foreign_owner()).status_code == 404
+
+
+def test_video_file_route_requires_durable_asset_owner(
+        client, tmp_path, monkeypatch):
+    import lib.video_analysis._pipeline as pipe
+    import lib.video_analysis._store as store
+    import routes.api_v1.videos as video_routes
+
+    monkeypatch.setattr(pipe, 'uploads_root', lambda: str(tmp_path / 'uploads'))
+    filename = 'owned-video.mp4'
+    video_dir = tmp_path / 'uploads' / 'videos'
+    video_dir.mkdir(parents=True)
+    (video_dir / filename).write_bytes(b'video-bytes')
+    store.register_video_asset(
+        filename,
+        video_id='v_owned',
+        user_id=1,
+    )
+
+    async def get_file():
+        return await client.get(f'/api/videos/{filename}')
+
+    assert _run_async(get_file()).status_code == 200
+    monkeypatch.setattr(video_routes, 'request_user_id', lambda: 2)
+    assert _run_async(get_file()).status_code == 404
 
 
 def test_upload_route_rejects_bad_extension(client):
@@ -666,7 +712,8 @@ def test_turn_builder_videos_sanitize_and_passthrough():
                     {'url': 42}],
          'transcript': 'words', 'evil_extra': 'drop me'},
     ]}
-    msg = build_user_msg_from_payload(payload, {'autoTranslate': False})
+    msg = build_user_msg_from_payload(
+        payload, {'autoTranslate': False}, user_id=1)
     vids = msg['videos']
     assert len(vids) == 1
     assert vids[0]['video_id'] == 'v1'
@@ -680,7 +727,8 @@ def test_turn_builder_storyboard_keys_survive():
         {'name': 'a.mp4', 'storyboard': 'arc text', 'storyboard_model': 'vl-test',
          'storyboard_status': 'internal-only'},
     ]}
-    msg = build_user_msg_from_payload(payload, {'autoTranslate': False})
+    msg = build_user_msg_from_payload(
+        payload, {'autoTranslate': False}, user_id=1)
     v = msg['videos'][0]
     assert v['storyboard'] == 'arc text' and v['storyboard_model'] == 'vl-test'
     assert 'storyboard_status' not in v  # status is registry metadata, not payload
@@ -689,26 +737,8 @@ def test_turn_builder_storyboard_keys_survive():
 def test_turn_builder_no_videos_key_when_empty():
     from lib.chat.turn_builder import build_user_msg_from_payload
     msg = build_user_msg_from_payload({'text': 'hi', 'videos': []},
-                                      {'autoTranslate': False})
+                                      {'autoTranslate': False}, user_id=1)
     assert 'videos' not in msg
-
-
-def test_frontend_video_wiring_pins():
-    """Static pins on the frontend glue (the repo's ratchet idiom): the send
-    pipeline, upload chips, Api namespace and file-picker accept must ALL stay
-    wired for videos — a silent de-wire turns uploads into no-ops."""
-    import pathlib
-    root = pathlib.Path(__file__).resolve().parent.parent
-    runtime = (root / 'frontend/src/runtime/app-runtime.js').read_text()
-    assert 'msgPayload.videos' in runtime
-    assert 'userMsg.videos = msgPayload.videos' in runtime
-    assert 'pendingVideos = [];' in runtime
-    assert '_waitForPendingVideos' in runtime
-    assert '_looksLikeVideo' in runtime and 'Api.videos.upload' in runtime
-    assert 'video-chip' in runtime
-    assert '/api/v1/videos/upload' in runtime and '/api/v1/videos/' in runtime
-    html = (root / 'index.html').read_text()
-    assert 'video/*' in html
 
 
 def test_body_cap_guard_matrix():

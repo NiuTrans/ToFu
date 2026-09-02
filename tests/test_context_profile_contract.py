@@ -18,7 +18,8 @@ def test_unknown_new_catalogue_models_are_not_fabricated():
     # gemini-3.5-pro / -ultra also pin the post-rule unknown guard: verified
     # flash variants win earlier, but unknown future variants must NOT
     # inherit the generic 'gemini' family estimate.
-    for model in ('gemini-3.5-pro', 'gemini-3.6-ultra', 'glm-6', 'kimi-k4'):
+    for model in ('gemini-3.5-pro', 'gemini-3.6-ultra', 'gemini-3.7-pro',
+                  'glm-6', 'kimi-k4'):
         assert context_profile(model) == {
             'window': None, 'source': 'unknown', 'exact': False,
         }
@@ -34,6 +35,7 @@ def test_sankuai_catalog_models_promoted_to_vendor_windows():
         'gemini-3.5-flash': 1_000_000,
         'gemini-3.5-flash-lite': 1_000_000,
         'gemini-3.6-flash': 1_000_000,
+        'gemini-3.7-flash': 1_000_000,
         'glm-5.1': 200_000,
         'glm-5.2': 1_000_000,
         'glm-5.3': 1_000_000,
@@ -177,12 +179,15 @@ def test_capabilities_keeps_same_model_per_provider(monkeypatch):
         {'id': 'b', 'models': [{'model_id': 'shared'}]},
     ]})
     rows = _models_summary()
-    assert [(row['provider'], row['id']) for row in rows] == [
-        ('a', 'shared'), ('b', 'shared'),
-    ]
-    assert all(row['context'] == {
+    assert len(rows) == 1
+    assert rows[0]['id'] == 'shared'
+    assert set(rows[0]['providers']) == {'a', 'b'}
+    assert {
+        offering['provider'] for offering in rows[0]['offerings']
+    } == {'a', 'b'}
+    assert all(offering['context'] == {
         'window': None, 'source': 'unknown', 'exact': False,
-    } for row in rows)
+    } for offering in rows[0]['offerings'])
 
 
 @pytest.mark.skipif(shutil.which('node') is None, reason='node not installed')
@@ -206,6 +211,13 @@ global.currentModel = 'unknown-model';
 global._contextPolicy = {per_model: {
   'p::estimated-model': {window: 100000, source: 'family_estimate', exact: false},
 }};
+global.runtimeScope.ConversationTurnRead = {
+  state: () => ({liveRoundUsageByTurn: {}}),
+  ordered: () => [{
+    turnId: 'turn-1', actor: 'assistant', updatedAt: 1,
+    projection: {lastRoundUsage: {tokensIn: 50000}},
+  }],
+};
 const source = fs.readFileSync(process.argv[2], 'utf8');
 const start = source.indexOf('/* ===== migrated source: context-bar.js ===== */');
 const end = source.indexOf('/* ===== migrated source: presence.js ===== */', start);
@@ -229,3 +241,96 @@ console.log(JSON.stringify({unknown, estimate}));
     assert payload['estimate']['zone'] == 'ok'
     assert payload['estimate']['exact'] is False
     assert payload['estimate']['source'] == 'family_estimate'
+
+
+def test_per_model_policy_has_bare_aliases():
+    """routes.config._build_per_model_context_policy must emit BOTH the
+    scoped ``provider::model`` key and the bare ``model_id`` alias.
+
+    The frontend ``_resolveContextProfile`` contract tries the scoped key
+    first, then the bare one — but the server historically wrote ONLY
+    scoped keys, so the documented fallback could never hit. Legacy
+    conversations (settings.provider_id fleet-wide NULL, verified
+    2026-08-20) live and die by the bare alias."""
+    from routes.config import _build_per_model_context_policy
+
+    per_model = _build_per_model_context_policy([
+        {'provider_id': 'sankuai', 'model_id': 'kimi-k3'},
+        {'provider_id': 'other', 'model_id': 'kimi-k3'},   # name collision
+        {'provider_id': '', 'model_id': ''},               # garbage row
+        {'provider_id': 'sankuai', 'model_id': 'glm-5.3'},
+    ])
+    assert per_model['sankuai::kimi-k3']['window'] == 1_000_000
+    # Bare alias exists and FIRST registration wins on collision.
+    assert per_model['kimi-k3'] == per_model['sankuai::kimi-k3']
+    assert per_model['other::kimi-k3']['window'] == 1_000_000
+    assert per_model['glm-5.3'] == per_model['sankuai::glm-5.3']
+    # The garbage row produced no keys.
+    assert '' not in per_model and '::' not in per_model
+    # Every scoped key has a bare twin.
+    scoped = [k for k in per_model if '::' in k]
+    for k in scoped:
+        assert k.split('::', 1)[1] in per_model
+
+
+@pytest.mark.skipif(shutil.which('node') is None, reason='node not installed')
+def test_frontend_providerless_conv_resolves_via_bare_key(tmp_path):
+    """The 2026-08-20 fleet bug end-to-end at the JS layer: a conversation
+    with NO provider_id (and a config without one) must still resolve its
+    window via the bare model alias in per_model. A NEUTER variant (alias
+    dropped) must fall back to zone 'unknown' — proving the alias is the
+    load-bearing link."""
+    harness = tmp_path / 'context_profile_providerless.js'
+    harness.write_text(r"""
+const fs = require('fs');
+global.window = global;
+global.runtimeScope = global;
+global.document = {
+  readyState: 'loading',
+  addEventListener: () => {},
+  getElementById: () => null,
+};
+// Legacy conv: provider_id NEVER persisted; global config carries none either.
+global.getConvById = () => ({
+  id: 'c1', model: 'kimi-k3',
+  messages: [{role: 'assistant', usage: {prompt_tokens: 50000}}],
+});
+global.activeConvId = 'c1';
+const perModel = {'sankuai::kimi-k3': {window: 1000000, source: 'repository_verified', exact: true}};
+if (process.env.WITH_BARE_ALIAS === '1') {
+  perModel['kimi-k3'] = perModel['sankuai::kimi-k3'];
+}
+global._contextPolicy = {per_model: perModel};
+global.runtimeScope.ConversationTurnRead = {
+  state: () => ({liveRoundUsageByTurn: {}}),
+  ordered: () => [{
+    turnId: 'turn-1', actor: 'assistant', updatedAt: 1,
+    projection: {lastRoundUsage: {tokensIn: 50000}},
+  }],
+};
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const start = source.indexOf('/* ===== migrated source: context-bar.js ===== */');
+const end = source.indexOf('/* ===== migrated source: presence.js ===== */', start);
+if (start < 0 || end < 0) throw new Error('context-bar migrated source not found');
+eval(source.slice(start, end));
+console.log(JSON.stringify(contextUsageSummary()));
+""", encoding='utf-8')
+    runtime = str(Path('frontend/src/runtime/app-runtime.js').resolve())
+
+    import os
+    env_with = dict(os.environ, WITH_BARE_ALIAS='1')
+    proc = subprocess.run(['node', str(harness), runtime],
+                          text=True, capture_output=True, check=True,
+                          env=env_with)
+    resolved = json.loads(proc.stdout)
+    assert resolved['limit'] == 1_000_000
+    assert resolved['zone'] == 'ok'
+    assert resolved['pct'] == 5
+
+    # NEUTER: without the bare alias the SAME conv is blind — the exact
+    # production shape before the fix.
+    proc = subprocess.run(['node', str(harness), runtime],
+                          text=True, capture_output=True, check=True)
+    blind = json.loads(proc.stdout)
+    assert blind['limit'] is None
+    assert blind['zone'] == 'unknown'

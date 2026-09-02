@@ -4,6 +4,7 @@ Reads/writes individual memory markdown files and enumerates a directory.
 Depends on :mod:`_frontmatter` (parse/build) and :mod:`_dirs` (``_ensure_dir``).
 """
 
+import json
 import os
 import re
 import shutil
@@ -28,7 +29,7 @@ logger = get_logger(__name__)
 #  Memory Eligibility Gating (OpenClaw-inspired)
 # ═══════════════════════════════════════════════════════
 
-def _check_memory_eligible(mem):
+def _check_memory_eligible(mem, owner_user_id=None):
     """Check whether a memory's runtime requirements are satisfied.
 
     Honours ``always=True`` (skip all gates) and:
@@ -63,7 +64,8 @@ def _check_memory_eligible(mem):
         if mem.get('is_package') and mem.get('id'):
             try:
                 from lib.skills.env import vault_has_env
-                if vault_has_env(mem['id'], var):
+                if vault_has_env(
+                        mem['id'], var, owner_user_id=owner_user_id):
                     continue
             except Exception as e:
                 logger.debug('vault env probe failed for %s: %s', var, e)
@@ -85,7 +87,7 @@ def _check_memory_eligible(mem):
 # ═══════════════════════════════════════════════════════
 
 def _memory_from_file(filepath, scope='global', package_dir=None,
-                       memory_id_override=None):
+                       memory_id_override=None, owner_user_id=None):
     """Read a single memory file and return a memory dict.
 
     Args:
@@ -97,6 +99,7 @@ def _memory_from_file(filepath, scope='global', package_dir=None,
             ``references/``, ``scripts/`` etc.).  ``None`` for flat memories.
         memory_id_override: Force a specific id (used for package skills
             where the directory name is the id, not the filename).
+        owner_user_id: Optional owner for package credential eligibility.
     """
     try:
         with open(filepath, encoding='utf-8') as f:
@@ -118,14 +121,29 @@ def _memory_from_file(filepath, scope='global', package_dir=None,
     # marker so the catalog endpoint can match them back (the memory id is
     # derived from SKILL.md ``name`` and rarely equals the catalog id).
     catalog_id = ''
+    origin = {}
     if package_dir:
         marker = os.path.join(package_dir, '.catalog_id')
         if os.path.isfile(marker):
             try:
                 with open(marker, encoding='utf-8') as cf:
-                    catalog_id = cf.read().strip()
+                    raw_catalog_id = cf.read(129).strip()
+                if len(raw_catalog_id) <= 128:
+                    catalog_id = raw_catalog_id
             except OSError as e:
                 logger.debug('Failed to read .catalog_id in %s: %s',
+                             package_dir, e)
+        origin_path = os.path.join(package_dir, '.skill-origin.json')
+        if os.path.isfile(origin_path) and not os.path.islink(origin_path):
+            try:
+                with open(origin_path, encoding='utf-8') as origin_file:
+                    raw_origin = origin_file.read(4_097)
+                if len(raw_origin) <= 4_096:
+                    parsed_origin = json.loads(raw_origin)
+                    if isinstance(parsed_origin, dict):
+                        origin = parsed_origin
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+                logger.debug('Failed to read skill origin in %s: %s',
                              package_dir, e)
 
     # Top-level frontmatter overrides (``requires_bins:`` /
@@ -156,9 +174,14 @@ def _memory_from_file(filepath, scope='global', package_dir=None,
         'is_package': bool(package_dir),
         'package_dir': package_dir or '',
         'catalog_id': catalog_id,
+        'source_revision': str(origin.get('source_revision') or '')[:128],
+        'source_registry': str(origin.get('source_registry') or '')[:64],
+        'source_url': str(origin.get('source_url') or '')[:2_048],
+        'content_sha256': str(origin.get('content_sha256') or '')[:64],
     }
 
-    eligible, reasons = _check_memory_eligible(mem)
+    eligible, reasons = _check_memory_eligible(
+        mem, owner_user_id=owner_user_id)
     mem['eligible'] = eligible
     mem['ineligible_reasons'] = reasons
     return mem

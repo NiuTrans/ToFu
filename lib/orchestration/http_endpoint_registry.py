@@ -85,9 +85,6 @@ ORCHESTRATION_HTTP_ENDPOINTS: Mapping[
     'authoring-contract': _endpoint(
         '/api/v1/orchestrations/authoring-contract', 'GET',
         'authoring-contract'),
-    'role-schema': _endpoint(
-        '/api/v1/orchestrations/role-schema', 'GET', 'authoring-contract',
-        query_args=(('role', 0),)),
     'plan': _endpoint(
         '/api/v1/orchestrations/plan', 'POST', 'plan',
         body_args=(

@@ -1,6 +1,6 @@
 """lib/paper/ideate.py — breakthrough-idea discovery + anti-"A+B" gate (R3).
 
-The auto-research recipe's stage 4 (docs/AUTO_RESEARCH_SYSTEM_DESIGN.md §3 阶段 4)
+The auto-research recipe's stage 4 (docs/modules/ingest_media.md §3 阶段 4)
 and its intellectual core: turn R2's library-verified open-gap map into
 **genuinely novel** research ideas, and — the hard part — KILL the "A+B stitching"
 ideas that a plain LLM produces by the dozen.
@@ -40,14 +40,14 @@ is preserved in the result's ``rejected`` list (and persisted under the
 ``ideate:<lang>`` report key) so the threshold can be calibrated from real
 rejection distributions rather than guessed. (Owner requirement.)
 
-Seams (facade discipline, same as survey/insight): ``dispatch_stream``,
-``search_arxiv``, ``fetch_arxiv_title`` are resolved THROUGH this module so a
-test patches ``ideate.search_arxiv`` etc. and it bites every gate — the whole
-thing is testable with zero network and zero real LLM.
+The dispatcher, arXiv search, and title lookup are module dependencies. Tests
+replace those exact consumer bindings, keeping the whole gate pipeline offline
+without package facades or reflective self-imports.
 """
 
 from __future__ import annotations
 
+import hashlib
 from typing import Callable, Optional
 
 from lib.log import get_logger
@@ -248,7 +248,7 @@ def split_identity_domain(queries) -> list:
 def assemble_arxiv_query(identity, domain, *, tier: int = 1) -> tuple:
     """Build the arXiv query string; return ``(query, mode)``.
 
-    ★ CONSTRUCTION LIVES IN tofu-search. This is a thin delegation to
+    CONSTRUCTION LIVES IN tofu-search. This is a thin delegation to
     ``tofu_search.search.vertical.arxiv.build_query`` — the three measured
     syntax facts (quoted = exact phrase so novel terms recall zero; identity
     terms must be OR-ed not AND-ed; the domain leg stays a quoted phrase) are
@@ -264,6 +264,8 @@ def assemble_arxiv_query(identity, domain, *, tier: int = 1) -> tuple:
 
     ``mode``: ``'fielded_t1'`` | ``'fielded_t2'`` | ``'domain'`` | ``'all'``.
     """
+    from lib.search_runtime import ensure_search_runtime
+    ensure_search_runtime()
     from tofu_search.search.vertical import arxiv as _ts
 
     field = 'ti' if tier <= 1 else 'abs'
@@ -342,6 +344,8 @@ def ts_search_by_query(identity_terms, domain_terms=None, *, field='ti',
     (asked properly, nothing there → widen the rung) from ``request_failed`` /
     ``unusable_query`` (not evidence about the literature at all).
     """
+    from lib.search_runtime import ensure_search_runtime
+    ensure_search_runtime()
     from tofu_search.search.vertical.arxiv import search_by_query as _sbq
     return _sbq(identity_terms, domain_terms, field=field,
                 max_results=max_results)
@@ -431,11 +435,10 @@ def _novelty_prior_set(idea: dict, *, k: int = IDEATE_NOVELTY_RETRIEVAL_K,
     ``novelty_basis='none'`` means the retrieval produced nothing, so pin #1
     cannot hold: the caller MUST NOT accept that idea on a rubric score alone.
     """
-    import lib.paper.ideate as _self
     title = (idea.get('title') or '').strip()
-    terms, query_source = _self.build_retrieval_query(idea)
+    terms, query_source = build_retrieval_query(idea)
 
-    # ★ The ladder carries STRUCTURED LEGS, not pre-built query strings.
+    # The ladder carries STRUCTURED LEGS, not pre-built query strings.
     #
     # It used to carry strings and hand them to `search_arxiv`, whose contract
     # is "free text" — so the adapter sanitized them a SECOND time, stripping
@@ -461,7 +464,7 @@ def _novelty_prior_set(idea: dict, *, k: int = IDEATE_NOVELTY_RETRIEVAL_K,
     attempts = [_flat]
     if terms and batch_terms:
         try:
-            legs = _self.split_identity_domain(list(batch_terms) + [terms])[-1]
+            legs = split_identity_domain(list(batch_terms) + [terms])[-1]
             ladder = []
             if legs['identity'] and legs['domain']:
                 ladder.append((legs['identity'], legs['domain'], 'ti', 'fielded_t1'))
@@ -478,7 +481,7 @@ def _novelty_prior_set(idea: dict, *, k: int = IDEATE_NOVELTY_RETRIEVAL_K,
     def _search(ident, dom, field):
         """Retrieve via the shared vertical. Returns (papers, outcome)."""
         try:
-            res = _self.ts_search_by_query(
+            res = ts_search_by_query(
                 ident, dom, field=field,
                 max_results=max(k, IDEATE_NOVELTY_RETRIEVAL_K)) or {}
         except Exception as e:
@@ -610,10 +613,8 @@ def _score_idea(idea: dict, prior_set: dict, gap: dict, lang: str, *,
     novelty axis to min(score, 2) (the cap is applied HERE, deterministically,
     not left to the model).
     """
-    import lib.paper.ideate as _self
     from lib.agent_loop import AbortSignal
     from lib.llm_errors import AbortedError
-    _dispatch_stream = _self.dispatch_stream
 
     abort_signal = AbortSignal.from_callback(abort)
     buf = {'content': ''}
@@ -622,12 +623,16 @@ def _score_idea(idea: dict, prior_set: dict, gap: dict, lang: str, *,
         buf['content'] += t
 
     try:
-        msg, _finish, _usage = _dispatch_stream(
+        from lib.llm.stream_result import require_verified_provider_stream_result
+        stream_result = require_verified_provider_stream_result(dispatch_stream(
             [{'role': 'user', 'content': _judge_prompt(idea, prior_set, gap, lang)}],
             on_content=_on_content, abort_check=abort_signal.is_set,
             prefer_model=model or None, strict_model=bool(model), capability='text',
             max_tokens=_RUBRIC_MAX_TOKENS, temperature=_RUBRIC_TEMPERATURE,
-            thinking_enabled=False, log_prefix='[Paper:Ideate:Judge]')
+            thinking_enabled=False, log_prefix='[Paper:Ideate:Judge]'),
+            context='paper ideate judge')
+        msg = stream_result.message
+        _usage = stream_result.usage
     except AbortedError:
         raise
     except Exception as e:
@@ -672,7 +677,7 @@ def _score_idea(idea: dict, prior_set: dict, gap: dict, lang: str, *,
     }
 
 
-# ── Grounding (recommend engine, facade-resolved) ──────────────────────────
+# ── Grounding ──────────────────────────────────────────────────────────────
 
 def _ground_idea_prior_art(idea: dict) -> tuple:
     """Ground every arXiv id in the idea's prior_art; return (grounded, dropped).
@@ -681,14 +686,13 @@ def _ground_idea_prior_art(idea: dict) -> tuple:
     prior_art and counted — an idea whose novelty rests on hallucinated papers
     should not survive on their strength. Mutates ``idea['prior_art']`` in place.
     """
-    import lib.paper.ideate as _self
     grounded, dropped = [], 0
     for raw in (idea.get('prior_art') or []):
         aid = _norm_id(raw)
         if not aid:
             continue
         try:
-            title = _self.fetch_arxiv_title(aid)
+            title = fetch_arxiv_title(aid)
         except Exception as e:
             logger.debug('[Paper:Ideate] grounding lookup failed for %s: %s', aid, e)
             title = ''
@@ -701,20 +705,25 @@ def _ground_idea_prior_art(idea: dict) -> tuple:
     return grounded, dropped
 
 
-# ── Generation (facade-resolved agentic loop, mirrors survey) ──────────────
+# ── Generation ─────────────────────────────────────────────────────────────
 
 def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
                         n_ideas=6, model=None, abort=None, on_tool_event=None,
-                        usage_meter=None) -> list:
+                        usage_meter=None, user_id=None) -> list:
     """Generate raw (un-gated) ideas anchored to R2's open_gaps.
 
     Single seam tests monkeypatch (``ideate._generate_raw_ideas``) to drive the
-    gate pipeline offline. Mirrors insight/survey synthesis: run_agent_loop +
-    _REPORT_TOOLS, facade-resolved dispatch."""
-    import lib.paper.ideate as _self
+    gate pipeline offline. Mirrors insight/survey synthesis with the narrow
+    research tool profile."""
     from lib.agent_loop import AbortSignal, run_agent_loop
-    from lib.paper.prompts import _REPORT_TOOLS, date_anchor_clause
-    from lib.paper.tools import make_research_tool_executor
+    from lib.paper.prompts import date_anchor_clause
+    from lib.paper.tools import (
+        PaperToolResultBudgetV2,
+        build_research_tool_schemas,
+        freeze_paper_tool_epoch,
+        make_paper_exec_shim,
+        make_research_tool_executor,
+    )
 
     system = date_anchor_clause(lang) + _ideate_system_prompt(lang, n_ideas)
     gaps_json = _compact_gaps(open_gaps)
@@ -726,6 +735,16 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
     messages = [{'role': 'system', 'content': system},
                 {'role': 'user', 'content': '\n\n---\n\n'.join(parts)}]
     abort_signal = AbortSignal.from_callback(abort)
+    paper_tools, paper_contracts = freeze_paper_tool_epoch(
+        build_research_tool_schemas(), owner_user_id=user_id)
+    _exec_shim = make_paper_exec_shim(
+        task_id=('paper-ideate-' + hashlib.sha256(
+            direction.encode('utf-8')).hexdigest()[:16]),
+        abort=abort_signal.is_set, owner_user_id=user_id,
+        tool_contract_documents_by_name=paper_contracts)
+    _result_budget = PaperToolResultBudgetV2(
+        owner_user_id=user_id, model=model or '')
+    contracts_by_round = {}
     _round = {'content': ''}
     _last = {'msg': None}
 
@@ -734,13 +753,17 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
 
         def _on_content(t):
             _round['content'] += t
-        effective_tools = usage_meter.allowed_tools(tools) if usage_meter else tools
-        return _self.dispatch_stream(
+        allowed_tools = (usage_meter.allowed_tools(tools)
+                         if usage_meter else tools)
+        effective_tools, contracts_by_round[rnd] = freeze_paper_tool_epoch(
+            allowed_tools, owner_user_id=user_id)
+        from lib.llm.stream_result import ensure_provider_stream_result
+        return ensure_provider_stream_result(dispatch_stream(
             messages, on_content=_on_content, abort_check=abort_signal.is_set,
             prefer_model=model or None, strict_model=bool(model), capability='text',
             tools=effective_tools, max_tokens=_IDEATE_MAX_TOKENS,
             temperature=_IDEATE_TEMPERATURE,
-            thinking_enabled=False, log_prefix='[Paper:Ideate]')
+            thinking_enabled=False, log_prefix='[Paper:Ideate]'))
 
     def _on_round_result(rnd, msg, finish, usage):
         _last['msg'] = msg
@@ -751,16 +774,19 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
         _round['content'] = ''
         messages.append(msg)
 
-    from lib.paper.report_engine import _execute_report_tool
+    from lib.paper.tools import execute_paper_tool
     _execute_tool = make_research_tool_executor(
         messages, user_question=direction[:300], abort_signal=abort_signal,
-        execute_report_tool=_execute_report_tool, on_tool_event=on_tool_event,
-        log_prefix='[Paper:Ideate]')
+        result_budget=_result_budget, exec_shim=_exec_shim,
+        paper_tool_executor=execute_paper_tool, on_tool_event=on_tool_event,
+        log_prefix='[Paper:Ideate]',
+        contract_documents_for_round=contracts_by_round.get)
 
     run_agent_loop(
         abort=abort_signal,
-        round_tools=_REPORT_TOOLS, dispatch=_dispatch, execute_tool=_execute_tool,
-        on_round_result=_on_round_result, on_tool_round=_begin_tool_round)
+        round_tools=paper_tools, dispatch=_dispatch, execute_tool=_execute_tool,
+        on_round_result=_on_round_result, on_tool_round=_begin_tool_round,
+        on_round_end=_result_budget.finish_round)
 
     content = _round['content']
     if not content and isinstance(_last['msg'], dict):
@@ -864,7 +890,8 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
                    reader_context: str = '', n_ideas: int = 6,
                    threshold: Optional[float] = None, model: Optional[str] = None,
                    abort: Optional[Callable[[], bool]] = None,
-                   on_tool_event: Optional[Callable[[dict], None]] = None) -> dict:
+                   on_tool_event: Optional[Callable[[dict], None]] = None,
+                   user_id: Optional[int] = None) -> dict:
     """Generate ideas from R2's open-gap map and run the anti-A+B gate.
 
     Args:
@@ -890,7 +917,6 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
     Every rejected idea keeps its scores + the gate that killed it, so the
     threshold can be calibrated from real data.
     """
-    import lib.paper.ideate as _self
     from lib.research.telemetry import ResearchUsageMeter, research_token_budget
 
     direction = (direction or '').strip()
@@ -910,10 +936,16 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
                 'threshold': thr, 'usage': usage_meter.snapshot()}
 
     try:
-        raw = _self._generate_raw_ideas(direction, open_gaps, reader_context, lang,
-                                        n_ideas=n_ideas, model=model, abort=abort,
-                                        on_tool_event=on_tool_event,
-                                        usage_meter=usage_meter)
+        generation_kwargs = {
+            'n_ideas': n_ideas, 'model': model, 'abort': abort,
+            'on_tool_event': on_tool_event, 'usage_meter': usage_meter,
+        }
+        # Compatibility callers that do not persist result artifacts keep the
+        # old monkeypatch seam. Production recipes always provide an owner.
+        if user_id is not None:
+            generation_kwargs['user_id'] = user_id
+        raw = _generate_raw_ideas(
+            direction, open_gaps, reader_context, lang, **generation_kwargs)
     except Exception as e:
         from lib.llm_errors import AbortedError
         if isinstance(e, AbortedError):
@@ -934,7 +966,7 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
     for _i in raw:
         if isinstance(_i, dict):
             try:
-                _t, _ = _self.build_retrieval_query(_i)
+                _t, _ = build_retrieval_query(_i)
             except Exception as _e:
                 # Names the call that actually failed (build_retrieval_query)
                 # rather than the enclosing function: a census that silently
@@ -952,7 +984,7 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
         # `kind` is template metadata, not a validity verdict — coerce it into
         # the frozen enum BEFORE any gate sees it, and record the coercion so
         # the normalization is auditable rather than silent.
-        _kind, _kind_changed = _self._normalize_kind(idea.get('kind'))
+        _kind, _kind_changed = _normalize_kind(idea.get('kind'))
         idea['kind'] = _kind
         if _kind_changed:
             idea['kind_normalized'] = True

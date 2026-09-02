@@ -39,7 +39,7 @@ def test_produce_video_result_carries_quality_hint(monkeypatch):
     monkeypatch.setattr(rt._motion_runtime, 'spawn', fake_spawn)
     monkeypatch.setattr(hdl, '_finalize_tool_round', lambda *a, **k: None)
 
-    task = {'events': []}
+    task = {'events': [], '_userId': 1}
     rn = 0
     round_entry = {'tool_calls': [], 'query': ''}
     tc = {'id': 'tc1', 'function': {'name': 'produce_video'}}

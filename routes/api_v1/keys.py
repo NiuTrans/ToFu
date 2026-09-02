@@ -26,7 +26,7 @@ from lib.request_parser import (
     require_str,
 )
 
-from .auth import current_auth, require_scope
+from .auth import current_auth, request_principal, require_scope
 
 logger = get_logger(__name__)
 
@@ -49,8 +49,17 @@ def whoami():
         'scopes': sorted(ctx.scopes),
         'rate_limit_rpm': ctx.rate_limit_rpm,
         'rate_limit_tpd': ctx.rate_limit_tpd,
-        'via_tunnel_token': ctx.via_tunnel_token,
+        'owner_id': ctx.owner_user_id,
+        'account_user_id': ctx.account_user_id or None,
     })
+
+
+def _credential_boundary() -> tuple[int, str | None]:
+    principal = request_principal()
+    return (
+        principal.require_owner(context='credential administration'),
+        principal.tenant_id,
+    )
 
 
 @api_v1_keys_bp.route('/api/v1/keys', methods=['GET'])
@@ -66,7 +75,9 @@ def whoami():
                                                     'items': {'$ref': '#/components/schemas/ApiKey'}}}}}}},
           })
 def list_keys_route():
-    return api_ok(keys=list_keys())
+    owner_user_id, tenant_id = _credential_boundary()
+    return api_ok(keys=list_keys(
+        owner_user_id=owner_user_id, tenant_id=tenant_id))
 
 
 @api_v1_keys_bp.route('/api/v1/keys', methods=['POST'])
@@ -113,10 +124,16 @@ def create_key_route():
         return api_bad_request(
             'At least one scope is required (or admin=true)', field='scopes')
     try:
+        owner_user_id, tenant_id = _credential_boundary()
+        auth_context = current_auth()
         row, plaintext = create_key(
             name=name, scopes=scopes, rate_limit_rpm=rpm,
             rate_limit_tpd=tpd, expires_at=expires,
-            metadata=metadata, admin=admin)
+            metadata=metadata, admin=admin,
+            owner_user_id=owner_user_id, tenant_id=tenant_id,
+            account_user_id=(
+                auth_context.account_user_id if auth_context else ''),
+        )
     except ValueError as e:
         return api_bad_request(str(e))
     return api_created(key=row, token=plaintext)
@@ -126,7 +143,9 @@ def create_key_route():
 @require_scope('admin')
 @api_meta(summary='Get an API key', tags=['keys'], scope='admin')
 def get_key_route(key_id):
-    row = get_key_by_id(key_id)
+    owner_user_id, tenant_id = _credential_boundary()
+    row = get_key_by_id(
+        key_id, owner_user_id=owner_user_id, tenant_id=tenant_id)
     if row is None:
         return api_not_found('Key not found')
     return api_ok(key=row)
@@ -167,16 +186,22 @@ def update_key_route(key_id):
         fields['metadata'] = md
     if not fields:
         return api_bad_request('No updatable fields provided')
-    if not update_key(key_id, **fields):
+    owner_user_id, tenant_id = _credential_boundary()
+    if not update_key(
+            key_id, owner_user_id=owner_user_id,
+            tenant_id=tenant_id, **fields):
         return api_not_found('Key not found')
-    return api_ok(key=get_key_by_id(key_id))
+    return api_ok(key=get_key_by_id(
+        key_id, owner_user_id=owner_user_id, tenant_id=tenant_id))
 
 
 @api_v1_keys_bp.route('/api/v1/keys/<key_id>', methods=['DELETE'])
 @require_scope('admin')
 @api_meta(summary='Revoke an API key', tags=['keys'], scope='admin')
 def delete_key_route(key_id):
-    if not revoke_key(key_id):
+    owner_user_id, tenant_id = _credential_boundary()
+    if not revoke_key(
+            key_id, owner_user_id=owner_user_id, tenant_id=tenant_id):
         return api_not_found('Key not found')
     audit_log('api_key_revoked_route', key_id=key_id,
               by=(current_auth().key_id if current_auth() else ''))

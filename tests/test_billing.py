@@ -20,20 +20,15 @@ import unittest.mock as _mock
 from unittest.mock import patch
 
 
+pytest_plugins = ('tests._billing_user_sidecar',)
+
+
 class _BillingTestBase(unittest.TestCase):
-    """Common setUp: tempdir, isolated pricing.json, fresh SQLite DB."""
+    """Common setup: isolated pricing over module-scoped Sidecar storage."""
 
     @classmethod
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory()
-        # Repoint the DB layer at a fresh per-class SQLite file. This MUST go
-        # through reset_sqlite_for_tests rather than just setting TOFU_DB_PATH
-        # + init_db(): the backend/path globals are frozen at import time, so
-        # the env var alone is a no-op and (under an ambient PG env) the test
-        # would silently share the live database. See the helper's docstring.
-        from lib.database import reset_sqlite_for_tests
-        cls._db_snapshot = reset_sqlite_for_tests(
-            os.path.join(cls._tmp.name, 'tofu.db'))
         # Isolate pricing.json so test edits don't pollute the dev tree.
         cls._pricing_path = os.path.join(cls._tmp.name, 'pricing.json')
         cls._pricing_patch = patch('lib.billing.pricing._PRICING_PATH',
@@ -45,8 +40,6 @@ class _BillingTestBase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls._pricing_patch.stop()
-        from lib.database import restore_db_state
-        restore_db_state(getattr(cls, '_db_snapshot', None))
         cls._tmp.cleanup()
 
 

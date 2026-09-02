@@ -6,12 +6,12 @@ import json
 import math
 import re
 
-from lib.database import knowledge_repository as _repository
 from lib.log import get_logger
 
 from . import store
 
 logger = get_logger(__name__)
+
 
 _CANDIDATE_LIMIT = 80
 _RESULT_LIMIT = 6
@@ -36,23 +36,15 @@ _QUERY_EXPANSION_GROUPS = (
 )
 
 
-def _fts_query(tokens: list[str]) -> str:
-    # Tokens are produced by our own conservative tokenizer. Quote every one
-    # so punctuation can never become an FTS operator.
-    return ' OR '.join('"' + token.replace('"', '""') + '"'
-                       for token in tokens[:32])
-
-
 def _normalized(text: str) -> str:
-    return re.sub(r'\s+', '', (text or '').casefold())
+    # Treat presentation punctuation as a phrase separator so identifiers such
+    # as ``ATLAS-NEBULA`` match a natural-language query for ``ATLAS NEBULA``.
+    return re.sub(r'[^a-z0-9\u3400-\u9fff]+', '', (text or '').casefold())
 
 
-def _candidate_rows(tokens: list[str]) -> list[dict]:
-    return _repository.search_candidates(
-        store._db_path(),
-        fts_query=_fts_query(tokens),
-        candidate_limit=_CANDIDATE_LIMIT,
-    )
+def _candidate_rows(tokens: list[str], *, user_id: int) -> list[dict]:
+    return store._repository(user_id).search_candidates(
+        tokens, limit=_CANDIDATE_LIMIT)
 
 
 def _expanded_tokens(query: str, original: list[str]) -> list[str]:
@@ -160,18 +152,21 @@ def _score(
     # A PDF image proxy often repeats OCR that is already present in a parsed
     # text section. Keep it retrievable (and valuable for scanned documents),
     # but prefer the cleaner text evidence when both answer the same query.
-    visual_proxy_penalty = (
-        4.0 if row.get('assets') and content.startswith('visual evidence:')
-        else 0.0)
-    return (
+    evidence_score = (
         math.log1p(bm25 * 1_000_000)
         + coverage * 4.0
         + phrase * 4.0
         + meta_hits * 0.9
         + semantic_coverage * 1.8
         + semantic_meta_hits * 0.25
-        - visual_proxy_penalty
     )
+    # Prefer clean parsed text when it duplicates an OCR proxy, but never let
+    # that preference erase valid visual-only evidence. A fixed subtraction
+    # could turn a partial-yet-grounded visual match negative on a backend
+    # without an FTS-specific bm25 contribution.
+    is_visual_proxy = bool(
+        row.get('assets') and content.startswith('visual evidence:'))
+    return evidence_score * (0.8 if is_visual_proxy else 1.0)
 
 
 def _neighbor_context(row: dict) -> str:
@@ -222,6 +217,7 @@ def _public_asset(asset: dict) -> dict:
 def search(
     query: str,
     *,
+    user_id: int,
     limit: int = _RESULT_LIMIT,
     require_enabled: bool = True,
 ) -> list[dict]:
@@ -232,7 +228,7 @@ def search(
     important when a user wants to validate evidence before turning it on.
     """
     query = (query or '').strip()
-    if not query or (require_enabled and not store.tool_available()):
+    if not query or (require_enabled and not store.tool_available(user_id=user_id)):
         return []
     original_tokens = store.search_tokens(query, cap=32)
     if not original_tokens:
@@ -245,7 +241,7 @@ def search(
     # so "software to install" can genuinely recall "client/application".
     candidate_tokens = list(dict.fromkeys(
         tokens + expanded_tokens + original_tokens))
-    rows = _candidate_rows(candidate_tokens)
+    rows = _candidate_rows(candidate_tokens, user_id=user_id)
     ranked = sorted(
         ((_score(row, query, tokens, expanded_tokens), row) for row in rows),
         key=lambda pair: (-pair[0], pair[1]['name'], pair[1]['ordinal']))

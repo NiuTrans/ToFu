@@ -71,8 +71,6 @@ def register_orchestration_mutation_routes(
                 'api_v1.orchestrations.approve_gate',
                 lambda: human_gate_service().approve(request_id, approved),
                 endpoint='human-approve',
-                target_id=request_id,
-                approved=approved,
                 on_success=lambda: logger.info(
                     '[Orchestrations] human approve req=%s approved=%s',
                     request_id,
@@ -107,7 +105,6 @@ def register_orchestration_mutation_routes(
                 lambda: human_gate_service().input(
                     request_id, response_text),
                 endpoint='human-input',
-                target_id=request_id,
                 on_success=lambda: logger.info(
                     '[Orchestrations] human input req=%s len=%d',
                     request_id,
@@ -133,7 +130,6 @@ def register_orchestration_mutation_routes(
             'api_v1.orchestrations.abort_run',
             lambda: run_service().abort(run_id),
             endpoint='task-abort',
-            target_id=run_id,
             on_success=lambda: logger.info(
                 '[Orchestrations] task run ABORT run=%s', run_id),
         )
@@ -150,15 +146,14 @@ def register_orchestration_mutation_routes(
             'api_v1.orchestrations.delete_run',
             lambda: run_service().delete(run_id),
             endpoint='task-remove',
-            target_id=run_id,
             on_success=lambda: logger.info(
                 '[Orchestrations] task run DELETE run=%s', run_id),
         )
 
-    def abort_runtime_task(task_id: str):
+    def abort_runtime_task(task_id: str, owner_user_id: int):
         return orchestration_mutation_service_response(
             'api_v1.orchestrations.abort_runtime',
-            lambda: runtime_mutation_service().abort(task_id),
+            lambda: runtime_mutation_service(owner_user_id).abort(task_id),
             endpoint='run-abort',
         )
 

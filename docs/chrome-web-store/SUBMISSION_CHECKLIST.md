@@ -13,7 +13,8 @@ kit.
 ## 0. Decide the build (do this first)
 
 - [ ] Read `REVIEW_RISKS.md`. Decide: are you willing to ship the **reduced**
-      Chrome build (no `browser_execute_js`, no `debugger`) if the reviewer
+      Chrome build (no `browser_execute_js`, no `browser_devtools`, no
+      `debugger`) if the reviewer
       rejects the full one for remote code? If **no**, stop — Firefox AMO is
       the better path for full power. If **yes**, continue.
 
@@ -73,7 +74,8 @@ kit.
 - [ ] Remote-code rejection → either argue the "user's own server" point once,
       or fall back to the reduced build (REVIEW_RISKS.md, outcome ladder #2).
 - [ ] `debugger` rejection → drop `debugger`, switch screenshots to the
-      viewport-only path, resubmit.
+      viewport-only path, accept DOM/URL-metadata fallback for dynamic sites,
+      and resubmit.
 - [ ] Re-package (`--store`), bump `version` in BOTH
       `browser_extension/manifest.json` and `manifest.store.json`, re-upload.
 

@@ -1,0 +1,774 @@
+/* ═══════════════════════════════════════════════════════════════════
+   Project Brain — full visual redesign (2026-07).
+   Design language: layered elevation on the shared theme tokens, an
+   accent hairline that ties the three columns to the panel head, generous
+   card padding, soft one-shot entrance motion (NO pulsing), and full text
+   WRAP everywhere (epics carry multi-sentence descriptions — never clip).
+   Every class name below is load-bearing for project-brain.js — do not
+   rename without updating the JS.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Local design tokens (scoped) so the whole surface stays internally
+   consistent and easy to retune. */
+.project-brain-overlay{
+  --pb-radius:12px; --pb-radius-sm:9px; --pb-radius-chip:999px;
+  --pb-card-bg:color-mix(in srgb,var(--bg-tertiary) 82%,var(--bg-secondary));
+  --pb-card-hover:color-mix(in srgb,var(--bg-hover) 70%,var(--bg-tertiary));
+  --pb-green:#22c55e; --pb-red:#ef4444; --pb-amber:#eab308;
+}
+/* Light surfaces: the dark-theme status hues above wash out on paper (amber
+   #eab308 text on cream is ~1.6:1 — the "auto-starts ~30s" badge was nearly
+   unreadable). Deepen the same hues so badges, lane accents, tab colour and
+   presence dots keep ≥ ~4.4:1 on the light card ground. */
+[data-theme="light"] .project-brain-overlay,
+[data-theme="tofu"] .project-brain-overlay{
+  --pb-green:#15803d; --pb-red:#dc2626; --pb-amber:#854d0e;
+}
+
+/* Trigger button in the project bar. */
+
+/* Overlay + sliding panel. */
+.project-brain-overlay{position:fixed;inset:0;height:100vh;height:var(--vh100,100vh);background:rgba(6,6,10,0.58);backdrop-filter:blur(4px);z-index:9998;display:flex;align-items:stretch;justify-content:flex-end;animation:fadeIn 0.16s ease}
+.project-brain-overlay[hidden]{display:none}
+/* WebView quirk: a position:fixed element sizes to the initial containing
+   block, which this Android WebView measures as height:0 (same root cause as
+   the blank-screen/modal fixes) — so inset:0 alone collapsed the overlay and
+   its height:100% panel to nothing. Pin an explicit height from the known-good
+   --vh100 px var (set by _installViewportHeightGuard), plain 100vh fallback. */
+.project-brain-panel{position:relative;background:var(--bg-secondary);border-left:1px solid var(--border-light);width:min(960px,94vw);height:100%;min-height:var(--vh100,100vh);display:flex;flex-direction:column;box-shadow:-24px 0 64px rgba(0,0,0,0.5);animation:pbSlideIn 0.24s cubic-bezier(0.16,1,0.3,1)}
+/* Accent hairline running down the panel's leading edge — ties it to the brand. */
+.project-brain-panel::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;background:linear-gradient(180deg,var(--accent),color-mix(in srgb,var(--accent) 30%,transparent));opacity:0.9}
+@keyframes pbSlideIn{from{transform:translateX(28px);opacity:0}to{transform:translateX(0);opacity:1}}
+
+/* Head. */
+.project-brain-head{display:flex;align-items:center;justify-content:space-between;padding:16px 22px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 7%,var(--bg-tertiary)),var(--bg-secondary))}
+.project-brain-title{display:flex;align-items:center;gap:10px;font-size:15.5px;font-weight:700;letter-spacing:0.01em;color:var(--text-primary)}
+.project-brain-title-ico{display:inline-flex;color:var(--accent)}
+.project-brain-title-ico svg{display:block}
+.project-brain-close{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;background:transparent;border:none;color:var(--text-tertiary);font-size:16px;line-height:1;cursor:pointer;border-radius:var(--radius-xs);transition:color var(--transition),background var(--transition),transform 0.12s ease}
+.project-brain-close:hover{color:var(--text-primary);background:var(--bg-hover)}
+.project-brain-close:active{transform:scale(0.9)}
+.project-brain-head-actions{display:flex;align-items:center;gap:8px}
+.pb-tr-toggle{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;background:transparent;border:1px solid var(--border);color:var(--text-tertiary);font-family:inherit;font-size:12px;font-weight:600;line-height:1;cursor:pointer;border-radius:var(--radius-xs);transition:color var(--transition),background var(--transition),border-color var(--transition)}
+.pb-tr-toggle:hover{color:var(--text-primary);background:var(--bg-hover)}
+.pb-tr-toggle .pb-tr-toggle-ico{display:inline-flex}
+.pb-tr-toggle .pb-tr-toggle-ico svg{display:block}
+.pb-tr-toggle.pb-tr-toggle-on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,var(--border));background:color-mix(in srgb,var(--accent) 12%,transparent)}
+/* A node showing a translation over its original — subtle accent underline so
+   the operator can tell at a glance the text is a translated VIEW (hover the
+   node to see the original in the title tooltip). */
+[data-pb-tr="1"]{text-decoration:underline;text-decoration-style:dotted;text-decoration-color:color-mix(in srgb,var(--accent) 55%,transparent);text-underline-offset:3px}
+
+/* ── Tab bar: the four surfaces shown one-at-a-time ──
+   Four side-by-side columns collapse to unreadable slivers on a narrow panel
+   (width:min(960px,94vw)) — so we tab between them and give the ACTIVE surface
+   the full width. Each tab carries a colour-coded dot matching its old column
+   accent + an optional count badge. */
+/* Five tabs overflow the bar on a phone-width panel (~505px intrinsic EN vs
+   ~338px of panel at a 360px viewport), and macOS auto-hides overlay
+   scrollbars — so the trailing tabs looked like they simply weren't there.
+   Lea-Verou scroll shadows: an edge shadow shows ONLY on a side that can
+   still scroll (the `local` cover gradients mask the `scroll` shadow
+   gradients at the extremes). Same technique as .stg-matrix-scroll in
+   settings.css; the scrollbar itself stays hidden, as tab bars should. */
+.project-brain-tabs{display:flex;align-items:stretch;gap:2px;padding:0 12px;background-color:var(--bg-secondary);border-bottom:1px solid var(--border);overflow-x:auto;flex-shrink:0;scrollbar-width:none;
+  background-image:linear-gradient(to right,var(--bg-secondary) 30%,transparent),linear-gradient(to right,transparent,var(--bg-secondary) 70%),radial-gradient(farthest-side at 0 50%,rgba(0,0,0,0.22),rgba(0,0,0,0)),radial-gradient(farthest-side at 100% 50%,rgba(0,0,0,0.22),rgba(0,0,0,0));
+  background-position:0 0,100% 0,0 0,100% 0;background-repeat:no-repeat;
+  background-size:32px 100%,32px 100%,10px 100%,10px 100%;
+  background-attachment:local,local,scroll,scroll}
+.project-brain-tabs::-webkit-scrollbar{height:0}
+.pb-tab{position:relative;display:inline-flex;align-items:center;gap:7px;padding:12px 15px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--text-tertiary);font-family:inherit;font-size:12.5px;font-weight:600;letter-spacing:0.01em;cursor:pointer;white-space:nowrap;transition:color var(--transition),border-color var(--transition)}
+.pb-tab::before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor;opacity:0.45;flex-shrink:0}
+.pb-tab:hover{color:var(--text-secondary)}
+.pb-tab-active{color:var(--text-primary);border-bottom-color:var(--accent)}
+.pb-tab-active::before{opacity:1}
+.pb-tab[data-pb-tab="charter"].pb-tab-active{color:var(--accent)}
+.pb-tab[data-pb-tab="board"].pb-tab-active{color:var(--pb-green)}
+.pb-tab[data-pb-tab="activity"].pb-tab-active{color:var(--pb-amber)}
+.pb-tab[data-pb-tab="peers"].pb-tab-active{color:var(--accent)}
+.pb-tab-count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;font-size:10.5px;font-weight:700;line-height:1;border-radius:999px;background:var(--bg-tertiary);border:1px solid var(--border);color:var(--text-secondary)}
+.pb-tab-count[hidden]{display:none}
+
+/* ── Keyboard focus rings ──
+   Every control below is a real <button> reachable by Tab, but the surface
+   painted focus for text inputs ONLY (and several of those do `outline:none`,
+   trading the ring for a border tint). That left ~20 buttons — tabs, board
+   actions, charter edit/delete, peer nudge, clamp toggles — with no visible
+   focus at all, so keyboard navigation was invisible. One shared rule keeps
+   the ring consistent and out-specifies nothing (`:focus-visible` only fires
+   for keyboard/AT focus, never on mouse click). Matches the accent-outline
+   idiom already used by .pb-board-act / .app-dialog-* elsewhere. */
+.project-brain-overlay .pb-tab:focus-visible,
+.project-brain-overlay .pb-chip:focus-visible,
+.project-brain-overlay .pb-clamp-toggle:focus-visible,
+.project-brain-overlay .pb-conv-chip:focus-visible,
+.project-brain-overlay .pb-tr-toggle:focus-visible,
+.project-brain-overlay .pb-charter-act:focus-visible,
+.project-brain-overlay .pb-charter-delete-all:focus-visible,
+.project-brain-overlay .pb-inline-save:focus-visible,
+.project-brain-overlay .pb-inline-cancel:focus-visible,
+.project-brain-overlay .pb-proposal-commit:focus-visible,
+.project-brain-overlay .pb-proposal-reject:focus-visible,
+.project-brain-overlay .pb-board-new:focus-visible,
+.project-brain-overlay .pb-peer-nudge-toggle:focus-visible,
+.project-brain-overlay .pb-peer-nudge-send:focus-visible,
+.project-brain-overlay .pb-peer-nudge-cancel:focus-visible,
+.project-brain-overlay .pb-peer-stop-btn:focus-visible,
+.project-brain-overlay .pb-peer-clickable:focus-visible,
+.project-brain-overlay .pb-status-refresh:focus-visible,
+.project-brain-overlay .pb-status-ask-btn:focus-visible,
+.project-brain-overlay .pb-watch-btn:focus-visible,
+.project-brain-overlay .pb-watch-add-btn:focus-visible,
+.project-brain-overlay .project-brain-close:focus-visible{
+  outline:2px solid color-mix(in srgb,var(--accent) 60%,transparent);
+  outline-offset:2px;
+  border-radius:var(--pb-radius-sm,4px);
+}
+
+/* Tab-panel host: the active panel fills the panel; the rest are hidden.
+   NOTE: the panels carry BOTH .project-brain-col AND .pb-tab-panel, so the
+   show/hide rules MUST out-specify .project-brain-col (which sets display:flex);
+   a bare .pb-tab-panel selector has equal specificity and loses on source order,
+   leaving every panel visible → tab clicks appear to do nothing. */
+.project-brain-columns{flex:1;display:block;background:var(--bg-secondary);overflow:hidden;min-height:0}
+.project-brain-col.pb-tab-panel{display:none;height:100%}
+.project-brain-col.pb-tab-panel-active{display:flex}
+.project-brain-col{background:var(--bg-secondary);display:flex;flex-direction:column;min-height:0;flex:1}
+.project-brain-col-body{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;max-width:820px;width:100%;margin:0 auto;box-sizing:border-box}
+.project-brain-col-body::-webkit-scrollbar{width:8px}
+.project-brain-col-body::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.project-brain-col-body::-webkit-scrollbar-thumb:hover{background:var(--border-light)}
+
+/* Empty states — a centered, quiet dashed frame instead of bare text. */
+.pb-activity-empty,.pb-charter-empty,.pb-board-empty,.pb-peers-empty,.pb-status-empty,.pb-status-loading,.pb-no-project{flex:1;display:flex;align-items:center;justify-content:center;min-height:200px;color:var(--text-tertiary);font-size:13px;text-align:center;padding:24px;margin:2px;border:1px dashed var(--border);border-radius:var(--pb-radius);background:color-mix(in srgb,var(--bg-tertiary) 30%,transparent)}
+.pb-board-lane-empty{color:var(--text-tertiary);font-size:12px;padding:8px 10px;text-align:center;border:1px dashed var(--border);border-radius:var(--pb-radius-sm);background:color-mix(in srgb,var(--bg-tertiary) 25%,transparent)}
+
+/* ── Activity column ── */
+.pb-activity-list{display:flex;flex-direction:column;gap:9px;min-height:100%}
+.pb-activity-row{display:flex;gap:11px;align-items:flex-start;padding:11px 12px;background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius);transition:border-color var(--transition),background var(--transition),transform 0.12s ease;animation:pbRowIn 0.24s cubic-bezier(0.16,1,0.3,1)}
+.pb-activity-row:hover{border-color:var(--border-light);background:var(--pb-card-hover);--pb-fade-to:var(--pb-card-hover);transform:translateY(-1px)}
+@keyframes pbRowIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.pb-activity-icon{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;flex-shrink:0;border-radius:8px;background:var(--bg-secondary);border:1px solid var(--border);color:var(--text-secondary)}
+.pb-activity-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}
+.pb-activity-summary{font-size:13px;color:var(--text-primary);line-height:1.45;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.pb-activity-time{font-size:10.5px;color:var(--text-tertiary);cursor:help}
+
+/* Activity legend — a compact key of the event glyphs. */
+.pb-activity-legend{display:flex;flex-wrap:wrap;gap:5px 12px;padding:10px 12px;margin-bottom:10px;background:color-mix(in srgb,var(--bg-tertiary) 55%,transparent);border:1px solid var(--border);border-radius:var(--pb-radius)}
+.pb-legend-item{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:var(--text-secondary);white-space:nowrap}
+.pb-legend-ico{display:inline-flex;color:var(--text-tertiary)}
+
+/* Conversation chip (peer owner links). */
+.pb-conv-chip{display:inline-flex;align-items:center;align-self:flex-start;max-width:100%;background:var(--bg-secondary);border:1px solid var(--border);color:var(--text-secondary);font-size:11px;padding:3px 10px;border-radius:var(--pb-radius-chip);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:inherit;transition:color var(--transition),border-color var(--transition),background var(--transition)}
+.pb-conv-chip:hover{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 50%,transparent);background:var(--accent-subtle)}
+
+/* ── Team / Peers column ── */
+.pb-peers-roster{display:flex;flex-direction:column;gap:9px}
+.pb-peers-roster-head,.pb-peers-thread-head{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-tertiary);margin:2px 0 6px}
+.pb-peer-card{display:flex;gap:10px;align-items:flex-start;padding:11px 12px;background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius);transition:border-color var(--transition),background var(--transition),transform 0.12s ease;animation:pbRowIn 0.24s cubic-bezier(0.16,1,0.3,1)}
+.pb-peer-clickable{cursor:pointer}
+.pb-peer-clickable:hover{border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:var(--pb-card-hover);transform:translateY(-1px)}
+.pb-peer-agent{margin-left:14px;border-style:dashed}
+/* Presence dot — a soft status light. green=running(pulse), amber=idle. */
+.pb-peer-dot{width:9px;height:9px;flex-shrink:0;margin-top:5px;border-radius:50%;background:var(--text-tertiary)}
+.pb-peer-dot[data-state="active"]{background:var(--pb-green);box-shadow:0 0 0 3px color-mix(in srgb,var(--pb-green) 22%,transparent);animation:pbPeerPulse 1.8s ease-in-out infinite}
+.pb-peer-dot[data-state="idle"]{background:var(--pb-amber);box-shadow:0 0 0 3px color-mix(in srgb,var(--pb-amber) 18%,transparent)}
+@keyframes pbPeerPulse{0%,100%{box-shadow:0 0 0 3px color-mix(in srgb,var(--pb-green) 22%,transparent)}50%{box-shadow:0 0 0 5px color-mix(in srgb,var(--pb-green) 8%,transparent)}}
+.pb-peer-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.pb-peer-who{font-size:13px;font-weight:600;color:var(--text-primary);line-height:1.4;overflow-wrap:anywhere}
+.pb-peer-doing{font-size:11.5px;color:var(--text-secondary);line-height:1.4;overflow-wrap:anywhere}
+/* Peer-message thread — chat-like exchanges between conversations. */
+.pb-peers-thread{margin-top:16px;padding-top:14px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px}
+.pb-peer-msg{padding:9px 11px;background:color-mix(in srgb,var(--bg-tertiary) 45%,transparent);border:1px solid var(--border);border-left:2px solid color-mix(in srgb,var(--accent) 55%,var(--border));border-radius:var(--pb-radius);animation:pbRowIn 0.24s cubic-bezier(0.16,1,0.3,1)}
+.pb-peer-msg-intervene{border-left-color:var(--pb-red);background:color-mix(in srgb,var(--pb-red) 7%,transparent)}
+.pb-peer-msg-head{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--text-tertiary);margin-bottom:4px}
+.pb-peer-msg-head svg{flex-shrink:0}
+.pb-peer-msg-route{font-family:var(--font-mono,monospace);color:var(--text-secondary);font-weight:600}
+.pb-peer-msg-time{margin-left:auto}
+.pb-peer-msg-body{font-size:12.5px;color:var(--text-primary);line-height:1.45;overflow-wrap:anywhere;word-break:break-word}
+/* Per-card nudge composer — the operator messages a sibling conversation. */
+.pb-peer-nudge{margin-top:6px}
+.pb-peer-nudge-toggle{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;font-size:11px;font-weight:600;color:var(--text-secondary);background:transparent;border:1px solid var(--border);border-radius:var(--pb-radius-sm);cursor:pointer;transition:border-color var(--transition),color var(--transition),background var(--transition)}
+.pb-peer-nudge-toggle:hover{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:var(--pb-card-hover)}
+.pb-peer-nudge-toggle svg{flex-shrink:0}
+.pb-peer-nudge-composer{margin-top:7px;display:flex;flex-direction:column;gap:6px}
+/* The composer is toggled shut via the [hidden] attr; its display:flex class
+   rule would otherwise out-order the UA [hidden]{display:none} → keep it hidden. */
+.pb-peer-nudge-composer[hidden]{display:none}
+.pb-peer-nudge-input{width:100%;box-sizing:border-box;resize:vertical;min-height:44px;padding:7px 9px;font:inherit;font-size:12px;line-height:1.4;color:var(--text-primary);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--pb-radius-sm)}
+.pb-peer-nudge-input:focus{outline:none;border-color:color-mix(in srgb,var(--accent) 55%,transparent)}
+.pb-peer-nudge-actions{display:flex;align-items:center;gap:8px}
+.pb-peer-nudge-status{font-size:11px;color:var(--text-tertiary);margin-right:auto;flex-shrink:0}
+.pb-peer-nudge-status-ok{color:var(--pb-green)}
+.pb-peer-nudge-status-err{color:var(--pb-red)}
+.pb-peer-nudge-cancel,.pb-peer-nudge-send{padding:4px 12px;font-size:11.5px;font-weight:600;border-radius:var(--pb-radius-sm);cursor:pointer;border:1px solid var(--border);transition:opacity var(--transition),background var(--transition),border-color var(--transition)}
+.pb-peer-nudge-cancel{color:var(--text-secondary);background:transparent}
+.pb-peer-nudge-cancel:hover{color:var(--text-primary);border-color:var(--text-tertiary)}
+.pb-peer-nudge-send{color:#fff;background:var(--accent);border-color:var(--accent)}
+.pb-peer-nudge-send:hover{opacity:0.9}
+.pb-peer-nudge-send:disabled{opacity:0.5;cursor:default}
+/* Per-card controls row: nudge + (when running) the operator hard-abort. */
+.pb-peer-controls{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:6px}
+.pb-peer-controls .pb-peer-nudge{margin-top:0}
+/* Operator STOP (hard-abort) — danger affordance, gated behind a confirm. */
+.pb-peer-stop{display:inline-flex;align-items:center;gap:6px}
+.pb-peer-stop-btn{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;font-size:11px;font-weight:600;color:var(--pb-red);background:transparent;border:1px solid color-mix(in srgb,var(--pb-red) 40%,var(--border));border-radius:var(--pb-radius-sm);cursor:pointer;transition:border-color var(--transition),background var(--transition)}
+.pb-peer-stop-btn:hover{background:color-mix(in srgb,var(--pb-red) 10%,transparent);border-color:color-mix(in srgb,var(--pb-red) 60%,transparent)}
+.pb-peer-stop-btn svg{flex-shrink:0}
+.pb-peer-stop-btn:disabled{opacity:0.5;cursor:default}
+.pb-peer-stop-status{font-size:11px;color:var(--text-tertiary)}
+.pb-peer-stop-status-ok{color:var(--pb-green)}
+.pb-peer-stop-status-err{color:var(--pb-red)}
+
+/* ── Status tab (Pillar #7 human↔brain status lane) ── */
+/* Section header: title + live "Updating…" pill + manual refresh. */
+.pb-status-header{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.pb-status-title{font-size:13px;font-weight:700;letter-spacing:0.01em;color:var(--text-primary);margin-right:auto}
+.pb-status-updating{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--accent);padding:2px 9px;background:var(--accent-subtle);border:1px solid color-mix(in srgb,var(--accent) 35%,var(--border));border-radius:999px}
+.pb-status-updating-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pbStatusPulse 1.1s ease-in-out infinite}
+@keyframes pbStatusPulse{0%,100%{opacity:0.35;transform:scale(0.82)}50%{opacity:1;transform:scale(1)}}
+.pb-status-refresh{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;flex-shrink:0;padding:0;color:var(--text-tertiary);background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);cursor:pointer;transition:color var(--transition),border-color var(--transition),background var(--transition)}
+.pb-status-refresh:hover{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:var(--accent-subtle)}
+.pb-status-refresh:disabled{opacity:0.45;cursor:default}
+.pb-status-refresh svg{display:block}
+/* Shimmer skeleton — the first-open synthesis wait (NOT a blocking spinner). */
+.pb-status-skeleton{display:flex;flex-direction:column;gap:9px;padding:12px 14px;background:var(--pb-card-bg);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--pb-radius)}
+.pb-status-skeleton-line{height:12px;border-radius:6px;background:linear-gradient(90deg,color-mix(in srgb,var(--text-tertiary) 14%,transparent) 25%,color-mix(in srgb,var(--text-tertiary) 26%,transparent) 37%,color-mix(in srgb,var(--text-tertiary) 14%,transparent) 63%);background-size:400% 100%;animation:pbStatusShimmer 1.4s ease-in-out infinite}
+.pb-status-skeleton-line:nth-child(2){width:92%}
+.pb-status-skeleton-line:nth-child(3){width:64%}
+@keyframes pbStatusShimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
+/* Reduced-motion: park EVERY infinite loop on this surface. The peer-presence
+   dot and the board pending badge are state cues, so they hold a static
+   visible frame (opacity reset) rather than being left mid-keyframe. */
+@media (prefers-reduced-motion:reduce){
+  .pb-status-updating-dot,.pb-status-skeleton-line{animation:none}
+  .pb-peer-dot[data-state="active"],.pb-board-badge-pending{animation:none;opacity:1}
+}
+.pb-status-latest{display:flex;flex-direction:column;gap:8px}
+.pb-status-narrative{font-size:13.5px;line-height:1.6;color:var(--text-primary);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;padding:12px 14px;background:var(--pb-card-bg);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--pb-radius)}
+.pb-status-latest-meta{font-size:11px;color:var(--text-tertiary)}
+.pb-status-evidence{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+.pb-status-ev-chip{font-size:11px;font-weight:600;color:var(--text-secondary);padding:2px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:999px}
+.pb-status-ev-charter{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--border))}
+/* Ask composer */
+.pb-status-ask{margin-top:18px;display:flex;flex-direction:column;gap:8px;padding:12px;background:color-mix(in srgb,var(--bg-tertiary) 30%,transparent);border:1px solid var(--border);border-radius:var(--pb-radius)}
+.pb-status-ask-head{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-tertiary)}
+.pb-status-ask-input{width:100%;box-sizing:border-box;resize:vertical;min-height:44px;padding:7px 9px;font:inherit;font-size:12.5px;line-height:1.4;color:var(--text-primary);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--pb-radius-sm)}
+.pb-status-ask-input:focus{outline:none;border-color:color-mix(in srgb,var(--accent) 55%,transparent)}
+.pb-status-ask-actions{display:flex;align-items:center;gap:8px}
+.pb-status-ask-status{font-size:11px;color:var(--text-tertiary);margin-right:auto;flex-shrink:0}
+.pb-status-ask-status-err{color:var(--pb-red)}
+.pb-status-ask-btn{padding:4px 14px;font-size:11.5px;font-weight:600;color:#fff;background:var(--accent);border:1px solid var(--accent);border-radius:var(--pb-radius-sm);cursor:pointer;transition:opacity var(--transition)}
+.pb-status-ask-btn:hover{opacity:0.9}
+.pb-status-ask-btn:disabled{opacity:0.5;cursor:default}
+.pb-status-ask-answer{font-size:12.5px;line-height:1.55;color:var(--text-primary);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;padding:10px 12px;background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius-sm)}
+/* History trail */
+.pb-status-history{margin-top:18px;display:flex;flex-direction:column;gap:9px}
+.pb-status-history-head{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-tertiary);margin:2px 0 4px}
+.pb-status-hist-row{display:flex;flex-direction:column;gap:6px;padding:10px 12px;background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius-sm)}
+.pb-status-hist-head{display:flex;align-items:center;gap:8px}
+.pb-status-hist-when{font-size:11px;color:var(--text-secondary);font-weight:600}
+.pb-status-hist-trigger{font-size:10.5px;color:var(--text-tertiary);padding:1px 7px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:999px}
+.pb-status-hist-narrative{font-size:12.5px;line-height:1.5;color:var(--text-primary);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+
+/* ── Watch lane (Pillar #7 — the human's "things I care about" list) ── */
+.pb-watch{margin-top:18px;display:flex;flex-direction:column;gap:10px}
+.pb-watch-head{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-tertiary);margin:2px 0 2px}
+.pb-watch-add{display:flex;flex-direction:column;gap:8px;padding:12px;background:color-mix(in srgb,var(--bg-tertiary) 30%,transparent);border:1px solid var(--border);border-radius:var(--pb-radius)}
+.pb-watch-kind{align-self:flex-start;padding:4px 8px;font:inherit;font-size:12px;color:var(--text-primary);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--pb-radius-sm)}
+.pb-watch-input{width:100%;box-sizing:border-box;resize:vertical;min-height:44px;padding:7px 9px;font:inherit;font-size:12.5px;line-height:1.4;color:var(--text-primary);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--pb-radius-sm)}
+.pb-watch-input:focus,.pb-watch-kind:focus{outline:none;border-color:color-mix(in srgb,var(--accent) 55%,transparent)}
+.pb-watch-add-actions{display:flex;align-items:center;gap:8px}
+.pb-watch-add-status{font-size:11px;color:var(--text-tertiary);margin-right:auto}
+.pb-watch-add-btn{padding:4px 14px;font-size:11.5px;font-weight:600;color:#fff;background:var(--accent);border:1px solid var(--accent);border-radius:var(--pb-radius-sm);cursor:pointer;transition:opacity var(--transition)}
+.pb-watch-add-btn:hover{opacity:0.9}
+.pb-watch-add-btn:disabled{opacity:0.5;cursor:default}
+.pb-watch-empty{color:var(--text-tertiary);font-size:12px;padding:12px;text-align:center;border:1px dashed var(--border);border-radius:var(--pb-radius-sm)}
+.pb-watch-list{display:flex;flex-direction:column;gap:10px}
+.pb-watch-item{display:flex;flex-direction:column;gap:7px;padding:11px 13px;background:var(--pb-card-bg);border:1px solid var(--border);border-left:3px solid var(--border);border-radius:var(--pb-radius)}
+.pb-watch-resolved{opacity:0.62}
+.pb-watch-item-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pb-watch-kind-badge{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;padding:1px 8px;border-radius:999px;color:var(--text-secondary);background:var(--bg-tertiary);border:1px solid var(--border)}
+.pb-watch-promoted,.pb-watch-status-badge{font-size:10.5px;color:var(--text-tertiary);padding:1px 7px;border:1px solid var(--border);border-radius:999px}
+.pb-watch-promoted{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--border))}
+/* Diverged: amber, deliberately a different HUE from the accent-coloured
+   "reaching agents" pill. If the two shared a colour the three-state verdict
+   would read as two, which is the whole point of computing it. */
+.pb-watch-diverged{font-size:10.5px;padding:1px 7px;border-radius:999px;cursor:help;color:#92400e;background:rgba(245,158,11,0.14);border:1px solid rgba(217,119,6,0.45)}
+[data-theme="dark"] .pb-watch-diverged,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .pb-watch-diverged{color:#fbbf24;background:rgba(251,191,36,0.12);border-color:rgba(251,191,36,0.4)}
+/* goal → north-star REPLACEMENT preview. The charter's content column is a
+   single slot, so promoting a goal REPLACES rather than appends — the human
+   must see what is about to be overwritten BEFORE it happens. */
+.pb-watch-replace{display:flex;flex-direction:column;gap:9px;margin-top:8px;padding:11px 12px;background:var(--bg-tertiary);border:1px solid rgba(217,119,6,0.4);border-radius:var(--pb-radius)}
+.pb-watch-replace-title{font-size:12.5px;font-weight:700;color:var(--text-primary)}
+.pb-watch-replace-cols{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.pb-watch-replace-single{grid-template-columns:1fr}
+@media (max-width:640px){.pb-watch-replace-cols{grid-template-columns:1fr}}
+.pb-watch-replace-col{display:flex;flex-direction:column;gap:4px;min-width:0}
+.pb-watch-replace-col-head{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-tertiary)}
+.pb-watch-replace-col-body{font-size:12px;line-height:1.5;color:var(--text-primary);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;padding:7px 9px;border-radius:var(--pb-radius-sm);background:var(--pb-card-bg);border:1px solid var(--border);max-height:150px;overflow-y:auto}
+.pb-watch-replace-old .pb-watch-replace-col-body{opacity:0.72}
+.pb-watch-replace-new .pb-watch-replace-col-body{border-color:color-mix(in srgb,var(--accent) 40%,var(--border))}
+.pb-watch-replace-note{font-size:11px;color:var(--text-tertiary)}
+.pb-watch-replace-actions{display:flex;align-items:center;gap:8px;justify-content:flex-end}
+.pb-watch-replace-msg{flex:1;font-size:11px;color:var(--text-tertiary);min-width:0}
+.pb-watch-btn-confirm{color:#fff;background:var(--accent);border-color:var(--accent)}
+.pb-watch-btn-confirm:hover{color:#fff;background:var(--accent-hover);border-color:var(--accent-hover)}
+.pb-watch-item-text{font-size:13px;line-height:1.5;color:var(--text-primary);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-weight:600}
+.pb-watch-response{font-size:12.5px;line-height:1.55;color:var(--text-primary);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;padding:8px 10px;background:color-mix(in srgb,var(--bg-tertiary) 40%,transparent);border-radius:var(--pb-radius-sm)}
+.pb-watch-response-pending{color:var(--text-tertiary);font-style:italic}
+.pb-watch-response-meta{font-size:10.5px;color:var(--text-tertiary);margin-top:5px}
+.pb-watch-trail{display:flex;flex-direction:column;gap:5px;padding-left:10px;border-left:2px solid var(--border)}
+.pb-watch-trail-row{display:flex;gap:8px;font-size:11.5px;line-height:1.45;color:var(--text-secondary)}
+.pb-watch-trail-when{flex-shrink:0;color:var(--text-tertiary)}
+.pb-watch-trail-text{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+.pb-watch-followup-q{font-size:11px;font-weight:600;color:var(--accent);margin-bottom:3px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+.pb-watch-resp-tools{margin-top:5px}
+.pb-watch-resp-actions{display:flex;gap:4px}
+.pb-watch-resp-act{background:none;border:none;padding:2px 4px;font:inherit;font-size:11px;font-weight:600;color:var(--text-tertiary);cursor:pointer;border-radius:var(--pb-radius-sm)}
+.pb-watch-resp-act:hover{color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.pb-watch-resp-editor{margin-top:6px;display:flex;flex-direction:column;gap:6px}
+.pb-watch-fix-title{font-size:12px}
+.pb-watch-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+.pb-watch-btn{padding:3px 10px;font-size:11px;font-weight:600;color:var(--text-secondary);background:transparent;border:1px solid var(--border);border-radius:var(--pb-radius-sm);cursor:pointer;transition:opacity var(--transition),border-color var(--transition),color var(--transition)}
+.pb-watch-btn:hover{color:var(--text-primary);border-color:var(--text-tertiary)}
+.pb-watch-btn:disabled{opacity:0.5;cursor:default}
+.pb-watch-btn-promote{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,var(--border))}
+.pb-watch-btn-delete:hover{color:var(--pb-red,#d9534f);border-color:var(--pb-red,#d9534f)}
+
+/* ── Charter column ── */
+.pb-charter-northstar{font-size:13px;line-height:1.55;color:var(--text-primary);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;padding:11px 13px;background:var(--pb-card-bg);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--pb-radius)}
+.pb-charter-section{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-tertiary);margin:18px 0 8px}
+.pb-charter-decisions{list-style:none;display:flex;flex-direction:column;gap:6px;margin:0;padding:0}
+.pb-charter-decisions li{position:relative;font-size:13px;line-height:1.45;color:var(--text-primary);padding:9px 11px;background:var(--pb-card-bg);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--pb-radius-sm);white-space:normal;overflow-wrap:anywhere;word-break:break-word;transition:border-color var(--transition),background var(--transition)}
+.pb-charter-decisions li:hover{background:var(--pb-card-hover);--pb-fade-to:var(--pb-card-hover)}
+
+/* ── Charter HUMAN edit/delete affordances ──
+   The north star and each committed decision carry small icon buttons that
+   appear on row hover; a click opens an inline editor (edit) or a two-step
+   confirm (delete). Backend-authoritative — every mutation is optimistic-
+   locked then re-renders from the server. */
+.pb-charter-northstar-row{position:relative}
+.pb-charter-row-actions{position:absolute;top:6px;right:6px;display:flex;gap:3px;opacity:0;transition:opacity var(--transition);pointer-events:none}
+.pb-charter-northstar-row:hover .pb-charter-row-actions,
+.pb-charter-decisions li:hover .pb-charter-row-actions,
+.pb-charter-row-actions:focus-within{opacity:1;pointer-events:auto}
+/* Touch devices have no hover, so the edit/delete affordances were completely
+   unreachable there (`opacity:0;pointer-events:none` was never lifted — a
+   :focus-within on a control you cannot tap can't bootstrap itself). Reveal
+   them permanently on coarse pointers, matching the project's existing
+   `(pointer:coarse)` convention. */
+@media (hover:none),(pointer:coarse){
+  .pb-charter-row-actions{opacity:1;pointer-events:auto}
+}
+.pb-decision-text{padding-right:2px}
+/* ── Charter health strip (backend-computed signals; a missing north star is loud) ── */
+.pb-charter-health{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-tertiary);padding:5px 10px;margin:0 0 10px;border:1px solid var(--border);border-radius:var(--pb-radius-sm);background:var(--pb-card-bg)}
+.pb-charter-health-warn{color:var(--error-text);border-color:var(--error-border);background:var(--error-bg);font-weight:600}
+.pb-charter-health-warn svg{flex:none;color:var(--error-text)}
+/* ── Decision two-tier row: kind badge + summary headline above the clamped full text ── */
+.pb-decision-head{display:flex;align-items:baseline;gap:6px;margin-bottom:4px;padding-right:52px}
+.pb-kind-badge{flex:none;font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--accent);background:var(--accent-subtle);border:1px solid var(--accent);border-radius:4px;padding:1px 5px}
+.pb-decision-summary{font-size:12.5px;font-weight:600;line-height:1.4;color:var(--text-primary);overflow-wrap:anywhere}
+/* ── Proposal summary input (required by the commit route) ── */
+.pb-proposal-summary-row{margin:6px 0}
+.pb-proposal-summary{width:100%;font-size:12px;padding:6px 9px;color:var(--text-primary);background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);outline:none}
+.pb-proposal-summary:focus{border-color:var(--accent)}
+.pb-proposal-summary::placeholder{color:var(--text-tertiary)}
+.pb-charter-act{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);color:var(--text-tertiary);cursor:pointer;transition:color var(--transition),border-color var(--transition),background var(--transition)}
+.pb-charter-act:hover{color:var(--text-primary);border-color:var(--border-light);background:var(--bg-hover)}
+.pb-charter-act svg{display:block}
+.pb-decision-delete:hover,.pb-charter-delete-all:hover{color:var(--pb-red);border-color:color-mix(in srgb,var(--pb-red) 55%,transparent)}
+.pb-charter-act.pb-confirm-armed,.pb-charter-delete-all.pb-confirm-armed{color:#fff;background:var(--pb-red);border-color:var(--pb-red)}
+
+/* Inline textarea editor (edit north-star / a decision). */
+.pb-inline-editor{display:flex;flex-direction:column;gap:8px;margin-top:2px}
+.pb-inline-editor-input{width:100%;min-height:96px;resize:vertical;box-sizing:border-box;padding:9px 11px;font-family:inherit;font-size:13px;line-height:1.5;color:var(--text-primary);background:var(--bg-primary);border:1px solid var(--accent);border-radius:var(--pb-radius-sm);outline:none}
+.pb-inline-editor-input:focus{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 22%,transparent)}
+.pb-inline-editor-label{font-size:11px;font-weight:600;color:var(--text-secondary);margin:0 0 4px;letter-spacing:.01em}
+.pb-inline-editor-summary{width:100%;box-sizing:border-box;padding:7px 11px;margin:0 0 8px;font-family:inherit;font-size:12.5px;line-height:1.45;color:var(--text-primary);background:var(--bg-primary);border:1px solid var(--accent);border-radius:var(--pb-radius-sm);outline:none}
+.pb-inline-editor-summary:focus{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 22%,transparent)}
+.pb-inline-editor-actions{display:flex;gap:8px}
+.pb-inline-save{background:var(--accent);color:#fff;border:none;border-radius:var(--pb-radius-sm);padding:6px 14px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;transition:background var(--transition)}
+.pb-inline-save:hover{background:var(--accent-hover)}
+.pb-inline-save:disabled{opacity:0.55;cursor:default}
+.pb-inline-cancel{background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:6px 14px;font-size:12px;font-family:inherit;cursor:pointer;transition:color var(--transition),border-color var(--transition)}
+.pb-inline-cancel:hover{color:var(--text-primary);border-color:var(--border-light)}
+
+/* Delete-whole-charter footer — a low-emphasis destructive action, set apart. */
+.pb-charter-footer{margin-top:22px;padding-top:14px;border-top:1px solid var(--border);display:flex;justify-content:flex-end}
+.pb-charter-delete-all{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;background:transparent;border:1px solid var(--border);border-radius:var(--pb-radius-sm);color:var(--text-tertiary);font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:color var(--transition),border-color var(--transition),background var(--transition)}
+.pb-charter-delete-all:hover{background:color-mix(in srgb,var(--pb-red) 10%,transparent)}
+.pb-charter-delete-all svg{display:block}
+/* ── Long-text clamp-with-expand ──
+   A committed decision / north-star / proposal can be 2000+ chars. Clamp to a
+   readable preview and let the human expand — otherwise one wall of text makes
+   the whole surface unusable (the reported bug). `.pb-clamp` is collapsed by
+   default; `.pb-clamp-open` shows all. A gradient fade hints there's more. */
+.pb-clamp{position:relative;overflow:hidden;max-height:7.8em;transition:max-height 0.18s ease}
+.pb-clamp.pb-clamp-open{max-height:none}
+/* The fade must resolve to whatever the HOST CARD is currently painted, not a
+   fixed token: every clamp container (activity row / board card / decision li /
+   influence epic) swaps to --pb-card-hover on :hover, so a hard-coded
+   --pb-card-bg fade left a visible ~9/255 rectangle floating over the last
+   line the moment the pointer entered the card. --pb-fade-to is re-pointed by
+   each :hover rule; the fallback keeps every non-hover host correct. */
+.pb-clamp:not(.pb-clamp-open)::after{content:'';position:absolute;left:0;right:0;bottom:0;height:1.15em;background:linear-gradient(180deg,transparent,var(--pb-fade-to,var(--pb-card-bg)));pointer-events:none}
+.pb-clamp-toggle{display:inline-flex;align-items:center;gap:4px;margin-top:7px;padding:2px 0;background:transparent;border:none;color:var(--accent);font-family:inherit;font-size:11.5px;font-weight:600;cursor:pointer}
+.pb-clamp-toggle:hover{text-decoration:underline}
+.pb-clamp-toggle svg{width:12px;height:12px;transition:transform 0.18s ease}
+.pb-clamp-toggle.pb-clamp-toggle-open svg{transform:rotate(180deg)}
+
+/* ── Hover preview for opaque conversation IDs ──
+   A single floating card (project-brain.js reuses one #pb-conv-preview node,
+   positioned via fixed coords) that resolves a [data-conv-id] chip to its
+   conversation's title + opening question on hover. Kept above the overlay. */
+.pb-conv-preview{position:fixed;z-index:100060;max-width:340px;min-width:190px;background:var(--pb-card-bg,var(--bg-secondary));border:1px solid var(--border);border-radius:var(--pb-radius,10px);box-shadow:0 8px 30px rgba(0,0,0,0.32);padding:10px 12px;pointer-events:none;font-size:12px;line-height:1.5}
+.pb-conv-preview[hidden]{display:none}
+.pb-preview-title{font-size:12.5px;font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pb-preview-id{font-size:10.5px;color:var(--text-tertiary);font-family:var(--font-mono,monospace);margin-top:1px}
+.pb-preview-label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-tertiary);margin-top:7px}
+.pb-preview-body{color:var(--text-secondary);margin-top:2px;overflow-wrap:anywhere;word-break:break-word;display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden}
+.pb-preview-empty,.pb-preview-loading{color:var(--text-tertiary);margin-top:6px;font-style:italic}
+/* Peer-message thread from/to ids get an underline-on-hover affordance so it's
+   discoverable they carry a preview. */
+.pb-peer-msg-cid{cursor:help;border-bottom:1px dotted var(--border)}
+.pb-peer-msg-cid:hover{color:var(--accent);border-bottom-color:var(--accent)}
+
+/* Charter pending proposals — the human commit/reject gate. */
+.pb-proposal{background:var(--pb-card-bg);border:1px solid color-mix(in srgb,var(--pb-amber) 34%,var(--border));border-radius:var(--pb-radius);padding:11px 12px;margin-bottom:9px;box-shadow:inset 3px 0 0 var(--pb-amber)}
+.pb-proposal-text{font-size:13px;color:var(--text-primary);line-height:1.5;margin-bottom:10px;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.pb-proposal-actions{display:flex;gap:8px}
+.pb-proposal-commit{flex:1;background:var(--accent);color:#fff;border:none;border-radius:var(--pb-radius-sm);padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:background var(--transition),transform 0.1s ease}
+.pb-proposal-commit:hover{background:var(--accent-hover)}
+.pb-proposal-commit:active{transform:scale(0.97)}
+.pb-proposal-commit:disabled{opacity:0.55;cursor:default}
+.pb-proposal-reject{background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:7px 12px;font-size:12px;cursor:pointer;font-family:inherit;transition:color var(--transition),border-color var(--transition)}
+.pb-proposal-reject:hover{color:var(--text-primary);border-color:var(--border-light)}
+
+/* ── Board column ── */
+.pb-board-lane{margin-bottom:18px}
+.pb-board-lane:last-child{margin-bottom:0}
+.pb-board-lane-head{display:flex;align-items:center;gap:7px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-tertiary);margin-bottom:9px}
+.pb-board-count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 6px;font-size:10.5px;font-weight:700;color:var(--text-secondary);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--pb-radius-chip)}
+.pb-board-card{background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius);padding:11px 12px;margin-bottom:8px;transition:border-color var(--transition),background var(--transition),transform 0.12s ease}
+.pb-board-card:hover{border-color:var(--border-light);background:var(--pb-card-hover);--pb-fade-to:var(--pb-card-hover);transform:translateY(-1px)}
+/* Lane colour-coding on the card's leading edge — held (amber) and awaiting
+   (accent) already carry one; extend the same scan-by-colour language to the
+   other statuses so the board reads at a glance. */
+.pb-board-card.pb-board-open{border-left:3px solid color-mix(in srgb,var(--pb-green) 65%,var(--border))}
+.pb-board-card.pb-board-claimed{border-left:3px solid color-mix(in srgb,var(--accent) 55%,var(--border))}
+.pb-board-card.pb-board-blocked{border-left:3px solid color-mix(in srgb,var(--pb-red) 45%,var(--border))}
+.pb-board-card.pb-board-done{border-left:3px solid color-mix(in srgb,var(--pb-green) 38%,var(--border));opacity:0.78}
+.pb-board-card.pb-board-held{border-left:3px solid var(--pb-amber)}
+.pb-board-lane-held .pb-board-count{color:var(--pb-amber);border-color:color-mix(in srgb,var(--pb-amber) 34%,transparent);background:color-mix(in srgb,var(--pb-amber) 12%,transparent)}
+.pb-board-held-by{font-size:10.5px;color:var(--text-tertiary)}
+.pb-board-title{font-size:13.5px;font-weight:600;line-height:1.5;color:var(--text-primary);white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.pb-board-card-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:9px}
+.pb-board-badge{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;padding:2px 8px;border-radius:var(--pb-radius-chip);line-height:1.5}
+.pb-board-badge-dispatched{background:var(--accent-subtle);color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent)}
+.pb-board-badge-dispatched svg{width:11px;height:11px}
+/* "auto-starts ~30s" — a genuinely-pickable open epic the heartbeat will
+   dispatch on its next sweep (backend-stamped `dispatchable`). Amber pulse to
+   read as "imminent", distinct from the accent "already dispatched" badge. */
+.pb-board-badge-pending{background:color-mix(in srgb,var(--pb-amber) 14%,transparent);color:var(--pb-amber);border:1px solid color-mix(in srgb,var(--pb-amber) 34%,transparent);animation:pbPendingPulse 2s ease-in-out infinite}
+.pb-board-badge-pending svg{width:11px;height:11px}
+@keyframes pbPendingPulse{0%,100%{opacity:1}50%{opacity:0.55}}
+/* Board human-action controls (post / complete / block / reopen) */
+.pb-board-toolbar{display:flex;justify-content:flex-end;margin-bottom:12px}
+.pb-board-new{display:inline-flex;align-items:center;gap:5px;background:var(--accent-subtle);color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 34%,transparent);border-radius:var(--pb-radius-sm);padding:6px 11px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;transition:background var(--transition),border-color var(--transition)}
+.pb-board-new:hover{background:color-mix(in srgb,var(--accent) 18%,transparent)}
+.pb-board-new:disabled{opacity:0.5;cursor:default}
+.pb-board-card-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px;padding-top:9px;border-top:1px solid var(--border)}
+.pb-board-act{display:inline-flex;align-items:center;gap:4px;background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:4px 9px;font-size:11px;font-weight:600;font-family:inherit;cursor:pointer;transition:color var(--transition),border-color var(--transition),background var(--transition)}
+.pb-board-act:hover{color:var(--text-primary);border-color:var(--border-light)}
+.pb-board-act:disabled{opacity:0.55;cursor:default}
+.pb-board-act-delete:hover{color:var(--danger,#c0392b);border-color:var(--danger,#c0392b)}
+/* ── Unified board interaction primitives (Pillar #2 of the panel redesign) ── */
+/* Primary CTA (submit answer / mark blocked) — same family as .pb-board-act,
+   one accent fill so the eye lands on the single forward action. */
+.pb-board-act.pb-btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.pb-board-act.pb-btn-primary:hover{background:var(--accent-hover);color:#fff;border-color:var(--accent-hover)}
+.pb-board-act:focus-visible{outline:2px solid color-mix(in srgb,var(--accent) 60%,transparent);outline-offset:1px}
+/* Awaiting-answer lane + card — COMPACT (2026-07-31 consolidation): the
+   question UI lives only in the Needs-you tab, so this card keeps the gated
+   state visible (accent rail + a whisper of accent wash) and deep-links. */
+.pb-board-lane-awaiting .pb-board-lane-head{color:var(--accent)}
+.pb-board-lane-awaiting .pb-board-count{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.pb-board-card.pb-board-awaiting{border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 4%,var(--pb-card-bg))}
+.pb-board-card.pb-board-awaiting:hover{background:color-mix(in srgb,var(--accent) 7%,var(--pb-card-hover));--pb-fade-to:color-mix(in srgb,var(--accent) 7%,var(--pb-card-hover))}
+.pb-board-badge-awaiting{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 34%,transparent)}
+.pb-board-badge-awaiting svg{width:11px;height:11px}
+.pb-board-awaiting-meta{font-size:10.5px;color:var(--text-tertiary)}
+/* Forward actions on a board card — deep-link to the answering surface, or
+   open a fresh chat about the epic. Accent family so the eye separates them
+   from the neutral lifecycle controls (complete/block/reopen). */
+.pb-board-act.pb-board-act-goto{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:var(--accent-subtle)}
+.pb-board-act.pb-board-act-goto:hover{color:var(--accent-hover);border-color:color-mix(in srgb,var(--accent) 50%,transparent);background:color-mix(in srgb,var(--accent) 16%,transparent)}
+.pb-board-act.pb-board-act-createConv{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:transparent}
+.pb-board-act.pb-board-act-createConv:hover{color:var(--accent-hover);border-color:color-mix(in srgb,var(--accent) 50%,transparent);background:var(--accent-subtle)}
+.pb-chip-row{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
+.pb-chip{display:inline-flex;align-items:center;gap:4px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-light);border-radius:var(--pb-radius-chip);padding:5px 12px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;transition:background var(--transition),border-color var(--transition),transform 0.1s ease}
+.pb-chip:hover{background:var(--bg-hover);border-color:var(--accent)}
+.pb-chip:active{transform:scale(0.97)}
+.pb-chip:disabled{opacity:0.55;cursor:default}
+/* Inline note editor (replaces window.prompt for Block) — the in-panel
+   prompt family shared with the Needs-you tab's answer input. */
+.pb-note-editor{display:flex;gap:7px;margin-top:9px;padding-top:9px;border-top:1px dashed var(--border)}
+.pb-note-text{flex:1;min-width:0;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:6px 10px;font-size:12px;color:var(--text-primary);font-family:inherit}
+.pb-note-text:focus{outline:none;border-color:var(--accent)}
+/* Answered badge — the human's decision travels with the unblocked epic. */
+.pb-board-badge-answered{background:color-mix(in srgb,var(--pb-green,#3fb950) 12%,transparent);color:var(--pb-green,#3fb950);border:1px solid color-mix(in srgb,var(--pb-green,#3fb950) 30%,transparent)}
+.pb-board-badge-answered svg{width:11px;height:11px}
+
+/* Focus flash: a Board deep-link ("go answer") lands the operator on THIS
+   attention card, not the tab top — a brief one-shot accent pulse so the eye
+   follows (finite animation, no reduced-motion concern). */
+.pb-attn-card.pb-attn-flash{animation:pbAttnFlash 1.4s ease}
+@keyframes pbAttnFlash{0%{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 26%,transparent)}100%{box-shadow:0 0 0 0 transparent}}
+
+/* collab-bar conflict styling (shares this block's ownership). */
+.collab-seg-conflict{color:var(--pb-red);font-weight:600}
+.collab-bar-inner.collab-has-conflicts{border-color:color-mix(in srgb,var(--pb-red) 40%,transparent)}
+
+/* ── "Needs you" tab (the attention surface) ──
+   ONE card grammar shared by every item type: severity rail · head (severity
+   pill + kind) · title/body · inline resolving control · meta. The eye learns
+   one shape instead of the four it used to meet across Charter/Board/Team.
+   Colour carries severity, NOT source: red rail = work is STOPPED until a
+   human acts; accent rail = advisory, progress continues. */
+.pb-attn-lead{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-tertiary);margin-bottom:12px}
+.pb-attn-lead-blocking{color:var(--pb-red)}
+.pb-attn-card{background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius);padding:12px 13px;margin-bottom:10px;transition:border-color var(--transition),background var(--transition),transform 0.12s ease;animation:pbRowIn 0.24s cubic-bezier(0.16,1,0.3,1)}
+.pb-attn-card:hover{border-color:var(--border-light);background:var(--pb-card-hover);--pb-fade-to:var(--pb-card-hover);transform:translateY(-1px)}
+.pb-attn-card.pb-attn-blocking{border-left:3px solid var(--pb-red)}
+.pb-attn-card.pb-attn-advisory{border-left:3px solid color-mix(in srgb,var(--accent) 55%,var(--border))}
+.pb-attn-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.pb-attn-sev{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;padding:2px 8px;border-radius:var(--pb-radius-chip);line-height:1.6}
+.pb-attn-sev svg{display:block}
+.pb-attn-sev-blocking{color:var(--pb-red);background:color-mix(in srgb,var(--pb-red) 12%,transparent);border:1px solid color-mix(in srgb,var(--pb-red) 32%,transparent)}
+.pb-attn-sev-advisory{color:var(--accent);background:var(--accent-subtle);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent)}
+.pb-attn-kind{font-size:10.5px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.05em}
+/* Type scale with actual hierarchy: title leads, body recedes, meta whispers.
+   (The old surface sat every level within ~1.5px, so nothing receded.) */
+.pb-attn-title{font-size:13.5px;font-weight:600;line-height:1.5;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
+.pb-attn-body{font-size:12.5px;line-height:1.6;color:var(--text-secondary);overflow-wrap:anywhere;word-break:break-word}
+.pb-attn-meta{font-size:11.5px;color:var(--text-tertiary);margin-top:8px;overflow-wrap:anywhere}
+/* The question IS the content on a halted epic — and after the 2026-07-31
+   consolidation this is the ONLY place it renders (the Board deep-links here). */
+.pb-attn-q{margin-top:9px;padding:10px 12px;border:1px solid color-mix(in srgb,var(--pb-red) 26%,transparent);border-radius:var(--pb-radius-sm);background:color-mix(in srgb,var(--pb-red) 6%,transparent);font-size:12.5px;line-height:1.6;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
+/* Section label — names the block that follows (Why it stopped / Your call),
+   so a decision card reads as labelled parts, not one dense wall. */
+.pb-attn-label{margin-top:10px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-tertiary)}
+/* The background block: the block reason promoted out of the meta tail into
+   its own quiet panel (clamp-rendered, so a long reason collapses). */
+.pb-attn-reason{margin-top:4px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--pb-radius-sm);background:color-mix(in srgb,var(--bg-tertiary) 30%,transparent);font-size:12px;line-height:1.6;color:var(--text-secondary);overflow-wrap:anywhere;word-break:break-word}
+/* Provenance chip in the card head — pushed right so the severity/kind pills
+   keep their lead position; reuses the panel-wide pb-conv-chip look. */
+.pb-attn-from{margin-left:auto;max-width:55%}
+.pb-attn-from-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Option chip with its description ON the card (was hover-only): the choice
+   and what it means read together, stacked. */
+.pb-attn-opt{flex-direction:column;align-items:flex-start;gap:2px}
+.pb-attn-opt-label{font-weight:600}
+.pb-attn-opt-desc{font-size:10.5px;font-weight:400;color:var(--text-tertiary);line-height:1.45;white-space:normal;text-align:left}
+.pb-attn-input-row{display:flex;gap:7px;margin-top:9px}
+.pb-attn-answer{flex:1;min-width:0;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:6px 10px;font-size:12px;color:var(--text-primary);font-family:inherit}
+.pb-attn-answer:focus{outline:none;border-color:var(--accent)}
+.pb-attn-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)}
+/* Action buttons reuse the board's button family verbatim (one button
+   vocabulary panel-wide, not a second look-alike set). */
+.pb-attn-act{display:inline-flex;align-items:center;gap:4px;background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:5px 10px;font-size:11.5px;font-weight:600;font-family:inherit;cursor:pointer;transition:color var(--transition),border-color var(--transition),background var(--transition)}
+.pb-attn-act:hover{color:var(--text-primary);border-color:var(--border-light)}
+.pb-attn-act:disabled{opacity:0.55;cursor:default}
+.pb-attn-act.pb-btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.pb-attn-act.pb-btn-primary:hover{background:var(--accent-hover);color:#fff;border-color:var(--accent-hover)}
+/* Create-conversation on a halted-epic card — accent outline, same family as
+   the Board's createConv/goto forward actions (one vocabulary panel-wide). */
+.pb-attn-act.pb-attn-act-conv{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:transparent}
+.pb-attn-act.pb-attn-act-conv:hover{color:var(--accent-hover);border-color:color-mix(in srgb,var(--accent) 50%,transparent);background:var(--accent-subtle)}
+/* The reassurance line: epics on a self-expiring cooldown need NOTHING from
+   the human, so they are deliberately not cards — a muted footnote instead. */
+.pb-attn-waiting{display:flex;align-items:center;gap:6px;margin-top:6px;padding:9px 11px;font-size:11.5px;color:var(--text-tertiary);border:1px dashed var(--border);border-radius:var(--pb-radius-sm);background:color-mix(in srgb,var(--bg-tertiary) 25%,transparent)}
+.pb-attn-waiting svg{display:block;flex-shrink:0}
+/* Empty state is a POSITIVE statement, not a "no data" box — the operator
+   asked "is anything waiting on me?" and "no" is a real, useful answer. */
+.pb-attn-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;min-height:200px;padding:24px;margin:2px;color:var(--text-tertiary);text-align:center;border:1px dashed var(--border);border-radius:var(--pb-radius);background:color-mix(in srgb,var(--bg-tertiary) 30%,transparent)}
+.pb-attn-empty svg{display:block;color:var(--pb-green);opacity:0.75}
+.pb-attn-empty-title{font-size:14px;font-weight:600;color:var(--text-secondary)}
+.pb-attn-empty-sub{font-size:12px;color:var(--text-tertiary)}
+/* Tab dot + badge. The badge turns red ONLY when something is genuinely
+   stopped, so an advisory-only project reads calm at a glance. */
+.pb-tab[data-pb-tab="attention"].pb-tab-active{color:var(--pb-red)}
+.pb-tab-count.pb-tab-count-blocking{color:#fff;background:var(--pb-red);border-color:var(--pb-red)}
+
+/* collab-bar attention styling: the count is always visible, but only
+   `blocking` (work actually stopped) escalates the bar's own border. */
+.collab-seg-needsyou{font-weight:600}
+.collab-seg-blocking{color:var(--pb-red)}
+.collab-bar-inner.collab-has-blocking{border-color:color-mix(in srgb,var(--pb-red) 40%,transparent)}
+.collab-conflicts{display:inline-flex;flex-wrap:wrap;gap:6px;margin-left:8px}
+.collab-conflict-line{font-size:11px;color:var(--pb-red);opacity:0.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px}
+
+/* ═══ Per-conversation Influence lens (banner above the columns) ═══ */
+.project-brain-influence{border-bottom:1px solid var(--border);background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 5%,var(--bg-primary)),var(--bg-primary));padding:14px 22px;max-height:40vh;max-height:calc(var(--vh100,100vh)*0.4);overflow-y:auto;animation:fadeIn 0.2s ease}
+.project-brain-influence[hidden]{display:none}
+.project-brain-influence::-webkit-scrollbar{width:8px}
+.project-brain-influence::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+/* Deep-link flash: when the conv-influence BAR opens the panel, briefly pulse
+   the lens so the user's eye lands on the conv-scoped section (not the top). */
+.project-brain-influence.pb-influence-flash{animation:pbInfluenceFlash 1.3s ease}
+@keyframes pbInfluenceFlash{0%{background:color-mix(in srgb,var(--accent) 26%,var(--bg-primary))}100%{background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 5%,var(--bg-primary)),var(--bg-primary))}}
+.pb-influence-head{display:flex;align-items:baseline;gap:9px;margin-bottom:12px}
+.pb-influence-title{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent)}
+.pb-influence-conv{font-size:12px;color:var(--text-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.pb-influence-body{display:flex;flex-direction:column;gap:13px}
+.pb-inf-chips{display:flex;flex-wrap:wrap;gap:7px}
+.pb-inf-chip{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:4px 10px;border-radius:var(--pb-radius-chip);line-height:1.4;background:var(--bg-tertiary);border:1px solid var(--border);color:var(--text-secondary)}
+.pb-inf-chip svg{width:12px;height:12px;flex-shrink:0}
+.pb-inf-chip-charter{background:var(--accent-subtle);border-color:color-mix(in srgb,var(--accent) 32%,transparent);color:var(--accent)}
+.pb-inf-chip-mine{background:color-mix(in srgb,var(--pb-green) 14%,transparent);border-color:color-mix(in srgb,var(--pb-green) 34%,transparent);color:var(--pb-green)}
+.pb-inf-chip-avoid{background:color-mix(in srgb,var(--pb-red) 13%,transparent);border-color:color-mix(in srgb,var(--pb-red) 34%,transparent);color:var(--pb-red)}
+.pb-inf-chip-pending{background:color-mix(in srgb,var(--pb-amber) 14%,transparent);border-color:color-mix(in srgb,var(--pb-amber) 36%,transparent);color:var(--pb-amber)}
+.pb-inf-group{display:flex;flex-direction:column;gap:6px}
+.pb-inf-group-head{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-tertiary)}
+.pb-inf-group-head::before{content:'';width:5px;height:5px;border-radius:50%;background:currentColor;opacity:0.6;flex-shrink:0}
+.pb-inf-group-mine .pb-inf-group-head{color:var(--pb-green)}
+.pb-inf-group-avoid .pb-inf-group-head{color:var(--pb-red)}
+.pb-inf-group-open .pb-inf-group-head{color:var(--text-tertiary)}
+.pb-inf-group-charter .pb-inf-group-head{color:var(--accent)}
+.pb-inf-northstar{font-size:12.5px;line-height:1.55;color:var(--text-primary);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;padding:9px 11px;background:var(--pb-card-bg);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--pb-radius-sm)}
+.pb-inf-decisions{list-style:none;display:flex;flex-direction:column;gap:5px;margin:0;padding:0}
+.pb-inf-decisions li{font-size:12.5px;line-height:1.45;color:var(--text-primary);padding:7px 10px;background:var(--pb-card-bg);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--pb-radius-sm);white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.pb-inf-epic{display:flex;align-items:center;gap:9px;font-size:12.5px;line-height:1.45;color:var(--text-primary);padding:9px 11px;background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius-sm);margin-bottom:5px;transition:border-color var(--transition),background var(--transition)}
+.pb-inf-epic:hover{background:var(--pb-card-hover);--pb-fade-to:var(--pb-card-hover)}
+.pb-inf-epic-title{flex:1;min-width:0;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.pb-inf-epic.pb-inf-mine{border-left:3px solid var(--pb-green)}
+.pb-inf-epic.pb-inf-avoid{border-left:3px solid var(--pb-red)}
+.pb-inf-epic.pb-inf-open{border-left:3px solid var(--text-tertiary)}
+/* ── The two channels ──
+   "already spliced into the prompt" and "reachable only by spending a tool
+   round" are different facts; rendering them as one list silently upgrades
+   the second into the first. Injected is accented, tool-visible is muted. */
+.pb-inf-channel{display:flex;flex-direction:column;gap:11px;padding:11px 12px;border-radius:var(--pb-radius);border:1px solid var(--border)}
+.pb-inf-channel-injected{background:color-mix(in srgb,var(--accent) 6%,transparent);border-color:color-mix(in srgb,var(--accent) 26%,transparent)}
+.pb-inf-channel-tools{background:var(--bg-tertiary)}
+.pb-inf-channel-head{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-secondary)}
+.pb-inf-channel-injected .pb-inf-channel-head{color:var(--accent)}
+.pb-inf-group-goals .pb-inf-group-head{color:var(--pb-amber)}
+.pb-inf-group-goals .pb-inf-decisions li{border-left-color:var(--pb-amber)}
+.pb-inf-chip-goals{background:color-mix(in srgb,var(--pb-amber) 14%,transparent);border-color:color-mix(in srgb,var(--pb-amber) 36%,transparent);color:var(--pb-amber)}
+/* Measured size of the lane's REAL injected block — a claim the human can check. */
+.pb-inf-cost{font-weight:600;font-size:9.5px;letter-spacing:0.02em;text-transform:none;color:var(--text-tertiary);margin-left:6px}
+.pb-inf-tool{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--text-secondary);padding:6px 9px;background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius-sm)}
+.pb-inf-tool code{font-size:11px;font-family:var(--font-mono,ui-monospace,monospace);color:var(--text-primary);background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;flex-shrink:0}
+.pb-inf-note{font-size:11.5px;line-height:1.5;color:var(--text-tertiary);padding:7px 10px;background:var(--bg-tertiary);border-radius:var(--pb-radius-sm)}
+.pb-inf-epic.pb-inf-pending{border-left:3px solid var(--pb-amber)}
+.pb-inf-group-pending .pb-inf-group-head{color:var(--pb-amber)}
+
+/* ── Collaboration bar: the single PROJECT cluster ──
+   The bar (#presenceStrip → .collab-bar-inner) hosts ONE project-scoped
+   cluster: the ambient status headline (.collab-status) + the action-ordered
+   coordination counts. The per-conversation influence lens lives inside the
+   Project Brain panel, not on this always-visible line. */
+.collab-cluster{display:inline-flex;align-items:center;gap:8px;min-width:0;flex:1 1 auto}
+
+/* ═══ Readability pass (P4 of the attention redesign) ═══
+   docs/modules/conversations_project_brain.md §3.3. Three complaints, three
+   fixes — all additive overrides of rules defined earlier in this block. */
+
+/* 1. TYPE HIERARCHY. Title / body / meta previously sat within ~1.5px of each
+   other, so nothing receded and every card read as a uniform grey wall. Give
+   the levels real separation: the title carries weight, the meta genuinely
+   whispers. (The .pb-attn-* family already ships this scale; these rules
+   retrofit the older surfaces so the whole panel reads the same.)
+   NOTE: the .pb-board-title size/weight lives in its ORIGINAL rule above, not
+   here — an override at this point in the file has equal specificity and would
+   depend on source order, which is exactly the cascade trap
+   test_project_brain_tab_css_cascade exists to catch. */
+.pb-board-card-meta,.pb-board-block-meta{font-size:11.5px;color:var(--text-tertiary)}
+.pb-peer-who{font-weight:600}
+.pb-peer-doing{font-size:11.5px;color:var(--text-tertiary)}
+.pb-status-hist-narrative{font-size:12.5px;line-height:1.6;color:var(--text-secondary)}
+
+/* 2. STICKY LANE HEADS. A long board scrolls its lane label out of view, so
+   the operator loses track of which lane a card belongs to. Pin the heads to
+   the top of the scroller (.project-brain-col-body). Needs an opaque
+   background — the cards scroll UNDER them. */
+.pb-board-lane-head,.pb-peers-roster-head,.pb-peers-thread-head{position:sticky;top:-16px;z-index:2;background:var(--bg-secondary);padding-top:8px;padding-bottom:8px;margin-top:-8px}
+
+/* 3. QUIET CHROME. Per-card lifecycle buttons (complete / block / reopen) were
+   always at full strength, so every board card shouted three actions before
+   the operator had even read its title. Recede them until the card is hovered
+   or something inside it has keyboard focus — the same idiom
+   .pb-charter-row-actions already uses. Actions stay FOCUSABLE at all times
+   (opacity only), so keyboard and AT users are unaffected. */
+@media (hover:hover) and (pointer:fine){
+  .pb-board-card-actions{opacity:0.45;transition:opacity var(--transition)}
+  .pb-board-card:hover .pb-board-card-actions,
+  .pb-board-card:focus-within .pb-board-card-actions{opacity:1}
+  /* An awaiting-answer or blocked card is the ONE place the operator must act
+     — its controls never recede. */
+  .pb-board-card.pb-board-awaiting .pb-board-card-actions,
+  .pb-board-card.pb-board-blocked .pb-board-card-actions{opacity:1}
+}
+
+/* 4. DE-DUPLICATION. The same numbers rendered up to 4× (tab badge + lane head
+   + Status evidence chip + collab bar). The tab badges are the canonical
+   at-a-glance counts, so the Status tab's echo of them recedes to supporting
+   evidence rather than competing as a second dashboard. */
+.pb-status-evidence{opacity:0.72}
+.pb-status-hist-row .pb-status-evidence{display:none}
+.pb-status-hist-row:hover .pb-status-evidence,
+.pb-status-hist-row:focus-within .pb-status-evidence{display:flex;opacity:0.72}
+
+/* ── Responsive: narrow panel ──
+   NOTE: .project-brain-columns is a display:block tab host (one panel visible
+   at a time), NOT a grid — the old `grid-template-columns:1fr` here was inert
+   left over from the pre-tab 4-column layout, and `overflow-y:auto` on it
+   fought the real scroller (.project-brain-col-body). Tighten the body gutter
+   instead, which is what actually buys reading width on a phone. */
+@media (max-width:720px){
+  .project-brain-col-body{padding:12px 12px}
+  .project-brain-tabs{padding:0 6px}
+}
+
+/* ── Frontend-stability hardening: native scroll anchoring + reserved media ──
+ * Root-cause primitives for the "read position lost / jumps" class. Appended as
+ * an isolated block that overrides no existing rule (all new selectors). */
+
+/* Native browser scroll anchoring (overflow-anchor:auto is the default, but we
+ * declare it EXPLICITLY so it survives any future reset and documents intent):
+ * when content grows/reflows ABOVE the current viewport — streaming deltas,
+ * late-landing cost/finish bars, lazy-loaded older messages — the browser keeps
+ * the reader's visual position fixed instead of the content shoving down/up.
+ * This is the single highest-leverage stability primitive and needs no JS. */
+#chatContainer{overflow-anchor:auto}
+#chatInner{overflow-anchor:auto}
+#chatInner .message{overflow-anchor:auto}
+/* The live streaming bubble is the ONE element that SHOULD ride the bottom as it
+ * grows; exclude it from anchoring so its growth doesn't fight stick-to-bottom. */
+#streaming-msg{overflow-anchor:none}
+
+/* Reserved box for bare markdown-rendered chat images (the .message-body img
+ * fallback — NOT the fixed-size upload thumbnails or the image-gen cards, which
+ * already reserve space). Without a reserved aspect box a late image decode
+ * grows the bubble and shoves content under the reader mid-read. aspect-ratio +
+ * object-fit:contain reserves the height up-front without distorting the image
+ * (letterboxed within the box); it never enlarges an intrinsically small image
+ * because width is still bounded by the image's natural size + the max-width. */
+.message-body img:not(.msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){aspect-ratio:3 / 2;height:auto;object-fit:contain}
+
+/* Known-stale cache paint: while a background server GET verifies a cached copy
+ * we ALREADY know is outdated (the sidebar's server-issued updatedAt is newer
+ * than the cached updatedAt), mark the provisional paint visibly pending so the
+ * transient pre-correction content reads as "verifying", not as truth. Cleared
+ * the moment Phase-2 reconciles (or the fetch settles). Persisted corruption is
+ * already prevented by the rev CAS; this only closes the cosmetic stale flash. */
+#chatInner.chat-cache-verifying{opacity:.82;transition:opacity .18s ease}
+
+/* ════════════════════════════════════════════════════
+   Orchestration Studio — scoped modal styles
+   (relocated from orchestration.js _orchInjectStyles, 2026-07)
+   ═══════════════════════════════════════════════════ */

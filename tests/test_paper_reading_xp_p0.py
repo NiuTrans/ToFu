@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""P0 backend suite — paper reading-experience (design
-docs/PAPER_READING_EXPERIENCE_DESIGN.md §3.2/§3.3/§3.4).
+"""Backend suite for the reading experience in docs/modules/ingest_media.md.
 
 Proves fully offline:
 
@@ -35,10 +34,37 @@ if __name__ == '__main__':
     # The engine import below freezes the DB backend from the ambient env —
     # the standalone guard must run FIRST (under pytest this branch never
     # fires, so the session DB is untouched).
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_paper_reading_xp_p0.standalone')
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_paper_reading_xp_p0.standalone')
 
-import lib.paper.insight_engine as ie  # noqa: E402
+import lib.paper.insight_engine._anchors as anchors_mod  # noqa: E402
+import lib.paper.insight_engine._config as config_mod  # noqa: E402
+import lib.paper.insight_engine._grounding as grounding_mod  # noqa: E402
+import lib.paper.insight_engine._run as ie  # noqa: E402
+import lib.paper.insight_engine._rubric as rubric_mod  # noqa: E402
+import lib.paper.insight_engine._synthesize as synth_mod  # noqa: E402
+import lib.paper.insight_prompts as insight_prompts  # noqa: E402
+
+TEST_OWNER_USER_ID = 1
+
+_PATCH_OWNERS = {
+    'dispatch_stream': synth_mod,
+    'execute_paper_tool': synth_mod,
+    'search_arxiv': grounding_mod,
+    'fetch_arxiv_title': grounding_mod,
+    '_build_reader_context': ie,
+    'score_report_rubric': ie,
+    '_persist_insight': ie,
+    '_self_identity': ie,
+}
+
+
+def _get_patch(name):
+    return getattr(_PATCH_OWNERS[name], name)
+
+
+def _set_patch(name, value):
+    setattr(_PATCH_OWNERS[name], name, value)
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -65,7 +91,7 @@ _ZH_REPORT = (
 
 # ── 1. heading extraction ────────────────────────────────────────────────
 def test_extract_report_headings():
-    heads = ie.extract_report_headings(_REPORT)
+    heads = anchors_mod.extract_report_headings(_REPORT)
     texts = [h['text'] for h in heads]
     assert texts == ['⚡ TL;DR', '🔑 Core Terminology',
                      '💡 Method — How It Works', '📊 Experimental Analysis'], \
@@ -78,26 +104,26 @@ def test_extract_report_headings():
 
 # ── 2. resolve_anchor ────────────────────────────────────────────────────
 def test_resolve_anchor_exact_fuzzy_fallback():
-    heads = ie.extract_report_headings(_REPORT)
+    heads = anchors_mod.extract_report_headings(_REPORT)
     # exact (case/emoji tolerant — model drops the emoji + varies case)
-    assert ie.resolve_anchor('Method — How It Works', heads) == 2
-    assert ie.resolve_anchor('method how it works', heads) == 2
+    assert anchors_mod.resolve_anchor('Method — How It Works', heads) == 2
+    assert anchors_mod.resolve_anchor('method how it works', heads) == 2
     # fuzzy: paraphrase sharing most tokens
-    assert ie.resolve_anchor('How It Works — the Method', heads) == 2
+    assert anchors_mod.resolve_anchor('How It Works — the Method', heads) == 2
     # below threshold → None (never guess)
-    assert ie.resolve_anchor('Related Work and Predecessors', heads) is None
+    assert anchors_mod.resolve_anchor('Related Work and Predecessors', heads) is None
     # empty / None → None
-    assert ie.resolve_anchor('', heads) is None
-    assert ie.resolve_anchor(None, heads) is None
+    assert anchors_mod.resolve_anchor('', heads) is None
+    assert anchors_mod.resolve_anchor(None, heads) is None
     _ok('resolve_anchor: exact + fuzzy hit, paraphrase tolerated, unknown → None')
 
 
 def test_resolve_anchor_zh():
-    heads = ie.extract_report_headings(_ZH_REPORT)
-    assert ie.resolve_anchor('方法——它如何工作', heads) == 1
+    heads = anchors_mod.extract_report_headings(_ZH_REPORT)
+    assert anchors_mod.resolve_anchor('方法——它如何工作', heads) == 1
     # CJK fuzzy: one char off
-    assert ie.resolve_anchor('方法——它怎样工作', heads) in (1, None)  # tolerance band
-    assert ie.resolve_anchor('研究版图与影响', heads) is None
+    assert anchors_mod.resolve_anchor('方法——它怎样工作', heads) in (1, None)  # tolerance band
+    assert anchors_mod.resolve_anchor('研究版图与影响', heads) is None
     _ok('resolve_anchor: zh headings resolve, unrelated zh → None')
 
 
@@ -117,7 +143,7 @@ def test_resolve_insight_anchors_items():
             'legacy plain string provocation',
         ],
     }
-    stats = ie.resolve_insight_anchors(insight, _REPORT)
+    stats = anchors_mod.resolve_insight_anchors(insight, _REPORT)
     conns = insight['connections']
     assert conns[0]['anchor_idx'] == 2, f'exact nomination not resolved: {conns[0]}'
     assert conns[1]['anchor_idx'] is None, 'unresolved nomination must fall back to None'
@@ -132,20 +158,20 @@ def test_resolve_insight_anchors_items():
 def test_enable_chain_three_levels():
     os.environ.pop('TOFU_PAPER_INSIGHT', None)
     # level 3: nothing set anywhere → default ON (owner-approved flip).
-    assert ie.insight_enabled() is True, 'interactive default must be ON'
+    assert config_mod.insight_enabled() is True, 'interactive default must be ON'
     # level 2: env kill switch honoured, both directions.
     os.environ['TOFU_PAPER_INSIGHT'] = '0'
     try:
-        assert ie.insight_enabled() is False, 'env=0 must disable'
+        assert config_mod.insight_enabled() is False, 'env=0 must disable'
         # level 1: explicit per-request cfg (headless stamp / opt-in) always wins.
-        assert ie.insight_enabled({'paperInsightEnabled': True}) is True, \
+        assert config_mod.insight_enabled({'paperInsightEnabled': True}) is True, \
             'cfg opt-in True must beat env=0'
     finally:
         os.environ.pop('TOFU_PAPER_INSIGHT', None)
     os.environ['TOFU_PAPER_INSIGHT'] = '1'
     try:
-        assert ie.insight_enabled() is True, 'env=1 must enable'
-        assert ie.insight_enabled({'paperInsightEnabled': False}) is False, \
+        assert config_mod.insight_enabled() is True, 'env=1 must enable'
+        assert config_mod.insight_enabled({'paperInsightEnabled': False}) is False, \
             'cfg stamp False must beat env=1'
     finally:
         os.environ.pop('TOFU_PAPER_INSIGHT', None)
@@ -187,10 +213,10 @@ class _UsagePatched:
         self.persisted = None
 
     def __enter__(self):
-        for name in ('dispatch_stream', '_execute_report_tool', 'search_arxiv',
+        for name in ('dispatch_stream', 'execute_paper_tool', 'search_arxiv',
                      'fetch_arxiv_title', '_build_reader_context',
                      'score_report_rubric', '_persist_insight', '_self_identity'):
-            self._orig[name] = getattr(ie, name)
+            self._orig[name] = _get_patch(name)
         rec = self
 
         def _fake_dispatch(messages, *, on_content=None, tools=None, **kw):
@@ -211,10 +237,10 @@ class _UsagePatched:
                              'kw': kw}
             return True
 
-        ie.dispatch_stream = _fake_dispatch
-        ie._execute_report_tool = lambda *a, **k: ('', [], None, None, None)
-        ie.search_arxiv = lambda *a, **k: []
-        ie.fetch_arxiv_title = lambda _id: ''
+        synth_mod.dispatch_stream = _fake_dispatch
+        synth_mod.execute_paper_tool = lambda *a, **k: ('', [], None, None, None)
+        grounding_mod.search_arxiv = lambda *a, **k: []
+        grounding_mod.fetch_arxiv_title = lambda _id: ''
         ie._build_reader_context = lambda *a, **k: ''
         ie.score_report_rubric = _fake_rubric
         ie._persist_insight = _fake_persist
@@ -223,14 +249,15 @@ class _UsagePatched:
 
     def __exit__(self, *exc):
         for k, v in self._orig.items():
-            setattr(ie, k, v)
+            _set_patch(k, v)
         return False
 
 
 def test_usage_folded_and_items_persisted():
     with _UsagePatched() as p:
         out = ie.run_report_insight('paper text', _REPORT, 'en', phash='u1',
-                                    allow_personal_context=False)
+                                    allow_personal_context=False,
+                                    user_id=TEST_OWNER_USER_ID)
     assert out['fired'] is True
     u = out['usage']
     assert u is not None, 'usage not surfaced'
@@ -267,12 +294,14 @@ def test_persist_insight_v2_meta_written():
     _storage_mod.get_storage_client = lambda *, write=False: _FakeClient()
     try:
         ok = ie._persist_insight('h1', 'en', '## 💡 x\n', 'm1',
+                                 user_id=TEST_OWNER_USER_ID,
                                  items={'thesis': 't'}, usage={'prompt_tokens': 1},
                                  baseline=3.0)
     finally:
         _storage_mod.get_storage_client = original
     assert ok is True
     assert captured['operation'] == 'paper.report.upsert'
+    assert captured['row']['user_id'] == TEST_OWNER_USER_ID
     assert captured['command_id'].startswith('paper.insight.upsert:')
     meta = captured['row']['meta']
     assert meta['kind'] == 'insight' and meta['v'] == 2
@@ -288,6 +317,7 @@ def test_merge_second_pass_updates_meta_persists_emits():
     events = []
     persisted = []
     task = {
+        '_userId': TEST_OWNER_USER_ID,
         'lang': 'en',
         'report_meta': {'model': 'm1', 'providerId': '',
                         'promptTokens': 1000, 'completionTokens': 200,
@@ -378,7 +408,7 @@ def _import_routes_paper():
                 mod.Blueprint.websocket = lambda self, *a, **k: (lambda f: f)
         except Exception:
             pass
-    import routes.paper as rp
+    import routes.paper_pkg._common as rp
     return rp
 
 
@@ -386,29 +416,32 @@ def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
 
-def test_read_path_v2_payload_not_merged():
+def test_read_path_v2_payload_not_merged(monkeypatch):
     rp = _import_routes_paper()
     phash = 'v2hash'
-    v2_meta = json.dumps({'kind': 'insight', 'v': 2,
-                          'items': {'thesis': 'The bet.',
-                                    'connections': [{'text': 'b', 'anchor_idx': 1}]},
-                          'baseline': 3.0})
+    v2_meta = {'kind': 'insight', 'v': 2,
+               'items': {'thesis': 'The bet.',
+                         'connections': [{'text': 'b', 'anchor_idx': 1}]},
+               'baseline': 3.0}
     rows = {
-        (phash, 'en'): {'report': _REPORT},
-        (phash, ie.insight_lang_key('en')): {
+        (phash, config_mod.insight_lang_key('en')): {
             'report': '## 💡 Insight & Ideas\n\nbody\n', 'meta': v2_meta},
     }
 
-    async def _fake_fetchone(sql, params, **kw):
-        return rows.get((params[0], params[1]))
+    class _Repository:
+        def __init__(self, user_id):
+            assert user_id == TEST_OWNER_USER_ID
 
-    orig = rp.async_fetchone
-    rp.async_fetchone = _fake_fetchone
-    try:
-        payload = _run(rp._load_cached_insight_payload(phash, 'en'))
-        out = _run(rp._append_cached_insight(_REPORT, phash, 'en'))
-    finally:
-        rp.async_fetchone = orig
+        def get_report(self, paper_hash, lang):
+            from lib.paper.artifact_repository import PaperReport
+            row = rows.get((paper_hash, lang))
+            return PaperReport(paper_hash, lang, **row) if row else None
+
+    monkeypatch.setattr(rp, 'PaperArtifactRepository', _Repository)
+    payload = _run(rp._load_cached_insight_payload(
+        phash, 'en', user_id=TEST_OWNER_USER_ID))
+    out = _run(rp._append_cached_insight(
+        _REPORT, phash, 'en', user_id=TEST_OWNER_USER_ID))
     assert payload is not None, 'v2 payload not served'
     assert payload['items']['connections'][0]['anchor_idx'] == 1
     assert payload['baseline'] == 3.0
@@ -418,25 +451,29 @@ def test_read_path_v2_payload_not_merged():
     _ok('读路径:v2 行出结构化负载、正文不合并')
 
 
-def test_read_path_v1_legacy_still_merges():
+def test_read_path_v1_legacy_still_merges(monkeypatch):
     rp = _import_routes_paper()
     phash = 'v1hash'
     rows = {
-        (phash, 'en'): {'report': _REPORT},
-        (phash, ie.insight_lang_key('en')): {
-            'report': '## 💡 Insight & Ideas\n\nlegacy\n', 'meta': '{"kind":"insight"}'},
+        (phash, config_mod.insight_lang_key('en')): {
+            'report': '## 💡 Insight & Ideas\n\nlegacy\n',
+            'meta': {'kind': 'insight'}},
     }
 
-    async def _fake_fetchone(sql, params, **kw):
-        return rows.get((params[0], params[1]))
+    class _Repository:
+        def __init__(self, user_id):
+            assert user_id == TEST_OWNER_USER_ID
 
-    orig = rp.async_fetchone
-    rp.async_fetchone = _fake_fetchone
-    try:
-        payload = _run(rp._load_cached_insight_payload(phash, 'en'))
-        out = _run(rp._append_cached_insight(_REPORT, phash, 'en'))
-    finally:
-        rp.async_fetchone = orig
+        def get_report(self, paper_hash, lang):
+            from lib.paper.artifact_repository import PaperReport
+            row = rows.get((paper_hash, lang))
+            return PaperReport(paper_hash, lang, **row) if row else None
+
+    monkeypatch.setattr(rp, 'PaperArtifactRepository', _Repository)
+    payload = _run(rp._load_cached_insight_payload(
+        phash, 'en', user_id=TEST_OWNER_USER_ID))
+    out = _run(rp._append_cached_insight(
+        _REPORT, phash, 'en', user_id=TEST_OWNER_USER_ID))
     assert payload is None, 'v1 row must not produce a structured payload'
     assert '## 💡 Insight & Ideas' in out, 'v1 row must keep the legacy merge'
     _ok('读路径:v1 旧行保持文末合并(向后兼容)')

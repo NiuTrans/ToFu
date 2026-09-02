@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from lib.mcp.registry import is_opensource_build
+from lib.provider_template_recipes import offering_recipes
 
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
@@ -180,7 +181,7 @@ def _load_meituan_template_as_provider():
         'api_keys': ['sk-mt'],
         'enabled': True,
         'extra_headers': tpl.get('extra_headers') or {},
-        'models': tpl['models'],
+        'models': offering_recipes(tpl, allow_legacy=False),
     }]
 
 

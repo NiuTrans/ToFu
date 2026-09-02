@@ -7,6 +7,7 @@ import time
 import uuid
 from collections.abc import Callable
 
+from lib.identity import require_user_id
 from lib.log import get_logger
 from lib.orchestration.run_store_port import (
     OrchestrationRunStoreError,
@@ -20,11 +21,26 @@ logger = get_logger(__name__)
 
 
 class SidecarOrchestrationRunStore:
-    def __init__(self, client: Callable[..., StorageClient] | None = None):
+    def __init__(
+        self,
+        owner_user_id: int,
+        *,
+        tenant_id: str | None = None,
+        client: Callable[..., StorageClient] | None = None,
+    ):
+        self.owner_user_id = require_user_id(
+            owner_user_id, context='orchestration run owner')
+        self.tenant_id = str(tenant_id or '').strip()
         if client is None:
             from lib.storage import get_storage_client
             client = get_storage_client
         self._client = client
+
+    def _boundary(self) -> dict[str, object]:
+        return {
+            'user_id': self.owner_user_id,
+            'tenant_id': self.tenant_id,
+        }
 
     def _storage(self, *, write: bool = False) -> StorageClient:
         return self._client(write=write)
@@ -65,6 +81,7 @@ class SidecarOrchestrationRunStore:
         if not run_id:
             return False
         result = self._write('orchestration.run.create', {
+            **self._boundary(),
             'run_id': run_id,
             'definition': definition or {},
             'input': input_text or '',
@@ -79,7 +96,8 @@ class SidecarOrchestrationRunStore:
                       error: dict | str | None = None) -> bool:
         if not run_id:
             return False
-        payload = {'run_id': run_id, 'status': status}
+        payload = {
+            **self._boundary(), 'run_id': run_id, 'status': status}
         if final is not None:
             payload['final'] = final
         if error is not None:
@@ -90,18 +108,21 @@ class SidecarOrchestrationRunStore:
 
     def retire_interrupted_runs(self, error: dict | str) -> int | None:
         result = self._write(
-            'orchestration.run.retire_interrupted', {'error': error},
+            'orchestration.run.retire_interrupted', {
+                **self._boundary(), 'error': error},
             receipt=True)
         return int(result['retired']) if 'retired' in result else None
 
     def get_run(self, run_id: str) -> dict | None:
         if not run_id:
             return None
-        return self._read('orchestration.run.get', {'run_id': run_id})
+        return self._read('orchestration.run.get', {
+            **self._boundary(), 'run_id': run_id})
 
     def list_runs(self, *, status: str = '', orch_id: str = '',
                   limit: int = 50) -> list[dict]:
         return self._read('orchestration.run.list', {
+            **self._boundary(),
             'status': status, 'orch_id': orch_id, 'limit': limit,
         })
 
@@ -109,6 +130,7 @@ class SidecarOrchestrationRunStore:
         if not run_id or seq is None:
             return False
         return bool(self._write('orchestration.event.append', {
+            **self._boundary(),
             'run_id': run_id, 'sequence': int(seq), 'event': event,
         }, receipt=False).get('accepted'))
 
@@ -117,6 +139,7 @@ class SidecarOrchestrationRunStore:
         if not run_id or seq is None:
             return False
         return bool(self._write('orchestration.event.project', {
+            **self._boundary(),
             'run_id': run_id, 'sequence': int(seq), 'event': event,
             'status': status,
         }, receipt=False).get('projected'))
@@ -125,6 +148,7 @@ class SidecarOrchestrationRunStore:
         if not run_id:
             return RunEventPage([], 0, False, True)
         result = self._read('orchestration.event.page', {
+            **self._boundary(),
             'run_id': run_id, 'cursor': max(0, int(cursor or 0)),
         })
         return RunEventPage(
@@ -150,7 +174,8 @@ class SidecarOrchestrationRunStore:
         if not run_id:
             return False
         return bool(self._write(
-            'orchestration.run.delete', {'run_id': run_id},
+            'orchestration.run.delete', {
+                **self._boundary(), 'run_id': run_id},
             receipt=True).get('deleted'))
 
 

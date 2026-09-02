@@ -1,6 +1,6 @@
 """lib/slides/import_pptx.py — PPTX → PPTD import (template replication).
 
-(docs/SLIDES_CAPABILITY_DESIGN.md §4.6 / P4). The user-facing flow: 上传一个
+(docs/modules/ingest_media.md §4.6 / P4). The user-facing flow: 上传一个
 现有 PPT/PPTX 模板 → 迁出主题(配色/字体/页面尺寸)+ 逐页元素 → PPTD 工程,
 之后 produce_slides 用这套视觉语言写新内容。
 

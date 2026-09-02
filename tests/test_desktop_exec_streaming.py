@@ -1,6 +1,6 @@
 """tests/test_desktop_exec_streaming.py — RWA P2:run_command 平价.
 
-docs/REMOTE_WORKTREE_DESIGN.md §3.4 + §5 P2:
+docs/modules/remote_execution.md:
   * **流式分片**:agent 执行不再阻塞 poll 循环,stdout/stderr 分片
     (``{cmd_id, seq, stream, data, done}``)随每次 poll 批量上行;
     服务器 ``resolve_streams`` 按 seq 去重拼帧(断线重发不双计);
@@ -252,9 +252,17 @@ class TestAgentLoopStreaming:
 def clean_streams():
     with db.command_queue_lock:
         db._streams.clear()
+        db.command_queue['c1'] = {
+            'id': 'c1', 'type': 'project_run_command', 'params': {},
+            'created_at': time.time(), 'event': threading.Event(),
+            'result': None, 'error': None, 'user_id': 'owner',
+            'target_agent_id': 'agent-A', 'claimed_agent_id': 'agent-A',
+        }
     yield
     with db.command_queue_lock:
         db._streams.clear()
+        db.command_queue.pop('c1', None)
+        db.command_queue.pop('c9', None)
 
 
 @pytest.mark.unit
@@ -268,7 +276,8 @@ class TestBridgeStreams:
         ]
 
     def test_reassembly_orders_by_seq(self, clean_streams):
-        db.resolve_streams(self._frames())
+        db.resolve_streams(
+            self._frames(), agent_id='agent-A', user_id='owner')
         stream = db.get_command_stream('c1')
         assert stream['stdout'] == 'AB'
         assert stream['stderr'] == 'E'
@@ -276,18 +285,23 @@ class TestBridgeStreams:
 
     def test_resend_dedupes_by_seq(self, clean_streams):
         # 断线重发同一批帧(agent outbox 前缀重传)不许双计
-        db.resolve_streams(self._frames())
-        db.resolve_streams(self._frames())
+        db.resolve_streams(
+            self._frames(), agent_id='agent-A', user_id='owner')
+        db.resolve_streams(
+            self._frames(), agent_id='agent-A', user_id='owner')
         assert db.get_command_stream('c1')['stdout'] == 'AB'
 
     def test_done_persists_across_batches(self, clean_streams):
-        db.resolve_streams(self._frames()[:2])
+        db.resolve_streams(
+            self._frames()[:2], agent_id='agent-A', user_id='owner')
         assert db.get_command_stream('c1')['done'] is False
-        db.resolve_streams(self._frames()[2:])
+        db.resolve_streams(
+            self._frames()[2:], agent_id='agent-A', user_id='owner')
         assert db.get_command_stream('c1')['done'] is True
 
     def test_ttl_sweep_drops_stale(self, clean_streams, monkeypatch):
-        db.resolve_streams(self._frames())
+        db.resolve_streams(
+            self._frames(), agent_id='agent-A', user_id='owner')
         with db.command_queue_lock:
             db._streams['c1']['updated_at'] = time.time() - 7200
         assert db.get_command_stream('c1') is None
@@ -305,13 +319,22 @@ class TestPollRouteStreams:
     @staticmethod
     def _auth():
         """Bridge endpoints are credential-gated (B0); use the in-process
-        loopback agent token like TestPollRouteV2 does."""
-        from routes.api_v1.auth import loopback_agent_token
-        return {'X-Bridge-Secret': loopback_agent_token()}
+        process capability like TestPollRouteV2 does."""
+        from lib.bridge_auth import process_agent_token
+        return {'X-Bridge-Secret': process_agent_token()}
 
     def test_poll_body_streams_reach_bridge(self, flask_client, clean_streams):
+        with db.command_queue_lock:
+            db.command_queue['c9'] = {
+                'id': 'c9', 'type': 'project_run_command', 'params': {},
+                'created_at': time.time(), 'event': threading.Event(),
+                'result': None, 'error': None, 'user_id': '1',
+                'target_agent_id': 'stream-agent',
+                'claimed_agent_id': 'stream-agent',
+            }
         r = flask_client.post('/api/desktop/poll', json={
             'results': [],
+            'agent': {'agent_id': 'stream-agent'},
             'streams': [{'cmd_id': 'c9', 'seq': 1, 'stream': 'stdout',
                          'data': 'hello', 'done': False}],
         }, headers=self._auth())
@@ -319,6 +342,8 @@ class TestPollRouteStreams:
         assert db.get_command_stream('c9')['stdout'] == 'hello'
 
     def test_poll_without_streams_still_ok(self, flask_client, clean_streams):
-        r = flask_client.post('/api/desktop/poll', json={'results': []},
+        r = flask_client.post('/api/desktop/poll', json={
+            'results': [], 'agent': {'agent_id': 'stream-agent'},
+        },
                               headers=self._auth())
         assert r.status_code == 200

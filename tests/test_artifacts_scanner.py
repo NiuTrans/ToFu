@@ -30,12 +30,24 @@ pytest_plugins = ('tests._artifact_sidecar',)
 
 @pytest.fixture()
 def fake_task():
-    return {
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+
+    task = {
         'id': 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
         'convId': 'conv-scan',
+        '_userId': 1,
+        'status': 'running',
+        'config': {'userId': 1},
         'events': [],
         'events_lock': threading.Lock(),
     }
+    with tasks_lock:
+        tasks[task['id']] = task
+    try:
+        yield task
+    finally:
+        with tasks_lock:
+            tasks.pop(task['id'], None)
 
 
 def _last_artifact_event(task):
@@ -257,17 +269,18 @@ class TestEdgeCases:
 # ─── Backfill route ──────────────────────────────────────────────────
 
 class TestBackfillRoute:
-    def _seed_conv(self, flask_client, conv_id, messages):
-        # Use the real API to seed: PUT /api/v1/conversations/<id>
-        payload = {
-            'title':     'scan-test',
-            'messages':  messages,
-            'createdAt': 1700000000000,
-            'updatedAt': 1700000000000,
-            'settings':  {},
-        }
-        r = flask_client.put(f'/api/v1/conversations/{conv_id}', json=payload)
-        assert r.status_code in (200, 201), r.get_data(as_text=True)
+    def _seed_conv(self, conv_id, messages):
+        from tests._seed import conv_document, seed_conversation
+
+        seed_conversation(
+            conv_id,
+            user_id=1,
+            title='scan-test',
+            messages=messages,
+            created_at=1700000000000,
+            updated_at=1700000000000,
+        )
+        return conv_document(conv_id, user_id=1)
 
     def test_backfill_round_trip(self, flask_client):
         import uuid as _uuid
@@ -284,7 +297,8 @@ class TestBackfillRoute:
              'content': 'Plain reply with no artifact.'},
         ]
         conv_id = 'conv-backfill-' + _uuid.uuid4().hex[:8]
-        self._seed_conv(flask_client, conv_id, msgs)
+        seeded = self._seed_conv(conv_id, msgs)
+        assistant_turn_id = seeded['messages'][1]['_turnId']
 
         r = flask_client.post('/api/v1/artifacts/scan', json={'conv_id': conv_id})
         assert r.status_code == 200, r.get_data(as_text=True)
@@ -292,14 +306,14 @@ class TestBackfillRoute:
         assert body['conv_id'] == conv_id
         assert body['scanned'] == 2
         assert body['created'] >= 1
-        assert any(a['msg_id'] == msg_id_1 for a in body['artifacts'])
+        assert any(a['msg_id'] == assistant_turn_id for a in body['artifacts'])
 
         # Idempotent: a second backfill creates 0 new rows (dedupe).
         flask_client.post('/api/v1/artifacts/scan', json={'conv_id': conv_id})
         listing = flask_client.get(f'/api/v1/artifacts?conv={conv_id}').get_json()
         # Only the assistant-1 message produced an artifact.
         assistant_1_arts = [a for a in listing['artifacts']
-                            if a['msg_id'] == msg_id_1]
+                            if a['msg_id'] == assistant_turn_id]
         assert len(assistant_1_arts) == 1
 
     def test_backfill_404_on_missing_conv(self, flask_client):

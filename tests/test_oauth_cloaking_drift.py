@@ -16,7 +16,7 @@ Why a guard instead of a sync runbook: the cloaking spec is an arms race —
 the 2026-07-31 port drifted FOUR ways in four days (2.1.63→2.1.220,
 codex_cli_rs→codex-tui, console→platform token endpoint, beta list). Any
 future drift turns this suite RED with the exact field that moved; the sync
-itself stays a deliberate, verified-by-owner act (docs/SUBSCRIPTION_RELAY_SCENARIOS_DESIGN.md
+itself stays a deliberate, verified-by-owner act (docs/modules/remote_execution.md
 §4.1: the test ALARMS, it never auto-edits).
 
 The suite skips wholesale when the reference checkout is absent (CI / the
@@ -34,7 +34,8 @@ import pytest
 
 from lib.desktop import egress as _server_egress
 from lib.desktop_agent import _egress as _agent_egress
-from lib.oauth import claude, outbound
+import lib.oauth.claude as claude
+import lib.oauth.outbound as outbound
 
 pytestmark = pytest.mark.unit
 
@@ -88,7 +89,7 @@ def _expected_oauth_betas(with_tools: bool) -> list:
 def _sync_msg(field: str, upstream, ours) -> str:
     return (f'cloaking drift on {field}:\n  upstream(CLIProxyAPI)={upstream!r}'
             f'\n  tofu={ours!r}\n  → sync lib/oauth/outbound.py (and the pins '
-            'listed in docs/SUBSCRIPTION_RELAY_SCENARIOS_DESIGN.md §2), then '
+            'listed in docs/modules/remote_execution.md), then '
             're-run this suite')
 
 

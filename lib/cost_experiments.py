@@ -22,14 +22,32 @@ unrelated model/tool setting on production requests.
 
 from __future__ import annotations
 
-import hashlib
+import copy
 import json
 import math
+import os
 import re
+import threading
 import time
 from typing import Any
 
 from lib.config_dir import config_path
+from lib.experiments.builtin_context_cost import (
+    CONTROL_POLICY,
+    OPTIMIZED_POLICY,
+    context_cost_spec,
+)
+from lib.experiments.contracts import (
+    ExperimentContractError,
+    validate_resolved_spec,
+)
+from lib.experiments.service import (
+    analyze_experiment,
+    assign_experiment,
+    compile_experiment_application,
+    compile_metric_extractor,
+)
+from lib.experiments.registry import registry as experiment_registry
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -37,16 +55,11 @@ logger = get_logger(__name__)
 
 _DEFAULT_EXPERIMENT_ID = 'context-cost-v1'
 _ARM_POLICIES = {
-    'control': {
-        'mcpToolExposure': 'inline',
-        'workingSetTokens': 0,
-    },
-    'optimized': {
-        'mcpToolExposure': 'auto',
-        'workingSetTokens': 128_000,
-    },
+    'control': CONTROL_POLICY,
+    'optimized': OPTIMIZED_POLICY,
 }
 _ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,80}$')
+_LIFECYCLES = {'draft', 'running', 'sealed'}
 
 
 class CostExperimentTransitionError(ValueError):
@@ -63,7 +76,9 @@ def _bounded_number(raw: Any, *, field: str, default: int,
         return default
     try:
         value = int(raw)
-    except (TypeError, ValueError) as exc:
+        if isinstance(raw, float) and not raw.is_integer():
+            raise ValueError('fractional value')
+    except (TypeError, ValueError, OverflowError) as exc:
         if strict:
             raise ValueError(f'{field} must be an integer') from exc
         logger.warning('[CostExperiment] invalid %s=%r; using %d',
@@ -96,6 +111,34 @@ def normalize_cost_experiment_config(raw: Any, *, strict: bool = False) -> dict:
         raise ValueError('enabled must be a boolean')
     enabled = enabled_raw if isinstance(enabled_raw, bool) else False
 
+    lifecycle_raw = raw.get('lifecycle')
+    lifecycle_invalid_reason = ''
+    if lifecycle_raw is not None and (
+            not isinstance(lifecycle_raw, str)
+            or lifecycle_raw not in _LIFECYCLES):
+        if strict:
+            raise ValueError('lifecycle must be draft, running, or sealed')
+        logger.error('[CostExperiment] invalid lifecycle=%r; disabling',
+                     lifecycle_raw)
+        lifecycle_invalid_reason = 'invalid_lifecycle'
+        enabled = False
+        lifecycle = 'draft'
+    elif lifecycle_raw == 'sealed' and enabled:
+        if strict:
+            raise ValueError(
+                'a sealed experiment cannot be enabled; choose a new experiment_id')
+        lifecycle_invalid_reason = 'sealed_experiment_reopened'
+        enabled = False
+        lifecycle = 'sealed'
+    else:
+        # Lifecycle is server-owned transition state. A stale settings snapshot
+        # may submit running+off or draft+on; the atomic transition validator
+        # derives the durable state after normalizing that requested operation.
+        lifecycle = (
+            'running' if enabled
+            else ('sealed' if lifecycle_raw == 'sealed' else 'draft')
+        )
+
     experiment_id = str(
         raw.get('experiment_id') or _DEFAULT_EXPERIMENT_ID).strip()
     if not _ID_RE.fullmatch(experiment_id):
@@ -107,106 +150,275 @@ def normalize_cost_experiment_config(raw: Any, *, strict: bool = False) -> dict:
                        experiment_id, _DEFAULT_EXPERIMENT_ID)
         experiment_id = _DEFAULT_EXPERIMENT_ID
 
-    return {
+    traffic_percent = _bounded_number(
+        raw.get('traffic_percent'), field='traffic_percent', default=10,
+        minimum=0, maximum=100, strict=strict)
+    treatment_percent = _bounded_number(
+        raw.get('treatment_percent'), field='treatment_percent', default=50,
+        minimum=0, maximum=100, strict=strict)
+    empty_arm = enabled and treatment_percent in (0, 100)
+    if empty_arm and strict:
+        raise ValueError(
+            'treatment_percent must be between 1 and 99 when enabled')
+    min_sample_size = _bounded_number(
+        raw.get('min_sample_size'), field='min_sample_size', default=20,
+        minimum=2, maximum=10_000, strict=strict)
+    started_at_ms = _bounded_number(
+        raw.get('started_at_ms'), field='started_at_ms', default=0,
+        minimum=0, maximum=9_999_999_999_999, strict=strict)
+    sealed_at_ms = _bounded_number(
+        raw.get('sealed_at_ms'), field='sealed_at_ms', default=0,
+        minimum=0, maximum=9_999_999_999_999, strict=strict)
+    try:
+        current_spec = context_cost_spec(
+            experiment_id=experiment_id,
+            traffic_percent=traffic_percent,
+            treatment_percent=treatment_percent,
+            minimum_sample_size=min_sample_size,
+        )
+    except (ExperimentContractError, RuntimeError, ValueError) as exc:
+        if strict:
+            raise ValueError(f'experiment capability resolution failed: {exc}') from exc
+        logger.error('[CostExperiment] capability resolution failed; disabling: %s',
+                     exc, exc_info=True)
+        return {
+            'enabled': False,
+            'lifecycle': 'sealed' if lifecycle == 'running' else lifecycle,
+            'experiment_id': experiment_id,
+            'traffic_percent': traffic_percent,
+            'treatment_percent': treatment_percent,
+            'min_sample_size': min_sample_size,
+            'started_at_ms': started_at_ms,
+            'sealed_at_ms': sealed_at_ms,
+            'assignment_unit': 'conversation',
+            'sticky': True,
+            'arms': {name: dict(policy)
+                     for name, policy in _ARM_POLICIES.items()},
+            'invalid_reason': 'capability_resolution_failed',
+        }
+
+    configured_spec = raw.get('spec')
+    persisted_spec = None
+    invalid_reason = (
+        lifecycle_invalid_reason
+        or ('empty_experiment_arm' if empty_arm else '')
+    )
+    stale_derived_fields = False
+    if isinstance(configured_spec, dict):
+        # A changed experiment ID intentionally starts a new immutable run;
+        # derived fields returned by an older settings GET are then stale.
+        if str(configured_spec.get('experimentId') or '') == experiment_id:
+            try:
+                persisted_spec = validate_resolved_spec(configured_spec)
+            except ExperimentContractError as exc:
+                if strict:
+                    raise ValueError(f'invalid persisted experiment spec: {exc}') from exc
+                invalid_reason = 'invalid_persisted_spec'
+                logger.error('[CostExperiment] invalid persisted spec; disabling: %s',
+                             exc)
+        else:
+            stale_derived_fields = True
+
+    supplied_digest = (
+        '' if stale_derived_fields
+        else str(raw.get('spec_digest') or '').strip()
+    )
+    if persisted_spec is not None:
+        persisted_digest = persisted_spec['specDigest']
+        if supplied_digest and supplied_digest != persisted_digest:
+            if strict:
+                raise ValueError('spec_digest does not match the persisted spec')
+            invalid_reason = 'invalid_persisted_spec'
+        supplied_digest = persisted_digest
+
+    current_digest = current_spec['specDigest']
+    if supplied_digest and supplied_digest != current_digest:
+        if strict:
+            raise ValueError(
+                'experiment specification changed; choose a new experiment_id')
+        invalid_reason = invalid_reason or 'strategy_spec_changed'
+        logger.error(
+            '[CostExperiment] spec drift for experiment=%s; disabling old run',
+            experiment_id,
+        )
+
+    effective_spec = persisted_spec or current_spec
+    result = {
         'enabled': enabled,
+        'lifecycle': lifecycle,
         'experiment_id': experiment_id,
-        'traffic_percent': _bounded_number(
-            raw.get('traffic_percent'), field='traffic_percent', default=10,
-            minimum=0, maximum=100, strict=strict),
-        'treatment_percent': _bounded_number(
-            raw.get('treatment_percent'), field='treatment_percent', default=50,
-            minimum=0, maximum=100, strict=strict),
-        'min_sample_size': _bounded_number(
-            raw.get('min_sample_size'), field='min_sample_size', default=20,
-            minimum=1, maximum=10_000, strict=strict),
+        'traffic_percent': traffic_percent,
+        'treatment_percent': treatment_percent,
+        'min_sample_size': min_sample_size,
+        'started_at_ms': started_at_ms,
+        'sealed_at_ms': sealed_at_ms,
         'assignment_unit': 'conversation',
         'sticky': True,
         'arms': {name: dict(policy) for name, policy in _ARM_POLICIES.items()},
+        'contract_version': effective_spec['contractVersion'],
+        'spec_digest': effective_spec['specDigest'],
+        'resolved_spec_digest': current_digest,
+        'spec': effective_spec,
     }
+    if invalid_reason:
+        result['enabled'] = False
+        if result['lifecycle'] == 'running':
+            result['lifecycle'] = 'sealed'
+        result['invalid_reason'] = invalid_reason
+    return result
+
+
+# The turn hot path (``_turn_prelude`` → ``apply_cost_experiment``) loads
+# this block once per chat turn, so a naive ``read_json`` would pay a full
+# read+parse of server_config.json on a network filesystem for every turn —
+# including the default-disabled case, where the read exists only to learn
+# "off".  Re-parse only when the file's mtime changes; the atomic-write
+# store replaces the file on save, which always bumps the path mtime.
+_CONFIG_CACHE_LOCK = threading.Lock()
+_CONFIG_CACHE: dict[str, Any] = {'mtime_ns': None, 'config': None}
+_APPLICATION_CACHE_LOCK = threading.Lock()
+_APPLICATION_CACHE: dict[str, Any] = {'key': None, 'apply': None}
+
+
+def _load_cached_cost_experiment_config() -> dict:
+    """Return the read-only process cache used by the turn hot path."""
+    from lib.json_store import read_json
+
+    path = config_path('server_config.json')
+    try:
+        mtime_ns = os.stat(path).st_mtime_ns
+    except OSError as exc:
+        # Missing/unreadable file means "no experiment"; never let a stat
+        # hiccup break the chat hot path.
+        logger.debug('[CostExperiment] server_config stat failed: %s', exc)
+        return normalize_cost_experiment_config({})
+    with _CONFIG_CACHE_LOCK:
+        cached = _CONFIG_CACHE
+        if cached['mtime_ns'] == mtime_ns and cached['config'] is not None:
+            return cached['config']
+    saved = read_json(path, default={})
+    raw = saved.get('cost_experiment') if isinstance(saved, dict) else {}
+    config = normalize_cost_experiment_config(raw)
+    with _CONFIG_CACHE_LOCK:
+        _CONFIG_CACHE['mtime_ns'] = mtime_ns
+        _CONFIG_CACHE['config'] = config
+    return config
 
 
 def load_cost_experiment_config() -> dict:
-    """Load the active experiment block from the shared server config."""
-    from lib.json_store import read_json
+    """Load a detached active experiment block from shared server config."""
+    return copy.deepcopy(_load_cached_cost_experiment_config())
 
-    saved = read_json(config_path('server_config.json'), default={})
-    raw = saved.get('cost_experiment') if isinstance(saved, dict) else {}
-    return normalize_cost_experiment_config(raw)
+
+def _compiled_cost_application(spec: dict):
+    """Return a generation-aware application plan for the turn hot path."""
+    providers = experiment_registry()
+    key = (str(spec.get('specDigest') or ''), providers.generation)
+    with _APPLICATION_CACHE_LOCK:
+        if (_APPLICATION_CACHE['key'] == key
+                and _APPLICATION_CACHE['apply'] is not None):
+            return _APPLICATION_CACHE['apply']
+        application = compile_experiment_application(
+            spec, provider_registry=providers)
+        _APPLICATION_CACHE['key'] = key
+        _APPLICATION_CACHE['apply'] = application
+        return application
 
 
 def validate_cost_experiment_transition(previous_raw: Any,
-                                        next_config: dict) -> None:
+                                        next_config: dict, *,
+                                        now_ms: int | None = None) -> dict:
     """Keep one experiment ID bound to one immutable routing shape.
 
-    Changing enrollment or arm thresholds can move an existing conversation
-    across variants even though assignment is hash-based. Once an experiment
-    block has been persisted, those changes therefore require a fresh ID.
-    Enable/disable and reporting sample-size changes remain safe in place.
+    Changing routing, provider code, or the fixed-horizon analysis plan under
+    an existing ID would mix incompatible observations. Once persisted, any
+    resolved-spec change therefore requires a fresh experiment ID. Stopping a
+    running experiment seals that ID permanently, giving fixed-horizon analysis
+    an irreversible boundary instead of a stop/restart peeking loop.
     """
-    if not isinstance(previous_raw, dict) or not previous_raw:
-        return
-    previous = normalize_cost_experiment_config(previous_raw)
+    transition_time = int(now_ms or time.time() * 1000)
     current = normalize_cost_experiment_config(next_config, strict=True)
+    if not isinstance(previous_raw, dict) or not previous_raw:
+        current['lifecycle'] = 'running' if current['enabled'] else 'draft'
+        current['started_at_ms'] = transition_time if current['enabled'] else 0
+        current['sealed_at_ms'] = 0
+        return current
+    previous = normalize_cost_experiment_config(previous_raw)
     if previous['experiment_id'] != current['experiment_id']:
-        return
+        current['lifecycle'] = 'running' if current['enabled'] else 'draft'
+        current['started_at_ms'] = transition_time if current['enabled'] else 0
+        current['sealed_at_ms'] = 0
+        return current
     changed = [
-        field for field in ('traffic_percent', 'treatment_percent')
-        if previous[field] != current[field]
+        field for field in (
+            'traffic_percent', 'treatment_percent', 'min_sample_size',
+            'spec_digest',
+        )
+        if previous.get(field) != current.get(field)
     ]
     if changed:
         raise CostExperimentTransitionError(
-            'change experiment_id before changing routing fields: '
+            'change experiment_id before changing immutable experiment fields: '
             + ', '.join(changed))
+    previous_lifecycle = previous.get('lifecycle') or (
+        'running' if previous.get('enabled') else 'draft')
+    if previous_lifecycle == 'sealed':
+        if current['enabled']:
+            raise CostExperimentTransitionError(
+                'sealed experiment IDs cannot be restarted; choose a new '
+                'experiment_id')
+        current['lifecycle'] = 'sealed'
+        current['started_at_ms'] = previous.get('started_at_ms', 0)
+        current['sealed_at_ms'] = previous.get('sealed_at_ms', 0)
+    elif previous_lifecycle == 'running':
+        current['lifecycle'] = 'running' if current['enabled'] else 'sealed'
+        current['started_at_ms'] = previous.get('started_at_ms', 0)
+        current['sealed_at_ms'] = (
+            previous.get('sealed_at_ms', 0)
+            if current['enabled'] else max(
+                transition_time, int(previous.get('started_at_ms') or 0)
+            )
+        )
+    else:
+        current['lifecycle'] = 'running' if current['enabled'] else 'draft'
+        current['started_at_ms'] = transition_time if current['enabled'] else 0
+        current['sealed_at_ms'] = 0
+    return current
 
 
-def _bucket(experiment_id: str, lane: str, conv_id: str) -> int:
-    digest = hashlib.sha256(
-        f'{experiment_id}\x00{lane}\x00{conv_id}'.encode('utf-8')).digest()
-    return int.from_bytes(digest[:8], 'big') % 10_000
+def _legacy_assignment(record: dict) -> dict:
+    """Expose the historic snake-case ID while retaining the v1 contract."""
+    return {**record, 'experiment_id': record.get('experimentId')}
 
 
-def assign_cost_experiment(config: dict, conv_id: str) -> dict:
+def assign_cost_experiment(config: dict, conv_id: str, *, owner_id: Any) -> dict:
     """Return a deterministic conversation-level assignment record."""
     cfg = normalize_cost_experiment_config(config)
     base = {
+        'contractVersion': cfg.get('contract_version'),
+        'experimentId': cfg['experiment_id'],
         'experiment_id': cfg['experiment_id'],
+        'specDigest': cfg.get('spec_digest'),
         'assignmentUnit': 'conversation',
         'status': 'off',
+        'exposureStatus': 'not_applicable',
     }
     if not cfg['enabled']:
         return base
     conv_id = str(conv_id or '').strip()
     if not conv_id:
         return {**base, 'status': 'excluded', 'reason': 'missing_conversation_id'}
-
-    enrollment_bucket = _bucket(cfg['experiment_id'], 'enrollment', conv_id)
-    if enrollment_bucket >= cfg['traffic_percent'] * 100:
+    try:
+        return _legacy_assignment(assign_experiment(
+            cfg['spec'], owner_id=owner_id, unit_id=conv_id))
+    except ValueError as exc:
+        logger.error('[CostExperiment] invalid assignment identity: %s', exc)
         return {
             **base,
-            'status': 'not_enrolled',
-            'enrollmentBucket': enrollment_bucket,
+            'status': 'excluded',
+            'exposureStatus': 'not_applied',
+            'reason': 'missing_owner_identity',
         }
-
-    arm_bucket = _bucket(cfg['experiment_id'], 'arm', conv_id)
-    arm = ('optimized'
-           if arm_bucket < cfg['treatment_percent'] * 100
-           else 'control')
-    return {
-        **base,
-        'status': 'assigned',
-        'arm': arm,
-        'enrollmentBucket': enrollment_bucket,
-        'armBucket': arm_bucket,
-        'policy': dict(cfg['arms'][arm]),
-    }
-
-
-def _has_request_policy_override(cfg: dict) -> bool:
-    if 'mcpToolExposure' in cfg:
-        return True
-    compaction = cfg.get('compaction')
-    return (isinstance(compaction, dict)
-            and 'workingSetTokens' in compaction)
 
 
 def apply_cost_experiment(task: dict, request_config: dict, *,
@@ -219,37 +431,66 @@ def apply_cost_experiment(task: dict, request_config: dict, *,
     """
     exp = (normalize_cost_experiment_config(experiment_config)
            if experiment_config is not None
-           else load_cost_experiment_config())
+           else _load_cached_cost_experiment_config())
     if not exp['enabled']:
         return request_config
 
-    assignment = assign_cost_experiment(exp, task.get('convId', ''))
-    if _has_request_policy_override(request_config):
+    owner_id = task.get('_userId')
+    if owner_id in (None, ''):
         assignment = {
+            'contractVersion': exp.get('contract_version'),
+            'experimentId': exp['experiment_id'],
             'experiment_id': exp['experiment_id'],
+            'specDigest': exp.get('spec_digest'),
             'assignmentUnit': 'conversation',
             'status': 'excluded',
-            'reason': 'request_override',
+            'exposureStatus': 'not_applied',
+            'reason': 'missing_owner_identity',
         }
         task['_costExperiment'] = assignment
         return request_config
-
-    task['_costExperiment'] = assignment
-    if assignment.get('status') != 'assigned':
+    conv_id = str(task.get('convId') or '').strip()
+    if not conv_id:
+        assignment = {
+            'contractVersion': exp.get('contract_version'),
+            'experimentId': exp['experiment_id'],
+            'experiment_id': exp['experiment_id'],
+            'specDigest': exp.get('spec_digest'),
+            'assignmentUnit': 'conversation',
+            'status': 'excluded',
+            'exposureStatus': 'not_applied',
+            'reason': 'missing_conversation_id',
+        }
+        task['_costExperiment'] = assignment
         return request_config
-
-    policy = assignment['policy']
-    updated = dict(request_config)
-    updated['mcpToolExposure'] = policy['mcpToolExposure']
-    compaction = dict(request_config.get('compaction') or {})
-    compaction['workingSetTokens'] = policy['workingSetTokens']
-    updated['compaction'] = compaction
+    try:
+        application = _compiled_cost_application(exp['spec'])
+    except (RuntimeError, TypeError, ValueError) as exc:
+        logger.error('[CostExperiment] application plan unavailable: %s', exc,
+                     exc_info=True)
+        task['_costExperiment'] = {
+            'contractVersion': exp.get('contract_version'),
+            'experimentId': exp['experiment_id'],
+            'experiment_id': exp['experiment_id'],
+            'specDigest': exp.get('spec_digest'),
+            'assignmentUnit': 'conversation',
+            'status': 'application_failed',
+            'exposureStatus': 'failed',
+            'reason': 'experiment_capability_unavailable',
+        }
+        return request_config
+    updated, assignment = application(
+        owner_id=owner_id, unit_id=conv_id, request_config=request_config)
+    assignment = _legacy_assignment(assignment)
+    task['_costExperiment'] = assignment
+    if assignment.get('exposureStatus') != 'applied':
+        return request_config
     task['config'] = updated
     logger.debug('[CostExperiment] task=%s conv=%s experiment=%s arm=%s',
                  str(task.get('id') or '')[:8],
                  str(task.get('convId') or '')[:8],
                  assignment['experiment_id'], assignment['arm'])
-    return updated
+    return dict(updated)
 
 
 def _safe_int(value: Any) -> int:
@@ -433,10 +674,18 @@ def build_cost_experiment_outcome(
         return None
     outcome = {
         key: assignment[key]
-        for key in ('experiment_id', 'assignmentUnit', 'status', 'arm',
-                    'reason', 'policy')
+        for key in (
+            'contractVersion', 'experimentId', 'experiment_id',
+            'specDigest', 'assignmentUnit', 'assignmentAlgorithm',
+            'subjectDigest', 'status', 'exposureStatus', 'exposedAt',
+            'arm', 'reason', 'strategy', 'policy',
+        )
         if key in assignment
     }
+    if 'experimentId' not in outcome and outcome.get('experiment_id'):
+        outcome['experimentId'] = outcome['experiment_id']
+    if 'experiment_id' not in outcome and outcome.get('experimentId'):
+        outcome['experiment_id'] = outcome['experimentId']
     if assignment.get('status') != 'assigned':
         return outcome
 
@@ -614,6 +863,49 @@ def build_task_cost_experiment_outcome(task: dict) -> dict | None:
     )
 
 
+def task_outcome_report_rows(records: list) -> tuple[list, int]:
+    """Project task-result outcome records into aggregator input rows.
+
+    ``task_results`` (legacy table / sidecar ``storage_records`` namespace)
+    already persists one ``metadata.costExperiment`` outcome per terminal
+    task, so the report can scan THAT compact projection instead of hauling
+    every conversation's full transcript.  The returned rows mirror the
+    conversation-scan shape (``{'id', 'messages', 'updated_at'}``) so
+    :func:`aggregate_cost_experiment_rows` consumes both sources unchanged.
+
+    Each record is ``{'task_id', 'conv_id', 'completed_at', 'outcome'}``
+    with ``outcome`` a dict or JSON string.  Unparseable records are logged,
+    counted (second return value), and skipped.
+    """
+    rows: list = []
+    invalid = 0
+    for record in records or []:
+        if not isinstance(record, dict):
+            invalid += 1
+            continue
+        outcome = record.get('outcome')
+        if isinstance(outcome, str):
+            try:
+                outcome = json.loads(outcome)
+            except (json.JSONDecodeError, ValueError) as exc:
+                invalid += 1
+                logger.warning(
+                    '[CostExperiment] report skipped malformed outcome '
+                    'record: %s', exc)
+                continue
+        if not isinstance(outcome, dict) or not outcome:
+            invalid += 1
+            continue
+        conv_id = str(record.get('conv_id') or record.get('task_id') or '')
+        completed_at = _safe_int(record.get('completed_at'))
+        rows.append({
+            'id': conv_id,
+            'messages': [{'role': 'assistant', 'costExperiment': outcome}],
+            'updated_at': completed_at,
+        })
+    return rows, invalid
+
+
 def _empty_arm() -> dict:
     return {
         'conversations': 0,
@@ -666,6 +958,9 @@ def _empty_arm() -> dict:
         '_conversation_ids': set(),
         '_conversation_costs': {},
         '_latencies': [],
+        '_assignment_units': set(),
+        '_first_observation_by_unit': {},
+        '_pending_order_by_unit': {},
     }
 
 
@@ -683,13 +978,71 @@ def aggregate_cost_experiment_rows(
     days: int,
     now_ms: int | None = None,
     min_sample_size: int = 20,
+    experiment_spec: dict | None = None,
+    analysis_closed: bool = False,
+    analysis_start_ms: int = 0,
+    analysis_sealed_ms: int = 0,
+    truncated: bool = False,
+    source_invalid_rows: int = 0,
 ) -> dict:
-    """Aggregate persisted assistant outcomes into a two-arm report."""
+    """Aggregate outcomes and run the spec-pinned promotion analyzer.
+
+    Descriptive totals remain available for legacy observations, but promotion
+    is refused unless every analyzed exposure carries the expected spec digest
+    and application marker and the source is complete.
+    """
     now_ms = int(now_ms or time.time() * 1000)
     days = max(1, min(90, int(days or 14)))
-    cutoff = now_ms - days * 86_400_000
+    analysis_start_ms = max(0, int(analysis_start_ms or 0))
+    analysis_sealed_ms = max(0, int(analysis_sealed_ms or 0))
+    cutoff = analysis_start_ms or (now_ms - days * 86_400_000)
     arms = {'control': _empty_arm(), 'optimized': _empty_arm()}
-    invalid_rows = 0
+    invalid_rows = max(0, int(source_invalid_rows or 0))
+    metric_extraction_errors = 0
+    unversioned_outcomes = 0
+    unverified_exposures = 0
+    pending_exposure_units: set[str] = set()
+    lifecycle_window_violations = 0
+    observed_spec_digests: set[str] = set()
+    unit_arms: dict[str, str] = {}
+    unit_exposure_order: dict[str, tuple[int, int, str, str]] = {}
+    cross_arm_units: set[str] = set()
+    funnel_statuses: dict[str, int] = {}
+    analysis_setup_error = ''
+    metric_extractor = None
+    try:
+        resolved_spec = (
+            validate_resolved_spec(experiment_spec)
+            if isinstance(experiment_spec, dict)
+            else context_cost_spec(
+                experiment_id=experiment_id,
+                traffic_percent=100,
+                treatment_percent=50,
+                minimum_sample_size=max(2, int(min_sample_size)),
+            )
+        )
+        if resolved_spec['experimentId'] != experiment_id:
+            raise ExperimentContractError(
+                'report spec experimentId does not match the requested run')
+        min_sample_size = int(
+            resolved_spec['analysis']['minimumSampleSizePerArm'])
+        metric_extractor = compile_metric_extractor(resolved_spec)
+    except (ExperimentContractError, RuntimeError, ValueError) as exc:
+        analysis_setup_error = str(exc)
+        logger.error('[CostExperiment] report spec unavailable: %s', exc,
+                     exc_info=True)
+        # Keep descriptive reporting usable while making the decision invalid.
+        resolved_spec = context_cost_spec(
+            experiment_id=experiment_id,
+            traffic_percent=100,
+            treatment_percent=50,
+            minimum_sample_size=max(2, int(min_sample_size)),
+        )
+        try:
+            metric_extractor = compile_metric_extractor(resolved_spec)
+        except (RuntimeError, TypeError, ValueError) as fallback_exc:
+            logger.error('[CostExperiment] fallback metrics unavailable: %s',
+                         fallback_exc, exc_info=True)
 
     for row in rows or []:
         try:
@@ -715,24 +1068,107 @@ def aggregate_cost_experiment_rows(
             outcome = message.get('costExperiment')
             if not isinstance(outcome, dict):
                 continue
-            if outcome.get('experiment_id') != experiment_id:
-                continue
-            if outcome.get('status') != 'assigned':
-                continue
-            arm_name = outcome.get('arm')
-            if arm_name not in arms:
+            outcome_id = str(
+                outcome.get('experimentId')
+                or outcome.get('experiment_id')
+                or '')
+            if outcome_id != experiment_id:
                 continue
             completed_at = _safe_int(outcome.get('completedAt')) or row_updated
             if completed_at < cutoff or completed_at > now_ms + 86_400_000:
                 continue
+            status = str(outcome.get('status') or 'missing')
+            funnel_statuses[status] = funnel_statuses.get(status, 0) + 1
+            if status != 'assigned':
+                continue
+            arm_name = outcome.get('arm')
+            if arm_name not in arms:
+                invalid_rows += 1
+                continue
+
+            spec_digest = str(outcome.get('specDigest') or '')
+            if spec_digest:
+                observed_spec_digests.add(spec_digest)
+            if (outcome.get('contractVersion') != 'tofu.experiment/v1'
+                    or not spec_digest):
+                unversioned_outcomes += 1
+            subject_digest = str(outcome.get('subjectDigest') or '').strip()
+            exposed_at = _safe_int(outcome.get('exposedAt'))
+            exposure_in_lifecycle = bool(
+                (not analysis_start_ms or exposed_at >= analysis_start_ms)
+                and (not analysis_sealed_ms or exposed_at <= analysis_sealed_ms)
+            )
+            verified_exposure = bool(
+                outcome.get('exposureStatus') == 'applied'
+                and re.fullmatch(r'[a-f0-9]{64}', subject_digest)
+                and exposed_at > 0
+                and exposure_in_lifecycle
+            )
+            if not verified_exposure:
+                unverified_exposures += 1
+            if exposed_at > 0 and not exposure_in_lifecycle:
+                lifecycle_window_violations += 1
+
+            unit_id = subject_digest or conv_id
+            if not unit_id:
+                invalid_rows += 1
+                continue
+            order_key = (
+                exposed_at or completed_at,
+                completed_at,
+                str(outcome.get('taskId') or ''),
+                unit_id,
+            )
+            if (unit_id not in unit_exposure_order
+                    or order_key < unit_exposure_order[unit_id]):
+                unit_exposure_order[unit_id] = order_key
+            previous_arm = unit_arms.setdefault(unit_id, str(arm_name))
+            if previous_arm != arm_name:
+                cross_arm_units.add(unit_id)
 
             arm = arms[arm_name]
             arm['_conversation_ids'].add(conv_id)
+            arm['_assignment_units'].add(unit_id)
+            if _safe_int(outcome.get('completedAt')) <= 0:
+                # Running checkpoints and terminal-construction failures retain
+                # the assignment record. They belong in the exposure denominator
+                # but can never be silently treated as completed observations.
+                pending_exposure_units.add(unit_id)
+                previous_pending = arm['_pending_order_by_unit'].get(unit_id)
+                if previous_pending is None or order_key < previous_pending:
+                    arm['_pending_order_by_unit'][unit_id] = order_key
+                continue
             arm['turns'] += 1
-            metrics = outcome.get('metrics') or {}
-            quality = outcome.get('quality') or {}
-            cost_usd = _safe_number(metrics.get('costUsd'))
+            metrics = outcome.get('metrics')
+            quality = outcome.get('quality')
+            if not isinstance(metrics, dict) or not isinstance(quality, dict):
+                invalid_rows += 1
+                metrics = metrics if isinstance(metrics, dict) else {}
+                quality = quality if isinstance(quality, dict) else {}
+            extraction_failed = False
+            try:
+                if metric_extractor is None:
+                    raise RuntimeError('metric extraction plan is unavailable')
+                extracted = metric_extractor(outcome)
+            except (RuntimeError, TypeError, ValueError) as exc:
+                extraction_failed = True
+                metric_extraction_errors += 1
+                logger.warning(
+                    '[CostExperiment] metric extraction failed: %s', exc)
+                extracted = {}
+            cost_usd = extracted.get('tofu.context-cost/cost.usd')
+            if cost_usd is None and extraction_failed:
+                cost_usd = _safe_number(metrics.get('costUsd'))
             cost_cny = _safe_number(metrics.get('costCny'))
+            oracle_passed = extracted.get(
+                'tofu.context-cost/quality.oracle_passed')
+            latency_value = extracted.get('tofu.context-cost/latency.ms')
+            terminal_without_error = extracted.get(
+                'tofu.context-cost/health.terminal_without_error')
+            if extraction_failed:
+                oracle_passed = quality.get('oraclePassed')
+                latency_value = _safe_number(outcome.get('latencyMs'))
+                terminal_without_error = quality.get('terminalWithoutError')
             public_cost_usd = _optional_number(
                 metrics, 'publicPriceCostUsd')
             public_cost_cny = _optional_number(
@@ -741,12 +1177,25 @@ def aggregate_cost_experiment_rows(
                 metrics, 'actualCacheWriteCostUsd')
             public_cache_write_cost = _optional_number(
                 metrics, 'publicPriceCacheWriteCostUsd')
+            first_observation = {
+                'orderKey': order_key,
+                'costUsd': float(cost_usd) if cost_usd is not None else None,
+                'quality': (float(oracle_passed)
+                            if isinstance(oracle_passed, bool) else None),
+                'latencyMs': (float(latency_value)
+                              if latency_value is not None else None),
+            }
+            existing_first = arm['_first_observation_by_unit'].get(unit_id)
+            if (existing_first is None
+                    or order_key < existing_first['orderKey']):
+                arm['_first_observation_by_unit'][unit_id] = first_observation
             conv_cost = arm['_conversation_costs'].setdefault(
                 conv_id, {'turns': 0, 'pricedTurns': 0, 'costUsd': 0.0})
             conv_cost['turns'] += 1
             if cost_usd is None:
                 arm['unpricedTurns'] += 1
             else:
+                cost_usd = float(cost_usd)
                 arm['pricedTurns'] += 1
                 arm['totalCostUsd'] += cost_usd
                 conv_cost['pricedTurns'] += 1
@@ -779,16 +1228,15 @@ def aggregate_cost_experiment_rows(
                 ('rounds', 'rounds'),
             ):
                 arm[target] += _safe_int(metrics.get(source))
-            latency = _safe_int(outcome.get('latencyMs'))
+            latency = _safe_int(latency_value)
             arm['latencyMs'] += latency
-            if outcome.get('latencyMs') is not None:
+            if latency_value is not None:
                 arm['latencySamples'] += 1
                 arm['_latencies'].append(latency)
-            arm['terminalWithoutError'] += int(
-                quality.get('terminalWithoutError') is True)
-            if isinstance(quality.get('oraclePassed'), bool):
+            arm['terminalWithoutError'] += int(terminal_without_error is True)
+            if isinstance(oracle_passed, bool):
                 arm['oracleEvaluated'] += 1
-                if quality['oraclePassed']:
+                if oracle_passed:
                     arm['oraclePassed'] += 1
                 if cost_usd is not None:
                     arm['oracleActualPriced'] += 1
@@ -798,6 +1246,9 @@ def aggregate_cost_experiment_rows(
                     arm['oraclePublicPriceCostUsd'] += public_cost_usd
             arm['compactions'] += _safe_int(quality.get('compactions'))
             telemetry = outcome.get('telemetry') or {}
+            if not isinstance(telemetry, dict):
+                invalid_rows += 1
+                telemetry = {}
             arm['mcpSearches'] += _safe_int(telemetry.get('mcpSearches'))
             arm['mcpSearchMisses'] += _safe_int(
                 telemetry.get('mcpSearchMisses'))
@@ -831,7 +1282,19 @@ def aggregate_cost_experiment_rows(
             arm['pricingSources'][pricing_source] = (
                 arm['pricingSources'].get(pricing_source, 0) + 1)
 
+    fixed_horizon = int(
+        resolved_spec['analysis']['maximumAssignmentUnits'])
+    ordered_units = sorted(
+        unit_arms, key=lambda unit_id: unit_exposure_order.get(
+            unit_id, (2**63 - 1, 2**63 - 1, '', unit_id)
+        )
+    )
+    fixed_horizon_reached = len(ordered_units) >= fixed_horizon
+    analysis_unit_ids = set(ordered_units[:fixed_horizon])
+
     public_arms: dict[str, dict] = {}
+    analysis_arms: dict[str, dict] = {}
+    pending_analysis_exposures = 0
     for name, raw in arms.items():
         turns = raw['turns']
         priced = raw['pricedTurns']
@@ -841,6 +1304,47 @@ def aggregate_cost_experiment_rows(
             if value['turns'] > 0 and value['turns'] == value['pricedTurns']
         ]
         fully_priced_cost = sum(value['costUsd'] for value in fully_priced)
+        arm_analysis_unit_ids = sorted(
+            unit_id for unit_id in raw['_assignment_units']
+            if unit_id in analysis_unit_ids
+        )
+        analysis_observations = [
+            raw['_first_observation_by_unit'][unit_id]
+            for unit_id in arm_analysis_unit_ids
+            if unit_id in raw['_first_observation_by_unit']
+        ]
+        pending_analysis_exposures += sum(
+            1 for unit_id in arm_analysis_unit_ids
+            if unit_id in raw['_pending_order_by_unit']
+            and (
+                unit_id not in raw['_first_observation_by_unit']
+                or raw['_pending_order_by_unit'][unit_id]
+                < raw['_first_observation_by_unit'][unit_id]['orderKey']
+            )
+        )
+        fully_priced_units = [
+            observation for observation in analysis_observations
+            if observation['costUsd'] is not None
+        ]
+        quality_by_unit = [
+            observation['quality'] for observation in analysis_observations
+            if observation['quality'] is not None
+        ]
+        latency_by_unit = [
+            observation['latencyMs'] for observation in analysis_observations
+            if observation['latencyMs'] is not None
+        ]
+        assigned_units = len(arm_analysis_unit_ids)
+        analysis_arms[name] = {
+            'assignedUnits': assigned_units,
+            'fullyPricedCosts': [value['costUsd']
+                                 for value in fully_priced_units],
+            'pricingCoverage': (
+                len(fully_priced_units) / assigned_units
+                if assigned_units else 0.0),
+            'qualityByUnit': quality_by_unit,
+            'latencyByUnit': latency_by_unit,
+        }
         latency_values = sorted(raw['_latencies'])
         p90_latency = (latency_values[max(
             0, math.ceil(0.9 * len(latency_values)) - 1)]
@@ -858,12 +1362,19 @@ def aggregate_cost_experiment_rows(
                 raw['oraclePublicPriceCostUsd'] / oracle_successes, 6)
         public_arms[name] = {
             **{key: value for key, value in raw.items()
-               if key not in ('_conversation_ids', '_conversation_costs',
-                              '_latencies',
-                              'latencyMs',
-                              'terminalWithoutError')},
+               if not key.startswith('_')
+               and key not in ('latencyMs', 'terminalWithoutError')},
             'conversations': len(raw['_conversation_ids']),
+            'assignedUnits': len(raw['_assignment_units']),
+            'analysisUnits': assigned_units,
             'fullyPricedConversations': len(fully_priced),
+            'fullyPricedAssignmentUnits': len(fully_priced_units),
+            'analysisCostPerFullyPricedAssignmentUnitUsd': (
+                round(sum(value['costUsd'] for value in fully_priced_units)
+                      / len(fully_priced_units), 6)
+                if fully_priced_units else None),
+            'assignmentUnitPricingCoverage': _rounded_ratio(
+                len(fully_priced_units), assigned_units),
             'totalCostUsd': round(raw['totalCostUsd'], 6),
             'totalCostCny': round(raw['totalCostCny'], 6),
             'totalPublicPriceCostUsd': round(
@@ -936,21 +1447,25 @@ def aggregate_cost_experiment_rows(
     if control_cost not in (None, 0) and optimized_cost is not None:
         turn_delta = round(
             (optimized_cost - control_cost) / control_cost * 100, 2)
+    all_observed_control_conv_cost = public_arms['control'][
+        'costPerFullyPricedConversationUsd']
+    all_observed_optimized_conv_cost = public_arms['optimized'][
+        'costPerFullyPricedConversationUsd']
+    all_observed_conversation_delta = None
+    if (all_observed_control_conv_cost not in (None, 0)
+            and all_observed_optimized_conv_cost is not None):
+        all_observed_conversation_delta = round(
+            (all_observed_optimized_conv_cost - all_observed_control_conv_cost)
+            / all_observed_control_conv_cost * 100, 2)
     control_conv_cost = public_arms['control'][
-        'costPerFullyPricedConversationUsd']
+        'analysisCostPerFullyPricedAssignmentUnitUsd']
     optimized_conv_cost = public_arms['optimized'][
-        'costPerFullyPricedConversationUsd']
+        'analysisCostPerFullyPricedAssignmentUnitUsd']
     conversation_delta = None
     if control_conv_cost not in (None, 0) and optimized_conv_cost is not None:
         conversation_delta = round(
             (optimized_conv_cost - control_conv_cost)
             / control_conv_cost * 100, 2)
-    ready = all(
-        public_arms[name]['fullyPricedConversations'] >= int(min_sample_size)
-        for name in ('control', 'optimized'))
-    quality_ready = all(
-        public_arms[name]['oracleEvaluated'] >= int(min_sample_size)
-        for name in ('control', 'optimized'))
     control_quality = public_arms['control']['oraclePassRate']
     optimized_quality = public_arms['optimized']['oraclePassRate']
     quality_delta = None
@@ -975,30 +1490,119 @@ def aggregate_cost_experiment_rows(
         cache_write_cost_delta = round(
             (optimized_cache_write_cost - control_cache_write_cost)
             / control_cache_write_cost * 100, 2)
+
+    analysis_payload = {
+        'arms': analysis_arms,
+        'analysisClosed': bool(analysis_closed),
+        'analysisStartVerified': analysis_start_ms > 0,
+        'analysisSealVerified': bool(
+            analysis_closed and analysis_sealed_ms > 0),
+        'analysisSealedAt': analysis_sealed_ms or None,
+        'fixedHorizonReached': fixed_horizon_reached,
+        'observedAssignmentUnits': len(ordered_units),
+        'analyzedAssignmentUnits': len(analysis_unit_ids),
+        'truncated': bool(truncated),
+        'invalidRows': invalid_rows,
+        'observedSpecDigests': sorted(observed_spec_digests),
+        'unversionedOutcomes': unversioned_outcomes,
+        'unverifiedExposures': unverified_exposures,
+        'pendingExposures': pending_analysis_exposures,
+        'crossArmUnits': len(cross_arm_units),
+        'metricExtractionErrors': metric_extraction_errors,
+    }
+    analysis_error = analysis_setup_error
+    decision: dict
+    if not analysis_error:
+        try:
+            decision = analyze_experiment(resolved_spec, analysis_payload)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            analysis_error = str(exc)
+            logger.error('[CostExperiment] analyzer unavailable: %s', exc,
+                         exc_info=True)
+    if analysis_error:
+        decision = {
+            'contractVersion': 'tofu.experiment-decision/v1',
+            'status': 'invalid_data',
+            'dataValid': False,
+            'sampleReady': False,
+            'pricingReady': False,
+            'qualityReady': False,
+            'latencyReady': False,
+            'srmReady': False,
+            'analysisClosed': bool(analysis_closed),
+            'analysisStartVerified': analysis_start_ms > 0,
+            'analysisSealVerified': bool(
+                analysis_closed and analysis_sealed_ms > 0),
+            'fixedHorizonReached': fixed_horizon_reached,
+            'maximumAssignmentUnits': fixed_horizon,
+            'decisionEligible': False,
+            'promotionEligible': False,
+            'blockers': ['analyzer_unavailable'],
+            'analysisError': analysis_error,
+        }
+    point_estimate_cheaper = bool(
+        conversation_delta is not None and conversation_delta < 0)
     return {
+        'contractVersion': 'tofu.experiment-report/v1',
         'experiment_id': experiment_id,
+        'experimentId': experiment_id,
+        'specDigest': resolved_spec['specDigest'],
         'windowDays': days,
         'assignmentUnit': 'conversation',
         'minSampleSize': int(min_sample_size),
-        'ready': ready,
-        'qualityReady': quality_ready,
+        'maximumAssignmentUnits': fixed_horizon,
+        'observedAssignmentUnits': len(ordered_units),
+        'analyzedAssignmentUnits': len(analysis_unit_ids),
+        'analysisClosed': bool(analysis_closed),
+        'analysisStartVerified': analysis_start_ms > 0,
+        'analysisSealVerified': bool(
+            analysis_closed and analysis_sealed_ms > 0),
+        'analysisStartedAt': analysis_start_ms or None,
+        'analysisSealedAt': analysis_sealed_ms or None,
+        'fixedHorizonReached': fixed_horizon_reached,
+        'ready': bool(decision.get('decisionEligible')),
+        'sampleReady': bool(decision.get('sampleReady')),
+        'pricingReady': bool(decision.get('pricingReady')),
+        'qualityReady': bool(decision.get('qualityReady')),
+        'latencyReady': bool(decision.get('latencyReady')),
+        'promotionEligible': bool(decision.get('promotionEligible')),
         'invalidRows': invalid_rows,
+        'truncated': bool(truncated),
+        'decision': decision,
+        'funnel': {
+            'outcomesByStatus': funnel_statuses,
+            'unversionedOutcomes': unversioned_outcomes,
+            'unverifiedExposures': unverified_exposures,
+            'pendingExposures': len(pending_exposure_units),
+            'pendingAnalysisExposures': pending_analysis_exposures,
+            'lifecycleWindowViolations': lifecycle_window_violations,
+            'crossArmUnits': len(cross_arm_units),
+            'metricExtractionErrors': metric_extraction_errors,
+        },
         'arms': public_arms,
         'comparison': {
             'costPerConversationDeltaPct': conversation_delta,
+            'allObservedCostPerConversationDeltaPct': (
+                all_observed_conversation_delta),
             'costPerPricedTurnDeltaPct': turn_delta,
             'oraclePassRateDelta': quality_delta,
             'publicPriceCostPerOracleSuccessDeltaPct': success_cost_delta,
             'publicCacheWriteCostPerTurnDeltaPct': cache_write_cost_delta,
-            'optimizedIsCheaper': bool(
-                conversation_delta is not None and conversation_delta < 0),
+            'pointEstimateOptimizedCheaper': point_estimate_cheaper,
+            # Compatibility field now means evidence-backed, safe-to-promote.
+            'optimizedIsCheaper': bool(decision.get('promotionEligible')),
         },
         'methodology': (
-            'Provider-reported usage multiplied by the persisted price '
-            'snapshot; missing prices are counted as unpriced, never zero. '
-            'terminalWithoutError is a run-health metric only. Semantic '
-            'quality is measured exclusively by oraclePassed; public-price '
-            'cost per success is emitted only with complete oracle pricing.'
+            'The first terminal exposure is the frozen observation for each '
+            'assignment unit; deterministic clustered '
+            'bootstrap intervals over the precommitted first assignment '
+            'horizon and an SRM diagnostic. Enrollment must be irreversibly '
+            'sealed before promotion. Provider-reported '
+            'usage uses persisted price snapshots; missing prices are never '
+            'zero and block promotion. terminalWithoutError is operational '
+            'health only; semantic non-inferiority requires oraclePassed. '
+            'Truncation, malformed rows, unverified exposure, or mixed spec '
+            'digests invalidate the decision.'
         ),
     }
 
@@ -1012,5 +1616,6 @@ __all__ = [
     'build_task_cost_experiment_outcome',
     'load_cost_experiment_config',
     'normalize_cost_experiment_config',
+    'task_outcome_report_rows',
     'validate_cost_experiment_transition',
 ]

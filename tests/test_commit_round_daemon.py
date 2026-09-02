@@ -4,19 +4,17 @@ WHY THIS FILE EXISTS
 ────────────────────
 `commit_round/_commit.py` + `_profile.py` are the per-round LANDING point: they
 snapshot the file-history, decide which side-channel file edits belong to THIS
-round, emit `round_committed`, and patch the conversation's assistant message
-after `persist_task_result` has already run. A regression loses task results
-that nothing else can reconstruct.
+round, emit `round_committed`, and fold post-settlement facts into the settled
+turn projection after `persist_task_result` has already run. A regression loses
+task results that nothing else can reconstruct.
 
 Measured before this file existed: `_commit.py` **6%**, `_profile.py` **13%** —
 the package was reachable only incidentally.
 
 DESIGN: why no real threads
     Both modules are split into `_spawn_*` (starts a daemon thread) and
-    `_run_*_async` (the thread BODY). Their docstrings state the body resolves
-    its callees THROUGH the facade (`_facade.append_event`,
-    `_facade._patch_assistant_message_with_prefs`) precisely so a test can steer
-    them. So the tests here drive the BODY synchronously and assert the
+    `_run_*_async` (the thread BODY). Tests replace the concrete consumer
+    bindings in `_commit` / `_profile`, then drive the BODY synchronously and assert the
     decisions, and cover the spawn functions only for their GATE conditions.
     That keeps every assertion deterministic — a thread-timing test would be
     flaky and would not check any more logic.
@@ -44,8 +42,8 @@ import sys
 
 import pytest
 
-import lib.tasks_pkg.commit_round as cr
 from lib.tasks_pkg.commit_round import _commit as commit_mod
+from lib.tasks_pkg.commit_round import _profile as profile_mod
 
 pytestmark = pytest.mark.unit
 
@@ -54,7 +52,7 @@ OTHER_TASK = 'task-of-a-concurrent-conversation'
 
 
 def _task(**over):
-    t = {'id': TASK_ID, 'convId': 'conv-1', 'toolRounds': []}
+    t = {'id': TASK_ID, 'convId': 'conv-1', '_userId': 1, 'toolRounds': []}
     t.update(over)
     return t
 
@@ -85,18 +83,18 @@ def spawned(monkeypatch):
 
 def test_commit_spawn_requires_project_enabled_path_and_task_id(spawned):
     """All three preconditions gate the daemon; none may be assumed."""
-    cr._spawn_async_commit_round(_task(), False, '/proj')          # disabled
-    cr._spawn_async_commit_round(_task(), True, None)              # no path
-    cr._spawn_async_commit_round(_task(id=''), True, '/proj')      # no task id
+    commit_mod._spawn_async_commit_round(_task(), False, '/proj')          # disabled
+    commit_mod._spawn_async_commit_round(_task(), True, None)              # no path
+    commit_mod._spawn_async_commit_round(_task(id=''), True, '/proj')      # no task id
     assert spawned == []
 
-    cr._spawn_async_commit_round(_task(), True, '/proj')
+    commit_mod._spawn_async_commit_round(_task(), True, '/proj')
     assert len(spawned) == 1 and spawned[0].get('started') is True
 
 
 def test_commit_spawn_thread_is_a_daemon(spawned):
     """A non-daemon thread would keep the process alive on shutdown."""
-    cr._spawn_async_commit_round(_task(), True, '/proj')
+    commit_mod._spawn_async_commit_round(_task(), True, '/proj')
     assert spawned[0]['daemon'] is True
 
 
@@ -110,7 +108,7 @@ def test_commit_spawn_failure_is_swallowed(monkeypatch):
         raise RuntimeError('cannot start thread')
 
     monkeypatch.setattr(commit_mod.threading, 'Thread', boom)
-    cr._spawn_async_commit_round(_task(), True, '/proj')   # must not raise
+    commit_mod._spawn_async_commit_round(_task(), True, '/proj')   # must not raise
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -164,14 +162,8 @@ def fh_env(monkeypatch):
     monkeypatch.setitem(sys.modules, 'lib.project_mod',
                         types.SimpleNamespace(
                             get_modifications=lambda root, conv_id=None: []))
-    monkeypatch.setattr(cr, 'append_event',
-                        lambda task, evt: env['events'].append(evt))
     monkeypatch.setattr(commit_mod, 'append_event',
                         lambda task, evt: env['events'].append(evt))
-    monkeypatch.setattr(cr, '_patch_assistant_message_with_git',
-                        lambda task, evt: None)
-    monkeypatch.setattr(commit_mod, '_patch_assistant_message_with_git',
-                        lambda task, evt: None)
     return env
 
 
@@ -223,6 +215,54 @@ def test_unattributed_edit_dropped_when_round_ran_only_readonly_tools(fh_env):
     task = _task(toolRounds=[_round('read_files'), _round('grep_search')])
     _run(task, fh_env)
     assert 'modifiedFileList' not in task or task['modifiedFileList'] == []
+
+
+def test_commit_round_emits_linear_git_settlement_receipt(
+        fh_env, monkeypatch):
+    import lib.linear_git_checkpoint as linear_checkpoint
+
+    receipt = {
+        'schema': 'tofu.linear-git-checkpoint/v2',
+        'status': 'committed',
+        'repositories': [{
+            'status': 'committed', 'checkpointSha': 'abc123',
+            'stableUpdated': True,
+        }],
+    }
+    calls = []
+
+    def _settle(task, *, user_id, project_path, project_paths):
+        calls.append((task['id'], user_id, project_path, project_paths))
+        return receipt
+
+    monkeypatch.setattr(
+        linear_checkpoint, 'settle_task_checkpoint', _settle)
+    task = _task()
+    events = _run(task, fh_env)
+
+    assert calls == [(TASK_ID, 1, '/proj', None)]
+    committed = [event for event in events
+                 if event.get('type') == 'round_committed']
+    assert committed
+    assert committed[-1]['linearGitCheckpoint'] == receipt
+
+
+def test_checkpoint_exception_does_not_rewrite_settled_task(
+        fh_env, monkeypatch):
+    import lib.linear_git_checkpoint as linear_checkpoint
+
+    def _explode(*_args, **_kwargs):
+        raise RuntimeError('Git checkpoint unavailable')
+
+    monkeypatch.setattr(
+        linear_checkpoint, 'settle_task_checkpoint', _explode)
+    task = _task(status='done', error='')
+
+    _run(task, fh_env)
+
+    assert task['status'] == 'done'
+    assert task['error'] == ''
+    assert '_linearGitCheckpoint' not in task
 
 
 def test_self_stamping_edit_tools_do_not_count_as_opaque(fh_env):
@@ -351,111 +391,57 @@ def test_disabled_file_history_is_a_clean_noop(fh_env, monkeypatch):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  Assistant-message patching — survives the SSE reader closing
+#  Turn-native projection fold — the files-changed card's only post-done path
 # ══════════════════════════════════════════════════════════════════
 
-@pytest.fixture
-def store(monkeypatch):
-    """Fake conversation store; returns the dict holding loaded/saved messages.
-
-    Mirrors the NARROW-WRITE contract the daemons now use: they no longer
-    read-modify-write the whole transcript (that erased rows a concurrent
-    autopilot append had just committed), they patch the fields of the ONE
-    message tagged with their own task id. The fake reproduces that, including
-    the deliberate absence of any positional fallback.
-    """
-    import types
-    state = {'messages': [], 'saved': None}
-
-    def _patch(cid, task_id, fields, *, max_attempts=5):
-        msgs = [dict(m) for m in state['messages']]
-        for i in range(len(msgs) - 1, -1, -1):
-            m = msgs[i]
-            if m.get('role') == 'assistant' and m.get('_taskId') == task_id:
-                m.update(fields)
-                state['saved'] = msgs
-                return True
-        return False
-
-    fake = types.SimpleNamespace(patch_message_fields_by_task=_patch)
-    monkeypatch.setitem(
-        sys.modules, 'lib.agent_core.store',
-        types.SimpleNamespace(get_conversation_store=lambda: fake))
-    return state
+def test_daemon_folds_file_list_into_the_turn_projection(fh_env, monkeypatch):
+    """The turn-native UI reads the turn projection, not the legacy message —
+    the daemon must land the derived list there or the files-changed card
+    never renders (post-settlement frames are refused by the authority)."""
+    import lib.turn_lifecycle as lifecycle
+    folds = []
+    monkeypatch.setattr(
+        lifecycle, 'apply_commit_round_file_changes',
+        lambda conv_id, turn_id, **kw: folds.append((conv_id, turn_id, kw)))
+    fh_env['diff'] = [{'path': 'mine.py', 'action': 'modified'}]
+    fh_env['tracked'] = {'mine.py': {'last_writer_task_id': TASK_ID}}
+    task = _task(_turnId='turn-1')
+    _run(task, fh_env)
+    assert len(folds) == 1
+    conv_id, turn_id, request = folds[0]
+    assert (conv_id, turn_id) == ('conv-1', 'turn-1')
+    assert request['files'] == [{'path': 'mine.py', 'action': 'modified'}]
+    assert request['task_id'] == TASK_ID
+    assert request['user_id'] == 1
 
 
-def test_patch_targets_the_message_tagged_with_this_task(store):
-    """Prefer the _taskId match over "last assistant" — with a follow-up task
-    already appended, the tail is someone else's message."""
-    store['messages'] = [
-        {'role': 'user', 'content': 'q'},
-        {'role': 'assistant', 'content': 'mine', '_taskId': TASK_ID},
-        {'role': 'assistant', 'content': 'later', '_taskId': 'task-newer'},
-    ]
-    cr._patch_assistant_message_with_git(
-        _task(), {'gitSha': 'snap-9', 'snapshotId': 'snap-9'})
-    assert store['saved'][1]['_snapshotId'] == 'snap-9'
-    assert '_snapshotId' not in store['saved'][2]
-
-
-def test_patch_writes_nothing_when_no_message_carries_this_task(store):
-    """No ``_taskId`` match → write NOTHING; never guess the last assistant.
-
-    This asserts the INVERSE of what it once did. The old "fall back to the last
-    assistant message" branch is the blob-clobber bug wearing a quieter mask:
-    these daemons run AFTER the turn settled, so by the time they fire the tail
-    may belong to a DIFFERENT task (a follow-up, an autopilot VU turn) and the
-    snapshot id gets stamped onto someone else's turn. An untagged message means
-    the row was compacted away or rebuilt — the correct action is to skip and
-    say so in the log, not to guess.
-    """
-    store['messages'] = [{'role': 'user', 'content': 'q'},
-                         {'role': 'assistant', 'content': 'a'}]
-    cr._patch_assistant_message_with_git(
-        _task(), {'gitSha': 'snap-9', 'snapshotId': 'snap-9'})
-    assert store['saved'] is None, (
-        'the snapshot was stamped onto an untagged assistant message — under '
-        'concurrency that is another task\'s turn')
-
-
-def test_patch_requires_conv_task_and_sha(store):
-    """Missing any of the three → no write at all (never a partial patch)."""
-    evt = {'gitSha': 'snap-9'}
-    cr._patch_assistant_message_with_git(_task(convId=''), evt)
-    cr._patch_assistant_message_with_git(_task(id=''), evt)
-    cr._patch_assistant_message_with_git(_task(), {})
-    assert store['saved'] is None
-
-
-def test_patch_is_a_noop_when_conversation_is_gone(monkeypatch):
-    """A deleted conversation must not raise from the post-done daemon."""
-    import types
+def test_turn_projection_fold_requires_list_conv_and_turn(monkeypatch):
+    """Missing any of the three → no fold at all (never a partial patch)."""
+    import lib.turn_lifecycle as lifecycle
     calls = []
-
-    def _gone(cid, tid, fields, **kw):
-        calls.append((cid, tid))
-        return False
-
-    fake = types.SimpleNamespace(patch_message_fields_by_task=_gone)
-    monkeypatch.setitem(
-        sys.modules, 'lib.agent_core.store',
-        types.SimpleNamespace(get_conversation_store=lambda: fake))
-    cr._patch_assistant_message_with_git(_task(), {'gitSha': 's'})
-    # The tagged-message lookup was attempted (narrow write, no positional
-    # fallback) and its False verdict was accepted without raising.
-    assert calls == [('conv-1', TASK_ID)]
+    monkeypatch.setattr(lifecycle, 'apply_commit_round_file_changes',
+                        lambda *a, **kw: calls.append((a, kw)))
+    commit_mod._patch_turn_projection_with_file_list(_task(_turnId='t'), {})
+    commit_mod._patch_turn_projection_with_file_list(
+        _task(convId='', _turnId='t'),
+        {'modifiedFileList': [{'path': 'x.py'}]})
+    commit_mod._patch_turn_projection_with_file_list(
+        _task(), {'modifiedFileList': [{'path': 'x.py'}]})
+    assert calls == []
 
 
-def test_patch_carries_modified_list_onto_the_message(store):
-    """Needed so a RELOAD (SSE long gone) still shows the files-changed bar."""
-    store['messages'] = [{'role': 'assistant', 'content': 'a', '_taskId': TASK_ID}]
-    cr._patch_assistant_message_with_git(_task(), {
-        'gitSha': 's', 'snapshotId': 's',
-        'modifiedFileList': [{'path': 'x.py', 'action': 'written'}],
-        'modifiedFiles': 1,
-    })
-    assert store['saved'][0]['modifiedFileList'][0]['path'] == 'x.py'
-    assert store['saved'][0]['modifiedFiles'] == 1
+def test_turn_projection_fold_failure_is_contained(monkeypatch, caplog):
+    """The body runs in a daemon thread: a fold failure must log, not raise —
+    the snapshot persist already happened."""
+    import lib.turn_lifecycle as lifecycle
+    monkeypatch.setattr(
+        lifecycle, 'apply_commit_round_file_changes',
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('sidecar down')))
+    with caplog.at_level('DEBUG', logger=commit_mod.__name__):
+        commit_mod._patch_turn_projection_with_file_list(
+            _task(_turnId='turn-1'),
+            {'modifiedFileList': [{'path': 'x.py'}]})  # must not raise
+    assert 'turn-projection file-changes fold failed: sidecar down' in caplog.text
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -466,6 +452,14 @@ def test_patch_carries_modified_list_onto_the_message(store):
 def profile_spawn(monkeypatch):
     calls = []
 
+    class _AlwaysAvailableSlot:
+        def acquire(self, blocking=False):
+            assert blocking is False
+            return True
+
+        def release(self):
+            return None
+
     class _FakeThread:
         def __init__(self, **kw):
             calls.append(kw)
@@ -475,22 +469,61 @@ def profile_spawn(monkeypatch):
 
     from lib.tasks_pkg.commit_round import _profile as prof
     monkeypatch.setattr(prof.threading, 'Thread', _FakeThread)
+    monkeypatch.setattr(prof, '_PROFILE_CONSOLIDATION_SLOT',
+                        _AlwaysAvailableSlot())
     return calls
 
 
 def test_profile_spawn_gated_on_eligibility_and_clean_finish(profile_spawn):
     """Consolidation costs a cheap-LLM round trip; it must not run on an errored
     turn nor when the prefetch gate did not mark it eligible."""
-    cr._spawn_async_profile_consolidation(_task(), [])                      # not eligible
-    cr._spawn_async_profile_consolidation(
+    profile_mod._spawn_async_profile_consolidation(_task(), [])                      # not eligible
+    profile_mod._spawn_async_profile_consolidation(
         _task(_profileConsolidateEligible=True, error='boom'), [])          # errored
-    cr._spawn_async_profile_consolidation(
+    profile_mod._spawn_async_profile_consolidation(
         _task(id='', _profileConsolidateEligible=True), [])                 # no id
     assert profile_spawn == []
 
-    cr._spawn_async_profile_consolidation(
+    profile_mod._spawn_async_profile_consolidation(
         _task(_profileConsolidateEligible=True), [])
     assert len(profile_spawn) == 1 and profile_spawn[0]['daemon'] is True
+
+
+def test_profile_spawn_is_bounded_when_worker_busy(monkeypatch):
+    """Concurrent completed turns cannot create an unbounded learner burst."""
+    class _BusySlot:
+        def acquire(self, blocking=False):
+            assert blocking is False
+            return False
+
+        def release(self):
+            raise AssertionError('an unacquired slot must not be released')
+
+    monkeypatch.setattr(profile_mod, '_PROFILE_CONSOLIDATION_SLOT', _BusySlot())
+    monkeypatch.setattr(
+        profile_mod.threading, 'Thread',
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError('busy learner must not create a thread')),
+    )
+
+    profile_mod._spawn_async_profile_consolidation(
+        _task(_profileConsolidateEligible=True), [])
+
+
+def test_terminal_finalizer_schedules_profile_consolidation():
+    """Guard the production call site; a helper alone does not auto-learn."""
+    import ast
+    import inspect
+    from lib.tasks_pkg.orchestrator import _finalize
+
+    finalizer = ast.parse(
+        inspect.getsource(_finalize._finalize_and_emit_done)).body[0]
+    calls = {
+        node.func.id
+        for node in ast.walk(finalizer)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert '_spawn_async_profile_consolidation' in calls
 
 
 @pytest.fixture
@@ -503,9 +536,9 @@ def prof_env(monkeypatch):
         sys.modules, 'lib.memory.profile_consolidate',
         types.SimpleNamespace(
             run_profile_consolidation=lambda msgs, task=None: list(env['learned'])))
-    monkeypatch.setattr(cr, 'append_event',
+    monkeypatch.setattr(profile_mod, 'append_event',
                         lambda task, evt: env['events'].append(evt))
-    monkeypatch.setattr(cr, '_patch_assistant_message_with_prefs',
+    monkeypatch.setattr(profile_mod, '_patch_turn_with_prefs',
                         lambda task, learned: env.update(patched=learned))
     return env
 
@@ -516,7 +549,7 @@ def test_each_learned_preference_gets_its_own_event(prof_env):
         {'kind': 'tooling', 'summary': 'prefers ripgrep', 'id': 'p2', 'pending': True},
     ]
     task = _task()
-    cr._run_profile_consolidation_async(task, [])
+    profile_mod._run_profile_consolidation_async(task, [])
     assert [e.get('summary') for e in prof_env['events']] == [
         'prefers tables', 'prefers ripgrep']
     assert prof_env['events'][1].get('pending') is True
@@ -527,7 +560,7 @@ def test_each_learned_preference_gets_its_own_event(prof_env):
 def test_nothing_learned_emits_nothing(prof_env):
     prof_env['learned'] = []
     task = _task()
-    cr._run_profile_consolidation_async(task, [])
+    profile_mod._run_profile_consolidation_async(task, [])
     assert prof_env['events'] == []
     assert '_preferencesLearned' not in task
     assert prof_env['patched'] is None
@@ -542,7 +575,7 @@ def test_consolidation_failure_is_contained(monkeypatch, prof_env):
             run_profile_consolidation=lambda msgs, task=None: (
                 _ for _ in ()).throw(RuntimeError('LLM down'))))
     task = _task()
-    cr._run_profile_consolidation_async(task, [])   # must not raise
+    profile_mod._run_profile_consolidation_async(task, [])   # must not raise
     assert '_preferencesLearned' not in task
 
 
@@ -550,39 +583,93 @@ def test_emit_failure_does_not_abort_persistence(monkeypatch, prof_env):
     """Live SSE delivery is best-effort; the DB patch is what survives reload,
     so a failing emit must NOT skip it."""
     prof_env['learned'] = [{'kind': 'style', 'summary': 's', 'id': 'p1'}]
-    monkeypatch.setattr(cr, 'append_event',
+    monkeypatch.setattr(profile_mod, 'append_event',
                         lambda t, e: (_ for _ in ()).throw(RuntimeError('no sse')))
-    cr._run_profile_consolidation_async(_task(), [])
+    profile_mod._run_profile_consolidation_async(_task(), [])
     assert prof_env['patched'] == prof_env['learned']
 
 
-def test_prefs_patch_targets_the_tagged_message(store):
-    store['messages'] = [
-        {'role': 'assistant', 'content': 'mine', '_taskId': TASK_ID},
-        {'role': 'assistant', 'content': 'other', '_taskId': 'task-newer'},
-    ]
-    learned = [{'kind': 'style', 'summary': 's', 'id': 'p1'}]
-    cr._patch_assistant_message_with_prefs(_task(), learned)
-    assert store['saved'][0]['_preferencesLearned'] == learned
-    assert '_preferencesLearned' not in store['saved'][1]
+def test_prefs_patch_updates_turn_provenance_with_revision_cas(monkeypatch):
+    import lib.turn_lifecycle as lifecycle
+
+    learned = [{'kind': 'added', 'summary': 'Prefer stable IDs', 'id': 'p1'}]
+    updates = []
+    monkeypatch.setattr(lifecycle, 'get_turn', lambda conv_id, turn_id, **kw: {
+        'turnId': turn_id,
+        'projectionRevision': 7,
+        'projection': {'content': 'answer', 'provenance': {
+            'blockId': 'provenance',
+            'memoryPrefetch': {'phase': 'done', 'selected': 1},
+        }},
+    })
+    monkeypatch.setattr(
+        lifecycle,
+        'update_turn_projection',
+        lambda conv_id, turn_id, **kw: updates.append(
+            (conv_id, turn_id, kw)) or {'ok': True},
+    )
+
+    profile_mod._patch_turn_with_prefs(_task(
+        _turnId='turn-a', _userId=9, content='answer',
+        _preferencesLearned=learned,
+    ), learned)
+
+    assert len(updates) == 1
+    conv_id, turn_id, request = updates[0]
+    assert (conv_id, turn_id) == ('conv-1', 'turn-a')
+    assert request['expected_projection_revision'] == 7
+    assert request['user_id'] == 9
+    assert request['projection']['content'] == 'answer'
+    assert request['projection']['provenance'] == {
+        'blockId': 'provenance',
+        'memoryPrefetch': {'phase': 'done', 'selected': 1},
+        'preferencesLearned': learned,
+    }
 
 
-def test_prefs_patch_requires_conv_task_and_learned(store):
-    cr._patch_assistant_message_with_prefs(_task(convId=''), [{'id': 'p'}])
-    cr._patch_assistant_message_with_prefs(_task(id=''), [{'id': 'p'}])
-    cr._patch_assistant_message_with_prefs(_task(), [])
-    assert store['saved'] is None
+def test_prefs_patch_requires_conv_task_and_learned(monkeypatch):
+    import lib.turn_lifecycle as lifecycle
+    monkeypatch.setattr(
+        lifecycle, 'get_turn',
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError('must not touch the turn authority')))
+    profile_mod._patch_turn_with_prefs(_task(convId=''), [{'id': 'p'}])
+    profile_mod._patch_turn_with_prefs(_task(id=''), [{'id': 'p'}])
+    profile_mod._patch_turn_with_prefs(_task(), [])
 
 
-# ══════════════════════════════════════════════════════════════════
-#  Facade contract — the patch seam these daemons depend on
-# ══════════════════════════════════════════════════════════════════
+def test_no_legacy_taskid_projection_bridge_remains():
+    """Post-settlement enrichment goes through the _turnId-keyed CAS seam only.
 
-def test_facade_reexports_the_documented_surface():
-    """The package docstring promises `commit_round.X` keeps resolving after the
-    monolith split, and the daemon bodies resolve callees THROUGH it so tests
-    can steer them. A dropped name breaks that seam at runtime, not at import."""
-    for name in cr.__all__:
-        assert hasattr(cr, name), f'facade lost {name}'
-    for name in ('append_event', 'EventType', 'build_event'):
-        assert name in cr.__all__, f'{name} must stay patchable at facade scope'
+    Turn projections strip identity keys (``_taskId``) at every persistence
+    path (``normalize_projection_document``), so a bridge that locates the row
+    by ``projection._taskId`` can never match — it only logged
+    ``[Store] no turn projection tagged`` and silently dropped the payload
+    (2026-08-26: every commit round; fileChanges/gitSha never landed).
+    """
+    import inspect
+
+    import lib.tasks_pkg.persistence_store as persistence_store
+    from lib.protocols import ConversationStore
+
+    for module in (commit_mod, profile_mod):
+        source = inspect.getsource(module)
+        assert 'patch_message_fields_by_task' not in source
+        assert '_patch_assistant_message' not in source
+    assert not hasattr(
+        persistence_store.DefaultConversationStore,
+        'patch_message_fields_by_task')
+    assert 'patch_message_fields_by_task' not in inspect.getsource(
+        ConversationStore)
+
+
+def test_package_is_namespace_only():
+    """Concrete owner modules, rather than package re-exports, are authoritative."""
+    import lib.tasks_pkg.commit_round as package
+
+    for old_export in (
+        '_spawn_async_commit_round',
+        '_spawn_async_profile_consolidation',
+        'append_event',
+    ):
+        assert not hasattr(package, old_export)

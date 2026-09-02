@@ -1,9 +1,21 @@
 # Tofu Headless API Guide
 
-> Tofu's backend is a fully featured agent foundation. Every UI feature
-> is reachable as a HTTP API. This document is the canonical reference
-> for **API-only callers** — SDKs, CLIs, n8n / Zapier nodes, custom
-> backends, evaluation harnesses, scripts.
+> Tofu's full backend is a fully featured agent foundation. This document is
+> the canonical reference for **API-only callers** of that full application —
+> SDKs, CLIs, n8n/Zapier nodes, custom backends, evaluation harnesses, and
+> scripts.
+
+There are now two headless deployment boundaries:
+
+| Deployment | Contains | State |
+|---|---|---|
+| `tofu-agent` package/sidecar | Agent run, model routing, tools, MCP, network, task replay/abort, one managed-Provider setup page | Bounded task memory + encrypted Provider file; no database/ChatUI frontend |
+| Full Tofu backend | Everything in this guide, including conversations, accounts, feature agents, provider CRUD, billing, and scheduling | Storage Sidecar |
+
+For `pip install tofu-agent`, the agent-only OCI image, provider ownership,
+authentication, and exact lightweight route list, read
+[DEVELOPER_RUNTIME.md](DEVELOPER_RUNTIME.md). Both compositions use the same
+production agent orchestrator.
 
 If you only want to drop Tofu into an OpenAI- or Anthropic-SDK app,
 skip to the [Compatibility adapters](#compatibility-adapters) section
@@ -15,29 +27,38 @@ skip to the [Compatibility adapters](#compatibility-adapters) section
 
 | Surface             | Path prefix     | Best for                                       |
 |---------------------|-----------------|------------------------------------------------|
-| **Tofu native v1**  | `/api/v1/*`     | Full feature parity with the UI; new clients   |
+| **Tofu v4 bootstrap** | `/api/v4/*`   | Version negotiation and the canonical v4 contract |
+| **Tofu native v1**  | `/api/v1/*`     | Current full feature surface during migration |
 | **OpenAI compat**   | `/v1/...`       | Existing code using `openai` / `langchain-openai` / OpenWebUI / LangChain / Cline / Aider / Continue.dev |
 | **Anthropic compat**| `/v1/messages`  | Existing code using the Anthropic SDK / Claude Code-style tools |
-| **Legacy `/api/*`** | `/api/...`      | The browser UI; still maintained, no auth-key support |
+| **Browser transports** | `/api/...`   | Streaming, uploads, redirects, and binary assets used by the UI |
 
 Self-describing endpoints:
 
+* `GET /api/v4/meta` — API/schema/server build and minimum client builds
+* `GET /api/v4/openapi.json` — canonical, generated v4 OpenAPI 3.1 contract
 * `GET /api/openapi.json`  — full OpenAPI 3.1 spec
 * `GET /api/openapi.yaml`  — same, YAML
 * `GET /api/docs`          — interactive **Swagger UI**
 * `GET /api/redoc`         — alternative ReDoc viewer
 * `GET /api/v1/capabilities` — runtime model/tool/agent registry
 
+New clients should probe `/api/v4/meta` before performing operations. Product
+operations remain on v1 until each route and all generated clients move to the
+v4 contract together; the server's release latch therefore remains on major 1.
+At the atomic cutover, old `/api/v1` and `/api/v3` calls return 426 with the v4
+metadata URL instead of executing compatibility logic.
+
 ---
 
 ## 2. Authentication
 
-Two complementary mechanisms:
+One credential, with transports suited to each client:
 
 | Use case            | How                                        |
 |---------------------|--------------------------------------------|
-| Browser / UI        | `TUNNEL_TOKEN` env var; cookie set on first `?token=` visit |
-| Programmatic / CI   | **Bearer API key** — `Authorization: Bearer tofu_live_…`    |
+| Browser / UI        | API key installed as the HttpOnly `tofu_session` cookie by the first `?token=` visit |
+| Programmatic / CI   | **Bearer API key** — `Authorization: Bearer tofu_live_…` |
 
 API keys are issued by the admin (Settings → API Keys, or the CLI
 `tofu keys create …`). Every key has:
@@ -134,8 +155,6 @@ available via `config`.
     "memoryEnabled": true,
     "projectPath": "",
     "agentBackend": "builtin",
-    "endpointMode": false,
-    "swarmEnabled": false,
     "mcpEnabled": true,
     "tools": {
       "toolSearch": "auto",
@@ -146,9 +165,11 @@ available via `config`.
       "transport": "sse",
       "reasoningMode": "standard",
       "verbosity": "medium",
-      "imageDetail": "auto",
+      "imageDetail": "auto"
+    },
+    "orchestration": {
       "multiAgent": "off",
-      "maxConcurrentSubagents": 3
+      "maxConcurrentAgents": 3
     },
     "disableModelFallback": false
   },
@@ -158,7 +179,16 @@ available via `config`.
 }
 ```
 
-`tools.toolSearch` applies to every provider: `auto` uses a verified native
+`tools.toolSearch`, `tools.programmaticCalling`, and
+`orchestration.multiAgent` apply to every tool-capable provider: `auto` uses a
+verified native implementation where available and otherwise the local
+gateway, ToolScript, or Swarm backend. PTC and Multi-agent can be active in the
+same request because they solve different task shapes. Legacy
+`responses.multiAgent` and `responses.maxConcurrentSubagents` inputs remain
+accepted as migration aliases, but normalized configuration is always returned
+under `orchestration`.
+
+Tool Search `auto` uses a verified native
 implementation where available and otherwise the local `search_tools` +
 direct native tool calls; `native` still falls back locally when capability is
 unverified. The `responses.*` controls remain limited to `protocol: responses`
@@ -206,6 +236,14 @@ with an effective `responses_profile` of `openai`. See
 attached as a `tofu` field on chunks for non-text events
 (phase, tool_call, snapshots).
 
+Terminal success is evidence-based. A provider stream cut first emits a
+`phase` event explaining that the already-delivered prefix is being preserved
+while Tofu performs a bounded lossless continuation. If recovery is exhausted,
+sync mode returns an HTTP error and stream mode emits an `error` object followed
+by `[DONE]`; neither mode fabricates `finish_reason: "stop"`. OpenAI- and
+Anthropic-compatible endpoints follow the same verdict, using their respective
+error channels instead of `stop` / `end_turn`.
+
 ### 3.2 Generic task lifecycle — `/api/v1/tasks/*`
 
 Once you have a `task_id` (from chat completions, paper, translate,
@@ -222,6 +260,15 @@ DELETE /api/v1/tasks/{id}            — drop from registry (admin)
 
 Cursor-based replay means the consumer can disconnect and reconnect
 without losing events.
+
+Terminal task-result metadata exposes
+`toolOrchestrationDecisions[]` as a bounded, provider-neutral trace. Each row
+separates the selected semantic lanes from their resolved backend
+(`programmaticBackend: native_openai | local | off` and
+`multiAgentBackend: native_openai | local_swarm | off`). This is offer/routing
+telemetry, not adoption evidence: use `programRuns[]` for programs that really
+executed, `caller.type=multi_agent` for native worker tool calls, and persisted
+`spawn_agents` handles for local Swarm execution.
 
 ### 3.3 Capabilities — `/api/v1/capabilities`
 
@@ -290,14 +337,14 @@ If you want a single WebSocket multiplexing every channel/task, this
 is the same socket the UI uses. Send `{"action":"subscribe", "channel":"chat", "taskId":"…"}`
 and the server pushes every event for that task. See
 [`lib/agent_core/push.py`](../lib/agent_core/push.py) for the full protocol
-(`lib/push.py` remains as a re-export shim).
+(`lib.agent_core.push` is the sole PushHub owner).
 
 ### 3.6.1 Streaming event contract — the frontend↔backend sync interface
 
 > **If you are building your own frontend, this is the section you read.**
 > The agent runtime emits a fixed vocabulary of JSON events. They flow over
-> the SSE chat stream, the `/api/v1/tasks/{id}/stream` replay stream, and the
-> `/api/push` WebSocket — the same events, regardless of transport.
+> the `/api/v1/tasks/{id}/stream` replay stream and the `/api/push` WebSocket —
+> the same events, regardless of transport.
 
 The vocabulary is **declared, versioned, and machine-discoverable**. The
 single source of truth is [`lib/agent_core/events.py`](../lib/agent_core/events.py);
@@ -314,7 +361,7 @@ GET /api/v1/capabilities
 → { …, "events": {
     "contract_version": 1,
     "transports": {
-      "sse": ["/api/chat/stream/<task_id>", "/api/v1/tasks/<task_id>/stream"],
+      "sse": ["/api/v1/tasks/<task_id>/stream"],
       "websocket": "/api/push",
       "cursor_replay": "/api/v1/tasks/<task_id>/events?cursor=N"
     },
@@ -341,7 +388,7 @@ its spec. The categories and the most important events:
 | `tool` | `tool_start`, `tool_progress`, `tool_result`, `tool_complete`, `tool_compacted` | Keyed by `toolCallId` + `roundNum` |
 | `context` | `round_usage`, `round_committed`, `messages_snapshot`, `compaction`, `compaction_done`, `memory_prefetch`, `project_external_edit` | Token accounting, durable checkpoints, context-window mgmt |
 | `interaction` | `human_guidance_request`, `write_approval_request`, `approval_required`, `stdin_request`, `stdin_resolved` | **Require a client response** before the task proceeds (see below) |
-| `endpoint` | `endpoint_iteration`, `endpoint_planner_done`, `endpoint_critic_msg`, `endpoint_new_turn`, `endpoint_complete` | Planner→Worker→Critic loop |
+| `flow` | `flow_iteration`, `flow_planner_done`, `flow_critic_msg`, `flow_new_turn`, `flow_complete` | FlowExecutor chat projection |
 | `swarm` | `swarm_phase`, `swarm_inbox_inject`, `swarm_agent_phase`, `swarm_agent_progress`, `swarm_agent_complete`, `swarm_agent_error`, `swarm_agent_tool_call` | Multi-agent orchestration |
 | `autopilot` | `autopilot_vu_event`, `autopilot_vu_done`, `autopilot_vu_cancel` | Autonomous-loop value units |
 | `artifact` / `scheduler` / `transport` | `artifact`, `timer_poll_check`, `sse_timeout`, `ping` | `ping` (WS keepalive) and `sse_timeout` are transport signals — ignore them |
@@ -388,11 +435,12 @@ unknown event types and unknown fields. A server-side drift test
 (`tests/test_event_registry.py`) guarantees the registry stays in lockstep with
 what the runtime actually emits and what the bundled frontend consumes.
 
-### 3.7 Bring Your Own Model (BYOM)
+### 3.7 Managed models and Bring Your Own Model (BYOM)
 
-> External callers supply the LLM endpoint; Tofu supplies the agent
-> runtime, tools, memory, swarm, and trajectory capture. This is the
-> "Tofu is an agent runtime; you bring the model" surface.
+> The operator may own the default LLM so callers supply only a Tofu URL and
+> token. A caller may instead select a registered model or provide one
+> endpoint/key/model block for a run. Tofu supplies the agent runtime, tools,
+> memory, swarm, and trajectory capture in every mode.
 
 Three layered ways to attach a custom endpoint, each strictly more
 powerful than the one below:
@@ -447,9 +495,9 @@ back in any response or `/tasks/{id}` snapshot.
 
 #### 3.7.2 Single-call agent runtime — `POST /api/v1/agent/run`
 
-Headline endpoint for "I have my own model and I want to run an agent
-turn end-to-end." One request bundles the prompt, the LLM endpoint,
-the agent capabilities, and the trajectory format.
+Headline endpoint for running one agent turn end-to-end. With a deployment
+default, the request needs only messages. An optional model/provider block,
+agent configuration, and trajectory format may override that composition.
 
 ```jsonc
 POST /api/v1/agent/run
@@ -457,14 +505,15 @@ Authorization: Bearer tofu_live_…
 {
   "messages": [{"role":"user","content":"Refactor lib/foo.py"}],
 
-  // 1. model is ALWAYS a string
+  // 1. model is optional when the deployment owns a default
   "model": "deepseek-v4-pro",                  // (a) plain alias
   // "model": "deepseek-v4-pro@prov_a3f2c1",    // (b) registered BYO
 
-  // 2. (c) inline BYO: pair `model` with a `provider` block
+  // 2. (c) inline BYO: model may live inside the provider block
   // "provider": {
   //   "base_url": "http://33.236.230.114:8080/v1",
   //   "api_key":  "sk-…",
+  //   "model":    "deepseek-v4-pro",
   //   "extra_headers": { "X-Internal-Tag": "..." }
   // },
 
@@ -485,14 +534,18 @@ Authorization: Bearer tofu_live_…
 }
 ```
 
-**Shape (a) — plain alias**. Resolves against the global slot pool;
-the operator-curated set of models. No ephemeral slot.
+**Managed default — no model/provider**. Uses the deployment's configured
+provider and model. This is the recommended application integration because
+consumers retain only the Tofu URL/token.
+
+**Shape (a) — plain alias**. Resolves against the global slot pool: the
+operator-curated set of models. No ephemeral slot.
 
 **Shape (b) — BYO suffix**. Resolves against the caller's providers
 (see 3.7.1); mints + disposes an ephemeral slot for this task.
 
 **Shape (c) — inline `provider` block**. The whole
-`(base_url, api_key, [extra_headers])` is supplied per-request.
+`(base_url|endpoint, api_key, model, [extra_headers])` is supplied per-request.
 The same one-shot ephemeral slot lifecycle applies. Use this for
 one-off evaluation runs or trajectory generation when you don't
 want to persist the endpoint.
@@ -546,6 +599,11 @@ The response always carries `task_id` so callers can switch to
 `/api/v1/tasks/{id}/*` for streaming, replay, or abort. When
 `trajectory` is set, the response carries top-level
 `trajectory_format` + `trajectory` fields (no nested envelope).
+
+Set `"async": true` or send `Prefer: respond-async` to receive HTTP 202 with
+`Location` and `X-Tofu-Task-Id` instead of waiting for the terminal result.
+SDK streaming uses that handle and reconnects to the existing task stream; it
+does not resubmit the agent request after a transport loss.
 
 | `trajectory` value | `trajectory` field shape                     |
 |--------------------|----------------------------------------------|
@@ -691,7 +749,7 @@ values:
 > treating a 200 as success.
 
 The enum is the single source of truth in
-[`lib/error_envelope.py`](../lib/error_envelope.py) (`KINDS`); a drift
+[`lib/error_envelope/__init__.py`](../lib/error_envelope/__init__.py) (`KINDS`); a drift
 test keeps it honest.
 
 > The envelope's `context` field is a free-form diagnostic tag (not a
@@ -945,7 +1003,7 @@ breakdown. Retention: 90 days, rolling.
 
 `GET /metrics` (admin-scoped) returns standard Prometheus text-format
 exposition. Configure your scraper with `Authorization: Bearer
-tofu_admin_…` (or `X-Tunnel-Token`).
+tofu_admin_…`.
 
 Exposed metrics:
 
@@ -967,8 +1025,9 @@ graph short- and long-term trends from the same scraper.
 
 ## 8. Versioning policy
 
-* **`/api/v1/*`**: stable, additive changes only. Breaking changes go
-  to `/api/v2`. Deprecated fields are kept for 6 months.
+* **Versioned `/api/vN/*` routes**: stable within a major version; additive
+  changes stay in-place and breaking changes use a new major namespace.
+  Deprecated fields are kept for 6 months.
 * **`/v1/chat/completions`** and **`/v1/messages`**: track upstream
   OpenAI / Anthropic shapes. We update when they update.
 * **Legacy `/api/*`**: tied to the UI; not stable for headless callers.

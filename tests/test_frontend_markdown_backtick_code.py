@@ -8,7 +8,8 @@ backticks and pushed "math-shaped" spans to KaTeX; it corrupted ordinary
 code/regex such as ``r'\\d+ : \\d+'`` and ``_RG_MATCH_LINE`` into garbled
 subscripts.  The override was removed; this test locks that in.
 
-We run the REAL renderMarkdown() (via Node + the shipped marked.min.js) so
+We run the REAL renderMarkdown() (via Node + the marked UMD build that the
+Vite graph bundles from npm) so
 the test tracks the production implementation, not a re-implementation.
 """
 
@@ -43,7 +44,7 @@ _HARNESS = r"""
 const fs = require('fs');
 function load(p){ return fs.readFileSync(p,'utf8'); }
 
-global.marked = require(process.argv[4]);   // marked.min.js (UMD)
+global.marked = require(process.argv[4]);   // marked CJS (same build the Vite graph bundles)
 var BASE_PATH = '';
 var _ensureKatex = function(){};            // no-op: katex stays unloaded
 
@@ -86,7 +87,7 @@ def test_backtick_content_renders_as_code_not_math():
             ['node', harness,
              os.path.join(JS_DIR, 'core', 'escape_html.js'),
              os.path.join(JS_DIR, 'core', 'markdown.js'),
-             os.path.join(ROOT, 'static', 'vendor', 'marked.min.js')],
+             os.path.join(ROOT, 'node_modules', 'marked', 'lib', 'marked.cjs')],
             capture_output=True, text=True, timeout=30,
         )
     finally:

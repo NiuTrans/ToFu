@@ -65,8 +65,9 @@ type ResearchWindow = Window & {
   _researchStream?: ResearchStream | null;
   _researchPollTimer?: number | null;
   _paintResearch?: () => void;
-  _showPaperLanding?: () => void;
-  _renderPaperLibrary?: () => void;
+  _researchModeActive?: () => boolean;
+  enterResearchMode?: () => Promise<void>;
+  enterPaperMode?: () => Promise<void>;
   _fetchArxivPaper?: (arxivId: string) => Promise<unknown>;
   _newResearchStream?: typeof newResearchStream;
   _researchAdoptServerClocks?: typeof researchAdoptServerClocks;
@@ -74,7 +75,6 @@ type ResearchWindow = Window & {
   _researchIngestEvent?: typeof researchIngestEvent;
   _researchApplySnapshot?: typeof researchApplySnapshot;
   _submitResearchDirection?: typeof submitResearchDirection;
-  _startResearchFromDescribe?: typeof startResearchFromDescribe;
   _startResearchJob?: typeof startResearchJob;
   _pollResearchOnce?: typeof pollResearchOnce;
   _researchIsRunning?: typeof researchIsRunning;
@@ -272,22 +272,13 @@ export function submitResearchDirection(): void {
   void startResearchJob(direction);
 }
 
-export function startResearchFromDescribe(): void {
-  const direction = directionFrom('paperDescribeInput');
-  if (!direction) {
-    globals().debugLog?.('Describe the research direction to explore', 'warning');
-    return;
-  }
-  void startResearchJob(direction);
-}
-
 export async function startResearchJob(direction: string): Promise<void> {
   const state = globals();
   if (state._researchStream) paperDetachPush(state._researchStream);
   stopResearchPoll();
   const stream = newResearchStream(direction);
   state._researchStream = stream;
-  paint();
+  ensureResearchMode();
   try {
     const data = await tasks().start('research', { direction });
     const taskId = typeof data.taskId === 'string' ? data.taskId : '';
@@ -379,8 +370,22 @@ export async function abortResearchJob(): Promise<void> {
 
 export function openResearchFolder(): void {
   if (!globals()._researchStream?.folderId) return;
-  globals()._showPaperLanding?.();
-  globals()._renderPaperLibrary?.();
+  // The harvested corpus lives in the Paper library — that mode owns it.
+  void globals().enterPaperMode?.();
+}
+
+/** A research stream must always render inside Research mode. */
+function ensureResearchMode(): void {
+  const enter = globals().enterResearchMode;
+  if (globals()._researchModeActive?.()) {
+    paint();
+  } else if (typeof enter === 'function') {
+    // Chrome paints synchronously and the session owner paints the console
+    // itself because the stream is already set, so nothing is lost.
+    void enter();
+  } else {
+    paint();
+  }
 }
 
 export function openResearchCorpusPaper(index: number): void {
@@ -449,6 +454,7 @@ export async function restoreResearchFromStore(
   stream.lang = lang || 'en';
   stream.status = 'done';
   state._researchStream = stream;
+  ensureResearchMode();
   try {
     const payload = await researchApi().lookup(direction, stream.lang);
     if (state._researchStream !== stream) return false;
@@ -486,7 +492,6 @@ export function installResearchRuntimeGlobals(): void {
   target._researchIngestEvent = researchIngestEvent;
   target._researchApplySnapshot = researchApplySnapshot;
   target._submitResearchDirection = submitResearchDirection;
-  target._startResearchFromDescribe = startResearchFromDescribe;
   target._startResearchJob = startResearchJob;
   target._pollResearchOnce = pollResearchOnce;
   target._researchIsRunning = researchIsRunning;

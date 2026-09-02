@@ -17,6 +17,7 @@ from lib.tasks_pkg.executor import SWARM_TOOL_NAMES
 from lib.tasks_pkg.manager import append_event
 from lib.tasks_pkg.tool_display import _build_tool_round_entry
 from lib.tool_input_repair import HALLUCINATION_ABORT_THRESHOLD, ingest_tool_call
+from lib.tool_rejection import stamp_tool_rejection
 
 from lib.tasks_pkg.tool_dispatch._labels import _known_tool_names
 from lib.tasks_pkg.tool_dispatch._repair import _apply_repair_to_round, _build_repair_summary
@@ -33,7 +34,7 @@ def _reject_undispatched(tc, display_name, tc_id, receipt_msg, rejected_meta,
     as a ``role:'tool'`` message in original tool-call order. The alternative —
     the old ``continue`` — left the model with an unexplained hole that the
     orphan-stripper then erased from the wire, and it INVENTED an explanation
-    (``tool-call limit reached`` spam, pt_914bb730).
+    (``tool-call limit reached`` spam, ).
 
     Deliberately does NOT consume the round's prose tag (``_ac_tagged``): a
     junk artefact is not model content, so the round's narration belongs with
@@ -43,14 +44,17 @@ def _reject_undispatched(tc, display_name, tc_id, receipt_msg, rejected_meta,
     """
     tool_round_num, round_entry, event_payload = _build_tool_round_entry(
         display_name, {}, tc_id, '{}', tool_round_num, project_enabled,
-        conv_id=task.get('convId') or task.get('id'))
+        conv_id=task.get('convId') or task.get('id'), task=task)
     rn = round_entry['roundNum']
     round_entry['llmRound'] = round_num
     event_payload['llmRound'] = round_num
     round_entry['status'] = 'rejected'
-    round_entry['_rejected'] = rejected_meta
     event_payload['status'] = 'rejected'
-    event_payload['_rejected'] = rejected_meta
+    rejection = stamp_tool_rejection(
+        round_entry, rejected_meta, tool_name=display_name,
+        reason=receipt_msg,
+    )
+    stamp_tool_rejection(event_payload, rejection)
     _source = str(tc.get('source') or 'native_direct')
     round_entry['source'] = _source
     event_payload['source'] = _source
@@ -112,10 +116,10 @@ def parse_tool_calls(
     tid = task['id'][:8]
     parsed_tcs = []
     _early = early_announced or {}
-    # ★ Capture per-round assistant content (text LLM emitted alongside tool calls)
+    # Capture per-round assistant content (text LLM emitted alongside tool calls)
     _assistant_content = (assistant_msg.get('content') or '').strip()
     _ac_tagged = False  # only tag the first entry per round
-    # ★ Capture per-round reasoning/thinking text so Continue can replay it
+    # Capture per-round reasoning/thinking text so Continue can replay it
     #   against APIs that accept thinking continuity (Claude extended-thinking).
     #   Currently sourced from OpenAI-compat `reasoning_content`; if an upstream
     #   proxy surfaces the block-level signature separately we can extend the
@@ -163,10 +167,13 @@ def parse_tool_calls(
             tool_call=tc, known_tools=_known,
             model=task.get('model', '') or '',
             conv_id=task.get('convId', '') or '',
+            contract_documents_by_name=(
+                task.get('_toolContractDocumentsByName')
+                if '_toolContractDocumentsByName' in task else None),
         )
         # Drop guard: streaming artefacts (antml:thinking, XML-corrupted
         # names, EMPTY names — e.g. the upstream HELLO_CHECK probe). Not
-        # executed — but NOT silent either (pt_914bb730): a bare ``continue``
+        # executed — but NOT silent either (): a bare ``continue``
         # used to leave the model with an orphan that the wire-stripper then
         # erased, and the model INVENTED an explanation for the hole
         # ("tool-call limit reached" — a limit that does not exist) and
@@ -234,6 +241,7 @@ def parse_tool_calls(
         # tool.
         fn_obj['name'] = fn_name
         _hallucinated = _ingested.rejection
+        _contract_error = _ingested.contract_error
         if _hallucinated:
             logger.warning(
                 '[Task %s] conv=%s Rejected hallucinated tool %r '
@@ -283,6 +291,27 @@ def parse_tool_calls(
         _repair_log = _ingested.repair_log or None
         _args_parse_error = _ingested.parse_error
         fn_args = _ingested.fn_args
+        # Every pre-dispatch refusal receives one typed descriptor.  Name
+        # hallucinations already carry their classifier output; contract and
+        # decode failures used to expose only ``status='rejected'``, forcing
+        # downstream consumers to guess why the tool did not run.
+        _rejection_meta = _hallucinated
+        if _rejection_meta is None and _contract_error:
+            _rejection_meta = {
+                'kind': 'tool_contract_invalid',
+                'tool': fn_name,
+                'code': _contract_error.get('code') or '',
+                'path': _contract_error.get('path') or '',
+                'reason': _args_parse_error or '',
+                'retryable': bool(_contract_error.get('retryable')),
+            }
+        elif _rejection_meta is None and _args_parse_error:
+            _rejection_meta = {
+                'kind': 'invalid_tool_arguments',
+                'tool': fn_name,
+                'reason': _args_parse_error,
+                'retryable': True,
+            }
 
         # ── Autopilot loop breaker (chat-only presentation on the reject) ──
         # A no-suggestion phantom re-emitted under autopilot is a token-burning
@@ -337,7 +366,10 @@ def parse_tool_calls(
             if tc_id in _early:
                 rn, round_entry = _early[tc_id]
                 round_entry['status'] = 'rejected'
-                round_entry['_rejected'] = _program_meta
+                stamp_tool_rejection(
+                    round_entry, _program_meta, tool_name=fn_name,
+                    reason=_program_msg,
+                )
                 parsed_tcs.append((
                     tc, fn_name, tc_id, {}, rn, round_entry, _program_msg))
             else:
@@ -358,14 +390,14 @@ def parse_tool_calls(
                 if (tc['caller'].get('type') == 'program'
                         and tc['caller'].get('caller_id')):
                     round_entry['_programCallId'] = tc['caller']['caller_id']
-            # ★ Harness fixed this call's args AFTER the streaming early-
+            # Harness fixed this call's args AFTER the streaming early-
             #   announce already rendered the (garbled) display — patch the
             #   stale round entry so the UI shows the corrected line + badge.
             if _repair_summary:
                 _patched = _apply_repair_to_round(
                     round_entry, fn_name, fn_args, _repair_summary,
                     project_enabled,
-                    task.get('convId') or task.get('id'))
+                    task.get('convId') or task.get('id'), task=task)
                 if _patched is not None:
                     # The garbled early-announce line is ALREADY on the user's
                     # screen; the settle frame would eventually refresh it, but
@@ -379,18 +411,24 @@ def parse_tool_calls(
                     _emit_ev(task, EventType.TOOL_PROGRESS,
                              roundNum=rn, toolCallId=tc_id, toolName=fn_name,
                              query=_patched, _repaired=_repair_summary)
-            # ★ Hallucinated tool announced during streaming — mark the
-            #   already-rendered round as rejected so the UI restyles it.
-            if _hallucinated:
+            # A refused tool announced during streaming is restyled by the
+            # typed descriptor on its later terminal event.
+            if _rejection_meta:
                 round_entry['status'] = 'rejected'
-                round_entry['_rejected'] = _hallucinated
-            # ★ Attach per-round prose to the first early-announced entry.
+                stamp_tool_rejection(
+                    round_entry, _rejection_meta, tool_name=fn_name,
+                    reason=_args_parse_error or '',
+                )
+            if _contract_error:
+                round_entry['status'] = 'rejected'
+                round_entry['_contractError'] = _contract_error
+            # Attach per-round prose to the first early-announced entry.
             #   thinking/signature are captured INDEPENDENTLY of content: a
             #   reasoning model routinely emits thinking then calls a tool with
             #   NO interstitial prose (_assistant_content == ''). Gating the
             #   whole block on content dropped that round's thinking, which then
-            #   vanished at finalize (assemble_segments reads round['thinking'],
-            #   and committedMessage overwrites the live-stamped copy).
+            #   vanished from the settled turn (assemble_segments reads
+            #   round['thinking'] when producing its projection).
             if not _ac_tagged and (_assistant_content or _assistant_thinking
                                    or _assistant_thinking_signature
                                    or _assistant_responses_items
@@ -407,7 +445,7 @@ def parse_tool_calls(
                     round_entry['_anthropicContentBlocks'] = (
                         _assistant_anthropic_blocks)
                 _ac_tagged = True
-            # ★ Preserve Gemini thought_signature (and any other vendor-specific
+            # Preserve Gemini thought_signature (and any other vendor-specific
             #   extra_content) so the frontend can round-trip it on Continue.
             #   Gemini 3.x REQUIRES echoing the signature back on subsequent
             #   requests that replay this tool_call, else HTTP 400.  See
@@ -429,10 +467,10 @@ def parse_tool_calls(
         tool_round_num, round_entry, event_payload = _build_tool_round_entry(
             fn_name, fn_args, tc_id, tc_args_str,
             tool_round_num, project_enabled,
-            conv_id=task.get('convId') or task.get('id'),
+            conv_id=task.get('convId') or task.get('id'), task=task,
         )
         rn = round_entry['roundNum']
-        # ★ Tag with LLM round so frontend can batch tool calls from the
+        # Tag with LLM round so frontend can batch tool calls from the
         #   same assistant turn — needed for accurate Continue grouping.
         round_entry['llmRound'] = round_num
         event_payload['llmRound'] = round_num
@@ -446,26 +484,34 @@ def parse_tool_calls(
                     and tc['caller'].get('caller_id')):
                 round_entry['_programCallId'] = tc['caller']['caller_id']
                 event_payload['programCallId'] = tc['caller']['caller_id']
-        # ★ Harness self-repair badge — tells the user this call's arguments
+        # Harness self-repair badge — tells the user this call's arguments
         #   were auto-corrected from a malformed model output.
         if _repair_summary:
             round_entry['_repaired'] = _repair_summary
             event_payload['_repaired'] = _repair_summary
-        # ★ Unified hallucination state — the call was rejected, never run.
-        #   The frontend renders `status:'rejected'` + `_rejected` distinctly
-        #   (struck-through line + "not a real tool" badge + suggestions).
-        if _hallucinated:
+        # Unified rejection state — kind tells consumers whether this was a
+        # missing tool, invalid arguments, a contract refusal, or another
+        # pre-execution block.  ``_rejected`` remains a compatibility alias.
+        if _rejection_meta:
             round_entry['status'] = 'rejected'
-            round_entry['_rejected'] = _hallucinated
             event_payload['status'] = 'rejected'
-            event_payload['_rejected'] = _hallucinated
-        # ★ Tag first entry with per-round prose so Continue can replay it and
+            rejection = stamp_tool_rejection(
+                round_entry, _rejection_meta, tool_name=fn_name,
+                reason=_args_parse_error or '',
+            )
+            stamp_tool_rejection(event_payload, rejection)
+        if _contract_error:
+            round_entry['status'] = 'rejected'
+            round_entry['_contractError'] = _contract_error
+            event_payload['status'] = 'rejected'
+            event_payload['_contractError'] = _contract_error
+        # Tag first entry with per-round prose so Continue can replay it and
         #   the settled segment timeline renders it adjacent to the tool.
         #   thinking/signature are captured INDEPENDENTLY of content — a
         #   thinking-only round (reasoning then a direct tool call, no
         #   interstitial prose) must still stamp its reasoning, or it is lost at
-        #   finalize (assemble_segments reads round['thinking'] and the
-        #   authoritative committedMessage overwrites the live-stamped copy).
+        #   finalization (assemble_segments reads round['thinking'] when
+        #   producing the authoritative turn projection).
         if not _ac_tagged and (_assistant_content or _assistant_thinking
                                or _assistant_thinking_signature
                                or _assistant_responses_items
@@ -488,7 +534,7 @@ def parse_tool_calls(
                 round_entry['_anthropicContentBlocks'] = (
                     _assistant_anthropic_blocks)
             _ac_tagged = True
-        # ★ Preserve Gemini thought_signature on the persisted tool round.
+        # Preserve Gemini thought_signature on the persisted tool round.
         #   Captured off the assistant tool_call entry by lib.llm's
         #   streaming parser (see: "Gemini thought_signature: preserve
         #   extra_content" branch in lib/llm/stream.py).  Without this,

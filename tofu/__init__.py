@@ -45,6 +45,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from lib.identity import PERSONAL_USER_ID
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -70,6 +72,7 @@ def chat(
     thinking_depth: str | None = None,
     user: str = '',
     timeout_s: float = 600.0,
+    user_id: int = PERSONAL_USER_ID,
 ) -> ChatResult:
     """Run one agent turn in-process and block until it finishes.
 
@@ -87,7 +90,7 @@ def chat(
     from lib.tasks_pkg.entry import run_chat_sync
 
     return run_chat_sync(
-        messages, model=model, config=config, timeout_s=timeout_s,
+        messages, user_id=user_id, model=model, config=config, timeout_s=timeout_s,
         max_tokens=max_tokens, temperature=temperature, tools=tools,
         response_format=response_format, thinking_depth=thinking_depth,
         user=user,
@@ -106,6 +109,7 @@ def stream(
     thinking_depth: str | None = None,
     user: str = '',
     timeout_s: float = 600.0,
+    user_id: int = PERSONAL_USER_ID,
 ) -> Iterator[dict]:
     """Run one agent turn in-process, yielding native Tofu event dicts.
 
@@ -119,7 +123,7 @@ def stream(
     from lib.tasks_pkg.entry import run_chat_stream
 
     yield from run_chat_stream(
-        messages, model=model, config=config, timeout_s=timeout_s,
+        messages, user_id=user_id, model=model, config=config, timeout_s=timeout_s,
         max_tokens=max_tokens, temperature=temperature, tools=tools,
         response_format=response_format, thinking_depth=thinking_depth,
         user=user,
@@ -127,32 +131,6 @@ def stream(
 
 
 def capabilities() -> dict:
-    """Return this deployment's runtime registry (models / tools / agents /
-    presets / backends / config schema / event contract).
-
-    Same payload as ``GET /api/v1/capabilities`` (minus the HTTP envelope),
-    built from the same helpers so there is no second source of truth.
-    """
-    from routes.api_v1.capabilities import (
-        _agents_summary, _backends, _config_schema, _events_contract,
-        _features, _models_summary, _presets, _tools_summary,
-    )
-    from lib.api_keys import ALL_SCOPES
-    try:
-        from lib.version import __version__ as ver
-    except ImportError:
-        ver = 'unknown'
-
-    return {
-        'tofu_version': ver,
-        'api_version': 'v1',
-        'features': _features(),
-        'models': _models_summary(),
-        'tools': _tools_summary(),
-        'agents': _agents_summary(),
-        'presets': _presets(),
-        'backends': _backends(),
-        'scopes': sorted(ALL_SCOPES),
-        'config_schema': _config_schema(),
-        'events': _events_contract(),
-    }
+    """Return the storage-free runtime's route-independent capabilities."""
+    from tofu_agent.capabilities import runtime_capabilities
+    return runtime_capabilities()

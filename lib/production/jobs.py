@@ -1,20 +1,8 @@
-"""lib/production/jobs.py — job manifest + crash-resume rescan.
+"""Minimal job manifests and startup recovery for production capabilities.
 
-The second cluster the P7 measurement found duplicated
-(docs/PRODUCTION_PIPELINE_DESIGN.md §9): motion's ``write_job_manifest`` /
-``resume_interrupted_jobs`` (20 L / 55 L) and longform's ``_write_manifest`` /
-``resume_interrupted_reports`` (16 L / 28 L) are the same shape.
-
-Why a manifest at all: **crash-resume is a correctness contract** (owner
-directive) — the stage-graph checkpoint lets a job resume mid-graph, but only
-if something re-spawns the job after the process dies. The manifest is that
-something: a tiny JSON next to the job's workdir recording the params needed
-to re-create the task, plus its lifecycle state. On startup, every workdir
-whose manifest still says ``running`` is re-spawned; the stage checkpoint then
-skips the work that already finished.
-
-Both halves are best-effort and never raise: a job that cannot be resumed must
-not take down startup, and a manifest write that fails must not fail the job.
+A manifest contains only the parameters needed to reconstruct a running task.
+Startup respawns running manifests; the stage checkpoint decides what work is
+still valid. Scans isolate malformed jobs so one entry cannot break startup.
 """
 
 from __future__ import annotations

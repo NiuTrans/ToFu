@@ -137,9 +137,9 @@ _FOLDERS_STATE = [
   { id: 'f_new',     name: 'fresh',  color: '#f59e0b', order: 3, createdAt: NOW - 5000 },
 ];
 global.conversations = window.conversations = [
-  { id: 'c1', title: 'A', messages: [{role:'user'}], updatedAt: NOW - 30 * DAY, folderId: 'f_act1' },
-  { id: 'c2', title: 'B', messages: [{role:'user'}], updatedAt: NOW - 2 * DAY,  folderId: 'f_act2' },
-  { id: 'c3', title: 'C', messages: [{role:'user'}], updatedAt: NOW - DAY },   // uncategorized
+  { id: 'c1', title: 'A', _serverTurnCount: 1, updatedAt: NOW - 30 * DAY, folderId: 'f_act1' },
+  { id: 'c2', title: 'B', _serverTurnCount: 1, updatedAt: NOW - 2 * DAY,  folderId: 'f_act2' },
+  { id: 'c3', title: 'C', _serverTurnCount: 1, updatedAt: NOW - DAY },   // uncategorized
 ];
 window._lastConvListHash = '';
 renderConversationList();
@@ -160,7 +160,7 @@ check('all_projects_rendered', rows.length === 5);
 /* Once the new project HAS a conversation, it keeps its place by activity —
  * i.e. the createdAt floor never fights the normal ranking. */
 window.conversations.push(
-  { id: 'c4', title: 'D', messages: [{role:'user'}], updatedAt: NOW - 10 * DAY, folderId: 'f_new' });
+  { id: 'c4', title: 'D', _serverTurnCount: 1, updatedAt: NOW - 10 * DAY, folderId: 'f_new' });
 window._lastConvListHash = '';
 renderConversationList();
 const rows2 = [...tabsEl.querySelectorAll('.project-rail-list .folder-tab[data-folder-id]')]

@@ -18,8 +18,9 @@ def test_server_import_defers_route_workers_to_serving_lifecycle():
     assert 'register_all(app, start_workers=False)' in inspect.getsource(
         app_assembly)
     worker = inspect.getsource(background_services.start_background_services)
-    assert 'start_registered_background_services(app)' in worker
-    assert 'start_janitor()' in worker
+    assert 'start_registered_background_services(' in worker
+    assert 'process_role=process_role' in worker
+    assert 'start_janitor()' not in worker
     assert 'start_prober()' in worker
     assert 'bootstrap_personal_key()' in worker
     assert 'load_saved_proxy_config()' in worker
@@ -86,11 +87,13 @@ def test_async_logging_workers_are_owned_by_quart_lifecycle(monkeypatch):
 
     assert server._start_logging_runtime() is True
     assert server._start_logging_runtime() is False
+    assert calls == ['listener-start']
+    server._start_log_aggregate_runtime_after_recovery()
     assert server._stop_logging_runtime(timeout=0.25) is True
     assert calls == [
         'listener-start', 'aggregate-start',
-        ('aggregate-stop', {'final_flush': True, 'timeout': 0.25}),
         ('listener-stop', 0.25),
+        ('aggregate-stop', {'final_flush': True, 'timeout': 0.25}),
     ]
 
 
@@ -121,20 +124,29 @@ def test_register_all_flag_controls_worker_start(monkeypatch):
 
 
 def test_background_service_start_is_per_app_idempotent(monkeypatch):
-    import lib.daily_report
+    from types import SimpleNamespace
+
     import lib.oauth.codex_catalog as codex_catalog
     import lib.llm_dispatch.model_catalog_sync as model_catalog_sync
-    import lib.scheduler
+    import lib.scheduler.manager as scheduler_manager
     import routes
     import routes.plugin_registry as plugin_registry
+    import runtime_guards
 
     calls = []
-    monkeypatch.setattr(lib.daily_report, 'start_report_scheduler',
-                        lambda: calls.append('daily'))
-    monkeypatch.setattr(lib.scheduler, 'start_scheduler_worker',
-                        lambda: calls.append('scheduler'))
+    monkeypatch.setattr(
+        runtime_guards, 'load_deployment_configuration',
+        lambda: SimpleNamespace(mode='personal'))
+    def start_scheduler_worker(*, principal):
+        assert principal.kind == 'system'
+        assert principal.owner_user_id == 1
+        assert principal.scopes == frozenset({'scheduler:run'})
+        calls.append('scheduler')
+
+    monkeypatch.setattr(
+        scheduler_manager, 'start_scheduler_worker', start_scheduler_worker)
     monkeypatch.setattr(codex_catalog, 'start_codex_catalog_refresher',
-                        lambda: calls.append('codex-catalog'))
+                        lambda: calls.append('codex-catalog') or True)
     monkeypatch.setattr(model_catalog_sync, 'start_model_catalog_sync',
                         lambda: calls.append('model-catalog'))
     monkeypatch.setattr(plugin_registry, 'run_startup_hooks',
@@ -144,17 +156,18 @@ def test_background_service_start_is_per_app_idempotent(monkeypatch):
         extensions = {}
 
     app = App()
-    assert routes.start_registered_background_services(app) == 5
+    assert routes.start_registered_background_services(app) == 4
     assert routes.start_registered_background_services(app) == 0
-    assert calls == ['daily', 'scheduler', 'codex-catalog', 'model-catalog', 'plugin']
+    assert calls == [
+        'scheduler', 'codex-catalog', 'model-catalog', 'plugin',
+    ]
 
 
 def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
-    import lib.daily_report
     import lib.knowledge.enrichment as knowledge_enrichment
     import lib.llm_dispatch.model_catalog_sync as model_catalog_sync
     import lib.oauth.codex_catalog as codex_catalog
-    import lib.scheduler
+    import lib.scheduler.manager as scheduler_manager
     import routes
     import routes.plugin_registry as plugin_registry
 
@@ -164,11 +177,9 @@ def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
         return lambda **kwargs: calls.append((name, kwargs)) or True
 
     monkeypatch.setattr(
-        lib.daily_report, 'stop_report_scheduler', stopped('daily'))
-    monkeypatch.setattr(
         knowledge_enrichment, 'stop_visual_enrichment', stopped('knowledge'))
     monkeypatch.setattr(
-        lib.scheduler, 'stop_scheduler_worker', stopped('scheduler'))
+        scheduler_manager, 'stop_scheduler_worker', stopped('scheduler'))
     monkeypatch.setattr(
         codex_catalog, 'stop_codex_catalog_refresher',
         stopped('codex-catalog'))
@@ -183,7 +194,7 @@ def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
         extensions = {'tofu_registered_background_services': True}
 
     app = App()
-    assert routes.stop_registered_background_services(app, timeout=0.25) == 6
+    assert routes.stop_registered_background_services(app, timeout=0.25) == 5
     assert routes.stop_registered_background_services(app, timeout=0.25) == 0
     assert calls == [
         ('plugin', {'app': app}),
@@ -191,25 +202,21 @@ def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
         ('model-catalog', {'timeout': 0.25}),
         ('codex-catalog', {'timeout': 0.25}),
         ('scheduler', {'timeout': 0.25}),
-        ('daily', {'timeout': 0.25}),
     ]
 
 
 def test_background_service_shutdown_retains_latch_on_timeout(monkeypatch):
-    import lib.daily_report
     import lib.knowledge.enrichment as knowledge_enrichment
     import lib.llm_dispatch.model_catalog_sync as model_catalog_sync
     import lib.oauth.codex_catalog as codex_catalog
-    import lib.scheduler
+    import lib.scheduler.manager as scheduler_manager
     import routes
     import routes.plugin_registry as plugin_registry
 
     monkeypatch.setattr(
-        lib.daily_report, 'stop_report_scheduler', lambda **_kwargs: False)
-    monkeypatch.setattr(
         knowledge_enrichment, 'stop_visual_enrichment', lambda **_kwargs: True)
     monkeypatch.setattr(
-        lib.scheduler, 'stop_scheduler_worker', lambda **_kwargs: True)
+        scheduler_manager, 'stop_scheduler_worker', lambda **_kwargs: False)
     monkeypatch.setattr(
         codex_catalog, 'stop_codex_catalog_refresher', lambda **_kwargs: True)
     monkeypatch.setattr(
@@ -220,5 +227,5 @@ def test_background_service_shutdown_retains_latch_on_timeout(monkeypatch):
         extensions = {'tofu_registered_background_services': True}
 
     app = App()
-    assert routes.stop_registered_background_services(app) == 4
+    assert routes.stop_registered_background_services(app) == 3
     assert app.extensions['tofu_registered_background_services'] is True

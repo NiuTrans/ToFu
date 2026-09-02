@@ -1,6 +1,6 @@
 """Event log append + stable per-message id helpers.
 
-Chat-specific extensions on top of :class:`~lib.task_runtime.TaskRuntime`'s
+Chat-specific extensions on top of :class:`~lib.agent_core.task_runtime.TaskRuntime`'s
 plain event append: phase tracking, durable persistent event-log rows,
 liveness clock, and terminal-notify wiring.
 
@@ -9,11 +9,13 @@ and steerable through the package facade.
 """
 
 from contextlib import nullcontext
+import time
 import uuid
 
+from lib.conversation_sync.attempt_identity import is_conversation_attempt
 from lib.log import get_logger
 
-from lib.tasks_pkg.manager._state import _chat_runtime
+from lib.tasks_pkg.manager.runtime import chat_task_runtime
 
 logger = get_logger(__name__)
 
@@ -40,7 +42,7 @@ def _assign_message_ids(messages):
             m['_msgId'] = str(uuid.uuid4())
             changed = True
         mid = m['_msgId']
-        # ★ Duplicate-id heal (pt_e0ea29f2): a conv can end up with TWO array
+        # Duplicate-id heal (): a conv can end up with TWO array
         #   entries sharing one _msgId (an aborted streaming residue persisted
         #   with the client-minted id, then its retry committing with the SAME
         #   id — measured on conv ms8bx7089s3268: idx1 fr=aborted + idx2
@@ -157,6 +159,93 @@ def snapshot_task_text(task):
         )
 
 
+def _probe_durable_next_seq(task_id):
+    """One past the task's highest durable event sequence, or None on failure.
+
+    Adoption seeds ``_eventNextSeq`` from this so a re-registered task never
+    re-mints a sequence the durable log already owns (the 2026-08-21
+    withholding-push flood: live-but-unregistered tasks took the legacy
+    fallback, re-minted ``seq = len(events)`` from a TRIMMED in-memory list,
+    and every frame collided with the original run's storage_events rows —
+    'Event sequence has a conflicting payload' — so every authoritative push
+    was withheld and the client froze until refresh). ``None`` means "cannot
+    seed safely right now" (the Sidecar authority is unreadable), so the
+    caller withholds this frame and retries adoption on the next one.
+    """
+    try:
+        from lib.storage import get_storage_client
+        row = get_storage_client().query(
+            'event.latest', {'task_id': task_id})
+        return int(row['sequence']) + 1 if row else 0
+    except Exception as e:
+        logger.debug('[Manager] durable seq probe failed task=%s: %s',
+                     (task_id or '?')[:8], e)
+        return None
+
+
+def _try_readopt_task(task) -> bool:
+    """Re-register a live chat task that fell out of the chat runtime.
+
+    Instead of letting a detached task dictionary become a second sequence
+    authority, seed
+    the task's next seq from the durable log and re-adopt it into the
+    runtime, so every subsequent frame flows through the normal monotonic
+    path — no payload conflicts, pushes resume.
+
+    Refuses: terminal tasks (finished work must not resurrect as a phantom
+    'running' row), ``discard_task``-tombstoned dicts (the autopilot VU
+    carrier's unregister is BY DESIGN), and tasks whose durable seq cannot
+    be probed right now (an unseeded adopt would mint straight into the
+    conflict range).
+    """
+    task_id = str((task or {}).get('id') or '')
+    if not task_id:
+        return False
+    if task.get('status') in ('done', 'error', 'aborted'):
+        return False
+    if task.get('_discarded_at'):
+        return False
+    seeded = _probe_durable_next_seq(task_id)
+    if seeded is None:
+        return False
+    with task.get('events_lock') or nullcontext():
+        retained = task.get('events')
+        if retained:
+            try:
+                retained_next = int(retained[-1].get('seq', -1)) + 1
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                retained_next = -1
+            if retained_next < seeded:
+                # The retained tail was fallback-minted from a trimmed list
+                # and would re-enter the durable-owned range — the exact
+                # conflict flood being closed. The runtime reconcile prefers
+                # a retained event's seq over the private hint, so reset the
+                # replay window: durable rows are the truth (these frames
+                # were withheld from clients anyway) and the next poll
+                # reports a cursor reset.
+                logger.warning('[Manager] task %s retained %d fallback-minted '
+                               'event(s) diverged from the durable log '
+                               '(next=%d < seed=%d) — resetting the replay '
+                               'window', task_id[:8], len(retained),
+                               retained_next, seeded)
+                retained.clear()
+        if not task.get('events'):
+            task['_eventBaseSeq'] = seeded
+            task['_eventNextSeq'] = seeded
+        else:
+            try:
+                task['_eventNextSeq'] = max(
+                    seeded, int(task['events'][-1].get('seq', seeded - 1)) + 1)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                task['_eventNextSeq'] = seeded
+    if not chat_task_runtime.adopt(task):
+        return False
+    logger.warning('[Manager] re-registered live task %s into the chat '
+                   'runtime (seeded _eventNextSeq=%d) — it was unregistered '
+                   'while still emitting events', task_id[:8], seeded)
+    return True
+
+
 def append_event(task, event):
     """Append an event to the task's event log (chat-specific behaviour).
 
@@ -168,7 +257,7 @@ def append_event(task, event):
     The runtime takes care of ``events`` append, the ``events_lock``, and
     pushing to the 'chat' WebSocket channel.
 
-    ★ Sub-agent proxy tasks (lib/swarm/agent.py::_dispatch_tool) set
+    Sub-agent proxy tasks (lib/swarm/agent.py::_dispatch_tool) set
     ``_suppressEvents`` so their inner tool executions (which call
     ``_finalize_tool_round`` → ``append_event``) never leak ``tool_start`` /
     ``tool_result`` SSE events onto the PARENT's stream. Those events carry
@@ -190,7 +279,7 @@ def append_event(task, event):
     if event.get('type') in ('delta_reset', 'retry_reset'):
         event.setdefault('contentEpoch', int(task.get('_contentEpoch') or 0))
 
-    # ★ Per-task wire transform (2026-07-26, VU-carrier stream contract).
+    # Per-task wire transform (2026-07-26, VU-carrier stream contract).
     #   A VU carrier sub-task installs ``_vu_event_transform`` so its OWN
     #   stream / push channel / persisted event log all carry the VU
     #   envelope (wrapped ``autopilot_vu_event`` frames + verbatim
@@ -211,89 +300,16 @@ def append_event(task, event):
                            'emitting raw frame', task['id'][:8], e)
             _wire = event
 
-    if _wire is not None:
-        _wire.setdefault('taskId', task.get('id', ''))
-        if task.get('_requestId'):
-            _wire.setdefault('requestId', task['_requestId'])
-        if task.get('_turnProtocolV2'):
-            _wire.setdefault('conversationId', task.get('convId', ''))
-            _wire.setdefault('turnId', task.get('_turnId', ''))
-            _wire.setdefault('attemptId', task.get('_attemptId', ''))
-
-    if _wire is not None:
-        # ★ Durable-before-visible ordering: the persistent task_events row MUST
-        #   commit before the frame is pushed to the client, so a cold reconnect
-        #   folding the log (event_fold.fold_cold_state_text) can never be behind
-        #   the bytes the client already holds. We hand the persist to the
-        #   runtime's before_push hook (fired after seq assignment, before push).
-        #   Best-effort: a DB blip is logged, never blocks the stream.
-        def _persist_before_push(_seq):
-            from lib.tasks_pkg.event_log import append_persistent_event
-            append_persistent_event(task['id'], _seq, _wire)
-            if task.get('_turnProtocolV2'):
-                from lib.turn_lifecycle import record_task_event
-                if not record_task_event(task, _wire):
-                    raise RuntimeError(
-                        'v2 event rejected: attempt is stale or no longer current')
-
-        seq = _chat_runtime.append_event(task['id'], _wire,
-                                         before_push=_persist_before_push)
-        if seq is None:
-            # Task not in runtime (registered via legacy direct dict insert in
-            # tests, etc.) — fall back to direct append for backward compat.
-            # We MUST mint a seq ourselves before falling through to event_log
-            # persistence below; otherwise append_persistent_event would receive
-            # ``event_id=None`` and refuse the row, leaving cold replay with a
-            # hole that looks (to the user) like the message disappeared.
-            with task['events_lock']:
-                seq = len(task['events'])
-                _wire['seq'] = seq
-                task['events'].append(_wire)
-            # Persist BEFORE the fallback push too (same durable-before-visible
-            # ordering as the runtime path above).
-            _fallback_visible = True
-            try:
-                _persist_before_push(seq)
-            except Exception as e:
-                if task.get('_turnProtocolV2'):
-                    _fallback_visible = False
-                    logger.error('[Manager] v2 fallback persistence failed; '
-                                 'withholding push task=%s: %s',
-                                 task['id'][:8], e)
-                else:
-                    logger.debug('[Manager] legacy-path persist failed '
-                                 '(non-fatal): %s', e)
-            if _fallback_visible:
-                try:
-                    from lib.push import push_event
-                    push_event('chat', task['id'], _wire)
-                except Exception as e:
-                    logger.warning('[Task] push_event fallback failed task=%s: %s',
-                                   task['id'][:8], e)
-
-    # ★ Liveness clock #1 (see reap_stuck_running_tasks): REAL progress events
-    #   — deltas / tool results / tool stdout chunks / retry & waiting phases —
-    #   bump _t_last_event. A rate-limited-but-alive turn keeps emitting retry
-    #   phases, so this stays fresh and the reaper never mistakes it for wedged.
-    #   (Clock #2, _dispatch_heartbeat, is refreshed around live dispatch /
-    #   model waits / ratified human-wait tools.)
-    #
-    # ★ EVIDENCE GRADING (owner ruling 2026-07-31, pt_8524e0ec): an event
-    #   carrying ``_selfTick`` is the tool-heartbeat pinging ITSELF — it keeps
-    #   the SSE transport non-silent but proves NOTHING about the tool being
-    #   alive, so it must NOT bump this clock. Before the grading, a hung
-    #   run_command (2.5h of zero output, task 96c56840) was kept
-    #   reap-immune by its own heartbeat ticks. Human-wait serial tools
-    #   (ask_human / await_task(wait) / timer_create) emit UNMARKED ticks —
-    #   their ratified exemption is preserved byte-for-byte.
-    import time
-    if not event.get('_selfTick'):
-        task['_t_last_event'] = time.time()
-
-    # ★ Track phase in task for polling fallback
+    # Track phase in task for polling fallback — AND for the v2 attempt-event
+    #   payload.  This block MUST run before the durable-persist section below:
+    #   record_task_event snapshots task['phase'] into the v2 event payload, so
+    #   a 'phase' frame must land its own phase (not the previous one), and a
+    #   'delta'/terminal frame must persist the CLEARED phase (None) so the
+    #   frontend folds the stage text exactly when v1 would (pt: v2 lane had
+    #   no stream phase text at all — the projection never carried it).
     if event.get('type') == 'phase':
         p = {'phase': event['phase'], 'detail': event.get('detail', '')}
-        # ★ i18n plumb: forward the stable detailKey (+ optional detailArgs) so
+        # i18n plumb: forward the stable detailKey (+ optional detailArgs) so
         #   the poll-fallback consumer localizes the label the same way the
         #   live SSE consumer does. Empty/absent keys fall back to `detail`.
         if event.get('detailKey'):
@@ -312,13 +328,13 @@ def append_event(task, event):
     elif event.get('type') == 'delta':
         task['phase'] = None  # Clear phase when LLM starts producing tokens
     elif event.get('type') in ('done', 'error', 'aborted'):
-        # ★ Terminal events retire the phase snapshot. Previously ONLY deltas
+        # Terminal events retire the phase snapshot. Previously ONLY deltas
         #   cleared it, so a task that ended while its last phase was still up
         #   (killed mid-compaction-summary, error right after a retrying beat)
-        #   kept serving that live-looking phase to the poll lane / cold replay
+        #   kept serving that live-looking phase to cold replay
         #   FOREVER — the multi-hour stale "compressing context…" HUD
         #   (measured 2026-08-01: 20:10's compacting phase still on a bubble
-        #   at 22:22, epic pt_f222e9ed). A finished task has no current phase.
+        #   at 22:22, ). A finished task has no current phase.
         task['phase'] = None
     elif (event.get('type') == 'compaction_done'
           and isinstance(task.get('phase'), dict)
@@ -329,18 +345,154 @@ def append_event(task, event):
         # phase that IS compacting — never clobber an unrelated live phase.
         task['phase'] = None
 
-    # ★ Persistence now happens in _persist_before_push (durable-before-visible
+    if _wire is not None:
+        _wire.setdefault('taskId', task.get('id', ''))
+        if task.get('_requestId'):
+            _wire.setdefault('requestId', task['_requestId'])
+        if is_conversation_attempt(task):
+            _wire.setdefault('conversationId', task.get('convId', ''))
+            _wire.setdefault('turnId', task.get('_turnId', ''))
+            _wire.setdefault('attemptId', task.get('_attemptId', ''))
+
+    if _wire is not None:
+        # Durable-before-visible ordering: the persistent task_events row MUST
+        #   commit before the frame is pushed to the client, so a cold reconnect
+        #   folding the log (event_fold.fold_cold_state_text) can never be behind
+        #   the bytes the client already holds. We hand the persist to the
+        #   runtime's before_push hook (fired after seq assignment, before push).
+        #   Best-effort: a DB blip is logged, never blocks the stream.
+        def _persist_before_push(_seq):
+            if (event.get('type') == 'phase'
+                    and isinstance(task.get('phase'), dict)):
+                # Phase heartbeats repaint by the authoritative event sequence;
+                # ``attempt`` remains reserved for actual retries.
+                task['phase']['seq'] = _seq
+            if task.get('_transientRuntime'):
+                return
+            if is_conversation_attempt(task):
+                from lib.turn_lifecycle import record_task_event
+                # One frame = one authority transaction (2026-08-20
+                # double-write root fix): the storage_events row rides INSIDE
+                # turn.event.record, so the turn projection and the
+                # cold-replay log can never diverge (the old two-command
+                # dance let one commit while the other timed out — the
+                # "conflicting payload" family).  Only a stale/coalesced
+                # outcome persists the row standalone, exactly as before.
+                outcome = record_task_event(task, _wire, task_event={
+                    'task_id': task['id'], 'sequence': _seq, 'event': _wire,
+                })
+                if (outcome and event.get('type') in
+                        ('done', 'error', 'aborted')):
+                    # The turn projection is now durably terminal. Translation
+                    # may start only after this authority boundary, otherwise
+                    # its projection CAS races the final model projection.
+                    from lib.translate.terminal import (
+                        schedule_terminal_turn_translations,
+                    )
+                    schedule_terminal_turn_translations(task)
+                if outcome != 'carried':
+                    from lib.tasks_pkg.event_log import append_persistent_event
+                    append_persistent_event(task['id'], _seq, _wire)
+                if not outcome:
+                    # The conversation authority permanently rejected this attempt
+                    # (settled or superseded): this worker is a zombie with no
+                    # durable sink. Flag the cooperative abort so the
+                    # round-start gate / abort_check stop it at the next poll
+                    # instead of letting it flood error.log for hours
+                    # (2026-08-17: 5 tasks ran 2h+ past their v2 abort,
+                    # ~30k withheld pushes). Idempotent — the same stamp the
+                    # abort endpoints plant.
+                    if not task.get('aborted'):
+                        task['aborted'] = True
+                        import time as _time
+                        task['_abort_timestamp'] = _time.time()
+                        task['_abort_reason'] = 'conversation_attempt_stale_fence'
+                        abort_event = task.get('abort_event')
+                        if abort_event is not None:
+                            abort_event.set()
+                        logger.warning('[Task %s] conversation attempt rejected as stale — '
+                                       'cooperative abort flagged so the worker '
+                                       'unwinds instead of looping',
+                                       (task.get('id') or '?')[:8])
+                    raise RuntimeError(
+                        'conversation event rejected: attempt is stale or no longer current')
+            else:
+                # Inline/headless tasks have no conversation-attempt row; the
+                # standalone event log is their durable replay authority.
+                from lib.tasks_pkg.event_log import append_persistent_event
+                append_persistent_event(task['id'], _seq, _wire)
+
+        seq = chat_task_runtime.append_event(task['id'], _wire,
+                                         before_push=_persist_before_push)
+        if seq is None and _try_readopt_task(task):
+            # Live task that had fallen out of the registry — re-registered
+            # with a durable-aligned seq seed; retry through the runtime's
+            # monotonic path instead of the legacy fallback's len() mint.
+            seq = chat_task_runtime.append_event(task['id'], _wire,
+                                             before_push=_persist_before_push)
+        if seq is None:
+            # The TaskRuntime owns event sequence allocation. Minting from a
+            # detached dict created a second sequence authority and caused
+            # durable conflicts after retained windows were trimmed. A live
+            # task may recover through _try_readopt_task on a later event; a
+            # terminal or deliberately discarded task is simply retired.
+            if task.get('status') in ('done', 'error', 'aborted') \
+                    or task.get('_discarded_at'):
+                logger.debug(
+                    '[Manager] ignored event for retired task=%s type=%s',
+                    task['id'][:8], event.get('type'))
+            else:
+                withheld_count = int(task.get('_registryWithheldCount') or 0) + 1
+                task['_registryWithheldCount'] = withheld_count
+                task.setdefault('_registryWithheldAt', time.time())
+                if withheld_count == 1 or withheld_count & (withheld_count - 1) == 0:
+                    logger.warning(
+                        '[Manager] withheld event for unregistered task=%s '
+                        'type=%s count=%d; no alternate sequence authority exists',
+                        task['id'][:8], event.get('type'), withheld_count)
+            return None
+
+    # Liveness clock #1 (see reap_stuck_running_tasks): REAL progress events
+    #   — deltas / tool results / tool stdout chunks / retry & waiting phases —
+    #   bump _t_last_event. A rate-limited-but-alive turn keeps emitting retry
+    #   phases, so this stays fresh and the reaper never mistakes it for wedged.
+    #   (Clock #2, _dispatch_heartbeat, is refreshed around live dispatch /
+    #   model waits / ratified human-wait tools.)
+    #
+    # EVIDENCE GRADING (owner ruling 2026-07-31, ): an event
+    #   carrying ``_selfTick`` is the tool-heartbeat pinging ITSELF — it keeps
+    #   the SSE transport non-silent but proves NOTHING about the tool being
+    #   alive, so it must NOT bump this clock. Before the grading, a hung
+    #   run_command (2.5h of zero output, task 96c56840) was kept
+    #   reap-immune by its own heartbeat ticks. Human-wait serial tools
+    #   (ask_human / await_task(wait) / timer_create) emit UNMARKED ticks —
+    #   their ratified exemption is preserved byte-for-byte.
+    if not event.get('_selfTick'):
+        task['_t_last_event'] = time.time()
+
+    # Persistence now happens in _persist_before_push (durable-before-visible
     #   ordering, above) — the row is committed BEFORE the client push, not
     #   after. Only the terminal flush_pending remains here (no-op for API
     #   compat; harmless if the persist raced).
-    if event.get('type') == 'done':
+    if event.get('type') == 'done' and not task.get('_transientRuntime'):
         try:
             from lib.tasks_pkg.event_log import flush_pending
             flush_pending(task['id'])
         except Exception as e:
             logger.debug('[Manager] flush_pending failed (non-fatal): %s', e)
 
-    # ★ Wake any async API handler awaiting this task (event-driven wait,
+    # The storage-free embed/headless runtime owns a task-local wakeup hook.
+    # It is deliberately task data (not a process-global subscriber table),
+    # so independent embedded runtimes cannot observe each other's events.
+    _transient_notifier = task.get('_transientEventNotifier')
+    if callable(_transient_notifier):
+        try:
+            _transient_notifier()
+        except Exception as e:
+            logger.debug('[Manager] transient event notify failed task=%s: %s',
+                         task['id'][:8], e)
+
+    # Wake any async API handler awaiting this task (event-driven wait,
     #   replaces the old busy-poll loops). Every event nudges the waiter so
     #   SSE generators flush incrementally; terminal events additionally
     #   release the admission slot + fire BYO/tool-env disposal callbacks.

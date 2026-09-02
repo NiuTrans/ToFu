@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from lib.log import audit_log, get_logger
 
@@ -236,7 +236,7 @@ def adapters_payload(*, client_id: str | None = None) -> dict:
 
 
 def invoke_adapter(adapter_id: str, command_name: str, params: dict | None = None,
-                   *, user_id: str | None = None, client_id: str | None = None,
+                   *, owner_user_id: str, client_id: str | None = None,
                    task_id: str = '') -> dict:
     adapter = get_adapter(adapter_id)
     if adapter is None:
@@ -256,7 +256,7 @@ def invoke_adapter(adapter_id: str, command_name: str, params: dict | None = Non
     used_client = str(client_id or '')
     try:
         lease = acquire_browser_lease(
-            user_id=user_id, client_id=client_id, task_id=task_id,
+            owner_user_id=owner_user_id, client_id=client_id, task_id=task_id,
             session=command.session, timeout=command.timeout + 15)
         used_client = lease.client_id
         require_caps = command.required_capabilities
@@ -267,7 +267,7 @@ def invoke_adapter(adapter_id: str, command_name: str, params: dict | None = Non
                 require_capabilities(lease.client_id, require_caps)
             if command.access == 'write':
                 require_access(
-                    lease.user_id, target_domain, access='write',
+                    lease.owner_user_id, target_domain, access='write',
                     client_id=lease.client_id, profile=lease.profile)
             if command.window_mode == 'current':
                 page.bind_active()
@@ -309,7 +309,7 @@ def invoke_adapter(adapter_id: str, command_name: str, params: dict | None = Non
                                     retryable=True) from exc
     finally:
         audit_log(
-            'browser_adapter_call', user_id=str(user_id or ''),
+            'browser_adapter_call', owner_user_id=str(owner_user_id),
             site=adapter.id, command=command.name, access=command.access,
             params=summarize_parameters(params), result=outcome,
             duration_ms=round((time.time() - started) * 1000),
@@ -424,6 +424,76 @@ _MODEL_PLAZA_EXTRACT = r"""
 
 _MODEL_PLAZA_URL = 'https://api.openai.com/ml/modelPlaza/modelInfo'
 
+_FRIDAY_MARKET_BASE_URL = 'https://friday.internal.example.com/skills/skills-market'
+
+
+def _friday_market_url(query: str, *, page_size: int) -> str:
+    """Return the canonical skills-market view with an explicit stable filter set."""
+    return _FRIDAY_MARKET_BASE_URL + '?' + urlencode({
+        'deepSearch': 'false',
+        'keyword': str(query or '').strip(),
+        'mainView': 'skill',
+        'orderByDownloadCount': 'all',
+        'orderByTotalCallCount': 'all',
+        'orderByTotalCallerCount': 'all',
+        'page': 1,
+        'pageSize': max(1, min(100, int(page_size))),
+        'securityScanStatus': 'all',
+        'spaceKeyword': '',
+        'spaceSortOrder': 'default',
+        'spaceTypeFilter': 'org,project',
+        'spaceVerifiedFilter': 'all',
+        'supportEnv': 'all',
+        'tag': '',
+        'verifiedType': 'all',
+        'viewMode': 'card',
+        'visibility': 'all',
+    })
+
+
+def _friday_search(page: BrowserPage, params: dict) -> list[dict]:
+    query = str(params.get('query') or '').strip()
+    limit = max(1, min(100, int(params.get('limit') or 30)))
+    pages = max(1, min(5, int(params.get('pages') or 1)))
+    url = _friday_market_url(query, page_size=max(30, limit))
+    receipt = page.research(
+        url, max_chars=80_000, max_scrolls=4,
+        max_pages=pages, pagination='auto')
+    payload = receipt.get('result') if isinstance(receipt, dict) else None
+    payload = payload if isinstance(payload, dict) else {}
+    from .network_evidence import extract_business_records
+    records = extract_business_records(
+        payload, owner_user_id=page.lease.owner_user_id,
+        source_url=url, query=query, limit=limit)
+    return [{
+        'title': record['title'],
+        'url': record['url'],
+        'snippet': record['snippet'],
+        'source': 'Friday Skills Market',
+        'metadata': {
+            **(record.get('metadata') or {}),
+            'id': record.get('id') or '',
+            'adapter': 'friday',
+        },
+    } for record in records]
+
+
+def _friday_detail(page: BrowserPage, params: dict) -> dict:
+    receipt = page.research(
+        params['url'], max_chars=int(params.get('max_chars') or 80_000),
+        max_scrolls=3, max_pages=1, pagination='none')
+    payload = receipt.get('result') if isinstance(receipt, dict) else None
+    payload = payload if isinstance(payload, dict) else {}
+    from .research import render_research_payload
+    content = render_research_payload(
+        payload, owner_user_id=page.lease.owner_user_id,
+        mode='content', max_chars=int(params.get('max_chars') or 80_000))
+    return {
+        'title': str(payload.get('title') or ''),
+        'url': str(payload.get('url') or params['url']),
+        'content': content,
+    }
+
 
 def _model_plaza_search(page: BrowserPage, params: dict) -> list[dict]:
     query = params['query'].strip()
@@ -493,6 +563,10 @@ _MODEL_SEARCH_CAPS = _CATALOG_SEARCH_CAPS + (
     BrowserCapability.FILL.value, BrowserCapability.PRESS.value,
     BrowserCapability.WAIT.value,
 )
+_DEEP_RESEARCH_CAPS = (
+    BrowserCapability.DEEP_COLLECT.value,
+    BrowserCapability.NETWORK_BODY.value,
+)
 _SEARCH_SCHEMA = {'type': 'object', 'properties': {
     'query': {'type': 'string'}, 'limit': {'type': 'integer'},
     'pages': {'type': 'integer'}}, 'required': ['query']}
@@ -537,6 +611,26 @@ def _register_builtins() -> None:
                            output_schema=_DETAIL_RESULT_SCHEMA,
                            required_capabilities=_DETAIL_CAPS, timeout=35,
                            handler=_model_plaza_detail),
+        )))
+    register_adapter(SiteAdapter(
+        id='friday', name='Friday Skills Market',
+        domains=('friday.internal.example.com',),
+        aliases=('friday-skills', 'skills-market', '技能市场'),
+        login_url=_FRIDAY_MARKET_BASE_URL,
+        risk_notice='使用浏览器中的美团 SSO 活会话；采集正文仅在内存中短暂保留并按域复核。',
+        builtin=True, version=1, commands=(
+            AdapterCommand(
+                'search', '检索技能市场并跨虚拟滚动/分页读取结构化技能记录',
+                input_schema=_SEARCH_SCHEMA,
+                output_schema=_RESULT_LIST_SCHEMA,
+                required_capabilities=_DEEP_RESEARCH_CAPS,
+                timeout=90, handler=_friday_search),
+            AdapterCommand(
+                'detail', '深层读取技能市场页面或技能详情',
+                input_schema=_DETAIL_SCHEMA,
+                output_schema=_DETAIL_RESULT_SCHEMA,
+                required_capabilities=_DEEP_RESEARCH_CAPS,
+                timeout=90, handler=_friday_detail),
         )))
 
 

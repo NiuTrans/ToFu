@@ -61,7 +61,7 @@ def _mk_items(status='searching', fn='web_search'):
 @pytest.fixture()
 def captured_events(monkeypatch):
     """Capture every append_event(task, event) the tick emits."""
-    from lib.tasks_pkg import tool_dispatch
+    import lib.tasks_pkg.tool_dispatch._heartbeat as tool_dispatch
     events = []
     monkeypatch.setattr(tool_dispatch, 'append_event',
                         lambda task, ev: events.append(ev))
@@ -72,7 +72,7 @@ def test_heartbeat_emits_progress_and_refreshes_clocks(captured_events):
     """EXEMPT class (ratified human-wait immunity, 2026-07-25): a tick for a
     human-wait tool emits progress AND refreshes the reaper dispatch clock,
     and its event stays UNMARKED (keeps bumping _t_last_event)."""
-    from lib.tasks_pkg.tool_dispatch import _emit_tool_heartbeat
+    from lib.tasks_pkg.tool_dispatch._heartbeat import _emit_tool_heartbeat
     task = _mk_task()
     items = _mk_items(status='searching', fn='ask_human')
     t0 = time.time() - 12  # pretend the tool has been running 12s
@@ -95,7 +95,7 @@ def test_heartbeat_nonexempt_tick_is_transport_only(captured_events):
     """ORDINARY tools (pt_8524e0ec): the tick still carries the UI countdown
     (transport), but is marked ``_selfTick`` and must NOT refresh the reaper
     dispatch clock — a hung ordinary tool is reaped at 30min of silence."""
-    from lib.tasks_pkg.tool_dispatch import _emit_tool_heartbeat
+    from lib.tasks_pkg.tool_dispatch._heartbeat import _emit_tool_heartbeat
     task = _mk_task()
     items = _mk_items(status='searching', fn='web_search')
     t0 = time.time() - 12
@@ -117,7 +117,7 @@ def test_heartbeat_skips_settled_round(captured_events):
     pinged — this is what prevents a heartbeat racing past settle from
     resurrecting a completed round. If the status gate were removed, this would
     emit a spurious progress event for a done round."""
-    from lib.tasks_pkg.tool_dispatch import _emit_tool_heartbeat
+    from lib.tasks_pkg.tool_dispatch._heartbeat import _emit_tool_heartbeat
     task = _mk_task()
     items = _mk_items(status='done')  # already settled
     n = _emit_tool_heartbeat(task, items, time.time() - 5)
@@ -128,7 +128,7 @@ def test_heartbeat_skips_settled_round(captured_events):
 def test_heartbeat_noop_when_aborted(captured_events):
     """An aborted task emits no progress (but still refreshes the clock so the
     reaper sees the abort winding down, not a wedge)."""
-    from lib.tasks_pkg.tool_dispatch import _emit_tool_heartbeat
+    from lib.tasks_pkg.tool_dispatch._heartbeat import _emit_tool_heartbeat
     task = _mk_task(aborted=True)
     items = _mk_items(status='searching')
     n = _emit_tool_heartbeat(task, items, time.time() - 5)
@@ -140,7 +140,7 @@ def test_heartbeat_thread_ticks_then_stops(captured_events):
     """Integration: the daemon ticker fires while blocking, then stops cleanly
     on stop.set(). Uses a tiny interval so the test is fast."""
     import os
-    from lib.tasks_pkg.tool_dispatch import _start_tool_heartbeat
+    from lib.tasks_pkg.tool_dispatch._heartbeat import _start_tool_heartbeat
     os.environ['TOOL_HEARTBEAT_INTERVAL'] = '2'  # clamped floor is 2s
     try:
         task = _mk_task()

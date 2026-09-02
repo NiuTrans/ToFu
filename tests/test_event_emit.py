@@ -15,7 +15,12 @@ from __future__ import annotations
 import json
 import unittest
 
+import pytest
+
 from lib.agent_core.events import EventType, build_event, emit
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestBuildEventByteIdentity(unittest.TestCase):
@@ -86,8 +91,8 @@ class TestEmitDelivery(unittest.TestCase):
         (manager.append_event mints event['seq'] in place and returns None —
         emit mirrors that contract exactly; we assert on the delivered event.)
         """
-        from lib.tasks_pkg.manager import _chat_runtime
-        task = _chat_runtime.create()
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+        task = chat_task_runtime.create(user_id=1)
         emit(task, EventType.PHASE, phase='working', detail='go', roundNum=1)
         last = task['events'][-1]
         expected = {'type': 'phase', 'phase': 'working', 'detail': 'go', 'roundNum': 1}
@@ -96,8 +101,8 @@ class TestEmitDelivery(unittest.TestCase):
         self.assertEqual(last['type'], 'phase')
 
     def test_emit_assigns_monotonic_seq_on_events(self):
-        from lib.tasks_pkg.manager import _chat_runtime
-        task = _chat_runtime.create()
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+        task = chat_task_runtime.create(user_id=1)
         emit(task, EventType.PHASE, phase='a')
         emit(task, EventType.PHASE, phase='b')
         seqs = [e['seq'] for e in task['events']]
@@ -110,9 +115,9 @@ class TestConvertedOrchestratorSites(unittest.TestCase):
     dicts to their pre-conversion literals (key order included)."""
 
     def test_emit_tool_round_phase_round0(self):
-        from lib.tasks_pkg import orchestrator as orch
-        from lib.tasks_pkg.manager import _chat_runtime
-        task = _chat_runtime.create()
+        import lib.tasks_pkg.orchestrator._finalize as orch
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+        task = chat_task_runtime.create(user_id=1)
         orch._emit_tool_round_phase(task, {'tool_calls': []}, 0)
         got = {k: v for k, v in task['events'][-1].items() if k != 'seq'}
         # `detailKey` was added so localized clients render the label in the
@@ -126,9 +131,9 @@ class TestConvertedOrchestratorSites(unittest.TestCase):
                          json.dumps(expected, ensure_ascii=False))
 
     def test_emit_tool_round_phase_with_tools(self):
-        from lib.tasks_pkg import orchestrator as orch
-        from lib.tasks_pkg.manager import _chat_runtime
-        task = _chat_runtime.create()
+        import lib.tasks_pkg.orchestrator._finalize as orch
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+        task = chat_task_runtime.create(user_id=1)
         am = {'tool_calls': [{'function': {'name': 'web_search'}}]}
         orch._emit_tool_round_phase(task, am, 2)
         got = {k: v for k, v in task['events'][-1].items() if k != 'seq'}

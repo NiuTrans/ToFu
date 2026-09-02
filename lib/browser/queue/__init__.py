@@ -1,9 +1,4 @@
-"""lib/browser/queue/ — Command queue infrastructure for Chrome Extension.
-
-Façade-preserving package. This ``__init__`` re-exports EVERY symbol the
-original ``lib/browser/queue.py`` module exposed, so all existing imports
-(``from lib.browser.queue import X`` and ``from .queue import *`` in
-``lib/browser/__init__.py``) keep working byte-identically.
+"""Owner/device-addressed command queue for the Chromium extension.
 
 Architecture (single-endpoint, proxy-safe):
   LLM tool_call  →  send_browser_command() [blocks with timeout]
@@ -17,14 +12,10 @@ Architecture (single-endpoint, proxy-safe):
                           ↓
   send_browser_command() unblocks and returns
 
-v4: single POST endpoint eliminates separate result POST that VSCode proxy drops.
-
-CRITICAL: the process-wide singleton state (``_commands``, ``_clients``,
-``_active_client`` …) lives in ``_state`` and is shared BY REFERENCE across the
+The process-wide queue/registry state (``_commands`` and ``_clients``) lives
+in ``_state`` and is shared by reference across the
 submodules — there is exactly one queue/registry in the process. The
-submodules are deliberately named ``_registry`` / ``_dispatch`` (NOT
-``_clients`` / ``_commands``) so they never shadow the ``_clients`` /
-``_commands`` dict attributes that consumers reach for as ``queue._commands``.
+single POST poll settles and claims commands for one authenticated owner/device.
 """
 
 from lib.log import get_logger
@@ -35,14 +26,14 @@ logger = get_logger(__name__)
 from ._state import (
     _commands, _commands_lock, _notify,
     _async_waiters, _async_waiters_lock, _wake_async_waiters,
-    _clients, _clients_lock, _last_poll_time, _STALE_GRACE, POLL_WAIT_TIMEOUT,
-    _active_client, _set_active_client, _get_active_client,
+    _clients, _clients_lock, _STALE_GRACE, POLL_WAIT_TIMEOUT,
 )
 
 # ── Client registry / poll tracking / stale cleanup ──
 from ._registry import (
     mark_poll, get_connected_clients, is_extension_connected, _cleanup_stale,
-    mark_locked_out, get_locked_out_clients, client_user_id,
+    mark_locked_out, get_locked_out_clients, client_owner_user_id,
+    mark_incompatible_client, get_incompatible_clients,
 )
 
 # ── Command dispatch & resolution (SYNC + ASYNC) ──
@@ -51,13 +42,20 @@ from ._dispatch import (
     wait_for_commands, wait_for_commands_async,
     resolve_command, resolve_batch,
 )
+from ._limits import (
+    BrowserPollCapacityExceeded,
+    MAX_COMMANDS_PER_POLL,
+    MAX_RESULTS_PER_POLL,
+)
 
 __all__ = [
     'mark_poll', 'get_connected_clients', 'send_browser_command',
     'get_pending_commands', 'wait_for_commands', 'wait_for_commands_async',
     'resolve_command', 'resolve_batch', 'is_extension_connected',
     'mark_locked_out', 'get_locked_out_clients',
-    'client_user_id',
-    '_set_active_client', '_get_active_client',
-    '_last_poll_time', '_commands', '_commands_lock',
+    'mark_incompatible_client', 'get_incompatible_clients',
+    'client_owner_user_id',
+    'BrowserPollCapacityExceeded',
+    'MAX_COMMANDS_PER_POLL', 'MAX_RESULTS_PER_POLL',
+    '_commands', '_commands_lock',
 ]

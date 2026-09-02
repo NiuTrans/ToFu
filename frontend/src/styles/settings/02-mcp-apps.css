@@ -1,0 +1,1010 @@
+/* ══════════════════════════════════════
+   MCP Apps Tab — App Store (brutalist tofu)
+   ══════════════════════════════════════ */
+
+/* ── Header row: title · tool count · connect-all · search ── */
+.mcp-store-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.mcp-store-header-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.mcp-store-header-title .settings-section-title { margin: 0; }
+.mcp-store-header-spacer { flex: 1; min-width: 12px; }
+.mcp-search {
+  flex: 1;
+  min-width: 180px;
+  max-width: 320px;
+  padding: 7px 12px 7px 30px;
+  font-size: 12px;
+  font-weight: 600;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none' stroke='%233d362c' stroke-width='2'><circle cx='7' cy='7' r='5'/><path d='M11 11l3 3' stroke-linecap='round'/></svg>") no-repeat 10px center;
+  color: var(--s-ink);
+  font-family: inherit;
+  box-shadow: var(--s-shadow-xs);
+  transition: box-shadow 0.1s, transform 0.1s;
+}
+.mcp-search:focus {
+  outline: none;
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--s-ink);
+}
+.mcp-search::placeholder { color: var(--s-ink-soft); opacity: 0.7; }
+/* ── Category pills ── */
+.mcp-category-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.mcp-cat-pill {
+  padding: 5px 11px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  color: var(--s-ink-soft);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, transform 0.08s, box-shadow 0.08s;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.mcp-cat-pill:hover {
+  background: var(--s-cream);
+  color: var(--s-ink);
+  transform: translate(-1px, -1px);
+  box-shadow: 2px 2px 0 var(--s-ink);
+}
+.mcp-cat-pill.active {
+  background: var(--s-ink);
+  color: var(--s-white);
+  border-color: var(--s-ink);
+  box-shadow: 2px 2px 0 var(--s-gold);
+}
+.mcp-cat-pill.active .mcp-cat-count { color: var(--s-gold); opacity: 1; }
+.mcp-cat-count {
+  font-weight: 700;
+  font-size: 10px;
+  opacity: 0.6;
+  font-family: 'JetBrains Mono', monospace;
+}
+/* ── Catalog: 2-col responsive grid ──
+ * Height alignment (owner directive): cards STRETCH to the row's tallest
+ * card so bottom edges sit flush. The stretch slack is quantized inside
+ * the card (desc reserves 2 lines; note/warn/compat chips clamp to 1 line)
+ * and whatever remains is spread evenly across row gaps by the card's
+ * align-content:space-between — no single pooled void. grid-auto-flow:dense
+ * still backfills the single cell an expanded (full-span) card vacates. */
+.mcp-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-flow: dense;
+  align-items: stretch;
+  gap: 10px;
+  max-height: 460px;
+  overflow-y: auto;
+  padding: 2px 6px 2px 2px;
+}
+/* A card with an open tools drawer takes the whole row: the drawer gets
+ * room for a multi-column tool layout and no sibling sits beside it. */
+.mcp-app-card.tools-open { grid-column: 1 / -1; }
+@media (max-width: 820px) {
+  .mcp-catalog-grid { grid-template-columns: 1fr; }
+}
+/* ── Skills pagination ── */
+.skills-pagination {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 8px 2px 2px;
+  border-top: 1px dashed rgba(26, 24, 20, 0.18);
+  font-size: 11px;
+  color: var(--s-ink-soft);
+}
+.skills-page-info { opacity: .75; font-weight: 600; }
+.skills-page-ctrls { display: flex; align-items: center; gap: 3px; }
+.skills-page-btn {
+  min-width: 26px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1.5px solid rgba(26, 24, 20, 0.25);
+  background: var(--s-white);
+  color: var(--s-ink-soft);
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  font-family: inherit;
+  transition: transform 0.1s, box-shadow 0.1s, border-color 0.1s, color 0.1s;
+}
+.skills-page-btn:hover:not([disabled]):not(.is-active) {
+  border-color: var(--s-ink);
+  color: var(--s-ink);
+  transform: translate(-1px, -1px);
+  box-shadow: 2px 2px 0 var(--s-ink);
+}
+.skills-page-btn.is-active {
+  background: var(--s-ink);
+  color: var(--s-gold);
+  border-color: var(--s-ink);
+  cursor: default;
+}
+.skills-page-btn[disabled] { opacity: .35; cursor: not-allowed; }
+.skills-page-ellipsis { opacity: .5; padding: 0 2px; }
+/* ── App card ── */
+.mcp-app-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  /* No grid-template-rows: rows hug content. When the grid stretches a
+   * shorter card to match its row-mate, space-between spreads the slack
+   * EVENLY across the row gaps instead of pooling one void between the
+   * description and the footer. */
+  align-content: space-between;
+  column-gap: 12px;
+  row-gap: 4px;
+  padding: 12px 14px 10px;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.mcp-app-card:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--s-ink);
+}
+.mcp-app-card.connected {
+  background: linear-gradient(180deg, rgba(201, 153, 63, 0.05) 0%, var(--s-white) 60%);
+  box-shadow: 2px 2px 0 var(--s-gold), var(--s-shadow-xs);
+}
+.mcp-app-card.connected:hover {
+  box-shadow: 3px 3px 0 var(--s-gold), 4px 4px 0 var(--s-ink);
+}
+.mcp-app-card.installed { background: var(--s-cream); }
+/* Icon tile */
+.mcp-app-icon {
+  grid-row: 1 / span 2;
+  font-size: 24px;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  box-shadow: 2px 2px 0 var(--s-ink);
+  line-height: 1;
+}
+.mcp-app-card.connected .mcp-app-icon {
+  background: var(--s-white);
+  box-shadow: 2px 2px 0 var(--s-gold);
+}
+.mcp-app-icon img,
+.mcp-app-icon svg {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+}
+/* Name + status dot */
+.mcp-app-name {
+  grid-column: 2;
+  font-size: 13px;
+  font-weight: 900;
+  color: var(--s-ink);
+  line-height: 1.25;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.mcp-app-name-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-app-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: var(--s-radius);
+  font-family: 'JetBrains Mono', monospace;
+  flex-shrink: 0;
+}
+.mcp-app-status .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.6);
+}
+.mcp-app-status.on {
+  background: var(--s-ink); color: var(--s-gold);
+}
+.mcp-app-status.off {
+  background: var(--s-cream); color: var(--s-ink-soft);
+  border: 1px solid var(--s-ink-soft);
+}
+.mcp-app-status.reconnecting {
+  background: #7c2d12; color: #fdba74;
+  animation: mcp-reconnect-pulse 1.6s ease-in-out infinite;
+}
+/* A subtle amber edge on a card whose server is failing to reconnect. */
+.mcp-app-card.reconnecting {
+  border-color: #b45309;
+}
+/* Credential-expired badge: the server is connected (live subprocess) but its
+   stored cookie/token no longer authenticates. Amber-warning tone, distinct
+   from the green "ON" so it reads as "attention needed, not offline". */
+.mcp-app-status.cred-expired {
+  background: #7c2d12; color: #fdba74;
+  display: inline-flex; align-items: center; gap: 3px;
+}
+.mcp-app-status.cred-expired > svg { display: block; }
+/* Amber edge on a connected-but-stale-credentials card. */
+.mcp-app-card.cred-expired {
+  border-color: #b45309;
+}
+.mcp-app-reconnecting-note {
+  font-size: 10px;
+  font-weight: 700;
+  color: #b45309;
+  font-family: 'JetBrains Mono', monospace;
+  white-space: nowrap;
+}
+/* Description — clamped at 2 lines AND reserved at 2 lines (2 × 1.45em):
+ * a one-line description keeps the same body height as a two-line one, so
+ * it contributes zero variance to the row's height alignment. */
+.mcp-app-desc {
+  grid-column: 2;
+  font-size: 11.5px;
+  color: var(--s-ink-soft);
+  line-height: 1.45;
+  min-height: 2.9em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* Getting-started note (catalog `install_note`): how to obtain a key, what
+ * the server can/cannot do. ONE line on the card face — multi-line notes
+ * were the biggest row-height outlier; the full text renders in the install
+ * modal (app-runtime.js _mcpOpenInstallModal), so nothing is lost to the
+ * ellipsis. MUST declare grid-column like its sibling (card is a grid). */
+.mcp-app-note {
+  grid-column: 2;
+  margin-top: 4px;
+  padding: 5px 7px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--s-ink-soft);
+  background: var(--s-bg-soft, rgba(0, 0, 0, .03));
+  border-left: 2px solid var(--s-border-strong, rgba(0, 0, 0, .12));
+  border-radius: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mcp-app-compat-notice {
+  grid-column: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 5px;
+  margin-top: 3px;
+  padding: 3px 7px;
+  border: 1px solid rgba(180, 83, 9, .35);
+  border-radius: var(--s-radius);
+  background: rgba(245, 158, 11, .08);
+  color: #92400e;
+  font-size: 10px;
+  line-height: 1.35;
+  font-weight: 700;
+}
+.mcp-app-compat-notice { max-width: 100%; }
+.mcp-app-compat-notice > svg { flex: 0 0 auto; }
+.mcp-app-compat-notice > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-install-modal-note {
+  margin-top: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--s-ink-soft);
+  background: var(--s-bg-soft, rgba(0, 0, 0, .03));
+  border-left: 2px solid var(--s-border-strong, rgba(0, 0, 0, .12));
+  border-radius: 3px;
+}
+/* "Where do I get this key" — a real link + optional ordered steps, rendered
+ * ABOVE the credential input. Replaces cramming a console breadcrumb into the
+ * placeholder (uncklickable, truncated, and gone as soon as the user types). */
+.mcp-obtain {
+  margin: 2px 0 5px;
+}
+.mcp-obtain-link {
+  display: inline-block;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent, #2563eb);
+  text-decoration: none;
+}
+.mcp-obtain-link:hover { text-decoration: underline; }
+.mcp-obtain-steps {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--s-ink-soft);
+}
+.mcp-env-saved-note,
+.mcp-env-shared-note {
+  display: block;
+  margin-top: 4px;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.mcp-env-shared-note { color: var(--accent, #2563eb); }
+/* Empty-state suggestion strip: shown when nothing is installed yet. Only
+ * lists servers the user can finish installing unaided, so a chip never leads
+ * to a dead end. */
+.mcp-suggest {
+  margin: 10px auto 0;
+  max-width: 560px;
+  text-align: center;
+}
+.mcp-suggest-title {
+  font-size: 11.5px;
+  color: var(--s-ink-soft);
+  margin-bottom: 8px;
+}
+.mcp-suggest-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+}
+.mcp-suggest-chip {
+  padding: 5px 10px;
+  font-size: 11.5px;
+  color: var(--s-ink);
+  background: var(--s-white);
+  border: var(--s-border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.mcp-suggest-chip:hover {
+  border-color: var(--accent, #2563eb);
+  background: var(--s-bg-soft, rgba(0, 0, 0, .03));
+}
+/* Card footer: repo link + action
+ * Use min-height matching the .btn-xs height so the left-side text
+ * (Repo) and the right-side buttons (卸载/连接/…) share a common
+ * vertical axis regardless of whether the right side is rendered as
+ * plain text only (no button), plain buttons, or text + button. */
+.mcp-app-footer {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 6px;
+  min-height: 26px;   /* = compact card .btn-xs height (see action rule below) */
+  border-top: 1px dashed rgba(26, 24, 20, 0.18);
+}
+.mcp-app-repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--s-ink-soft);
+  text-decoration: none;
+  opacity: 0.7;
+  transition: opacity 0.1s, color 0.1s;
+  line-height: 1;
+  letter-spacing: 0.02em;
+}
+.mcp-app-repo svg { flex-shrink: 0; }
+.mcp-app-repo:hover { opacity: 1; color: var(--s-ink); text-decoration: underline; }
+.mcp-app-tools-count {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--s-ink);
+  font-family: 'JetBrains Mono', monospace;
+  opacity: 0.7;
+  line-height: 1;
+}
+/* Per-tool toggle (pt_53065dbe86bb4286): the tools badge is a BUTTON that
+ * expands the per-tool checkbox panel — reset button chrome, keep the badge
+ * look, signal clickability on hover. */
+.mcp-tools-toggle {
+  border: 1px solid transparent;
+  background: none;
+  padding: 2px 4px;
+  border-radius: var(--s-radius);
+  cursor: pointer;
+}
+.mcp-tools-toggle:hover {
+  opacity: 1;
+  border-color: rgba(26, 24, 20, 0.18);
+  background: rgba(201, 153, 63, 0.08);
+}
+/* Recessed paper tray: pinned toolbar on top (live count + bulk actions),
+ * multi-column switch grid below — only the grid scrolls, so the toolbar
+ * stays put on long lists. */
+.mcp-tool-panel {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  box-shadow: inset 0 2px 4px rgba(74, 63, 47, 0.07);
+  padding: 7px 10px 9px;
+}
+.mcp-tool-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 2px 7px;
+  margin-bottom: 7px;
+  border-bottom: 1px dashed rgba(26, 24, 20, 0.18);
+}
+.mcp-tool-panel-count {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: var(--s-ink-soft);
+  font-family: 'JetBrains Mono', monospace;
+}
+.mcp-tool-bulk { display: inline-flex; gap: 2px; flex-shrink: 0; }
+.mcp-tool-bulk-btn {
+  border: 1px solid transparent;
+  background: none;
+  padding: 2px 7px;
+  border-radius: var(--s-radius);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--s-ink-soft);
+  cursor: pointer;
+  font-family: inherit;
+  transition: color 0.1s, background 0.1s, border-color 0.1s;
+}
+.mcp-tool-bulk-btn:hover {
+  color: var(--s-ink);
+  background: rgba(201, 153, 63, 0.12);
+  border-color: rgba(26, 24, 20, 0.18);
+}
+.mcp-tool-loading { font-size: 11px; color: var(--s-ink-soft); padding: 6px 2px; }
+.mcp-tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
+  gap: 1px 10px;
+  max-height: 216px;
+  overflow-y: auto;
+  padding: 1px 2px;
+}
+/* Must out-specificy the ambient `.modal label` / `.settings-panel label`
+ * resets (0,1,1 — display:block + margin-bottom + uppercase text), which
+ * otherwise flatten this flex row and push the switch off the text axis. */
+.mcp-tool-grid .mcp-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 3px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.mcp-tool-row:hover { background: rgba(201, 153, 63, 0.10); }
+/* The switch is the house .stg-toggle component (styles.css): its real
+ * input is visually hidden, so the ambient modal/panel input resets
+ * (.modal input padding, [data-theme] .modal:not(...) input:not(...)
+ * background/border) paint a 1px invisible box and cannot deform the
+ * visible track/thumb spans. Do NOT restyle the input here — a previous
+ * appearance:none reskin lost that fight (0,4,1 ambient specificity)
+ * and rendered as an inflated, misaligned, never-gold pill. */
+.mcp-tool-row .stg-toggle { margin-left: auto; }
+.mcp-tool-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: var(--s-ink);
+}
+.mcp-tool-row:has(input:not(:checked)) .mcp-tool-name { opacity: 0.45; }
+/* Version badge: server-reported upstream version (InitializeResult.serverInfo.version) */
+.mcp-app-version {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--s-ink-soft);
+  font-family: 'JetBrains Mono', monospace;
+  padding: 2px 5px;
+  border: 1px solid rgba(26, 24, 20, 0.18);
+  border-radius: var(--s-radius);
+  background: rgba(201, 153, 63, 0.08);
+  line-height: 1;
+  white-space: nowrap;
+}
+/* Action buttons cluster — share the button baseline with left-side text */
+.mcp-app-action {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  align-items: center;
+}
+/* Card actions are btn-xs, but the tofu pixel skin
+ * ([data-theme="tofu"] .btn-primary/.btn-secondary — padding:9px 20px,
+ * font-size:13px at 0,2,0) inflates them into slabs that swallow the
+ * footer. This (0,3,0) scope re-asserts the compact btn-xs metrics so
+ * every card action is a small chip level with the version/tools badges.
+ * Scoped to the WHOLE card, not just .mcp-app-action: the Skills tab
+ * reuses .mcp-app-card but parks its buttons in .skill-card-actions and
+ * the per-skill env rows/editor — same inflation root, same fix. The
+ * install modal is NOT inside a card, so its buttons keep modal scale. */
+.settings-panel .mcp-app-card .btn-xs {
+  padding: 4px 11px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+/* In-flight card (connecting/installing/uninstalling): the status pill and
+ * the footer note had NO rule at all and rendered as bare text. Give them
+ * the same quiet outlined-chip look as .mcp-app-status.off, with a pulse
+ * so the card reads as busy, not broken. */
+.mcp-app-status.pending {
+  background: var(--s-cream);
+  color: var(--s-ink-soft);
+  border: 1px solid var(--s-ink-soft);
+  animation: mcp-reconnect-pulse 1.6s ease-in-out infinite;
+}
+.mcp-app-pending-note {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--s-ink-soft);
+  font-family: 'JetBrains Mono', monospace;
+  white-space: nowrap;
+  animation: mcp-reconnect-pulse 1.6s ease-in-out infinite;
+}
+/* ── Header quick action ──
+ * Lock both children of .mcp-store-header to the same explicit
+ * 36px height with the same vertical metrics so they sit on a
+ * shared baseline regardless of the later tofu-theme overrides
+ * (`[data-theme="tofu"] .btn-primary` at line ~8014 forces
+ * padding:9px 20px / font-size:13px). The button uses inline-flex
+ * to vertically center its text; the <input> uses traditional
+ * top/bottom padding so the native browser baseline algorithm
+ * keeps the placeholder centered. */
+.mcp-store-header .mcp-search {
+  height: 36px !important;
+  box-sizing: border-box !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  line-height: 32px !important;  /* 36 - 2*2 border */
+  margin: 0 !important;
+  vertical-align: middle !important;
+}
+.mcp-store-header .mcp-connect-all-btn {
+  height: 36px !important;
+  box-sizing: border-box !important;
+  padding: 0 14px !important;
+  margin: 0 !important;
+  font-size: 12px !important;
+  line-height: 1 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  vertical-align: middle !important;
+  flex-shrink: 0;
+  border: var(--s-border) !important;
+  border-radius: var(--s-radius) !important;
+  box-shadow: var(--s-shadow-xs) !important;
+  transform: none !important;
+}
+/* Advanced toggle */
+.mcp-advanced-toggle {
+  margin-top: 4px;
+}
+.mcp-advanced-toggle summary { list-style: none; }
+.mcp-advanced-toggle summary::-webkit-details-marker { display: none; }
+.mcp-add-form {
+  padding: 14px;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+}
+.mcp-add-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+/* Install Modal */
+.mcp-install-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.mcp-install-modal {
+  background: var(--s-white);
+  border: 3px solid var(--s-ink);
+  border-radius: var(--s-radius);
+  box-shadow: 8px 8px 0 var(--s-ink);
+  width: 420px;
+  max-width: 90vw;
+  max-height: 90vh;
+  max-height: calc(var(--vh100,100vh)*0.9);
+  overflow-y: auto;
+  padding: 24px;
+}
+.mcp-install-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.mcp-install-modal-icon {
+  font-size: 36px;
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  flex-shrink: 0;
+}
+.mcp-install-modal-icon img,
+.mcp-install-modal-icon svg {
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+}
+.mcp-install-modal-title {
+  font-size: 18px;
+  font-weight: 900;
+  color: var(--s-ink);
+}
+.mcp-install-modal-desc {
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  margin-top: 2px;
+}
+.mcp-install-noenv {
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  padding: 8px;
+  text-align: center;
+  background: var(--s-cream);
+  border-radius: var(--s-radius);
+}
+.mcp-install-modal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+.mcp-install-status {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: var(--s-radius);
+  font-size: 12px;
+  font-weight: 700;
+}
+.mcp-install-status.info {
+  background: rgba(99, 102, 241, 0.08);
+  color: #6366f1;
+}
+.mcp-install-status.success {
+  background: rgba(34, 197, 94, 0.1);
+  color: #16a34a;
+}
+.mcp-install-status.error {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+.mcp-env-input {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  color: var(--s-ink);
+}
+.mcp-env-input:focus { outline: 2px solid var(--s-ink); outline-offset: -1px; }
+.mcp-env-select {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  color: var(--s-ink);
+}
+.mcp-env-select:focus { outline: 2px solid var(--s-ink); outline-offset: -1px; }
+/* ── Skills Settings tab ── App-Store layout (brutalist tofu) ── */
+/* Header count badges — tofu stamp chips. Same markup lives in the MCP tab
+ * header, so both store tabs get the same chip language here. (The shared
+ * .stg-badge indigo/green pair in styles.css is for provider cards; the
+ * store header overrides it — settings.css loads after styles.css.) */
+.mcp-store-header-title .stg-badge{border:var(--s-border-sm);background:var(--s-white);color:var(--s-ink-soft);box-shadow:none;border-radius:var(--s-radius);text-transform:none;letter-spacing:.02em}
+/* Scope segmented control — cream track + ink active block with the gold
+ * offset shadow, echoing .mcp-cat-pill.active (one 'active' language per
+ * panel). Shared with the MCP tab's scope control (same classes). */
+.skills-scope-tabs{display:inline-flex;gap:3px;padding:3px;background:var(--s-cream);border:var(--s-border-sm);border-radius:var(--s-radius);box-shadow:var(--s-shadow-xs);align-items:center}
+.skills-scope-tab{padding:5px 14px;border:1.5px solid transparent;background:transparent;color:var(--s-ink-soft);font-size:11px;font-weight:800;letter-spacing:.03em;border-radius:var(--s-radius);cursor:pointer;transition:background .1s,color .1s,box-shadow .1s;font-family:inherit;line-height:1.2}
+.skills-scope-tab:hover{color:var(--s-ink);background:var(--s-skin)}
+.skills-scope-tab.active{background:var(--s-ink);color:var(--s-white);border-color:var(--s-ink);box-shadow:2px 2px 0 var(--s-gold)}
+/* Cross-link to memory creation — a quiet secondary action, visually
+ * separated from the scope control it used to masquerade as. */
+.skills-newmem-btn{display:inline-flex;align-items:center;gap:5px;flex-shrink:0}
+.skills-intro{margin:2px 0 10px}
+/* Local .zip install drop zone — dashed ink hairline on white, cream hover
+ * lift, gold fill while a file is held over it. */
+.skills-drop-zone{display:flex;align-items:center;justify-content:center;gap:10px;padding:13px 18px;margin:2px 0 14px;border:1.5px dashed rgba(26,24,20,.35);border-radius:var(--s-radius);color:var(--s-ink-soft);font-size:12.5px;font-weight:600;cursor:pointer;transition:all .15s ease;background:var(--s-white)}
+.skills-drop-zone svg{color:var(--s-gold-dim);flex-shrink:0}
+.skills-drop-zone:hover{border-color:var(--s-ink);color:var(--s-ink);background:var(--s-cream);transform:translate(-1px,-1px);box-shadow:var(--s-shadow-xs)}
+.skills-drop-zone.is-dragging{border-style:solid;border-color:var(--s-gold-dim);background:var(--s-gold-glow);color:var(--s-ink);transform:none;box-shadow:var(--s-shadow-xs)}
+.skills-drop-zone-text{pointer-events:none}
+/* Skill card uses mcp-app-card as base; add skill-specific accents.
+ * The base .mcp-app-card is a 2-col grid (44px icon | 1fr content). The
+ * skill-only children (author line, requirement warning, footer) MUST be
+ * pinned to the content column / full width — otherwise the grid
+ * auto-places them in column 1 under the icon and the card looks broken. */
+.mcp-app-card.skill-card .mcp-app-icon{filter:saturate(1.1)}
+/* Featured tag — the catalog sorts featured entries first; the solid gold
+ * stamp makes that ranking visible instead of silent. */
+.mcp-app-card .skill-badge-featured{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border:1px solid var(--s-gold-dim);border-radius:var(--s-radius);background:var(--s-gold);color:var(--s-ink);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;flex-shrink:0}
+.mcp-app-card .skill-badge-official{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border:1px solid rgba(168,125,46,.55);border-radius:var(--s-radius);background:rgba(201,153,63,.1);color:var(--s-gold-dim);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;flex-shrink:0}
+/* One line, ellipsized: requirement warnings can list several bins/env
+ * names and were a row-height outlier. Content is a single text node
+ * (⚠ + text), so block display makes the ellipsis actually render —
+ * text-overflow on a flex container does nothing. */
+.mcp-app-card .skill-badge-warn{grid-column:2;justify-self:start;display:block;padding:2px 7px;margin-top:4px;border:1px solid rgba(168,125,46,.45);border-radius:var(--s-radius);background:rgba(201,153,63,.12);color:var(--s-gold-dim);font-size:10px;font-weight:700;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mcp-app-card .skill-author{grid-column:2;font-size:10.5px;color:var(--s-ink-soft);opacity:.8;margin-top:1px}
+.mcp-app-card .skill-card-footer{grid-column:1 / -1;display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px;padding-top:6px;min-height:26px;border-top:1px dashed rgba(26,24,20,.18)}
+.mcp-app-card .skill-card-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+/* Per-skill env/key bindings (credential-vault backed). One row per variable:
+ * name chip + state + actions; the editor unfolds under the row. */
+.skill-env-section{grid-column:1 / -1;display:flex;flex-direction:column;gap:4px;margin-top:6px;padding-top:6px;border-top:1px dashed rgba(26,24,20,.18)}
+.skill-env-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.skill-env-name{font-size:10.5px;font-weight:700;padding:1px 7px;border:1px solid rgba(26,24,20,.25);border-radius:var(--s-radius);background:var(--s-cream);color:var(--s-ink)}
+.skill-env-state{font-size:10px;font-weight:700;letter-spacing:.02em}
+.skill-env-state.is-ok{color:var(--s-gold-dim)}
+.skill-env-state.is-missing{color:#b3462e}
+.skill-env-editor{display:flex;gap:6px;align-items:center;padding:4px 0 2px}
+.skill-env-input{flex:1;min-width:0;padding:5px 8px;font-size:11px;border:var(--s-border-sm);border-radius:var(--s-radius);background:var(--s-white);color:var(--s-ink)}
+.skill-env-input:focus{outline:2px solid var(--s-ink);outline-offset:-1px}
+/* Installed state — same gold language as .mcp-app-card.connected: the
+ * card reads 'already yours' without the old green wash. */
+.mcp-app-card.is-installed{background:linear-gradient(180deg,rgba(201,153,63,.06) 0%,var(--s-white) 60%);box-shadow:2px 2px 0 var(--s-gold),var(--s-shadow-xs)}
+.mcp-app-card.is-installed:hover{box-shadow:3px 3px 0 var(--s-gold),4px 4px 0 var(--s-ink)}
+.mcp-app-card .skill-installed-tag{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:var(--s-radius);background:var(--s-ink);color:var(--s-gold);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;align-self:center;font-family:'JetBrains Mono',monospace}
+/* Skills file browser list */
+.skills-files-modal{max-width:640px;max-height:80vh;max-height:calc(var(--vh100,100vh)*0.8);display:flex;flex-direction:column}
+.skills-files-list{flex:1;overflow-y:auto;margin:12px 0;padding:6px 0;border:var(--s-border-sm);border-radius:var(--s-radius);background:var(--s-white);max-height:50vh;max-height:calc(var(--vh100,100vh)*0.5)}
+.skills-file-row{display:flex;align-items:center;gap:10px;padding:6px 12px;font-size:12.5px;color:var(--s-ink);border-bottom:1px solid rgba(26,24,20,.07)}
+.skills-file-row:last-child{border-bottom:none}
+.skills-file-row:hover{background:var(--s-cream)}
+.skills-file-kind{flex:0 0 16px;font-size:14px;text-align:center;color:var(--s-ink-soft)}
+.skills-file-kind svg{width:14px;height:14px;vertical-align:middle}
+.skills-file-path{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono,monospace);font-size:11.5px;color:var(--s-ink)}
+.skills-file-size{flex:0 0 auto;font-size:10px;color:var(--s-ink-soft);opacity:.7;font-variant-numeric:tabular-nums}
+.skills-file-row.is-skill{background:rgba(201,153,63,.12);font-weight:600}
+/* Toast used by catalog install */
+.skills-toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:10px 18px;background:var(--s-white);color:var(--s-ink);border:var(--s-border);border-radius:var(--s-radius);font-size:12.5px;font-weight:700;box-shadow:var(--s-shadow-sm);z-index:10020;animation:skillsToastIn .25s cubic-bezier(.2,1,.3,1)}
+.skills-toast.is-error{border-color:var(--s-blocked);background:rgba(248,113,113,.1);color:#b91c1c}
+.skills-toast.is-success{border-color:var(--s-gold-dim);background:rgba(201,153,63,.08)}
+
+
+/* ══ api(access-matrix) / general(system-prompt) / preset(visibility) settings pages (moved from styles.css 2026-07-18) ══ */
+/* ── System-prompt mode row: dropdown + edit button, aligned ── */
+.sysprompt-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--s-ink);
+  margin-bottom: 6px;
+}
+.sysprompt-control-row {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.sysprompt-control-row select {
+  flex: 1;
+  min-width: 0;
+}
+.sysprompt-control-row .stg-btn-balance {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+/* ── System-prompt compact summary row (editor lives in a modal) ── */
+.sysprompt-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.sysprompt-summary {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sysprompt-summary.has-value {
+  color: var(--s-ink);
+  font-family: 'JetBrains Mono', monospace;
+}
+/* ── Per-block system-prompt editor ── */
+.sysprompt-blocks-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sysprompt-blocks-mode {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sysprompt-preview-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.sysprompt-blocks-mode-label {
+  opacity: 0.65;
+}
+.sysprompt-blocks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sysprompt-block {
+  position: relative;
+  border: 1px solid var(--border-color, rgba(128,128,128,0.2));
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-elevated, var(--bg-secondary, rgba(128,128,128,0.03)));
+  transition: border-color .12s, background .12s;
+}
+/* Accent edge bar shows on/off at a glance without reading the toggle. */
+.sysprompt-block::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--accent, #4caf50);
+  transition: background .12s;
+}
+.sysprompt-block.is-off { background: transparent; }
+.sysprompt-block.is-off::before { background: var(--border-color, rgba(128,128,128,0.25)); }
+.sysprompt-block-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px 9px 14px;
+  cursor: pointer;
+}
+.sysprompt-block-head:hover { background: rgba(128,128,128,0.06); }
+.sysprompt-block-chevron {
+  flex: 0 0 auto;
+  width: 14px; height: 14px;
+  color: var(--text-tertiary);
+  transition: transform .15s;
+}
+.sysprompt-block.is-open .sysprompt-block-chevron { transform: rotate(90deg); }
+.sysprompt-block-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  min-width: 0;
+  flex: 1;
+}
+.sysprompt-block-title > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sysprompt-block.is-off .sysprompt-block-title { color: var(--text-tertiary); }
+.sysprompt-block-badge {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-soft, rgba(120,120,200,0.16));
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+/* Project-affected blocks: blocks whose text differs in code/project mode.
+   Distinct amber badge + a thicker, amber accent edge so the user can see at
+   a glance which sections "code/project mode" actually rewrites. */
+.sysprompt-block-badge.is-project-badge {
+  background: var(--accent-amber-soft, rgba(212, 160, 23, 0.18));
+  color: var(--accent-amber, #c79100);
+  cursor: help;
+}
+.sysprompt-block.is-project:not(.is-off)::before {
+  width: 4px;
+  background: var(--accent-amber, #d4a017);
+}
+.sysprompt-block.is-project:not(.is-off) {
+  border-color: var(--accent-amber-soft, rgba(212, 160, 23, 0.35));
+}
+.sysprompt-block-toggle {
+  flex: 0 0 auto;
+}
+.sysprompt-block-text {
+  margin: 0;
+  padding: 2px 14px 12px 14px;
+  max-height: 220px;
+  overflow: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border-color, rgba(128,128,128,0.12));
+}
+.sysprompt-block:not(.is-open) .sysprompt-block-text { display: none; }

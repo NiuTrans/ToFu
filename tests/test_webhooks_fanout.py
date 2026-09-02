@@ -50,6 +50,8 @@ from routes.api_v1 import webhooks as wh  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+
 
 @pytest.fixture(autouse=True)
 def _no_real_webhook_dns(monkeypatch):
@@ -60,6 +62,7 @@ def _no_real_webhook_dns(monkeypatch):
 def _sub(**over):
     s = {
         'id': 'wh_deadbeef',
+        'owner_user_id': TEST_OWNER_USER_ID,
         'url': 'https://example.invalid/hook',
         'channel': '',
         'task_id': '*',
@@ -69,6 +72,15 @@ def _sub(**over):
     }
     s.update(over)
     return s
+
+
+def _fanout(channel, task_id, payload, *, user_id=TEST_OWNER_USER_ID):
+    """Invoke the listener with the owner marker injected by PushHub."""
+    wh._on_push_event(
+        channel,
+        task_id,
+        {**payload, '_ownerUserId': str(user_id)},
+    )
 
 
 @pytest.fixture
@@ -108,6 +120,7 @@ def test_public_view_strips_the_secret():
     """
     out = wh._public(_sub())
     assert 'secret' not in out, 'HMAC secret leaked through the public view'
+    assert 'owner_user_id' not in out, 'owner routing metadata leaked publicly'
     assert out['id'] == 'wh_deadbeef', 'public view dropped identifying fields'
     assert out['url'] == 'https://example.invalid/hook'
 
@@ -160,23 +173,23 @@ def test_different_secrets_yield_different_signatures():
 
 def test_disabled_subscription_receives_nothing(subs, queued):
     subs.append(_sub(disabled=True))
-    wh._on_push_event('chat', 'task-1', {'type': 'done'})
+    _fanout('chat', 'task-1', {'type': 'done'})
     assert queued == [], 'a disabled subscription was still delivered to'
 
 
 def test_channel_filter_excludes_other_channels(subs, queued):
     subs.append(_sub(id='wh_chat', channel='chat'))
-    wh._on_push_event('presence', 'task-1', {'type': 'done'})
+    _fanout('presence', 'task-1', {'type': 'done'})
     assert queued == [], 'event from another channel leaked to a channel-scoped sub'
-    wh._on_push_event('chat', 'task-1', {'type': 'done'})
+    _fanout('chat', 'task-1', {'type': 'done'})
     assert [i['sub']['id'] for i in queued] == ['wh_chat']
 
 
 def test_empty_channel_means_all_channels(subs, queued):
     """An unset channel is a wildcard — the documented default."""
     subs.append(_sub(channel=''))
-    wh._on_push_event('chat', 't1', {'type': 'done'})
-    wh._on_push_event('presence', 't1', {'type': 'done'})
+    _fanout('chat', 't1', {'type': 'done'})
+    _fanout('presence', 't1', {'type': 'done'})
     assert len(queued) == 2
 
 
@@ -184,29 +197,29 @@ def test_task_id_filter_excludes_other_tasks(subs, queued):
     """THE cross-tenant assertion: a task-scoped subscriber must never see
     another task's events."""
     subs.append(_sub(id='wh_t1', task_id='task-1'))
-    wh._on_push_event('chat', 'task-2', {'type': 'done'})
+    _fanout('chat', 'task-2', {'type': 'done'})
     assert queued == [], "another task's event was delivered to a task-scoped sub"
-    wh._on_push_event('chat', 'task-1', {'type': 'done'})
+    _fanout('chat', 'task-1', {'type': 'done'})
     assert [i['task_id'] for i in queued] == ['task-1']
 
 
 def test_star_task_id_matches_every_task(subs, queued):
     subs.append(_sub(task_id='*'))
-    wh._on_push_event('chat', 'anything', {'type': 'done'})
+    _fanout('chat', 'anything', {'type': 'done'})
     assert len(queued) == 1
 
 
 def test_event_type_filter_excludes_unlisted_types(subs, queued):
     subs.append(_sub(event_types=['done', 'error']))
-    wh._on_push_event('chat', 't1', {'type': 'phase'})
+    _fanout('chat', 't1', {'type': 'phase'})
     assert queued == [], 'an unsubscribed event type was delivered'
-    wh._on_push_event('chat', 't1', {'type': 'error'})
+    _fanout('chat', 't1', {'type': 'error'})
     assert [i['payload']['type'] for i in queued] == ['error']
 
 
 def test_empty_event_types_means_all_types(subs, queued):
     subs.append(_sub(event_types=[]))
-    wh._on_push_event('chat', 't1', {'type': 'anything_at_all'})
+    _fanout('chat', 't1', {'type': 'anything_at_all'})
     assert len(queued) == 1
 
 
@@ -216,22 +229,22 @@ def test_filters_compose_as_AND_not_OR(subs, queued):
     An OR would turn a narrowly-scoped subscription into a firehose.
     """
     subs.append(_sub(channel='chat', task_id='task-1', event_types=['done']))
-    wh._on_push_event('chat', 'task-1', {'type': 'phase'})     # wrong type
-    wh._on_push_event('chat', 'task-2', {'type': 'done'})      # wrong task
-    wh._on_push_event('presence', 'task-1', {'type': 'done'})  # wrong channel
+    _fanout('chat', 'task-1', {'type': 'phase'})     # wrong type
+    _fanout('chat', 'task-2', {'type': 'done'})      # wrong task
+    _fanout('presence', 'task-1', {'type': 'done'})  # wrong channel
     assert queued == [], 'filters behaved as OR — scope leaked'
-    wh._on_push_event('chat', 'task-1', {'type': 'done'})      # all three match
+    _fanout('chat', 'task-1', {'type': 'done'})      # all three match
     assert len(queued) == 1
 
 
 def test_no_subscriptions_is_a_cheap_noop(subs, queued):
-    wh._on_push_event('chat', 't1', {'type': 'done'})
+    _fanout('chat', 't1', {'type': 'done'})
     assert queued == []
 
 
 def test_each_matching_subscription_gets_its_own_delivery(subs, queued):
     subs.extend([_sub(id='wh_a'), _sub(id='wh_b')])
-    wh._on_push_event('chat', 't1', {'type': 'done'})
+    _fanout('chat', 't1', {'type': 'done'})
     assert sorted(i['sub']['id'] for i in queued) == ['wh_a', 'wh_b']
 
 
@@ -239,11 +252,13 @@ def test_enqueued_item_carries_the_delivery_context(subs, queued):
     """The worker needs channel/task/payload + a zero attempt counter; a missing
     ``attempt`` would make the retry ladder mis-count from the first failure."""
     subs.append(_sub())
-    wh._on_push_event('chat', 'task-9', {'type': 'done', 'x': 1})
+    _fanout('chat', 'task-9', {'type': 'done', 'x': 1})
     item = queued[0]
     assert item['channel'] == 'chat'
     assert item['task_id'] == 'task-9'
-    assert item['payload'] == {'type': 'done', 'x': 1}
+    assert item['payload'] == {
+        'type': 'done', 'x': 1, '_ownerUserId': str(TEST_OWNER_USER_ID),
+    }
     assert item['attempt'] == 0
     assert isinstance(item['ts'], float)
 
@@ -365,7 +380,7 @@ def test_queue_full_is_swallowed_so_push_keeps_working(subs, monkeypatch):
             raise RuntimeError('queue full')
 
     monkeypatch.setattr(wh, '_QUEUE', _FullQueue())
-    wh._on_push_event('chat', 't1', {'type': 'done'})   # must not raise
+    _fanout('chat', 't1', {'type': 'done'})   # must not raise
 
 
 def test_retry_schedule_is_bounded_and_uses_no_timer_threads():

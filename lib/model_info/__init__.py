@@ -105,6 +105,13 @@ from lib.model_info._context import (  # noqa: E402,F401
     resolved_context_profile,
 )
 
+# ── Display-fold knowledge (picker alias/family folding) ──
+from lib.model_info._folds import (  # noqa: E402,F401
+    build_fold_index,
+    family_key,
+    version_tuple,
+)
+
 __all__ = [
     # family detection
     'claude_line_version', 'glm_line_version',
@@ -129,6 +136,8 @@ __all__ = [
     '_parse_token_limit_from_error', '_LEARNED_MODEL_LIMITS', '_limits_lock',
     # video frame budget
     'video_frame_budget', 'aggregate_image_cap',
+    # display folds
+    'build_fold_index', 'family_key', 'version_tuple',
     # context windows
     'ContextProfile', 'context_profile', 'resolved_context_profile',
 ]

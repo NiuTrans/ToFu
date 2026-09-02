@@ -1,5 +1,4 @@
-"""Checkpoint second pass — per-section self-test flip cards (design P2,
-docs/PAPER_READING_EXPERIENCE_DESIGN.md).
+"""Checkpoint second pass — per-section self-test flip cards.
 
 The fidelity report is a PASSIVE read; the cheapest proven way to make
 understanding stick is active recall. After a report completes, this pass asks
@@ -132,7 +131,7 @@ def _parse_json_obj(text):
 
 
 def run_report_checkpoints(report_md, ui_lang='en', *, phash='', model=None,
-                           abort=None, persist=True) -> dict:
+                           abort=None, persist=True, user_id: int) -> dict:
     """Generate → anchor → persist per-section checkpoint cards. Best-effort.
 
     Returns ``{'items': [{section, anchor_idx, question, answer}], 'usage':
@@ -185,7 +184,8 @@ def run_report_checkpoints(report_md, ui_lang='en', *, phash='', model=None,
         def _on_content(text):
             buf['content'] += text
 
-        _msg, _finish, usage = dispatch_stream(
+        from lib.llm.stream_result import require_verified_provider_stream_result
+        stream_result = require_verified_provider_stream_result(dispatch_stream(
             msgs,
             on_content=_on_content,
             abort_check=abort_signal.is_set,
@@ -196,7 +196,9 @@ def run_report_checkpoints(report_md, ui_lang='en', *, phash='', model=None,
             temperature=temperature,
             thinking_enabled=False,
             log_prefix=prefix,
-        )
+        ), context='paper checkpoint generation')
+        _msg = stream_result.message
+        usage = stream_result.usage
         _acc(usage)
         content = buf['content'] or (_msg.get('content') if isinstance(_msg, dict) else '')
         return content
@@ -253,22 +255,27 @@ def run_report_checkpoints(report_md, ui_lang='en', *, phash='', model=None,
 
     if persist and items:
         try:
-            from lib.storage import get_storage_client
+            from lib.paper.artifact_repository import (
+                PaperArtifactRepository,
+                PaperReport,
+            )
             meta = {'kind': 'checkpoints', 'v': 2, 'items': items,
                     'usage': out['usage']}
-            get_storage_client(write=True).command('paper.report.upsert', {
-                'paper_hash': phash,
-                'lang': checkpoints_lang_key(ui_lang),
-                # The report column carries a compact markdown rendering so the
-                # row is human-inspectable; the structured items ride meta.
-                'report': '\n'.join(
-                    ['## 🧠 Checkpoints' if not zh else '## 🧠 随堂检查', ''] +
-                    [f"- **{i['section']}** — {i['question']} → {i['answer']}"
-                     for i in items]) + '\n',
-                'model': model or '',
-                'meta': meta,
-                'created_at': int(time.time()),
-            }, f'paper.checkpoints.upsert:{uuid.uuid4().hex}')
+            PaperArtifactRepository(user_id).put_report(
+                PaperReport(
+                    paper_hash=phash,
+                    lang=checkpoints_lang_key(ui_lang),
+                    # Keep a human-inspectable rendering beside structured meta.
+                    report='\n'.join(
+                        ['## 🧠 Checkpoints' if not zh else '## 🧠 随堂检查', ''] +
+                        [f"- **{i['section']}** — {i['question']} → {i['answer']}"
+                         for i in items]) + '\n',
+                    model=model or '',
+                    meta=meta,
+                    created_at=int(time.time()),
+                ),
+                command_id=f'paper.checkpoints.upsert:{uuid.uuid4().hex}',
+            )
             out['persisted'] = True
             logger.info('[Paper:Checkpoints] Persisted — hash=%s key=%s %d cards',
                         phash, checkpoints_lang_key(ui_lang), len(items))

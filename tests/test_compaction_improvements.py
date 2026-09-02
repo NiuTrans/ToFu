@@ -36,13 +36,13 @@ class TestToolResultBudgeting:
     """Verify budget_tool_result with persistence and exempt tools."""
 
     def test_small_result_passthrough(self):
-        from lib.tasks_pkg.compaction import budget_tool_result
+        from lib.tasks_pkg.compaction.api import budget_tool_result
         content = "Hello world"
         assert budget_tool_result('read_files', content) == content
 
     def test_read_files_exempt_never_truncated(self):
         """read_files results should NEVER be truncated (like Claude Code Infinity)."""
-        from lib.tasks_pkg.compaction import budget_tool_result
+        from lib.tasks_pkg.compaction.api import budget_tool_result
         # Create a 200K char result — should pass through unchanged
         content = "x" * 200_000
         result = budget_tool_result('read_files', content)
@@ -51,14 +51,14 @@ class TestToolResultBudgeting:
 
     def test_read_files_exempt_for_absolute_paths(self):
         """read_files results should NEVER be truncated (covers both relative and absolute paths)."""
-        from lib.tasks_pkg.compaction import budget_tool_result
+        from lib.tasks_pkg.compaction.api import budget_tool_result
         content = "y" * 200_000
         result = budget_tool_result('read_files', content)
         assert result == content
 
     def test_large_grep_result_persisted_to_disk(self):
         """Non-exempt tools exceeding budget should be persisted to disk."""
-        from lib.tasks_pkg.compaction import budget_tool_result
+        from lib.tasks_pkg.compaction.api import budget_tool_result
         content = "matched_line\n" * 10_000  # ~130K chars
         result = budget_tool_result('grep_search', content)
         assert len(result) < len(content)
@@ -75,7 +75,11 @@ class TestToolResultBudgeting:
             assert len(f.read()) == len(content)  # full content preserved
 
     def test_different_tools_different_budgets(self):
-        from lib.tasks_pkg.compaction import _BUDGET_EXEMPT_TOOLS, TOOL_RESULT_MAX_CHARS, budget_tool_result
+        from lib.tasks_pkg.compaction._constants import (
+            TOOL_RESULT_MAX_CHARS,
+            _BUDGET_EXEMPT_TOOLS,
+        )
+        from lib.tasks_pkg.compaction.api import budget_tool_result
         # grep_search has a 30K budget; read_files is exempt (0)
         assert TOOL_RESULT_MAX_CHARS['grep_search'] == 30_000
         assert 'read_files' in _BUDGET_EXEMPT_TOOLS
@@ -88,12 +92,13 @@ class TestToolResultBudgeting:
         assert read_result == content             # exempt, unchanged
 
     def test_non_string_passthrough(self):
-        from lib.tasks_pkg.compaction import budget_tool_result
+        from lib.tasks_pkg.compaction.api import budget_tool_result
         content = 12345
         assert budget_tool_result('read_files', content) == content
 
     def test_unknown_tool_uses_default_budget(self):
-        from lib.tasks_pkg.compaction import _DEFAULT_TOOL_RESULT_MAX, budget_tool_result
+        from lib.tasks_pkg.compaction._constants import _DEFAULT_TOOL_RESULT_MAX
+        from lib.tasks_pkg.compaction.api import budget_tool_result
         content = "z" * (_DEFAULT_TOOL_RESULT_MAX + 10_000)
         result = budget_tool_result('unknown_new_tool', content)
         assert len(result) < len(content)
@@ -101,7 +106,8 @@ class TestToolResultBudgeting:
 
     def test_persistence_preview_truncated_at_newline(self):
         """Preview in persisted result should truncate at newline boundary."""
-        from lib.tasks_pkg.compaction import _PERSIST_PREVIEW_CHARS, budget_tool_result
+        from lib.tasks_pkg.compaction._constants import _PERSIST_PREVIEW_CHARS
+        from lib.tasks_pkg.compaction.api import budget_tool_result
         # Build content with lines
         lines = [f'Line {i}: ' + 'x' * 80 for i in range(500)]
         content = '\n'.join(lines)
@@ -153,7 +159,8 @@ class TestExtendedMicroCompact:
         return messages
 
     def test_strips_old_thinking_blocks(self):
-        from lib.tasks_pkg.compaction import _THINKING_HOT_TAIL, micro_compact
+        from lib.tasks_pkg.compaction._constants import _THINKING_HOT_TAIL
+        from lib.tasks_pkg.compaction.api import micro_compact
         # Need more than _THINKING_HOT_TAIL assistants for stripping to kick in.
         # (Stripping only applies to the cold tail beyond the hot tail.)
         n_total = _THINKING_HOT_TAIL + 5
@@ -178,7 +185,8 @@ class TestExtendedMicroCompact:
         assert rc_after == _THINKING_HOT_TAIL
 
     def test_keeps_recent_thinking_intact(self):
-        from lib.tasks_pkg.compaction import _THINKING_HOT_TAIL, micro_compact
+        from lib.tasks_pkg.compaction._constants import _THINKING_HOT_TAIL
+        from lib.tasks_pkg.compaction.api import micro_compact
         messages = self._make_messages(n_assistants=6, thinking_size=3000)
 
         micro_compact(messages, conv_id='test456')
@@ -191,7 +199,7 @@ class TestExtendedMicroCompact:
             assert len(m.get('reasoning_content', '')) > 0
 
     def test_no_thinking_to_strip(self):
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.compaction.api import micro_compact
         messages = [
             {'role': 'system', 'content': 'Hello'},
             {'role': 'user', 'content': 'Hi'},
@@ -202,7 +210,7 @@ class TestExtendedMicroCompact:
 
 
 # ═══════════════════════════════════════════════════════════
-#  3. 9-Section Summary Template (analysis stripping)
+#  3. Structured Summary Receipt (analysis stripping)
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
@@ -215,18 +223,18 @@ class TestAnalysisStripping:
         raw_output = (
             "<analysis>\nThis is the analysis scratchpad.\n"
             "Key concepts: X, Y, Z.\n</analysis>\n\n"
-            "### 1. Primary Request\nThe user wants to..."
+            "### Objective\nThe user wants to..."
         )
         cleaned = re.sub(
             r'<analysis>.*?</analysis>\s*',
             '', raw_output, flags=re.DOTALL,
         )
         assert '<analysis>' not in cleaned
-        assert '### 1. Primary Request' in cleaned
+        assert '### Objective' in cleaned
 
     def test_no_analysis_passthrough(self):
         import re
-        raw_output = "### 1. Primary Request\nThe user wants to..."
+        raw_output = "### Objective\nThe user wants to..."
         cleaned = re.sub(
             r'<analysis>.*?</analysis>\s*',
             '', raw_output, flags=re.DOTALL,
@@ -243,7 +251,7 @@ class TestReactiveCompact:
     """Verify reactive_compact emergency compaction works."""
 
     def test_head_truncate_reduces_messages(self):
-        from lib.tasks_pkg.compaction import _head_truncate
+        from lib.tasks_pkg.compaction._reactive._headtrunc import _head_truncate
         messages = [
             {'role': 'system', 'content': 'System prompt'},
         ]
@@ -259,7 +267,7 @@ class TestReactiveCompact:
         assert messages[0]['role'] == 'system'
 
     def test_head_truncate_preserves_system(self):
-        from lib.tasks_pkg.compaction import _head_truncate
+        from lib.tasks_pkg.compaction._reactive._headtrunc import _head_truncate
         messages = [
             {'role': 'system', 'content': 'Important system prompt'},
             {'role': 'user', 'content': 'Q ' * 50000},
@@ -282,7 +290,7 @@ class TestReactiveCompact:
         full walk. This guards that equivalence for BOTH trim modes so a
         future refactor can't silently drift the drop boundary.
         """
-        from lib.tasks_pkg.compaction import _head_truncate
+        from lib.tasks_pkg.compaction._reactive._headtrunc import _head_truncate
         from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
 
         def _mk():
@@ -381,20 +389,20 @@ class TestConcurrencySafety:
     """Verify write tools are correctly marked for serial execution."""
 
     def test_write_tools_defined(self):
-        from lib.tasks_pkg.tool_dispatch import _WRITE_TOOLS
+        from lib.tasks_pkg.tool_dispatch._flags import _WRITE_TOOLS
         assert 'write_file' in _WRITE_TOOLS
         assert 'apply_diff' in _WRITE_TOOLS
         assert 'run_command' in _WRITE_TOOLS
 
     def test_read_tools_not_in_write_set(self):
-        from lib.tasks_pkg.tool_dispatch import _WRITE_TOOLS
+        from lib.tasks_pkg.tool_dispatch._flags import _WRITE_TOOLS
         read_tools = ['read_files', 'list_dir', 'grep_search', 'find_files',
                       'web_search', 'fetch_url']
         for tool in read_tools:
             assert tool not in _WRITE_TOOLS, f"{tool} should NOT be in _WRITE_TOOLS"
 
     def test_write_tools_disjoint_from_idempotent(self):
-        from lib.tasks_pkg.tool_dispatch import _IDEMPOTENT_TOOLS, _WRITE_TOOLS
+        from lib.tasks_pkg.tool_dispatch._flags import _IDEMPOTENT_TOOLS, _WRITE_TOOLS
         overlap = _WRITE_TOOLS & _IDEMPOTENT_TOOLS
         assert len(overlap) == 0, f"Write tools should not be idempotent: {overlap}"
 
@@ -418,28 +426,25 @@ class TestDeltaAttachments:
     def test_context_always_injected_on_fresh_messages(self):
         """Simulate the real scenario: 2 tasks in same conversation.
         Both should have project context in their system message."""
-        from lib.tasks_pkg.system_context import (
-            _append_to_system_message,
-            _inject_system_contexts,
-        )
+        from lib.tasks_pkg.context_composer import compose_task_context
 
         # Task 1: fresh messages from frontend
         msgs1 = [{'role': 'system', 'content': 'You are helpful'},
                  {'role': 'user', 'content': 'Hello'}]
-        _inject_system_contexts(
-            msgs1, '/fake', project_enabled=False,
+        compose_task_context(
+            msgs1, user_id=0, project_path='/fake', project_enabled=False,
             memory_enabled=False, search_enabled=False,
-            swarm_enabled=False, has_real_tools=False,
+            has_real_tools=False,
             conv_id='conv6',
         )
 
         # Task 2: ANOTHER fresh messages list (new task!)
         msgs2 = [{'role': 'system', 'content': 'You are helpful'},
                  {'role': 'user', 'content': 'Hello again'}]
-        _inject_system_contexts(
-            msgs2, '/fake', project_enabled=False,
+        compose_task_context(
+            msgs2, user_id=0, project_path='/fake', project_enabled=False,
             memory_enabled=False, search_enabled=False,
-            swarm_enabled=False, has_real_tools=False,
+            has_real_tools=False,
             conv_id='conv6',
         )
 
@@ -474,7 +479,7 @@ class TestCompactionPipeline:
         assert captured[0]['_compaction_round'] == 37
 
     def test_pipeline_runs_without_error(self):
-        from lib.tasks_pkg.compaction import run_compaction_pipeline
+        from lib.tasks_pkg.compaction.api import run_compaction_pipeline
         messages = [
             {'role': 'system', 'content': 'System'},
             {'role': 'user', 'content': 'Hello'},
@@ -483,12 +488,14 @@ class TestCompactionPipeline:
         before = [dict(m) for m in messages]
         result = run_compaction_pipeline(
             messages, current_round=1,
-            task={'convId': 'test', 'config': {'model': 'gpt-4'}})
+            task={'convId': 'test', '_userId': 1,
+                  'config': {'model': 'gpt-4'}})
         assert result is None
         assert messages == before, 'a short transcript must not be compacted'
 
     def test_pipeline_with_tool_results(self):
-        from lib.tasks_pkg.compaction import MICRO_HOT_TAIL, run_compaction_pipeline
+        from lib.tasks_pkg.compaction._constants import MICRO_HOT_TAIL
+        from lib.tasks_pkg.compaction.api import run_compaction_pipeline
         messages = [{'role': 'system', 'content': 'System'}]
         # Add more than MICRO_HOT_TAIL tool results
         for i in range(MICRO_HOT_TAIL + 10):
@@ -508,7 +515,8 @@ class TestCompactionPipeline:
 
         msg_before = len(messages)
         run_compaction_pipeline(messages, current_round=5,
-                               task={'convId': 'test_pipe', 'config': {'model': 'gpt-4'}})
+                               task={'convId': 'test_pipe', '_userId': 1,
+                                     'config': {'model': 'gpt-4'}})
 
         # Messages should still be the same count (micro_compact replaces in place)
         assert len(messages) == msg_before
@@ -520,7 +528,7 @@ class TestCompactionPipeline:
 
     def test_budget_tool_result_in_pipeline(self):
         """Verify budget_tool_result persists oversized grep results."""
-        from lib.tasks_pkg.compaction import budget_tool_result
+        from lib.tasks_pkg.compaction.api import budget_tool_result
         large = "matched_line\n" * 10_000  # ~130K chars
         result = budget_tool_result('grep_search', large)
         assert '[Persisted to:' in result
@@ -533,34 +541,39 @@ class TestCompactionPipeline:
 
 @pytest.mark.unit
 class TestSummaryTemplate:
-    """Verify the upgraded 9-section summary template."""
+    """Verify the compact continuation-receipt template."""
 
-    def test_template_has_9_sections(self):
-        from lib.tasks_pkg.compaction import _SUMMARY_SYSTEM_PROMPT
+    def test_template_has_state_receipt_sections(self):
+        from lib.tasks_pkg.compaction._layer2._prompt import _SUMMARY_SYSTEM_PROMPT
         expected_sections = [
-            '1. Primary Request',
-            '2. Key Technical Concepts',
-            '3. Files & Code',
-            '4. Errors & Debugging',
-            '5. Problem-Solving Progress',
-            '6. All User Messages',
-            '7. Decisions & Preferences',
-            '8. Current Working State',
-            '9. Pending / Next Steps',
+            'Objective',
+            'Binding Constraints & Decisions',
+            'Completed & Verified',
+            'Current Working State',
+            'Errors & Blockers',
+            'Pending / Next Steps',
         ]
         for section in expected_sections:
             assert section in _SUMMARY_SYSTEM_PROMPT, \
                 f"Missing section in summary template: {section}"
 
     def test_template_has_analysis_scratchpad(self):
-        from lib.tasks_pkg.compaction import _SUMMARY_SYSTEM_PROMPT
+        from lib.tasks_pkg.compaction._layer2._prompt import _SUMMARY_SYSTEM_PROMPT
         assert '<analysis>' in _SUMMARY_SYSTEM_PROMPT
         assert 'Strip the <analysis> section' in _SUMMARY_SYSTEM_PROMPT
 
-    def test_template_mandates_user_messages(self):
-        from lib.tasks_pkg.compaction import _SUMMARY_SYSTEM_PROMPT
-        assert 'MANDATORY' in _SUMMARY_SYSTEM_PROMPT
-        assert 'never omitted' in _SUMMARY_SYSTEM_PROMPT or 'never skip' in _SUMMARY_SYSTEM_PROMPT
+    def test_template_does_not_duplicate_all_user_messages(self):
+        from lib.tasks_pkg.compaction._layer2._prompt import _SUMMARY_SYSTEM_PROMPT
+        assert 'All User Messages' not in _SUMMARY_SYSTEM_PROMPT
+        assert 'retained verbatim outside' in _SUMMARY_SYSTEM_PROMPT
+
+    def test_template_rejects_transport_paths(self):
+        from lib.tasks_pkg.compaction._layer2._prompt import _SUMMARY_SYSTEM_PROMPT
+        assert 'data/tool-results' in _SUMMARY_SYSTEM_PROMPT
+
+    def test_dispatch_ceiling_matches_the_receipt_contract(self):
+        from lib.tasks_pkg.compaction._constants import _SUMMARY_MAX_TOKENS
+        assert _SUMMARY_MAX_TOKENS == 2200
 
 
 # ═══════════════════════════════════════════════════════════
@@ -575,7 +588,7 @@ class TestReactiveCompactThreadSafety:
         """reactive_compact should NOT use 'global _KEEP_RECENT_PAIRS'."""
         import inspect
 
-        from lib.tasks_pkg.compaction import reactive_compact
+        from lib.tasks_pkg.compaction.api import reactive_compact
         source = inspect.getsource(reactive_compact)
         assert 'global _KEEP_RECENT_PAIRS' not in source, \
             'reactive_compact should NOT mutate global _KEEP_RECENT_PAIRS — use parameter instead'
@@ -584,7 +597,7 @@ class TestReactiveCompactThreadSafety:
         """force_compact_if_needed should accept keep_recent_pairs parameter."""
         import inspect
 
-        from lib.tasks_pkg.compaction import force_compact_if_needed
+        from lib.tasks_pkg.compaction.api import force_compact_if_needed
         sig = inspect.signature(force_compact_if_needed)
         assert 'keep_recent_pairs' in sig.parameters, \
             'force_compact_if_needed should have keep_recent_pairs parameter'
@@ -600,17 +613,20 @@ class TestReactiveCompactCleanup:
     """Verify _reactive_compact_attempts is cleaned up."""
 
     def test_cleanup_function_exists(self):
-        from lib.tasks_pkg.llm_fallback import cleanup_reactive_compact_state
+        from lib.tasks_pkg.llm_fallback._state import cleanup_reactive_compact_state
         assert callable(cleanup_reactive_compact_state)
 
     def test_cleanup_removes_entry(self):
-        from lib.tasks_pkg.llm_fallback import _reactive_compact_attempts, cleanup_reactive_compact_state
+        from lib.tasks_pkg.llm_fallback._state import (
+            _reactive_compact_attempts,
+            cleanup_reactive_compact_state,
+        )
         _reactive_compact_attempts['test_task_1'] = 2
         cleanup_reactive_compact_state('test_task_1')
         assert 'test_task_1' not in _reactive_compact_attempts
 
     def test_cleanup_noop_for_missing_key(self):
-        from lib.tasks_pkg.llm_fallback import (
+        from lib.tasks_pkg.llm_fallback._state import (
             _reactive_compact_attempts, cleanup_reactive_compact_state)
         before = dict(_reactive_compact_attempts)
         cleanup_reactive_compact_state('nonexistent_task')
@@ -643,76 +659,69 @@ class TestPromptTooLongNonStreaming:
 
 @pytest.mark.unit
 class TestPostCompactReinjection:
-    """Verify _reinject_system_contexts_after_compact logic."""
+    """Verify recompose_context_after_compaction logic."""
 
     def test_no_task_no_crash(self):
-        from lib.tasks_pkg.compaction import _reinject_system_contexts_after_compact
+        from lib.tasks_pkg.compaction.api import recompose_context_after_compaction
         messages = [{'role': 'system', 'content': 'Hello'}]
-        result = _reinject_system_contexts_after_compact(messages, task=None)
+        result = recompose_context_after_compaction(messages, task=None)
         assert result is None
         assert messages == [{'role': 'system', 'content': 'Hello'}]
 
     def test_recomposes_after_compaction(self, tmp_path, monkeypatch):
-        from lib.tasks_pkg.compaction import _reinject_system_contexts_after_compact
-        from lib.tasks_pkg import system_context
+        from lib.tasks_pkg.compaction.api import recompose_context_after_compaction
+        import lib.tasks_pkg.context_composer as context_composer
         # A successful compaction always recomposes managed context.
         messages = [{'role': 'system', 'content': 'A bare system message without the CC static block'}]
         calls = []
 
-        def _record_injection(in_messages, project_path, project_enabled,
-                              memory_enabled, search_enabled, swarm_enabled,
-                              **kwargs):
+        def _record_injection(in_messages, **kwargs):
             calls.append({
                 'messages': in_messages,
-                'project_path': project_path,
-                'project_enabled': project_enabled,
-                'memory_enabled': memory_enabled,
-                'search_enabled': search_enabled,
-                'swarm_enabled': swarm_enabled,
+                'project_path': kwargs['project_path'],
+                'project_enabled': kwargs['project_enabled'],
+                'memory_enabled': kwargs['memory_enabled'],
+                'search_enabled': kwargs['search_enabled'],
                 'kwargs': kwargs,
             })
 
-        monkeypatch.setattr(system_context, '_inject_system_contexts',
+        monkeypatch.setattr(context_composer, 'compose_task_context',
                             _record_injection)
         task = {
+            '_userId': 1,
             'config': {
                 'projectPath': str(tmp_path),
                 'memoryEnabled': False,
                 'searchMode': '',
-                'swarmEnabled': False,
             }
         }
-        _reinject_system_contexts_after_compact(messages, task=task)
+        recompose_context_after_compaction(messages, task=task)
         assert len(calls) == 1, 'compaction did not trigger composition'
         assert calls[0]['messages'] is messages
         assert calls[0]['project_path'] == str(tmp_path)
         assert calls[0]['project_enabled'] is True
         assert calls[0]['memory_enabled'] is False
         assert calls[0]['search_enabled'] is False
-        assert calls[0]['swarm_enabled'] is False
 
     def test_recomposes_even_when_static_block_survived(self, monkeypatch):
         """A surviving static block does not prove tail evidence survived."""
-        from lib.tasks_pkg.compaction import _reinject_system_contexts_after_compact
-        from lib.tasks_pkg import system_context
-        from lib.tasks_pkg.system_context import _CC_STATIC_MARKER
-        sys_text = (f'Some bare prompt with the marker: '
-                    f'"{_CC_STATIC_MARKER}". Pretend this is the CC static '
-                    f'block.')
+        from lib.tasks_pkg.compaction.api import recompose_context_after_compaction
+        import lib.tasks_pkg.context_composer as context_composer
+        sys_text = 'A surviving static prompt block.'
         messages = [{'role': 'system', 'content': sys_text}]
         calls = []
         monkeypatch.setattr(
-            system_context, '_inject_system_contexts',
+            context_composer, 'compose_task_context',
             lambda *args, **kwargs: calls.append((args, kwargs)))
         task = {
+            '_userId': 1,
             'config': {
                 'projectPath': '/tmp/test_project',
                 'memoryEnabled': False,
                 'searchMode': '',
-                'swarmEnabled': False,
             }
         }
-        _reinject_system_contexts_after_compact(messages, task=task)
+        recompose_context_after_compaction(messages, task=task)
         assert len(calls) == 1
 
 
@@ -727,7 +736,7 @@ class TestDiskPersistence:
     def test_persisted_file_contains_full_content(self):
         import re
 
-        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
         content = "full content line\n" * 5000  # ~85K
         result = _persist_to_disk(content, 'grep_search', 'tc_test_1', 'conv_test')
         assert '[Persisted to:' in result
@@ -737,7 +746,8 @@ class TestDiskPersistence:
             assert f.read() == content  # zero information loss
 
     def test_persistence_directory_structure(self):
-        from lib.tasks_pkg.compaction import _PERSIST_DIR_BASE, _persist_to_disk
+        from lib.tasks_pkg.compaction._constants import _PERSIST_DIR_BASE
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
         content = "test" * 20_000
         result = _persist_to_disk(content, 'run_command', 'tc_123', 'conv_abcdef123456')
         import re
@@ -748,14 +758,15 @@ class TestDiskPersistence:
         assert 'conv_abcdef1' in filepath  # first 12 chars of conv_id
 
     def test_preview_is_included(self):
-        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
         content = "PREVIEW_START\n" + "middle\n" * 5000 + "END\n"
         result = _persist_to_disk(content, 'fetch_url', 'tc_2')
         assert 'Preview' in result
         assert 'PREVIEW_START' in result  # first line in preview
 
     def test_preview_size_limited(self):
-        from lib.tasks_pkg.compaction import _PERSIST_PREVIEW_CHARS, _persist_to_disk
+        from lib.tasks_pkg.compaction._constants import _PERSIST_PREVIEW_CHARS
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
         content = "x" * 100_000
         result = _persist_to_disk(content, 'web_search', 'tc_3')
         # Result should be much smaller than original
@@ -765,7 +776,7 @@ class TestDiskPersistence:
         """Batch fetch_url persist should produce per-URL files + index listing ALL URLs."""
         import os
         import re as _re
-        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
 
         url1 = 'https://example.com/alpha'
         url2 = 'https://example.com/beta'
@@ -803,7 +814,7 @@ class TestDiskPersistence:
 
     def test_fetch_url_single_falls_through(self):
         """Single-URL fetch_url should use default single-file persist (not split)."""
-        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
         url = 'https://example.com/only'
         body = 'single-page-body\n' + ('z' * 60_000)
         content = f"Content from {url} ({len(body):,} chars):\n\n{body}"
@@ -817,7 +828,7 @@ class TestDiskPersistence:
         label (title) instead of the opaque persisted filename."""
         import os
         import re as _re
-        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
         from lib.tasks_pkg.persist_registry import clear, lookup
         from lib.tasks_pkg.tool_display import _persisted_read_labels
 
@@ -864,7 +875,7 @@ class TestDiskPersistence:
         persisted-result label must show the meaningful title line, not the
         wall of box-drawing characters (the reported UI ugliness)."""
         import os
-        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
         from lib.tasks_pkg.persist_registry import clear, lookup
         from lib.tasks_pkg.tool_display import _persisted_read_labels
 
@@ -932,7 +943,7 @@ class TestDiskPersistence:
         """Batch find_files persist should produce per-search files + index listing ALL patterns."""
         import os
         import re as _re
-        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
 
         # Simulate batch find_files output (3 searches, each with many files)
         def _mk_section(pattern, in_path, n):
@@ -972,7 +983,7 @@ class TestDiskPersistence:
 
     def test_find_files_single_falls_through(self):
         """Single-search find_files output uses default single-file persist."""
-        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
         content = (
             'Files matching "*.py" in lib (5000 found):\n\n'
             + '\n'.join(f'lib/file_{k}.py' for k in range(5000))
@@ -985,7 +996,7 @@ class TestDiskPersistence:
         """Failed fetches in a batch should also appear as FAILED entries in the index."""
         import os
         import re as _re
-        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
 
         url1 = 'https://ok.example.com/a'
         url2 = 'https://bad.example.com/b'
@@ -1013,7 +1024,7 @@ class TestDiskPersistence:
 
     def test_web_search_structured_preview_shows_all_results(self):
         """web_search persist preview should show title/URL/snippet for ALL results."""
-        from lib.tasks_pkg.compaction import _generate_web_search_preview
+        from lib.tasks_pkg.compaction._persist import _generate_web_search_preview
         content = (
             "Search results:\n\n"
             "[1] First Result Title\n"
@@ -1053,14 +1064,15 @@ class TestDiskPersistence:
 
     def test_web_search_preview_fallback_for_non_structured(self):
         """Non-structured content should fall back to default truncation."""
-        from lib.tasks_pkg.compaction import _PERSIST_PREVIEW_CHARS, _generate_web_search_preview
+        from lib.tasks_pkg.compaction._constants import _PERSIST_PREVIEW_CHARS
+        from lib.tasks_pkg.compaction._persist import _generate_web_search_preview
         content = "This is not structured web search output. " * 500
         preview = _generate_web_search_preview(content)
         assert len(preview) <= _PERSIST_PREVIEW_CHARS
 
     def test_persist_to_disk_web_search_splits_per_result(self):
         """_persist_to_disk for web_search should split into per-result files."""
-        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
         content = (
             "Search results:\n\n"
             "[1] First\n    URL: https://a.com\n    Source: G\n\n"
@@ -1089,7 +1101,7 @@ class TestDiskPersistence:
 
     def test_persist_to_disk_grep_search_splits_per_file(self):
         """_persist_to_disk for grep_search should split results by source file."""
-        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
         content = 'grep "import" (*.py) — 20 matches:\n\n'
         content += 'lib/a.py:1:import os\nlib/a.py:2:import sys\n'
         content += 'lib/b.py:1:import json\nlib/b.py:3:import re\n'
@@ -1106,7 +1118,7 @@ class TestDiskPersistence:
 
     def test_persist_grep_search_single_file_fallback(self):
         """grep_search with matches in only 1 file should NOT split."""
-        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
         content = 'grep "x" (*.py) — 5 matches:\n\n'
         content += 'lib/only.py:1:x\n' * 500 + 'y' * 30000
         result = _persist_to_disk(content, 'grep_search', 'tc_gs2')
@@ -1115,7 +1127,7 @@ class TestDiskPersistence:
 
     def test_persist_web_search_single_result_fallback(self):
         """web_search with only 1 result should NOT split."""
-        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
         content = (
             "Search results:\n\n"
             "[1] Only Result\n    URL: https://only.com\n    Source: G\n\n"
@@ -1133,7 +1145,7 @@ class TestAggregateRoundBudget:
     """Verify per-round aggregate budget enforcement."""
 
     def test_under_budget_passthrough(self):
-        from lib.tasks_pkg.compaction import enforce_round_aggregate_budget
+        from lib.tasks_pkg.compaction.api import enforce_round_aggregate_budget
         results = {
             'tc_1': ('short result', 'grep_search', 'tc_1'),
             'tc_2': ('another short', 'run_command', 'tc_2'),
@@ -1144,7 +1156,10 @@ class TestAggregateRoundBudget:
         assert updated['tc_2'][0] == 'another short'
 
     def test_over_budget_persists_largest(self):
-        from lib.tasks_pkg.compaction import MAX_ROUND_TOOL_RESULTS_CHARS, enforce_round_aggregate_budget
+        from lib.tasks_pkg.compaction._constants import (
+            MAX_ROUND_TOOL_RESULTS_CHARS,
+        )
+        from lib.tasks_pkg.compaction.api import enforce_round_aggregate_budget
         # Create 5 results that together exceed 300K
         results = {}
         for i in range(5):
@@ -1168,7 +1183,7 @@ class TestAggregateRoundBudget:
         assert total <= MAX_ROUND_TOOL_RESULTS_CHARS + 50_000  # some slack
 
     def test_exempt_tools_not_persisted_by_aggregate(self):
-        from lib.tasks_pkg.compaction import enforce_round_aggregate_budget
+        from lib.tasks_pkg.compaction.api import enforce_round_aggregate_budget
         results = {
             'tc_1': ('x' * 200_000, 'read_files', 'tc_1'),  # exempt
             'tc_2': ('y' * 200_000, 'grep_search', 'tc_2'),  # not exempt
@@ -1189,23 +1204,23 @@ class TestEmptyResultMarker:
     """Verify empty tool results get descriptive markers."""
 
     def test_empty_string_gets_marker(self):
-        from lib.tasks_pkg.compaction import mark_empty_result
+        from lib.tasks_pkg.compaction.api import mark_empty_result
         result = mark_empty_result('run_command', '')
         assert 'run_command' in result
         assert 'completed with no output' in result
 
     def test_whitespace_only_gets_marker(self):
-        from lib.tasks_pkg.compaction import mark_empty_result
+        from lib.tasks_pkg.compaction.api import mark_empty_result
         result = mark_empty_result('run_command', '   \n  \t  ')
         assert 'completed with no output' in result
 
     def test_non_empty_passthrough(self):
-        from lib.tasks_pkg.compaction import mark_empty_result
+        from lib.tasks_pkg.compaction.api import mark_empty_result
         content = 'Some actual output'
         assert mark_empty_result('run_command', content) == content
 
     def test_non_string_passthrough(self):
-        from lib.tasks_pkg.compaction import mark_empty_result
+        from lib.tasks_pkg.compaction.api import mark_empty_result
         content = 12345
         assert mark_empty_result('run_command', content) == content
 
@@ -1219,7 +1234,8 @@ class TestMicroCompactPersistenceMarkers:
     """Verify micro_compact skips persistence markers."""
 
     def test_skips_persisted_markers(self):
-        from lib.tasks_pkg.compaction import MICRO_HOT_TAIL, micro_compact
+        from lib.tasks_pkg.compaction._constants import MICRO_HOT_TAIL
+        from lib.tasks_pkg.compaction.api import micro_compact
         messages = [{'role': 'system', 'content': 'System'}]
         # Add more than MICRO_HOT_TAIL tool results, some with persistence markers
         for i in range(MICRO_HOT_TAIL + 5):
@@ -1291,7 +1307,7 @@ class TestAssistantContentCompaction:
 
     def test_phase_d_disabled_by_default(self):
         """Phase D should NOT compact when enable_assistant_compact is not set."""
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.compaction.api import micro_compact
         messages = self._build_conversation(num_rounds=12, content_len=1500)
         micro_compact(messages)
         # No assistant messages should be compacted (Phase D disabled by default)
@@ -1306,7 +1322,7 @@ class TestAssistantContentCompaction:
 
     def test_cold_assistant_messages_compacted_when_enabled(self):
         """Assistant messages outside hot tail should be compacted when opted in."""
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.compaction.api import micro_compact
         messages = self._build_conversation(num_rounds=12, content_len=1500)
         tokens_saved = micro_compact(messages, enable_assistant_compact=True)
         # Should have compacted some assistant messages
@@ -1321,7 +1337,7 @@ class TestAssistantContentCompaction:
 
     def test_hot_tail_assistant_messages_preserved(self):
         """The 6 most recent assistant messages should NOT be compacted."""
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.compaction.api import micro_compact
         messages = self._build_conversation(num_rounds=12, content_len=1500)
         micro_compact(messages, enable_assistant_compact=True)
         # Get the last 6 assistant messages
@@ -1335,7 +1351,7 @@ class TestAssistantContentCompaction:
 
     def test_short_assistant_content_not_compacted(self):
         """Assistant content under threshold (800 chars) should be preserved."""
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.compaction.api import micro_compact
         messages = self._build_conversation(num_rounds=12, content_len=200)
         tokens_saved = micro_compact(messages, enable_assistant_compact=True)
         # No assistant messages should be compacted (all < 800 chars)
@@ -1349,7 +1365,7 @@ class TestAssistantContentCompaction:
 
     def test_empty_content_assistant_skipped(self):
         """Assistant messages with empty/None content (tool_calls only) should be skipped."""
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.compaction.api import micro_compact
         messages = [{'role': 'system', 'content': 'test'}]
         for i in range(12):
             messages.append({'role': 'user', 'content': f'Q{i}'})
@@ -1375,7 +1391,7 @@ class TestAssistantContentCompaction:
 
     def test_already_compacted_not_double_compacted(self):
         """Assistant messages already compacted should not be re-compacted."""
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.compaction.api import micro_compact
         messages = self._build_conversation(num_rounds=12, content_len=1500)
         micro_compact(messages, enable_assistant_compact=True)
         # Run again
@@ -1396,7 +1412,7 @@ class TestAssistantContentCompaction:
 
     def test_preview_preserved_in_compacted(self):
         """Compacted assistant messages should preserve a 200-char preview."""
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.compaction.api import micro_compact
         messages = self._build_conversation(num_rounds=12, content_len=2000)
         micro_compact(messages, enable_assistant_compact=True)
         compacted = [
@@ -1414,7 +1430,7 @@ class TestAssistantContentCompaction:
 
     def test_list_content_compacted(self):
         """Assistant messages with list content blocks should be compacted."""
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.compaction.api import micro_compact
         messages = [{'role': 'system', 'content': 'test'}]
         for i in range(12):
             messages.append({'role': 'user', 'content': f'Q{i}'})
@@ -1435,7 +1451,7 @@ class TestAssistantContentCompaction:
 
     def test_token_savings_reported(self):
         """micro_compact should report token savings from assistant compaction."""
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.compaction.api import micro_compact
         messages = self._build_conversation(num_rounds=12, content_len=2000)
         tokens_saved = micro_compact(messages, enable_assistant_compact=True)
         # Each compacted message saves ~(2000 - 250) / 4 ≈ 437 tokens
@@ -1489,7 +1505,7 @@ class TestTurnBoundary:
     def test_current_turn_always_preserved_fewer_turns_than_cap(self):
         """Regression for conv=modearkif6k9tr: few user turns + many tool
         messages must still preserve the current turn."""
-        from lib.tasks_pkg.compaction import _find_turn_boundary
+        from lib.tasks_pkg.compaction._layer2._anchor import _find_turn_boundary
         msgs = [{'role': 'system', 'content': 'You are helpful.'}]
         # 4 user turns, each with 50 tool messages (like the bug conv)
         for k in range(4):
@@ -1513,7 +1529,7 @@ class TestTurnBoundary:
 
     def test_current_turn_preserved_even_when_oversized(self):
         """If the current turn alone exceeds the budget, preserve it anyway."""
-        from lib.tasks_pkg.compaction import _find_turn_boundary
+        from lib.tasks_pkg.compaction._layer2._anchor import _find_turn_boundary
         # Build a huge single turn that dwarfs any budget
         msgs = [{'role': 'user', 'content': 'tiny old Q'}]
         msgs.append({'role': 'assistant', 'content': 'tiny old A'})
@@ -1526,7 +1542,7 @@ class TestTurnBoundary:
 
     def test_budget_caps_older_turns(self):
         """Budget limits how many PRIOR turns (beyond current) are kept."""
-        from lib.tasks_pkg.compaction import _find_turn_boundary
+        from lib.tasks_pkg.compaction._layer2._anchor import _find_turn_boundary
         msgs = []
         for k in range(10):
             msgs.extend(self._mk_agentic_turn(f'Q{k}', n_tool_rounds=2,
@@ -1543,7 +1559,7 @@ class TestTurnBoundary:
 
     def test_max_turns_caps_preservation(self):
         """max_turns caps how many turns are kept regardless of budget."""
-        from lib.tasks_pkg.compaction import _find_turn_boundary
+        from lib.tasks_pkg.compaction._layer2._anchor import _find_turn_boundary
         msgs = []
         for k in range(20):
             msgs.extend(self._mk_agentic_turn(f'Q{k}', n_tool_rounds=1))
@@ -1557,7 +1573,7 @@ class TestTurnBoundary:
 
     def test_refuse_when_no_user_message(self):
         """No user message → return len(messages) to signal refusal."""
-        from lib.tasks_pkg.compaction import _find_turn_boundary
+        from lib.tasks_pkg.compaction._layer2._anchor import _find_turn_boundary
         msgs = [
             {'role': 'system', 'content': 'sys'},
             {'role': 'assistant', 'content': 'hello'},
@@ -1567,7 +1583,7 @@ class TestTurnBoundary:
     def test_boundary_always_on_user_index(self):
         """Invariant: the returned boundary points at a 'user' message
         (or len(messages) for refusal)."""
-        from lib.tasks_pkg.compaction import _find_turn_boundary
+        from lib.tasks_pkg.compaction._layer2._anchor import _find_turn_boundary
         msgs = [{'role': 'system', 'content': 'sys'}]
         for k in range(5):
             msgs.extend(self._mk_agentic_turn(f'Q{k}', n_tool_rounds=3))
@@ -1577,7 +1593,7 @@ class TestTurnBoundary:
 
     def test_single_turn_conversation(self):
         """A fresh conversation with just one turn → the whole turn is preserved."""
-        from lib.tasks_pkg.compaction import _find_turn_boundary
+        from lib.tasks_pkg.compaction._layer2._anchor import _find_turn_boundary
         msgs = [{'role': 'system', 'content': 'sys'}]
         msgs.extend(self._mk_agentic_turn('hi', n_tool_rounds=2))
         boundary = _find_turn_boundary(msgs)
@@ -1596,9 +1612,8 @@ class TestTurnBoundaryRegression:
     always preserve at least the current turn."""
 
     def test_turn_boundary_preserves_current_turn_with_few_users(self):
-        from lib.tasks_pkg.compaction import (
-            _find_turn_boundary, _MAX_PRESERVE_TURNS,
-        )
+        from lib.tasks_pkg.compaction._constants import _MAX_PRESERVE_TURNS
+        from lib.tasks_pkg.compaction._layer2._anchor import _find_turn_boundary
         msgs = [{'role': 'system', 'content': 'sys'}]
         # Only 4 user turns — fewer than _MAX_PRESERVE_TURNS (16).
         for k in range(4):
@@ -1631,7 +1646,7 @@ class TestRelevanceFormatFilter:
     assistant messages to the relevance-rating cheap model."""
 
     def test_tool_messages_excluded(self):
-        from lib.tasks_pkg.compaction import _format_messages_for_summary
+        from lib.tasks_pkg.compaction._layer2._prompt import _format_messages_for_summary
         msgs = [
             {'role': 'user', 'content': 'find foo'},
             {'role': 'assistant', 'content': None,
@@ -1652,7 +1667,7 @@ class TestRelevanceFormatFilter:
         assert 'grep_search' not in out
 
     def test_tool_call_only_assistant_dropped(self):
-        from lib.tasks_pkg.compaction import _format_messages_for_summary
+        from lib.tasks_pkg.compaction._layer2._prompt import _format_messages_for_summary
         msgs = [
             {'role': 'user', 'content': 'question'},
             {'role': 'assistant', 'content': '',
@@ -1666,7 +1681,7 @@ class TestRelevanceFormatFilter:
 
     def test_assistant_with_text_kept_even_with_tool_calls(self):
         """Assistant message with both text AND tool_calls — text is kept."""
-        from lib.tasks_pkg.compaction import _format_messages_for_summary
+        from lib.tasks_pkg.compaction._layer2._prompt import _format_messages_for_summary
         msgs = [
             {'role': 'user', 'content': 'Q'},
             {'role': 'assistant',
@@ -1679,7 +1694,7 @@ class TestRelevanceFormatFilter:
         assert 'I need to investigate' in out
 
     def test_system_messages_excluded(self):
-        from lib.tasks_pkg.compaction import _format_messages_for_summary
+        from lib.tasks_pkg.compaction._layer2._prompt import _format_messages_for_summary
         msgs = [
             {'role': 'system', 'content': 'You are helpful'},
             {'role': 'user', 'content': 'Q'},
@@ -1690,7 +1705,7 @@ class TestRelevanceFormatFilter:
 
     def test_reasoning_content_excluded(self):
         """reasoning_content (thinking) must not leak into relevance format."""
-        from lib.tasks_pkg.compaction import _format_messages_for_summary
+        from lib.tasks_pkg.compaction._layer2._prompt import _format_messages_for_summary
         msgs = [
             {'role': 'user', 'content': 'Q'},
             {'role': 'assistant', 'content': 'Answer',
@@ -1701,7 +1716,7 @@ class TestRelevanceFormatFilter:
         assert '[assistant] Answer' in out
 
     def test_empty_user_skipped(self):
-        from lib.tasks_pkg.compaction import _format_messages_for_summary
+        from lib.tasks_pkg.compaction._layer2._prompt import _format_messages_for_summary
         msgs = [
             {'role': 'user', 'content': ''},
             {'role': 'user', 'content': '   '},
@@ -1712,13 +1727,23 @@ class TestRelevanceFormatFilter:
         # Only one [user] line should be present
         assert out.count('[user]') == 1
 
+    def test_meta_user_carrier_is_labelled_as_context(self):
+        from lib.tasks_pkg.compaction._layer2._prompt import _format_messages_for_summary
+        out = _format_messages_for_summary([
+            {'role': 'user', '_isMeta': True, 'content': 'project rules'},
+            {'role': 'user', 'content': 'real question'},
+        ])
+        assert '[context] project rules' in out
+        assert '[user] project rules' not in out
+        assert '[user] real question' in out
+
 
 @pytest.mark.unit
 class TestContextLimitDetection:
     """Ensure newer Claude versions aren't silently downgraded to 200k."""
 
     def test_claude_opus_47_variants(self):
-        from lib.tasks_pkg.compaction import _get_context_limit
+        from lib.tasks_pkg.compaction._tokens import _get_context_limit
         variants = [
             'aws.claude-opus-4.7',
             'claude-opus-4-7',
@@ -1734,12 +1759,12 @@ class TestContextLimitDetection:
             )
 
     def test_claude_sonnet_46_plus(self):
-        from lib.tasks_pkg.compaction import _get_context_limit
+        from lib.tasks_pkg.compaction._tokens import _get_context_limit
         for m in ['claude-sonnet-4.6', 'claude-sonnet-4-7', 'aws.claude-sonnet-4.8']:
             assert _get_context_limit({'config': {'model': m}}) == 1_000_000
 
     def test_older_claude_still_200k(self):
-        from lib.tasks_pkg.compaction import _get_context_limit
+        from lib.tasks_pkg.compaction._tokens import _get_context_limit
         assert _get_context_limit({'config': {'model': 'claude-3-opus'}}) == 200_000
         assert _get_context_limit({'config': {'model': 'claude-3.5-sonnet'}}) == 200_000
 
@@ -1750,7 +1775,7 @@ class TestCompactRefusalGuards:
 
     def test_refuses_when_no_user_message(self, monkeypatch):
         """No user msg → compaction is refused, messages untouched."""
-        from lib.tasks_pkg.compaction import execute_compact_tool
+        from lib.tasks_pkg.compaction.api import execute_compact_tool
         msgs = [
             {'role': 'system', 'content': 'sys'},
             {'role': 'assistant', 'content': 'orphaned'},
@@ -1767,7 +1792,8 @@ class TestCompactRefusalGuards:
 
     def test_cooldown_not_set_on_refusal(self):
         """Refused compactions must not claim the 30s cooldown slot."""
-        from lib.tasks_pkg.compaction import _summary_cooldowns, execute_compact_tool
+        from lib.tasks_pkg.compaction._constants import _summary_cooldowns
+        from lib.tasks_pkg.compaction.api import execute_compact_tool
         conv_id = 'conv_cooldown_test'
         _summary_cooldowns.pop(conv_id, None)
         msgs = [{'role': 'assistant', 'content': 'orphaned'}]  # no user
@@ -1802,7 +1828,7 @@ class TestForceCompactReportsSummaryFailure:
         return msgs
 
     def test_empty_summary_returns_false_and_no_injection(self, monkeypatch):
-        from lib.tasks_pkg.compaction import _layer2
+        import lib.tasks_pkg.compaction._layer2._compact as _layer2
 
         # Force the summary LLM to come back empty (the exact failure mode).
         monkeypatch.setattr(_layer2, '_generate_query_aware_summary',
@@ -1812,7 +1838,7 @@ class TestForceCompactReportsSummaryFailure:
 
         msgs = self._mk_messages()
         original = list(msgs)
-        task = {'id': 'fail_test', 'convId': 'conv_fail',
+        task = {'id': 'fail_test', 'convId': 'conv_fail', '_userId': 1,
                 'config': {'model': 'gpt-4'}}
 
         result = _layer2.force_compact_if_needed(
@@ -1829,14 +1855,14 @@ class TestForceCompactReportsSummaryFailure:
         )
 
     def test_successful_summary_returns_true_and_injects(self, monkeypatch):
-        from lib.tasks_pkg.compaction import _layer2
+        import lib.tasks_pkg.compaction._layer2._compact as _layer2
 
         monkeypatch.setattr(_layer2, '_generate_query_aware_summary',
                             lambda *a, **k: 'SUMMARY BODY')
         monkeypatch.setattr(_layer2, '_archive_transcript', lambda *a, **k: None)
 
         msgs = self._mk_messages()
-        task = {'id': 'ok_test', 'convId': 'conv_ok',
+        task = {'id': 'ok_test', 'convId': 'conv_ok', '_userId': 1,
                 'config': {'model': 'gpt-4'}}
 
         result = _layer2.force_compact_if_needed(
@@ -1853,8 +1879,9 @@ class TestForceCompactReportsSummaryFailure:
         """The reported after-count describes the next request, including the
         synthetic context_compact call/result, not the intermediate list before
         that pair is appended."""
-        from lib.tasks_pkg.compaction import _estimate_total_tokens, _layer2
-        import lib.tasks_pkg.cache_tracking as cache_tracking
+        import lib.tasks_pkg.compaction._layer2._compact as _layer2
+        from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
+        import lib.tasks_pkg.cache_tracking._roi as cache_tracking
 
         summary = 'dense summary payload ' * 120
         monkeypatch.setattr(
@@ -1870,6 +1897,7 @@ class TestForceCompactReportsSummaryFailure:
             if isinstance(msg.get('content'), str):
                 msg['content'] += ' payload' * 400
         task = {'id': 'metrics_pair', 'convId': 'conv_metrics_pair',
+                '_userId': 1,
                 'config': {'model': 'gpt-4'}}
 
         result = _layer2.force_compact_if_needed(
@@ -1885,7 +1913,7 @@ class TestForceCompactReportsSummaryFailure:
         assert metrics['tokens_before'] > metrics['tokens_after']
 
     def test_archive_records_the_actual_pipeline_round(self, monkeypatch):
-        from lib.tasks_pkg.compaction import _layer2
+        import lib.tasks_pkg.compaction._layer2._compact as _layer2
 
         monkeypatch.setattr(
             _layer2, '_generate_query_aware_summary',
@@ -1899,6 +1927,7 @@ class TestForceCompactReportsSummaryFailure:
         result = _layer2.force_compact_if_needed(
             msgs,
             task={'id': 'archive-round', 'convId': 'archive-round',
+                  '_userId': 1,
                   'config': {'model': 'gpt-4'}},
             force=True, keep_recent_pairs=1, _compaction_round=37,
         )
@@ -1957,12 +1986,13 @@ class TestPairedAssistantCompaction:
 
     def test_off_by_default_no_paired_compaction(self):
         """micro_compact must NOT compact interstitials unless flag is set."""
-        import lib.tasks_pkg.compaction as _c
+        import lib.tasks_pkg.compaction._constants as _c
+        from lib.tasks_pkg.compaction.api import micro_compact
         orig = _c.MICRO_HOT_TAIL
         _c.MICRO_HOT_TAIL = 2
         try:
             msgs = self._mk_conversation(6)
-            _c.micro_compact(msgs, conv_id='test_off')
+            micro_compact(msgs, conv_id='test_off')
             # No assistant content should be replaced with the
             # interstitial-compacted marker
             touched = [m for m in msgs
@@ -1975,12 +2005,13 @@ class TestPairedAssistantCompaction:
 
     def test_on_compacts_paired_assistants(self):
         """With flag enabled, paired interstitials on cold rounds compact."""
-        import lib.tasks_pkg.compaction as _c
+        import lib.tasks_pkg.compaction._constants as _c
+        from lib.tasks_pkg.compaction.api import micro_compact
         orig = _c.MICRO_HOT_TAIL
         _c.MICRO_HOT_TAIL = 2
         try:
             msgs = self._mk_conversation(6)
-            _c.micro_compact(msgs, conv_id='test_on',
+            micro_compact(msgs, conv_id='test_on',
                              enable_paired_assistant_compact=True)
             touched = [m for m in msgs
                        if m.get('role') == 'assistant'
@@ -1995,7 +2026,8 @@ class TestPairedAssistantCompaction:
     def test_current_turn_interstitial_preserved(self):
         """Phase B2 must NEVER touch interstitials in the hot tail — they're
         still active context for the model."""
-        import lib.tasks_pkg.compaction as _c
+        import lib.tasks_pkg.compaction._constants as _c
+        from lib.tasks_pkg.compaction.api import micro_compact
         orig = _c.MICRO_HOT_TAIL
         _c.MICRO_HOT_TAIL = 2
         try:
@@ -2005,7 +2037,7 @@ class TestPairedAssistantCompaction:
                              if m.get('role') == 'assistant']
             hot_assistant_indices = assistant_idx[-2:]
             before = [msgs[i]['content'] for i in hot_assistant_indices]
-            _c.micro_compact(msgs, conv_id='test_hot',
+            micro_compact(msgs, conv_id='test_hot',
                              enable_paired_assistant_compact=True)
             after = [msgs[i]['content'] for i in hot_assistant_indices]
             assert before == after, (
@@ -2016,17 +2048,18 @@ class TestPairedAssistantCompaction:
 
     def test_idempotent(self):
         """Running B2 twice must not double-compact."""
-        import lib.tasks_pkg.compaction as _c
+        import lib.tasks_pkg.compaction._constants as _c
+        from lib.tasks_pkg.compaction.api import micro_compact
         orig = _c.MICRO_HOT_TAIL
         _c.MICRO_HOT_TAIL = 2
         try:
             msgs = self._mk_conversation(6)
-            _c.micro_compact(msgs, conv_id='idem1',
+            micro_compact(msgs, conv_id='idem1',
                              enable_paired_assistant_compact=True)
             snapshot = [
                 m.get('content') for m in msgs if m.get('role') == 'assistant'
             ]
-            _c.micro_compact(msgs, conv_id='idem2',
+            micro_compact(msgs, conv_id='idem2',
                              enable_paired_assistant_compact=True)
             after = [
                 m.get('content') for m in msgs if m.get('role') == 'assistant'
@@ -2037,7 +2070,8 @@ class TestPairedAssistantCompaction:
 
     def test_short_interstitial_skipped(self):
         """Interstitials below _PAIRED_COMMENTARY_THRESHOLD (200) are untouched."""
-        import lib.tasks_pkg.compaction as _c
+        import lib.tasks_pkg.compaction._constants as _c
+        from lib.tasks_pkg.compaction.api import micro_compact
         orig_ht = _c.MICRO_HOT_TAIL
         _c.MICRO_HOT_TAIL = 2
         try:
@@ -2058,7 +2092,7 @@ class TestPairedAssistantCompaction:
                     'role': 'tool', 'tool_call_id': tc_id,
                     'name': 'grep_search', 'content': 'match\n' * 500,
                 })
-            _c.micro_compact(msgs, conv_id='test_short',
+            micro_compact(msgs, conv_id='test_short',
                              enable_paired_assistant_compact=True)
             touched = [m for m in msgs
                        if m.get('role') == 'assistant'
@@ -2074,7 +2108,7 @@ class TestPairedAssistantCompaction:
         """reactive_compact must pass enable_paired_assistant_compact=True
         alongside enable_assistant_compact=True."""
         import inspect
-        from lib.tasks_pkg import compaction as _c
+        import lib.tasks_pkg.compaction._reactive as _c
         src = inspect.getsource(_c.reactive_compact)
         assert 'enable_paired_assistant_compact=True' in src, (
             'reactive_compact should enable Phase B2 — cache is being '
@@ -2085,7 +2119,7 @@ class TestPairedAssistantCompaction:
     def test_micro_compact_kwarg_accepted(self):
         """Defensive: ensure the flag is actually wired through."""
         import inspect
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.compaction.api import micro_compact
         src = inspect.getsource(micro_compact)
         assert 'enable_paired_assistant_compact' in src, (
             'micro_compact must honor enable_paired_assistant_compact kwarg')
@@ -2133,7 +2167,7 @@ class TestProactiveHeadTruncateFallback:
     @staticmethod
     def _task_128k():
         # gpt-4 → 128k window in _get_static_context_limit.
-        return {'id': 'oom_test', 'convId': 'conv-oom',
+        return {'id': 'oom_test', 'convId': 'conv-oom', '_userId': 1,
                 'config': {'model': 'gpt-4'}}
 
     def _stub_summary_fail(self, monkeypatch):
@@ -2145,7 +2179,7 @@ class TestProactiveHeadTruncateFallback:
         the REAL graceful-degradation path (cheap→text retry) end to end,
         then still raises so the summary genuinely fails."""
         import lib.llm_dispatch as _ld
-        from lib.tasks_pkg.compaction import _layer2
+        import lib.tasks_pkg.compaction._layer2._compact as _layer2
 
         def _boom(*a, **k):
             raise RuntimeError('All 3 dispatch attempts failed for capability=cheap')
@@ -2185,7 +2219,7 @@ class TestProactiveHeadTruncateFallback:
     def test_force_compact_fallback_returns_true_and_truncates(self, monkeypatch):
         """Unit-level: force_compact_if_needed(_allow_head_truncate_fallback=True)
         returns True and drops messages when summary fails + over budget."""
-        from lib.tasks_pkg.compaction import _layer2
+        import lib.tasks_pkg.compaction._layer2._compact as _layer2
         self._stub_summary_fail(monkeypatch)
 
         msgs = self._oversized_messages()
@@ -2201,7 +2235,7 @@ class TestProactiveHeadTruncateFallback:
         failure → returns False and does NOT truncate. This is the
         force-compact-empty-summary-fatal-loop contract that reactive_compact's
         own Phase-4 head-truncate depends on."""
-        from lib.tasks_pkg.compaction import _layer2
+        import lib.tasks_pkg.compaction._layer2._compact as _layer2
         self._stub_summary_fail(monkeypatch)
 
         msgs = self._oversized_messages()
@@ -2217,7 +2251,7 @@ class TestProactiveHeadTruncateFallback:
         """WITH the flag but context UNDER the window: summary failure still
         returns False and does not gratuitously truncate. Only a genuine
         over-window overflow triggers the head-truncate escape."""
-        from lib.tasks_pkg.compaction import _layer2
+        import lib.tasks_pkg.compaction._layer2._compact as _layer2
         self._stub_summary_fail(monkeypatch)
 
         # Small conversation, nowhere near a 128k window.
@@ -2238,7 +2272,7 @@ class TestProactiveHeadTruncateFallback:
         also pass _allow_head_truncate_fallback to force_compact (that would
         double-truncate). Guards the byte-identical-reactive requirement."""
         import inspect
-        from lib.tasks_pkg.compaction import _reactive
+        import lib.tasks_pkg.compaction._reactive as _reactive
         src = inspect.getsource(_reactive.reactive_compact)
         assert '_allow_head_truncate_fallback' not in src, (
             'reactive_compact must not opt into the proactive head-truncate '

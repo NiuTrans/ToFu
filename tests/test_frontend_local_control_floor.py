@@ -216,7 +216,7 @@ HARNESS = textwrap.dedent("""
     global.desktopEnabled = false;
     global._applyBrowserUI = (v) => {{ global.browserEnabled = !!v; }};
     global._applyDesktopUI = (v) => {{ global.desktopEnabled = !!v; }};
-    global._saveConvToolState = () => {{}};
+    global.captureActiveConversationSettings = () => {{}};
     global.updateSubmenuCounts = () => {{}};
     global.showToast = () => {{}};
     global._safeClipboardWrite = () => Promise.resolve();

@@ -1,63 +1,43 @@
-"""lib.billing.payments._common — Helpers shared by all providers.
-
-Owns the ``billing_payments`` row lifecycle:
-  pending → settled  (success path)
-  pending → failed   (provider-rejected / cancelled)
-
-Plus the conversion from provider minor units (cents / 分) to micro-
-credits, gated by an operator-tunable ratio in payments.json.
-"""
+"""Payment row lifecycle implemented as atomic semantic storage commands."""
 
 from __future__ import annotations
 
-import json
-import time
 from dataclasses import dataclass
+import hashlib
+import json
 from typing import List, Optional
 
 from lib.config_dir import config_path
-from lib.database import (
-    DOMAIN_SYSTEM,
-    get_thread_db,
-    write_transaction,
-)
-from lib.ids import short_id
 from lib.json_store import read_json
 from lib.log import audit_log, get_logger
+from lib.storage import get_storage_client
+
 
 logger = get_logger(__name__)
-
 _DEFAULT_CREDIT_PER_MINOR_UNIT = 1.0
 
 
 def _payments_settings() -> dict:
-    raw = read_json(config_path('payments.json'),
-                    default={
-                        'stripe': {},
-                        'alipay': {},
-                        'credit_per_minor_unit':
-                            _DEFAULT_CREDIT_PER_MINOR_UNIT,
-                    })
-    if not isinstance(raw, dict):
-        return {}
-    return raw
+    raw = read_json(config_path('payments.json'), default={
+        'stripe': {}, 'alipay': {},
+        'credit_per_minor_unit': _DEFAULT_CREDIT_PER_MINOR_UNIT,
+    })
+    return raw if isinstance(raw, dict) else {}
 
 
 def credit_per_minor_unit() -> float:
-    """How many credits one minor unit of the provider currency buys."""
-    s = _payments_settings()
+    settings = _payments_settings()
     try:
-        return float(s.get('credit_per_minor_unit')
-                      or _DEFAULT_CREDIT_PER_MINOR_UNIT)
-    except (TypeError, ValueError) as e:
-        logger.debug('[Payments] Bad credit_per_minor_unit, using default: %s', e)
+        return float(settings.get('credit_per_minor_unit')
+                     or _DEFAULT_CREDIT_PER_MINOR_UNIT)
+    except (TypeError, ValueError) as exc:
+        logger.debug(
+            '[Payments] Bad credit_per_minor_unit, using default: %s', exc)
         return _DEFAULT_CREDIT_PER_MINOR_UNIT
 
 
 def minor_to_micro(amount_minor: int) -> int:
-    """Convert provider minor units → integer micro-credits."""
-    credits = float(amount_minor) * credit_per_minor_unit()
-    return int(round(credits * 1_000_000))
+    return int(round(float(amount_minor) * credit_per_minor_unit() * 1_000_000))
 
 
 @dataclass(frozen=True)
@@ -69,61 +49,58 @@ class PaymentRecord:
     amount_minor: int
     currency: str
     credit_micro: int
-    status: str  # pending | settled | failed
+    status: str
     created_at: int
     settled_at: int
     raw: dict
 
     @classmethod
     def from_row(cls, row) -> 'PaymentRecord':
-        if hasattr(row, 'keys'):
-            raw = row['raw']
-        else:
-            raw = row[10]
-        try:
-            raw_d = json.loads(raw) if raw else {}
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.debug('[Payments] Malformed raw payload, defaulting: %s', e)
-            raw_d = {}
-        if hasattr(row, 'keys'):
-            return cls(
-                id=row['id'], user_id=row['user_id'],
-                provider=row['provider'],
-                provider_id=row['provider_id'] or '',
-                amount_minor=int(row['amount_minor']),
-                currency=row['currency'],
-                credit_micro=int(row['credit_micro']),
-                status=row['status'],
-                created_at=int(row['created_at']),
-                settled_at=int(row['settled_at']),
-                raw=raw_d,
-            )
+        raw = row.get('raw') or {}
+        if not isinstance(raw, dict):
+            try:
+                raw = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                raw = {}
         return cls(
-            id=row[0], user_id=row[1], provider=row[2],
-            provider_id=row[3] or '', amount_minor=int(row[4]),
-            currency=row[5], credit_micro=int(row[6]),
-            status=row[7], created_at=int(row[8]),
-            settled_at=int(row[9]), raw=raw_d,
+            id=str(row['id']), user_id=str(row['user_id']),
+            provider=str(row['provider']),
+            provider_id=str(row.get('provider_id') or ''),
+            amount_minor=int(row['amount_minor']), currency=str(row['currency']),
+            credit_micro=int(row['credit_micro']), status=str(row['status']),
+            created_at=int(row['created_at']), settled_at=int(row['settled_at']),
+            raw=raw,
         )
 
 
-def _new_payment_id() -> str:
-    return short_id('pay_')
+def _stable_id(prefix: str, *parts: object) -> str:
+    digest = hashlib.sha256('\0'.join(map(str, parts)).encode('utf-8')).hexdigest()
+    return f'{prefix}{digest[:32]}'
+
+
+def _command_id(operation: str, payload: dict) -> str:
+    """Identify one concrete request while business keys handle deduplication.
+
+    A provider payment ID is a business idempotency key: the first accepted
+    payment wins even if a later webhook contains different fields.  Receipt
+    IDs, however, identify an exact command replay and therefore include the
+    canonical request body.
+    """
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'),
+    ).encode('utf-8')
+    return _stable_id(
+        'cmd_', operation, hashlib.sha256(encoded).hexdigest())
 
 
 def find_by_provider_id(provider: str, provider_id: str) -> Optional[PaymentRecord]:
-    """Idempotency lookup."""
     if not provider_id:
         return None
-    db = get_thread_db(DOMAIN_SYSTEM)
-    row = db.execute(
-        'SELECT id, user_id, provider, provider_id, amount_minor, '
-        '       currency, credit_micro, status, created_at, settled_at, raw '
-        '  FROM billing_payments '
-        ' WHERE provider = ? AND provider_id = ? '
-        ' LIMIT 1',
-        (provider, provider_id)).fetchone()
-    return PaymentRecord.from_row(row) if row is not None else None
+    value = get_storage_client().query(
+        'billing.payment.find', {
+            'provider': provider, 'provider_id': provider_id,
+        }, deadline=2.0)
+    return PaymentRecord.from_row(value) if value is not None else None
 
 
 def record_payment(
@@ -136,102 +113,57 @@ def record_payment(
     raw: Optional[dict] = None,
     status: str = 'pending',
 ) -> PaymentRecord:
-    """Insert a payment row. Idempotent on (provider, provider_id):
-    re-call with the same id returns the existing record.
-    """
     if not provider_id:
         raise ValueError('provider_id is required for an idempotent payment')
-    existing = find_by_provider_id(provider, provider_id)
-    if existing is not None:
-        return existing
-    pid = _new_payment_id()
-    now = int(time.time())
+    if status not in {'pending', 'settled', 'failed'}:
+        raise ValueError('invalid payment status')
     credit_micro = minor_to_micro(amount_minor)
-    raw_str = json.dumps(raw or {}, ensure_ascii=False, sort_keys=True)
-    db = get_thread_db(DOMAIN_SYSTEM)
-    try:
-        with write_transaction(db, label='record provider payment'):
-            db.execute(
-                'INSERT INTO billing_payments '
-                '  (id, user_id, provider, provider_id, amount_minor, currency, '
-                '   credit_micro, status, created_at, settled_at, raw) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
-                (pid, user_id, provider, provider_id, amount_minor, currency,
-                 credit_micro, status, now, raw_str))
-    except Exception:
-        # UNIQUE(provider, provider_id) is the cross-process idempotency
-        # verdict. A concurrent winner is success, not an API error.
-        existing = find_by_provider_id(provider, provider_id)
-        if existing is not None:
-            return existing
-        raise
-    audit_log('payment_recorded', payment_id=pid, user_id=user_id,
-              provider=provider, provider_id=provider_id,
-              amount_minor=amount_minor, status=status)
-    return PaymentRecord(
-        id=pid, user_id=user_id, provider=provider,
-        provider_id=provider_id, amount_minor=amount_minor,
-        currency=currency, credit_micro=credit_micro,
-        status=status, created_at=now, settled_at=0,
-        raw=raw or {})
+    identity = (provider, provider_id)
+    payload = {
+        'id': _stable_id('pay_', *identity), 'user_id': user_id,
+        'provider': provider, 'provider_id': provider_id,
+        'amount_minor': int(amount_minor), 'currency': currency,
+        'credit_micro': credit_micro, 'status': status,
+        'raw': dict(raw or {}),
+    }
+    result = get_storage_client(write=True).command(
+        'billing.payment.record', payload,
+        _command_id('billing.payment.record', payload), deadline=5.0,
+    )
+    payment = PaymentRecord.from_row(result['payment'])
+    if result.get('created'):
+        audit_log(
+            'payment_recorded', payment_id=payment.id, user_id=user_id,
+            provider=provider, provider_id=provider_id,
+            amount_minor=amount_minor, status=status)
+    return payment
 
 
 def mark_payment_settled(payment_id: str, *, raw: Optional[dict] = None) -> None:
-    """Flip a payment to status=settled and (idempotently) deposit the
-    credits into the user's wallet. Caller is responsible for calling
-    this AFTER the provider confirms successful settlement.
-    """
-    db = get_thread_db(DOMAIN_SYSTEM)
-    now = int(time.time())
-    raw_str = (json.dumps(raw, ensure_ascii=False, sort_keys=True)
-               if raw is not None else None)
-    with write_transaction(db, label='settle provider payment'):
-        row = db.execute(
-            'SELECT id, user_id, provider, provider_id, amount_minor, '
-            '       currency, credit_micro, status '
-            '  FROM billing_payments WHERE id = ?',
-            (payment_id,)).fetchone()
-        if row is None:
-            logger.warning('[Payments] settle: unknown payment %s', payment_id)
-            return
-        if hasattr(row, 'keys'):
-            user_id = row['user_id']
-            provider = row['provider']
-            provider_id = row['provider_id'] or ''
-            credit_micro = int(row['credit_micro'])
-            status = row['status']
-        else:
-            user_id = row[1]
-            provider = row[2]
-            provider_id = row[3] or ''
-            credit_micro = int(row[6])
-            status = row[7]
-        if status == 'settled':
-            return
-
-        # Deposit and payment transition share ONE outer transaction. deposit()
-        # nests via a savepoint on the same thread connection; its ledger
-        # idempotency constraint remains the duplicate-webhook verdict.
-        if credit_micro > 0:
-            from lib.billing import deposit
-            deposit(user_id, credit_micro, kind='topup',
-                    ref_type='payment', ref_id=provider_id or payment_id,
-                    note=f'{provider} payment settled')
-        if raw_str is not None:
-            cursor = db.execute(
-                'UPDATE billing_payments SET status=?, settled_at=?, raw=? '
-                "WHERE id=? AND status<>'settled'",
-                ('settled', now, raw_str, payment_id))
-        else:
-            cursor = db.execute(
-                'UPDATE billing_payments SET status=?, settled_at=? '
-                "WHERE id=? AND status<>'settled'",
-                ('settled', now, payment_id))
-    if getattr(cursor, 'rowcount', 0) == 0:
+    if not payment_id:
+        raise ValueError('payment_id required')
+    raw_document = dict(raw) if raw is not None else None
+    raw_digest = hashlib.sha256(
+        json.dumps(raw_document, ensure_ascii=False, sort_keys=True,
+                   separators=(',', ':')).encode('utf-8')
+        if raw_document is not None else b'').hexdigest()[:16]
+    result = get_storage_client(write=True).command(
+        'billing.payment.settle', {
+            'payment_id': payment_id, 'raw': raw_document,
+            'ledger_id': _stable_id('led_', 'payment', payment_id),
+        },
+        _stable_id('cmd_', 'billing.payment.settle', payment_id, raw_digest),
+        deadline=5.0,
+    )
+    if not result.get('found'):
+        logger.warning('[Payments] settle: unknown payment %s', payment_id)
         return
-    audit_log('payment_settled', payment_id=payment_id,
-              user_id=user_id, provider=provider,
-              credit_micro=credit_micro)
+    if result.get('settled'):
+        payment = PaymentRecord.from_row(result['payment'])
+        audit_log(
+            'payment_settled', payment_id=payment_id,
+            user_id=payment.user_id, provider=payment.provider,
+            credit_micro=payment.credit_micro)
 
 
 def list_payments(
@@ -242,30 +174,16 @@ def list_payments(
     limit: int = 100,
     offset: int = 0,
 ) -> List[PaymentRecord]:
-    db = get_thread_db(DOMAIN_SYSTEM)
-    where = []
-    params: list = []
-    if user_id:
-        where.append('user_id = ?'); params.append(user_id)
-    if provider:
-        where.append('provider = ?'); params.append(provider)
-    if status:
-        where.append('status = ?'); params.append(status)
-    sql = ('SELECT id, user_id, provider, provider_id, amount_minor, '
-           '       currency, credit_micro, status, created_at, '
-           '       settled_at, raw '
-           '  FROM billing_payments')
-    if where:
-        sql += ' WHERE ' + ' AND '.join(where)
-    sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
-    params.extend([int(limit), int(offset)])
-    rows = db.execute(sql, tuple(params)).fetchall()
-    return [PaymentRecord.from_row(r) for r in rows]
+    rows = get_storage_client().query(
+        'billing.payment.list', {
+            'user_id': user_id, 'provider': provider, 'status': status,
+            'limit': int(limit), 'offset': int(offset),
+        }, deadline=5.0)
+    return [PaymentRecord.from_row(row) for row in rows]
 
 
 __all__ = [
-    'PaymentRecord', '_payments_settings',
-    'credit_per_minor_unit', 'minor_to_micro',
-    'find_by_provider_id', 'record_payment',
-    'mark_payment_settled', 'list_payments',
+    'PaymentRecord', '_payments_settings', 'credit_per_minor_unit',
+    'find_by_provider_id', 'list_payments', 'mark_payment_settled',
+    'minor_to_micro', 'record_payment',
 ]

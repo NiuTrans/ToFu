@@ -1,205 +1,229 @@
-#!/usr/bin/env python3
-"""tests/test_settings_store.py — the serialized conversations.settings
-read-merge-write helper (lib/conversations/settings_store.py).
+"""Settings mutations use one owner-scoped, storage-side CAS boundary."""
 
-WHY
----
-~13 call sites used to do a bare read-modify-write of the WHOLE settings blob
-(``SELECT settings`` → mutate one key → ``UPDATE conversations SET settings=?``).
-Because each rewrites the ENTIRE blob, two concurrent settings writers silently
-clobber each other's keys (last writer wins). Real collisions on a single box:
-a tool-toggle PATCH dropping a just-stamped ``activeTaskId``; an autopilot
-summary store wiping the ``projectSummary`` cache. The messages column had a
-CAS helper; the settings column had NONE. The fix is a per-conv SERIALIZED
-read-merge-write (``update_conversation_settings`` / ``set_conversation_settings``)
-so every writer merges its key onto the FRESHEST blob.
+from __future__ import annotations
 
-Tests (drive the REAL helper against a real DB):
-  1. ``test_set_merges_without_clobber`` — two SEPARATE set calls each keep the
-     other's key (basic merge).
-  2. ``test_missing_conv_returns_none`` — absent row → None (skipped semantics).
-  3. ``test_mutate_false_skips_write`` — a mutate returning False writes nothing.
-  4. ``test_concurrent_writer_not_clobbered`` — ★ the clobber-prevention proof.
-     A concurrent settings write (stamping key B) sneaks in DURING our mutate
-     callback (which sets key A). Because the helper RE-READS under the lock,
-     the merge sees the fresh blob and BOTH keys survive.
-     Double-neuter: make the helper read settings ONCE before the lock (a bare
-     RMW) → key B is clobbered → this FAILS.
+import copy
+import threading
 
-Env note (see project memory): run DIRECTLY
-(``python tests/test_settings_store.py``) — bare pytest may lack the schema.
-"""
-
-import json as _json
-import os
-import sys
-import time
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-def _color(s, c): return f'\033[{c}m{s}\033[0m'
-def _ok(msg): print(' ', _color('✓', '32'), msg)
-def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
+import pytest
 
 
-def _seed(db, conv_id, settings):
-    from lib.database import json_dumps_pg
-    from lib.database._core_schema import CONVERSATIONS, upsert
-    now = int(time.time() * 1000)
-    upsert(db, CONVERSATIONS, {
-        'id': conv_id, 'user_id': 1, 'title': 'settings-test',
-        'messages': '[]', 'msg_count': 0,
-        'created_at': now, 'updated_at': now, 'search_text': '',
-        'settings': json_dumps_pg(settings),
-    }, insert_cols=['id', 'user_id', 'title', 'messages', 'msg_count',
-                    'created_at', 'updated_at', 'search_text', 'settings'],
-       retry=True)
-    db.commit()
+pytestmark = pytest.mark.unit
 
 
-def _read_settings(db, conv_id):
-    row = db.execute('SELECT settings, updated_at FROM conversations WHERE id=? AND user_id=1',
-                     (conv_id,)).fetchone()
-    if not row:
-        return None, None
-    s = _json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
-    return s, row[1]
+class _SettingsClient:
+    """Protocol-faithful in-memory client with deterministic conflict injection."""
+
+    def __init__(self, settings: dict | None = None, *, missing: bool = False):
+        self.settings = copy.deepcopy(settings or {})
+        self.missing = missing
+        self.commands: list[tuple] = []
+        self.lock = threading.Lock()
+        self.inject_before_next_command = None
+
+    def query(self, operation, payload):
+        assert operation == "conversation.get"
+        assert payload["derive_messages"] is False
+        if self.missing:
+            return None
+        with self.lock:
+            settings = copy.deepcopy(self.settings)
+        return {
+            "metadata": {
+                "id": payload["conv_id"],
+                "user_id": payload["user_id"],
+                "settings": settings,
+                "rev": 7,
+            },
+            "messages": [],
+        }
+
+    def command(self, operation, payload, command_id):
+        assert operation == "conversation.settings.update"
+        assert payload["replace"] is True
+        with self.lock:
+            if self.inject_before_next_command is not None:
+                injection = self.inject_before_next_command
+                self.inject_before_next_command = None
+                injection(self.settings)
+            self.commands.append((copy.deepcopy(payload), command_id))
+            if self.settings != payload["expected_settings"]:
+                return {
+                    "applied": False,
+                    "missing": False,
+                    "conflict": True,
+                    "rev": 7,
+                }
+            self.settings = copy.deepcopy(payload["updates"])
+            return {
+                "applied": True,
+                "missing": False,
+                "conflict": False,
+                "rev": 7,
+            }
 
 
-def _cleanup(db, conv_id):
-    from lib.database import db_execute_with_retry
-    db_execute_with_retry(db, 'DELETE FROM conversations WHERE id=? AND user_id=1', (conv_id,))
-    db.commit()
+@pytest.fixture
+def install_client(monkeypatch):
+    notifications = []
+
+    def install(client):
+        monkeypatch.setattr(
+            "lib.storage.get_storage_client", lambda **_kwargs: client
+        )
+        monkeypatch.setattr(
+            "lib.conversations.settings_store._publish_after_settings_write",
+            lambda *args: notifications.append(args),
+        )
+        return notifications
+
+    return install
 
 
-def test_set_merges_without_clobber():
+def test_set_calls_merge_without_clobbering_unrelated_keys(install_client):
     from lib.conversations import set_conversation_settings
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    conv_id = 'cv-set-merge'
-    db = get_thread_db(DOMAIN_CHAT)
-    _seed(db, conv_id, {'model': 'x'})
-    try:
-        set_conversation_settings(conv_id, {'activeTaskId': 't1'}, db=db)
-        set_conversation_settings(conv_id, {'autopilotEnabled': True}, db=db)
-        s, _ = _read_settings(db, conv_id)
-        assert s.get('model') == 'x', s
-        assert s.get('activeTaskId') == 't1', s
-        assert s.get('autopilotEnabled') is True, s
-    finally:
-        _cleanup(db, conv_id)
-    _ok('sequential set calls merge (no key clobbered)')
+
+    client = _SettingsClient({"model": "x"})
+    notifications = install_client(client)
+
+    set_conversation_settings("conv-settings", {"activeTaskId": "t1"}, user_id=1)
+    set_conversation_settings("conv-settings", {"autopilotEnabled": True}, user_id=1)
+
+    assert client.settings == {
+        "model": "x",
+        "activeTaskId": "t1",
+        "autopilotEnabled": True,
+    }
+    assert len(notifications) == 2
 
 
-def test_missing_conv_returns_none():
-    from lib.conversations import set_conversation_settings, update_conversation_settings
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    db = get_thread_db(DOMAIN_CHAT)
-    assert set_conversation_settings('cv-does-not-exist', {'a': 1}, db=db) is None
-    assert update_conversation_settings('cv-does-not-exist', lambda s: s.update({'a': 1}), db=db) is None
-    _ok('absent conversation row → None (skipped)')
-
-
-def test_mutate_false_skips_write():
+def test_callback_can_delete_keys(install_client):
     from lib.conversations import update_conversation_settings
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    conv_id = 'cv-skip-write'
-    db = get_thread_db(DOMAIN_CHAT)
-    _seed(db, conv_id, {'model': 'x'})
-    try:
-        _, before = _read_settings(db, conv_id)
 
-        def _noop(settings):
-            settings['sideEffect'] = 'should-not-persist'
-            return False  # signal: nothing changed
+    client = _SettingsClient({"autopilotRunId": "run-1", "model": "x"})
+    install_client(client)
 
-        res = update_conversation_settings(conv_id, _noop, db=db)
-        assert res is not None, 'row exists → should not be None'
-        s, after = _read_settings(db, conv_id)
-        assert 'sideEffect' not in s, f'False mutate must not persist: {s}'
-        assert after == before, 'updated_at must be untouched on a skipped write'
-    finally:
-        _cleanup(db, conv_id)
-    _ok('mutate returning False writes nothing (skip)')
+    result = update_conversation_settings(
+        "conv-settings",
+        lambda settings: settings.pop("autopilotRunId"),
+        user_id=1,
+    )
+
+    assert result == {"model": "x"}
+    assert client.settings == {"model": "x"}
+    payload, _command_id = client.commands[-1]
+    assert payload["updates"] == {"model": "x"}
+    assert payload["expected_settings"]["autopilotRunId"] == "run-1"
 
 
-def test_concurrent_writer_not_clobbered():
-    """★ Clobber-prevention proof — a classic lost-update stress test.
-
-    Two threads each call the helper N times to INCREMENT a shared counter key
-    (``read n → write n+1``). If the read+write is serialized per conv (the real
-    helper re-reads UNDER the per-conv lock), no increment is lost → final
-    counter == 2N. If the read happened OUTSIDE the lock (a bare RMW — the
-    pre-fix behaviour), two threads read the same n and both write n+1 → lost
-    updates → final counter < 2N.
-
-    Each thread uses its OWN thread-local DB connection (``get_thread_db``), so
-    this is a realistic two-writer race on the same row. This is the
-    double-neuter target: move the SELECT before ``with _lock_for(...)`` and
-    this FAILS (final < 2N).
-    """
-    import threading
-
+def test_conflict_replays_mutation_against_fresh_snapshot(install_client):
     from lib.conversations import update_conversation_settings
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    conv_id = 'cv-lost-update'
-    main_db = get_thread_db(DOMAIN_CHAT)
-    _seed(main_db, conv_id, {'counter': 0})
 
-    N = 60
-    errors = []
+    client = _SettingsClient({"counter": 0})
+    client.inject_before_next_command = lambda settings: settings.update(
+        {"counter": 1, "concurrentKey": "preserved"}
+    )
+    install_client(client)
 
-    def _worker():
-        try:
-            # Fresh thread-local connection for this thread.
-            get_thread_db(DOMAIN_CHAT)
-            for _ in range(N):
-                def _inc(settings):
-                    settings['counter'] = int(settings.get('counter', 0)) + 1
-                update_conversation_settings(conv_id, _inc)
-        except Exception as e:  # pragma: no cover - surfaced via errors list
-            errors.append(e)
+    calls = 0
 
-    t1 = threading.Thread(target=_worker, name='sset-A')
-    t2 = threading.Thread(target=_worker, name='sset-B')
-    t1.start(); t2.start()
-    t1.join(); t2.join()
+    def increment(settings):
+        nonlocal calls
+        calls += 1
+        settings["counter"] = int(settings.get("counter", 0)) + 1
 
-    try:
-        assert not errors, f'worker raised: {errors}'
-        s, _ = _read_settings(main_db, conv_id)
-        assert s.get('counter') == 2 * N, (
-            f'lost update — expected {2 * N}, got {s.get("counter")}: '
-            f'read+write not serialized under the per-conv lock')
-    finally:
-        _cleanup(main_db, conv_id)
-    _ok(f'{2 * N} concurrent increments all land (no lost update / clobber)')
+    result = update_conversation_settings("conv-settings", increment, user_id=1)
+
+    assert calls == 2
+    assert result == {"counter": 2, "concurrentKey": "preserved"}
+    assert client.settings == result
+    assert len(client.commands) == 2
+    assert client.commands[0][1] != client.commands[1][1]
 
 
-def main():
-    print()
-    print(_color('═══ conversations.settings store tests ═══', '36'))
-    print()
-    tests = [
-        test_set_merges_without_clobber,
-        test_missing_conv_returns_none,
-        test_mutate_false_skips_write,
-        test_concurrent_writer_not_clobbered,
-    ]
-    for fn in tests:
-        try:
-            fn()
-        except AssertionError as e:
-            _fail(f'{fn.__name__}: {e}')
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            _fail(f'{fn.__name__}: unexpected {type(e).__name__}: {e}')
-    print()
-    print(_color(f'═══ ALL {len(tests)} SETTINGS-STORE TESTS PASSED ═══', '32'))
-    print()
+def test_false_or_unchanged_mutation_skips_command_and_notification(
+    install_client,
+):
+    from lib.conversations import update_conversation_settings
+
+    client = _SettingsClient({"model": "x"})
+    notifications = install_client(client)
+
+    result = update_conversation_settings(
+        "conv-settings",
+        lambda settings: settings.update({"temporary": True}) or False,
+        user_id=1,
+    )
+    unchanged = update_conversation_settings(
+        "conv-settings",
+        lambda settings: settings.update({"model": "x"}),
+        user_id=1,
+    )
+
+    assert result["temporary"] is True
+    assert unchanged == {"model": "x"}
+    assert client.settings == {"model": "x"}
+    assert client.commands == []
+    assert notifications == []
 
 
-if __name__ == '__main__':
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_settings_store.__main__')
-    main()
+def test_missing_conversation_returns_none(install_client):
+    from lib.conversations import set_conversation_settings
+
+    client = _SettingsClient(missing=True)
+    notifications = install_client(client)
+
+    assert set_conversation_settings("missing", {"a": 1}, user_id=1) is None
+    assert client.commands == []
+    assert notifications == []
+
+
+def test_owner_is_explicit_in_query_and_command(install_client):
+    from lib.conversations import set_conversation_settings
+
+    client = _SettingsClient()
+    install_client(client)
+
+    set_conversation_settings("conv-settings", {"a": 1}, user_id=47)
+
+    payload, command_id = client.commands[-1]
+    assert payload["user_id"] == 47
+    assert command_id.startswith("conversation-settings:47:conv-settings:")
+
+
+def test_owner_is_a_required_core_argument():
+    from lib.conversations import (
+        set_conversation_settings,
+        update_conversation_settings,
+    )
+
+    with pytest.raises(TypeError, match="user_id"):
+        set_conversation_settings("conv-settings", {"a": 1})
+    with pytest.raises(TypeError, match="user_id"):
+        update_conversation_settings("conv-settings", lambda settings: None)
+
+
+def test_same_conversation_id_cannot_cross_owner_boundary(
+    install_client,
+):
+    from lib.conversations import set_conversation_settings
+
+    owner_clients = {
+        11: _SettingsClient({"owner": 11, "value": "left"}),
+        22: _SettingsClient({"owner": 22, "value": "right"}),
+    }
+
+    class _OwnerRouter:
+        def query(self, operation, payload):
+            return owner_clients[payload["user_id"]].query(operation, payload)
+
+        def command(self, operation, payload, command_id):
+            return owner_clients[payload["user_id"]].command(
+                operation, payload, command_id)
+
+    install_client(_OwnerRouter())
+    set_conversation_settings(
+        "shared-conversation-id", {"value": "updated"}, user_id=11)
+
+    assert owner_clients[11].settings["value"] == "updated"
+    assert owner_clients[22].settings == {"owner": 22, "value": "right"}

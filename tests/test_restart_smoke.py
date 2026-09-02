@@ -11,10 +11,9 @@ What this guarantees on every fresh `python server.py` boot:
      WebSocket and exposes the global ``PushHub`` singleton.
   5. The unified ``TaskRuntime`` lifecycle (create / append_event /
      finish / poll / abort) is wired correctly and pushes events
-     through ``lib.push.push_event``.
-  6. Per-task ``/api/chat/ws/<task_id>`` is **removed** — chat streams
-     exclusively via SSE (``/api/chat/stream/<id>``) for durability
-     (Last-Event-ID resume across server restarts).
+     through ``lib.agent_core.push.push_event``.
+  6. Retired per-chat WebSocket/SSE routes stay removed; task replay streams
+     use ``/api/v1/tasks/<id>/stream`` and native conversation state uses v3.
   7. JSON error handlers go through the unified ``api_response``
      helpers so their shape is ``{ok: False, error: ...}``.
   8. Server startup never invokes the retired classic JS bundler; release
@@ -40,13 +39,13 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._chat_sidecar',)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Fixtures — load server.py exactly the way `python server.py` does
 # ═══════════════════════════════════════════════════════════════════════
-
-
-_TEST_TUNNEL_TOKEN = '__smoke_test_token__'
 
 
 @pytest.fixture(scope='module')
@@ -61,10 +60,8 @@ def deps_available():
 
 
 @pytest.fixture(scope='module')
-def server_module(deps_available):
+def server_module(deps_available, _chat_sidecar_runtime):
     """Import server.py and return the module (NOT the if-name-main block)."""
-    # Install a tunnel token so test requests pass the auth middleware.
-    os.environ.setdefault('TUNNEL_TOKEN', _TEST_TUNNEL_TOKEN)
     spec = importlib.util.spec_from_file_location(
         'server',
         os.path.join(os.path.dirname(os.path.dirname(__file__)), 'server.py'),
@@ -102,8 +99,10 @@ def client(app):
 
 
 def _auth_headers():
-    """Headers that satisfy the tunnel-token auth middleware."""
-    return {'X-Tunnel-Token': _TEST_TUNNEL_TOKEN}
+    """Mint a real admin credential for smoke requests in every auth mode."""
+    from lib.api_keys import create_key
+    _row, token = create_key(owner_user_id=1, name='restart-smoke', scopes=[], admin=True)
+    return {'Authorization': f'Bearer {token}'}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -133,18 +132,14 @@ def test_quart_request_remains_native_async(server_module):
 # ═══════════════════════════════════════════════════════════════════════
 
 
-# Domains that must always be registered. After the /api/v1 migration,
-# several domains (config, conversations, project, memory, scheduler, mcp,
-# optimizer, browser, desktop) no longer own a bare-named Blueprint — they
-# live under the ``api_v1_<name>`` namespace. The always-on legacy UI
-# blueprints (chat, common, upload, translate, oauth, paper, push,
-# artifacts, metrics) keep their bare names.
+# Domains that must always be registered. Chat is owned by its v1 blueprint;
+# there is no parallel bare-name route owner.
 REQUIRED_BLUEPRINTS = {
-    # Legacy UI / always-on blueprints (bare names):
-    'chat', 'common', 'upload', 'translate', 'browser', 'desktop',
+    # Always-on blueprints:
+    'common', 'upload', 'translate', 'browser', 'desktop',
     'oauth', 'paper', 'push', 'artifacts', 'metrics',
-    # Migrated domains (now under the api_v1_* namespace):
-    'api_v1_config', 'api_v1_conversations', 'api_v1_project',
+    # Native API domains:
+    'api_v1_chat', 'api_v1_config', 'api_v1_conversations', 'api_v1_project',
     'api_v1_memory', 'api_v1_scheduler', 'api_v1_mcp', 'api_v1_optimizer',
 }
 
@@ -180,30 +175,31 @@ def test_per_task_chat_ws_removed(app):
 
 def test_push_hub_singleton_present():
     """The PushHub singleton must be importable and have its public API."""
-    from lib.push import broadcast, hub, push_event, PushClient
+    from lib.agent_core.push import hub, push_event, PushClient
     assert hub is not None
     # Public callables
     assert callable(push_event)
-    assert callable(broadcast)
     assert callable(PushClient)
     # The methods used by routes/push.py and TaskRuntime must exist
     for attr in ('register', 'unregister', 'subscribe', 'unsubscribe',
-                 'push_event', 'broadcast', 'add_listener', 'remove_listener'):
+                 'push_event', 'add_listener', 'remove_listener'):
         assert hasattr(hub, attr), f'PushHub missing {attr}'
 
 
 def test_push_hub_add_listener():
     """add_listener hooks every push_event so webhooks/observers work
     without monkey-patching."""
-    from lib.push import hub
+    from lib.agent_core.push import hub
     captured = []
     def listener(ch, tid, payload):
         captured.append((ch, tid, payload))
     hub.add_listener(listener)
     try:
-        hub.push_event('test-ch', 'tid-1', {'x': 42})
+        hub.push_event('test-ch', 'tid-1', {'x': 42}, user_id=1)
         assert len(captured) == 1
-        assert captured[0] == ('test-ch', 'tid-1', {'x': 42})
+        assert captured[0] == (
+            'test-ch', 'tid-1', {'x': 42, '_ownerUserId': '1'},
+        )
     finally:
         hub.remove_listener(listener)
 
@@ -219,18 +215,18 @@ def test_task_runtime_lifecycle_pushes_events(monkeypatch, server_module):
     """
     # TaskRuntime.append_event resolves push_event from its canonical home
     # (lib.agent_core.push) after the 2026-06 leaf relocation, so patch there.
-    from lib.agent_core import push as push_mod
-    from lib.task_runtime import TaskRuntime
+    import lib.agent_core.push as push_mod
+    from lib.agent_core.task_runtime import TaskRuntime
 
     captured: list[tuple] = []
 
-    def fake_push(channel, task_id, payload):
-        captured.append((channel, task_id, dict(payload)))
+    def fake_push(channel, task_id, payload, *, user_id):
+        captured.append((channel, task_id, dict(payload), user_id))
 
     monkeypatch.setattr(push_mod, 'push_event', fake_push)
 
     rt = TaskRuntime('smoke-test', ttl=60, push_channel='smoke')
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.append_event(task['id'], {'type': 'progress', 'pct': 10})
     rt.finish(task['id'], result={'ok': True})
 
@@ -247,15 +243,16 @@ def test_task_runtime_lifecycle_pushes_events(monkeypatch, server_module):
     assert 'progress' in types and 'done' in types
 
     # And every event was fanned out to the push channel
-    channels = {c for c, _, _ in captured}
+    channels = {channel for channel, _, _, _ in captured}
     assert channels == {'smoke'}
+    assert {user_id for _, _, _, user_id in captured} == {1}
 
 
 def test_task_runtime_abort(server_module):
-    from lib.task_runtime import TaskRuntime
+    from lib.agent_core.task_runtime import TaskRuntime
 
     rt = TaskRuntime('smoke-abort', ttl=60, push_channel=None)
-    task = rt.create()
+    task = rt.create(user_id=1)
     assert rt.abort(task['id']) is True
     assert task['abort_event'].is_set() is True
     # Aborting again on the same task is a no-op (still running until
@@ -265,15 +262,15 @@ def test_task_runtime_abort(server_module):
     assert rt.get(task['id'])['status'] == 'aborted'
 
 
-def test_chat_runtime_aliases_present():
-    """lib.tasks_pkg.manager exports `tasks` and `tasks_lock` aliasing the
-    chat TaskRuntime — 47 call sites depend on this.
-    """
+def test_chat_runtime_registry_is_not_exported():
+    """The manager exports the runtime, never its backing map or lock."""
     from lib.tasks_pkg import manager
-    assert hasattr(manager, 'tasks')
-    assert hasattr(manager, 'tasks_lock')
-    assert manager.tasks is manager._chat_runtime._tasks
-    assert manager.tasks_lock is manager._chat_runtime._lock
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+
+    assert manager.chat_task_runtime is chat_task_runtime
+    assert not hasattr(manager, 'tasks')
+    assert not hasattr(manager, 'tasks_lock')
+    assert not hasattr(manager, '_chat_runtime')
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -291,21 +288,13 @@ def _run_async(coro):
 
 
 def test_sync_route_runs_under_quart(client):
-    """A long-standing sync Flask route must still be served by Quart.
-
-    Response shape: api-contract batch 11 (2026-08-01) deliberately migrated
-    ``/api/v1/chat/active`` from a bare array to the ``api_ok`` envelope —
-    the task array now lives under ``items`` (``Api.chat.active`` unwraps it,
-    null-preserving; see routes/chat.py's migration note). The old
-    ``isinstance(data, list)`` assertion pinned the pre-migration shape and
-    went stale; this pins BOTH the thread-pool dispatch AND the envelope.
-    """
+    """The canonical task-list route is served through Quart."""
     async def go():
-        resp = await client.get('/api/v1/chat/active', headers=_auth_headers())
+        resp = await client.get('/api/v1/tasks', headers=_auth_headers())
         assert resp.status_code == 200
         data = await resp.get_json()
         assert data.get('ok') is True
-        assert isinstance(data.get('items'), list)
+        assert isinstance(data.get('tasks'), list)
     _run_async(go())
 
 
@@ -336,7 +325,7 @@ def test_404_html_for_browser(client):
 
 def test_405_uses_unified_envelope(client):
     async def go():
-        resp = await client.post('/api/v1/chat/active',
+        resp = await client.post('/api/v1/tasks',
                                  headers=_auth_headers())  # GET-only route
         assert resp.status_code == 405
         data = await resp.get_json()
@@ -358,21 +347,6 @@ def test_server_never_builds_or_imports_the_retired_classic_graph(server_module)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  8. SSE streaming fallback path still wired (per-task poll route)
-# ═══════════════════════════════════════════════════════════════════════
-
-
-def test_chat_poll_unknown_task_404(client):
-    async def go():
-        resp = await client.get('/api/chat/poll/this-task-id-does-not-exist',
-                                headers=_auth_headers())
-        # poll for unknown task: 404 (most paths) or 200 with an empty/done
-        # envelope (a few legacy routes). Either way it must not 500.
-        assert resp.status_code in (200, 404)
-    _run_async(go())
-
-
-# ═══════════════════════════════════════════════════════════════════════
 #  Standalone runner
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -384,11 +358,10 @@ def _standalone():
     # force-sqlite shim + pytest_configure gate never ran. Refuse to boot the
     # real app against a non-test DB here too (the keystone principle).
     try:
-        from tests.conftest import _assert_test_database
+        from tests.conftest import _assert_isolated_storage
     except Exception:
-        from conftest import _assert_test_database  # when run from tests/ cwd
-    _assert_test_database('test_restart_smoke._standalone')
-    os.environ.setdefault('TUNNEL_TOKEN', _TEST_TUNNEL_TOKEN)
+        from conftest import _assert_isolated_storage  # when run from tests/ cwd
+    _assert_isolated_storage('test_restart_smoke._standalone')
     try:
         import hypercorn  # noqa: F401
         import httpx      # noqa: F401
@@ -431,27 +404,27 @@ def _standalone():
     assert '/api/chat/ws/<task_id>' not in rules, 'per-task chat WS should be gone'
     print('✓ /api/push WS route present; per-task /api/chat/ws removed (SSE only)')
 
-    from lib.push import hub
-    from lib.task_runtime import TaskRuntime
+    from lib.agent_core.push import hub
+    from lib.agent_core.task_runtime import TaskRuntime
     rt = TaskRuntime('standalone-smoke', ttl=10, push_channel=None)
-    t = rt.create()
+    t = rt.create(user_id=1)
     rt.append_event(t['id'], {'type': 'progress'})
     rt.finish(t['id'], result={'ok': True})
     assert rt.get(t['id'])['status'] == 'done'
     print('✓ TaskRuntime lifecycle (create→append_event→finish) works')
     print(f'✓ PushHub singleton ready (clients={hub.client_count})')
 
-    _h = {'X-Tunnel-Token': _TEST_TUNNEL_TOKEN}
+    _h = _auth_headers()
 
     async def _check_routes():
         async with app.test_client() as c:
-            r = await c.get('/api/v1/chat/active', headers=_h)
+            r = await c.get('/api/v1/tasks', headers=_h)
             assert r.status_code == 200, r.status_code
             r = await c.get('/api/nope', headers=_h)
             assert r.status_code == 404
             data = await r.get_json()
             assert data['ok'] is False
-            r = await c.post('/api/v1/chat/active', headers=_h)
+            r = await c.post('/api/v1/tasks', headers=_h)
             assert r.status_code == 405
         return True
 

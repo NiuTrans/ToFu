@@ -20,6 +20,7 @@ import os
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from lib.log import audit_log, get_logger, log_context
@@ -35,6 +36,7 @@ from lib.mcp.types import (
     MCP_KEEPALIVE_INTERVAL,
     MCP_MAX_RESULT_CHARS,
     MCP_PING_TIMEOUT,
+    MCP_STDIO_IDLE_SECONDS,
     MCPToolInfo,
     make_namespaced_name,
     parse_namespaced_name,
@@ -48,7 +50,7 @@ from lib.mcp.client._errors import (
     _unwrap_exception_group,
 )
 from lib.mcp.client._coerce import _coerce_args_to_schema, _extract_read_only_hint
-from lib.mcp.client._vendor import _ensure_writable_caches
+from lib.mcp.client._vendor import _ensure_writable_caches, _propagate_proxy_env
 from lib.mcp.client._install import _prepend_interpreter_bin_to_path
 
 logger = get_logger(__name__)
@@ -250,6 +252,16 @@ class MCPBridge:
         # from ``self._servers`` and never be retried). Protected by ``self._lock``.
         self._configs: dict[str, dict] = {}
 
+        # Local stdio transports are expensive optional process trees.  A
+        # parked server keeps its discovered catalog/config/identity in
+        # memory, but its owner task and subprocess are closed until the next
+        # tool call transparently reconnects it.  Activity uses monotonic time
+        # and an in-flight count so wall-clock changes and long-running calls
+        # can never make the idle sweeper terminate live work.
+        self._parked: set[str] = set()
+        self._last_activity: dict[str, float] = {}
+        self._active_calls: dict[str, int] = {}
+
         # Per-server CREDENTIAL health: name → {status, checked_at, detail}.
         # A SECOND health axis distinct from transport health — a live
         # subprocess with a valid protocol ping can still hold an EXPIRED
@@ -262,6 +274,7 @@ class MCPBridge:
         # Monotonic timestamp of the last credential probe per server, so the
         # keepalive sweep re-probes at most once per MCP_CRED_PROBE_INTERVAL.
         self._cred_probe_ts: dict[str, float] = {}
+        self._cred_probe_inflight: set[str] = set()
 
         # Per-server resolved liveness-probe method name (see
         # ``_probe_liveness``): 'send_discover' | 'discover' | 'send_ping' |
@@ -508,12 +521,21 @@ class MCPBridge:
         # the async loop; holding self._lock across it would freeze every
         # concurrent GET /api/v1/mcp/catalog for the duration.
         had_old = False
+        was_parked = False
         with self._lock:
             had_old = name in self._servers
+            was_parked = name in self._parked
+            # A manual connect is real activity.  This also makes an idle
+            # sweep that has selected but not yet claimed the server stand
+            # down before it can close the old transport.
+            self._last_activity[name] = time.monotonic()
         if had_old:
             logger.info('[MCP] Reconnecting server %s (was already connected)', name)
             try:
-                self._disconnect_one(name)
+                self._disconnect_one(
+                    name,
+                    preserve_catalog=was_parked,
+                )
             except Exception as e:
                 # Non-fatal: worst case the OS reaps the stale subprocess
                 # when the event loop shuts down. Always log with context.
@@ -525,6 +547,8 @@ class MCPBridge:
 
         with self._lock:
             self._servers[name] = handle
+            self._parked.discard(name)
+            self._last_activity[name] = time.monotonic()
             self._started = True
         self._replace_server_catalog(
             name, handle, tools,
@@ -714,28 +738,44 @@ class MCPBridge:
             return False
         with self._lock:
             last = self._cred_probe_ts.get(name, 0.0)
-        return (time.time() - last) >= MCP_CRED_PROBE_INTERVAL
+            in_flight = name in self._cred_probe_inflight
+        return (not in_flight
+                and (time.time() - last) >= MCP_CRED_PROBE_INTERVAL)
 
-    def _probe_cred_health_async(self, name: str) -> None:
+    def _probe_cred_health_async(self, name: str) -> bool:
         """Fire a one-shot credential probe on a daemon thread (non-blocking).
 
         Used at connect time so a fresh connection surfaces an expired cookie
-        promptly WITHOUT blocking the connect/handshake path. No-op for servers
-        with no declared ``health_probe``.
+        promptly WITHOUT blocking the connect/handshake path, and by periodic
+        maintenance so its long-lived asyncio loop never creates a permanent
+        default executor. Per-server singleflight prevents overlapping probes.
         """
         if MCP_CRED_PROBE_INTERVAL < 0:
-            return
+            return False
         if self._cred_probe_spec(name) is None:
-            return
+            return False
+        with self._lock:
+            if name in self._cred_probe_inflight:
+                return False
+            self._cred_probe_inflight.add(name)
 
         def _worker():
             try:
                 self._run_cred_probe(name)
             except Exception as e:  # defence in depth — _run_cred_probe swallows
                 logger.debug('[MCP] async cred probe for %s failed: %s', name, e)
+            finally:
+                with self._lock:
+                    self._cred_probe_inflight.discard(name)
 
-        threading.Thread(target=_worker, name=f'mcp-credprobe-{name}',
-                         daemon=True).start()
+        try:
+            threading.Thread(target=_worker, name=f'mcp-credprobe-{name}',
+                             daemon=True).start()
+        except BaseException:
+            with self._lock:
+                self._cred_probe_inflight.discard(name)
+            raise
+        return True
 
     def _breaker_record_failure(self, name: str) -> float:
         """Record a failed reconnect and return the backoff delay applied.
@@ -978,6 +1018,11 @@ class MCPBridge:
 
                     # Merge env: os.environ + custom env vars
                     env = dict(os.environ)
+                    # Make the outbound proxy (HTTP(S)_PROXY / ALL_PROXY and
+                    # the TOFU_* aliases) visible to the launcher subprocess,
+                    # which resolves its own dependency tree from the package
+                    # index before the MCP handshake.
+                    _propagate_proxy_env(env)
                     # Node.js does NOT read HTTP_PROXY / HTTPS_PROXY by default.
                     # Two mechanisms ensure proxy support for child processes:
                     #   1. NODE_USE_ENV_PROXY=1 — env-var flag (Node ≥ v22.21)
@@ -1198,7 +1243,13 @@ class MCPBridge:
                     logger.debug('[MCP] stderr_file close failed: %s', e)
                 handle._stderr_file = None
 
-    def _disconnect_one(self, name: str, forget: bool = False) -> None:
+    def _disconnect_one(
+        self,
+        name: str,
+        forget: bool = False,
+        *,
+        preserve_catalog: bool = False,
+    ) -> bool:
         """Sync: request shutdown for a single server and wait (bounded).
 
         Safe to call from any thread. Runs entirely via ``_run_async``
@@ -1211,28 +1262,46 @@ class MCPBridge:
                 loop stops retrying it. The reconnect teardown path leaves
                 this False so a transient reconnect doesn't erase recovery
                 state.
+            preserve_catalog: close only the live transport while retaining
+                the server handle's identity plus the separately cached tool
+                catalog. Used exclusively by bounded stdio idle parking.
+
+        Returns:
+            ``True`` when the owner closed inside the shutdown budget. A
+            timeout is force-cancelled and returns ``False``.
         """
+        if forget and preserve_catalog:
+            raise ValueError('forget and preserve_catalog are mutually exclusive')
         with self._lock:
-            handle = self._servers.pop(name, None)
-            # Remove tool index entries eagerly — the server is gone as
-            # far as callers are concerned, even if cleanup is still
-            # draining.
-            to_remove = [k for k, v in self._tool_index.items()
-                         if v['server_name'] == name]
-            for k in to_remove:
-                del self._tool_index[k]
+            handle = (
+                self._servers.get(name)
+                if preserve_catalog else
+                self._servers.pop(name, None)
+            )
+            if not preserve_catalog:
+                # Remove tool index entries eagerly — an explicit disconnect
+                # or ordinary failed reconnect removes execution authority.
+                to_remove = [k for k, v in self._tool_index.items()
+                             if v['server_name'] == name]
+                for k in to_remove:
+                    del self._tool_index[k]
             if forget:
                 self._breaker.pop(name, None)
                 self._configs.pop(name, None)
-            # Credential-health is transient live state — always drop it when
-            # the handle goes away (a reconnect re-probes fresh on connect).
-            self._cred_health.pop(name, None)
-            self._cred_probe_ts.pop(name, None)
+            if not preserve_catalog:
+                # Credential-health is transient live state. A real
+                # disconnect drops it; a parked server keeps the last-known
+                # verdict until transparent reconnect probes it again.
+                self._cred_health.pop(name, None)
+                self._cred_probe_ts.pop(name, None)
+                self._parked.discard(name)
+                self._last_activity.pop(name, None)
+                self._active_calls.pop(name, None)
             # The reconnected peer may speak a different protocol revision, so
             # the resolved probe must be re-derived rather than inherited.
             self._probe_method.pop(name, None)
         if handle is None:
-            return
+            return True
 
         try:
             self._run_async_with_timeout(
@@ -1253,6 +1322,19 @@ class MCPBridge:
                 loop = self._loop
                 if loop is not None and loop.is_running():
                     loop.call_soon_threadsafe(handle._owner_task.cancel)
+            return False
+
+        if preserve_catalog:
+            # The owner/context stack is now closed. Drop every transport/task
+            # reference that could retain pipes or SDK buffers while keeping
+            # only the small identity and discovered-tool snapshot used by
+            # list_servers().
+            handle.session = None
+            handle._shutdown_event = None
+            handle._ready_future = None
+            handle._closed_future = None
+            handle._owner_task = None
+        return True
 
     async def _async_signal_shutdown(self, handle: _MCPServerHandle) -> None:
         """Async: set the shutdown event and await the owner task's exit."""
@@ -1306,7 +1388,11 @@ class MCPBridge:
             self._configs.clear()
             self._cred_health.clear()
             self._cred_probe_ts.clear()
+            self._cred_probe_inflight.clear()
             self._probe_method.clear()
+            self._parked.clear()
+            self._last_activity.clear()
+            self._active_calls.clear()
             self._started = False
 
         # Shut down the event loop
@@ -1351,7 +1437,7 @@ class MCPBridge:
             },
         }
 
-    # ── Per-tool enable/disable (pt_53065dbe86bb4286) ─────────
+    # ── Per-tool enable/disable () ─────────
     # The user disables individual tools of a server in Settings → MCP; the
     # list lives in the server config row (``disabled_tools``) so it survives
     # restarts and rides the existing config plumbing (migrations preserve
@@ -1491,6 +1577,10 @@ class MCPBridge:
                     'catalog_version': getattr(handle, 'catalog_version', ''),
                     'tools_list_changed': bool(
                         getattr(handle, 'tools_list_changed', False)),
+                    # Parked stdio servers remain logically available: their
+                    # cached catalog stays visible and the next call performs
+                    # one serialized transparent reconnect.
+                    'parked': name in getattr(self, '_parked', ()),
                 })
             return result
 
@@ -1517,12 +1607,31 @@ class MCPBridge:
 
         with self._lock:
             handle = self._servers.get(server_name)
-            if handle is None:
+            info = self._tool_index.get(namespaced_name)
+            known_config = server_name in getattr(self, '_configs', {})
+            parked = server_name in getattr(self, '_parked', ())
+            if handle is None and not (known_config and info is not None):
                 raise ValueError(f'MCP server not connected: {server_name}')
             if tool_name in self._disabled_tools_for(server_name):
                 raise ValueError(
                     f'MCP tool disabled by user: {namespaced_name} '
                     f'(re-enable it in Settings → MCP)')
+            # Claim activity before the idle sweeper's second, serialized
+            # eligibility check. A call arriving while parking is already in
+            # progress sees ``parked`` and waits on the reconnect lock below.
+            activity = getattr(self, '_last_activity', None)
+            if activity is not None:
+                activity[server_name] = time.monotonic()
+
+        if handle is None or parked or handle.session is None:
+            logger.info('[MCP:Call] waking parked server %s', server_name)
+            handle = self._reconnect_server(server_name)
+            with self._lock:
+                info = self._tool_index.get(namespaced_name)
+            if info is None:
+                raise ValueError(
+                    f'MCP tool no longer exposed after reconnect: '
+                    f'{namespaced_name}')
 
         # Coerce LLM-provided strings to the schema's declared types.
         # LLMs that don't strictly honor the JSON schema (esp. weaker models)
@@ -1530,7 +1639,6 @@ class MCPBridge:
         # the MCP server's jsonschema validator then rejects with
         # `'1' is not of type 'integer'`. Best-effort coerce so the call
         # actually reaches the server.
-        info = self._tool_index.get(namespaced_name)
         if info is not None:
             arguments = _coerce_args_to_schema(arguments, info['input_schema'])
             # Use the server's actual registered tool name. ``parse_namespaced_name``
@@ -1668,14 +1776,28 @@ class MCPBridge:
             read_timeout = timedelta(seconds=float(timeout))
         else:
             read_timeout = float(timeout) if timeout else None
-        result = await handle.session.call_tool(
-            tool_name,
-            arguments=arguments,
-            # None = no read timeout (the default). A per-server "timeout" in
-            # mcp_servers.json still bounds that server's calls, and that is
-            # what keeps the degraded-streak breaker meaningful.
-            read_timeout_seconds=read_timeout if timeout else None,
-        )
+        active_calls = getattr(self, '_active_calls', None)
+        if active_calls is not None:
+            with self._lock:
+                active_calls[handle.name] = active_calls.get(handle.name, 0) + 1
+        try:
+            result = await handle.session.call_tool(
+                tool_name,
+                arguments=arguments,
+                # None = no read timeout (the default). A per-server
+                # "timeout" in mcp_servers.json still bounds that server's
+                # calls, preserving the degraded-streak breaker.
+                read_timeout_seconds=read_timeout if timeout else None,
+            )
+        finally:
+            if active_calls is not None:
+                with self._lock:
+                    remaining = max(0, active_calls.get(handle.name, 1) - 1)
+                    if remaining:
+                        active_calls[handle.name] = remaining
+                    else:
+                        active_calls.pop(handle.name, None)
+                    self._last_activity[handle.name] = time.monotonic()
 
         # Extract text from the MCP CallToolResult
         if _tool_result_is_error(result):
@@ -1693,15 +1815,91 @@ class MCPBridge:
 
     # ── Keepalive: proactive health-check + auto-reconnect ──
 
-    def _start_keepalive(self) -> None:
-        """Launch the background keepalive loop on the MCP event loop.
+    def _stdio_idle_due(self, name: str, handle: _MCPServerHandle) -> bool:
+        """Cheap keepalive-side filter; parking rechecks under serialization."""
+        if MCP_STDIO_IDLE_SECONDS <= 0 or handle.session is None:
+            return False
+        from lib.mcp.transport import is_stdio
+        if not is_stdio(handle.config):
+            return False
+        now = time.monotonic()
+        with self._lock:
+            if (name in self._parked
+                    or self._active_calls.get(name, 0) > 0):
+                return False
+            last_activity = self._last_activity.get(name, now)
+        return (now - last_activity) >= MCP_STDIO_IDLE_SECONDS
 
-        Idempotent and a no-op when disabled
-        (``TOFU_MCP_KEEPALIVE_INTERVAL=0``). Called after the first
-        successful connect so idle deployments don't spin a loop for
-        nothing.
+    def _park_idle_stdio_server(self, name: str) -> bool:
+        """Close one idle local transport without withdrawing its tools.
+
+        The per-server reconnect lock serializes this transition with reactive
+        and proactive reconnects. Eligibility is re-evaluated only after that
+        lock is held, so a tool call that arrived after the keepalive snapshot
+        can refresh activity and veto parking. Long-running calls additionally
+        hold ``_active_calls[name]`` for their entire SDK await.
         """
-        if MCP_KEEPALIVE_INTERVAL <= 0:
+        if MCP_STDIO_IDLE_SECONDS <= 0:
+            return False
+        from lib.mcp.transport import is_stdio
+
+        with self._lock:
+            reconnect_lock = self._reconnect_locks.setdefault(
+                name, threading.Lock())
+        with reconnect_lock:
+            now = time.monotonic()
+            with self._lock:
+                handle = self._servers.get(name)
+                last_activity = self._last_activity.get(name, now)
+                idle_for = max(0.0, now - last_activity)
+                eligible = bool(
+                    handle is not None
+                    and handle.session is not None
+                    and name not in self._parked
+                    and self._active_calls.get(name, 0) == 0
+                    and idle_for >= MCP_STDIO_IDLE_SECONDS
+                    and is_stdio(handle.config)
+                )
+                if not eligible:
+                    return False
+                # Claim the transition before releasing the state lock. A
+                # concurrent call now takes the reconnect path and blocks on
+                # ``reconnect_lock`` until shutdown is complete.
+                self._parked.add(name)
+
+            closed = self._disconnect_one(name, preserve_catalog=True)
+            if not closed:
+                with self._lock:
+                    self._parked.discard(name)
+                    self._last_activity[name] = time.monotonic()
+                logger.warning('[MCP] Idle parking of %s exceeded shutdown '
+                               'budget; leaving it eligible for health recovery',
+                               name)
+                return False
+
+            audit_log(
+                'mcp_stdio_parked',
+                server=name,
+                idle_seconds=round(idle_for, 1),
+                idle_budget_seconds=MCP_STDIO_IDLE_SECONDS,
+            )
+            logger.info(
+                '[MCP] Parked idle stdio server %s after %.0fs '
+                '(catalog retained; next call reconnects)',
+                name, idle_for,
+            )
+            return True
+
+    def _start_keepalive(self) -> None:
+        """Launch the background MCP maintenance loop on its event loop.
+
+        Idempotent and a no-op only when both proactive health checks and
+        stdio idle parking are disabled. ``TOFU_MCP_KEEPALIVE_INTERVAL=0``
+        still disables liveness/reconnect/credential work without disabling
+        the independent local-process lifecycle budget.
+        """
+        maintenance_interval = self._maintenance_interval_seconds()
+        if maintenance_interval <= 0:
             return
         loop = self._loop
         if loop is None or not loop.is_running():
@@ -1715,8 +1913,26 @@ class MCPBridge:
                 self._keepalive_loop(), name='mcp-keepalive')
 
         loop.call_soon_threadsafe(_spawn)
-        logger.info('[MCP] Keepalive loop armed (interval=%ds, ping_timeout=%ds)',
-                    MCP_KEEPALIVE_INTERVAL, MCP_PING_TIMEOUT)
+        logger.info(
+            '[MCP] Maintenance loop armed (tick=%ss, keepalive=%ss, '
+            'stdio_idle=%ss, ping_timeout=%ss)',
+            maintenance_interval,
+            MCP_KEEPALIVE_INTERVAL,
+            MCP_STDIO_IDLE_SECONDS,
+            MCP_PING_TIMEOUT,
+        )
+
+    @staticmethod
+    def _maintenance_interval_seconds() -> float:
+        """Smallest enabled cadence; zero means no background lifecycle."""
+        intervals: list[float] = []
+        if MCP_KEEPALIVE_INTERVAL > 0:
+            intervals.append(float(MCP_KEEPALIVE_INTERVAL))
+        if MCP_STDIO_IDLE_SECONDS > 0:
+            # Parking never needs sub-45-second polling in production. For a
+            # smaller explicit idle budget, observe the requested boundary.
+            intervals.append(float(min(45, MCP_STDIO_IDLE_SECONDS)))
+        return min(intervals) if intervals else 0.0
 
     @staticmethod
     def _probe_callable(session, meth: str) -> bool:
@@ -1904,6 +2120,22 @@ class MCPBridge:
                      _unwrap_exception_group(last_exc) if last_exc else '?')
         return 'alive'
 
+    async def _run_maintenance_blocking(self, callback, *args):
+        """Offload one bounded maintenance call without retaining loop workers.
+
+        The MCP event loop lives for the whole server process. Using its
+        default executor once therefore leaves an ``asyncio_0`` thread resident
+        forever. Each parking/reconnect call instead owns one lazy worker and
+        shuts that generation down as soon as the awaited call settles.
+        """
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='mcp-maintenance')
+        try:
+            return await loop.run_in_executor(executor, callback, *args)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=False)
+
     async def _keepalive_loop(self) -> None:
         """Health-check every connected server periodically; reconnect dead ones.
 
@@ -1924,7 +2156,10 @@ class MCPBridge:
         stop = self._keepalive_stop
         while stop is not None and not stop.is_set():
             try:
-                await asyncio.wait_for(stop.wait(), timeout=MCP_KEEPALIVE_INTERVAL)
+                interval = self._maintenance_interval_seconds()
+                if interval <= 0:
+                    break
+                await asyncio.wait_for(stop.wait(), timeout=interval)
                 break  # stop was set → exit loop
             except asyncio.TimeoutError:
                 pass  # normal: interval elapsed, run a health sweep
@@ -1934,9 +2169,14 @@ class MCPBridge:
             with self._lock:
                 live = dict(self._servers)
                 candidates = set(live) | set(self._breaker)
-            loop = asyncio.get_running_loop()
+                parked = set(self._parked)
 
             for name in candidates:
+                # Parking is intentional, unlike a dead transport. It keeps
+                # the catalog logically connected and waits for a real call;
+                # proactive liveness/credential work must not wake it.
+                if name in parked:
+                    continue
                 # Skip servers whose backoff window hasn't elapsed.
                 if self._breaker_blocks(name):
                     continue
@@ -1945,35 +2185,59 @@ class MCPBridge:
                 session = handle.session if handle is not None else None
 
                 if session is not None:
-                    verdict = await self._probe_liveness(
-                        name,
-                        session,
-                        sdk_generation=getattr(handle, 'sdk_generation', 0),
-                        protocol_version=getattr(handle, 'protocol_version', ''),
-                    )
-                    if verdict == 'alive':
-                        # Transport is alive — but the stored CREDENTIALS may
-                        # have expired underneath it. Re-probe at most once per
-                        # MCP_CRED_PROBE_INTERVAL (offloaded to a worker thread:
-                        # _run_cred_probe drives call_tool, which re-enters this
-                        # very loop and would deadlock if run inline).
-                        #
-                        # This hangs off "peer answered", NOT off a successful
-                        # ping. Under the old code the credential probe was
-                        # downstream of ping success, so a 2026-07-28 server
-                        # (whose ping is -32601) stalled it FOREVER — an expired
-                        # cookie would then never be surfaced. Measured before
-                        # the fix: 0 credential probes across 12 sweeps.
-                        if self._cred_probe_due(name):
-                            loop.run_in_executor(None, self._run_cred_probe, name)
+                    if self._stdio_idle_due(name, handle):
+                        parked_now = await self._run_maintenance_blocking(
+                            self._park_idle_stdio_server, name)
+                        if parked_now:
+                            continue
+                        # Parking may have waited behind a concurrent reconnect.
+                        # Refresh the handle before probing; the snapshot's old
+                        # SDK session may already be closed.
+                        with self._lock:
+                            handle = self._servers.get(name)
+                            intentionally_parked = name in self._parked
+                        if intentionally_parked:
+                            continue
+                        session = (
+                            handle.session if handle is not None else None)
+                    if MCP_KEEPALIVE_INTERVAL <= 0:
                         continue
+                    if session is None:
+                        logger.info('[MCP] Keepalive found %s without a live '
+                                    'session after idle arbitration', name)
+                    else:
+                        verdict = await self._probe_liveness(
+                            name,
+                            session,
+                            sdk_generation=getattr(handle, 'sdk_generation', 0),
+                            protocol_version=getattr(handle, 'protocol_version', ''),
+                        )
+                        if verdict == 'alive':
+                            # Transport is alive — but the stored CREDENTIALS may
+                            # have expired underneath it. Re-probe at most once per
+                            # MCP_CRED_PROBE_INTERVAL (offloaded to a worker thread:
+                            # _run_cred_probe drives call_tool, which re-enters this
+                            # very loop and would deadlock if run inline).
+                            #
+                            # This hangs off "peer answered", NOT off a successful
+                            # ping. Under the old code the credential probe was
+                            # downstream of ping success, so a 2026-07-28 server
+                            # (whose ping is -32601) stalled it FOREVER — an expired
+                            # cookie would then never be surfaced. Measured before
+                            # the fix: 0 credential probes across 12 sweeps.
+                            if self._cred_probe_due(name):
+                                self._probe_cred_health_async(name)
+                            continue
                 else:
+                    if MCP_KEEPALIVE_INTERVAL <= 0:
+                        continue
                     # No live session but the breaker is tracking it (failed
                     # reconnect previously, backoff now elapsed) → retry.
                     logger.info('[MCP] Keepalive retrying backed-off server %s', name)
 
                 try:
-                    await loop.run_in_executor(None, self._reconnect_server, name)
+                    await self._run_maintenance_blocking(
+                        self._reconnect_server, name)
                     logger.info('[MCP] Keepalive reconnected %s', name)
                 except asyncio.CancelledError:
                     raise

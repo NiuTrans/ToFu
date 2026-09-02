@@ -8,7 +8,6 @@ import os
 import re
 import zipfile
 
-from lib.env_compat import getenv_compat
 from lib.log import get_logger
 
 from .assets import (
@@ -48,7 +47,7 @@ class KnowledgeIngestError(ValueError):
 
 
 def _limit_chars() -> int:
-    raw = getenv_compat('TOFU_KNOWLEDGE_MAX_TEXT_CHARS', default='12000000')
+    raw = os.environ.get('TOFU_KNOWLEDGE_MAX_TEXT_CHARS', '12000000')
     try:
         return max(100_000, min(int(raw), 50_000_000))
     except (TypeError, ValueError) as exc:
@@ -675,7 +674,7 @@ def extract(raw: bytes, filename: str, *, _depth: int = 0) -> dict:
         visible = re.sub(r'\[[^\]]*error[^\]]*\]', '', text, flags=re.I).strip()
         is_scanned = len(visible) < max(80, pages * 40)
         if is_scanned:
-            raw_limit = getenv_compat('TOFU_KNOWLEDGE_OCR_MAX_PAGES', default='80')
+            raw_limit = os.environ.get('TOFU_KNOWLEDGE_OCR_MAX_PAGES', '80')
             try:
                 ocr_limit = max(1, min(int(raw_limit), 500))
             except (TypeError, ValueError) as exc:

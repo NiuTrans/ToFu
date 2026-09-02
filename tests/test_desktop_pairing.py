@@ -1,5 +1,5 @@
 """tests/test_desktop_pairing.py — the pairing-code mint + exchange
-contract (docs/DESKTOP_AGENT_DIST_DESIGN.md §11, slice P1).
+contract (docs/modules/remote_execution.md).
 
 Pinned against the live ``lib.desktop.pairing`` store and the two routes:
 
@@ -27,7 +27,10 @@ Contract:
 Run:  pytest tests/test_desktop_pairing.py -q -p no:napari -o addopts=
 """
 
+
 from __future__ import annotations
+
+pytest_plugins = ('tests._credential_sidecar',)
 
 import socket
 import time
@@ -43,11 +46,14 @@ pytestmark = [pytest.mark.unit, pytest.mark.auth_mode('private')]
 
 # ── key helpers ───────────────────────────────────────────────────────
 
+_OWNER_IDS = {'u-pair': 11, 'u-alice': 12, 'u-bob': 13}
+
 def _bearer(user_id='u-pair'):
-    """A Bearer token carrying *user_id* (loopback synthetic principal)."""
+    """A Bearer token carrying the named fixture's repository owner."""
     from lib.api_keys import create_key
-    row, token = create_key(name=f'test-{user_id}', scopes=['chat'],
-                             user_id=user_id)
+    row, token = create_key(
+        owner_user_id=_OWNER_IDS[user_id],
+        name=f'test-{user_id}', scopes=['chat'])
     return {'Authorization': f'Bearer {token}'}, token, row['id']
 
 
@@ -55,9 +61,10 @@ def _clear_state():
     from lib.desktop.pairing import _STORE, _STORE_LOCK
     with _STORE_LOCK:
         _STORE.clear()
-    from lib import api_keys
-    api_keys._cache.clear()
-    api_keys._cache_loaded = False
+    from lib.api_keys import list_keys, revoke_key
+    for owner_user_id in _OWNER_IDS.values():
+        for key in list_keys(owner_user_id=owner_user_id):
+            revoke_key(key['id'], owner_user_id=owner_user_id)
 
 
 def _mint(cli, auth):
@@ -96,7 +103,7 @@ class TestPairingLifecycle:
         assert r.status_code == 201, r.get_data(as_text=True)
         body = r.get_json()
         assert body['scopes'] == ['agents:bridge']
-        assert body['user_id'] == 'u-alice'
+        assert body['owner_id'] == _OWNER_IDS['u-alice']
         assert body['token'].startswith('tofu_live_')
         # The minted token authorizes a poll scoped to u-alice.
         poll = flask_client.post(
@@ -143,7 +150,7 @@ class TestPairingLifecycle:
         auth_b, _, _ = _bearer('u-bob')
         code = self._mint(flask_client, auth_b)
         body = self._consume_ok(flask_client, code)
-        assert body['user_id'] == 'u-bob'
+        assert body['owner_id'] == _OWNER_IDS['u-bob']
 
     # ── helpers ──────────────────────────────────────────────────────
 
@@ -207,8 +214,13 @@ class TestLanDiscovery:
         res = pairing_mod.LanDiscoveryResponder(
             url='http://192.168.9.9:15000', bind=('127.0.0.1', 0))
         assert res.start()
+        thread = res._thread
         assert res.start()  # second call is a no-op
-        res.stop()
+        assert res._sock.gettimeout() is None, \
+            'idle discovery must block on socket readiness, not poll a timer'
+        assert res.stop(timeout=1.0)
+        assert thread is not None and not thread.is_alive()
+        assert res._thread is None
         assert res._sock is None
 
 

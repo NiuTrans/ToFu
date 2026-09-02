@@ -31,7 +31,13 @@ import pytest
 from tests._jsdom import frontend_module_guard
 
 REPO = Path(__file__).resolve().parent.parent
-SCENE_JS = REPO / "static" / "js" / "tofu-scene.js"
+import sys as _sys
+_sys.path.insert(0, str(REPO))
+from tests._runtime_sections import runtime_section_path
+import sys as _sys
+if str(REPO) not in _sys.path:
+    _sys.path.insert(0, str(REPO))
+SCENE_JS = Path(runtime_section_path('tofu-scene.js'))
 
 # P0-1: node absent → clean skip normally, collection-red under
 # TOFU_REQUIRE_FRONTEND=1 (docs/TESTING_STRATEGY.md §4).

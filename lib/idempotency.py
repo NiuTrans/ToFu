@@ -57,6 +57,9 @@ def _get_request():
 _DEFAULT_TTL = 86400  # 24h
 _DEFAULT_MAX = 10_000
 
+# TODO(enterprise, S5): per-process replay cache and single-flight registry;
+# move claims to an atomic shared-store primitive so replicas dedupe.
+# docs/ENTERPRISE_READINESS_AUDIT.md
 _cache = TTLCache(ttl=_DEFAULT_TTL, max_size=_DEFAULT_MAX,
                    name='idempotency')
 
@@ -101,8 +104,6 @@ def _cache_key(idem_key: str) -> str:
         ctx = getattr(g, 'auth_ctx', None)
         if ctx is not None and getattr(ctx, 'key_id', ''):
             return f'k:{ctx.key_id}:{idem_key}'
-        if ctx is not None and getattr(ctx, 'via_tunnel_token', False):
-            return f'tun:{idem_key}'
         if ctx is not None and getattr(ctx, 'via_open_mode', False):
             return f'open:{idem_key}'
     except Exception as e:

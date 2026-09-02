@@ -31,7 +31,9 @@ def reconstruct_tool_messages_from_segments(segments: list[dict[str, Any]]):
     messages. Returns the message list, or None (→ caller uses the legacy
     fallback) when any round lacks the required identity fields.
     """
-    from lib.tasks_pkg.conv_message_builder import _reconstruct_tool_call_messages
+    from lib.tasks_pkg.conv_message_builder._toolcalls import (
+        _reconstruct_tool_call_messages,
+    )
     rounds = _rounds_view_from_segments(segments)
     return _reconstruct_tool_call_messages(rounds)
 

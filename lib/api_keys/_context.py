@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from lib.identity import PERSONAL_USER_ID, require_user_id
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -48,11 +49,9 @@ _ADMIN_SCOPE = 'admin'
 class AuthContext:
     """Resolved auth state for the current request.
 
-    ``key_id`` and ``scopes`` are populated when a valid Bearer token
-    matches a row in ``api_keys.json``. ``via_tunnel_token`` is True
-    when the request authenticated via ``TUNNEL_TOKEN`` (cookie/header)
-    — those requests have implicit full ``admin`` scope (matches the UI's
-    historical privilege level).
+    ``account_user_id`` is the opaque account subject shown by account APIs.
+    ``owner_user_id`` is the positive integer used by repositories.  They are
+    deliberately separate and must never be coerced into one another.
 
     ``via_open_mode`` is True for requests that came through the auth
     gate while ``lib.auth_mode`` reports ``mode=open`` — there is no
@@ -65,12 +64,27 @@ class AuthContext:
     scopes: frozenset = field(default_factory=frozenset)
     rate_limit_rpm: int = 0
     rate_limit_tpd: int = 0
-    via_tunnel_token: bool = False
     via_open_mode: bool = False
-    user_id: str = ''  # owning user (multi-user mode); '' for legacy/personal keys
+    owner_user_id: int | None = None
+    account_user_id: str = ''
+    tenant_id: str | None = None  # evolution seam; no tenant product behavior yet
+
+    def __post_init__(self) -> None:
+        if self.owner_user_id is not None:
+            self.owner_user_id = require_user_id(
+                self.owner_user_id, context='authentication owner')
+        self.account_user_id = str(self.account_user_id or '').strip()
+        if len(self.account_user_id) > 256:
+            raise ValueError('account_user_id must be at most 256 characters')
+        if self.account_user_id and self.owner_user_id is None:
+            raise ValueError('account identity requires owner_user_id')
+        normalized_tenant = str(self.tenant_id or '').strip()
+        if len(normalized_tenant) > 256:
+            raise ValueError('tenant_id must be at most 256 characters')
+        self.tenant_id = normalized_tenant or None
 
     def has_scope(self, scope: str) -> bool:
-        if self.via_tunnel_token or self.via_open_mode:
+        if self.via_open_mode:
             return True
         if _ADMIN_SCOPE in self.scopes:
             return True
@@ -78,7 +92,7 @@ class AuthContext:
 
     @property
     def is_authenticated(self) -> bool:
-        return bool(self.key_id) or self.via_tunnel_token or self.via_open_mode
+        return bool(self.key_id) or self.via_open_mode
 
 
 def local_admin_context() -> 'AuthContext':
@@ -86,13 +100,14 @@ def local_admin_context() -> 'AuthContext':
 
     The key_id is the literal ``'local'`` so usage tracking, idempotency
     keys, and audit logs share one stable principal across an open-mode
-    deployment without needing a real row in ``api_keys.json``.
+    deployment without needing a persisted credential row.
     """
     return AuthContext(
         key_id='local', name='local',
         scopes=frozenset({_ADMIN_SCOPE}),
         rate_limit_rpm=0, rate_limit_tpd=0,
-        via_tunnel_token=False, via_open_mode=True,
+        via_open_mode=True,
+        owner_user_id=PERSONAL_USER_ID,
     )
 
 

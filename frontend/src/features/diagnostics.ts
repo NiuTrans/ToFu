@@ -6,29 +6,20 @@ export interface FrontendDiagnostics {
   heapBytes?: number;
 }
 
-interface LegacyConversation {
+interface ConversationShell {
   id?: string;
-  _needsLoad?: boolean;
-  messages?: unknown[];
-  _serverMsgCount?: number;
-  _windowed?: boolean;
-  _trimmed?: boolean;
-  _hasMoreEarlier?: boolean;
-  _totalCount?: number | null;
+  _turnSnapshotRequired?: boolean;
+  _serverTurnCount?: number;
 }
 
-interface DiagnosticResponse {
-  status: number;
-  text(): Promise<string>;
-}
-
-interface DiagnosticApi {
-  conversations?: {
-    getResponse(
-      id: string,
-      options: Record<string, unknown>,
-    ): Promise<DiagnosticResponse>;
-  };
+interface ConversationReadPort {
+  ordered?(conversationOrId: unknown): ReadonlyArray<unknown>;
+  activeAttemptIds?(conversationOrId: unknown): ReadonlyArray<string>;
+  state?(conversationOrId: unknown): {
+    conversationRevision?: number;
+    transport?: string;
+    livePhase?: unknown;
+  } | null;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -38,14 +29,9 @@ function activeConversationId(): string | null {
   return typeof value === 'string' ? value : null;
 }
 
-function conversationList(): LegacyConversation[] {
+function conversationList(): ConversationShell[] {
   const value = getRuntimeService('conversations');
-  return Array.isArray(value) ? value as LegacyConversation[] : [];
-}
-
-function conversationWindowParam(): string {
-  const value = getRuntimeService('convWindowParam');
-  return typeof value === 'function' ? String(value()) : '';
+  return Array.isArray(value) ? value as ConversationShell[] : [];
 }
 
 function safe<T>(fn: () => T, fallback: T): T {
@@ -63,38 +49,22 @@ function activeConversationSnapshot(): JsonObject {
     if (!id) return { activeConvId: id };
     const conversation = conversations.find((item) => item?.id === id);
     if (!conversation) return { activeConvId: id, found: false };
+    const turnRead = getRuntimeService(
+      'ConversationTurnRead',
+    ) as ConversationReadPort | undefined;
+    const state = turnRead?.state?.(conversation);
     return {
       activeConvId: id,
       found: true,
-      needsLoad: Boolean(conversation._needsLoad),
-      inMemoryMsgCount: conversation.messages?.length ?? 0,
-      serverMsgCount: conversation._serverMsgCount ?? 0,
-      windowed: Boolean(conversation._windowed),
-      trimmed: Boolean(conversation._trimmed),
-      hasMoreEarlier: Boolean(conversation._hasMoreEarlier),
-      totalCount: conversation._totalCount ?? null,
+      turnSnapshotRequired: Boolean(conversation._turnSnapshotRequired),
+      inMemoryTurnCount: turnRead?.ordered?.(conversation)?.length ?? 0,
+      serverTurnCount: conversation._serverTurnCount ?? 0,
+      revision: state?.conversationRevision ?? 0,
+      transport: state?.transport ?? 'unavailable',
+      activeAttemptCount: turnRead?.activeAttemptIds?.(conversation)?.length ?? 0,
+      livePhase: state?.livePhase ?? null,
     };
   }, { error: 'activeConv snapshot failed' });
-}
-
-function skeletonShowing(): boolean | null {
-  return safe(() => {
-    const inner = document.getElementById('chatInner');
-    if (!inner) return null;
-    const text = inner.textContent ?? '';
-    return text.includes('Fetching') && text.includes('from server');
-  }, null);
-}
-
-function windowConfiguration(): JsonObject {
-  return safe<JsonObject>(() => ({
-    windowParam: conversationWindowParam() || '(fn missing)',
-    override: getRuntimeService('TOFU_CONV_WINDOW') ?? null,
-  }), { error: 'window config failed' });
-}
-
-function elapsedSince(startedAt: number): number {
-  return Math.round(safe(() => performance.now(), Date.now()) - startedAt);
 }
 
 function errorMessage(error: unknown): string {
@@ -102,78 +72,53 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-async function liveGetProbe(): Promise<JsonObject> {
-  const id = safe(
-    activeConversationId,
-    null,
-  );
-  if (!id) return { skipped: 'no active conversation' };
-
-  const param = safe(
-    conversationWindowParam,
-    '',
-  );
-  const requestedWith = param ? `window=${param}` : '(no window param — full blob)';
-  const startedAt = safe(() => performance.now(), Date.now());
-  const controller = safe(() => new AbortController(), null);
-  const timer = window.setTimeout(() => safe(() => controller?.abort(), undefined), 15_000);
-  const api = window.Api as unknown as DiagnosticApi | undefined;
-
-  if (typeof api?.conversations?.getResponse !== 'function') {
-    window.clearTimeout(timer);
-    return { requestedWith, skipped: 'Api client unavailable' };
-  }
-
-  const options: Record<string, unknown> = {
-    headers: { Accept: 'application/json' },
-    onError: 'throw',
-    timeout: 0,
+function conversationSyncConfiguration(): JsonObject {
+  return {
+    protocol: 'conversation-sync-v3',
+    authority: 'sidecar-turn-store',
+    browserTranscriptCache: 'none',
   };
-  if (param) options.query = { window: param };
-  if (controller) options.signal = controller.signal;
+}
 
-  try {
-    const response = await api.conversations.getResponse(id, options);
-    const body = await response.text();
-    let windowedFlag: boolean | null = null;
-    let totalCount: unknown = null;
-    let messagesReturned: number | null = null;
-    let jsonParseError: string | null = null;
-    try {
-      const parsed = JSON.parse(body) as JsonObject | null;
-      windowedFlag = parsed?.windowed === true;
-      totalCount = parsed?.totalCount ?? null;
-      messagesReturned = Array.isArray(parsed?.messages) ? parsed.messages.length : 0;
-    } catch (error) {
-      jsonParseError = errorMessage(error);
-    }
-    return {
-      requestedWith,
-      httpStatus: response.status,
-      bodyBytes: body.length,
-      elapsedMs: elapsedSince(startedAt),
-      serverSaysWindowed: windowedFlag,
-      totalCount,
-      messagesReturned,
-      jsonParseError,
-    };
-  } catch (error) {
-    const aborted = safe(
-      () => (error as { name?: string } | null)?.name === 'AbortError',
-      false,
+function surfaceSnapshot(): JsonObject | null {
+  return safe<JsonObject | null>(() => {
+    const surface = document.querySelector<HTMLElement>(
+      '[data-conversation-surface="turn-store"]',
     );
+    if (!surface) return null;
     return {
-      requestedWith,
-      failed: true,
-      aborted,
-      note: aborted
-        ? 'fetch aborted at 15s — body never fully arrived (tunnel buffering / truncation suspected)'
-        : `fetch error: ${errorMessage(error)}`,
-      elapsedMs: elapsedSince(startedAt),
+      conversationId: surface.dataset.conversationId ?? null,
+      revision: Number(surface.dataset.conversationRevision || 0),
+      transport: surface.dataset.transport ?? null,
+      turnNodeCount: surface.querySelectorAll(':scope [data-turn-id]').length,
     };
-  } finally {
-    window.clearTimeout(timer);
-  }
+  }, null);
+}
+
+function liveStateProbe(): JsonObject {
+  const id = safe(activeConversationId, null);
+  if (!id) return { skipped: 'no active conversation' };
+  const turnRead = getRuntimeService(
+    'ConversationTurnRead',
+  ) as ConversationReadPort | undefined;
+  const state = safe(() => turnRead?.state?.(id) ?? null, null);
+  if (!state) return {
+    protocol: 'conversation-sync-v3',
+    conversationId: id,
+    skipped: 'TurnStore state unavailable',
+  };
+  return {
+    protocol: 'conversation-sync-v3',
+    conversationId: id,
+    revision: state.conversationRevision ?? 0,
+    transport: state.transport ?? 'unavailable',
+    turnCount: safe(() => turnRead?.ordered?.(id)?.length ?? 0, 0),
+    activeAttemptCount: safe(
+      () => turnRead?.activeAttemptIds?.(id)?.length ?? 0,
+      0,
+    ),
+    livePhase: state.livePhase ?? null,
+  };
 }
 
 function serializeDiagnostics(blob: JsonObject): string {
@@ -215,15 +160,15 @@ export async function collectDiagnostics(): Promise<string> {
         () => conversationList().length,
         null,
       ),
-      windowConfig: windowConfiguration(),
-      skeletonShowing: skeletonShowing(),
+      conversationSync: conversationSyncConfiguration(),
+      surface: surfaceSnapshot(),
       activeConv: activeConversationSnapshot(),
       recentLog: safe(() => {
         const ring = getRuntimeService('__tofuDiagRing');
         return Array.isArray(ring) ? ring.slice(-60) : [];
       }, []),
     };
-    blob.liveGetProbe = await liveGetProbe();
+    blob.liveStateProbe = liveStateProbe();
     return serializeDiagnostics(blob);
   } catch (error) {
     return serializeDiagnostics({

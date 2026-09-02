@@ -19,11 +19,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.tasks_pkg.stream_handler import (  # noqa: E402
+from lib.tasks_pkg.stream_handler.api import analyse_stream_result  # noqa: E402
+from lib.tasks_pkg.stream_handler._budget import (  # noqa: E402
     _PREMATURE_RETRY_MAX_CLASSIC,
     _PREMATURE_RETRY_MAX_ZERO_BYTE,
-    analyse_stream_result,
 )
+from tests._registered_chat_task import registered_chat_task  # noqa: E402
 
 
 def _fresh_task():
@@ -156,17 +157,19 @@ def test_normal_empty_round0_does_not_retry():
 def test_phase_event_fields_for_zero_byte_round0():
     """Frontend dedup relies on attempt + bucket; ensure both are emitted."""
     task = _fresh_task()
-    analyse_stream_result(
-        assistant_msg={'role': 'assistant', 'content': '', 'reasoning_content': ''},
-        last_finish_reason='stop',
-        task=task,
-        tid='test',
-        model='aws.claude-opus-4.7',
-        round_num=0,
-        _premature_retry_count=0,
-        messages=[],
-        usage=_zero_byte_usage(),
-    )
+    with registered_chat_task(task):
+        analyse_stream_result(
+            assistant_msg={'role': 'assistant', 'content': '',
+                           'reasoning_content': ''},
+            last_finish_reason='stop',
+            task=task,
+            tid='test',
+            model='aws.claude-opus-4.7',
+            round_num=0,
+            _premature_retry_count=0,
+            messages=[],
+            usage=_zero_byte_usage(),
+        )
     events = task.get('events') or []
     phase_events = [e for e in events if e.get('type') == 'phase']
     assert phase_events, 'expected a phase event to be appended'

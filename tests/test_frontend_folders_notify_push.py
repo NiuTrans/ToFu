@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tests/test_frontend_folders_notify_push.py — apply-side regression for the
 event-driven cross-device FOLDER sync handler (``_onFoldersChangedPush`` in
-static/js/core/cross_tab_sync.js).
+``core/conversation_invalidation.js``).
 
 WHY
 ---
@@ -41,11 +41,16 @@ from tests._jsdom import JS_DIR, node_deps_available, run_harness
 
 pytestmark = pytest.mark.unit
 
-_SRC = os.path.join(JS_DIR, 'core', 'cross_tab_sync.js')
+_SRC = os.path.join(JS_DIR, 'core', 'conversation_invalidation.js')
 
 # The exact delete-reconcile assignment the fix introduced (neuter target).
-_UNASSIGN = 'c.folderId = null;\n          touched = true;'
-_NEUTER = 'touched = true;'  # drop the assignment, keep the flag
+_UNASSIGN = (
+    'if (conversation?.folderId === deletedFolderId) '
+    'conversation.folderId = null;'
+)
+_NEUTER = (
+    'if (conversation?.folderId === deletedFolderId) void 0;'
+)
 
 _BODY = r"""
 const { setup } = require(process.env.JSDOM_HARNESS);
@@ -56,9 +61,8 @@ const _timers = [];
 const { document, check, report } = setup({
   root: process.argv[3],
   html: '<!DOCTYPE html><body><div id="convList"></div></body>',
-  // argv[4] = conv_state_reducer.js (the REAL _frameIsOurs — the handler's
-  // multi-user gate delegates to it; missing here it fails OPEN and
-  // C_foreign_user_ignored cannot be exercised). Load it FIRST.
+  // argv[4] = frame_identity.js. The handler's ownership gate fails closed,
+  // so load that owner before the invalidation adapter.
   targets: [process.argv[4], process.argv[2]],
   globals: {
     setTimeout: (fn) => { _timers.push(fn); return _timers.length; },
@@ -66,6 +70,7 @@ const { document, check, report } = setup({
     _editingMsgIdx: null,
     activeStreams: new Map(),
     conversations: [],
+    _currentUserId: 1,
     saveConversations: () => { global.__saved = (global.__saved || 0) + 1; },
     renderConversationList: () => { global.__rendered = (global.__rendered || 0) + 1; },
     ConvCache: { put: () => {} },
@@ -88,8 +93,8 @@ Object.defineProperty(document, 'visibilityState', { value: 'visible', configura
 
 // Seed two conversations, one assigned to the folder we will delete.
 window.conversations.push(
-  { id: 'c1', folderId: 'f-del', messages: [] },
-  { id: 'c2', folderId: 'f-keep', messages: [] },
+  { id: 'c1', folderId: 'f-del' },
+  { id: 'c2', folderId: 'f-keep' },
 );
 
 const NEUTER = process.env.NEUTER === '1';
@@ -143,7 +148,7 @@ def test_folders_changed_applies_without_refresh():
     run_harness(
         target_js=_SRC,
         body_js=_BODY,
-        extra_targets=[os.path.join(JS_DIR, 'core', 'conv_state_reducer.js')],
+        extra_targets=[os.path.join(JS_DIR, 'core', 'frame_identity.js')],
         min_pass=7,
         label='folders-changed apply',
     )
@@ -170,7 +175,7 @@ def test_NC_no_unassign_leaves_stale_folderid():
         run_harness(
             target_js=neutered_path,
             body_js=_BODY,
-            extra_targets=[os.path.join(JS_DIR, 'core', 'conv_state_reducer.js')],
+            extra_targets=[os.path.join(JS_DIR, 'core', 'frame_identity.js')],
             min_pass=3,
             label='folders-changed apply NC',
         )

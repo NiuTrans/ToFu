@@ -1,18 +1,14 @@
-"""tests/test_frontend_sidebar_settled_facts.py — the sidebar's incomplete/
-errored dot on a messages-stripped (?meta=1) shell.
+"""Sidebar incomplete/error dots on metadata-only catalog shells.
 
 WHY
 ---
-The sidebar list loads conversations WITHOUT their ``messages`` array (the
-``?meta=1`` metadata path strips bodies). ``_convStatusFlags`` computes the
-amber "incomplete" / red "errored" dot from the tail assistant message — which
-isn't present on a shell. So a crash-interrupted conversation showed NO dot
-until the user opened it (loading full messages). The fix: the backend stamps
+The sidebar catalog intentionally has no Turn bodies. ``_convStatusFlags``
+normally derives status from the latest normalized assistant Turn, which is
+unavailable before hydration. The backend therefore stamps
 RAW settled-turn facts into ``settings`` (surfaced onto the conv as
 ``lastFinishReason`` / ``lastMsgError`` / ``lastMsgHasOutput``), and
-``_convStatusFlags`` gains a fallback branch that runs the SAME
-``_FINISH_ERR`` / ``_FINISH_NORMAL`` classifier when ``c.messages`` is absent
-or is the empty array used by real lazy sidebar shells.
+``_convStatusFlags`` runs the same ``_FINISH_ERR`` / ``_FINISH_NORMAL``
+classifier when TurnStore has no hydrated assistant Turn.
 
 This harness slices the REAL shipped ``_convStatusFlags`` out of
 ``static/js/ui/conversation_list.js`` and evals it (bites the actual logic),
@@ -31,11 +27,12 @@ import shutil
 import subprocess
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 SRC = os.path.join(JS_DIR, 'ui', 'conversation_list.js')
 
@@ -60,11 +57,16 @@ def _extract_flags(src_text: str) -> str:
 _HARNESS = r"""
 const fs = require('fs');
 global.window = global;
+global.runtimeScope = global;
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 // Module globals _convStatusFlags references:
 global.activeStreams = new Map();
+global.ConversationTurnRead = {
+  ordered() { return []; },
+  state() { return { turnsById: {} }; },
+};
 global._FINISH_NORMAL = new Set(['stop', 'end_turn', 'stop_sequence', 'tool_use', 'tool_calls']);
 global._FINISH_ERR = new Set(['error', 'server_offline']);
 global._autopilotRunConcluded = function () { return false; };
@@ -84,13 +86,13 @@ check('fn_exposed', typeof _convStatusFlags === 'function');
   check('interrupted_shell_incomplete', f.incomplete === true && f.errored === false);
 })();
 
-// ── real lazy shell shape uses messages:[]; it must hit the same fallback ──
+// ── lazy catalog shell has no transcript field; it hits the same fallback ──
 (function () {
-  const c = { id: 'i2', messages: [], _needsLoad: true,
+  const c = { id: 'i2', _turnSnapshotRequired: true,
               lastMsgRole: 'assistant', lastFinishReason: 'interrupted',
               lastMsgError: false, lastMsgHasOutput: true };
   const f = _convStatusFlags(c);
-  check('empty_array_shell_incomplete', f.incomplete === true && f.errored === false);
+  check('lazy_shell_incomplete', f.incomplete === true && f.errored === false);
 })();
 
 // ── error shell → errored ──
@@ -176,10 +178,10 @@ def test_fallback_branch_is_load_bearing_neuter():
     with open(SRC, encoding='utf-8') as f:
         real = _extract_flags(f.read())
 
-    # NC: remove the entire `else if (!streaming && !hasLoadedMessages...)`
+    # NC: remove the metadata fallback used when there is no hydrated Turn.
     #     fallback block that classifies a stripped shell.
     nc = re.sub(
-        r"  else if \(!streaming && !hasLoadedMessages && c\.lastMsgRole === 'assistant'\) \{.*?\n  \}\n",
+        r" else if \(!streaming && !latestAssistant && c\.lastMsgRole === 'assistant'\) \{.*?\n  \}",
         "\n",
         real, flags=re.DOTALL,
     )

@@ -83,7 +83,8 @@ def test_audit_log_returns_before_write_completes(tmp_path, monkeypatch):
 def test_audit_log_write_failure_falls_back_without_raising(
         tmp_path, monkeypatch, caplog):
     """A failing write on the queue path must not raise into the caller and
-    must surface via the 'audit' logger fallback (from the writer thread)."""
+    must surface via the 'audit' logger fallback (from the writer thread)
+    without echoing the rejected audit payload into a second log."""
     _force_queue_path(monkeypatch, tmp_path)
     # Point at a path whose parent is a regular file → open() fails.
     blocker = tmp_path / 'blocker'
@@ -93,8 +94,9 @@ def test_audit_log_write_failure_falls_back_without_raising(
     with caplog.at_level('ERROR', logger='audit'):
         log_mod.audit_log('doomed_event')
         _drain()
-    assert any('Failed to write audit log' in r.message
-               and 'doomed_event' in r.message for r in caplog.records)
+    assert any('Failed to write audit log record' in r.message
+               for r in caplog.records)
+    assert 'doomed_event' not in caplog.text
 
 
 def test_audit_queue_is_bounded_and_keeps_newest(monkeypatch, caplog):

@@ -71,9 +71,9 @@ function rowsAndOlder() {
 //    The sole "older" group must be force-expanded so rows render. ──
 global.activeConvId = window.activeConvId = null;
 global.conversations = window.conversations = [
-  { id: 'old1', title: 'Old 1', messages: [{ role: 'user' }], updatedAt: now - 40 * DAY },
-  { id: 'old2', title: 'Old 2', messages: [{ role: 'user' }], updatedAt: now - 55 * DAY },
-  { id: 'old3', title: 'Old 3', messages: [{ role: 'user' }], updatedAt: now - 70 * DAY },
+  { id: 'old1', title: 'Old 1', _serverTurnCount: 1, updatedAt: now - 40 * DAY },
+  { id: 'old2', title: 'Old 2', _serverTurnCount: 1, updatedAt: now - 55 * DAY },
+  { id: 'old3', title: 'Old 3', _serverTurnCount: 1, updatedAt: now - 70 * DAY },
 ];
 renderConversationList();
 let r1 = rowsAndOlder();
@@ -84,9 +84,9 @@ check('allold_older_force_expanded', r1.hasOlder && r1.olderCollapsed === false)
 //    the sole populated group, so it must STAY collapsed (default preserved)
 //    and only the recent row is clickable. ──
 global.conversations = window.conversations = [
-  { id: 'recent', title: 'Recent', messages: [{ role: 'user' }], updatedAt: now - 1000 },
-  { id: 'old2', title: 'Old 2', messages: [{ role: 'user' }], updatedAt: now - 55 * DAY },
-  { id: 'old3', title: 'Old 3', messages: [{ role: 'user' }], updatedAt: now - 70 * DAY },
+  { id: 'recent', title: 'Recent', _serverTurnCount: 1, updatedAt: now - 1000 },
+  { id: 'old2', title: 'Old 2', _serverTurnCount: 1, updatedAt: now - 55 * DAY },
+  { id: 'old3', title: 'Old 3', _serverTurnCount: 1, updatedAt: now - 70 * DAY },
 ];
 window._lastConvListHash = '';   // force past the hash guard
 renderConversationList();
@@ -99,9 +99,9 @@ check('mixed_only_recent_clickable', r2.rows === 1);
 //    force-expand guard must not override an explicit user toggle. ──
 global.activeConvId = window.activeConvId = 'today1';
 global.conversations = window.conversations = [
-  { id: 'today1', title: 'Today 1', messages: [{ role: 'user' }], updatedAt: now - 1000 },
-  { id: 'today2', title: 'Today 2', messages: [{ role: 'user' }], updatedAt: now - 2000 },
-  { id: 'old3', title: 'Old 3', messages: [{ role: 'user' }], updatedAt: now - 70 * DAY },
+  { id: 'today1', title: 'Today 1', _serverTurnCount: 1, updatedAt: now - 1000 },
+  { id: 'today2', title: 'Today 2', _serverTurnCount: 1, updatedAt: now - 2000 },
+  { id: 'old3', title: 'Old 3', _serverTurnCount: 1, updatedAt: now - 70 * DAY },
 ];
 window._lastConvListHash = '';
 renderConversationList();

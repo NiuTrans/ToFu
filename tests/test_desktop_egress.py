@@ -392,33 +392,21 @@ class TestOSProxyDiscovery(unittest.TestCase):
 
 
 class TestBridgeTTL(unittest.TestCase):
-    """Bridge 按命令 TTL。
-
-    Isolation (2026-08-04): take_pending_commands() with no args is a V1
-    poller in the legacy '' tenant — _deliverable answers it ONLY when no
-    ''-user agent is online. Any earlier suite that polls /api/desktop/poll
-    (test_desktop_pairing's lifecycle does) registers an agent that stays
-    "online" for 15s and this suite's assertions silently flip to [].
-    Snapshot-clear-restore the bridge registry so the TTL contract is
-    judged against a world these tests actually own (恢复式, never
-    destroyed for downstream suites).
-    """
+    """Bridge expiration follows each command's declared TTL."""
 
     def setUp(self):
         from lib.desktop import bridge
         self._bridge = bridge
         with bridge.command_queue_lock:
             self._saved_agents = dict(bridge._agents)
-            self._saved_v1 = bridge._v1_last_poll
             bridge._agents.clear()
-            bridge._v1_last_poll = 0.0
+        bridge.register_agent('ttl-agent', {'name': 'ttl'}, user_id='owner')
 
     def tearDown(self):
         bridge = self._bridge
         with bridge.command_queue_lock:
             bridge._agents.clear()
             bridge._agents.update(self._saved_agents)
-            bridge._v1_last_poll = self._saved_v1
 
     def test_per_command_ttl_override(self):
         from lib.desktop import bridge
@@ -426,11 +414,12 @@ class TestBridgeTTL(unittest.TestCase):
         cmd = {'id': 'c1', 'type': 'egress_http', 'params': {},
                'created_at': now - 100,  # 超过全局 90s
                'event': threading.Event(), 'result': None, 'error': None,
-               'ttl': 120}
+               'ttl': 120, 'user_id': 'owner'}
         with bridge.command_queue_lock:
             bridge.command_queue['c1'] = cmd
         try:
-            pending = bridge.take_pending_commands()
+            pending = bridge.take_pending_commands(
+                agent_id='ttl-agent', user_id='owner')
             self.assertEqual([c['id'] for c in pending], ['c1'])
         finally:
             with bridge.command_queue_lock:
@@ -441,11 +430,13 @@ class TestBridgeTTL(unittest.TestCase):
         now = time.time()
         cmd = {'id': 'c2', 'type': 'desktop_list_files', 'params': {},
                'created_at': now - 100,
-               'event': threading.Event(), 'result': None, 'error': None}
+               'event': threading.Event(), 'result': None, 'error': None,
+               'user_id': 'owner'}
         with bridge.command_queue_lock:
             bridge.command_queue['c2'] = cmd
         try:
-            pending = bridge.take_pending_commands()
+            pending = bridge.take_pending_commands(
+                agent_id='ttl-agent', user_id='owner')
             self.assertEqual(pending, [])
             self.assertEqual(cmd['error'], 'Command expired (stale cleanup)')
         finally:
@@ -456,7 +447,7 @@ class TestBridgeTTL(unittest.TestCase):
 class TestRefreshSingleflight(unittest.TestCase):
 
     def test_concurrent_refresh_merges_to_one_upstream_call(self):
-        from lib.oauth import token_store
+        import lib.oauth.token_store as token_store
         calls = {'n': 0}
         stored = {'expire': 0, 'refresh_token': 'r0', 'access_token': 'old'}
 
@@ -482,7 +473,7 @@ class TestRefreshSingleflight(unittest.TestCase):
         self.assertTrue(all(r and r['access_token'] == 'new' for r in results))
 
     def test_singleflight_passes_through_failure(self):
-        from lib.oauth import token_store
+        import lib.oauth.token_store as token_store
         with mock.patch('lib.oauth.token_store.load_token', return_value=None):
             out = token_store.refresh_singleflight(
                 'codex', 'r0', lambda rt: None, load=lambda: None)
@@ -492,7 +483,7 @@ class TestRefreshSingleflight(unittest.TestCase):
 class TestExchangeViaEgress(unittest.TestCase):
 
     def test_claude_exchange_falls_back_to_egress_on_geo_block(self):
-        from lib.oauth import claude
+        import lib.oauth.claude as claude
         geo = mock.Mock(status_code=403,
                         text='{"error":{"type":"forbidden","message":"Request not allowed"}}')
         geo.json.return_value = {'error': {'type': 'forbidden'}}

@@ -1,6 +1,9 @@
 """tests/test_logs_clean_route.py — POST /api/v1/logs/clean integration."""
 
+
 from __future__ import annotations
+
+pytest_plugins = ('tests._credential_sidecar',)
 
 import asyncio
 import os
@@ -22,11 +25,6 @@ class LogsCleanRouteTest(unittest.TestCase):
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory()
         from lib import api_keys
-        cls._orig_path = api_keys._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(cls._tmp.name, 'api_keys.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        os.environ['TUNNEL_TOKEN'] = 'tt'
 
         from quart import Quart
         cls.app = Quart(__name__, static_folder=None)
@@ -41,14 +39,11 @@ class LogsCleanRouteTest(unittest.TestCase):
         cls.app.register_blueprint(api_v1_logs_bp)
 
         from lib.api_keys import create_key
-        _row, cls.token = create_key(name='log-test', scopes=['chat'])
+        _row, cls.token = create_key(owner_user_id=1, name='log-test', scopes=['chat'])
 
     @classmethod
     def tearDownClass(cls):
         from lib import api_keys
-        api_keys._STORE_PATH = cls._orig_path
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
         cls._tmp.cleanup()
 
     def _post(self, body, headers=None):
@@ -119,11 +114,6 @@ class ExtractFileChangesRouteTest(unittest.TestCase):
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory()
         from lib import api_keys
-        cls._orig_path = api_keys._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(cls._tmp.name, 'api_keys.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        os.environ['TUNNEL_TOKEN'] = 'tt'
 
         from quart import Quart
         cls.app = Quart(__name__, static_folder=None)
@@ -138,14 +128,11 @@ class ExtractFileChangesRouteTest(unittest.TestCase):
         cls.app.register_blueprint(api_v1_logs_bp)
 
         from lib.api_keys import create_key
-        _row, cls.token = create_key(name='extract-test', scopes=['chat'])
+        _row, cls.token = create_key(owner_user_id=1, name='extract-test', scopes=['chat'])
 
     @classmethod
     def tearDownClass(cls):
         from lib import api_keys
-        api_keys._STORE_PATH = cls._orig_path
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
         cls._tmp.cleanup()
 
     def _post(self, body, headers=None):

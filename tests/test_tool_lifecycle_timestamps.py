@@ -16,10 +16,9 @@ different places:
                   a render outright when the conv/DOM guards do not line up, so
                   this is a real, measured failure mode, not a hypothetical.
 
-Today all three are indistinguishable, because the tool lifecycle events carry
-NO CLOCK AT ALL. Verified against ``lib/agent_core/events.py``: the four TOOL
-EventSpecs (``tool_start`` / ``tool_progress`` / ``tool_result`` /
-``tool_complete``) declare only ids, names, payloads. Nothing timestamped.
+The original defect made all three indistinguishable because tool lifecycle
+events carried no clocks. The executable contracts below now keep that defect
+from returning.
 
 So "I fixed the latency" is unfalsifiable — which is the real reason this face
 exists. It is the measurement instrument for the other three.
@@ -31,7 +30,8 @@ Backend, monotonic-derived but wall-clock-comparable epoch-ms:
   * ``tEnd``      — when it returned (on terminal events);
   * ``emittedAt`` — when the frame was handed to the event chokepoint.
 Frontend:
-  * ``receivedAt`` — stamped by the client the moment the frame is applied.
+  * the canonical turn projection must preserve every diagnostic clock already
+    present on a tool round, including an optional ingress ``receivedAt``.
 
 From those four the three segments are derivable, per tool row:
   execution = tEnd - tStart   |   transport = receivedAt - emittedAt
@@ -51,8 +51,8 @@ WHAT THIS SUITE PINS
      and tEnd >= tStart.
   5. A slow tool's measured execution really reflects its duration (the number
      is honest, not a constant).
-  6. The frontend stamps ``receivedAt`` and preserves the backend clocks on the
-     round, so the three segments survive into the render layer.
+  6. The production TypeScript projection preserves all four clocks through
+     both its direct-message and full-state public projections.
 
 Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
         tests/test_tool_lifecycle_timestamps.py -v
@@ -60,17 +60,24 @@ Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import subprocess
 import threading
 import time
 
 import pytest
 
+from tests._runtime_sections import native_module_path
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-RUNTIME_JS = os.path.join(ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
+CONVERSATION_VIEW_MODEL_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'conversation', 'presentation',
+    'conversation-view-model.ts')
 
 TOOL_EVENT_TYPES = ('tool_start', 'tool_progress', 'tool_result', 'tool_complete')
 
@@ -130,6 +137,7 @@ def _mk_task(**over):
     t = {
         'id': 'ts-task-1',
         'convId': 'cv-ts-1',
+        '_userId': 1,
         'status': 'running',
         'aborted': False,
         'model': 'test-model',
@@ -172,9 +180,9 @@ class _Recorder:
 @pytest.fixture()
 def rec(monkeypatch):
     r = _Recorder()
-    from lib.tasks_pkg import tool_dispatch as td_facade
+    import lib.tasks_pkg.tool_dispatch._heartbeat as td_facade
     from lib.tasks_pkg.executor import _finalize as exec_finalize
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
 
     monkeypatch.setattr(_pipeline, 'append_event', r, raising=False)
     monkeypatch.setattr(td_facade, 'append_event', r, raising=False)
@@ -198,14 +206,15 @@ def fake_tools(monkeypatch):
               'source': 'Test', 'fetched': True, 'fetchedChars': len(text)}])
         return tc_id, text, False
 
-    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     monkeypatch.setattr(_heartbeat, '_execute_tool_one', _fake, raising=False)
     monkeypatch.setattr(_pipeline, '_execute_tool_one', _fake, raising=False)
     return script
 
 
 def _run(task, tcs):
-    from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline
+    from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
     execute_tool_pipeline(
         task, tcs, cfg={'autoApply': True}, project_path=None,
         project_enabled=False, tool_list=[], messages=[],
@@ -332,187 +341,56 @@ def test_emitted_at_is_stamped_at_one_chokepoint():
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  Face 6 — the clocks survive into the frontend
+#  Face 6 — the clocks survive the production frontend projection
 # ═══════════════════════════════════════════════════════════════════
 
 _HARNESS = r"""
 const fs = require('fs');
-const path = require('path');
 global.window = global;
-const _log = console.log.bind(console);
-global.console = { log: _log, warn: () => {}, error: () => {}, debug: () => {} };
-
-const out = [];
-function check(name, cond, detail) {
-  out.push((cond ? 'PASS ' : 'FAIL ') + name + (cond ? '' : '  :: ' + (detail || '')));
-}
-
-const JS_DIR = process.argv[1];
-(0, eval)(fs.readFileSync(path.join(JS_DIR, 'ui/stream_reducer.js'), 'utf8'));
+(0, eval)(fs.readFileSync(process.argv[1], 'utf8'));
 
 const T0 = Date.now() - 5000;
-let state = emptyStreamState();
+const round = {
+  roundNum: 1, toolCallId: 'tc-1', status: 'done', results: [],
+  tStart: T0, tEnd: T0 + 2500, emittedAt: T0 + 2505,
+  receivedAt: T0 + 2507,
+};
+const turn = {
+  turnId: 'turn-1', actor: 'assistant', kind: 'reply', laneId: 'main',
+  conversationId: 'conv-a', ordinal: 1,
+  parentTurnId: null, status: 'completed', currentAttemptId: null,
+  projectionRevision: 1, projection: { content: '', toolRounds: [round],
+    segments: [{type:'tool_use', blockId:'tool:tc-1', id:'tc-1',
+      name:'search', input:{}, result:{status:'done'}}] },
+  settlement: {}, createdAt: T0,
+};
 
-state = reduceStreamState(state, {
-  type: 'tool_start', roundNum: 1, toolCallId: 'tc-1', toolName: 'web_search',
-  query: 'q', tStart: T0, emittedAt: T0,
-});
-let r = state.toolRounds[0];
-check('start_clock_kept_on_round', r.tStart === T0,
-      'the reducer must preserve tStart so a running row can show a truthful '
-    + 'elapsed time; got ' + r.tStart);
+const direct = selectTurnBlocks(turn).find(block => block.kind === 'tool').round;
+const projected = selectConversationViewModel({
+    turnsById: { 'turn-1': turn }, laneOrder: { main: ['turn-1'] },
+    attemptsById:{}, queueItems:[], pendingEventsByTurn:{},
+    commandPending: {}, liveRoundUsageByTurn: {}, transport: 'connected',
+    conversationId:'conv-a', conversationRevision:1,
+  }).mainLane.turns[0].blocks.find(block => block.kind === 'tool').round;
 
-state = reduceStreamState(state, {
-  type: 'tool_result', roundNum: 1, toolCallId: 'tc-1', results: [],
-  tStart: T0, tEnd: T0 + 2500, emittedAt: T0 + 2505, receivedAt: T0 + 2507,
-});
-r = state.toolRounds[0];
-check('end_clock_kept_on_round', r.tEnd === T0 + 2500,
-      'tEnd must survive onto the round; got ' + r.tEnd);
-check('emitted_clock_kept_on_round', r.emittedAt === T0 + 2505,
-      'emittedAt must survive onto the round; got ' + r.emittedAt);
-/* receivedAt is stamped at stream INGRESS (ui/sse_pipeline.js), NOT here: the
- * reducer is pure, and a Date.now() inside it would make the live fold diverge
- * from the cold projection of the same settled turn. The reducer's job is to
- * PRESERVE it onto the round so the render can read it. */
-check('received_clock_preserved', r.receivedAt === T0 + 2507,
-      'the reducer must carry the ingress-stamped receivedAt onto the round — '
-    + 'without it the transport segment (receivedAt - emittedAt) cannot be '
-    + 'computed at render time; got ' + r.receivedAt);
-check('transport_segment_derivable', (r.receivedAt - r.emittedAt) === 2,
-      'transport = receivedAt - emittedAt must be derivable from the round');
-check('execution_segment_derivable', (r.tEnd - r.tStart) === 2500,
-      'execution = tEnd - tStart must be derivable from the round alone');
-
-// A cold snapshot (poll / reconnect) must not lose the clocks either.
-const cold = projectColdSnapshot({ content: '', thinking: '', toolRounds: [
-  { roundNum: 1, toolCallId: 'tc-1', status: 'done', results: [],
-    tStart: T0, tEnd: T0 + 900, emittedAt: T0 + 905 },
-]});
-check('cold_snapshot_preserves_clocks',
-      cold.toolRounds[0].tStart === T0 && cold.toolRounds[0].tEnd === T0 + 900,
-      'a reconnected/replayed row must keep its timings, else the diagnostic '
-    + 'vanishes exactly when a user reloads to investigate a slow turn');
-
-console.log(out.join('\n'));
+console.log(JSON.stringify({ direct, projected, original: round }));
 """
 
 
-def test_frontend_preserves_and_stamps_the_clocks():
-    """The Vite-owned reducer preserves every diagnostic clock."""
-    source = open(RUNTIME_JS, encoding='utf-8').read()
-    for assignment in (
-            'r.tStart = ev.tStart', 'r.tEnd = ev.tEnd',
-            'r.emittedAt = ev.emittedAt', 'r.receivedAt = ev.receivedAt'):
-        assert assignment in source
-    assert "const _CLIENT_LOCAL_ROUND_KEYS = ['receivedAt'];" in source
-    assert 'function projectColdSnapshot(snap)' in source
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_frontend_projection_preserves_tool_clocks():
+    """Both direct and full-state projections preserve diagnostic clocks."""
+    built = native_module_path(
+        'tool-lifecycle-conversation-view-model.js',
+        CONVERSATION_VIEW_MODEL_TS)
+    proc = subprocess.run(
+        ['node', '-e', _HARNESS, built], capture_output=True, text=True,
+        timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
 
-
-# ═══════════════════════════════════════════════════════════════════
-#  Face 7 — receivedAt is really stamped at INGRESS (end-to-end)
-# ═══════════════════════════════════════════════════════════════════
-
-_INGRESS_HARNESS = r"""
-const fs = require('fs');
-const path = require('path');
-global.window = global;
-const _log = console.log.bind(console);
-global.console = { log: _log, warn: () => {}, error: () => {}, debug: () => {},
-                   info: () => {} };
-
-const out = [];
-function check(name, cond, detail) {
-  out.push((cond ? 'PASS ' : 'FAIL ') + name + (cond ? '' : '  :: ' + (detail || '')));
-}
-
-const JS_DIR = process.argv[1];
-
-// Ambient stubs the pipeline + handlers touch.
-global.conversations = []; global.activeConvId = 'c1';
-global.twUpdate = () => {}; global.setStreamPhase = () => {};
-global.renderConversationList = () => {}; global.saveConversations = () => {};
-global.updateSendButton = () => {}; global.debugLog = () => {};
-global.showToast = () => {}; global.escapeHtml = (s) => String(s == null ? '' : s);
-global.t = (k) => k;
-global.Api = { project: { status: () => Promise.resolve(null) } };
-global.getActiveConv = () => conversations.find((c) => c.id === activeConvId);
-global.errorEnvelopeMessage = () => '';
-global._debugCache = {}; global.convAutoTranslate = () => false;
-global.updateContextBar = () => {};
-global.requestAnimationFrame = (fn) => { try { fn(); } catch (e) {} return 0; };
-global._ensureMsgId = (m) => m;
-global._resolveAssistantById = (c, i) =>
-  (c && c.messages.find((m) => m._msgId === i)) || null;
-global._hasRealToolRound = () => false;
-global._spliceInjectRow = (a, r) => { a.push(r); return a; };
-global._saveSseCursor = () => {};
-global.document = { getElementById: () => null, querySelectorAll: () => [],
-                    addEventListener: () => {}, removeEventListener: () => {} };
-global.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
-
-// Bundle order (lib/js_bundler.py _BUNDLE_FILES): reducer, then handlers, then
-// the pipeline — they share window scope with no imports.
-for (const f of ['ui/stream_reducer.js', 'ui/sse_handlers_tool.js',
-                 'ui/sse_handlers_io.js', 'ui/sse_pipeline.js']) {
-  (0, eval)(fs.readFileSync(path.join(JS_DIR, f), 'utf8'));
-}
-
-const T = window.__sse_test__;
-if (!T || typeof T.dispatchSSEEvent !== 'function') {
-  console.log('FAIL harness_no_seam :: window.__sse_test__ missing');
-  process.exit(0);
-}
-
-const am = { role: 'assistant', content: '', thinking: '', toolRounds: [],
-             _msgId: 'mid-w' };
-conversations.push({ id: 'c1', messages: [{ role: 'user', content: 'hi' }, am] });
-const ctx = T.makeCtx({ convId: 'c1', taskId: 't1',
-  stream: { controller: { signal: { aborted: false } } }, assistantMsg: am });
-
-const T0 = Date.now() - 3000;
-const before = Date.now();
-T.dispatchSSEEvent('data: ' + JSON.stringify({
-  type: 'tool_start', roundNum: 1, toolCallId: 'tc-1', toolName: 'web_search',
-  query: 'q', tStart: T0, emittedAt: T0 }), ctx);
-T.dispatchSSEEvent('data: ' + JSON.stringify({
-  type: 'tool_result', roundNum: 1, toolCallId: 'tc-1', results: [],
-  tStart: T0, tEnd: T0 + 2500, emittedAt: T0 + 2505 }), ctx);
-const after = Date.now();
-
-const r = am.toolRounds[0];
-check('round_exists', !!r, 'the tool round must be created');
-if (r) {
-  check('ingress_stamped_receivedAt',
-        typeof r.receivedAt === 'number' && r.receivedAt >= before
-          && r.receivedAt <= after,
-        'the SSE ingress must stamp receivedAt on a tool frame (in [' + before
-        + ',' + after + ']); got ' + r.receivedAt);
-  check('backend_clocks_survived',
-        r.tStart === T0 && r.tEnd === T0 + 2500 && r.emittedAt === T0 + 2505,
-        'the three backend clocks must reach the round unchanged; got '
-        + JSON.stringify({ tStart: r.tStart, tEnd: r.tEnd,
-                           emittedAt: r.emittedAt }));
-  check('three_segments_derivable',
-        (r.tEnd - r.tStart) === 2500 && (r.receivedAt - r.emittedAt) >= 0,
-        'execution and transport must both be computable from the round alone');
-}
-
-// A DELTA frame must NOT be stamped — the hottest path in the product stays lean.
-const amc = am.content;
-T.dispatchSSEEvent('data: ' + JSON.stringify({ type: 'delta', content: 'x' }), ctx);
-check('delta_path_untouched', am.content === amc + 'x',
-      'delta must still apply normally');
-
-console.log(out.join('\n'));
-"""
-
-
-def test_ingress_stamps_received_at_end_to_end():
-    """Only tool lifecycle frames receive a browser-ingress clock."""
-    source = open(RUNTIME_JS, encoding='utf-8').read()
-    dispatch = source[source.index('function dispatchSSEEvent(line, ctx)'):]
-    dispatch = dispatch[:dispatch.index('/* ===== migrated source:', 1)]
-    assert 'ev.receivedAt = Date.now();' in dispatch
-    assert "_evType.indexOf('tool_') === 0" in dispatch
-    assert 'ev.receivedAt == null' in dispatch
+    expected = got['original']
+    assert got['direct'] == expected
+    assert got['projected'] == expected
+    assert expected['tEnd'] - expected['tStart'] == 2500
+    assert expected['receivedAt'] - expected['emittedAt'] == 2

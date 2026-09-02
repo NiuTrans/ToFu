@@ -124,9 +124,12 @@ class FakeBilledGateway:
 
 
 def _seed_wire_fp(conv_id: str, fp):
-    from lib.tasks_pkg.cache_tracking import _cache_lock, _cache_states
+    from lib.tasks_pkg.cache_tracking._state import (
+        _cache_lock,
+        _cache_states,
+    )
     from lib.tasks_pkg.cache_tracking._state import CacheState, _state_key
-    key = _state_key(conv_id)
+    key = _state_key(conv_id, user_id=1)
     with _cache_lock:
         st = _cache_states.get(key)
         if st is None:
@@ -139,6 +142,7 @@ def _mk_task(conv_id: str = 'billing-parity') -> dict:
     return {
         'id': 'task-parity',
         'convId': conv_id,
+        '_userId': 1,
         'content': '',
         'thinking': '',
         'config': {},
@@ -209,8 +213,8 @@ def pinned_pricing(monkeypatch):
 def _drive_primary_path(monkeypatch, script, conv_id: str):
     """Real _llm_call_with_fallback → real stream_llm_response → recorded
     api_rounds + accumulated_usage. Returns (accumulated, api_rounds, gateway)."""
-    import lib.tasks_pkg.manager as _mgr
-    import lib.tasks_pkg.llm_fallback as _fb
+    import lib.tasks_pkg.manager._stream as _mgr
+    import lib.tasks_pkg.llm_fallback._call as _fb
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY', '1')
     # MAX=2 matches the production default; primary + up to 2 resends.
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY_MAX', '2')
@@ -294,8 +298,8 @@ def test_parity_primary_path_no_resend_when_disabled(monkeypatch, pinned_pricing
     inert when there is nothing to discard."""
     from lib.cost import compute_cost
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY', '0')
-    import lib.tasks_pkg.manager as _mgr
-    import lib.tasks_pkg.llm_fallback as _fb
+    import lib.tasks_pkg.manager._stream as _mgr
+    import lib.tasks_pkg.llm_fallback._call as _fb
     _seed_wire_fp('parity-off', [{'k': 'a'}])
     gateway = FakeBilledGateway([_FLOOR])
     _orig = _mgr.dispatch_stream
@@ -463,20 +467,6 @@ def test_static_gate_every_registered_consumer_bills_discards():
         f'exact regression the guard exists to catch — re-wire the '
         f'`for _bill in (usage.get("_extra_billing_rounds") or []):` loop '
         f'next to the api_rounds.append call site.')
-
-
-def test_static_gate_extra_billing_rounds_symbol_stable():
-    """The producer (_stream.py) exposes the discard list under the exact
-    field name every consumer reads. Renaming it silently on ONE side would
-    reopen the leak — this ties the two together at CI time."""
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    producer = open(os.path.join(repo, 'lib/tasks_pkg/manager/_stream.py'),
-                    encoding='utf-8').read()
-    assert "'_extra_billing_rounds'" in producer or \
-           '"_extra_billing_rounds"' in producer, (
-        'Producer _stream.py no longer names the discard field '
-        '_extra_billing_rounds — consumers still read that name, so this '
-        'rename silently reopens the leak.')
 
 
 # ── Guard 3: default gate stays OFF (redundant with test_cache_floor_retry

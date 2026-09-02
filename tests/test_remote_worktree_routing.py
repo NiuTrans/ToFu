@@ -1,6 +1,6 @@
 """tests/test_remote_worktree_routing.py — RWA P3:工具投影 + 执行路由.
 
-docs/REMOTE_WORKTREE_DESIGN.md §5 P3 + 拍板 3A(同名路由)+ 约束③第三条:
+docs/modules/remote_execution.md:
   * **同名策略**:远程会话沿用 write_file 等工具名 —— schema 逐字节不变,
     仅 description 追加本地执行提示(``with_remote_hint``);
     OFF→ON 一次性 latch-clear(project_ready/multiroot 同范式);
@@ -10,7 +10,7 @@ docs/REMOTE_WORKTREE_DESIGN.md §5 P3 + 拍板 3A(同名路由)+ 约束③第三
     不适用 —— agent 侧自守(P1 约束⑤);
   * **批准门洞闭合**:``ToolSpec('desktop')`` 补 provides + write_tools,
     desktop 写/执行工具进串行写分区(原来既进并行池又绕 Manual 门);
-  * 未映射工具(apply_diffs / insert_content / create_project /
+  * 未映射工具(apply_diffs / insert_content /
     read_files 批量 / inspect_image)报诚实错,绝不静默落服务器路径。
 
 Run:  pytest tests/test_remote_worktree_routing.py -m unit -v
@@ -32,7 +32,7 @@ def _ctx(cfg=None, conv_id='', project_enabled=True):
         task_id='task-1', project_path='/srv/app',
         project_enabled=project_enabled, search_mode='off', search_enabled=False,
         fetch_enabled=False, code_exec_enabled=False, browser_enabled=False,
-        desktop_enabled=False, swarm_enabled=False, conv_id=conv_id)
+        desktop_enabled=False, conv_id=conv_id)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -42,7 +42,7 @@ def _ctx(cfg=None, conv_id='', project_enabled=True):
 @pytest.mark.unit
 class TestDesktopWriteToolsDeclaration:
     def test_spec_declares_provides_and_write_partition(self):
-        from lib.tools import all_specs
+        from lib.tools.registry import all_specs
         spec = next(s for s in all_specs() if s.key == 'desktop')
         from lib.desktop_tools import DESKTOP_TOOL_NAMES
         assert spec.provides == frozenset(DESKTOP_TOOL_NAMES)
@@ -86,8 +86,9 @@ class TestBindingContract:
 class TestProjection:
     def test_remote_hint_same_names_same_params(self, monkeypatch):
         monkeypatch.setenv('TOFU_REMOTE_WORKTREE', '1')
-        from lib.tools import PROJECT_TOOLS
+        from lib.tools.project import PROJECT_TOOLS
         tools = _build_project_or_code_exec(_ctx())
+        # create_project 已退出模型面向 schema；拍板 3A 契约对剩余项目工具不变。
         base = {t['function']['name']: t for t in PROJECT_TOOLS}
         hinted = {t['function']['name']: t for t in tools}
         # 拍板 3A:同名同 schema,仅 description 变化
@@ -100,7 +101,7 @@ class TestProjection:
 
     def test_master_switch_off_no_hint(self, monkeypatch):
         monkeypatch.delenv('TOFU_REMOTE_WORKTREE', raising=False)
-        from lib.tools import PROJECT_TOOLS
+        from lib.tools.project import PROJECT_TOOLS
         tools = _build_project_or_code_exec(_ctx())  # cfg 带绑定但总闸关
         by = {t['function']['name']: t for t in tools}
         base = {t['function']['name']: t for t in PROJECT_TOOLS}
@@ -181,6 +182,75 @@ class TestRouting:
         call = routed['send'][0]
         assert call['cmd_type'] == 'project_run_command'
         assert call['timeout'] == 630.0
+
+    def test_plain_ls_run_command_routes_to_bounded_directory_backend(self, routed):
+        _call('run_command', {
+            'command': 'ls -lah src', 'working_dir': 'packages'})
+        call = routed['send'][0]
+        assert call['cmd_type'] == 'project_list_dir'
+        assert call['params'] == {
+            'root': 'myapp', 'path': 'packages/src', 'show_hidden': True,
+            'shell_compatible': True}
+        assert routed['meta'][0]['toolName'] == 'run_command'
+        assert routed['meta'][0]['routedAs'] == 'project_list_dir'
+
+    def test_plain_find_run_command_routes_to_complete_bounded_backend(
+            self, routed):
+        _call('run_command', {
+            'command': "find src -type f -name '*.py'",
+            'working_dir': 'packages',
+        })
+        call = routed['send'][0]
+        assert call['cmd_type'] == 'project_find_files'
+        assert call['params'] == {
+            'root': 'myapp',
+            'path': 'packages/src',
+            'pattern': '*.py',
+            'max_results': 500,
+            'case_sensitive': True,
+            'shell_output': True,
+            'respect_project_ignores': False,
+        }
+        assert routed['meta'][0]['toolName'] == 'run_command'
+        assert routed['meta'][0]['routedAs'] == 'project_find_files'
+
+    @pytest.mark.parametrize('command', [
+        "find src -name '*.py'",
+        "find src -type f -name '*.py' | head",
+        "find src -type f -exec echo {} \\;",
+    ])
+    def test_complex_find_run_command_keeps_real_shell(self, routed, command):
+        _call('run_command', {'command': command})
+        assert routed['send'][0]['cmd_type'] == 'project_run_command'
+
+    @pytest.mark.parametrize('command,first_route', [
+        ('ls README.md', 'project_list_dir'),
+        ('find README.md -type f', 'project_find_files'),
+    ])
+    def test_non_directory_operand_declines_fast_path_then_runs_shell(
+            self, monkeypatch, routed, command, first_route):
+        import lib.desktop
+
+        def fake_send(cmd_type, params=None, timeout=30,
+                      target_agent_id=None, user_id='', cmd_id=None):
+            routed['send'].append({
+                'cmd_type': cmd_type,
+                'params': params,
+                'timeout': timeout,
+                'target_agent_id': target_agent_id,
+            })
+            if cmd_type == first_route:
+                return {'error': 'not a directory'}, None
+            return {
+                'stdout': 'README.md\n', 'stderr': '', 'exit_code': 0,
+            }, None
+
+        monkeypatch.setattr(lib.desktop, 'send_desktop_command', fake_send)
+        _call('run_command', {'command': command})
+        assert [call['cmd_type'] for call in routed['send']] == [
+            first_route, 'project_run_command']
+        assert routed['meta'][0]['toolName'] == 'run_command'
+        assert 'routedAs' not in routed['meta'][0]
 
     def test_unsupported_tool_honest_error(self, routed):
         _tc, content, _ = _call('apply_diffs', {'edits': []})

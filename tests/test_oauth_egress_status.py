@@ -65,6 +65,38 @@ class TestEgressStatus(unittest.TestCase):
         self.assertEqual(st['state'], 'direct')
         self.assertIn('server_routes', st)
         self.assertIn('preferred_server_route', st)
+        self.assertIn('preferred_server_route_label', st)
+        self.assertIn('preferred_server_route_mode', st)
+
+    def test_preferred_proxy_metadata_is_credential_free_and_named(self):
+        from lib.subscription_routes import Route, manager as route_manager
+        route_status = {
+            'preferred': {'api.anthropic.com': 'pool:hk'},
+            'routes': {
+                'api.anthropic.com': {
+                    'direct': {'healthy': False},
+                    'pool:hk': {'healthy': True},
+                },
+            },
+        }
+        specs = [
+            Route('direct', 'direct', 'direct'),
+            Route('pool:hk', 'proxy Hong Kong', 'proxy',
+                  proxy_url='http://secret:password@proxy.invalid:8080'),
+        ]
+        with mock.patch.object(route_manager, 'status',
+                               return_value=route_status), \
+             mock.patch('lib.proxy.subscription_route_specs',
+                        return_value=specs):
+            st = self._status(verdict='ok')
+        self.assertEqual(st['preferred_server_route'], 'pool:hk')
+        self.assertEqual(st['preferred_server_route_label'],
+                         'proxy Hong Kong')
+        self.assertEqual(st['preferred_server_route_mode'], 'proxy')
+        self.assertEqual(st['server_routes']['pool:hk']['label'],
+                         'proxy Hong Kong')
+        self.assertNotIn('proxy_url', st['server_routes']['pool:hk'])
+        self.assertNotIn('password', json.dumps(st))
 
     def test_agent_when_blocked_and_capable_agent_online(self):
         st = self._status(verdict='geo_blocked', agents=[_agent()])

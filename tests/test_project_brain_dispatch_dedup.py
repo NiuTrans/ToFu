@@ -39,37 +39,17 @@ never on the shape of the implementation. Each fix has a source-level NEUTER.
 
 from __future__ import annotations
 
-import json
-import os
-import time
+import threading
 
 import pytest
 
 pytestmark = pytest.mark.unit
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
-_DISPATCH_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_dispatch.py')
-_QUEUE_SRC = os.path.join(ROOT, 'lib', 'message_queue.py')
-
-
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
-
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
 
 @pytest.fixture(autouse=True)
-def _clean(flask_app):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_tasks')
-        db.execute('DELETE FROM project_events')
-        db.execute('DELETE FROM message_queue')
-        db.commit()
+def _clean(chat_sidecar):
     _clear_task_registry()
     yield
     _clear_task_registry()
@@ -82,7 +62,7 @@ def _stub_push(monkeypatch):
 
 def _clear_task_registry():
     try:
-        from lib.tasks_pkg.manager import tasks, tasks_lock
+        from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
         with tasks_lock:
             tasks.clear()
     except Exception as e:  # pragma: no cover - registry absent in some runs
@@ -95,53 +75,62 @@ def _expire_lease(flask_app, project_path: str, task_id: str):
     This is the step the pre-existing duplicate guard never took, which is why
     it read as green while production stacked ten rows.
     """
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib.conversations.project_board import read_board
+    from lib.storage import get_storage_client
+    from tests._seed import seed_board_task
     with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('UPDATE project_tasks SET lease_expires_at=1 '
-                   'WHERE id=? AND project_path=?', (task_id, project_path))
-        db.commit()
+        task = next(
+            item for item in read_board(
+                project_path, user_id=TEST_OWNER_USER_ID)['tasks']
+            if item['id'] == task_id)
+        deleted = get_storage_client(write=True).command(
+            'board.mutate', {
+                'action': 'delete', 'project_path': project_path,
+                'user_id': TEST_OWNER_USER_ID, 'task_id': task_id,
+            }, f'expire-fixture-delete:{task_id}')
+        assert deleted.get('ok'), deleted
+        seed_board_task(
+            task_id, project_path, user_id=TEST_OWNER_USER_ID,
+            title=task['title'], status='claimed',
+            owner_conv_id=task.get('owner_conv_id') or '',
+            lease_expires_at=1,
+            created_by_conv=task.get('created_by_conv') or '',
+            depends_on=task.get('depends_on') or [],
+            kind=task.get('kind') or '', dispatched=1,
+            write_set=task.get('write_set') or [])
 
 
 def _busy(conv_id: str):
-    from lib.tasks_pkg.manager import tasks, tasks_lock
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
     with tasks_lock:
         tasks['live-' + conv_id] = {
             'id': 'live-' + conv_id, 'convId': conv_id,
+            '_userId': TEST_OWNER_USER_ID,
             'status': 'running', 'aborted': False,
         }
 
 
 def _kickoff_rows(flask_app, conv_id: str) -> list[dict]:
     """Every queued brain kickoff on ``conv_id``, decoded."""
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib.storage import get_storage_client
     from lib.message_queue import KIND_WORKFLOW
     with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        rows = db.execute(
-            'SELECT payload FROM message_queue WHERE conv_id=? AND kind=?',
-            (conv_id, KIND_WORKFLOW)).fetchall()
-    out = []
-    for r in rows:
-        try:
-            out.append(json.loads(r['payload'] or '{}'))
-        except (TypeError, ValueError):
-            out.append({})
-    return out
+        rows = get_storage_client().query(
+            'queue.list', {
+                'conv_id': conv_id, 'user_id': TEST_OWNER_USER_ID,
+            }) or []
+    return [dict(row.get('payload') or {}) for row in rows
+            if row.get('kind') == KIND_WORKFLOW]
 
 
 def _mk_conv(flask_app, conv_id: str, project_path: str):
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    from tests._seed import delete_conversation, seed_conversation
     with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        now = int(time.time() * 1000)
-        settings = json.dumps({'projectPath': project_path, 'model': 'test-model'})
-        db.execute('DELETE FROM conversations WHERE id=? AND user_id=1', (conv_id,))
-        db.execute(
-            'INSERT INTO conversations (id, user_id, title, messages, settings, '
-            'created_at, updated_at, msg_count) VALUES (?,1,?,?,?,?,?,0)',
-            (conv_id, 'dispatch dedup guard', json.dumps([]), settings, now, now))
-        db.commit()
+        delete_conversation(conv_id, user_id=TEST_OWNER_USER_ID)
+        seed_conversation(
+            conv_id, user_id=TEST_OWNER_USER_ID,
+            title='dispatch dedup guard',
+            settings={'projectPath': project_path, 'model': 'test-model'})
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -166,8 +155,8 @@ def test_completion_seam_does_not_restack_after_lease_expiry(flask_app):
     _busy(conv)   # busy BEFORE posting → the kickoff stays observable
 
     with flask_app.app_context():
-        epic_id = post_task(project, conv, 'epic whose target stays busy for hours')['id']
-        first = on_epic_completed(project, completed_conv_id=conv)
+        epic_id = post_task(project, conv, 'epic whose target stays busy for hours', user_id=TEST_OWNER_USER_ID)['id']
+        first = on_epic_completed(project, completed_conv_id=conv, user_id=TEST_OWNER_USER_ID)
     rows_after_first = _kickoff_rows(flask_app, conv)
 
     assert first == 1 and len(rows_after_first) == 1, (
@@ -177,7 +166,7 @@ def test_completion_seam_does_not_restack_after_lease_expiry(flask_app):
     # ── 30 minutes pass under a still-running task: the claim lapses. ──
     _expire_lease(flask_app, project, epic_id)
     with flask_app.app_context():
-        board = read_board(project)
+        board = read_board(project, user_id=TEST_OWNER_USER_ID)
         effective = next(t for t in board['tasks'] if t['id'] == epic_id)
     assert effective['status'] == 'open', (
         'fixture precondition: an expired claim must read back as open — if it '
@@ -186,8 +175,8 @@ def test_completion_seam_does_not_restack_after_lease_expiry(flask_app):
     # A sibling finishes an unrelated epic → the seam re-fires (twice, as the
     # real 20:38:01 scatter did within one second).
     with flask_app.app_context():
-        again = (on_epic_completed(project, completed_conv_id=conv)
-                 + on_epic_completed(project, completed_conv_id=conv))
+        again = (on_epic_completed(project, completed_conv_id=conv, user_id=TEST_OWNER_USER_ID)
+                 + on_epic_completed(project, completed_conv_id=conv, user_id=TEST_OWNER_USER_ID))
     rows_after = _kickoff_rows(flask_app, conv)
     mine = [p for p in rows_after if p.get('boardTaskId') == epic_id]
 
@@ -218,10 +207,10 @@ def test_completion_seam_still_enqueues_into_a_BUSY_conv(flask_app):
     _busy(conv)
 
     with flask_app.app_context():
-        dep = post_task(project, conv, 'dependency')['id']
-        dependent = post_task(project, conv, 'dependent work', depends_on=[dep])['id']
-        complete_task(project, conv, dep)
-        on_epic_completed(project, completed_conv_id=conv)
+        dep = post_task(project, conv, 'dependency', user_id=TEST_OWNER_USER_ID)['id']
+        dependent = post_task(project, conv, 'dependent work', depends_on=[dep], user_id=TEST_OWNER_USER_ID)['id']
+        complete_task(project, conv, dep, user_id=TEST_OWNER_USER_ID)
+        on_epic_completed(project, completed_conv_id=conv, user_id=TEST_OWNER_USER_ID)
 
     ids = [p.get('boardTaskId') for p in _kickoff_rows(flask_app, conv)]
     assert dependent in ids, (
@@ -243,9 +232,9 @@ def test_distinct_epics_still_each_get_a_kickoff(flask_app):
     _busy(conv)
 
     with flask_app.app_context():
-        a = post_task(project, conv, 'epic A')['id']
-        b = post_task(project, conv, 'epic B')['id']
-        on_epic_completed(project, completed_conv_id=conv)
+        a = post_task(project, conv, 'epic A', user_id=TEST_OWNER_USER_ID)['id']
+        b = post_task(project, conv, 'epic B', user_id=TEST_OWNER_USER_ID)['id']
+        on_epic_completed(project, completed_conv_id=conv, user_id=TEST_OWNER_USER_ID)
 
     ids = {p.get('boardTaskId') for p in _kickoff_rows(flask_app, conv)}
     assert {a, b} <= ids, (
@@ -267,7 +256,7 @@ def _enqueue_kickoff(flask_app, conv_id: str, board_task_id: str, project: str):
              BRAIN_DISPATCH_MARKER: True,
              'boardTaskId': board_task_id},
             {'model': 'test-model', 'projectPath': project},
-            kind=KIND_WORKFLOW)
+            kind=KIND_WORKFLOW, user_id=TEST_OWNER_USER_ID)
 
 
 def test_enqueue_is_idempotent_per_board_task(flask_app):
@@ -315,8 +304,7 @@ def test_enqueue_dedup_is_scoped_to_the_same_conversation(flask_app):
 def test_human_turns_are_never_deduped(flask_app):
     """A human can send the same text twice and MUST get two turns. Only rows
     carrying a ``boardTaskId`` are dedup-able."""
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    from lib.message_queue import enqueue_message
+    from lib.message_queue import enqueue_message, get_queue
 
     project = '/dedup/human'
     conv = 'cDEDUP_HUMAN'
@@ -324,12 +312,10 @@ def test_human_turns_are_never_deduped(flask_app):
 
     with flask_app.app_context():
         enqueue_message(conv, {'text': 'same thing'},
-                        {'model': 'test-model', 'projectPath': project})
+                        {'model': 'test-model', 'projectPath': project}, user_id=TEST_OWNER_USER_ID)
         enqueue_message(conv, {'text': 'same thing'},
-                        {'model': 'test-model', 'projectPath': project})
-        db = get_thread_db(DOMAIN_CHAT)
-        n = db.execute('SELECT COUNT(*) c FROM message_queue WHERE conv_id=?',
-                       (conv,)).fetchone()['c']
+                        {'model': 'test-model', 'projectPath': project}, user_id=TEST_OWNER_USER_ID)
+        n = len(get_queue(conv, user_id=TEST_OWNER_USER_ID))
     assert int(n) == 2, (
         'a human turn was swallowed by the board dedup — only brain kickoffs '
         'carry a boardTaskId and only they may collapse')
@@ -337,8 +323,7 @@ def test_human_turns_are_never_deduped(flask_app):
 
 def test_peer_messages_are_never_deduped(flask_app):
     """Two distinct peer messages are two turns — they carry no boardTaskId."""
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    from lib.message_queue import KIND_PEER_MSG, enqueue_message
+    from lib.message_queue import KIND_PEER_MSG, enqueue_message, get_queue
 
     project = '/dedup/peer'
     conv = 'cDEDUP_PEER'
@@ -347,91 +332,78 @@ def test_peer_messages_are_never_deduped(flask_app):
     with flask_app.app_context():
         enqueue_message(conv, {'text': 'peer one', '_peerMessage': True},
                         {'model': 'test-model', 'projectPath': project},
-                        kind=KIND_PEER_MSG)
+                        kind=KIND_PEER_MSG, user_id=TEST_OWNER_USER_ID)
         enqueue_message(conv, {'text': 'peer two', '_peerMessage': True},
                         {'model': 'test-model', 'projectPath': project},
-                        kind=KIND_PEER_MSG)
-        db = get_thread_db(DOMAIN_CHAT)
-        n = db.execute('SELECT COUNT(*) c FROM message_queue WHERE conv_id=? '
-                       'AND kind=?', (conv, KIND_PEER_MSG)).fetchone()['c']
+                        kind=KIND_PEER_MSG, user_id=TEST_OWNER_USER_ID)
+        n = len([
+            row for row in get_queue(conv, user_id=TEST_OWNER_USER_ID)
+            if row.get('kind') == KIND_PEER_MSG
+        ])
     assert int(n) == 2, 'peer messages must never be collapsed'
 
 
-# ════════════════════════════════════════════════════════════════════
-#  Source-level NEGATIVE CONTROLS
-# ════════════════════════════════════════════════════════════════════
+def test_completion_seam_queued_probe_is_load_bearing(flask_app, monkeypatch):
+    """If the producer-level probe lies, the seam attempts a second dispatch.
 
-from tests._nc_harness import patch_restore as _patch_restore  # noqa: E402
-
-
-def test_NC_A_completion_seam_without_queued_probe_restacks(flask_app):
-    """NC-A: drop BOTH the epic-scoped probe (A) AND the enqueue dedup floor
-    (B) → the lease-expiry shape stacks a second row again.
-
-    Both must be neutered together: with only A removed, B's structural dedup
-    still collapses the second enqueue onto the first row, so the assertion
-    would never bite. The combined neuter isolates A's necessity.
+    The real Sidecar still supplies the structural de-dup floor; replacing the
+    historical in-process source neuter with this boundary test keeps the
+    producer guard observable after queue authority moved out of process.
     """
     from lib.conversations.project_board import post_task
-    from tests._nc_harness import neutered_source
+    import lib.conversations.project_dispatch as pd
 
     project = '/nc_a/leaseexp'
     conv = 'cNC_A'
     _mk_conv(flask_app, conv, project)
     _busy(conv)
+    with flask_app.app_context():
+        epic_id = post_task(
+            project, conv, 'epic', user_id=TEST_OWNER_USER_ID)['id']
+        assert pd.on_epic_completed(
+            project, completed_conv_id=conv,
+            user_id=TEST_OWNER_USER_ID) == 1
+    _expire_lease(flask_app, project, epic_id)
 
-    with neutered_source(
-        _DISPATCH_SRC,
-        ("            if _epic_already_queued(target, epic.get('id', '')):\n"
-         "                continue"),
-        "            if False:  # NC-A (queued probe disabled)\n                continue",
-    ):
-        with neutered_source(
-            _QUEUE_SRC,
-            "    existing = _existing_board_kickoff(db, conv_id, message_data, kind)\n",
-            "    existing = None  # NC-A+B (dedup disabled)\n",
-        ):
-            import lib.conversations.project_dispatch as pd
-            with flask_app.app_context():
-                epic_id = post_task(project, conv, 'epic')['id']
-                pd.on_epic_completed(project, completed_conv_id=conv)
-            _expire_lease(flask_app, project, epic_id)
-            with flask_app.app_context():
-                pd.on_epic_completed(project, completed_conv_id=conv)
-
-    mine = [p for p in _kickoff_rows(flask_app, conv)
-            if p.get('boardTaskId') == epic_id]
-    assert len(mine) >= 2, (
-        'NC-A: without the queued probe the seam must re-stack after lease '
-        'expiry (got %d rows)' % len(mine))
+    attempted = []
+    monkeypatch.setattr(
+        pd, '_epic_already_queued', lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        pd, 'dispatch_epic',
+        lambda _p, epic, _target, **_k:
+        attempted.append(epic['id']) or {'ok': True})
+    monkeypatch.setattr(pd, '_drain_idle_target', lambda *_a, **_k: None)
+    with flask_app.app_context():
+        assert pd.on_epic_completed(
+            project, completed_conv_id=conv,
+            user_id=TEST_OWNER_USER_ID) == 1
+    assert attempted == [epic_id]
 
 
-def test_NC_B_enqueue_without_dedup_stacks_rows(flask_app):
-    """NC-B: drop the structural dedup in ``enqueue_message`` → repeated
-    kickoffs for one epic stack again."""
-    from tests._nc_harness import neutered_source
-
-    project = '/nc_b/enq'
-    conv = 'cNC_B'
+def test_concurrent_enqueue_keeps_one_structural_kickoff(flask_app):
+    """Concurrent producers converge on one Sidecar row and one queue id."""
+    project = '/dedup/concurrent'
+    conv = 'cDEDUP_CONCURRENT'
     _mk_conv(flask_app, conv, project)
-    from lib.conversations.project_dispatch import BRAIN_DISPATCH_MARKER
-    from lib.message_queue import KIND_WORKFLOW
+    barrier = threading.Barrier(4)
+    results = []
+    failures = []
 
-    with neutered_source(
-        _QUEUE_SRC,
-        "    existing = _existing_board_kickoff(db, conv_id, message_data, kind)\n",
-        "    existing = None  # NC-B (dedup disabled)\n",
-    ) as mq:
-        with flask_app.app_context():
-            for _ in range(3):
-                mq.enqueue_message(
-                    conv,
-                    {'text': 'kickoff', BRAIN_DISPATCH_MARKER: True,
-                     'boardTaskId': 'pt_nc_b_epic'},
-                    {'model': 'test-model', 'projectPath': project},
-                    kind=KIND_WORKFLOW)
+    def enqueue():
+        try:
+            barrier.wait()
+            results.append(_enqueue_kickoff(
+                flask_app, conv, 'pt_concurrent_epic', project))
+        except Exception as error:  # pragma: no cover - asserted below
+            failures.append(error)
 
-    rows = _kickoff_rows(flask_app, conv)
-    assert len(rows) >= 3, (
-        'NC-B: without the dedup floor three enqueues must produce three '
-        'rows (got %d)' % len(rows))
+    threads = [threading.Thread(target=enqueue) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(10)
+    assert not failures
+    assert len(results) == 3
+    assert len({result['queueId'] for result in results}) == 1
+    assert len(_kickoff_rows(flask_app, conv)) == 1

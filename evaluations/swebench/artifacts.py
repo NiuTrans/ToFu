@@ -119,6 +119,23 @@ def atomic_write_json(path: Path, value: Any) -> None:
             pass
 
 
+def harden_artifact_tree(root: Path) -> None:
+    """Remove group/world permissions without following artifact symlinks."""
+
+    root = root.expanduser().resolve(strict=True)
+    if not root.is_dir() or root.stat().st_mode & 0o077:
+        raise PermissionError(f"artifact root must already be private: {root}")
+    for current, directories, files in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for name in directories + files:
+            path = current_path / name
+            if path.is_symlink():
+                continue
+            try:
+                mode = path.stat().st_mode & 0o7777
+                path.chmod(mode & ~0o077)
+            except FileNotFoundError:
+                continue
 def output_guard_status(root: Path, project_root: Path = PROJECT_ROOT) -> tuple[bool, str]:
     root = root.expanduser().resolve()
     marker = root / ".tofu-swebench-eval-root"

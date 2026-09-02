@@ -14,7 +14,7 @@ Architecture:
        ↕  stdio / SSE  (JSON-RPC 2.0)
   MCPBridge (lib/mcp/client.py)
        ↕  translate to OpenAI function-calling format
-  ToolRegistry (lib/tasks_pkg/executor.py)
+  ToolRegistry (lib/tasks_pkg/executor/_registry.py)
        ↕
   LLM (function-calling)
 

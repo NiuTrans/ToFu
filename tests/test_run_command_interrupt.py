@@ -256,10 +256,10 @@ def reaper_env(monkeypatch):
 @pytest.fixture()
 def put_task(monkeypatch):
     """Insert synthetic tasks into the registry; stub the finalizer (no DB)."""
-    from lib.tasks_pkg import tasks, tasks_lock
-    from lib.tasks_pkg import manager
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+    from lib.tasks_pkg.manager import _maintenance
 
-    monkeypatch.setattr(manager, '_finalize_reaped_stuck_task',
+    monkeypatch.setattr(_maintenance, '_finalize_reaped_stuck_task',
                         lambda t: None, raising=True)
     added = []
 
@@ -299,7 +299,7 @@ def _reap():
 
 
 def _get(task_id):
-    from lib.tasks_pkg import tasks, tasks_lock
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
     with tasks_lock:
         return dict(tasks.get(task_id) or {})
 
@@ -417,7 +417,7 @@ def test_meta_run_command_watchdog_interrupted_badge():
 # ─────────────────────────────────────────────────────────────────────────
 @pytest.fixture()
 def reg_task():
-    from lib.tasks_pkg import tasks, tasks_lock
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
     added = []
 
     def _put(task):

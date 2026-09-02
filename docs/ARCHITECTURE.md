@@ -1,554 +1,202 @@
-# Tofu (豆腐) — Architecture Panorama
+# Tofu architecture
 
-> Canonical, up-to-date layered map of the project. Used as the source for
-> `docs/architecture.html` (visual diagram) and whenever an AI assistant
-> needs a birds-eye view.
->
-> **Last re-scanned:** 2026-08-14 against `lib/`, `routes/`, `frontend/src/`,
-> `server.py`, `routes/__init__.py`.
-> **VERSION:** 0.16.0
+This document is the system map. It names dependency direction and ownership;
+domain contracts hold field-level behavior. Start at [the documentation map](README.md)
+and follow one domain owner before editing.
 
----
+## Non-negotiable invariants
 
-## 1. Five-layer mental model
+1. Authentication and authorization are decided at one middleware boundary,
+   default deny. A structured principal with explicit numeric owner identity
+   is carried below that boundary.
+2. Routes are stateless HTTP adapters. Application services own policy;
+   repositories own persistence vocabulary; the storage sidecar owns SQL.
+3. A domain has one command path, one durable authority, one event vocabulary,
+   and one user-visible error taxonomy.
+4. SQLite and PostgreSQL implement the same semantic storage operations.
+   Application code never selects SQL by backend.
+5. Generated contracts are the source of wire truth. Generated consumers are
+   not hand-edited.
+6. Every resource has an explicit lifecycle: creation, ownership, cancellation,
+   disposal, retry, and failure behavior.
 
-Tofu maps cleanly onto the same five layers Claude Code popularised
-(Entry / Core / Safety / Context / Tools) plus an **Infra** layer that
-covers logging, DB, OAuth, cross-DC, etc. and an **Ops** layer for the
-nightly optimiser / scheduler.
+## Runtime topology
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        ① Entry Layer                                │
-│   Web UI (index.html)  │  Feishu Bot  │  Proactive Scheduler        │
-│   Browser Extension    │  Desktop Agent│  MCP sub-process (stdio)   │
-│   Headless API: /api/v1/* · OpenAI-compat · Anthropic-compat        │
-└─────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                        ② Core Engine                                │
-│   routes/chat.py → tasks_pkg.manager.create_task()                  │
-│   tasks_pkg.orchestrator.run_task()  ←  main ReAct loop             │
-│   tasks_pkg.endpoint.run_endpoint_task()  ←  Planner→Worker→Critic  │
-│   tasks_pkg.autopilot  ·  lib/orchestration_engine.py (DAG runs)    │
-│   lib/swarm/master.py  ←  multi-agent DAG                           │
-│   SSE stream: append_event() → /api/chat/stream/<task_id>           │
-└─────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│         ③ Safety / Policy  ·  ④ Context Engineering                 │
-│  project_mod.config.DANGEROUS_PATTERNS   │  context_composer/        │
-│  tasks_pkg.approval (write approval)     │  compaction/ (3-layer)    │
-│  oauth/ (Claude/Codex PKCE)              │  memory/ + skills/        │
-│  proxy.py / rate_limiter.py              │  conv_message_builder.py  │
-│  export.py (3-level sanitisation)        │  attachments.py           │
-│  agent_core/personal_scope (headless     │  token_counter/ (budget)  │
-│    fail-closed)  ·  auth_mode.py         │                           │
-└─────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                        ⑤ Tools & Extensions                         │
-│  lib/tools/*.py (definitions)  →  tasks_pkg.tool_dispatch           │
-│                                 →  tasks_pkg.executor               │
-│                                 →  tasks_pkg.handlers/*.py          │
-│  Built-in: project / search / fetch / browser / code_exec /         │
-│            image_gen / memory / conversation /                      │
-│            human_guidance / meta(plan)                              │
-│  External: MCP (mcp/), Swarm agents, Desktop tools                  │
-└─────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│              ⑥ LLM Dispatch  ·  ⑦ Infra  ·  ⑧ Ops                   │
-│  llm_dispatch/ (slot × model × key) + llm/ package (build_body/SSE)  │
-│  storage/ client → storage.v1 sidecar → SQLite or PostgreSQL       │
-│  billing/ (wallet · ledger · pricing) · log.py (5-stream)           │
-│  scheduler/ (cron, timer, proactive)                                │
-│  optimizer/ (nightly self-tuning loop)                              │
-│  cross_dc.py  ·  fs_keepalive.py  ·  compat/  ·  self_update.py     │
-└─────────────────────────────────────────────────────────────────────┘
+The agent kernel has a second composition boundary, not a second execution
+implementation. Embedded callers and the lightweight sidecar create explicitly
+owned transient tasks and bypass persistence entirely:
+
+```text
+tofu_agent embed / sidecar
+  → explicit PrincipalContext
+  → transient TaskRuntime
+  → shared agent execution → providers / tools / MCP
 ```
 
-> **Plugin note.** The former in-tree **trading** subsystem was extracted to a
-> standalone `tofu-trading` package (2026-06). It is no longer part of core; it
-> mounts through the `tofu.blueprints` / `tofu.startup` entry-point groups
-> discovered by `routes/plugin_registry.py`. Core is trading-agnostic.
-
----
-
-## 2. Full Mermaid panorama
-
-Paste into any Mermaid-aware renderer (GitHub, Typora, Obsidian).
+That process has no full-application route, repository, storage-sidecar,
+billing, or frontend lifecycle. Its state is bounded process memory and cannot
+survive restart. See
+[DEVELOPER_RUNTIME.md](DEVELOPER_RUNTIME.md). The durable application topology
+is:
 
 ```mermaid
-flowchart TB
-  %% ============ ENTRY ============
-  subgraph ENTRY["① 入口层 Entry"]
-    direction LR
-    web[Web UI<br/>index.html + static/js]
-    feishu[Feishu Bot<br/>lib/feishu/]
-    ext[Browser Extension<br/>browser_extension/]
-    desk[Desktop Agent<br/>lib/desktop_agent.py]
-    sched_in[Proactive Scheduler<br/>lib/scheduler/proactive.py]
-    headless[Headless API<br/>/api/v1/* · OpenAI · Anthropic compat]
-    mcp_in[MCP Servers<br/>stdio/SSE subprocess]
-  end
-
-  %% ============ ROUTES ============
-  subgraph ROUTES["routes/ — top-level BPs + api_v1/ (37 modules)"]
-    direction LR
-    r_chat[chat.py + chat_queue<br/>chat_human_io · chat_tool_state]
-    r_conv[conversations + _search<br/>_compaction · common]
-    r_media[paper · translate · upload<br/>browser · desktop · artifacts]
-    r_v1a[api_v1: chat · agents · agent_run<br/>conversations · tasks · endpoint]
-    r_v1b[api_v1: project · memory · mcp<br/>orchestrations · swarm · scheduler]
-    r_v1c[api_v1: auth · users · keys · billing<br/>providers · optimizer · daily_report]
-    r_compat[compat_openai · compat_anthropic<br/>api_docs · metrics · legacy_redirects]
-    r_plug[(plugin BPs via<br/>tofu.blueprints entry-points)]
-  end
-
-  %% ============ CORE ============
-  subgraph CORE["② 核心引擎 Core Engine"]
-    direction TB
-    mgr[tasks_pkg/manager.py<br/>create_task · persist · SSE events]
-    orch[tasks_pkg/orchestrator.py<br/>run_task — ReAct loop]
-    endp[tasks_pkg/endpoint.py<br/>Planner → Worker → Critic<br/>+ endpoint_prompts · endpoint_review]
-    auto[tasks_pkg/autopilot.py<br/>virtual-user self-drive]
-    orun[lib/orchestration_engine.py<br/>multi-step DAG runs]
-    swarm[lib/swarm/master.py<br/>+ scheduler · agent · planner<br/>streaming DAG, artifact store]
-    stream[stream_handler · cache_tracking<br/>llm_fallback]
-  end
-
-  %% ============ CONTEXT ============
-  subgraph CTX["④ 上下文工程 Context"]
-    direction TB
-    sysc[context_composer/<br/>providers + renderer + manifest<br/>system_context compatibility facade]
-    comp[compaction/<br/>micro → smart-summary → force]
-    mem[memory/<br/>local metadata retrieval + profile]
-    skills[skills/<br/>index + load_skill]
-    conv_m[conv_message_builder.py<br/>build_api_messages_from_db]
-    att[attachments.py<br/>per-turn file injection]
-    msg_store[server_message_store.py<br/>persist_registry · persistence_store]
-    tok[token_counter/<br/>context budget]
-  end
-
-  %% ============ SAFETY ============
-  subgraph SAFE["③ 安全拦截 Safety"]
-    direction LR
-    approv[tasks_pkg/approval.py<br/>write-approval gate]
-    hooks[tasks_pkg/tool_hooks.py<br/>before/after hooks]
-    dang[project_mod/config.py<br/>DANGEROUS_PATTERNS]
-    pscope[agent_core/personal_scope.py<br/>headless fail-closed]
-    oauth_b[oauth/<br/>Claude · Codex · PKCE]
-    proxy[proxy.py · rate_limiter.py<br/>auth_mode.py]
-    export[export.py<br/>3-level sanitisation]
-  end
-
-  %% ============ TOOLS ============
-  subgraph TOOLS["⑤ 工具与扩展 Tools"]
-    direction TB
-    tdef[lib/tools/*.py<br/>definitions]
-    tdisp[tasks_pkg/tool_dispatch.py<br/>name → handler routing]
-    texec[tasks_pkg/executor.py<br/>+ streaming_tool_executor<br/>+ executor_image]
-    thand[tasks_pkg/handlers/<br/>misc · project · search<br/>browser · mcp · memory · code_exec]
-
-    subgraph TFAM["tool families"]
-      direction LR
-      t1[project_mod/<br/>list/read/grep/write/<br/>apply_diff/run_command]
-      t2[tofu_search external pkg<br/>search + fetch · multi-engine + filter]
-      t3[browser/<br/>extension-bridge<br/>+ playwright pool]
-      t4[image_gen.py<br/>multi-model dispatch]
-      t5[mcp/<br/>client · registry · config]
-      t6[file_reader.py<br/>pdf_parser/ · doc_parser]
-    end
-  end
-
-  %% ============ LLM ============
-  subgraph LLM["⑥ LLM Dispatch"]
-    direction TB
-    disp[llm_dispatch/dispatcher.py<br/>slot × model × key]
-    api[llm_dispatch/api.py<br/>dispatch_chat · dispatch_stream]
-    conf[llm_dispatch/config.py<br/>model aliases · routing]
-    disc[llm_dispatch/discovery.py<br/>auto-discover /v1/models]
-    client[lib/llm/<br/>body · stream · astream · cache · diagnostics]
-    minfo[model_info.py · context_limits.py<br/>_clamp_max_tokens]
-    byo[byo_providers · byo_resolve<br/>byo_egress · provider_probe]
-  end
-
-  %% ============ INFRA ============
-  subgraph INFRA["⑦ 基础设施 Infra"]
-    direction LR
-    db[storage client + sidecar<br/>SQLite or PostgreSQL<br/>semantic operations · receipts · backup]
-    bill[billing/<br/>wallet · ledger · pricing<br/>payments/]
-    log[log.py<br/>app · access · error · vendor · audit]
-    comp_p[compat/<br/>_platform · openai · anthropic shims]
-    xdc[cross_dc.py · fs_keepalive.py<br/>FUSE latency auto-probe]
-    boot[bootstrap.py · self_update.py<br/>dep-repair · in-place update]
-  end
-
-  %% ============ OPS ============
-  subgraph OPS["⑧ Ops & 自进化 Evolution"]
-    direction TB
-    opt[optimizer/<br/>analyzer · proposer · applier<br/>storage · actions/<br/>nightly LLM-driven tuning]
-    sch[scheduler/<br/>cron · timer · proactive<br/>manager · executor]
-    daily[lib/daily_report/<br/>My Day · calendar · TODOs]
-    audit[audit_log events<br/>→ logs/audit.log]
-  end
-
-  %% ============ WIRING ============
-  ENTRY --> ROUTES
-  ROUTES --> CORE
-  CORE --> CTX
-  CORE --> SAFE
-  CORE --> TOOLS
-  TOOLS --> LLM
-  CORE --> LLM
-  CORE --> INFRA
-  INFRA --> bill
-  OPS -.observes.-> INFRA
-  OPS -.feedback.-> CORE
-  ENTRY -.MCP stdio.-> TOOLS
+flowchart LR
+  Browser[Browser / SDK] --> Auth[Auth middleware]
+  Auth --> Routes[Stateless routes]
+  Routes --> Services[Application services]
+  Services --> Execution[Task and agent execution]
+  Services --> Repositories[User-scoped repositories]
+  Execution --> Repositories
+  Repositories --> Client[Semantic storage client]
+  Client --> Sidecar[Storage sidecar]
+  Sidecar --> SQLite[(SQLite)]
+  Sidecar --> Postgres[(PostgreSQL)]
+  Execution --> Providers[LLM / tools / MCP]
+  Services --> Events[Committed events / push]
+  Events --> Browser
 ```
 
----
+The web process never opens the application database. The sidecar owns
+connections, transactions, schema, maintenance, and backend adaptation. A
+selected backend that is unavailable fails closed; runtime does not silently
+switch stores.
 
-## 3. Directory-level canonical list
+Personal mode is one `all` process plus SQLite. Distributed mode uses explicit
+`api`, `worker`, and `scheduler` roles; every Pod's Sidecar connects to the same
+external PostgreSQL authority, while Redis carries only ephemeral leases and
+wake hints. `lib/process_roles.py` is the single lifecycle ownership table.
 
-Grounded against the current filesystem (2026-07-06).
+## Layers and dependency direction
 
-### 3.1 Top level
+| Layer | Owners | May depend on |
+|---|---|---|
+| Delivery | `frontend/src/`, `routes/`, `tofu_agent/server.py`, SDKs | generated contracts, application services |
+| Access boundary | auth/request middleware, `routes/common.py` | identity and policy services |
+| Application | domain packages under `lib/` | repository protocols, execution ports |
+| Execution | `lib/tasks_pkg/`, `lib/agent_core/`, `tofu_agent/runtime.py`, tools, LLM dispatch | application contracts; semantic storage only for durable composition |
+| Persistence | `lib/storage/`, `lib/storage_sidecar/` | schema and backend adapters only |
+| Operations | `serverctl.py`, lifecycle modules, health and maintenance | public service/storage ports |
 
-| Path | Role |
+Dependencies point down this table. A lower layer never imports a route or
+browser owner. Cross-domain behavior is expressed as an explicit protocol or
+committed event, not a call into another domain's private module.
+
+## Request lifecycle
+
+```text
+request
+  → request ID / authentication / authorization / rate policy
+  → schema decode at the route boundary
+  → user-scoped application command or query
+  → repository semantic operation
+  → sidecar transaction
+  → typed response or typed error envelope
+```
+
+Routes may translate protocol names but do not catch and reinterpret arbitrary
+exceptions. The shared error boundary maps known domain/storage errors into the
+canonical envelope from [API_CONTRACT.md](API_CONTRACT.md).
+
+## Identity boundary
+
+Public tenant accounts and repository owners are different identifiers. An
+opaque `account_user_id` is used for login, account administration, and
+billing. A positive integer `owner_user_id` scopes repositories, tasks,
+events, caches, and connected devices. `AuthContext` carries both;
+`PrincipalContext` projects only the owner into domain code. Neither identifier
+is parsed or coerced into the other.
+
+Bearer credentials and account-owner allocation live in the Sidecar identity
+domain. Remote device bridges use owner-scoped `agents:bridge` credentials;
+there is no shared deployment secret or unauthenticated bridge mode. See
+[IDENTITY.md](IDENTITY.md) and
+[`contracts/identity_v1.yaml`](../contracts/identity_v1.yaml).
+
+## Conversation lifecycle
+
+Conversation state uses the turn-native v3 protocol only:
+
+```text
+generated command
+  → ConversationTurnCommandService
+  → atomic turn/attempt/change transaction
+  → commit acknowledgement
+  → wake hint
+  → one conversation SSE coordinator
+  → one turn reducer
+  → renderer projection
+```
+
+The snapshot includes revision, settings, turns, attempts, replay cursor, and
+heartbeat policy. Push and cross-tab notifications only invalidate; they never
+write projection state. See [CONVERSATION_SYNC_V3.md](CONVERSATION_SYNC_V3.md).
+
+Header lifecycle is a separate atomic boundary defined by
+`contracts/conversation_lifecycle_v1.yaml`. Delete moves the normalized turn
+graph out of the active authority; restore moves it back without executable
+attempt state; clone creates a new terminal graph with remapped identities.
+Browser-held message arrays are projections and never participate in these
+transactions.
+
+## Frontend delivery
+
+New domain code is TypeScript in `frontend/src/`. The retained application shell
+is authored as named sections under `frontend/src/runtime/sections/`; styles are
+authored under `frontend/src/styles/`. Manifests define deterministic order and
+generators produce the large delivery artifacts. Those artifacts are ignored by
+normal discovery and must not be edited. See
+[FRONTEND_ARCHITECTURE.md](FRONTEND_ARCHITECTURE.md).
+
+## Storage and identity
+
+Repositories accept identity explicitly and expose semantic operations. The
+storage client chooses command/query behavior, deadlines, and typed errors; the
+sidecar operation catalog chooses transaction mode and backend implementation.
+SQL, paths such as `data/tofu.db`, and SQLite/PostgreSQL syntax remain inside
+the storage package. See [STORAGE.md](STORAGE.md) and
+[modules/data_tier.md](modules/data_tier.md).
+
+## Domain ownership map
+
+| Change | First owner to inspect |
 |---|---|
-| `server.py` | App entry (Quart + Hypercorn) · Flask→Quart shim · middleware · logging bootstrap · auto-TLS for HTTP/2 · auto-delegates to `bootstrap.py` on ImportError |
-| `bootstrap.py` | LLM-guided dependency-repair launcher with live browser status page |
-| `export.py` | 3-level sanitising export (personal / internal / opensource) — see CLAUDE.md §11 |
-| `index.html` | Main SPA |
-| `trading.html` | Legacy trading SPA shell (core trading code now lives in the external `tofu-trading` plugin) |
-| `healthcheck.py` · `install.{py,sh,ps1}` | Install / health helpers |
+| Boot, process lifecycle, shutdown | [modules/infra_runtime.md](modules/infra_runtime.md) |
+| HTTP, auth, providers, billing | [modules/auth_providers_billing.md](modules/auth_providers_billing.md) |
+| Conversations and project state | [modules/conversations_project_brain.md](modules/conversations_project_brain.md) |
+| Tasks, agents, orchestration | [modules/task_engine.md](modules/task_engine.md), [modules/orchestration_dag.md](modules/orchestration_dag.md) |
+| Model dispatch and streaming | [modules/llm_io.md](modules/llm_io.md) |
+| Tools, browser, MCP | [modules/tools_execution.md](modules/tools_execution.md) |
+| Context, memory, compaction | [modules/context_engineering.md](modules/context_engineering.md) |
+| Papers, media, knowledge | [modules/ingest_media.md](modules/ingest_media.md) |
+| Scheduling and operations | [modules/scheduling_ops.md](modules/scheduling_ops.md) |
+| External APIs and integrations | [modules/integrations_api.md](modules/integrations_api.md) |
 
-### 3.2 `lib/` — core libraries (59 top-level sub-packages + top-level modules)
+## Adding a capability
 
-**Sub-packages** (59 directories under `lib/` carrying an `__init__.py`,
-excluding the `tests/` test package). The `tasks_pkg/handlers/` row below is a
-*nested* sub-package of `tasks_pkg/`, listed for convenience — it is NOT counted
-in the 59.
+1. Select the existing domain owner; create a new domain only if no owner can
+   express the invariant without reversing dependencies.
+2. Define or extend the machine-readable contract.
+3. Add an application command/query with an explicit identity parameter.
+4. Add semantic repository/storage operations and their transaction rules.
+5. Generate consumers and implement the UI through the typed client.
+6. Test failure, cancellation, idempotency, ownership, rollback, and cleanup.
+7. Update the domain map and authority document; delete superseded paths.
 
-> **Note (2026-07-18 re-scan):** many former loose `lib/*.py` modules have been
-> promoted to facade **packages** (`image_gen/`, `pricing/`, `model_info/`,
-> `key_stats/`, `log_clean/`, `file_reader/`, `doc_parser/`, `text_lang/`,
-> `mt_provider/`, `conv_config/`, `conv_ref/`, `self_update/`, `orchestration/`,
-> `error_envelope/`, `openapi/`, `context_limits/`, `llm_sanitize/`,
-> `tool_input_repair/`, …). Each keeps a package-level `__init__.py` facade so
-> import paths are unchanged. The `.py`→package migration is COMPLETE — there is
-> no lingering same-named `.py` shadowing any of these package dirs.
+Do not add an adapter that becomes a second implementation. A temporary bridge
+must delegate to the owner and carry a concrete deletion condition in the same
+change.
 
-| Package | Purpose |
-|---|---|
-| `agent_core/` | **Browsable facade for the reusable agent base** (relocated 2026-06). `__init__.py` PEP-562 lazy facade (`CORE_MEMBERS` maps symbol → module); `task_runtime.py` (real home; `lib/task_runtime.py` shims it); `push.py` (PushHub + `push_event()`; `lib/push.py` shims it); `events.py` (EventType/EventSpec contract); `profiles.py` (capability profiles); `personal_scope.py` (app-personal vs headless fail-closed — see CLAUDE.md §3.7) |
-| `artifacts/` | Generated-artifact storage / retrieval |
-| `billing/` | Wallet · ledger · pricing · per-user cost accounting (`payments/` sub-pkg) |
-| `browser/` | advanced · handlers · queue · dispatch · display · fetch |
-| `chat/` | Chat-domain helpers shared by the chat routes |
-| `compat/` | Cross-platform shim (`_platform.py`: Linux/macOS/Windows) + OpenAI/Anthropic API-compat adapters (`openai.py`, `anthropic.py`) |
-| `conversations/` | Conversation-store domain logic shared by routes |
-| `daily_report/` | My-Day / daily-report engine + background scheduler |
-| `storage/` | `StorageClient` · `StorageSupervisor` · protocol/errors · declarative plugin manifests |
-| `storage_sidecar/` | semantic catalog · command receipts · project/FUSE preflight · SQLite/PostgreSQL adapters · maintenance |
-| `database/` | migration compatibility repositories moving to named `storage.v1` operations |
-| `desktop/` | Desktop-agent server-side support (pairs with the top-level `desktop_agent.py` / `desktop_tools.py`) |
-| `feishu/` | `_state` · conversation · messaging · pipeline · commands · events · startup |
-| `file_history/` | api · store — per-file copy-backup undo |
-| `llm/` | `body` · `chat` · `stream` · `astream` · `_sse_core` · `cache` · `anthropic_outbound` · `responses_outbound` · `diagnostics` · `_transport` (split from the former `llm_client.py`) |
-| `llm_dispatch/` | api · config · discovery · dispatcher · factory · slot (multi-key × multi-model) |
-| `longform/` | Long-form research reports — recipe (research → outline → sections×N → assemble) · engine · runtime. Rides `production/`'s stage graph; the stage list is DATA-dependent (one per outline section) |
-| `mcp/` | client · registry · config · project_names · types |
-| `memory/` | storage · tools · injection · relevance · prefetch |
-| `motion_video/` | Motion-graphics video pipeline — `_recipe` (topic → researched script → TTS-timed storyboard) · `_scene_author` (per-scene composition author, degrades to `_template`) · `_render` · `_concat` · `_audio` · engine · runtime |
-| `production/` | **Production Substrate** — `runtime.py` (ProductionRuntime over TaskRuntime) · `jobs.py` (manifest + crash-resume rescan) · `stages.py` (checkpointed stage graph; capability-agnostic by guard test) |
-| `oauth/` | claude · codex · manager · pkce · token_store · outbound |
-| `optimizer/` | analyzer · proposer · applier · storage · actions/ (**nightly self-tuning**; REST surface at `routes/api_v1/optimizer.py`) |
-| `paper/` | Reading-Mode engine: report_engine · translate_engine · prompts · images · arxiv · tools |
-| `pdf_parser/` | core · text · images · math · vlm · postprocess · _common |
-| `presence/` | Cross-conversation live presence ("who is working here now") — the Project-Brain peer-status registry alongside the push hub |
-| `research/` | Auto-research pipeline — harvest recent literature into a reusable corpus · survey what exists · propose ideas screened against that corpus for novelty |
-| `skills/` | **User-installed workflow packages** (AgentSkills format) — registry · `<available_skills>` index · exact-id `load_skill` progressive disclosure · installer · catalog. A DIFFERENT noun from `memory/`; the model channel is read-only |
-| `project_mod/` | `tools` (execute_tool registry) · `run_command` · `read_tools` · `write_tools` · scanner · indexer · modifications · config |
-| `scheduler/` | manager · executor · cron · timer · proactive · tool_defs · _shared |
-| `swarm/` (16 modules) | master · agent · scheduler · planner · registry · rate_limiter · artifact_store · integration · events · tools · types · messages · result_format · protocol · persistence · snapshot — *(`review`/`synthesis` from earlier revisions no longer exist on disk)* |
-| `tasks_pkg/` | **Task orchestration / execution** — see §3.2.1 |
-| `tasks_pkg/handlers/` | misc · project · search · browser · mcp · memory · code_exec · _adapter |
-| `token_counter/` | Context-window token accounting / budget |
-| `tools/` | **Definitions**: project · search · browser · meta · human_guidance · image_gen · code_exec · conversation |
-| `translate/` | Translation engine + cache + provider plumbing |
-| `tts/` | Text-to-speech / narration synthesis (drives motion-video + podcast narration) |
-| `agent_inbox/` | Per-task model-facing inbox for async swarm updates |
-| `agent_verdict/` | Shared STOP/CONTINUE verdict + loop-control heuristics (facade pkg; see CLAUDE.md §4) |
-| `api_keys/` | Bearer-token API-key auth — single source for scopes / minting (see CLAUDE.md §15) |
-| `context_limits/` | Auto-learned per-(provider, model) context-window sizes |
-| `conv_config/` | Conversation config + settings resolution (server-side canonical merge) |
-| `conv_ref/` | Conversation Reference — retrieve + format other conversations for context |
-| `cross_dc/` | Cross-datacenter FUSE latency detection (env-var driven, auto-benchmarks) |
-| `desktop_agent/` | Local-machine control bridge (pairs with `desktop/`) |
-| `doc_parser/` | Document text extraction for non-PDF formats |
-| `error_envelope/` | Typed backend→frontend error envelope (shaping / fingerprint / format) |
-| `file_reader/` | Read arbitrary local files: images · PDFs · Office docs |
-| `image_gen/` | Image generation dispatch (was a single 1125-line module; now a package) |
-| `key_stats/` | Per-day per-key success/failure tracking with auto-disable |
-| `llm_sanitize/` | Message-list sanitization (gateway terms · orphan tool calls · role merge) |
-| `log_clean/` | Pure-function log-noise detection (facade pkg) |
-| `model_info/` | **HOT_PATH** per-model capabilities + `_clamp_max_tokens` (see CLAUDE.md §12) |
-| `mt_provider/` | Machine-translation provider adapters (unified interface) |
-| `openapi/` | OpenAPI 3.1 spec generation (facade pkg; `api_meta` / `build_spec`) |
-| `orchestration/` | Orchestration definition schema + validator (facade pkg; engine is `orchestration_engine.py`) |
-| `pricing/` | Model pricing tables · exchange-rate fetch · background refresh |
-| `self_update/` | In-place self-update via `git pull --ff-only` |
-| `text_lang/` | Lightweight text-language helpers (facade pkg) |
-| `tool_input_repair/` | Centralized tool-argument repair for open-model tool-calling failures |
-| `transcription/` | Provider-agnostic speech-to-text (STT / ASR) |
+## Verification
 
-#### 3.2.1 `lib/tasks_pkg/` — execution package (38 modules + 3 sub-packages)
-
-`orchestrator` · `manager` · `endpoint` · `endpoint_prompts` · `endpoint_review` ·
-`autopilot` · `entry` · `executor` · `executor_image` · `streaming_tool_executor` ·
-`tool_dispatch` · `tool_display` · `tool_hooks` · `cache_tracking` · `llm_fallback` ·
-`stream_handler` · `message_builder` · `conv_message_builder` · `server_message_store` ·
-`persist_registry` · `persistence_store` · `system_context` · `system_prompt_cc` ·
-`model_config` · `attachments` · `approval` · `human_guidance` · `stdin_handler` ·
-`auto_translate` · `commit_round` · `event_log` (durable SSE replay) ·
-`event_fold` · `activity_sink` · `killed_recovery` (killed-task recovery) ·
-`turn_retry` · `wire_fingerprint` · `wire_messages` · `write_breakdown`
-
-Sub-packages: **`compaction/`** (3-layer context compaction, now a package) ·
-**`segments/`** (segment-timeline model) · **`handlers/`** (per-tool execution handlers).
-
-#### 3.2.2 `lib/` top-level modules
-
-All **85** `lib/*.py` modules are accounted for (`agent_loop.py` added
-2026-07-01; `runtime_state_store.py` / `runtime_paths.py` / `llm_json.py` added
-since; verified against disk, zero invented names). The table below names
-77 directly; the remaining 8 are documented elsewhere: the six `orchestration*`
-modules share the single `orchestration*.py` row, and the `push.py` +
-`task_runtime.py` compat shims are described in the `agent_core/` package row
-in §3.2.
-
-| Module(s) | Purpose |
-|---|---|
-| `log.py` · `log_clean.py` | `get_logger` / `log_context` / `log_exception` / `audit_log`; log-retention cleanup |
-| `agent_core_manifest.py` | Declares `CORE_MODULES` / `REGISTRY_SEAMS` / `CONCRETE_PLUGIN_MODULES` — source of truth for the core/plugin split |
-| `agent_artifacts.py` | `.tofu*` artifact registry (CLAUDE.md §3.6) |
-| `agent_inbox.py` · `agent_options.py` · `agent_verdict.py` · `agent_loop.py` | Agent inbox · option resolution · STOP/CONTINUE verdict logic · shared multi-round tool-loop + `AbortSignal` seam (CLAUDE.md §4.6) |
-| `orchestration*.py` | `orchestration` · `orchestration_engine` · `orchestration_composer` · `orchestration_endpoint_adapter` · `orchestration_endpoint_runner` · `orchestration_runs` — multi-step DAG orchestration |
-| `model_info.py` · `context_limits.py` · `pricing.py` · `cost.py` · `cost_estimator.py` | Per-model caps · context limits · pricing tables · cost accounting |
-| `api_response.py` · `request_parser.py` · `error_envelope.py` · `error_fingerprint.py` · `llm_error_format.py` · `llm_errors.py` | Unified JSON responses · typed body parsing · error shaping |
-| `http_client.py` · `json_store.py` · `ttl_cache.py` · `idempotency.py` | Shared infra (CLAUDE.md §4.6) |
-| `auth_mode.py` · `auth_sources.py` · `api_keys.py` · `rate_limit_api.py` · `rate_limit_store.py` · `rate_limiter.py` · `relay_config.py` | Auth modes · key management · rate limiting · relay config |
-| `byo_providers.py` · `byo_resolve.py` · `byo_egress.py` · `provider_balance.py` · `provider_defaults.py` · `provider_probe.py` · `mt_provider.py` | Bring-your-own-provider plumbing |
-| `conv_config.py` · `conv_ref.py` · `branch_meta.py` · `feature_registry.py` · `features_store.py` | Conversation config · branch metadata · feature flags |
-| `js_bundler.py` · `css_bundler.py` · `openapi.py` | Frontend bundling · OpenAPI spec gen |
-| `self_update.py` · `env_compat.py` · `config_dir.py` · `cross_dc.py` · `fs_keepalive.py` · `proxy.py` · `code_server_excludes.py` | Self-update · env/platform · cross-DC FUSE probe · keepalive · proxy · code-server exclude list |
-| `runtime_state_store.py` · `runtime_paths.py` | Pluggable runtime-state backend (inproc default / redis opt-in via `TOFU_RUNTIME_STATE_BACKEND` — the scale-out lease/counter substrate seam) · runtime path resolution |
-| `llm_json.py` | Robust JSON extraction from LLM output (fence-stripping, lenient parse) |
-| `llm_sanitize.py` | Message sanitization (gateway terms, orphan tool calls, role merging) |
-| `embeddings.py` · `file_reader.py` · `doc_parser.py` · `image_gen.py` · `pptx_translator.py` · `text_lang.py` · `translate_cache.py` | Embeddings · file/doc reading · image gen · translation helpers |
-| `desktop_agent.py` · `desktop_tools.py` | Desktop agent bridge |
-| `dispatch_stats.py` · `usage_tracker.py` · `key_stats.py` · `trajectory.py` · `tool_changes.py` · `tool_input_repair.py` · `message_queue.py` · `search_bridge.py` · `protocols.py` · `utils.py` · `_pkg_utils.py` · `version.py` | Stats · usage · trajectory · tool-input repair · message queue · misc helpers |
-
-### 3.3 `routes/` — Blueprints (top-level + `api_v1/`; 362 `@*_bp.route` decorators)
-
-The headless **`/api/v1/*`** surface is the canonical API (see CLAUDE.md §16).
-`routes/__init__.py::ALL_BLUEPRINTS` wires the core set; optional feature
-plugins (e.g. `tofu-trading`) mount via `routes/plugin_registry.py`
-(`tofu.blueprints` / `tofu.startup` entry-point groups).
-
-**Top-level Blueprints (always on):**
-`common`, `chat` (+ side-effect modules `chat_queue`, `chat_human_io`,
-`chat_tool_state`), `conversations` (+ `conversations_search`,
-`conversations_compaction`), `config`, `browser`, `desktop`, `oauth`,
-`translate`, `upload`, `artifacts`, `paper`, `push`,
-`compat_openai`, `compat_anthropic`, `api_docs`, `metrics`, `legacy_redirects`.
-
-**`routes/api_v1/` — headless surface (43 modules):**
-`agents`, `agent_run`, `artifacts`, `audio`, `auth`, `auth_mode`, `auth_sources`,
-`billing`, `browser`, `capabilities`, `chat`, `chat_direct`, `common`,
-`config`, `conversations`, `daily_report`, `desktop`, `endpoint`, `folders`,
-`keys`, `logs`, `mcp`, `memory`, `motion`, `oauth`, `optimizer`,
-`orchestrations`, `paper`, `paper_folders`, `private_hosts`, `project`,
-`providers`, `research`, `scheduler`, `skills`, `swarm`, `tasks`, `translate`,
-`update`, `uploads`, `usage`, `users`, `webhooks`.
-
-> **Trading routes are gone from core** — extracted to the standalone
-> `tofu-trading` package; they register only when that plugin is installed.
-
-### 3.4 `frontend/src/` — Vite / ESM frontend
-
-`main.ts` and `admin.ts` are the two production entries. Backend access flows
-through `api/transport.ts`; `i18n/` emits per-locale chunks; `vendor-runtime.ts`
-loads Marked, DOMPurify, Highlight.js, KaTeX, PDF.js and html2canvas from npm,
-with heavy dependencies deferred. Domain owners live under `features/` and
-typed conversation state under `core/`.
-
-Remaining vanilla modules are contained in the checkJs ESM migration owner
-`runtime/app-runtime.js`. They share no classic-script load order and do not
-publish globals. The supported browser extension surface is exactly
-`window.Api` plus `window.TofuModules` v3. CI/release builds the complete graph
-into `static/vite/`; the Python server only validates the manifest and emits
-entry tags, and therefore never requires Node at end-user runtime.
-
-### 3.5 `data/`, `logs/`, `docs/` (runtime & docs)
-
-- `data/config/server_config.json` · `features.json` · `profiles/*.json` ·
-  `daily_reports/` (**per-project** isolated; no `~/.chatui/` global state)
-- `logs/` — app · access · error · vendor · audit
-- `docs/` — `ARCHITECTURE.md` (this file) · `architecture.html` /
-  `architecture_en.html` (visual companions) · `HEADLESS_API.md` ·
-  `api_client.md` · `legacy_api_migration.md` · `EVENTS.md` ·
-  `COMPAT_OPENAI.md` · `COMPAT_ANTHROPIC.md` · `CUSTOM_TOOLS.md` ·
-  `TOOL_PLUGINS.md` · `CLAUDE_CODE_ALIGNMENT.md` · `SECURITY_AUDIT_REPORT.md` ·
-  `DEVELOPMENT_DIRECTION.md` · `agentic-development-experience.md`
-
----
-
-## 4. Request → Response walk-through
-
-Helps when explaining Tofu in a talk / diagram legend.
-
-1. **Browser** sends `POST /api/chat/send` (atomic: msg + translate + start task).
-2. `routes/chat.py::chat_send()` persists the user message, calls
-   `_start_task_for_conv()` → `tasks_pkg/conv_message_builder.py::build_api_messages_from_db()`.
-3. `manager.create_task()` stores the task in memory + registers conv→task latest.
-4. Background thread runs `orchestrator.run_task()`:
-   - `context_composer.compose_context()` (typed providers → ordered messages + manifest; `system_context._inject_system_contexts` is the compatibility facade)
-   - per round:
-     - `llm_dispatch.api.dispatch_stream()` → `llm_dispatch.dispatcher` picks
-       best **slot** (key × model) → `lib.llm.stream_chat()` streams SSE.
-     - `stream_handler.analyse_stream_result()` classifies finish reason /
-       tool calls / retries; `llm_fallback` swaps model on failure.
-     - `tool_dispatch.parse_tool_calls()` + `execute_tool_pipeline()` →
-       `executor._execute_tool_one()` → per-family handler.
-     - `cache_tracking` tracks prompt-cache breaks.
-     - `compaction.run_compaction_pipeline()` compresses old turns when needed.
-5. `append_event()` emits SSE to `/api/chat/stream/<task_id>` (polled by frontend).
-   Every event is **also** persisted via `tasks_pkg/event_log.append_persistent_event()`
-   into the `task_events` table — this is what makes Last-Event-ID resumption
-   durable across `cleanup_old_tasks` and server restart. Successive deltas
-   are coalesced into one row per ~250 ms window with the LAST event_id.
-6. On completion, `persist_task_result()` writes through the selected
-   `storage.v1` backend,
-   `message_queue.dispatch_next_queued()` kicks any queued next message.
-7. **Endpoint mode**: same loop wrapped in `endpoint.run_endpoint_task()`
-   with Planner / Worker / Critic phases and `MAX_REPLANS=3`.
-8. **Swarm mode**: `routes/api_v1/swarm.py` delegates to `swarm/master.py` which
-   runs a streaming DAG of specialist agents via `swarm/scheduler.py`.
-9. **Headless**: `/api/v1/agent/run` (`agent_run.py`) and the OpenAI/Anthropic
-   compat surfaces build a config via `apply_headless_personal_defaults()` so
-   operator-personal state (memory, preference profile) fails CLOSED for BYO
-   callers (CLAUDE.md §3.7).
-
----
-
-## 5. Drift-check protocol (for AI assistants)
-
-When re-generating this file or the HTML companion:
+Use the smallest relevant test, then neighboring contract tests, then broad
+gates. The common architecture checks are:
 
 ```bash
-# 1. Inventory
-list_dir('lib'); list_dir('routes'); list_dir('routes/api_v1'); list_dir('static/js')
-list_dir('lib/tasks_pkg'); list_dir('lib/swarm')
-list_dir('static/js/core'); list_dir('static/js/ui'); list_dir('static/js/main'); list_dir('static/js/settings')
-
-# 2. Count route decorators
-grep_search(pattern='@\\w+_bp\\.route', path='routes', count_only=True)
-
-# 3. Trace active ALL_BLUEPRINTS
-read_files([{path: 'routes/__init__.py'}])
-
-# 4. Confirm trading is plugin-only (no in-tree trading package)
-list_dir('lib')  # expect NO trading*/ dirs; mounts via plugin_registry.py
+make docs-check
+npm run check:frontend
+make suite-health
+make test-unit
+make test-api
 ```
 
-If the inventory has changed (new package, new tasks_pkg module, new blueprint),
-update both §3 of this file and the matching block in `docs/architecture.html`,
-then bump the "Last re-scanned" line at the top.
-
----
-
-## 6. Messages-as-Rows roadmap (sync foundation)
-
-The conversation store has been migrating away from "single JSONB array,
-two writers" toward "individually addressable rows, server-only writes".
-The current shape is the bridge layer:
-
-| Phase | Status | What landed |
-|---|---|---|
-| **0. Persisted SSE events** | ✅ 2026-05-09 | `task_events` table + `tasks_pkg/event_log.py`. `append_event` mirrors every event; SSE stream falls back to the table when the task is gone. Survives `cleanup_old_tasks` and server restart. |
-| **1. Comprehensive checkpoint** | ✅ 2026-05-09 | `_sync_partial_to_conversation` is now CAS-retried and writes the full structural payload (toolRounds, modifiedFileList, _memoryPrefetch, gitSha, model). Page-reload mid-stream reconstructs the same UI. |
-| **2. Stable per-message IDs** | ✅ 2026-05-09 | `_assign_message_ids()` backfills UUIDs onto every JSONB write site (save_conv, patch_message, partial sync, result sync). New `PATCH /api/conversations/<cid>/messages/by-id/<mid>` endpoint. `routes/translate.py` resolves by id first, then idx, then content. The "msg_idx N out of range" warning class is fixed. |
-| **3. Frontend reads via id** | ⏳ mostly done (2026-06-25) | `_patchMessageOnServer`, `_startTranslateTask`, AND now **edit/regenerate** send `msgId` when available (`saveEditAndResend`/`regenerateFromUser` send `truncateToMsgId`; `chat_regenerate` resolves it via `find_message_by_id` and falls back to the index). Branch ops are still index-based (low-value; the parent-message index is validated server-side against the freshly-persisted array). Legacy `msgIdx` paths all still work. |
-| **4. Stop frontend writes** | ◑ split (verified 2026-06-25) | **Append primitive = DONE, already live:** the *user-message-creation* path does NOT use a full-array PUT — `sendMessage`→`Api.chat.send`→`chat_send` (`routes/chat.py`) creates the user message server-side via `_append_user_msg_idempotent` + `_persist_conv_messages`. A separate `POST .../messages` endpoint would be redundant with this. **Full-array-PUT elimination = DEFERRED, and NOT benign:** the remaining `syncConversationToServer` PUTs serve edit/regen/branch/post-stream/checkpoint (rewrite/truncate ops, not append), and the `save_conv` guards they pass through (`blocked_msg_regression`, `blocked_stale_checkpoint`, the cross-talk count-jump detector) are **load-bearing safety** added by the 2026-05 sync-hardening to fix real data-loss races. Removing them requires replacing `save_conv` with per-op targeted endpoints everywhere FIRST — a large cutover that is the opposite of low-risk. The cross-talk heuristic stays until the full-array PUT is provably gone. |
-| **5. Per-message rows** | ✅ sole-authority cutover staged (2026-08-10) | `conversation_messages(conv_id, seq, msg_id, role, content, …, meta)` is the canonical transcript behind `conversation_repository`. Semantic writes advance rows, metadata, FTS, derived counts, and `rev` atomically under CAS; `conversations.messages` freezes as a rollback archive after `TOFU_MESSAGES_ROWS_AUTHORITY=1`. Startup rejects any revision/count/projection/orphan mismatch, and both static and runtime guards reject business SQL that reads **or writes** the archive (including `executemany`/scripts). Window/live-task reads, recovery, scheduler, swarm, translation, reports, and plugins share the same boundary. `TOFU_MESSAGES_ROWS=0` / `TOFU_MESSAGES_ROWS_READ=0` remain pre-cutover controls but authority mode refuses to run if either disables canonical rows. |
-
-Phase 0–2 are shipped and reversible. Phase 3 is opt-in per call site
-(absence of `_msgId` falls through to the legacy index path). Phase 4–5
-require a coordinated backfill + frontend cutover and should ship as
-their own PRs once Phase 3 is fully migrated.
-
----
-
-## 7. Network topology and horizontal-scale contract
-
-The browser transport is deliberately layered:
-
-1. **Resumable SSE is the authoritative task stream.** Event ids and the
-   durable `task_events` log allow cursor replay after a broken connection or
-   task-registry eviction. SSE responses disable proxy buffering and omit the
-   HTTP/1-only `Connection` field, so the same response is valid over HTTP/1.1
-   and HTTP/2.
-2. **WebSocket is the low-latency control/push plane.** It carries invalidation
-   and presence-style frames, not the only copy of task output. Redis Pub/Sub
-   fans those frames across replicas and automatically reconnects/resubscribes;
-   a Redis outage degrades to same-replica push instead of breaking requests.
-3. **Incremental polling is the compatibility fallback.** It reconstructs from
-   the in-memory task or durable checkpoints when SSE cannot stay connected.
-
-For more than one replica, use these invariants together:
-
-- Run exactly one `server.py` process per replica. `server.py --workers N`
-  rejects `N != 1` because the programmatic Hypercorn API does not implement
-  CLI worker fan-out; process scaling belongs to the supervisor/orchestrator.
-- Set a unique `TOFU_REPLICA_ID`, a shared `TOFU_REDIS_URL`, and
-  `TOFU_RUNTIME_STATE_BACKEND=redis` on every replica.
-- Hash `X-Tofu-Affinity-Key` at ingress as shown in
-  `deploy/nginx-task-affinity.conf.example`. The browser derives a stable key
-  from the conversation id before the task-start POST (random only for a
-  conversation-less task), persists task mappings in `sessionStorage`, and
-  reuses it for SSE, poll, abort, command interrupt and interactive human
-  responses. This keeps branches, background children and different devices
-  on the same conversation owner. The task's durable-at-birth record also
-  stores the routing key, so `/api/v1/chat/active` can rediscover
-  remote-replica tasks after reload.
-- Use one shared selected backend through its Storage Sidecar. Separate
-  SQLite files or PostgreSQL clusters are separate applications, not replicas.
-  A shared Redis bus cannot reconcile divergent conversation/task databases.
-- Terminate public/fleet TLS at the ingress with a device-trusted certificate.
-  The app-generated certificate is a development convenience; its SANs include
-  loopback, hostname, discovered local addresses and `TOFU_TLS_SANS`, but it is
-  still self-signed.
-
-Failure semantics are conservative for long work. Redis leases are refreshed
-while their owners live and are reclaimed only after the owner stops
-heartbeating; Redis reconnect uses jittered backoff. No task/LLM read deadline
-is introduced by scaling. A full replica/process crash still destroys that
-process's in-flight model socket and Python execution; durable checkpoints and
-event replay preserve partial output and recovery state, but execution is not
-live-migrated to another process.
-
----
-
-*Companion files: `docs/architecture.html` / `docs/architecture_en.html`
-(visual panoramic diagrams, use for screenshots / slides / social posts),
-`CLAUDE.md §1` (terse overview that points here), `README.md` (user-facing
-project tour).*
+The exact testing policy lives in [TESTING_STRATEGY.md](TESTING_STRATEGY.md).

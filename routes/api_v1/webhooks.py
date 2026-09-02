@@ -26,11 +26,9 @@ from quart import Blueprint
 
 from lib.api_response import api_bad_request, api_created, api_not_found, api_ok
 from lib.config_dir import config_path
-from lib.http_client import http_post
 from lib.json_store import read_json, update_json_atomic
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
-from lib.safe_fetch import SafeFetchError, validate_public_url
 from lib.request_parser import (
     BadRequest, optional_list, optional_str, parse_body, require_str,
 )
@@ -50,6 +48,17 @@ _WORKER_STOP = threading.Event()
 _MAX_DELAYED_RETRIES = 10_000
 
 
+class _WebhookUrlError(ValueError):
+    """A webhook URL failed the public-egress policy."""
+
+
+def http_post(*args, **kwargs):
+    """Request-loaded HTTP seam retained for focused delivery tests."""
+    from lib.http_client import http_post as _http_post
+
+    return _http_post(*args, **kwargs)
+
+
 # ── Persistence ────────────────────────────────────────────────────
 
 def _load() -> list:
@@ -67,7 +76,13 @@ def _save(subs: list) -> None:
 def _public(sub: dict) -> dict:
     out = dict(sub)
     out.pop('secret', None)
+    out.pop('owner_user_id', None)
     return out
+
+
+def _current_owner_user_id() -> str:
+    context = current_auth()
+    return str(context.owner_user_id or '') if context else ''
 
 
 # ── Worker ─────────────────────────────────────────────────────────
@@ -90,7 +105,7 @@ def _ensure_worker_started() -> None:
         # out to ``_on_push_event``, which enqueues a delivery for each
         # matching subscription. Listener exceptions are isolated by the
         # hub itself, so a delivery bug can never break in-browser push.
-        from lib.push import hub
+        from lib.agent_core.push import hub
         hub.add_listener(_on_push_event)
 
 
@@ -130,7 +145,13 @@ def _on_push_event(channel: str, task_id: str, payload: dict) -> None:
     if not subs:
         return
     now = time.time()
+    event_owner = str(payload.get('_ownerUserId') or '')
     for sub in subs:
+        subscription_owner = str(sub.get('owner_user_id') or '')
+        if not subscription_owner:
+            continue
+        if event_owner and subscription_owner != event_owner:
+            continue
         if sub.get('disabled'):
             continue
         if sub.get('channel') and sub['channel'] != channel:
@@ -156,19 +177,29 @@ def _sign(secret: str, body: str, ts: str) -> str:
 
 def _validate_webhook_url(url: str, *, allow_unresolved: bool = False) -> None:
     """Webhooks are public egress unless the operator names an exception."""
-    validate_public_url(
-        url, allow_hosts_env='TOFU_WEBHOOK_ALLOW_HOSTS',
-        allow_unresolved=allow_unresolved)
+    from lib.safe_fetch import SafeFetchError, validate_public_url
+
+    try:
+        validate_public_url(
+            url, allow_hosts_env='TOFU_WEBHOOK_ALLOW_HOSTS',
+            allow_unresolved=allow_unresolved)
+    except SafeFetchError as exc:
+        raise _WebhookUrlError(str(exc)) from exc
 
 
 def _deliver(item: dict) -> bool:
     sub = item['sub']
     url = sub.get('url')
     secret = sub.get('secret') or ''
+    public_payload = {
+        key: value
+        for key, value in item['payload'].items()
+        if key != '_ownerUserId'
+    }
     body = json.dumps({
         'channel': item['channel'],
         'task_id': item['task_id'],
-        'event': item['payload'],
+        'event': public_payload,
         'ts': item['ts'],
     }, ensure_ascii=False)
     ts = str(int(item['ts']))
@@ -292,7 +323,14 @@ def _worker_loop():
 @api_meta(summary='List webhook subscriptions', tags=['webhooks'],
           scope='webhooks')
 def list_subs():
-    return api_ok(subs=[_public(s) for s in _load()])
+    owner_user_id = _current_owner_user_id()
+    return api_ok(
+        subs=[
+            _public(subscription)
+            for subscription in _load()
+            if str(subscription.get('owner_user_id') or '') == owner_user_id
+        ]
+    )
 
 
 @api_v1_webhooks_bp.route('/api/v1/webhooks', methods=['POST'])
@@ -311,7 +349,7 @@ def create_sub():
         # outage is merely deferred because _deliver() revalidates immediately
         # before every network request and follows no redirects.
         _validate_webhook_url(url, allow_unresolved=True)
-    except SafeFetchError as e:
+    except _WebhookUrlError as e:
         return api_bad_request(str(e), field='url')
     channel = optional_str(body, 'channel', default='', max_len=80)
     task_id = optional_str(body, 'task_id', default='*', max_len=200)
@@ -326,6 +364,7 @@ def create_sub():
         'secret': secrets.token_hex(32),
         'created_at': time.time(),
         'created_by': (current_auth().key_id if current_auth() else ''),
+        'owner_user_id': _current_owner_user_id(),
         'disabled': False,
     }
     subs = _load()
@@ -345,7 +384,15 @@ def create_sub():
           scope='webhooks')
 def delete_sub(sub_id):
     subs = _load()
-    new_subs = [s for s in subs if s.get('id') != sub_id]
+    owner_user_id = _current_owner_user_id()
+    new_subs = [
+        subscription
+        for subscription in subs
+        if not (
+            subscription.get('id') == sub_id
+            and str(subscription.get('owner_user_id') or '') == owner_user_id
+        )
+    ]
     if len(new_subs) == len(subs):
         return api_not_found('Subscription not found')
     _save(new_subs)

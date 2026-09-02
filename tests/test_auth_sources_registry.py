@@ -1,7 +1,7 @@
 """tests/test_auth_sources_registry.py — auth_sources as the site registry (P2).
 
 The store evolves from "credential provider" to "site-access registry"
-(docs/SITE_KNOWLEDGE_LAYER_DESIGN.md §3.1, epic pt_689b73b305fe4810):
+(docs/modules/browser_automation.md):
 
   * ``access_strategy`` (browser_first / cookies_replay / public) is a
     registry field: defaults ride the catalog spec (zero-migration for old
@@ -138,15 +138,22 @@ def test_match_disabled_never_matches(store):
 
 
 def _fake_bridge(monkeypatch, *, connected=True, cookies=()):
-    import lib.browser as B
-    monkeypatch.setattr(B, 'is_extension_connected', lambda *a, **k: connected)
+    import lib.browser.queue as browser_queue
+    monkeypatch.setattr(
+        browser_queue,
+        'is_extension_connected',
+        lambda *a, **k: connected,
+    )
 
-    def fake_send(cmd, params=None, timeout=30, client_id=None):
+    def fake_send(
+        cmd, params=None, timeout=30, client_id=None, owner_user_id=None,
+    ):
         assert cmd == 'get_cookies'
         assert set(params or {}) == {'domain'}, 'probe must be domain-scoped'
+        assert str(owner_user_id) == '1'
         return [{'name': n} for n in cookies], None
 
-    monkeypatch.setattr(B, 'send_browser_command', fake_send)
+    monkeypatch.setattr(browser_queue, 'send_browser_command', fake_send)
 
 
 def test_live_session_detected(store, monkeypatch):
@@ -154,7 +161,7 @@ def test_live_session_detected(store, monkeypatch):
     A._live_session_cache.clear()
     _fake_bridge(monkeypatch, connected=True,
                  cookies=('web_session', 'a1', 'unrelated'))
-    st = A.live_session_status('xiaohongshu.com')
+    st = A.live_session_status('xiaohongshu.com', owner_user_id=1)
     assert st['extension'] is True
     assert st['live_session'] is True
     assert 'web_session' in st['matched']
@@ -165,7 +172,7 @@ def test_live_session_absent(store, monkeypatch):
     A, _ = store
     A._live_session_cache.clear()
     _fake_bridge(monkeypatch, connected=True, cookies=('other_cookie',))
-    st = A.live_session_status('xiaohongshu.com')
+    st = A.live_session_status('xiaohongshu.com', owner_user_id=1)
     assert st['extension'] is True
     assert st['live_session'] is False
     assert 'web_session' in st['missing_required']
@@ -175,7 +182,7 @@ def test_live_session_extension_offline(store, monkeypatch):
     A, _ = store
     A._live_session_cache.clear()
     _fake_bridge(monkeypatch, connected=False)
-    st = A.live_session_status('xiaohongshu.com')
+    st = A.live_session_status('xiaohongshu.com', owner_user_id=1)
     assert st['extension'] is False
     assert st['live_session'] is False
 
@@ -186,18 +193,25 @@ def test_live_session_cached(store, monkeypatch):
     A, _ = store
     A._live_session_cache.clear()
     calls = []
-    import lib.browser as B
-    monkeypatch.setattr(B, 'is_extension_connected', lambda *a, **k: True)
+    import lib.browser.queue as browser_queue
+    monkeypatch.setattr(
+        browser_queue,
+        'is_extension_connected',
+        lambda *a, **k: True,
+    )
 
-    def counting(cmd, params=None, timeout=30, client_id=None):
+    def counting(
+        cmd, params=None, timeout=30, client_id=None, owner_user_id=None,
+    ):
+        assert str(owner_user_id) == '1'
         calls.append(1)
         return [{'name': 'web_session'}], None
 
-    monkeypatch.setattr(B, 'send_browser_command', counting)
-    A.live_session_status('xiaohongshu.com')
-    A.live_session_status('xiaohongshu.com')
+    monkeypatch.setattr(browser_queue, 'send_browser_command', counting)
+    A.live_session_status('xiaohongshu.com', owner_user_id=1)
+    A.live_session_status('xiaohongshu.com', owner_user_id=1)
     assert len(calls) == 1
-    A.live_session_status('xiaohongshu.com', refresh=True)
+    A.live_session_status('xiaohongshu.com', owner_user_id=1, refresh=True)
     assert len(calls) == 2, 'refresh=1 forces a re-probe'
 
 

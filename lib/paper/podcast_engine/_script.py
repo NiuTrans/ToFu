@@ -54,7 +54,7 @@ class ScriptParseError(Exception):
 def render_figure_list(images: list[dict]) -> tuple[str, list[str]]:
     """Render the manifest as a prompt block; return (text, allowed_files).
 
-    ``images`` is the figure manifest (``_load_image_manifest``): entries
+    ``images`` is the figure manifest (``load_image_manifest``): entries
     carry ``url`` (/api/paper/images/<phash>/<file>) + ``caption`` + ``page``.
     The script may only reference the BASENAME via figure_ref.
     """
@@ -234,11 +234,13 @@ def _stream_call(messages: list[dict], *, model: str | None,
     # paper stream callers all accumulate from on_content instead. Doing the
     # same also guarantees the text we parse is byte-identical to the text we
     # counted progress from.
-    _msg, _finish, usage = dispatch_stream(
+    from lib.llm.stream_result import require_verified_provider_stream_result
+    stream_result = require_verified_provider_stream_result(dispatch_stream(
         messages, max_tokens=16384, temperature=0.2, prefer_model=model,
         on_content=_on_content, on_attempt_restart=_on_attempt_restart,
-        log_prefix='[Paper:Podcast:Script]')
-    return ''.join(buf), usage
+        log_prefix='[Paper:Podcast:Script]'),
+        context='paper podcast script')
+    return ''.join(buf), stream_result.usage
 
 # ── Main entry ───────────────────────────────────────────────────────────
 
@@ -259,7 +261,7 @@ def generate_script(*, source_text: str, lang: str, mode: str, title: str,
         images: Figure manifest entries (figure list + figure_ref whitelist).
         model: prefer_model for the dispatch (None = dispatcher default).
         on_event: optional sink for ``progress`` sub-step events
-            (docs/PAPER_MEDIA_UX_DESIGN.md §2.3) — called as
+            (docs/modules/ingest_media.md §2.3) — called as
             ``on_event({'type': 'progress', 'phase': 'script', 'unit': 'pass',
             'step': 'draft'|'validate'|'revise'|'critic', ...})`` as the
             pipeline advances. Never let a sink failure break generation.

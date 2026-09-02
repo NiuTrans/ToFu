@@ -161,13 +161,16 @@ class TestHardCeilingClamp:
     result text may exceed the hard ceiling, with NO per-tool exemption."""
 
     def test_within_ceiling_passes_through_unchanged(self):
-        from lib.tasks_pkg.compaction import clamp_tool_result_text
+        from lib.tasks_pkg.compaction.api import clamp_tool_result_text
         text = 'x' * 1000
         assert clamp_tool_result_text('grep_search', text) == text
 
     def test_over_ceiling_is_clamped(self):
-        from lib.tasks_pkg.compaction import (
-            clamp_tool_result_text, _SINGLE_RESULT_HARD_CEILING_CHARS,
+        from lib.tasks_pkg.compaction.api import (
+            clamp_tool_result_text,
+        )
+        from lib.tasks_pkg.compaction._constants import (
+            _SINGLE_RESULT_HARD_CEILING_CHARS,
         )
         text = 'x' * (_SINGLE_RESULT_HARD_CEILING_CHARS + 500_000)
         out = clamp_tool_result_text('read_files', text, tc_id='toolu_abc')
@@ -178,10 +181,13 @@ class TestHardCeilingClamp:
     def test_exempt_tool_is_NOT_exempt_here(self):
         """read_files is exempt from Layer 0 budget but MUST still be
         clamped by this Layer 2 backstop — that's the whole point."""
-        from lib.tasks_pkg.compaction import (
-            clamp_tool_result_text, _SINGLE_RESULT_HARD_CEILING_CHARS,
+        from lib.tasks_pkg.compaction.api import (
+            clamp_tool_result_text,
         )
-        from lib.tasks_pkg.compaction import _BUDGET_EXEMPT_TOOLS
+        from lib.tasks_pkg.compaction._constants import (
+            _BUDGET_EXEMPT_TOOLS,
+            _SINGLE_RESULT_HARD_CEILING_CHARS,
+        )
         assert 'read_files' in _BUDGET_EXEMPT_TOOLS  # premise
         huge = 'B' * (_SINGLE_RESULT_HARD_CEILING_CHARS * 2)
         out = clamp_tool_result_text('read_files', huge)
@@ -190,7 +196,7 @@ class TestHardCeilingClamp:
     def test_screenshot_dict_passes_through(self):
         """Non-str content (image dicts) is never touched — images ride the
         native protocol and never enter the text stream this guards."""
-        from lib.tasks_pkg.compaction import clamp_tool_result_text
+        from lib.tasks_pkg.compaction.api import clamp_tool_result_text
         img = {'__screenshot__': True, 'dataUrl': 'data:image/png;base64,' + 'A' * 9_000_000}
         assert clamp_tool_result_text('read_files', img) is img
 
@@ -205,7 +211,9 @@ class TestReactiveInPlaceTruncation:
     the failure mode whole-message dropping cannot fix."""
 
     def test_truncates_the_largest_message(self):
-        from lib.tasks_pkg.compaction import _truncate_largest_message
+        from lib.tasks_pkg.compaction._reactive._strip import (
+            _truncate_largest_message,
+        )
         messages = [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'hi'},
@@ -221,14 +229,18 @@ class TestReactiveInPlaceTruncation:
         assert messages[1]['content'] == 'hi'
 
     def test_noop_when_all_messages_small(self):
-        from lib.tasks_pkg.compaction import _truncate_largest_message
+        from lib.tasks_pkg.compaction._reactive._strip import (
+            _truncate_largest_message,
+        )
         messages = [{'role': 'tool', 'content': 'x' * 100}]
         idx, freed = _truncate_largest_message(messages, ceiling_chars=800_000)
         assert idx == -1
         assert freed == 0
 
     def test_skips_system_and_multimodal_content(self):
-        from lib.tasks_pkg.compaction import _truncate_largest_message
+        from lib.tasks_pkg.compaction._reactive._strip import (
+            _truncate_largest_message,
+        )
         messages = [
             {'role': 'system', 'content': 'S' * 2_000_000},  # protected
             {'role': 'user', 'content': [{'type': 'image_url',
@@ -250,8 +262,11 @@ class TestNoToolFloodsContextProperty:
     reintroduces the bug class — which per-incident tests cannot catch."""
 
     def test_every_tool_result_is_bounded_or_image(self):
-        from lib.tasks_pkg.compaction import (
-            clamp_tool_result_text, _SINGLE_RESULT_HARD_CEILING_CHARS,
+        from lib.tasks_pkg.compaction.api import (
+            clamp_tool_result_text,
+        )
+        from lib.tasks_pkg.compaction._constants import (
+            _SINGLE_RESULT_HARD_CEILING_CHARS,
         )
         from lib.tasks_pkg.executor import tool_registry
 
@@ -272,26 +287,30 @@ class TestNoToolFloodsContextProperty:
     def test_image_dict_result_is_never_stringified_by_guard(self):
         """The guard must pass image dicts through untouched for every tool
         name (so a __screenshot__ never gets str()'d into base64 text)."""
-        from lib.tasks_pkg.compaction import clamp_tool_result_text
+        from lib.tasks_pkg.compaction.api import clamp_tool_result_text
         img = {'__screenshot__': True, 'dataUrl': 'data:image/png;base64,' + 'A' * 5_000_000}
         for name in ('read_files', 'grep_search', 'web_search', 'fetch_url'):
             assert clamp_tool_result_text(name, img) is img
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Facade reachability — new symbols stay importable (hot-reload contract)
+#  Ownership reachability — each symbol has one explicit import path
 # ═══════════════════════════════════════════════════════════════════════
 
 @pytest.mark.unit
 class TestNewSymbolsReachable:
-    @pytest.mark.parametrize('name', [
-        'clamp_tool_result_text',
-        '_truncate_largest_message',
-        '_SINGLE_RESULT_HARD_CEILING_CHARS',
-    ])
-    def test_symbol_reachable_via_facade(self, name):
-        from lib.tasks_pkg import compaction as _comp
-        assert hasattr(_comp, name), (
-            f'lib.tasks_pkg.compaction.{name} missing — breaks hot-reload '
-            f'contract / production import'
+    def test_public_clamp_is_in_api(self):
+        from lib.tasks_pkg.compaction.api import clamp_tool_result_text
+        assert callable(clamp_tool_result_text)
+
+    def test_private_emergency_truncation_has_a_concrete_owner(self):
+        from lib.tasks_pkg.compaction._reactive._strip import (
+            _truncate_largest_message,
         )
+        assert callable(_truncate_largest_message)
+
+    def test_hard_ceiling_has_a_concrete_owner(self):
+        from lib.tasks_pkg.compaction._constants import (
+            _SINGLE_RESULT_HARD_CEILING_CHARS,
+        )
+        assert _SINGLE_RESULT_HARD_CEILING_CHARS > 0

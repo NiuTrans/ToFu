@@ -32,6 +32,11 @@ from __future__ import annotations
 import importlib
 import pathlib
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUN_PY = ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_run.py'
@@ -123,9 +128,8 @@ def test_leaf_carries_seed_branch_and_rationale():
     src = LEAF_PY.read_text()
     assert "task['model'] = model" in src, (
         'leaf must carry the model seed assignment')
-    assert 'pt_8f6cbc753855415e' in src, (
-        'leaf must carry the epic reference for the seed rationale '
-        '(40 NULL-model error rows in 14 days)')
+    assert 'first-call DISPATCH failure' in src
+    assert 'metadata.model NULL' in src
 
 
 def test_leaf_returns_mcfg():

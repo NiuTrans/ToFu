@@ -42,7 +42,7 @@ from lib.tools.registry._spec import ToolContext, all_specs
 logger = get_logger(__name__)
 
 
-def _reference_context() -> ToolContext:
+def _reference_context(*, owner_user_id: int = 0) -> ToolContext:
     """The reference gate context — mirrors a plain chat turn's defaults.
 
     ``search_mode`` follows the same default as
@@ -75,7 +75,6 @@ def _reference_context() -> ToolContext:
         code_exec_enabled=False,
         browser_enabled=bool(feats.get('browserEnabled', False)),
         desktop_enabled=bool(feats.get('desktopEnabled', False)),
-        swarm_enabled=bool(feats.get('swarmEnabled', False)),
         image_gen_enabled=bool(feats.get('imageGenEnabled', False)),
         human_guidance_enabled=bool(feats.get('humanGuidanceEnabled', False)),
         scheduler_enabled=True,
@@ -85,6 +84,7 @@ def _reference_context() -> ToolContext:
         # evaluated as hidden — because the panel's job is to show what is
         # REGISTERED, including what's currently invisible to requests.
         enabled_plugins=set(),
+        owner_user_id=int(owner_user_id),
     )
 
 
@@ -182,7 +182,7 @@ def _mcp_servers() -> list[dict]:
         return []
 
 
-def build_tool_inventory() -> dict:
+def build_tool_inventory(*, owner_user_id: int = 0) -> dict:
     """Assemble the full live inventory. Never raises — every enrichment is
     independently fail-soft so the panel always gets a renderable payload.
 
@@ -193,7 +193,7 @@ def build_tool_inventory() -> dict:
     """
     import time
 
-    ctx = _reference_context()
+    ctx = _reference_context(owner_user_id=owner_user_id)
     bound, writes = _handler_coverage()
 
     # ── Assemble per-spec; plugin allow-list resolution for display ──
@@ -288,6 +288,7 @@ def build_tool_inventory() -> dict:
                 'description': _schema_description(schema)[:300],
                 'required': _required_params(schema),
                 'write': name in writes or name in spec.write_tools,
+                'confirmation_required': name in spec.confirmation_tools,
                 'handler': name in bound or spec.handler is not None,
                 'enabled': gate_state == 'on',
             })
@@ -305,6 +306,7 @@ def build_tool_inventory() -> dict:
                     'description': '',
                     'required': [],
                     'write': name in writes or name in spec.write_tools,
+                    'confirmation_required': name in spec.confirmation_tools,
                     'handler': name in bound,
                     'enabled': False,
                 })
@@ -350,7 +352,6 @@ def build_tool_inventory() -> dict:
             'project_attached': bool(ctx.project_enabled),
             'browser_enabled': ctx.browser_enabled,
             'desktop_enabled': ctx.desktop_enabled,
-            'swarm_enabled': ctx.swarm_enabled,
             'image_gen_enabled': ctx.image_gen_enabled,
             'human_guidance_enabled': ctx.human_guidance_enabled,
             'mcp_enabled': ctx.cfg.get('mcpEnabled', True),

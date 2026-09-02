@@ -63,7 +63,9 @@ wire tools 只描述“模型当前看见什么”；执行权限始终由任务
 
 ## 搜索结果展示
 
-`search_tools` 的模型结果保持机器可读 JSON；前端事件额外携带最小展示投影：工具名、namespace、描述和参数摘要。界面以卡片明确列出本次命中的工具，并标识必填参数、更多分页结果和 fail-open 状态。`execute_tools` 是纯协议适配层，不显示、不计入工具数；真实子工具照常显示成功、错误和审批。MCP 私有 `_meta`、完整索引字段和权限信息不会进入展示投影。
+`search_tools` 的模型结果保持机器可读 JSON；前端事件额外携带最小展示投影：工具名、namespace、描述和参数摘要。界面以卡片明确列出本次命中的工具，并标识必填参数、更多分页结果和 fail-open 状态。`execute_tools` 是纯协议适配层，不显示、不计入工具数；真实子工具照常显示成功、错误和审批。子调用尚未生成生命周期事件就被参数校验拒绝时，活动时间线显示“目标子工具已跳过”、稳定错误码、原因和重试提示，而不是显示 `execute_tools 执行失败`；已执行子工具的错误事件始终优先，外壳不得重复报错。冷回放前端会从对应 round 的有界 `toolContent` 恢复旧版校验诊断，无法恢复的外壳行才直接过滤。MCP 私有 `_meta`、完整索引字段和权限信息不会进入展示投影。
+
+规范化只接受确定的一对一修复，且 live catalog 中的精确名称永远优先。例如仅有大结果续读工具时，`read_artifact(ref=...)` 可规范化为 `read_tool_artifact(artifact_ref=...)`；若真正的 `read_artifact` 同时可用，则不改名。所有修复写入不含参数值的审计记录，最终仍按请求自有 schema 校验。
 
 ## MCP 协作协议
 
@@ -92,5 +94,5 @@ ChatUI 连接建立时拉取并缓存完整 `tools/list`，后续任务检索只
 
 `hope-mcp` 和 `xuecheng-mcp` 的 profile 环境变量仍定义服务端允许上限，例如 `XUECHENG_TOOLSET=reader,editor`。只有上限变化需要重启连接；每任务 active 选择由 ChatUI 完成。
 
-开源实现对比、冻结模拟用户语料、legacy/Qwen/candidate arm 和实验结果见
-[Tool Search 开源方案与评测](./TOOL_SEARCH_OPEN_SOURCE_EVALUATION.md)。
+冻结模拟用户语料和实验执行代码位于 `evaluations/tool_search/`；文档只保留
+当前执行契约，不复制一次性的对比结论。

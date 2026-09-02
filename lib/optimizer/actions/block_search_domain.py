@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import lib as _lib
 from lib.config_dir import config_path as _config_path
+from lib.identity import require_user_id
 from lib.json_store import JsonStoreReadError, update_json_atomic
 from lib.log import audit_log, get_logger
 from lib.search_settings import normalise_domain as _ss_normalise_domain
@@ -36,7 +37,7 @@ def _normalise_domain(domain: str) -> str:
 #  Public apply / revert
 # ══════════════════════════════════════════════════════════
 
-def apply(args: dict) -> dict:
+def apply(args: dict, *, owner_user_id: int) -> dict:
     """Add the target domain to ``search.skip_domains``.
 
     Args:
@@ -48,6 +49,8 @@ def apply(args: dict) -> dict:
     Raises:
         ValueError on invalid args; OSError on file write failure.
     """
+    owner_id = require_user_id(
+        owner_user_id, context='optimizer action owner')
     domain = _normalise_domain(str(args.get('domain') or ''))
     if not domain or '.' not in domain:
         raise ValueError(f'invalid domain: {args.get("domain")!r}')
@@ -90,6 +93,7 @@ def apply(args: dict) -> dict:
 
     audit_log(
         'optimizer_action',
+        user_id=owner_id,
         action='block_search_domain',
         domain=domain,
         ttl_days=ttl_days,
@@ -106,8 +110,10 @@ def apply(args: dict) -> dict:
     }
 
 
-def revert(args: dict) -> dict:
+def revert(args: dict, *, owner_user_id: int) -> dict:
     """Remove the target domain from ``search.skip_domains``."""
+    owner_id = require_user_id(
+        owner_user_id, context='optimizer action owner')
     domain = _normalise_domain(str(args.get('domain') or ''))
     if not domain:
         raise ValueError(f'invalid domain for revert: {args.get("domain")!r}')
@@ -140,6 +146,7 @@ def revert(args: dict) -> dict:
                          'failed: %s', e, exc_info=True)
             raise
         audit_log('optimizer_revert',
+                  user_id=owner_id,
                   action='block_search_domain', domain=domain,
                   skip_domains_size_after=outcome['size'])
         logger.info('[Optimizer.block_search_domain] reverted domain=%s '
@@ -151,6 +158,7 @@ def revert(args: dict) -> dict:
     logger.info('[Optimizer.block_search_domain] revert no-op: %s not present',
                 domain)
     audit_log('optimizer_revert',
+              user_id=owner_id,
               action='block_search_domain', domain=domain, noop=True)
     return {'domain': domain, 'reverted': False, 'reason': 'not_present'}
 
@@ -162,4 +170,7 @@ ACTION = {
                     'ttl_days (default 7); auto-reverts on expiry.'),
     'apply': apply,
     'revert': revert,
+    # server_config.json is a personal-computer authority. Distributed mode
+    # must not let one owner mutate a deployment-global file.
+    'deployment_modes': frozenset({'personal'}),
 }

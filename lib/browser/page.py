@@ -64,7 +64,7 @@ class BrowserPage:
             # populate it; until then only lifecycle calls are allowed.
             return
         require_access(
-            self.lease.user_id, target, access=access,
+            self.lease.owner_user_id, target, access=access,
             client_id=self.lease.client_id, profile=self.lease.profile)
 
     def _state(self) -> dict:
@@ -72,7 +72,8 @@ class BrowserPage:
             return {'tabId': None, 'url': self._url}
         result, error = self._send(
             'page_state', {'tabId': self.tab_id}, timeout=8,
-            client_id=self.lease.client_id)
+            client_id=self.lease.client_id,
+            owner_user_id=self.lease.owner_user_id)
         if error:
             return {'tabId': self.tab_id, 'url': self._url, 'stateError': str(error)}
         if isinstance(result, dict):
@@ -110,7 +111,8 @@ class BrowserPage:
         if self.tab_id is not None and 'tabId' not in payload:
             payload['tabId'] = self.tab_id
         result, error = self._send(
-            command, payload, timeout=timeout, client_id=self.lease.client_id)
+            command, payload, timeout=timeout, client_id=self.lease.client_id,
+            owner_user_id=self.lease.owner_user_id)
         if error:
             raise BrowserCommandError(str(error))
         state = None
@@ -140,7 +142,8 @@ class BrowserPage:
                            if active is None else bool(active),
                            'waitForLoad': url != 'about:blank',
                            'timeoutMs': 15_000}, timeout=20,
-            client_id=self.lease.client_id)
+            client_id=self.lease.client_id,
+            owner_user_id=self.lease.owner_user_id)
         if error:
             raise BrowserCommandError(str(error))
         if not isinstance(result, dict) or result.get('id') is None:
@@ -165,7 +168,8 @@ class BrowserPage:
         """Bind the lease to this browser's active ordinary HTTP(S) tab."""
         self._require(BrowserCapability.TABS, BrowserCapability.SNAPSHOT)
         result, error = self._send(
-            'list_tabs', {}, timeout=8, client_id=self.lease.client_id)
+            'list_tabs', {}, timeout=8, client_id=self.lease.client_id,
+            owner_user_id=self.lease.owner_user_id)
         if error:
             raise BrowserCommandError(str(error))
         tabs = result if isinstance(result, list) else []
@@ -297,9 +301,15 @@ class BrowserPage:
                          capability=BrowserCapability.EXECUTE, access='write',
                          trusted_read=trusted_read)
 
-    def start_network_capture(self, *, url_patterns=None) -> dict:
+    def start_network_capture(self, *, url_patterns=None,
+                              capture_bodies: bool = True) -> dict:
+        if capture_bodies:
+            self._require(BrowserCapability.NETWORK_BODY)
         out = self._run(
-            'network_capture_start', {'urlPatterns': list(url_patterns or [])},
+            'network_capture_start', {
+                'urlPatterns': list(url_patterns or []),
+                'captureBodies': bool(capture_bodies),
+            },
             capability=BrowserCapability.NETWORK_CAPTURE)
         result = out.get('result') or {}
         capture_id = result.get('captureId') if isinstance(result, dict) else None
@@ -313,6 +323,33 @@ class BrowserPage:
             capability=BrowserCapability.NETWORK_CAPTURE, access=None)
         self.lease.network_captures.discard(str(capture_id))
         return out
+
+    def research(self, url: str, *, max_chars=60_000, max_scrolls=4,
+                 max_pages=3, pagination='auto') -> dict:
+        """Deep-read one URL in an extension-owned temporary background tab."""
+        self._require(
+            BrowserCapability.DEEP_COLLECT, BrowserCapability.NETWORK_BODY)
+        self._authorize('read', url=url)
+        result, error = self._send(
+            'research_url', {
+                'url': str(url),
+                'maxChars': max(1_000, min(80_000, int(max_chars))),
+                'maxScrolls': max(0, min(8, int(max_scrolls))),
+                'maxPages': max(1, min(5, int(max_pages))),
+                'pagination': str(pagination),
+                'timeoutMs': 65_000,
+            }, timeout=80, client_id=self.lease.client_id,
+            owner_user_id=self.lease.owner_user_id)
+        if error:
+            raise BrowserCommandError(str(error))
+        if not isinstance(result, dict) or not result.get('url'):
+            raise BrowserCommandError(
+                'Browser did not return a valid deep-research result')
+        self._authorize('read', url=str(result['url']))
+        return {'ok': True, 'result': result, 'page': {
+            'url': str(result.get('url') or ''),
+            'title': str(result.get('title') or ''),
+        }, 'lease': self.lease.public_dict()}
 
     def upload(self, data_base64: str, *, filename: str,
                mime_type='application/octet-stream', selector: str = '',

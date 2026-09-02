@@ -20,7 +20,7 @@ def resolve_profile_scope(ctx) -> str:
     """Resolve the profile storage scope from a request ``AuthContext``.
 
     The rule is deliberately minimal: the scope is the authenticated
-    ``user_id``, which is populated ONLY by multi-user login
+    positive ``owner_user_id`` assigned at the authentication boundary
     (``_mint_session_key`` in ``routes/api_v1/users.py``). Open mode
     (synthetic local-admin) and private mode (a Bearer key with no tenant
     binding) both leave ``user_id`` empty, so they resolve to ``''`` — the
@@ -30,7 +30,8 @@ def resolve_profile_scope(ctx) -> str:
     ``''`` (the global file), never a half-built scope.
     """
     try:
-        return (getattr(ctx, 'user_id', '') or '').strip()
+        owner_user_id = getattr(ctx, 'owner_user_id', None)
+        return str(owner_user_id) if owner_user_id is not None else ''
     except Exception as e:
         logger.debug('[UserProfile] scope resolve failed: %s', e)
         return ''

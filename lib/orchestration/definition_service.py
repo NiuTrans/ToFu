@@ -27,7 +27,7 @@ from lib.orchestration.definition_store_port import (
 )
 from lib.orchestration.errors import DefinitionServiceError
 from lib.orchestration.service_call import orchestration_dependency_call
-from lib.orchestration.definition_wire_contracts import (
+from lib.orchestration.definition_wire_projection import (
     definition_entry_summary,
 )
 
@@ -54,9 +54,12 @@ class OrchestrationDefinitionService:
         self._repository = bind_orchestration_definition_store(repository)
 
     @classmethod
-    def from_path(cls, path: str | None = None):
+    def for_owner(
+        cls, owner_user_id: int, *, tenant_id: str | None = None,
+    ):
         from lib.orchestration.store import OrchestrationStore
-        return cls(OrchestrationStore(path))
+        return cls(OrchestrationStore(
+            owner_user_id, tenant_id=tenant_id))
 
     def list_entries(self) -> list[dict]:
         return _repository_call(
@@ -113,7 +116,7 @@ class OrchestrationDefinitionService:
         return DefinitionWriteResult(entry, prepared.inspection)
 
     def update(self, orchestration_id: str, definition: dict, *,
-               expected_updated_at: int | None = None) -> DefinitionWriteResult:
+               expected_updated_at: int) -> DefinitionWriteResult:
         prepared = prepare_definition(definition)
         if prepared.definition is None:
             return DefinitionWriteResult(None, prepared.inspection)
@@ -132,15 +135,11 @@ class OrchestrationDefinitionService:
             current_updated_at=stored.current_updated_at,
         )
 
-    def delete(self, orchestration_id: str) -> bool:
-        """Compatibility delete for callers without a known version."""
-        return self.delete_if_current(orchestration_id).deleted
-
     def delete_if_current(
         self,
         orchestration_id: str,
         *,
-        expected_updated_at: int | None = None,
+        expected_updated_at: int,
     ) -> DefinitionDeleteResult:
         stored = _repository_call(
             'delete',

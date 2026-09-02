@@ -1,9 +1,9 @@
 """lib/runtime_state_store.py — Shared lease / counter / heartbeat primitive.
 
 The foundation of the horizontal scale-out work (board epics
-``pt_96b80d88c8d54b71`` Epic C + ``pt_823ff5a3bf004c40`` Epic B). See the
-ratified design in ``docs/EPIC_B_PUSH_FANOUT_DESIGN.md`` §0 (Build Order) /
-§5 (lease-TTL primitive) and ``docs/EPIC_C_RUNTIME_STATE_DESIGN.md`` §4.2.
+``` Epic C + ``` Epic B). See the
+ratified design in ``docs/ENTERPRISE_READINESS_AUDIT.md`` §0 (Build Order) /
+§5 (lease-TTL primitive) and ``docs/ENTERPRISE_READINESS_AUDIT.md`` §4.2.
 
 **Why this module exists.** Every per-process runtime cap (the admission
 ceiling in ``lib/agent_core/admission.py`` and the per-principal SSE semaphore
@@ -52,22 +52,21 @@ of three times.
     per-replica loop calls this every ``ttl/3`` so a LIVING task's lease never
     expires (design §5.2) — TTL only bites when heartbeats STOP (crash).
 
-**Fail-open** (design §4, same discipline as ``rate_limit_store``): if the
-Redis backend cannot connect / errors, it degrades — ``acquire`` returns True,
-``count`` returns 0 — and schedules a jittered exponential reconnect. Calls
-skip the known-broken pool only until that backoff expires; recovery replaces
-the client and living admission slots are reasserted by their heartbeat. A cap
-substrate must never take down the request path; the worst case is that the cap
-temporarily stops enforcing (today's behaviour), never a crash or task kill.
+**Failure policy:** personal mode keeps the historical fail-open behavior for
+an explicitly selected Redis backend. Distributed mode is fail-closed for NEW
+lease/slot admission: an unavailable Redis returns refusal, which HTTP adapters
+surface as 503 + Retry-After. Already accepted work never depends on Pub/Sub or
+Redis progress and continues from PostgreSQL authority; reconnect remains
+jittered and living leases are reasserted by heartbeat.
 """
 from __future__ import annotations
 
+import os
 import random
 import threading
 import time
 from typing import Iterable, List, Tuple
 
-from lib.env_compat import getenv_compat
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -253,7 +252,7 @@ class RedisRuntimeStateStore:
     _RETRY_MAX = 30.0
     _WARN_INTERVAL = 30.0
 
-    def __init__(self):
+    def __init__(self, *, fail_open: bool = True, redis_url: str = ''):
         # ``_available`` is diagnostic state only.  It must never become a
         # permanent circuit breaker: Redis can be restarted independently of
         # this process and the next request after the backoff must reconnect.
@@ -264,11 +263,13 @@ class RedisRuntimeStateStore:
         self._retry_delay = self._RETRY_MIN
         self._last_warn_at = 0.0
         self._last_error = ''
+        self._fail_open = bool(fail_open)
+        self._redis_url = str(redis_url or '').strip()
 
     def _new_client(self):
         """Construct a client. Split out so reconnect tests need no live Redis."""
         import redis  # optional dependency — guarded by the caller
-        url = (getenv_compat('TOFU_REDIS_URL')
+        url = (self._redis_url or os.environ.get('TOFU_REDIS_URL')
                or 'redis://127.0.0.1:6379/0')
         return redis.Redis.from_url(
             url, socket_connect_timeout=1.0, socket_timeout=1.0,
@@ -351,6 +352,8 @@ class RedisRuntimeStateStore:
                 'reconnect_in_s': max(0.0, self._next_retry_at - now),
                 'retry_delay_s': self._retry_delay,
                 'last_error': self._last_error,
+                'admission_failure_policy': (
+                    'open' if self._fail_open else 'closed'),
             }
 
     def _k(self, kind: str, key: str) -> str:
@@ -359,13 +362,13 @@ class RedisRuntimeStateStore:
     def acquire_lease(self, kind: str, key: str, ttl: float) -> bool:
         r = self._redis()
         if r is None:
-            return True  # fail-open
+            return self._fail_open
         try:
             r.set(self._k(kind, key), '1', ex=max(1, int(ttl)))
             return True
         except Exception as e:
             self._command_failed(e, 'acquire')
-            return True
+            return self._fail_open
 
     def _zcap_k(self, kind: str, count_prefix: str) -> str:
         # One sorted-set per (kind, count_prefix) holding the live slots.
@@ -402,12 +405,13 @@ class RedisRuntimeStateStore:
         admission gate and the reported count can never drift. A crash leaves
         members that expire by score (reclaimed on the next op's
         ZREMRANGEBYSCORE); a whole-key ``EXPIRE`` backstops an idle set.
-        ``limit <= 0`` = unbounded. Fail-OPEN on backend error (admit)."""
+        ``limit <= 0`` = unbounded. Backend failure follows the deployment's
+        admission policy (personal=open, distributed=closed)."""
         if limit <= 0:
             return self.acquire_lease(kind, slot_key, ttl)
         r = self._redis()
         if r is None:
-            return True  # fail-open
+            return self._fail_open
         zk = self._zcap_k(kind, count_prefix)
         ttl_i = max(1, int(ttl))
         try:
@@ -441,14 +445,14 @@ class RedisRuntimeStateStore:
                     logger.debug('[RuntimeStateStore] acquire_slot WATCH retry '
                                  'for %s (attempt %d)', slot_key, _attempt)
                     continue
-            # Far past any real burst; fail-open like a backend error rather
-            # than refuse a legitimate caller forever.
+            # Far past any real burst; apply the deployment's backend-failure
+            # policy rather than inventing a separate contention policy.
             logger.warning('[RuntimeStateStore] acquire_slot watch retries '
-                           'exhausted for %s — fail-open', slot_key)
-            return True
+                           'exhausted for %s', slot_key)
+            return self._fail_open
         except Exception as e:
             self._command_failed(e, 'acquire_slot')
-            return True
+            return self._fail_open
 
     def release_slot(self, kind: str, slot_key: str, count_prefix: str) -> None:
         """Release a slot acquired via :meth:`acquire_slot` — ``ZREM`` the
@@ -630,25 +634,42 @@ _store_backend: str = ''
 def get_store():
     """Return the active runtime-state store, building it lazily.
 
-    Backend from ``TOFU_RUNTIME_STATE_BACKEND``:
+    Personal backend from ``TOFU_RUNTIME_STATE_BACKEND``:
       * ``inproc`` (default) → :class:`InProcRuntimeStateStore`
       * ``redis`` → :class:`RedisRuntimeStateStore`
-    An unrecognised value logs a WARN and falls back to inproc.
+    An unrecognised personal value logs a WARN and falls back to inproc.
+    Distributed mode always selects Redis from ``TOFU_REDIS_URL_FILE`` and
+    fails new admission closed when it is unavailable.
     """
     global _store, _store_backend
-    desired = (getenv_compat('TOFU_RUNTIME_STATE_BACKEND')
-               or 'inproc').strip().lower()
+    from runtime_guards import load_deployment_configuration
+    deployment = load_deployment_configuration(
+        allow_test_backend_override=(
+            os.environ.get('TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE') == '1'))
+    if deployment.mode == 'distributed':
+        desired = 'redis'
+        fail_open = False
+        redis_url = deployment.redis_url
+    else:
+        desired = (os.environ.get('TOFU_RUNTIME_STATE_BACKEND')
+                   or 'inproc').strip().lower()
+        fail_open = True
+        redis_url = ''
     if desired not in ('inproc', 'redis'):
         logger.warning('[RuntimeStateStore] unknown backend %r — defaulting '
                        'to inproc', desired)
         desired = 'inproc'
+    cache_key = f'{desired}:{"open" if fail_open else "closed"}'
     with _store_lock:
-        if _store is not None and _store_backend == desired:
+        if _store is not None and _store_backend == cache_key:
             return _store
-        _store = (RedisRuntimeStateStore() if desired == 'redis'
+        _store = (RedisRuntimeStateStore(
+            fail_open=fail_open, redis_url=redis_url) if desired == 'redis'
                   else InProcRuntimeStateStore())
-        _store_backend = desired
-        logger.info('[RuntimeStateStore] backend=%s active', desired)
+        _store_backend = cache_key
+        logger.info(
+            '[RuntimeStateStore] backend=%s admission_failure_policy=%s active',
+            desired, 'open' if fail_open else 'closed')
     return _store
 
 

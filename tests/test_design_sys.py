@@ -17,7 +17,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.design_sys import fonts, themes  # noqa: E402
+import lib.design_sys.fonts as fonts  # noqa: E402
+import lib.design_sys.themes as themes  # noqa: E402
 
 pytestmark = pytest.mark.unit
 

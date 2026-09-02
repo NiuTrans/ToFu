@@ -1,5 +1,3 @@
-# Incident anchor: born in commit 5c0b8732 — refactor(orchestrator): pt_03f4cdf1 slice 32 — extract round-open (RO...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 32 — extract the per-round
 open (ROUND_START event + phase emit) and the streaming-accumulator
 construction from _run.py's stream loop into
@@ -30,6 +28,8 @@ import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUN_PY = ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_run.py'
+ROOT_LOOP_PY = (
+    ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_root_agent_loop.py')
 LEAF_PY = ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_round_open.py'
 
 
@@ -62,17 +62,17 @@ def test_helper_signatures():
 # 3. _run.py imports and delegates
 # ---------------------------------------------------------------------------
 def test_run_py_imports_round_open():
-    src = RUN_PY.read_text()
+    src = ROOT_LOOP_PY.read_text()
     assert ('from lib.tasks_pkg.orchestrator._round_open import' in src), (
         '_run.py must import from _round_open at module scope')
 
 
 def test_run_task_delegates_round_open_and_accumulator():
-    src = RUN_PY.read_text()
-    assert 'emit_round_open(task, rs, round_num' in src, (
-        '_run.py must delegate the round-open emit')
-    assert '_stream_acc = build_stream_accumulator(' in src, (
-        '_run.py must delegate the accumulator construction')
+    src = ROOT_LOOP_PY.read_text()
+    assert 'emit_round_open(' in src, (
+        'the root adapter must delegate the round-open emit')
+    assert 'stream_accumulator = build_stream_accumulator(' in src, (
+        'the root adapter must delegate the accumulator construction')
 
 
 # ---------------------------------------------------------------------------

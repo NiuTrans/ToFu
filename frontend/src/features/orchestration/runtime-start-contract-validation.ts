@@ -29,16 +29,6 @@ export function validateRuntimeStartRuntimeSection(
   }
   orchestrationRequireStringFields(
     section, metadata.requiredStringFields, 'runtimeStartContract', missing);
-  if (!orchestrationContractRecord(section.legacyIdFields)) {
-    missing.push('runtimeStartContract.legacyIdFields');
-  } else {
-    orchestrationRequireStringFields(
-      section.legacyIdFields,
-      kinds.map(String),
-      'runtimeStartContract.legacyIdFields',
-      missing,
-    );
-  }
   if (!orchestrationContractRecord(section.successStatuses)) {
     missing.push('runtimeStartContract.successStatuses');
   } else {

@@ -1,6 +1,6 @@
 """Task open — the run_task preamble's kick / snapshot / open-log cluster.
 
-Extracted 2026-08-01 (pt_03f4cdf1 slice 35) from ``run_task``'s preamble.
+Extracted 2026-08-01 ( slice 35) from ``run_task``'s preamble.
 The id-shape check + ``set_req_id`` stay in the spine (prologue); these
 three helpers cover everything between that and the try body.
 """
@@ -41,10 +41,9 @@ def snapshot_turn_input(task) -> None:
     restore the ORIGINAL input first, or the re-run would double-inject
     system blocks and replay a half-finished round. Captured ONCE and
     preserved across every retry attempt (see _maybe_auto_retry_turn).
-    Skipped for endpoint-managed tasks (the endpoint lane owns its own
-    turn boundary).
+    Skipped for Flow-managed tasks (the Flow executor owns its turn boundary).
     """
-    if not task.get('_endpoint_managed') and '_turn_input_messages' not in task:
+    if not task.get('_flow_managed') and '_turn_input_messages' not in task:
         task['_turn_input_messages'] = list(task.get('messages') or [])
 
 

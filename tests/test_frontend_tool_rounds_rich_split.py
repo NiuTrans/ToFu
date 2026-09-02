@@ -7,8 +7,7 @@ Census (2026-08-01, all grep-verified):
   * the WHOLE public surface (renderToolRoundsHTML /
     renderSegmentTimelineHTML / renderMcpLoginHintHtml /
     renderTurnProvenanceHtml / renderPreferenceLearnedHtml) is called
-    bare from first-paint paths (chat_render.js:1438-1499,
-    streaming_ui.js:147-153, branch.js:249, branch_stream.js:293) —
+    from the shared selector adapter and auxiliary branch views —
     an overall manifest move is impossible (ledger ruling 2026-08-01),
   * `_renderConvMetaBlock` has exactly ONE caller
     (_renderUnifiedToolLine:2005) whose control flow ALREADY degrades
@@ -23,8 +22,12 @@ Census (2026-08-01, all grep-verified):
   * `_cmdTimerTicker` STAYS (run_command chips are core cold-render);
     only `_timerCountdownTicker` moves with the timer-watcher block.
 
+The structured checklist card is also deferred; its revision projection stays
+in core because both grouped and timeline renderers use it. Core-only mode
+falls back to the generic tool row until the rich module's upgrade pass runs.
+
 Degradation window: the idle prefetch lands the rich module ~2s after
-boot; before that, conv-meta / timer rounds render as the generic
+boot; before that, conv-meta / checklist / timer rounds render as the generic
 one-line summary. The module's load-time upgrade pass re-renders the
 active conversation once IF it contains such rounds (skipped while a
 stream is live — the stream re-renders itself).
@@ -35,13 +38,18 @@ from __future__ import annotations
 import pathlib
 import re
 
+import pytest
+
+from tests._runtime_sections import runtime_section_names, runtime_section_path
+
+pytestmark = pytest.mark.unit
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
 INDEX_HTML = ROOT / 'index.html'
-TR_CORE = ROOT / 'static' / 'js' / 'ui' / 'tool_rounds.js'
-TR_RICH = ROOT / 'static' / 'js' / 'ui' / 'tool_rounds_rich.js'
-FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-bridge.js'
+TR_CORE = pathlib.Path(runtime_section_path('ui/tool_rounds.js'))
+TR_RICH = pathlib.Path(runtime_section_path('ui/tool_rounds_rich.js'))
+FEATURE_LOADER = pathlib.Path(runtime_section_path('feature-bridge.js'))
 
 MOVED_SYMBOLS = (
     '_convMetaHeadLabel', '_convMetaPurpose', '_renderConvDigest',
@@ -51,14 +59,22 @@ MOVED_SYMBOLS = (
     '_renderPeerDelivery', '_renderCommitResult', '_CONV_META_ROUTINE_READS',
     '_convMetaDefaultOpen', '_convMetaSummaryChip', '_structuredConvMetaBody',
     '_CONV_META_SOURCE_I18N', '_renderConvMetaBlock',
-    '_timerNextPollText', '_timerPollReasonText', '_renderTimerWatcherBlock',
+    '_renderTodoBlock', '_timerNextPollText', '_timerPollReasonText',
+    '_renderTimerWatcherBlock',
     '_tickTimerCountdowns',
 )
 
 
 def _manifest():
-    import lib.js_bundler as jb
-    return jb._extract_manifest_from_source(str(BUNDLER_PY))
+    """Migration-aware manifest view (the js_bundler manifest is gone with
+    ``static/js``): the retained Vite runtime's logical section list stands
+    in for both file lists, and the deferred entry points come from the
+    migrated feature-bridge.js section."""
+    files = runtime_section_names()
+    source = FEATURE_LOADER.read_text()
+    match = re.search(r'_FEATURE_ENTRY_POINTS\s*=\s*\[([^\]]*)\]', source)
+    entries = set(re.findall(r"'([^']+)'", match.group(1))) if match else set()
+    return files, files, entries, set()
 
 
 def _core_src():
@@ -82,8 +98,17 @@ def test_rich_module_in_deferred_files():
 
 def test_rich_module_not_in_core_bundle_files():
     bundle, _df, _ep, _crit = _manifest()
-    assert 'ui/tool_rounds_rich.js' not in bundle, (
-        "'ui/tool_rounds_rich.js' must NOT be in _BUNDLE_FILES")
+    assert bundle.count('ui/tool_rounds_rich.js') == 1, (
+        "'ui/tool_rounds_rich.js' must occur exactly once in the retained "
+        'Vite runtime (a duplicate would double its ticker and upgrade pass)')
+
+
+def test_rich_module_follows_core_owner_in_runtime_order():
+    bundle, _df, _ep, _crit = _manifest()
+    core_index = bundle.index('ui/tool_rounds.js')
+    assert bundle[core_index + 1] == 'ui/tool_rounds_rich.js', (
+        'the structured renderers must immediately follow their core dispatch '
+        'owner in retained-runtime order')
 
 
 # ---------------------------------------------------------------------------
@@ -154,13 +179,22 @@ def test_conv_meta_dispatch_guarded():
         'typeof-guarded so absence degrades to the generic line')
 
 
+def test_todo_dispatch_guarded():
+    assert re.search(
+        r"typeof\s+_renderTodoBlock\s*===\s*['\"]function['\"]",
+        _core_src()), (
+        'the checklist-card dispatch must be typeof-guarded so the deferred '
+        'rich module can be absent without breaking tool-round rendering')
+
+
 # ---------------------------------------------------------------------------
 # 5. upgrade pass + no-stub + dev-fallback (controls)
 # ---------------------------------------------------------------------------
 def test_upgrade_hook_present():
     src = _rich_src()
     for needle in ('_upgradeDegradedToolRounds', 'getActiveConv',
-                   'renderChat', 'activeStreams'):
+                   'requestAuthoritativeConversationRender', 'convIsBusy',
+                   'todo_write'):
         assert needle in src, (
             f'the rich module must carry the load-time upgrade pass '
             f'(missing {needle}) — otherwise rounds rendered during the '

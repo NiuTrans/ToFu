@@ -1,9 +1,12 @@
 """tests/test_usage_and_metrics_routes.py — /api/v1/usage + /metrics."""
 
+pytest_plugins = ('tests._credential_sidecar',)
+
 import asyncio
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import pytest
 
@@ -29,10 +32,6 @@ class UsageRouteTest(unittest.TestCase):
         cls._tmp = tempfile.TemporaryDirectory()
 
         from lib import api_keys
-        cls._orig_keys_path = api_keys._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(cls._tmp.name, 'api_keys.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
 
         from lib import usage_tracker as ut
         cls._orig_usage_path = ut._STORE_PATH
@@ -40,7 +39,6 @@ class UsageRouteTest(unittest.TestCase):
         ut._state.clear()
         ut._loaded = False
 
-        os.environ['TUNNEL_TOKEN'] = 'test-tunnel-no-real'
 
         from quart import Quart
         cls.app = Quart(__name__, static_folder=None)
@@ -60,16 +58,13 @@ class UsageRouteTest(unittest.TestCase):
         cls.app.register_blueprint(metrics_bp)
 
         from lib.api_keys import create_key
-        _row, cls.user_token = create_key(name='user', scopes=['usage', 'chat'])
-        _row, cls.admin_token = create_key(name='admin', scopes=[],
+        _row, cls.user_token = create_key(owner_user_id=1, name='user', scopes=['usage', 'chat'])
+        _row, cls.admin_token = create_key(owner_user_id=1, name='admin', scopes=[],
                                             admin=True)
 
     @classmethod
     def tearDownClass(cls):
         from lib import api_keys, usage_tracker
-        api_keys._STORE_PATH = cls._orig_keys_path
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
         usage_tracker._STORE_PATH = cls._orig_usage_path
         usage_tracker._state.clear()
         usage_tracker._loaded = False
@@ -158,9 +153,11 @@ class UsageRouteTest(unittest.TestCase):
             self.assertIn('# TYPE tofu_usage_requests_total counter', body)
             self.assertIn('tofu_usage_tokens_total', body)
             self.assertIn('tofu_active_keys', body)
-            self.assertIn('tofu_db_commits_total', body)
-            self.assertIn('tofu_sqlite_writer_waiting', body)
-            self.assertIn('tofu_sqlite_writer_timeouts_total', body)
+            self.assertIn('tofu_storage_queries_total', body)
+            self.assertIn('tofu_storage_commands_total', body)
+            self.assertIn('tofu_storage_command_timeouts_total', body)
+            self.assertIn('tofu_storage_writer_stall_interrupts_total', body)
+            self.assertIn('tofu_storage_writer_cache_bytes', body)
             # Should be valid Prometheus exposition — every metric line
             # has either `name value` or `name{labels} value`.
             for line in body.splitlines():
@@ -172,6 +169,64 @@ class UsageRouteTest(unittest.TestCase):
                                   f'malformed metrics line: {line!r}')
                 float(parts[1])  # raises if not numeric
         _new_loop_run(go())
+
+    def test_storage_metrics_expose_commit_phase_and_durable_ship_lag(self):
+        from routes.metrics import _collect_storage_metrics
+
+        class Client:
+            @staticmethod
+            def metrics():
+                return {
+                    'backend': 'sqlite',
+                    'sqlite_version': '3.53.4',
+                    'queries': {'queries': 9, 'query_failures': 1},
+                    'writer_cache_mib': 32,
+                    'writer': {
+                        'submitted': 7,
+                        'failed': 2,
+                        'timed_out': 1,
+                        'stall_interrupts': 3,
+                        'batches': 4,
+                        'batched_jobs': 6,
+                        'current': {'phase': 'commit'},
+                        'commit_latency': {
+                            'samples': 5,
+                            'p50_ms': 1.25,
+                            'p95_ms': 12.5,
+                            'max_ms': 99.0,
+                        },
+                    },
+                    'fastpath': {
+                        'active': True,
+                        'shipper': {
+                            'ship_lag_bytes': 4096,
+                            'last_ship_age_s': 2.5,
+                        },
+                    },
+                }
+
+        lines = []
+        with mock.patch('lib.storage.get_storage_client',
+                        return_value=Client()):
+            _collect_storage_metrics(lines)
+        body = '\n'.join(lines)
+
+        self.assertIn(
+            'tofu_storage_commit_latency_milliseconds{backend="sqlite",'
+            'statistic="p95"} 12.5', body)
+        self.assertIn(
+            'tofu_storage_writer_phase{backend="sqlite",phase="commit"} 1',
+            body)
+        self.assertIn('tofu_storage_writer_cache_bytes{backend="sqlite"} '
+                      '33554432', body)
+        self.assertIn(
+            'tofu_storage_sqlite_runtime_info{backend="sqlite",'
+            'version="3.53.4"} 1', body)
+        self.assertIn('tofu_storage_fastpath_ship_lag_bytes{backend="sqlite"} '
+                      '4096', body)
+        self.assertIn(
+            'tofu_storage_fastpath_last_ship_age_seconds{backend="sqlite"} '
+            '2.5', body)
 
     def test_metrics_requires_admin(self):
         async def go():

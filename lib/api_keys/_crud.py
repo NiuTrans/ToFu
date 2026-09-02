@@ -1,206 +1,260 @@
-"""lib/api_keys/_crud.py — Key issuance, mutation, and lookup.
-
-Read + write operations over the shared cache: :func:`list_keys`,
-:func:`get_key_by_id`, :func:`create_key`, :func:`revoke_key`,
-:func:`update_key`, :func:`touch_key`.
-
-All mutations go through the single ``_cache`` / ``_cache_lock`` owned by
-:mod:`lib.api_keys._store` and persist via its :func:`_persist`.
-"""
+"""Bearer-credential service backed exclusively by semantic Sidecar calls."""
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import time
 from typing import Optional
 
+from lib.identity import require_user_id
 from lib.log import audit_log, get_logger
+from lib.storage import get_storage_client
 
 from ._context import _ADMIN_SCOPE, _normalise_scopes
-from ._store import (
-    _cache,
-    _cache_lock,
-    _ensure_loaded,
-    _hash_token,
-    _persist,
-    _public_view,
-)
 
 logger = get_logger(__name__)
 
-
-def list_keys() -> list[dict]:
-    """Return all keys (without secret hashes), newest first."""
-    _ensure_loaded()
-    with _cache_lock:
-        rows = sorted(_cache, key=lambda r: r.get('created_at', 0), reverse=True)
-        return [_public_view(r) for r in rows]
+_UPDATABLE = frozenset({
+    'name', 'scopes', 'rate_limit_rpm', 'rate_limit_tpd', 'expires_at',
+    'disabled', 'metadata',
+})
 
 
-def get_key_by_id(key_id: str) -> Optional[dict]:
-    _ensure_loaded()
-    with _cache_lock:
-        for row in _cache:
-            if row.get('id') == key_id:
-                return _public_view(row)
-    return None
+def _boundary(owner_user_id, tenant_id: str | None) -> dict:
+    return {
+        'owner_user_id': require_user_id(
+            owner_user_id, context='credential owner'),
+        'tenant_id': str(tenant_id or '').strip(),
+    }
 
 
-def create_key(name: str, *, scopes: list, rate_limit_rpm: int = 60,
-               rate_limit_tpd: int = 0,
-               expires_at: Optional[float] = None,
-               metadata: Optional[dict] = None,
-               admin: bool = False,
-               user_id: str = '') -> tuple[dict, str]:
-    """Mint a new API key. Returns ``(public_row, plaintext_token)``.
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
 
-    The plaintext token is shown ONCE — the caller (route handler) is
-    responsible for delivering it to the user. Only its SHA-256 hash
-    is persisted.
 
-    ``admin=True`` produces a token shaped ``tofu_admin_…`` and forces
-    the ``admin`` scope. Otherwise the token is ``tofu_live_…``.
-    """
-    _ensure_loaded()
-    if not name or not isinstance(name, str):
+def list_keys(*, owner_user_id: int, tenant_id: str | None = None) -> list[dict]:
+    """List credentials owned by one explicit repository principal."""
+    return list(get_storage_client().query(
+        'credential.list', _boundary(owner_user_id, tenant_id)))
+
+
+def get_key_by_id(
+    key_id: str,
+    *,
+    owner_user_id: int,
+    tenant_id: str | None = None,
+) -> Optional[dict]:
+    return get_storage_client().query('credential.get', {
+        **_boundary(owner_user_id, tenant_id),
+        'credential_id': str(key_id or ''),
+    })
+
+
+def _mint_key(
+    name: str,
+    *,
+    storage_operation: str,
+    scopes: list,
+    owner_user_id: int,
+    account_user_id: str = '',
+    tenant_id: str | None = None,
+    rate_limit_rpm: int = 60,
+    rate_limit_tpd: int = 0,
+    expires_at: Optional[float] = None,
+    metadata: Optional[dict] = None,
+    admin: bool = False,
+) -> tuple[dict | None, str]:
+    if not isinstance(name, str) or not name.strip():
         raise ValueError('name required')
-    name = name.strip()[:80]
+    normalized_name = name.strip()[:80]
     scope_set = _normalise_scopes(scopes)
     if admin:
         scope_set = scope_set | {_ADMIN_SCOPE}
     if not scope_set:
         raise ValueError('at least one scope required')
-
+    if metadata is not None and not isinstance(metadata, dict):
+        raise ValueError('metadata must be an object')
+    try:
+        rpm = max(0, int(rate_limit_rpm or 0))
+        tpd = max(0, int(rate_limit_tpd or 0))
+        expiration = float(expires_at) if expires_at is not None else None
+    except (TypeError, ValueError) as exc:
+        raise ValueError('credential limits and expiry must be numeric') from exc
     token_kind = 'admin' if _ADMIN_SCOPE in scope_set else 'live'
-    secret = secrets.token_hex(16)
-    plaintext = f'tofu_{token_kind}_{secret}'
-    prefix_len = len('tofu_xxxx_') + 6  # enough to identify in UI
-    prefix = plaintext[:prefix_len]
-    key_id = 'k_' + secrets.token_hex(4)
-    row = {
-        'id': key_id,
-        'name': name,
-        'prefix': prefix,
-        'secret_hash': _hash_token(plaintext),
-        'scopes': sorted(scope_set),
-        'rate_limit_rpm': max(0, int(rate_limit_rpm or 0)),
-        'rate_limit_tpd': max(0, int(rate_limit_tpd or 0)),
-        'created_at': time.time(),
-        'last_used_at': None,
-        'expires_at': float(expires_at) if expires_at else None,
-        'disabled': False,
-        'metadata': dict(metadata or {}),
-        'user_id': str(user_id or ''),
-    }
-    with _cache_lock:
-        _cache.append(row)
-        _persist()
-    audit_log('api_key_created', key_id=key_id, name=name,
-              scopes=sorted(scope_set), rpm=row['rate_limit_rpm'],
-              tpd=row['rate_limit_tpd'], admin=admin)
-    logger.info('[ApiKeys] created %s name=%r scopes=%s', key_id, name,
+    plaintext = f'tofu_{token_kind}_{secrets.token_hex(16)}'
+    prefix = plaintext[:len('tofu_xxxx_') + 6]
+    key_id = 'k_' + secrets.token_hex(8)
+    if storage_operation not in {
+        'credential.create', 'credential.create_if_owner_empty',
+    }:
+        raise ValueError('unsupported credential creation operation')
+    row = get_storage_client(write=True).command(
+        storage_operation, {
+            **_boundary(owner_user_id, tenant_id),
+            'credential_id': key_id,
+            'account_user_id': str(account_user_id or '').strip(),
+            'name': normalized_name,
+            'prefix': prefix,
+            'secret_hash': _hash_token(plaintext),
+            'scopes': sorted(scope_set),
+            'rate_limit_rpm': rpm,
+            'rate_limit_tpd': tpd,
+            'created_at': time.time(),
+            'expires_at': expiration,
+            'metadata': dict(metadata or {}),
+        },
+        (f'credential.create:{key_id}'
+         if storage_operation == 'credential.create' else None),
+    )
+    if row is None:
+        return None, ''
+    audit_log(
+        'api_key_created', key_id=key_id, name=normalized_name,
+        owner_user_id=row['owner_user_id'], scopes=sorted(scope_set),
+        rpm=rpm, tpd=tpd, admin=admin,
+    )
+    logger.info('[ApiKeys] created %s name=%r owner=%s scopes=%s',
+                key_id, normalized_name, row['owner_user_id'],
                 sorted(scope_set))
-    return _public_view(row), plaintext
+    return row, plaintext
 
 
-def revoke_key(key_id: str) -> bool:
-    _ensure_loaded()
-    with _cache_lock:
-        for i, row in enumerate(_cache):
-            if row.get('id') == key_id:
-                is_bootstrap = (
-                    (row.get('metadata') or {}).get('origin')
-                    == 'bootstrap_personal_key'
-                )
-                _cache.pop(i)
-                _persist()
-                audit_log('api_key_revoked', key_id=key_id,
-                          name=row.get('name', ''))
-                logger.info('[ApiKeys] revoked %s', key_id)
-                # The first-run emergency token is a one-shot copy of
-                # the bootstrap key only. Once that key is gone the file
-                # is a dead reference, so clear it to avoid handing the
-                # user a phantom token.
-                if is_bootstrap:
-                    # Lazy import avoids a package-init import cycle
-                    # (_firstrun depends on _crud.create_key).
-                    from ._firstrun import _clear_first_run_token
-                    _clear_first_run_token('bootstrap key revoked')
-                return True
-    return False
+def create_key(
+    name: str,
+    *,
+    scopes: list,
+    owner_user_id: int,
+    account_user_id: str = '',
+    tenant_id: str | None = None,
+    rate_limit_rpm: int = 60,
+    rate_limit_tpd: int = 0,
+    expires_at: Optional[float] = None,
+    metadata: Optional[dict] = None,
+    admin: bool = False,
+) -> tuple[dict, str]:
+    """Mint one credential; plaintext is returned once and never persisted."""
+    row, plaintext = _mint_key(
+        name,
+        storage_operation='credential.create',
+        scopes=scopes,
+        owner_user_id=owner_user_id,
+        account_user_id=account_user_id,
+        tenant_id=tenant_id,
+        rate_limit_rpm=rate_limit_rpm,
+        rate_limit_tpd=rate_limit_tpd,
+        expires_at=expires_at,
+        metadata=metadata,
+        admin=admin,
+    )
+    assert row is not None
+    return row, plaintext
 
 
-_UPDATABLE = frozenset({'name', 'scopes', 'rate_limit_rpm',
-                         'rate_limit_tpd', 'expires_at', 'disabled',
-                         'metadata', 'user_id'})
+def create_first_owner_key(
+    name: str,
+    *,
+    owner_user_id: int,
+    tenant_id: str | None = None,
+    metadata: Optional[dict] = None,
+) -> tuple[dict, str] | None:
+    """Atomically mint the bootstrap admin key only when its owner has none."""
+    row, plaintext = _mint_key(
+        name,
+        storage_operation='credential.create_if_owner_empty',
+        scopes=[],
+        owner_user_id=owner_user_id,
+        tenant_id=tenant_id,
+        metadata=metadata,
+        admin=True,
+    )
+    return None if row is None else (row, plaintext)
 
 
-def update_key(key_id: str, **fields) -> bool:
-    """Update an existing key in place.
-
-    NOTE: the ``admin`` scope is NOT grantable through this path. A key's
-    privilege tier is fixed at mint time and reflected in its token prefix
-    (``tofu_admin_`` vs ``tofu_live_``); letting PATCH add ``admin`` would
-    leave a ``tofu_live_`` token silently wielding full privileges. Any
-    ``admin`` entry in an incoming ``scopes`` list is dropped here (a
-    warning is logged); the key keeps its existing admin-ness, which is
-    only ever set by :func:`create_key` with ``admin=True``. To change a
-    key's tier, revoke and re-mint.
-    """
-    _ensure_loaded()
-    with _cache_lock:
-        for row in _cache:
-            if row.get('id') != key_id:
-                continue
-            had_admin = _ADMIN_SCOPE in (row.get('scopes') or ())
-            changed = {}
-            for k, v in fields.items():
-                if k not in _UPDATABLE:
-                    continue
-                if k == 'scopes':
-                    new_scopes = set(_normalise_scopes(v))
-                    requested_admin = _ADMIN_SCOPE in new_scopes
-                    if requested_admin and not had_admin:
-                        logger.warning('[ApiKeys] refusing to grant admin '
-                                       'scope via update_key on %s; revoke '
-                                       'and re-mint to change tier', key_id)
-                    # Preserve the key's existing admin-ness, never flip it.
-                    if had_admin:
-                        new_scopes.add(_ADMIN_SCOPE)
-                    else:
-                        new_scopes.discard(_ADMIN_SCOPE)
-                    v = sorted(new_scopes)
-                if k in ('rate_limit_rpm', 'rate_limit_tpd'):
-                    v = max(0, int(v or 0))
-                if k == 'disabled':
-                    v = bool(v)
-                if k == 'name' and isinstance(v, str):
-                    v = v.strip()[:80]
-                if k == 'metadata' and not isinstance(v, dict):
-                    continue
-                if row.get(k) != v:
-                    row[k] = v
-                    changed[k] = v
-            if changed:
-                _persist()
-                audit_log('api_key_updated', key_id=key_id, fields=changed)
-                logger.info('[ApiKeys] updated %s fields=%s', key_id,
-                            list(changed))
-            return True
-    return False
+def revoke_key(
+    key_id: str,
+    *,
+    owner_user_id: int,
+    tenant_id: str | None = None,
+) -> bool:
+    result = get_storage_client(write=True).command(
+        'credential.revoke', {
+            **_boundary(owner_user_id, tenant_id),
+            'credential_id': str(key_id or ''),
+            'revoked_at': time.time(),
+        },
+        f'credential.revoke:{require_user_id(owner_user_id)}:{key_id}:'
+        f'{secrets.token_hex(8)}',
+    )
+    if not result['revoked']:
+        return False
+    audit_log('api_key_revoked', key_id=key_id, owner_user_id=owner_user_id)
+    logger.info('[ApiKeys] revoked %s owner=%s', key_id, owner_user_id)
+    if result['metadata'].get('origin') == 'bootstrap_personal_key':
+        from ._firstrun import _clear_first_run_token
+        _clear_first_run_token('bootstrap key revoked')
+    return True
 
 
-def touch_key(key_id: str) -> None:
-    """Record ``last_used_at = now`` for a key. Cheap, fire-and-forget."""
-    if not key_id:
-        return
-    _ensure_loaded()
-    with _cache_lock:
-        for row in _cache:
-            if row.get('id') == key_id:
-                row['last_used_at'] = time.time()
-                # Don't fsync on every request — periodic rewrites only.
-                # Persistence happens via _persist() on next mutation, or
-                # via the cleanup hook (TODO if last_used_at drift becomes
-                # a problem in practice).
-                return
+def update_key(
+    key_id: str,
+    *,
+    owner_user_id: int,
+    tenant_id: str | None = None,
+    **fields,
+) -> bool:
+    existing = get_key_by_id(
+        key_id, owner_user_id=owner_user_id, tenant_id=tenant_id)
+    if existing is None:
+        return False
+    updates = {}
+    had_admin = _ADMIN_SCOPE in (existing.get('scopes') or ())
+    for key, value in fields.items():
+        if key not in _UPDATABLE:
+            continue
+        if key == 'scopes':
+            scopes = set(_normalise_scopes(value))
+            if had_admin:
+                scopes.add(_ADMIN_SCOPE)
+            else:
+                scopes.discard(_ADMIN_SCOPE)
+            if not scopes:
+                raise ValueError('at least one scope required')
+            value = sorted(scopes)
+        elif key in {'rate_limit_rpm', 'rate_limit_tpd'}:
+            value = max(0, int(value or 0))
+        elif key == 'disabled':
+            value = bool(value)
+        elif key == 'name':
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError('name required')
+            value = value.strip()[:80]
+        elif key == 'metadata':
+            if not isinstance(value, dict):
+                raise ValueError('metadata must be an object')
+            value = dict(value)
+        elif key == 'expires_at' and value is not None:
+            value = float(value)
+        if existing.get(key) != value:
+            updates[key] = value
+    if not updates:
+        return True
+    result = get_storage_client(write=True).command(
+        'credential.update', {
+            **_boundary(owner_user_id, tenant_id),
+            'credential_id': key_id,
+            'updates': updates,
+        },
+        f'credential.update:{key_id}:{secrets.token_hex(8)}',
+    )
+    if result is None:
+        return False
+    audit_log('api_key_updated', key_id=key_id, fields=updates,
+              owner_user_id=owner_user_id)
+    return True
+
+
+__all__ = [
+    '_UPDATABLE', '_hash_token', 'create_first_owner_key', 'create_key',
+    'get_key_by_id', 'list_keys', 'revoke_key', 'update_key',
+]

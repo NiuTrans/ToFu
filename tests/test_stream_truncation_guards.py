@@ -10,10 +10,12 @@ heal the empty-output cases, but four gaps were measured:
       string that the orchestrator proceeded to EXECUTE (or the sanitizer
       substituted ``{}`` — a tool running on empty/wrong args). 34 of 560
       anomaly dumps died inside tool args.
-  G2  a cut WITH partial content failed the whole turn (abnormal_stop error
-      envelope + whole-turn auto-retry wipe) when the user can only Retry /
-      Continue anyway. Now a soft landing: premature_close finish tag, no
-      error envelope, partial reply kept.
+  G2  a cut WITH partial content was soft-landed as a completed turn even
+      though the gateway ended in the middle of an SSE JSON frame. Now the
+      visible prefix is preserved, ``phase:retrying`` tells the user what
+      happened, and a bounded continuation resumes from that exact prefix.
+      Exhaustion is an honest error and never triggers a destructive
+      whole-turn replay.
   G3  ``record_truncation`` cooled a slot only on 3 CONSECUTIVE truncations,
       but interleaved successes kept zeroing the streak — intermittent rot
       never cooled. Now a rolling 10-minute window also feeds the gate.
@@ -43,10 +45,15 @@ pytestmark = pytest.mark.unit
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.agent_loop import unparseable_tool_calls  # noqa: E402
-from lib.tasks_pkg.stream_handler import (  # noqa: E402
-    _PREMATURE_RETRY_MAX_CLASSIC,
+from lib.tasks_pkg.stream_handler.api import (  # noqa: E402
+    RecoveryDecision,
     analyse_stream_result,
 )
+from lib.tasks_pkg.stream_handler._budget import (  # noqa: E402
+    _PARTIAL_STREAM_RETRY_MAX,
+    _PREMATURE_RETRY_MAX_CLASSIC,
+)
+from tests._registered_chat_task import registered_chat_task  # noqa: E402
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -75,10 +82,10 @@ def _fresh_task(*, phase_counter=0, content='', thinking='',
 
 
 class _no_sleep:
-    """Patch the facade-routed backoff sleep away for the test duration."""
+    """Patch the retry-budget owner's backoff sleep for the test duration."""
 
     def __enter__(self):
-        import lib.tasks_pkg.stream_handler as sh
+        import lib.tasks_pkg.stream_handler._budget as sh
         self._sh = sh
         self._orig = sh._interruptible_sleep
         sh._interruptible_sleep = lambda seconds, task: None
@@ -167,8 +174,9 @@ class TestTruncatedToolArgsRetry(unittest.TestCase):
                            round_base_thinking='')
         msg = {'role': 'assistant', 'content': '',
                'tool_calls': [_tc('write_file', '{"path": "a.py", "cont')]}
-        with _no_sleep():
+        with registered_chat_task(task), _no_sleep():
             d = self._analyse(task, msg, _missing_done_usage())
+        self.assertIsInstance(d, RecoveryDecision)
         self.assertEqual(d['action'], 'continue')
         self.assertEqual(d['premature_retry_count'], 1)
         self.assertEqual(task['_premature_retry_count_phase'], 1)
@@ -199,6 +207,235 @@ class TestTruncatedToolArgsRetry(unittest.TestCase):
         self.assertEqual(d['action'], 'proceed')
         self.assertIsNone(task['error'])
         self.assertEqual(task['events'], [])
+
+    def test_malformed_frame_never_executes_even_parseable_tool_calls(self):
+        """A dropped frame may contain an additional call, so a later clean
+        finish cannot make the visible subset safe to execute."""
+        task = _fresh_task(
+            content='PRIOR untrusted preamble',
+            round_base_content='PRIOR',
+        )
+        msg = {
+            'role': 'assistant',
+            'tool_calls': [_tc('read_files', '{"path":"safe.py"}')],
+        }
+        usage = {
+            '_malformed_stream': True,
+            '_malformed_frames': 1,
+            '_stream_anomaly': True,
+            '_stream_state': 'malformed_stream',
+            '_chunks_received': 4,
+            'trace_id': 'M-MALFORMED-TOOLS',
+        }
+
+        with registered_chat_task(task), _no_sleep():
+            decision = self._analyse(task, msg, usage)
+
+        self.assertEqual(decision['action'], 'continue')
+        self.assertEqual(task['content'], 'PRIOR')
+        phases = [event for event in task['events']
+                  if event.get('type') == 'phase']
+        self.assertEqual(phases[-1]['bucket'], 'malformed_tool_stream')
+
+    def test_typed_malformed_state_is_authoritative_without_usage_flags(self):
+        """The closed stream result, not the legacy usage bag, drives policy."""
+        from lib.llm.stream_result import (
+            ProviderStreamResult,
+            ProviderStreamState,
+        )
+
+        task = _fresh_task(
+            content='PRIOR untrusted preamble',
+            round_base_content='PRIOR',
+        )
+        msg = {
+            'role': 'assistant',
+            'tool_calls': [_tc('read_files', '{"path":"safe.py"}')],
+        }
+        stream_result = ProviderStreamResult(
+            message=msg,
+            compatibility_finish_reason='stop',
+            usage={},
+            state=ProviderStreamState.MALFORMED_STREAM,
+            malformed_frame_count=1,
+        )
+
+        with registered_chat_task(task), _no_sleep():
+            decision = analyse_stream_result(
+                assistant_msg=msg,
+                last_finish_reason='stop',
+                task=task,
+                tid='typed-malformed',
+                model='kimi-k3',
+                round_num=1,
+                _premature_retry_count=0,
+                messages=[],
+                usage={},
+                stream_result=stream_result,
+            )
+
+        self.assertEqual(decision['action'], 'continue')
+        self.assertEqual(decision.stream_state,
+                         ProviderStreamState.MALFORMED_STREAM)
+        self.assertEqual(task['content'], 'PRIOR')
+        phases = [event for event in task['events']
+                  if event.get('type') == 'phase']
+        self.assertEqual(phases[-1]['bucket'], 'malformed_tool_stream')
+
+    def test_typed_finished_state_clears_stale_legacy_anomaly_flags(self):
+        """A stale usage bag cannot demote verified typed completion."""
+        from lib.llm.stream_result import (
+            ProviderStreamResult,
+            ProviderStreamState,
+        )
+
+        task = _fresh_task(content='complete')
+        msg = {'role': 'assistant', 'content': 'complete'}
+        stream_result = ProviderStreamResult(
+            message=msg,
+            compatibility_finish_reason='stop',
+            usage={
+                '_stream_anomaly': True,
+                '_missing_finish_reason': True,
+                '_malformed_stream': True,
+                '_malformed_frames': 3,
+            },
+            state=ProviderStreamState.PROVIDER_FINISHED,
+            provider_finish_reason='stop',
+            saw_finish_reason=True,
+        )
+
+        with registered_chat_task(task), _no_sleep():
+            decision = analyse_stream_result(
+                assistant_msg={'role': 'assistant', 'content': 'stale'},
+                last_finish_reason='error',
+                task=task,
+                tid='typed-finished',
+                model='kimi-k3',
+                round_num=1,
+                _premature_retry_count=0,
+                messages=[],
+                usage=stream_result.usage,
+                stream_result=stream_result,
+            )
+
+        self.assertEqual(decision['action'], 'break')
+        self.assertEqual(decision['loop_exit_reason'], 'no_tool_calls_round_1')
+        self.assertEqual(decision['last_finish_reason'], 'stop')
+        self.assertEqual(decision.stream_state,
+                         ProviderStreamState.PROVIDER_FINISHED)
+        self.assertIsNone(task['error'])
+        self.assertEqual(task['events'], [])
+
+    def test_typed_result_never_borrows_previous_round_usage(self):
+        """The separate legacy usage argument may be a sticky prior round."""
+        from lib.llm.stream_result import (
+            ProviderStreamResult,
+            ProviderStreamState,
+        )
+
+        task = _fresh_task(content='complete')
+        msg = {'role': 'assistant', 'content': 'complete'}
+        stream_result = ProviderStreamResult(
+            message=msg,
+            compatibility_finish_reason='stop',
+            usage=None,
+            state=ProviderStreamState.PROVIDER_FINISHED,
+            provider_finish_reason='stop',
+            saw_finish_reason=True,
+        )
+
+        decision = analyse_stream_result(
+            assistant_msg=msg,
+            last_finish_reason='stop',
+            task=task,
+            tid='typed-no-stale-usage',
+            model='kimi-k3',
+            round_num=1,
+            _premature_retry_count=0,
+            messages=[],
+            usage={
+                '_stream_anomaly': True,
+                '_missing_finish_reason': True,
+                '_dispatch': {'key': 'previous-round'},
+            },
+            stream_result=stream_result,
+        )
+
+        self.assertEqual(decision['action'], 'break')
+        self.assertEqual(decision['loop_exit_reason'], 'no_tool_calls_round_1')
+        self.assertEqual(decision['last_finish_reason'], 'stop')
+        self.assertIsNone(task['error'])
+
+    def test_typed_client_abort_stops_before_parseable_tool_call(self):
+        from lib.llm.stream_result import (
+            ProviderStreamResult,
+            ProviderStreamState,
+        )
+
+        task = _fresh_task()
+        msg = {
+            'role': 'assistant',
+            'tool_calls': [_tc('read_files', '{"path":"safe.py"}')],
+        }
+        stream_result = ProviderStreamResult(
+            message=msg,
+            compatibility_finish_reason='stop',
+            usage={},
+            state=ProviderStreamState.CLIENT_ABORTED,
+        )
+
+        decision = analyse_stream_result(
+            assistant_msg=msg,
+            last_finish_reason='stop',
+            task=task,
+            tid='typed-abort',
+            model='kimi-k3',
+            round_num=1,
+            _premature_retry_count=0,
+            messages=[],
+            stream_result=stream_result,
+        )
+
+        self.assertEqual(decision['action'], 'break')
+        self.assertEqual(decision['last_finish_reason'], 'aborted')
+        self.assertEqual(decision['abort_detected_phase'],
+                         'post_stream_round_1')
+
+    def test_typed_unknown_stops_before_parseable_tool_call(self):
+        from lib.llm.stream_result import (
+            ProviderStreamResult,
+            ProviderStreamState,
+        )
+
+        task = _fresh_task()
+        msg = {
+            'role': 'assistant',
+            'tool_calls': [_tc('read_files', '{"path":"safe.py"}')],
+        }
+        stream_result = ProviderStreamResult(
+            message=msg,
+            compatibility_finish_reason='stop',
+            usage={},
+            state=ProviderStreamState.UNKNOWN,
+        )
+
+        decision = analyse_stream_result(
+            assistant_msg=msg,
+            last_finish_reason='stop',
+            task=task,
+            tid='typed-unknown',
+            model='kimi-k3',
+            round_num=1,
+            _premature_retry_count=0,
+            messages=[],
+            stream_result=stream_result,
+        )
+
+        self.assertEqual(decision['action'], 'break')
+        self.assertEqual(decision['last_finish_reason'], 'error')
+        self.assertEqual(task['error']['kind'], 'internal')
+        self.assertIn('unknown', decision['loop_exit_reason'])
 
     def test_guard_gated_on_missing_done(self):
         """Corrupt args WITHOUT _missing_done (e.g. a model glitch, not a
@@ -240,30 +477,241 @@ class TestTruncatedToolArgsRetry(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────
-#  G2 — content-bearing stream anomaly: soft landing, not an error
+#  G2 — content-bearing stream anomaly: preserve + continue, never fake success
 # ─────────────────────────────────────────────────────────────────────
 
-class TestPartialContentSoftLanding(unittest.TestCase):
+class TestPartialContentLosslessRetry(unittest.TestCase):
 
-    def test_partial_content_settles_premature_close_without_error(self):
-        """Owner directive: the user sees the failure (premature_close finish
-        tag = '网关中断 · 内容可能不完整') but the turn is NOT interrupted —
-        no error envelope, no whole-turn auto-retry wiping the partial."""
-        task = _fresh_task(content='an almost-complete answer body')
+    @staticmethod
+    def _usage():
+        return {'_stream_anomaly': True, '_missing_done': True,
+                '_chunks_received': 900, 'stream_elapsed_ms': 176000,
+                'trace_id': 'M-PARTIAL'}
+
+    def test_partial_content_emits_phase_and_continues_from_exact_prefix(self):
+        """The already rendered bytes survive and become assistant prefill;
+        the retry is visible in the ordinary stream status-text channel."""
+        prefix = 'an almost-complete answer body'
+        task = _fresh_task(content=prefix)
         msg = {'role': 'assistant',
-               'content': 'an almost-complete answer body',
+               'content': prefix,
                'reasoning_content': ''}
-        usage = {'_stream_anomaly': True, '_missing_done': True,
-                 '_chunks_received': 900, 'stream_elapsed_ms': 176000,
-                 'trace_id': 'M-PARTIAL'}
+        messages = [{'role': 'user', 'content': 'finish the diagnosis'}]
+        with registered_chat_task(task), _no_sleep():
+            d = analyse_stream_result(
+                assistant_msg=msg, last_finish_reason='stop', task=task,
+                tid='partial', model='kimi-k3', round_num=2,
+                _premature_retry_count=0, messages=messages,
+                usage=self._usage())
+
+        self.assertEqual(d['action'], 'continue')
+        self.assertEqual(d['premature_retry_count'], 1)
+        self.assertEqual(task['content'], prefix)
+        self.assertIsNone(task['error'])
+        self.assertTrue(
+            task.get('_suppress_whole_turn_retry_to_preserve_partial'))
+        self.assertEqual(messages[-1]['role'], 'assistant')
+        self.assertEqual(messages[-1]['content'], prefix)
+        self.assertTrue(messages[-1].get('_partialStreamPrefill'))
+        from lib.tasks_pkg.wire_messages import apply_wire_sanitize
+        wire = apply_wire_sanitize(messages)
+        self.assertEqual(wire[-1], {'role': 'assistant', 'content': prefix})
+        self.assertNotIn('delta_reset', [e.get('type') for e in task['events']])
+        phases = [e for e in task['events'] if e.get('type') == 'phase']
+        self.assertTrue(phases, task['events'])
+        phase = phases[-1]
+        self.assertEqual(phase.get('phase'), 'retrying')
+        self.assertEqual(phase.get('bucket'), 'partial_stream')
+        self.assertEqual(phase.get('errorKind'), 'premature_close')
+        self.assertEqual(phase.get('continuationMode'), 'assistant_prefill')
+        self.assertEqual(phase.get('detailKey'),
+                         'stream.phase.partialStreamRetry')
+        self.assertEqual(phase.get('detailArgs', {}).get('chars'), len(prefix))
+
+    def test_repeated_cuts_extend_one_prefill_without_separator(self):
+        """Each fresh continuation is concatenated byte-for-byte; generic
+        same-role history merging must not inject a ``\\n\\n`` seam."""
+        task = _fresh_task(content='prefix')
+        messages = [{'role': 'user', 'content': 'go'}]
+        with registered_chat_task(task), _no_sleep():
+            first = analyse_stream_result(
+                assistant_msg={'role': 'assistant', 'content': 'prefix'},
+                last_finish_reason='stop', task=task, tid='partial',
+                model='kimi-k3', round_num=0, _premature_retry_count=0,
+                messages=messages, usage=self._usage())
+            task['content'] += '-middle'
+            second = analyse_stream_result(
+                assistant_msg={'role': 'assistant', 'content': '-middle'},
+                last_finish_reason='stop', task=task, tid='partial',
+                model='kimi-k3', round_num=1,
+                _premature_retry_count=first['premature_retry_count'],
+                messages=messages, usage=self._usage())
+
+        self.assertEqual(second['action'], 'continue')
+        self.assertEqual(second['premature_retry_count'], 2)
+        prefill_rows = [m for m in messages
+                        if m.get('_partialStreamPrefill')]
+        self.assertEqual(len(prefill_rows), 1)
+        self.assertEqual(prefill_rows[0]['content'], 'prefix-middle')
+        self.assertEqual(task['content'], 'prefix-middle')
+        from lib.tasks_pkg.wire_messages import apply_wire_sanitize
+        self.assertEqual(apply_wire_sanitize(messages)[-1], {
+            'role': 'assistant', 'content': 'prefix-middle'})
+
+    def test_successful_prose_consumes_prefill_without_separator(self):
+        from lib.tasks_pkg.assistant_messages import (
+            PARTIAL_STREAM_PREFILL_MARKER,
+            append_assistant_prose_message,
+        )
+        from lib.tasks_pkg.wire_messages import apply_wire_sanitize
+
+        messages = [
+            {'role': 'user', 'content': 'go'},
+            {'role': 'assistant', 'content': 'exact prefix',
+             PARTIAL_STREAM_PREFILL_MARKER: True},
+        ]
+        adopted = append_assistant_prose_message(
+            messages,
+            {'role': 'assistant', 'content': ' continuation'},
+        )
+
+        self.assertEqual(len(messages), 2)
+        self.assertIs(adopted, messages[-1])
+        self.assertEqual(messages[-1], {
+            'role': 'assistant',
+            'content': 'exact prefix continuation',
+        })
+        self.assertEqual(apply_wire_sanitize(messages)[-1]['content'],
+                         'exact prefix continuation')
+
+    def test_successful_tool_call_consumes_prefill_as_one_assistant_row(self):
+        from lib.tasks_pkg.assistant_messages import (
+            PARTIAL_STREAM_PREFILL_MARKER,
+            append_assistant_message_with_partial_prefill,
+        )
+
+        messages = [
+            {'role': 'user', 'content': 'go'},
+            {'role': 'assistant', 'content': 'exact prefix',
+             PARTIAL_STREAM_PREFILL_MARKER: True},
+        ]
+        tool_message = {
+            'role': 'assistant',
+            'tool_calls': [_tc('read_files', '{"path":"safe.py"}')],
+        }
+        adopted = append_assistant_message_with_partial_prefill(
+            messages,
+            tool_message,
+            continuation_content=' then inspect ',
+        )
+
+        self.assertEqual(len(messages), 2)
+        self.assertIs(adopted, messages[-1])
+        self.assertEqual(messages[-1]['content'],
+                         'exact prefix then inspect ')
+        self.assertEqual(messages[-1]['tool_calls'], tool_message['tool_calls'])
+        self.assertNotIn(PARTIAL_STREAM_PREFILL_MARKER, messages[-1])
+
+    def test_existing_continue_prefill_is_extended_without_separator(self):
+        """A stream cut during an already-resumed task must extend the manual
+        Continue prefill instead of creating two same-role wire messages."""
+        task = _fresh_task(content='full prior answerfresh fragment')
+        messages = [
+            {'role': 'user', 'content': 'go'},
+            {'role': 'assistant', 'content': 'prior answer tail'},
+        ]
+        with registered_chat_task(task), _no_sleep():
+            d = analyse_stream_result(
+                assistant_msg={'role': 'assistant',
+                               'content': 'fresh fragment'},
+                last_finish_reason='stop', task=task, tid='partial',
+                model='kimi-k3', round_num=0, _premature_retry_count=0,
+                messages=messages, usage=self._usage())
+
+        self.assertEqual(d['action'], 'continue')
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[-1]['content'],
+                         'prior answer tailfresh fragment')
+        self.assertTrue(messages[-1].get('_partialStreamPrefill'))
+        from lib.tasks_pkg.wire_messages import apply_wire_sanitize
+        self.assertEqual(apply_wire_sanitize(messages)[-1], {
+            'role': 'assistant',
+            'content': 'prior answer tailfresh fragment',
+        })
+
+    def test_provider_without_prefill_uses_ordered_continuation_nudge(self):
+        """Claude rejects a trailing assistant prefill, so keep the prefix as
+        assistant history and terminate the request with a user nudge."""
+        prefix = 'partial claude answer'
+        task = _fresh_task(content=prefix)
+        messages = [{'role': 'user', 'content': 'go'}]
+        with registered_chat_task(task), _no_sleep():
+            d = analyse_stream_result(
+                assistant_msg={'role': 'assistant', 'content': prefix},
+                last_finish_reason='stop', task=task, tid='partial',
+                model='claude-sonnet-4-5', round_num=0,
+                _premature_retry_count=0, messages=messages,
+                usage=self._usage())
+
+        self.assertEqual(d['action'], 'continue')
+        self.assertEqual(messages[-2],
+                         {'role': 'assistant', 'content': prefix})
+        self.assertEqual(messages[-1]['role'], 'user')
+        self.assertIn('LOSSLESS STREAM CONTINUATION', messages[-1]['content'])
+        phase = [e for e in task['events'] if e.get('type') == 'phase'][-1]
+        self.assertEqual(phase.get('continuationMode'), 'continuation_nudge')
+        self.assertEqual(task['content'], prefix)
+
+    def test_exhausted_budget_is_failed_but_keeps_partial(self):
+        prefix = 'still-visible partial answer'
+        task = _fresh_task(
+            phase_counter=_PARTIAL_STREAM_RETRY_MAX, content=prefix)
         d = analyse_stream_result(
-            assistant_msg=msg, last_finish_reason='stop', task=task,
-            tid='soft', model='kimi-k3', round_num=2,
-            _premature_retry_count=0, messages=[], usage=usage)
+            assistant_msg={'role': 'assistant', 'content': prefix},
+            last_finish_reason='stop', task=task, tid='partial',
+            model='kimi-k3', round_num=3,
+            _premature_retry_count=_PARTIAL_STREAM_RETRY_MAX,
+            messages=[{'role': 'user', 'content': 'go'}],
+            usage=self._usage())
+
         self.assertEqual(d['action'], 'break')
         self.assertEqual(d['last_finish_reason'], 'premature_close')
-        self.assertIn('soft', d['loop_exit_reason'])
-        self.assertIsNone(task['error'])  # no error card, no auto-retry
+        self.assertIn('retries_exhausted', d['loop_exit_reason'])
+        self.assertEqual(task['error'].get('kind'), 'premature_close')
+        self.assertTrue(
+            task.get('_suppress_whole_turn_retry_to_preserve_partial'))
+        self.assertEqual(task['content'], prefix)
+
+    def test_later_empty_retry_failure_keeps_earlier_partial_protected(self):
+        """Once any prose was preserved, a later empty continuation must not
+        fall back into the destructive whole-turn retry seam."""
+        prefix = 'already visible prefix'
+        task = _fresh_task(content=prefix)
+        messages = [{'role': 'user', 'content': 'go'}]
+        with registered_chat_task(task), _no_sleep():
+            first = analyse_stream_result(
+                assistant_msg={'role': 'assistant', 'content': prefix},
+                last_finish_reason='stop', task=task, tid='partial',
+                model='kimi-k3', round_num=0, _premature_retry_count=0,
+                messages=messages, usage=self._usage())
+            self.assertEqual(first['action'], 'continue')
+            task['_premature_retry_count_phase'] = \
+                _PREMATURE_RETRY_MAX_CLASSIC
+            terminal = analyse_stream_result(
+                assistant_msg={'role': 'assistant', 'content': '',
+                               'reasoning_content': 'incomplete reasoning'},
+                last_finish_reason='stop', task=task, tid='partial',
+                model='kimi-k3', round_num=2,
+                _premature_retry_count=_PREMATURE_RETRY_MAX_CLASSIC,
+                messages=messages,
+                usage=self._usage() | {'_chunks_received': 10})
+
+        self.assertEqual(terminal['action'], 'break')
+        self.assertEqual(terminal['last_finish_reason'], 'abnormal_stop')
+        self.assertEqual(task['error'].get('kind'), 'abnormal_stop')
+        self.assertEqual(task['content'], prefix)
+        self.assertTrue(
+            task.get('_suppress_whole_turn_retry_to_preserve_partial'))
 
     def test_no_content_anomaly_keeps_honest_error(self):
         """Nothing streamed at all → there is no partial to preserve; the
@@ -483,9 +931,10 @@ class TestSwarmPrematureCloseGuard(unittest.TestCase):
         self.assertEqual(agent.result.final_answer, final['content'])
         self.assertEqual(agent._poison_strikes, 1)
 
-    def test_empty_close_retries_then_degrades_without_loop(self):
+    def test_empty_close_retries_then_fails_honestly_without_loop(self):
         """An empty premature-close round retries up to the bonus cap, then
-        the loop settles (no infinite re-issue)."""
+        rejects the unverified result (no infinite re-issue or fake success)."""
+        from lib.llm.stream_result import UnverifiedProviderStreamError
         from lib.swarm.types import SubAgentStatus
         empty = {'role': 'assistant', 'content': ''}
         disp = {'n': 0}
@@ -495,11 +944,13 @@ class TestSwarmPrematureCloseGuard(unittest.TestCase):
             return empty, 'stop', _usage_missing_done()
 
         agent = _mk_agent(dispatch)
-        agent._run_loop(time.time())
-        # 1 base round + 2 bonus rounds, then the exhausted fall-through.
+        with self.assertRaises(UnverifiedProviderStreamError):
+            agent._run_loop(time.time())
+        # 1 base round + 2 bonus rounds, then the exhausted fail-closed gate.
         self.assertEqual(disp['n'], 3)
         self.assertEqual(agent._poison_strikes, 2)
-        self.assertEqual(agent.result.status, SubAgentStatus.COMPLETED.value)
+        self.assertEqual(agent.result.status, SubAgentStatus.PENDING.value)
+        self.assertFalse(agent.result.final_answer)
 
     def test_clean_rounds_untouched_by_guard(self):
         """No _missing_done → zero behavior change (the guard is inert)."""

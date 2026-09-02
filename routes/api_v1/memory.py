@@ -76,18 +76,24 @@ def _project_path() -> str:
     description=(
         'Returns ``{memories: [...]}`` — flat memories ONLY (installed '
         'skill packages are a different noun, served by '
-        '``/api/v1/skills``). Use ``?scope=all|project|global`` to filter.'
+        '``/api/v1/skills``). Use ``?scope=all|project|global`` to filter. '
+        'Pass ``?summary=1`` to omit the (potentially large) ``body`` of '
+        'each memory — list UIs fetch the body lazily via '
+        '``GET /api/v1/memory/<id>`` when a card is expanded.'
     ),
     tags=['memory'],
 )
 def list_memories_v1():
-    from lib.memory import list_memories
+    from lib.memory.storage import list_memories
     scope = request.args.get('scope', 'all')
+    summary = request.args.get('summary', '').lower() in ('1', 'true', 'yes')
     memories = [m for m in list_memories(project_path=_project_path(),
                                          scope=scope)
                 if not m.get('is_package')]
     for m in memories:
         m.pop('filepath', None)
+        if summary:
+            m.pop('body', None)
     return api_ok({'memories': memories})
 
 
@@ -95,7 +101,7 @@ def list_memories_v1():
 @require_auth
 @api_meta(summary='Get one memory', tags=['memory'])
 def get_memory_v1(memory_id):
-    from lib.memory import get_memory
+    from lib.memory.storage import get_memory
     mem = get_memory(memory_id, project_path=_project_path())
     if not mem:
         return api_not_found('Memory not found')
@@ -117,7 +123,7 @@ def get_memory_v1(memory_id):
             'scope': {'type': 'string', 'enum': ['global', 'project']}}}}}},
 )
 def create_memory_v1():
-    from lib.memory import create_memory
+    from lib.memory.storage import create_memory
     data = parse_body(force=True)
     name = data.get('name', 'Untitled')
     logger.info('[Memory.v1] creating %r (scope=%s)', name,
@@ -139,7 +145,7 @@ def create_memory_v1():
 @require_auth
 @api_meta(summary='Update a memory', tags=['memory'])
 def update_memory_v1(memory_id):
-    from lib.memory import update_memory
+    from lib.memory.storage import update_memory
     data = parse_body(force=True)
     try:
         mem = update_memory(memory_id, data, project_path=_project_path())
@@ -156,7 +162,7 @@ def update_memory_v1(memory_id):
 @require_auth
 @api_meta(summary='Delete a memory', tags=['memory'])
 def delete_memory_v1(memory_id):
-    from lib.memory import delete_memory
+    from lib.memory.storage import delete_memory
     logger.warning('[Memory.v1] deleting %s', memory_id)
     try:
         ok = delete_memory(memory_id, project_path=_project_path())
@@ -177,7 +183,7 @@ def delete_memory_v1(memory_id):
     tags=['memory'],
 )
 def merge_memories_v1():
-    from lib.memory import merge_memories
+    from lib.memory.storage import merge_memories
     data = parse_body(force=True)
     logger.info('[Memory.v1] merging %s → %s',
                 data.get('memory_ids', []), data.get('name', '?'))
@@ -203,7 +209,7 @@ def merge_memories_v1():
 @require_auth
 @api_meta(summary='Enable / disable a memory', tags=['memory'])
 def toggle_memory_v1(memory_id):
-    from lib.memory import toggle_memory
+    from lib.memory.storage import toggle_memory
     data = parse_body()
     mem = toggle_memory(memory_id, enabled=data.get('enabled'),
                          project_path=_project_path())
@@ -220,7 +226,7 @@ def preview_clear_memories_v1():
     from lib.auth_mode import is_multi_user
     if is_multi_user():
         return api_forbidden('Bulk memory clearing is disabled in multi-user mode')
-    from lib.memory import clear_memories
+    from lib.memory.storage import clear_memories
     return api_ok(clear_memories(project_path=_project_path(), dry_run=True))
 
 
@@ -234,7 +240,7 @@ def clear_memories_v1():
     data = parse_body()
     if data.get('confirm') is not True:
         return api_bad_request('confirm=true is required')
-    from lib.memory import clear_memories
+    from lib.memory.storage import clear_memories
     result = clear_memories(project_path=_project_path(), dry_run=False)
     logger.warning('[Memory.v1] cleared %d visible memories (%d failed)',
                    len(result['deleted_ids']), len(result['failed_ids']))
@@ -244,7 +250,7 @@ def clear_memories_v1():
 # ── Structured "My Context" CRUD ───────────────────────────────────
 
 def _context_scope() -> str:
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     from .auth import current_auth
     return up.resolve_profile_scope(current_auth())
 
@@ -253,7 +259,7 @@ def _context_scope() -> str:
 @require_auth
 @api_meta(summary='Get durable user context', tags=['memory'])
 def get_user_context_v1():
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     return api_ok(up.context_status(_context_scope()))
 
 
@@ -261,7 +267,7 @@ def get_user_context_v1():
 @require_auth
 @api_meta(summary='Replace durable user context', tags=['memory'])
 def put_user_context_v1():
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     data = parse_body()
     try:
         result = up.save_context_items(data.get('items'), _context_scope())
@@ -274,7 +280,7 @@ def put_user_context_v1():
 @require_auth
 @api_meta(summary='Create one durable user-context item', tags=['memory'])
 def create_user_context_v1():
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     data = parse_body()
     try:
         result = up.create_context_item(data, _context_scope(), source='manual')
@@ -287,7 +293,7 @@ def create_user_context_v1():
 @require_auth
 @api_meta(summary='Update one durable user-context item', tags=['memory'])
 def update_user_context_v1(item_id):
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     try:
         result = up.update_context_item(item_id, parse_body(), _context_scope())
     except up.ContextValidationError as exc:
@@ -301,7 +307,7 @@ def update_user_context_v1(item_id):
 @require_auth
 @api_meta(summary='Delete one durable user-context item', tags=['memory'])
 def delete_user_context_v1(item_id):
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     if not up.delete_context_item(item_id, _context_scope()):
         return api_not_found('Context item not found')
     return api_ok(deleted=True)
@@ -312,7 +318,7 @@ def delete_user_context_v1(item_id):
 @require_auth
 @api_meta(summary='Undo an assistant-learned context change', tags=['memory'])
 def undo_user_context_change_v1(change_id):
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     try:
         result = up.undo_context_change(change_id, _context_scope())
     except up.ContextConflictError as exc:
@@ -337,7 +343,7 @@ def undo_user_context_change_v1(change_id):
     tags=['memory'],
 )
 def get_user_profile_v1():
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     from .auth import current_auth
     scope = up.resolve_profile_scope(current_auth())
     body = up.load_profile(scope)
@@ -362,7 +368,7 @@ def get_user_profile_v1():
     tags=['memory'],
 )
 def put_user_profile_v1():
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     from .auth import current_auth
     scope = up.resolve_profile_scope(current_auth())
     data = parse_body()
@@ -387,7 +393,7 @@ def put_user_profile_v1():
     tags=['memory'],
 )
 def resolve_profile_pending_v1(pending_id):
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     from .auth import current_auth
     scope = up.resolve_profile_scope(current_auth())
     data = parse_body()

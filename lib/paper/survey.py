@@ -1,6 +1,6 @@
 """lib/paper/survey.py — multi-paper fan-in survey + open-gap map (R2).
 
-The auto-research recipe's stage 3 (docs/AUTO_RESEARCH_SYSTEM_DESIGN.md §3 阶段 3):
+The auto-research recipe's stage 3 (docs/modules/ingest_media.md §3 阶段 3):
 take the local library that ``harvest`` (R1) built and synthesize it into
 
   1. a human-readable **survey markdown**, and
@@ -36,16 +36,16 @@ survey markdown's inline ``arXiv:<id>`` identifiers go through
 ``lib.paper.citation_audit.build_citation_audit`` verbatim; a suspicious
 (unresolvable) identifier surfaces a citation-integrity card in the result meta.
 
-Monkeypatch seams (same discipline as insight/recommend): ``dispatch_stream``
-and ``_execute_report_tool`` are resolved THROUGH this module at call time, so a
-test patches ``survey.dispatch_stream`` / ``survey._execute_report_tool`` and it
-bites the whole chain — no network, no real LLM needed to test the gates.
+The dispatcher and tool executor are module dependencies, so tests can replace
+the exact consumer bindings without a package facade or import-time registry.
 """
 
 from __future__ import annotations
 
+import hashlib
 from typing import Callable, Optional
 
+from lib.identity import require_user_id
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -106,118 +106,111 @@ def _norm_id(arxiv_id) -> str:
 
 # ── Input loading (pin #2: reports/library only, never a re-parse) ─────────
 
-def _load_paper_inputs(arxiv_ids, *, lang: str = 'en', user_id: int = 1,
-                       per_paper_chars: int = _SURVEY_PER_PAPER_CHARS,
-                       max_papers: int = _SURVEY_MAX_PAPERS) -> list:
-    """Load survey inputs for a set of library papers WITHOUT re-parsing.
+def _load_paper_inputs(
+    arxiv_ids,
+    *,
+    lang: str = 'en',
+    user_id: int,
+    per_paper_chars: int = _SURVEY_PER_PAPER_CHARS,
+    max_papers: int = _SURVEY_MAX_PAPERS,
+) -> list:
+    """Load existing reports or parsed text without reparsing any PDF."""
+    from lib.paper.library_repository import PaperLibraryRepository
 
-    For each arXiv id, in priority order:
-      1. an already-generated report from ``paper_reports`` (keyed on the
-         paper's ``paper_hash`` + the plain ``lang`` — zero cost);
-      2. the stored ``parsed_text`` slice from ``paper_library``.
-    A paper with neither (not in the shelf, or empty text) is skipped and
-    reported back to the caller as a ``missing`` id — it is NEVER parsed here.
-
-    Returns a list of dicts::
-
-        {'arxiv_id', 'paper_hash', 'title', 'source': 'report'|'parsed_text',
-         'content': <capped str>}
-
-    Best-effort: a DB hiccup on one paper is logged and that paper is skipped.
-    """
-    out = []
-    seen = set()
-    from lib.database import DOMAIN_CHAT, pooled_db
-
-    def _load(db):
-        for raw in (arxiv_ids or []):
-            aid = _norm_id(raw)
-            if not aid or aid in seen:
-                continue
-            seen.add(aid)
-            if len(out) >= max_papers:
-                logger.info('[Paper:Survey] input cap %d reached — %d id(s) not loaded',
-                            max_papers, len(arxiv_ids) - len(out))
-                break
-            try:
-                row = db.execute(
-                    'SELECT paper_hash, title, parsed_text FROM paper_library '
-                    'WHERE arxiv_id=? AND user_id=? AND parsed_text != \'\' '
-                    'ORDER BY updated_at DESC LIMIT 1', (raw, user_id)).fetchone()
-                if not row:
-                    # try the version-normalized id too
-                    row = db.execute(
-                        'SELECT paper_hash, title, parsed_text FROM paper_library '
-                        'WHERE arxiv_id=? AND user_id=? AND parsed_text != \'\' '
-                        'ORDER BY updated_at DESC LIMIT 1', (aid, user_id)).fetchone()
-            except Exception as e:
-                logger.warning('[Paper:Survey] library lookup failed for %s: %s', aid, e)
-                continue
-            if not row:
-                logger.debug('[Paper:Survey] %s not in library — skipped (no reparse)', aid)
-                continue
-            phash = row['paper_hash'] or ''
-            title = row['title'] or f'arXiv:{aid}'
-            # Prefer an already-generated report (zero cost).
-            content, source = '', ''
-            if phash:
-                try:
-                    rep = db.execute(
-                        'SELECT report FROM paper_reports WHERE paper_hash=? AND lang=?',
-                        (phash, lang)).fetchone()
-                    if rep and (rep['report'] or '').strip():
-                        content = rep['report']
-                        source = 'report'
-                except Exception as e:
-                    logger.debug('[Paper:Survey] report lookup failed for %s: %s', aid, e)
-            if not content:
-                content = row['parsed_text'] or ''
-                source = 'parsed_text'
-            if not content.strip():
-                continue
-            out.append({
-                'arxiv_id': aid, 'paper_hash': phash, 'title': title,
-                'source': source, 'content': content[:per_paper_chars],
-            })
+    user_id = require_user_id(user_id, context='paper survey input load')
     try:
-        with pooled_db(DOMAIN_CHAT) as db:
-            _load(db)
-    except Exception as e:
-        logger.error('[Paper:Survey] cannot load DB inputs: %s', e, exc_info=True)
-        return out
-    logger.info('[Paper:Survey] loaded %d paper input(s) — %d from reports, %d from parsed_text',
-                len(out), sum(1 for p in out if p['source'] == 'report'),
-                sum(1 for p in out if p['source'] == 'parsed_text'))
-    return out
+        entries = PaperLibraryRepository(user_id).list_entries()
+    except Exception as error:
+        logger.error(
+            '[Paper:Survey] library input load failed: %s', error,
+            exc_info=True,
+        )
+        return []
+
+    entries_by_arxiv_id = {}
+    for entry in entries:
+        normalized = _norm_id(entry.arxiv_id)
+        if normalized and entry.parsed_text:
+            entries_by_arxiv_id.setdefault(normalized, entry)
+
+    from lib.paper.artifact_repository import PaperArtifactRepository
+    artifacts = PaperArtifactRepository(user_id)
+    output = []
+    seen = set()
+    for raw in arxiv_ids or []:
+        normalized = _norm_id(raw)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        if len(output) >= max_papers:
+            logger.info(
+                '[Paper:Survey] input cap %d reached', max_papers)
+            break
+        entry = entries_by_arxiv_id.get(normalized)
+        if entry is None:
+            logger.debug(
+                '[Paper:Survey] %s not in library — skipped', normalized)
+            continue
+
+        content = ''
+        source_kind = ''
+        if entry.paper_hash:
+            try:
+                report = artifacts.get_report(entry.paper_hash, lang)
+                if report and report.report.strip():
+                    content = report.report
+                    source_kind = 'report'
+            except Exception as error:
+                logger.debug(
+                    '[Paper:Survey] report lookup failed for %s: %s',
+                    normalized, error,
+                )
+        if not content:
+            content = entry.parsed_text
+            source_kind = 'parsed_text'
+        if not content.strip():
+            continue
+        output.append({
+            'arxiv_id': normalized,
+            'paper_hash': entry.paper_hash,
+            'title': entry.title or f'arXiv:{normalized}',
+            'source': source_kind,
+            'content': content[:per_paper_chars],
+        })
+
+    logger.info(
+        '[Paper:Survey] loaded %d paper input(s) — %d reports, %d parsed text',
+        len(output),
+        sum(1 for paper in output if paper['source'] == 'report'),
+        sum(1 for paper in output if paper['source'] == 'parsed_text'),
+    )
+    return output
 
 
 # ── The library-verifiable structural gate (pin #1) ────────────────────────
 
-def _library_id_set(user_id: int = 1, folder_id: str = '') -> set:
-    """Return the set of version-normalized arXiv ids present in paper_library.
+def _library_id_set(*, user_id: int, folder_id: str = '') -> set:
+    """Return normalized arXiv ids from exactly one owner's bookshelf."""
+    from lib.paper.library_repository import PaperLibraryRepository
 
-    Optionally scoped to a ``folder_id`` (the research task's shelf). Any id in
-    this set is a paper we have actually harvested; anything the survey cites
-    outside it is unverifiable and gets stripped."""
-    ids = set()
+    user_id = require_user_id(user_id, context='paper survey library lookup')
     try:
-        from lib.database import DOMAIN_CHAT, pooled_db
-        with pooled_db(DOMAIN_CHAT) as db:
-            if folder_id:
-                rows = db.execute(
-                    'SELECT arxiv_id FROM paper_library WHERE user_id=? AND folder_id=? '
-                    'AND arxiv_id != \'\'', (user_id, folder_id)).fetchall()
-            else:
-                rows = db.execute(
-                    'SELECT arxiv_id FROM paper_library WHERE user_id=? AND arxiv_id != \'\'',
-                    (user_id,)).fetchall()
-    except Exception as e:
-        logger.error('[Paper:Survey] library id-set query failed: %s', e, exc_info=True)
-        return ids
-    for r in rows:
-        nid = _norm_id(r['arxiv_id'])
-        if nid:
-            ids.add(nid)
+        entries = PaperLibraryRepository(user_id).list_entries()
+    except Exception as error:
+        logger.error(
+            '[Paper:Survey] library id-set query failed: %s',
+            error,
+            exc_info=True,
+        )
+        return set()
+
+    ids = set()
+    for entry in entries:
+        if folder_id and entry.folder_id != folder_id:
+            continue
+        normalized = _norm_id(entry.arxiv_id)
+        if normalized:
+            ids.add(normalized)
     return ids
 
 
@@ -261,7 +254,7 @@ def _tier_ids(id_list, lib_ids: set, stripped: list, tiers: dict,
     return kept
 
 
-def _verify_against_library(gap_map: dict, *, user_id: int = 1,
+def _verify_against_library(gap_map: dict, *, user_id: int,
                             folder_id: str = '', lib_ids: Optional[set] = None,
                             ground_fn=None) -> dict:
     """Grade every arXiv id in an open-gap map into three tiers (R2/R3 seam v2).
@@ -291,9 +284,10 @@ def _verify_against_library(gap_map: dict, *, user_id: int = 1,
       * per-gap: ``evidence_tiers`` / ``library_evidence_count`` /
         ``grounded_evidence_count`` / ``low_confidence``.
 
-    ``ground_fn`` defaults to the module's ``_fetch_arxiv_title`` seam; pass a
+    ``ground_fn`` defaults to the module's ``_fetch_arxiv_title`` dependency; pass a
     stub in tests to avoid the network.
     """
+    user_id = require_user_id(user_id, context='paper survey verification')
     if not isinstance(gap_map, dict):
         return {'schema_version': OPEN_GAPS_SCHEMA_VERSION, 'clusters': [],
                 'method_matrix': [], 'open_gaps': [], 'stripped_ids': [],
@@ -301,8 +295,7 @@ def _verify_against_library(gap_map: dict, *, user_id: int = 1,
     if lib_ids is None:
         lib_ids = _library_id_set(user_id=user_id, folder_id=folder_id)
     if ground_fn is None:
-        import lib.paper.survey as _self
-        ground_fn = _self._fetch_arxiv_title
+        ground_fn = _fetch_arxiv_title
 
     out = dict(gap_map)
     out['schema_version'] = OPEN_GAPS_SCHEMA_VERSION
@@ -392,7 +385,7 @@ def _audit_citations(survey_md: str) -> Optional[dict]:
         return None
 
 
-# ── LLM synthesis (facade-resolved seams, mirrors insight) ─────────────────
+# ── LLM synthesis ──────────────────────────────────────────────────────────
 
 def _parse_llm_json(content):
     from lib.llm.json_extract import extract_first_json_object
@@ -400,20 +393,19 @@ def _parse_llm_json(content):
 
 
 def dispatch_stream(*args, **kwargs):
-    """Facade seam → the real dispatcher. Patched by tests as ``survey.dispatch_stream``."""
+    """Dispatch one survey round; replace this consumer binding in tests."""
     from lib.llm_dispatch import dispatch_stream as _ds
     return _ds(*args, **kwargs)
 
 
-def _execute_report_tool(*args, **kwargs):
-    """Facade seam → the report engine's research-tool executor.
-    Patched by tests as ``survey._execute_report_tool``."""
-    from lib.paper.report_engine import _execute_report_tool as _ert
+def execute_paper_tool(*args, **kwargs):
+    """Execute one survey research tool; replace this binding in tests."""
+    from lib.paper.tools import execute_paper_tool as _ert
     return _ert(*args, **kwargs)
 
 
 def _fetch_arxiv_title(arxiv_id):
-    """Facade seam → arXiv title verify (the 'grounded' evidence tier probe).
+    """Verify an arXiv title for the grounded-evidence tier.
 
     Patched by tests as ``survey._fetch_arxiv_title``. Returns '' when the id
     cannot be confirmed to exist (→ that id is a hallucination, stripped)."""
@@ -425,26 +417,28 @@ def _fetch_arxiv_title(arxiv_id):
         return ''
 
 
-def _synthesize_survey(paper_inputs, direction, lang, *, model=None, abort=None,
-                       on_tool_event=None, usage_meter=None):
+def _synthesize_survey(paper_inputs, direction, lang, *, user_id, model=None,
+                       abort=None, on_tool_event=None, usage_meter=None):
     """Agentic fan-in synthesis: research the frontier, then emit the survey.
 
     Returns ``(survey_md, gap_map)`` where ``gap_map`` is the RAW (un-gated)
     open_gaps dict the model produced; the caller runs the library gate on it.
 
     Mirrors ``insight_engine._synthesize._research_and_synthesize``: shared
-    ``run_agent_loop`` with ``_REPORT_TOOLS`` at a low temperature, all LLM/tool
-    seams resolved through this module for monkeypatching. The model is asked to
+    ``run_agent_loop`` with the narrow research profile at a low temperature.
+    The model is asked to
     emit the markdown survey followed by a fenced ```json``` block carrying the
     open_gaps map; we split on the last JSON object.
     """
-    import lib.paper.survey as _self
     from lib.agent_loop import AbortSignal, run_agent_loop
-    from lib.paper.prompts import _REPORT_TOOLS, date_anchor_clause
-    from lib.paper.tools import make_research_tool_executor
-
-    _dispatch_stream = _self.dispatch_stream
-    _exec_report_tool = _self._execute_report_tool
+    from lib.paper.prompts import date_anchor_clause
+    from lib.paper.tools import (
+        PaperToolResultBudgetV2,
+        build_research_tool_schemas,
+        freeze_paper_tool_epoch,
+        make_paper_exec_shim,
+        make_research_tool_executor,
+    )
 
     system = date_anchor_clause(lang) + _survey_system_prompt(lang)
     parts = [f'## RESEARCH DIRECTION\n\n{direction}\n',
@@ -457,6 +451,16 @@ def _synthesize_survey(paper_inputs, direction, lang, *, model=None, abort=None,
     messages = [{'role': 'system', 'content': system},
                 {'role': 'user', 'content': user_content}]
     abort_signal = AbortSignal.from_callback(abort)
+    paper_tools, paper_contracts = freeze_paper_tool_epoch(
+        build_research_tool_schemas(), owner_user_id=user_id)
+    _exec_shim = make_paper_exec_shim(
+        task_id=('paper-survey-' + hashlib.sha256(
+            direction.encode('utf-8')).hexdigest()[:16]),
+        abort=abort_signal.is_set, owner_user_id=user_id,
+        tool_contract_documents_by_name=paper_contracts)
+    _result_budget = PaperToolResultBudgetV2(
+        owner_user_id=user_id, model=model or '')
+    contracts_by_round = {}
     _round = {'content': ''}
     _last = {'msg': None}
 
@@ -466,16 +470,20 @@ def _synthesize_survey(paper_inputs, direction, lang, *, model=None, abort=None,
         def _on_content(text):
             _round['content'] += text
 
-        effective_tools = usage_meter.allowed_tools(tools) if usage_meter else tools
+        allowed_tools = (usage_meter.allowed_tools(tools)
+                         if usage_meter else tools)
+        effective_tools, contracts_by_round[rnd] = freeze_paper_tool_epoch(
+            allowed_tools, owner_user_id=user_id)
         logger.info('[Paper:Survey] round %d — msgs=%d tools=%s papers=%d',
                     rnd + 1, len(messages), 'yes' if effective_tools else 'no',
                     len(paper_inputs))
-        return _dispatch_stream(
+        from lib.llm.stream_result import ensure_provider_stream_result
+        return ensure_provider_stream_result(dispatch_stream(
             messages, on_content=_on_content, abort_check=abort_signal.is_set,
             prefer_model=model or None, strict_model=bool(model), capability='text',
             tools=effective_tools, max_tokens=_SURVEY_MAX_TOKENS,
             temperature=_SURVEY_TEMPERATURE,
-            thinking_enabled=False, log_prefix='[Paper:Survey]')
+            thinking_enabled=False, log_prefix='[Paper:Survey]'))
 
     def _on_round_result(rnd, msg, finish, usage):
         _last['msg'] = msg
@@ -488,13 +496,16 @@ def _synthesize_survey(paper_inputs, direction, lang, *, model=None, abort=None,
 
     _execute_tool = make_research_tool_executor(
         messages, user_question=direction[:300], abort_signal=abort_signal,
-        execute_report_tool=_exec_report_tool, on_tool_event=on_tool_event,
-        log_prefix='[Paper:Survey]')
+        result_budget=_result_budget, exec_shim=_exec_shim,
+        paper_tool_executor=execute_paper_tool, on_tool_event=on_tool_event,
+        log_prefix='[Paper:Survey]',
+        contract_documents_for_round=contracts_by_round.get)
 
     run_agent_loop(
         abort=abort_signal,
-        round_tools=_REPORT_TOOLS, dispatch=_dispatch, execute_tool=_execute_tool,
-        on_round_result=_on_round_result, on_tool_round=_begin_tool_round)
+        round_tools=paper_tools, dispatch=_dispatch, execute_tool=_execute_tool,
+        on_round_result=_on_round_result, on_tool_round=_begin_tool_round,
+        on_round_end=_result_budget.finish_round)
 
     content = _round['content']
     if not content and isinstance(_last['msg'], dict):
@@ -564,7 +575,7 @@ def _survey_system_prompt(lang: str) -> str:
 
 # ── Public entry ───────────────────────────────────────────────────────────
 
-def build_survey(direction: str, arxiv_ids, *, lang: str = 'en', user_id: int = 1,
+def build_survey(direction: str, arxiv_ids, *, lang: str = 'en', user_id: int,
                  folder_id: str = '', model: Optional[str] = None,
                  abort: Optional[Callable[[], bool]] = None,
                  on_tool_event: Optional[Callable[[dict], None]] = None) -> dict:
@@ -594,6 +605,7 @@ def build_survey(direction: str, arxiv_ids, *, lang: str = 'en', user_id: int = 
     """
     from lib.research.telemetry import ResearchUsageMeter, research_token_budget
 
+    user_id = require_user_id(user_id, context='paper survey')
     direction = (direction or '').strip()
     usage_meter = ResearchUsageMeter(
         'survey', fallback_model=model or '',
@@ -615,7 +627,7 @@ def build_survey(direction: str, arxiv_ids, *, lang: str = 'en', user_id: int = 
 
     try:
         survey_md, raw_gap_map = _synthesize_survey(
-            inputs, direction, lang, model=model, abort=abort,
+            inputs, direction, lang, user_id=user_id, model=model, abort=abort,
             on_tool_event=on_tool_event, usage_meter=usage_meter)
     except Exception as e:
         from lib.llm_errors import AbortedError

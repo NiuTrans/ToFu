@@ -6,10 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from lib.orchestration.definition_wire_contracts import (
+from lib.orchestration.definition_contract_registry import (
     MAX_DEFINITION_VERSION,
-    definition_write_conflict,
     definition_write_contract,
+)
+from lib.orchestration.definition_wire_projection import (
+    definition_write_conflict,
     definition_write_version_token,
 )
 import routes.api_v1.orchestration_definition_http as definition_http
@@ -56,14 +58,11 @@ def test_definition_conflict_projection_uses_published_field_registry():
     }
     assert projected[fields['currentUpdatedAt']] == 9
 
-    unguarded = definition_write_conflict(None, None, operation='replace')
-    assert unguarded['write'][fields['expectedUpdatedAt']] is None
-    assert unguarded['write'][fields['currentUpdatedAt']] is None
-
-
 @pytest.mark.parametrize(('expected', 'current'), (
+    (None, 9),
     (True, 9),
     (-1, 9),
+    (7, None),
     (7, False),
     (7, MAX_DEFINITION_VERSION + 1),
 ))

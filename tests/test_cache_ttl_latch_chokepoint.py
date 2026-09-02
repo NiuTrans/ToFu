@@ -72,7 +72,10 @@ def test_no_task_id_reads_volatile_global_and_flips():
     the re-key. This proves the latch bypass is real and load-bearing."""
     import lib as _lib
     import lib.llm.cache as C
-    from lib.tasks_pkg.cache_tracking import _ttl_latch, latch_extended_ttl  # noqa: F401
+    from lib.tasks_pkg.cache_tracking._ttl import (
+        _ttl_latch,
+        latch_extended_ttl,
+    )
     from lib.tasks_pkg.wire_fingerprint import markers_ttl_flipped
 
     _ttl_latch.clear()
@@ -100,7 +103,7 @@ def test_same_task_id_latch_holds_across_global_flip():
     stamp gives every send)."""
     import lib as _lib
     import lib.llm.cache as C
-    from lib.tasks_pkg.cache_tracking import _ttl_latch
+    from lib.tasks_pkg.cache_tracking._ttl import _ttl_latch
     from lib.tasks_pkg.wire_fingerprint import marker_signature, markers_ttl_flipped
 
     _ttl_latch.clear()
@@ -123,7 +126,7 @@ def test_stream_llm_response_stamps_task_id_at_chokepoint():
     arrives at stream_llm_response WITHOUT _task_id must have it stamped from
     task['id'] before dispatch — so no build_body call site can bypass the
     latch. We patch dispatch_stream to capture the body it receives."""
-    import lib.tasks_pkg.manager as _mgr
+    import lib.tasks_pkg.manager._stream as _mgr
 
     captured = {}
 
@@ -136,7 +139,8 @@ def test_stream_llm_response_stamps_task_id_at_chokepoint():
     _mgr.dispatch_stream = _fake_dispatch
     try:
         _thr = __import__('threading')
-        task = {'id': 'task-choke-123', 'convId': 'c1', 'content': '',
+        task = {'id': 'task-choke-123', 'convId': 'c1', '_userId': 1,
+                'content': '',
                 'thinking': '', 'config': {}, 'events': [],
                 'content_lock': _thr.Lock(), 'events_lock': _thr.Lock()}
         body = _grow_body(task_id=None)   # call site FORGOT to set it
@@ -154,7 +158,7 @@ def test_stream_llm_response_stamps_task_id_at_chokepoint():
 def test_stream_llm_response_does_not_clobber_existing_task_id():
     """The stamp must not OVERWRITE a _task_id a call site already set (e.g. the
     swarm agent uses agent_id as its latch key) — only fill it when absent."""
-    import lib.tasks_pkg.manager as _mgr
+    import lib.tasks_pkg.manager._stream as _mgr
 
     captured = {}
 
@@ -167,7 +171,8 @@ def test_stream_llm_response_does_not_clobber_existing_task_id():
     _mgr.dispatch_stream = _fake_dispatch
     try:
         _thr = __import__('threading')
-        task = {'id': 'task-outer', 'convId': 'c1', 'content': '',
+        task = {'id': 'task-outer', 'convId': 'c1', '_userId': 1,
+                'content': '',
                 'thinking': '', 'config': {}, 'events': [],
                 'content_lock': _thr.Lock(), 'events_lock': _thr.Lock()}
         body = _grow_body(task_id='explicit-latch-key')

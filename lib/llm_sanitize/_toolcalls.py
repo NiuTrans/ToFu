@@ -41,7 +41,7 @@ def _mint_tool_call_id(msg_idx: int, call_idx: int, tc: dict) -> str:
     source messages — a random mint would give the same persisted call a
     DIFFERENT wire id on every round, breaking the prompt-cache prefix and
     tripping cache_tracking ``body_identical=false`` for exactly the
-    non-parse producers (endpoint mode, compat shims, legacy history) this
+    non-parse producers (Flow nodes, compat shims, legacy history) this
     healer exists to protect (owner review 2026-08-07: two build_body runs
     over one id-less call minted call_d35b67054ae1 vs call_426a3d3ea09a).
     Deriving from (position, content) makes the mint idempotent across
@@ -59,7 +59,7 @@ def _fix_tool_call_wire_shape(messages: list) -> list:
     """Heal OpenAI-style tool_call protocol violations on the wire.
 
     Single chokepoint — runs in ``build_body`` for EVERY model and EVERY
-    producer (fresh stream rounds, persisted history, endpoint mode, swarm,
+    producer (fresh stream rounds, persisted history, Flow nodes, swarm,
     compat shims). Every rule below is backed by a live probe against
     kimi-k3 (2026-08-07 matrix, ``max_tokens=1``):
 

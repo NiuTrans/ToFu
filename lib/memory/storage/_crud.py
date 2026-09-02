@@ -278,15 +278,7 @@ def merge_memories(memory_ids, name, description, body, tags=None, scope='projec
     if not memory_ids or len(memory_ids) < 2:
         raise ValueError("merge_memories requires at least 2 memory IDs")
 
-    # Resolve the CRUD collaborators THROUGH the package facade at call time so
-    # a test's ``monkeypatch.setattr(lib.memory.storage, 'create_memory', …)``
-    # (etc.) steers this orchestrator exactly as it did on the pre-split module.
-    from lib.memory import storage as _facade
-    _list_all = getattr(_facade, 'list_all_memories', list_all_memories)
-    _create = getattr(_facade, 'create_memory', create_memory)
-    _delete = getattr(_facade, 'delete_memory', delete_memory)
-
-    all_memories = _list_all(project_path, extra_paths=extra_paths)
+    all_memories = list_all_memories(project_path, extra_paths=extra_paths)
     mem_map = {s['id']: s for s in all_memories}
     missing = [sid for sid in memory_ids if sid not in mem_map]
     if missing:
@@ -300,13 +292,14 @@ def merge_memories(memory_ids, name, description, body, tags=None, scope='projec
             merged_tags.update(mem_map[sid].get('tags', []))
         tags = sorted(merged_tags)
 
-    merged = _create(name=name, description=description, body=body,
-                     tags=tags, scope=scope, project_path=project_path)
+    merged = create_memory(name=name, description=description, body=body,
+                           tags=tags, scope=scope,
+                           project_path=project_path)
 
     deleted_ids = []
     failed_ids = []
     for sid in memory_ids:
-        if _delete(sid, project_path, extra_paths=extra_paths):
+        if delete_memory(sid, project_path, extra_paths=extra_paths):
             deleted_ids.append(sid)
         else:
             failed_ids.append(sid)

@@ -10,9 +10,8 @@ preamble (215 chars). The two content tracks diverged:
     here).
   * the returned assistant_msg['content'] — the ADOPTED resend's full text.
 
-``_sync._sync_result_to_conversation`` persists from ``task['content']`` — so
-the adopted resend's full answer was silently dropped and the partial preamble
-was stored (the live 3411→215 loss, app.log 15050→15052→15072).
+The terminal turn event projects from ``task['content']``, so the two tracks
+must converge before finalization.
 
 The fix (lib/tasks_pkg/manager/_stream.py) converges ``task['content']`` /
 ``task['thinking']`` from the adopted ``msg`` AFTER the floor-retry loop —
@@ -48,12 +47,14 @@ _PARTIAL = 'PARTIAL_PREAMBLE_FIRST_ATTEMPT'          # what the 1st attempt stre
 _FULL = 'FULL_DELIVERABLE_' + ('X' * 3400)           # the adopted resend's real answer
 _PARTIAL_THINK = 'partial-thinking'
 _FULL_THINK = 'FULL_THINKING_' + ('Y' * 2200)
+_TEST_OWNER_USER_ID = 1
 
 
 def _make_task(tid='floor-reinject-1', conv='convFR'):
     return {
         'id': tid,
         'convId': conv,
+        '_userId': _TEST_OWNER_USER_ID,
         'aborted': False,
         'content': '',
         'thinking': '',
@@ -66,11 +67,10 @@ def _make_task(tid='floor-reinject-1', conv='convFR'):
 def _patch_common(monkeypatch, dispatch_fn):
     """Patch the floor-retry gate ON, its predicates, and the side-effecting
     seams (append_event / checkpoint) so the test exercises only the
-    content-convergence logic. dispatch_fn is installed on the manager facade
-    exactly as production resolves it (getattr(_mgr_facade, 'dispatch_stream')).
+    content-convergence logic. dispatch_fn is installed at the concrete
+    streaming module's dependency binding.
     """
     import lib.tasks_pkg.floor_retry as _fr
-    import lib.tasks_pkg.manager as _mgr
     import lib.tasks_pkg.manager._stream as _stream
 
     # Gate ON + always-eligible predicates (isolate the convergence, not the
@@ -79,10 +79,13 @@ def _patch_common(monkeypatch, dispatch_fn):
     monkeypatch.setattr(_fr, 'floor_retry_max', lambda: 2)
     # is_floor_collapse reads a synthetic 'floor' marker on our fake usage.
     monkeypatch.setattr(_fr, 'is_floor_collapse', lambda u: bool((u or {}).get('floor')))
-    monkeypatch.setattr(_fr, 'wire_prefix_stable', lambda conv, u: True)
+    monkeypatch.setattr(
+        _fr,
+        'wire_prefix_stable',
+        lambda conv, u, *, user_id: user_id == _TEST_OWNER_USER_ID,
+    )
 
-    # dispatch_stream is resolved via getattr(_mgr_facade, 'dispatch_stream').
-    monkeypatch.setattr(_mgr, 'dispatch_stream', dispatch_fn, raising=False)
+    monkeypatch.setattr(_stream, 'dispatch_stream', dispatch_fn)
 
     # Silence the event/persistence seams.
     monkeypatch.setattr(_stream, 'append_event', lambda *a, **k: None)

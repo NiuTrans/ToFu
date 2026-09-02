@@ -9,7 +9,7 @@ import pytest
 
 from lib.orchestration_execution_runtime import OrchestrationExecutionRuntime
 from lib.orchestration_graph import FlowExecutionError
-from lib.orchestration_outcome import OrchestrationOutcomeLedger
+from lib.orchestration.outcome_ledger import OrchestrationOutcomeLedger
 
 
 pytestmark = pytest.mark.unit

@@ -1,41 +1,19 @@
-"""lib/production/runtime.py — ProductionRuntime: the long-job runtime layer.
+"""Long-production lifecycle layered over `TaskRuntime`.
 
-P6 extraction, driven by the P7 measurement (docs/PRODUCTION_PIPELINE_DESIGN.md
-§9): writing a third capability showed the per-capability ``runtime.py`` is
-**67% byte-identical after renaming** across motion-video / paper-podcast /
-longform-report. This module is that shared 67%.
-
-It is a thin layer OVER :class:`lib.task_runtime.TaskRuntime`, not a
-replacement — TaskRuntime already owns the task registry, event log, push,
-poll, spawn and terminal states. What every production capability had to
-hand-roll on top of it, and what lives here now:
-
-  * **dedup index** — "a second identical request joins the in-flight job
-    instead of regenerating", including pruning entries whose task died;
-  * **create + field-shape update** — ``runtime.create()`` then ``.update()``
-    with the worker's expected fields;
-  * **append + touch** — append an event and bump ``updated_at``;
-  * **stale sweep** — TTL purge keyed on ``updated_at`` (not TaskRuntime's
-    ``finished_at``), plus dedup-index pruning;
-  * **id minting** — ``<prefix>_<uuid16>``.
-
-Deliberately NOT here: the binary ``deliverable`` channel. The P7 measurement
-found sample 3 (a markdown report) did not need it, so it is a video/podcast
-commonality rather than a global one — abstracting it now would be exactly the
-"wrong shape from too few samples" mistake the design note's risk table warns
-about.
+Owns atomic dedup claim/create, capability task initialization, event touch,
+retention pruning, and task ID minting. Recipe logic and binary publication
+stay in capability packages. See ``docs/modules/production.md``.
 """
 
 from __future__ import annotations
 
-import time
 import threading
 import uuid
 import weakref
 from typing import Any, Callable, Optional
 
 from lib.log import get_logger
-from lib.task_runtime import TaskRuntime
+from lib.agent_core.task_runtime import TaskRuntime
 
 logger = get_logger(__name__)
 
@@ -111,20 +89,6 @@ class ProductionRuntime:
     def ttl(self) -> int:
         return self.runtime.ttl
 
-    @property
-    def tasks(self) -> dict:
-        """The live task registry dict (shared with TaskRuntime)."""
-        return self.runtime._tasks       # type: ignore[attr-defined]
-
-    @property
-    def lock(self):
-        """The registry lock (shared with TaskRuntime)."""
-        return self.runtime._lock        # type: ignore[attr-defined]
-
-    @property
-    def dedup_index(self) -> dict:
-        return self._dedup
-
     def get(self, task_id: str):
         return self.runtime.get(task_id)
 
@@ -154,10 +118,9 @@ class ProductionRuntime:
             tid = self._dedup.get(key)
             if not tid:
                 return None
-            with self.lock:
-                task = self.tasks.get(tid)
-                if task and task.get('status') in ('pending', 'running'):
-                    return tid
+            task = self.runtime.get(tid)
+            if task and task.get('status') in ('pending', 'running'):
+                return tid
             self._dedup.pop(key, None)
             reason = 'terminal' if task is not None else 'orphan'
             self._dedup_evictions[reason] += 1
@@ -176,11 +139,7 @@ class ProductionRuntime:
         that pressure instead of dropping dedup protection and launching a
         duplicate expensive job.
         """
-        with self.lock:
-            statuses = {
-                task_id: task.get('status')
-                for task_id, task in self.tasks.items()
-            }
+        statuses = self.runtime.task_statuses()
         removed = {'terminal': 0, orphan_reason: 0}
         for key, task_id in list(self._dedup.items()):
             status = statuses.get(task_id)
@@ -207,7 +166,7 @@ class ProductionRuntime:
             'evictions': evictions,
         }
 
-    def claim_task(self, key: tuple, task_id: str, *,
+    def claim_task(self, key: tuple, task_id: str, *, user_id: int,
                    meta: Optional[dict] = None,
                    fields: Optional[dict] = None) -> tuple[Optional[dict], Optional[str]]:
         """Atomically join-or-create a task for a dedup key.
@@ -222,13 +181,15 @@ class ProductionRuntime:
             existing = self.index_get(key)
             if existing:
                 return None, existing
-            task = self.create_task(task_id, meta=meta, fields=fields)
+            task = self.create_task(
+                task_id, user_id=user_id, meta=meta, fields=fields)
             self.index_register(key, task_id)
             return task, None
 
     # ── Task creation + events ────────────────────────────────
 
-    def create_task(self, task_id: str, *, meta: Optional[dict] = None,
+    def create_task(self, task_id: str, *, user_id: int,
+                    meta: Optional[dict] = None,
                     fields: Optional[dict] = None) -> dict:
         """Create + register a pending task carrying the worker's field shape.
 
@@ -236,43 +197,35 @@ class ProductionRuntime:
         API); ``fields`` are the extra top-level keys this capability's worker
         reads. ``task_id`` / ``status`` / ``updated_at`` are always set.
         """
-        task = self.runtime.create(task_id=task_id, meta=meta or {})
-        task.update({
+        task = self.runtime.create(
+            user_id=user_id, task_id=task_id, meta=meta or {})
+        custom_fields = {
             'task_id': task_id,
-            'status': 'pending',
-            'result': None,
-            'updated_at': time.time(),
-        })
+            'user_id': user_id,
+        }
         if fields:
-            task.update(fields)
+            custom_fields.update(fields)
+        self.runtime.update_fields(task_id, fields=custom_fields)
         return task
 
     def append_event(self, task: dict, event: dict) -> Any:
         """Append one event (monotonic seq + WS push) and touch the task."""
-        seq = self.runtime.append_event(task['task_id'], event)
-        task['updated_at'] = time.time()
-        return seq
+        return self.runtime.append_event(task['task_id'], event)
 
     # ── Stale sweep ───────────────────────────────────────────
 
     def cleanup_stale(self) -> int:
         """Drop terminal tasks past TTL and prune orphaned dedup entries.
 
-        Keyed on ``updated_at`` (when the job last did something), which is
-        what the capabilities used — TaskRuntime's own sweep keys on
-        ``finished_at`` and does not know about the dedup index.
+        TaskRuntime owns terminal retention by ``finished_at``. This layer
+        removes dedup keys for exactly the IDs evicted by that sweep.
         """
-        now = time.time()
-        with self.lock:
-            stale = [tid for tid, t in self.tasks.items()
-                     if t.get('status') in ('done', 'error', 'aborted')
-                     and now - t.get('updated_at', now) > self.ttl]
-            for tid in stale:
-                self.tasks.pop(tid, None)
+        before = self.runtime.task_ids()
+        removed = self.runtime.cleanup_stale()
+        stale = before - self.runtime.task_ids()
         with self._dedup_claim_lock:
-            expired_ids = set(stale)
             ttl_keys = [key for key, task_id in self._dedup.items()
-                        if task_id in expired_ids]
+                        if task_id in stale]
             for key in ttl_keys:
                 self._dedup.pop(key, None)
             self._dedup_evictions['ttl'] += len(ttl_keys)
@@ -280,4 +233,4 @@ class ProductionRuntime:
         if stale:
             logger.info('[%s] cleaned %d stale task(s)', self.log_label,
                         len(stale))
-        return len(stale)
+        return removed

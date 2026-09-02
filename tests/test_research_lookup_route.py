@@ -40,6 +40,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+
 
 def _new_loop_run(coro):
     """Drive one coroutine on a private loop.
@@ -91,13 +93,11 @@ _IDEATE = {
 
 @pytest.fixture()
 def fresh_db(tmp_path, monkeypatch):
-    from lib.database import reset_sqlite_for_tests, restore_db_state
-    from lib.research import persistence
+    import lib.research.persistence as persistence
     from lib.storage import StorageSupervisor
 
-    snapshot = reset_sqlite_for_tests(str(tmp_path / 'research_route.db'))
     supervisor = StorageSupervisor(
-        project_root=tmp_path / 'sidecar', backend='sqlite', startup_timeout=20)
+        project_root=tmp_path / 'sidecar', backend='sqlite', startup_timeout=60)
     supervisor.start()
     monkeypatch.setattr(
         persistence, '_storage', lambda **_kwargs: supervisor.client)
@@ -105,7 +105,6 @@ def fresh_db(tmp_path, monkeypatch):
         yield supervisor
     finally:
         supervisor.stop()
-        restore_db_state(snapshot)
 
 
 @pytest.fixture()
@@ -124,8 +123,12 @@ def client(fresh_db):
 @pytest.fixture()
 def seeded(fresh_db):
     from lib.research.persistence import persist_ideate, persist_survey
-    persist_survey(_DIRECTION, 'en', '# Survey\n\nBody.', _OPEN_GAPS, model='m1')
-    persist_ideate(_DIRECTION, 'en', _IDEATE, model='m1')
+    persist_survey(
+        _DIRECTION, 'en', '# Survey\n\nBody.', _OPEN_GAPS, model='m1',
+        user_id=TEST_OWNER_USER_ID)
+    persist_ideate(
+        _DIRECTION, 'en', _IDEATE, model='m1',
+        user_id=TEST_OWNER_USER_ID)
 
 
 def _empty_the_task_registry():
@@ -221,7 +224,9 @@ def test_degraded_flag_survives_the_persist_and_the_lookup(client, fresh_db):
     wiped = dict(_IDEATE, accepted=[], gate_reached='structural',
                  degraded=True,
                  degraded_reason='structural gate rejected ALL 6 idea(s)')
-    persist_ideate(_DIRECTION, 'en', wiped, model='m1')
+    persist_ideate(
+        _DIRECTION, 'en', wiped, model='m1',
+        user_id=TEST_OWNER_USER_ID)
     _empty_the_task_registry()
 
     status, body = _get_json(

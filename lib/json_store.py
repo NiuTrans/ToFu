@@ -84,9 +84,7 @@ def _path_lock(path: str) -> threading.Lock:
 # lock held on the old inode would not cover the new one. The sidecar inode
 # is stable.
 #
-# Mirrors the proven degradation policy of
-# ``lib/database/_bootstrap._try_acquire_startup_lock``: on Windows (no
-# portable ``fcntl``), when ``fcntl`` is unavailable, or when the filesystem
+# On Windows (no portable ``fcntl``), when ``fcntl`` is unavailable, or when the filesystem
 # doesn't support advisory locks, we degrade to a no-op (the thread lock
 # still protects the common single-process case) rather than ship a
 # half-reliable path or newly regress hosts.

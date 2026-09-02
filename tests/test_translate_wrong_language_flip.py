@@ -16,7 +16,12 @@ These tests patch the LLM dispatch + MT provider + cache so they run
 offline and deterministically.
 """
 
+import pytest
+
 import lib.translate.engine as engine
+
+
+pytestmark = pytest.mark.unit
 
 
 # A mixed message: short English lead-in + a large Chinese body (the shape of

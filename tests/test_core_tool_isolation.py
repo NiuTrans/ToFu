@@ -12,7 +12,7 @@ This test fails the moment ``model_config.py`` regrows the old hand-maintained
 ``if feature: tool_list.append(SOME_TOOL)`` ladder — i.e. the moment a future
 change starts hardcoding concrete tools back into core again.
 
-If you are adding a tool: define a ``ToolSpec`` in ``lib/tools/registry.py``
+If you are adding a tool: define a ``ToolSpec`` in ``lib/tools/registry/``
 (or ship one from a plugin via the ``tofu.tools`` entry point).  Do NOT add
 a branch here.
 """
@@ -64,7 +64,7 @@ def test_model_config_does_not_import_concrete_tool_schemas():
     if offenders:
         pytest.fail(
             'model_config.py re-imported concrete tool schemas — these belong '
-            'behind ToolSpec in lib/tools/registry.py, not in core:\n  '
+            'behind ToolSpec in lib/tools/registry/, not in core:\n  '
             + '\n  '.join(sorted(set(offenders)))
             + '\n\nFix: register a ToolSpec instead of importing the schema here.'
         )
@@ -81,7 +81,7 @@ def test_model_config_has_no_tool_list_ladder():
     src = _read_source()
     assert 'tool_list.append' not in src and 'tool_list.extend' not in src, (
         'model_config.py is rebuilding a tool if-ladder (tool_list.append/extend). '
-        'Tool gating now lives in lib/tools/registry.py ToolSpec.build(). '
+        'Tool gating now lives in lib/tools/registry/ ToolSpec.build(). '
         'Add a ToolSpec there instead.'
     )
 
@@ -91,7 +91,7 @@ def test_assembly_delegates_to_registry():
     src = _read_source()
     assert 'assemble_tool_list(ctx)' in src, (
         'model_config.py no longer delegates to the registry assemble_tool_list. '
-        'Tool assembly must go through lib/tools/registry.py.'
+        'Tool assembly must go through lib/tools/registry/.'
     )
 
 

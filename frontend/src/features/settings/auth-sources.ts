@@ -1,5 +1,6 @@
 import { featureRegistry } from '../../feature-registry';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
+import type { I18nKey } from '../../i18n';
 
 interface AuthSourceField {
   name?: string;
@@ -20,7 +21,7 @@ interface AuthSourceRow {
   has_proxy?: boolean;
   proxy_hint?: string;
   login_url?: string;
-  risk_note_key?: string;
+  risk_note_key?: I18nKey;
   access_strategy?: string;
   knowledge?: AuthSourceKnowledge;
   fields?: AuthSourceField[];
@@ -76,7 +77,7 @@ function authSourcesApi(): AuthSourcesApi {
 }
 
 function translate(
-  key: string,
+  key: I18nKey,
   fallback: string,
   values?: Record<string, unknown>,
 ): string {
@@ -108,7 +109,7 @@ function registryBadgesHtml(source: AuthSourceRow): string {
     browser_first: 'settings.authSrcStrategyBrowserFirst',
     cookies_replay: 'settings.authSrcStrategyCookiesReplay',
     public: 'settings.authSrcStrategyPublic',
-  } as Record<string, string>)[strategy]
+  } satisfies Record<string, I18nKey>)[strategy]
     || 'settings.authSrcStrategyBrowserFirst';
   const knowledge = source.knowledge || {};
   let knowledgeHtml = '';

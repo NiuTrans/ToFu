@@ -47,14 +47,19 @@ def test_asset_paths_accept_only_requested_suffixes():
     assert not _safe_asset_path('assets/main-AbCd1234.css', ('.js', '.mjs'))
 
 
-def test_manifest_rejects_missing_entry_file(tmp_path, monkeypatch):
+@pytest.mark.parametrize('validator_name', (
+    'validate_vite_artifact',
+    'validate_published_vite_artifact',
+))
+def test_manifest_rejects_missing_entry_file(
+        tmp_path, monkeypatch, validator_name):
     manifest = {
         'frontend/src/main.ts': {'file': 'assets/missing.js', 'isEntry': True},
         'frontend/src/admin.ts': {'file': 'assets/admin.js', 'isEntry': True},
     }
     assets = _install_graph(tmp_path, monkeypatch, manifest, ('admin.js',))
     with pytest.raises(assets.ViteAssetError, match='missing.js'):
-        assets.validate_vite_artifact()
+        getattr(assets, validator_name)()
 
 
 def test_manifest_rejects_dangling_import(tmp_path, monkeypatch):

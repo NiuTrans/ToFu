@@ -17,13 +17,20 @@ def _run(coro):
 def browser_api(tmp_path, monkeypatch):
     from quart import Quart
 
-    from lib.browser import access
+    import lib.browser.access as access
     from lib.browser.queue import _state
+    from lib.storage import start_storage
     from routes.api_v1.auth import bearer_auth_before_request
     from routes.api_v1.browser import api_v1_browser_bp
 
+    # This mini-app bypasses the shared ``flask_client`` fixture, whose normal
+    # lifecycle performs the mandatory Sidecar handshake.  Credential setup
+    # below is itself a semantic storage write, so make that dependency
+    # explicit instead of relying on whichever earlier test happened to start
+    # the process-wide test Sidecar.  Session teardown remains the single
+    # owner that stops it, matching ``flask_client``.
+    start_storage()
     monkeypatch.setattr(access, '_STORE_PATH', str(tmp_path / 'browser_access.json'))
-    monkeypatch.setenv('TUNNEL_TOKEN', 'browser-api-test-gate')
     with _state._clients_lock:
         _state._clients.clear()
     app = Quart(__name__)
@@ -39,7 +46,7 @@ def test_access_and_adapter_endpoints_are_authenticated_and_user_scoped(
         browser_api):
     from lib.api_keys import create_key
 
-    _row, token = create_key(name='browser-access-api', scopes=['chat'])
+    _row, token = create_key(owner_user_id=1, name='browser-access-api', scopes=['chat'])
     headers = {'Authorization': f'Bearer {token}'}
 
     async def scenario():

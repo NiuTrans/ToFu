@@ -37,23 +37,6 @@ CANNED_RESPONSES = {
         "and even some math: E = mc². "
         "This helps verify that the frontend renders streaming content correctly."
     ),
-    # Endpoint mode: multi-turn worker+critic
-    "endpoint_worker": (
-        "I've analyzed the task and here's my implementation:\n\n"
-        "```python\ndef solve(x):\n    return x * 2\n```\n\n"
-        "This solution handles the core requirement."
-    ),
-    "endpoint_critic": (
-        "The implementation looks correct. The function properly handles "
-        "the input and returns the expected output. **Approved.**"
-    ),
-    # Swarm: master plan
-    "swarm_plan": json.dumps({
-        "agents": [
-            {"id": "research-1", "role": "researcher", "objective": "Find information"},
-            {"id": "coder-1", "role": "coder", "objective": "Write the code"},
-        ]
-    }),
     # Error scenario
     "error": None,  # triggers 500
 }
@@ -64,7 +47,16 @@ def _detect_scenario(messages: list[dict], config: dict) -> str:
     if not messages:
         return "default"
 
-    last_content = (messages[-1].get("content") or "").lower()
+    last_content = messages[-1].get("content") or ""
+    if isinstance(last_content, list):
+        # Production Agent requests use OpenAI content parts even for a
+        # text-only turn. Keep the fixture protocol-realistic instead of
+        # assuming the legacy string shorthand.
+        last_content = " ".join(
+            str(part.get("text") or part.get("content") or "")
+            for part in last_content if isinstance(part, dict)
+        )
+    last_content = str(last_content).lower()
 
     # Explicit test triggers
     if "__test_error__" in last_content:
@@ -75,12 +67,6 @@ def _detect_scenario(messages: list[dict], config: dict) -> str:
         return "tool_call"
     if "__test_think__" in last_content:
         return "thinking"
-
-    # Detect by config
-    if config.get("endpointMode"):
-        return "endpoint_worker"
-    if config.get("swarmEnabled"):
-        return "swarm_plan"
 
     return "default"
 

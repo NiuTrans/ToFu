@@ -1,14 +1,14 @@
 """Shared machine policy for bounded producer/verifier loops.
 
-Endpoint mode and generic graph execution have different event/presentation
-adapters, but their safety caps and zero-deliverable streak semantics must not
-drift.  This module is deliberately free of task, graph and persistence I/O.
+Verifier loops and generic graph execution have different projections, but
+their safety caps and zero-deliverable streak semantics must not drift. This
+module is deliberately free of task, graph and persistence I/O.
 """
 
 from __future__ import annotations
 
 
-# A newly authored/Endpoint loop starts at ten turns. The default executor
+# A newly authored Flow loop starts at ten turns. The default executor
 # permits two additional turns so the canonical Autopilot graph can use its
 # intentional twelve-turn budget. Delivery adapters may explicitly raise the
 # executor ceiling for non-Studio workloads.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lib.orchestration.definition_wire_contracts import (
+from lib.orchestration.definition_contract_schema import (
     definition_layout_schema,
     definition_request_schema,
 )

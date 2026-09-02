@@ -1,7 +1,7 @@
 """Structured, revisioned task checklists for ``todo_write``.
 
 Backport of OMC's TodoWrite / Claude Code's TodoWriteTool (Rec 1 of
-``docs/omc-claude-code-backport-analysis.md``).  The model maintains a
+``docs/modules/task_engine.md``).  The model maintains a
 machine-readable checklist on the live ``task`` dict as ``task['_todos']`` —
 NOT in the message list — so it:
 

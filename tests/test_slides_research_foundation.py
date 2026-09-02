@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from lib.slides import recipe
-from lib.slides._research import research_topic, summarise_current_signals
-from lib.production.research import evidence_checkpoint_version
+import lib.slides.recipe as recipe
+from lib.production.research import (
+    evidence_checkpoint_version,
+    research_topic,
+    summarise_current_signals,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -25,7 +28,7 @@ def test_research_keeps_only_url_grounded_unique_cards(monkeypatch):
         ]
 
     monkeypatch.setattr(
-        'lib.tasks_pkg.handlers.search.perform_web_search',
+        'tofu_search.perform_web_search',
         _search)
     out = research_topic('topic')
     assert out['degraded'] is False
@@ -141,7 +144,7 @@ def test_research_queries_subject_not_creative_or_model_instructions(monkeypatch
         }]
 
     monkeypatch.setattr(
-        'lib.tasks_pkg.handlers.search.perform_web_search', _search)
+        'tofu_search.perform_web_search', _search)
     out = research_topic('小米澎程 SkyNomad 汽车宣传片和视频，都用 kimi k3')
     assert out['subject'] == '小米澎程 SkyNomad 汽车'
     assert len(calls) == 3
@@ -169,7 +172,7 @@ def test_research_reserves_half_the_card_budget_for_official_candidates(
         return _results('background')
 
     monkeypatch.setattr(
-        'lib.tasks_pkg.handlers.search.perform_web_search', _search)
+        'tofu_search.perform_web_search', _search)
     out = research_topic('product story', max_cards=12)
     titles = [card['title'] for card in out['cards']]
     assert titles[:4] == [f'current-{i}' for i in range(1, 5)]
@@ -234,7 +237,7 @@ def test_official_lane_keeps_named_product_url_even_when_ranked_last(monkeypatch
         return rows
 
     monkeypatch.setattr(
-        'lib.tasks_pkg.handlers.search.perform_web_search', _search)
+        'tofu_search.perform_web_search', _search)
     out = research_topic('SkyNomad launch deck', max_cards=6)
     assert out['cards'][0]['title'] == 'Named product page'
     assert out['cards'][0]['source_hints'] == [

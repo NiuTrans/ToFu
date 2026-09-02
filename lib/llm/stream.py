@@ -2,7 +2,7 @@
 """Streaming chat completion with SSE parsing (sync transport).
 
 Public API:
-  - stream_chat(body, ...) → (assistant_msg, finish_reason, usage)
+  - stream_chat(body, ...) → ProviderStreamResult
 
 The SSE parsing / error classification / tool-call accumulation / anomaly
 diagnostics live in ``lib/llm/_sse_core.py`` and are shared with the async
@@ -18,10 +18,12 @@ import requests
 
 from lib.llm._sse_core import (
     SSEAccumulator,
+    activate_native_orchestration_fallback,
     activate_native_tool_search_fallback,
     classify_status_error,
     prepare_request,
 )
+from lib.llm._sse_framer import SSEFramer
 from lib.llm._transport import (
     CONNECT_TIMEOUT,
     MAX_STREAM_RETRIES,
@@ -31,6 +33,11 @@ from lib.llm._transport import (
     attach_limit_learned,
     get_sync_session,
     prepare_retryable_wait,
+)
+from lib.llm.stream_result import (
+    ProviderStreamResult,
+    ProviderStreamState,
+    ensure_provider_stream_result,
 )
 from lib.llm_errors import (
     AbortedError,
@@ -45,17 +52,41 @@ from lib.llm_errors import (
     decode_error_body,
 )
 from lib.log import get_logger
-from lib.proxy import proxies_for, report_outcome as _proxy_report_outcome
+from lib.proxy import (
+    describe_route,
+    proxies_for,
+    report_outcome as _proxy_report_outcome,
+)
 from lib.subscription_quota import record_codex_quota
 
 logger = get_logger(__name__)
+
+
+def _iter_response_bytes(response):
+    """Yield raw response bytes, with a narrow legacy-test fallback."""
+    iter_content = getattr(response, 'iter_content', None)
+    if callable(iter_content):
+        for chunk in iter_content(chunk_size=64 << 10):
+            if chunk:
+                yield bytes(chunk)
+        return
+    # Older adapters/fakes exposed only the former line-oriented surface.
+    # Treat each non-empty yielded line as a complete event so they can migrate
+    # without reintroducing line parsing into production transports.
+    for line in response.iter_lines(decode_unicode=False):
+        if isinstance(line, str):
+            line = line.encode('utf-8')
+        if line:
+            yield bytes(line) + b'\n\n'
 
 
 def stream_chat(body, *, on_thinking=None, on_content=None,
                 on_tool_call_ready=None,
                 abort_check=None, log_prefix='', api_key=None, base_url=None,
                 extra_headers=None, api_protocol='openai', oauth='',
-                adapter=None, on_attempt_restart=None, on_first_byte_wait=None):
+                adapter=None, on_attempt_restart=None,
+                on_first_byte_wait=None,
+                on_stream_wait=None) -> ProviderStreamResult:
     """Streaming chat completion with callbacks.
 
     Automatically retries on transient connection errors up to
@@ -68,16 +99,19 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
     its partial accumulation (e.g. truncate back to the per-round base) so the
     re-streamed text does not stack on the abandoned attempt's tail.
 
-    ``on_first_byte_wait`` (optional): fired with the current IDLE duration
-    (seconds since the last byte, or since request send when none has
-    arrived) every IDLE_HEARTBEAT_S while the attempt is silent — both
-    before the first SSE byte and during any mid-stream stall. See
-    lib/llm/_transport.StreamIdleWatchdog. There is no read timeout, so
-    this beat is the only liveness signal a long silence produces; the
-    stuck-task reaper depends on it (docstring there).
+    ``on_stream_wait`` (optional): receives the typed current-attempt progress
+    status every ``IDLE_HEARTBEAT_S`` while transport bytes are silent. The
+    status distinguishes response headers, wire traffic, complete SSE events,
+    and semantic progress without borrowing retry-attempt counters.
+
+    ``on_first_byte_wait`` is the legacy duration-only heartbeat. Despite its
+    historical name it reports current transport silence both before the first
+    byte and during a mid-stream stall. New callers should use
+    ``on_stream_wait``.
 
     Returns:
-        (assistant_msg, finish_reason, usage)
+        A typed provider-stream result. Legacy callers may still unpack it as
+        ``(assistant_msg, finish_reason, usage)``.
 
     Raises:
         RateLimitError, PermissionError_, AbortedError,
@@ -95,15 +129,17 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
     _limit_learned = None
     for attempt in range(1 + MAX_STREAM_RETRIES):
         try:
-            msg, finish_reason, usage = _stream_chat_once(
+            stream_result = ensure_provider_stream_result(_stream_chat_once(
                 body, on_thinking=on_thinking, on_content=on_content,
                 on_tool_call_ready=on_tool_call_ready,
                 abort_check=abort_check, log_prefix=log_prefix,
                 attempt=attempt, api_key=api_key, base_url=base_url,
                 extra_headers=extra_headers, api_protocol=api_protocol,
-                oauth=oauth, adapter=adapter, on_first_byte_wait=on_first_byte_wait)
-            usage = attach_limit_learned(usage, _limit_learned)
-            return msg, finish_reason, usage
+                oauth=oauth, adapter=adapter,
+                on_first_byte_wait=on_first_byte_wait,
+                on_stream_wait=on_stream_wait))
+            usage = attach_limit_learned(stream_result.usage, _limit_learned)
+            return stream_result.with_usage(usage)
         except (RateLimitError, PermissionError_, AbortedError, ContentFilterError, PromptTooLongError, EndpointUnreachableError):
             # EndpointUnreachableError: the host is down — retrying it on
             # the SAME slot just burns another connect timeout. Escape to
@@ -132,12 +168,60 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                       abort_check=None, log_prefix='', attempt=0,
                       api_key=None, base_url=None, extra_headers=None,
                       api_protocol='openai', oauth='', adapter=None,
-                      on_first_byte_wait=None):
+                      on_first_byte_wait=None, on_stream_wait=None):
     """Single attempt at a streaming chat completion (sync transport)."""
     plan = prepare_request(
         body, attempt=attempt, log_prefix=log_prefix,
         api_key=api_key, base_url=base_url, extra_headers=extra_headers,
         api_protocol=api_protocol, oauth=oauth)
+
+    _network_route = {
+        'routeId': 'unresolved',
+        'routeMode': 'unknown',
+        'decisionReason': 'not_resolved',
+    }
+    _subscription_route = None
+    _network_latency_ms = None
+    _network_reported = False
+
+    def _set_network_route(metadata, *, subscription_route=None,
+                           latency_ms=None):
+        nonlocal _network_route, _subscription_route, _network_latency_ms
+        _network_route = dict(metadata or _network_route)
+        _subscription_route = subscription_route
+        if latency_ms is not None:
+            _network_latency_ms = max(0.0, float(latency_ms))
+
+    def _report_network_outcome(ok: bool, failure_kind='network_fail'):
+        """Feed the complete stream outcome to the exact route once."""
+        nonlocal _network_reported
+        if _network_reported:
+            return
+        _network_reported = True
+        try:
+            if _subscription_route is not None:
+                from lib.proxy import report_subscription_route
+                report_subscription_route(
+                    plan.url, _subscription_route, ok, _network_latency_ms,
+                    failure_kind=failure_kind)
+            elif _network_route.get('routeMode') in {
+                    'direct', 'proxy', 'env'}:
+                _proxy_report_outcome(
+                    plan.url, ok, _network_latency_ms,
+                    pool_id=_network_route.get('poolId') or '')
+        except Exception as error:
+            logger.debug('%s network outcome report failed: %s',
+                         log_prefix, error)
+
+    def _annotate_network_error(error, failure_stage):
+        """Carry safe route evidence through dispatch exception wrapping."""
+        try:
+            error.network_route = dict(_network_route)
+            error.failure_stage = str(failure_stage or '')[:80]
+        except Exception as annotate_error:
+            logger.debug('%s network error annotation failed: %s',
+                         log_prefix, annotate_error)
+        return error
 
     if plan.responses_transport == 'websocket':
         from lib.llm.responses_websocket import (
@@ -149,7 +233,8 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                 plan, on_thinking=on_thinking, on_content=on_content,
                 on_tool_call_ready=on_tool_call_ready,
                 abort_check=abort_check, log_prefix=log_prefix,
-                on_first_byte_wait=on_first_byte_wait)
+                on_first_byte_wait=on_first_byte_wait,
+                on_stream_wait=on_stream_wait)
         except ResponsesWebSocketUnavailable as exc:
             # The socket failed before response.create was sent, so the same
             # translated request can safely use the proven SSE transport.
@@ -162,22 +247,28 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
     # closed and leaked the fd once per retry against a down endpoint.
     resp = None
     # ── Idle watchdog ──
-    # Two jobs, neither of which bounds the request: beat while the
-    # upstream is silent (HUD + the reaper's liveness clocks), and poll
-    # ``abort_check`` so a Stop pressed during a silent stretch actually
-    # lands. The in-loop abort check below only runs when a line arrives,
-    # so without this poll a zero-byte hang would ignore Stop entirely —
-    # and with no read timeout left, nothing else would ever end it.
-    # Constants are read through the module at call time so tests /
-    # deployments can retune without a re-import.
+    # Three jobs: beat while the upstream is silent (HUD + the reaper's
+    # liveness clocks), poll ``abort_check`` so a Stop pressed during a
+    # silent stretch actually lands, and cut a genuinely SILENT stream short
+    # after the rolling transport-idle window. Any bytes — including SSE
+    # comments/keep-alives — renew the window, matching native Codex. The
+    # in-loop abort check below only runs when a byte arrives, so without the
+    # poll a zero-byte hang would ignore Stop entirely. Constants are read
+    # through the module at call time so tests/deployments can retune.
     import lib.llm._transport as _tp
     _resp_holder = {}
+    _progress = _tp.StreamProgress(0, started_at=plan.t0)
     _watchdog = StreamIdleWatchdog(
         heartbeat_interval=_tp.IDLE_HEARTBEAT_S,
         on_beat=on_first_byte_wait,
+        on_progress=on_stream_wait,
+        progress=_progress,
         abort_check=abort_check,
         on_abort=lambda: (_resp_holder.get('resp') and
-                          _resp_holder['resp'].close()))
+                          _resp_holder['resp'].close()),
+        idle_timeout=_tp.stream_idle_timeout_seconds(),
+        on_idle_timeout=lambda: (_resp_holder.get('resp') and
+                                 _resp_holder['resp'].close()))
     _watchdog.start()
     try:
         _conn_t0 = time.monotonic()
@@ -197,6 +288,11 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                 from lib.desktop import adapter as _ad
                 _pu = _urlparse(plan.url)
                 _relay_path = _pu.path + (('?' + _pu.query) if _pu.query else '')
+                _set_network_route({
+                    'routeId': 'desktop:adapter',
+                    'routeMode': 'desktop',
+                    'decisionReason': 'subscription_adapter',
+                })
                 try:
                     resp = _ad.relay_stream(
                         adapter.get('agent_id', ''),
@@ -205,20 +301,26 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                         body=json.dumps(plan.body).encode(),
                         log_prefix=log_prefix)
                 except _eg.EgressUnavailable as e:
-                    _proxy_report_outcome(plan.url, False)
-                    raise EndpointUnreachableError(
-                        str(e), base_url=plan.url) from e
+                    _report_network_outcome(False, 'connect')
+                    error = EndpointUnreachableError(
+                        str(e), base_url=plan.url)
+                    raise _annotate_network_error(error, 'connect') from e
                 _resp_holder['resp'] = resp
                 if _watchdog.aborted:
                     raise AbortedError('User aborted while awaiting response headers')
-                _proxy_report_outcome(
-                    plan.url, True, (time.monotonic() - _conn_t0) * 1000.0)
+                _network_latency_ms = (
+                    time.monotonic() - _conn_t0) * 1000.0
             else:
                 try:
                     _egress_route = _eg.route_request(plan.url, user_id='')
                 except _eg.EgressUnavailable as e:
                     raise EndpointUnreachableError(str(e), base_url=plan.url) from e
                 if _egress_route != 'direct':
+                    _set_network_route({
+                        'routeId': 'desktop:egress',
+                        'routeMode': 'desktop',
+                        'decisionReason': 'desktop_egress',
+                    })
                     try:
                         resp = _eg.open_stream(
                             plan.url, method='POST', headers=plan.hdrs,
@@ -237,6 +339,13 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                         for _server_route in _server_routes:
                             _attempted_routes.add(_server_route.route_id)
                             _route_t0 = time.monotonic()
+                            _set_network_route({
+                                'routeId': str(_server_route.route_id)[:160],
+                                'routeMode': str(_server_route.mode)[:24],
+                                'decisionReason': 'subscription_route_race',
+                                **({'poolId': str(_server_route.pool_id)[:160]}
+                                   if _server_route.pool_id else {}),
+                            }, subscription_route=_server_route)
                             try:
                                 resp = get_sync_session().post(
                                     plan.url, headers=plan.hdrs,
@@ -275,9 +384,8 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                                         _server_routes.append(_candidate)
                                         _known_routes.add(_candidate.route_id)
                                 continue
-                            report_subscription_route(
-                                plan.url, _server_route, True,
-                                (time.monotonic() - _route_t0) * 1000.0)
+                            _network_latency_ms = (
+                                time.monotonic() - _route_t0) * 1000.0
                             break
                         else:
                             raise EndpointUnreachableError(
@@ -285,28 +393,27 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                                 'connection setup',
                                 base_url=plan.url) from None
                     else:
+                        _generic_proxies = proxies_for(plan.url)
+                        _set_network_route(
+                            describe_route(
+                                plan.url, proxies=_generic_proxies))
                         resp = get_sync_session().post(
                             plan.url, headers=plan.hdrs, json=plan.body,
                             stream=True, timeout=(CONNECT_TIMEOUT, None),
-                            proxies=proxies_for(plan.url),
+                            proxies=_generic_proxies,
                             allow_redirects=False)
                 _resp_holder['resp'] = resp
                 if _watchdog.aborted:
                     # Stop landed while we were blocked pre-headers — the flag
                     # is all we get (no socket handle to close retroactively).
                     raise AbortedError('User aborted while awaiting response headers')
-                # Server-route attempts report their concrete route above;
-                # desktop-agent success belongs to agent health, not a stale
-                # server proxy choice. Only generic non-subscription direct
-                # traffic still feeds the legacy netpath scorer here.
-                if _egress_route == 'direct' and not _server_routes:
-                    _proxy_report_outcome(
-                        plan.url, True,
-                        (time.monotonic() - _conn_t0) * 1000.0)
+                if _network_latency_ms is None:
+                    _network_latency_ms = (
+                        time.monotonic() - _conn_t0) * 1000.0
         except AbortedError:
             raise
         except requests.exceptions.ConnectionError as e:
-            _proxy_report_outcome(plan.url, False)
+            _report_network_outcome(False, 'connect')
             # Connect-phase failure (ConnectTimeout / connection refused /
             # SYN dropped) = the endpoint is down. Convert to
             # EndpointUnreachableError so it escapes the same-key retry loop
@@ -314,14 +421,20 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             # burning CONNECT_TIMEOUT × MAX_STREAM_RETRIES on a dead host.
             logger.warning('%s ✖ Endpoint unreachable (connect phase) %s: %s',
                            log_prefix, plan.url, e)
-            raise EndpointUnreachableError(
-                'endpoint unreachable: %s' % e, base_url=plan.url) from e
+            error = EndpointUnreachableError(
+                'endpoint unreachable: %s' % e, base_url=plan.url)
+            raise _annotate_network_error(error, 'connect') from e
 
         resp_trace = resp.headers.get('M-TraceId', '')
+        _watchdog.notify_response_headers()
         if resp_trace and resp_trace != plan.trace_id:
             logger.debug('%s resp M-TraceId=%s', log_prefix, resp_trace)
 
         if resp.status_code != 200:
+            # A complete application-level HTTP response proves the selected
+            # network route. Provider status classification is separate from
+            # route health.
+            _report_network_outcome(True)
             # decode_error_body, NOT resp.text: requests falls back to
             # ISO-8859-1 for text/* without charset, garbling UTF-8 CJK
             # gateway error pages into mojibake (toio 400 incident 2026-07-25).
@@ -337,12 +450,26 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             if activate_native_tool_search_fallback(
                     resp.status_code, err_body, plan=plan,
                     canonical_body=body):
-                raise RetryableAPIError(
+                error = RetryableAPIError(
                     'native Tool Search rejected; retrying locally',
                     status_code=resp.status_code)
-            classify_status_error(resp.status_code, err_body,
-                                  body=plan.body,
-                                  log_prefix=log_prefix, raw_dumper=plan.raw_dumper)
+                raise _annotate_network_error(
+                    error, 'provider_response')
+            if activate_native_orchestration_fallback(
+                    resp.status_code, err_body, plan=plan,
+                    canonical_body=body):
+                error = RetryableAPIError(
+                    'native orchestration rejected; retrying locally',
+                    status_code=resp.status_code)
+                raise _annotate_network_error(
+                    error, 'provider_response')
+            try:
+                classify_status_error(
+                    resp.status_code, err_body, body=plan.body,
+                    log_prefix=log_prefix, raw_dumper=plan.raw_dumper)
+            except Exception as error:
+                _annotate_network_error(error, 'provider_response')
+                raise
 
         resp.encoding = 'utf-8'
 
@@ -350,40 +477,81 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             plan.body, plan.trace_id, plan.raw_dumper, plan.wire_translator,
             plan.t0, url=plan.url, log_prefix=log_prefix,
             on_thinking=on_thinking, on_content=on_content,
-            on_tool_call_ready=on_tool_call_ready)
+            on_tool_call_ready=on_tool_call_ready,
+            progress=_progress)
 
+        framer = SSEFramer()
+        stopped = False
         try:
-            for line in resp.iter_lines(decode_unicode=True):
-                # Any line — even a blank keep-alive — proves the upstream is
-                # alive: reset the idle clock. Deliberately NOT a disarm:
-                # with no read timeout, a stream that goes quiet again after
-                # its first byte is just as unbounded as one that never
-                # started, so beats must resume and abort must stay pollable.
-                _watchdog.notify_activity()
+            for raw_chunk in _iter_response_bytes(resp):
+                if _watchdog.idle_timed_out:
+                    # The watchdog closed the socket after
+                    # IDLE_STREAM_TIMEOUT_S of silence. Fall through to
+                    # finalize() so the premature-close diagnostics fire.
+                    break
+                _watchdog.notify_transport_bytes(len(raw_chunk))
                 if abort_check and abort_check():
                     acc.mark_aborted()
                     break
-                if acc.feed_line(line):
+                for event in framer.feed(raw_chunk):
+                    if acc.feed_event(event):
+                        stopped = True
+                        break
+                framing_issues = framer.drain_issues()
+                if framing_issues.count:
+                    acc.record_malformed_frames(
+                        framing_issues.count,
+                        framing_issues.diagnostics,
+                    )
+                if stopped:
                     break
         except Exception as _iter_e:
-            if _watchdog.aborted:
+            if _watchdog.idle_timed_out:
+                # Closing the response from the watchdog thread usually
+                # surfaces as an I/O error here; treat it as a premature close
+                # (finalize will flag _missing_done) rather than re-raising.
+                pass
+            elif _watchdog.aborted:
                 raise AbortedError(
                     'User aborted while waiting on %s' % plan.url) from _iter_e
-            from lib.desktop.egress import EgressUnavailable as _EU
-            if isinstance(_iter_e, _EU):
-                # Agent died / stream vanished mid-flight — fail over
-                # (provider-down semantics), never a silent partial success.
-                raise EndpointUnreachableError(
-                    str(_iter_e), base_url=plan.url) from _iter_e
-            raise
+            elif isinstance(_iter_e, (
+                    RateLimitError, PermissionError_, ContentFilterError,
+                    PromptTooLongError, ModelLimitError, RetryableAPIError)):
+                # A typed SSE application error proves the route delivered a
+                # valid provider frame. It belongs to dispatch/provider health,
+                # not network path health.
+                _report_network_outcome(True)
+                _annotate_network_error(_iter_e, 'provider_stream')
+                raise
+            else:
+                from lib.desktop.egress import EgressUnavailable as _EU
+                if isinstance(_iter_e, _EU):
+                    # Agent died / stream vanished mid-flight — fail over
+                    # (provider-down semantics), never a silent partial success.
+                    _report_network_outcome(False, 'midstream_disconnect')
+                    error = EndpointUnreachableError(
+                        str(_iter_e), base_url=plan.url)
+                    raise _annotate_network_error(
+                        error, 'midstream_disconnect') from _iter_e
+                _report_network_outcome(False, 'midstream_io')
+                _annotate_network_error(_iter_e, 'midstream_io')
+                raise
+        for event in framer.finalize():
+            if not stopped and acc.feed_event(event):
+                stopped = True
+        framing_issues = framer.drain_issues()
+        if framing_issues.count:
+            acc.record_malformed_frames(
+                framing_issues.count, framing_issues.diagnostics)
         if _watchdog.aborted:
             # A close() can surface as a CLEAN end of iteration on some
             # urllib3 versions — without this check an aborted attempt would
             # finalize as a silent empty/partial "success".
             raise AbortedError('User aborted while waiting on %s' % plan.url)
-
         acc.fire_final_tool_callback()
-        msg, finish_reason, usage = acc.finalize(resp_trace=resp_trace)
+        stream_result = ensure_provider_stream_result(
+            acc.finalize(resp_trace=resp_trace))
+        msg, finish_reason, usage = stream_result
         # ChatGPT-backed Codex reports the subscription allowance in response
         # headers, separately from the token usage carried by the SSE body.
         # Preserve both facts on the same per-round usage record.
@@ -392,7 +560,36 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                          if isinstance(adapter, dict) and adapter else 'codex'))
         usage = record_codex_quota(
             resp.headers, usage, cache_key=_quota_scope)
-        return msg, finish_reason, usage
+        usage['_network_route'] = dict(_network_route)
+        stream_state = stream_result.state
+        if stream_state is ProviderStreamState.NO_ACTIONABLE_OUTPUT:
+            usage['_failure_stage'] = 'no_actionable_output'
+            _report_network_outcome(True)
+        elif stream_state is ProviderStreamState.SEMANTIC_PROGRESS_TIMEOUT:
+            usage['_failure_stage'] = 'semantic_progress_timeout'
+            _report_network_outcome(True)
+        elif stream_state is ProviderStreamState.MALFORMED_STREAM:
+            usage['_failure_stage'] = 'stream_decode'
+            _report_network_outcome(True)
+        elif stream_state is ProviderStreamState.PREMATURE_CLOSE:
+            usage['_failure_stage'] = 'midstream_close'
+            _report_network_outcome(False, 'midstream_close')
+        elif stream_state is ProviderStreamState.CLIENT_ABORTED:
+            # Caller cancellation is neither route success nor route failure.
+            usage.pop('_failure_stage', None)
+        elif stream_state in {
+                ProviderStreamState.EMPTY_RESPONSE,
+                ProviderStreamState.TOOL_PAYLOAD_MISSING,
+        }:
+            usage['_failure_stage'] = 'provider_stream_invalid'
+            _report_network_outcome(True)
+        elif stream_state is not ProviderStreamState.PROVIDER_FINISHED:
+            usage['_failure_stage'] = 'provider_stream_invalid'
+            _report_network_outcome(False, 'provider_stream_invalid')
+        else:
+            usage.pop('_failure_stage', None)
+            _report_network_outcome(True)
+        return stream_result.with_usage(usage)
     finally:
         _watchdog.cancel()
         try:

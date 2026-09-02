@@ -51,28 +51,20 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _CHARTER_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_charter.py')
 
 
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
-
-
 @pytest.fixture(autouse=True)
-def _clean(flask_app, monkeypatch):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_charter')
-        db.execute('DELETE FROM project_events')
-        db.commit()
-    import lib.push as push_mod
+def _clean(chat_sidecar, monkeypatch):
+    import tests._seed as seed
+    seed.clear_records('project_charter')
+    seed.clear_events()
+    import lib.agent_core.push as push_mod
     monkeypatch.setattr(push_mod, 'push_event', lambda *a, **k: None)
     monkeypatch.setattr('lib.agent_core.push.push_event', lambda *a, **k: None)
     yield
@@ -89,8 +81,8 @@ def _interleave(pc, sibling_commit):
     real = pc.read_charter
     state = {'fired': False}
 
-    def hooked(path):
-        rec = real(path)
+    def hooked(path, *, user_id):
+        rec = real(path, user_id=user_id)
         if not state['fired']:
             state['fired'] = True
             pc.read_charter = real
@@ -116,20 +108,20 @@ def test_concurrent_appends_both_survive(flask_app):
     p = os.path.abspath('/tmp/charter-cc-append')
     with flask_app.app_context():
         pc.commit_charter(p, add_decision='D0', summary='D0',
-                          updated_by_conv='seed')
+                          updated_by_conv='seed', user_id=TEST_OWNER_USER_ID)
 
         def sibling():
             pc.commit_charter(p, add_decision='SIBLING', summary='SIBLING',
-                              updated_by_conv='sibB')
+                              updated_by_conv='sibB', user_id=TEST_OWNER_USER_ID)
 
         hooked, real = _interleave(pc, sibling)
         pc.read_charter = hooked
         try:
             res = pc.commit_charter(p, add_decision='MINE', summary='MINE',
-                                    updated_by_conv='human')
+                                    updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
         finally:
             pc.read_charter = real
-        texts = [d['text'] for d in pc.read_charter(p)['decisions']]
+        texts = [d['text'] for d in pc.read_charter(p, user_id=TEST_OWNER_USER_ID)['decisions']]
 
     assert res.get('ok'), res
     assert 'SIBLING' in texts, (
@@ -152,20 +144,20 @@ def test_concurrent_append_reports_the_truth(flask_app):
     p = os.path.abspath('/tmp/charter-cc-truth')
     with flask_app.app_context():
         pc.commit_charter(p, add_decision='D0', summary='D0',
-                          updated_by_conv='seed')
+                          updated_by_conv='seed', user_id=TEST_OWNER_USER_ID)
 
         def sibling():
             pc.commit_charter(p, add_decision='SIB', summary='SIB',
-                              updated_by_conv='sibB')
+                              updated_by_conv='sibB', user_id=TEST_OWNER_USER_ID)
 
         hooked, real = _interleave(pc, sibling)
         pc.read_charter = hooked
         try:
             res = pc.commit_charter(p, add_decision='MINE', summary='MINE',
-                                    updated_by_conv='human')
+                                    updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
         finally:
             pc.read_charter = real
-        texts = [d['text'] for d in pc.read_charter(p)['decisions']]
+        texts = [d['text'] for d in pc.read_charter(p, user_id=TEST_OWNER_USER_ID)['decisions']]
 
     assert res.get('ok') == ('MINE' in texts), (
         'ok=True MUST mean the decision is actually in the charter — '
@@ -190,20 +182,20 @@ def test_append_never_reverts_a_concurrent_north_star_edit(flask_app):
     import lib.conversations.project_charter as pc
     p = os.path.abspath('/tmp/charter-cc-northstar')
     with flask_app.app_context():
-        pc.commit_charter(p, content='NORTH STAR v1', updated_by_conv='seed')
+        pc.commit_charter(p, content='NORTH STAR v1', updated_by_conv='seed', user_id=TEST_OWNER_USER_ID)
 
         def sibling():
             pc.commit_charter(p, content='NORTH STAR v2 (sibling)',
-                              updated_by_conv='sibB')
+                              updated_by_conv='sibB', user_id=TEST_OWNER_USER_ID)
 
         hooked, real = _interleave(pc, sibling)
         pc.read_charter = hooked
         try:
             res = pc.commit_charter(p, add_decision='MINE', summary='MINE',
-                                    updated_by_conv='human')
+                                    updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
         finally:
             pc.read_charter = real
-        rec = pc.read_charter(p)
+        rec = pc.read_charter(p, user_id=TEST_OWNER_USER_ID)
 
     assert res.get('ok'), res
     assert rec['content'] == 'NORTH STAR v2 (sibling)', (
@@ -230,8 +222,8 @@ def test_content_and_add_decision_are_mutually_exclusive(flask_app):
     p = os.path.abspath('/tmp/charter-cc-mutex')
     with flask_app.app_context():
         res = pc.commit_charter(p, content='NS', add_decision='D',
-                                summary='D', updated_by_conv='human')
-        rec = pc.read_charter(p)
+                                summary='D', updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
+        rec = pc.read_charter(p, user_id=TEST_OWNER_USER_ID)
 
     assert res.get('ok') is False, \
         'content + add_decision in one call must be refused'
@@ -272,14 +264,14 @@ def test_pure_append_is_not_refused_for_a_stale_version(flask_app):
     p = os.path.abspath('/tmp/charter-cc-append-stale')
     with flask_app.app_context():
         pc.commit_charter(p, add_decision='D0', summary='D0',
-                          updated_by_conv='seed')
-        rendered_version = pc.read_charter(p)['version']
+                          updated_by_conv='seed', user_id=TEST_OWNER_USER_ID)
+        rendered_version = pc.read_charter(p, user_id=TEST_OWNER_USER_ID)['version']
         pc.commit_charter(p, add_decision='SIBLING', summary='S',
-                          updated_by_conv='sibB')   # version moves on
+                          updated_by_conv='sibB', user_id=TEST_OWNER_USER_ID)   # version moves on
         res = pc.commit_charter(p, add_decision='MINE', summary='M',
                                 expected_version=rendered_version,
-                                updated_by_conv='human')
-        texts = [d['text'] for d in pc.read_charter(p)['decisions']]
+                                updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
+        texts = [d['text'] for d in pc.read_charter(p, user_id=TEST_OWNER_USER_ID)['decisions']]
 
     assert res.get('ok'), \
         f'a pure append must survive version skew, not 409; got {res}'
@@ -298,12 +290,12 @@ def test_content_overwrite_still_refuses_a_stale_version(flask_app):
     import lib.conversations.project_charter as pc
     p = os.path.abspath('/tmp/charter-cc-content-stale')
     with flask_app.app_context():
-        pc.commit_charter(p, content='v1', updated_by_conv='seed')
-        stale = pc.read_charter(p)['version'] - 1
+        pc.commit_charter(p, content='v1', updated_by_conv='seed', user_id=TEST_OWNER_USER_ID)
+        stale = pc.read_charter(p, user_id=TEST_OWNER_USER_ID)['version'] - 1
         res = pc.commit_charter(p, content='clobber',
                                 expected_version=stale,
-                                updated_by_conv='human')
-        rec = pc.read_charter(p)
+                                updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
+        rec = pc.read_charter(p, user_id=TEST_OWNER_USER_ID)
 
     assert res.get('ok') is False and res.get('error') == 'version_conflict', res
     assert rec['content'] == 'v1', 'the rejected overwrite must not land'
@@ -317,20 +309,20 @@ def test_decision_cap_still_holds_under_replay(flask_app):
     cap = pc._MAX_DECISIONS
     with flask_app.app_context():
         pc.commit_charter(p, add_decision='D0', summary='D0',
-                          updated_by_conv='seed')
+                          updated_by_conv='seed', user_id=TEST_OWNER_USER_ID)
 
         def sibling():
             pc.commit_charter(p, add_decision='SIB', summary='S',
-                              updated_by_conv='sibB')
+                              updated_by_conv='sibB', user_id=TEST_OWNER_USER_ID)
 
         hooked, real = _interleave(pc, sibling)
         pc.read_charter = hooked
         try:
             pc.commit_charter(p, add_decision='MINE', summary='M',
-                              updated_by_conv='human')
+                              updated_by_conv='human', user_id=TEST_OWNER_USER_ID)
         finally:
             pc.read_charter = real
-        decisions = pc.read_charter(p)['decisions']
+        decisions = pc.read_charter(p, user_id=TEST_OWNER_USER_ID)['decisions']
 
     texts = [d['text'] for d in decisions]
     assert len(decisions) <= cap

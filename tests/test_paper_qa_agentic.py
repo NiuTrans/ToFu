@@ -20,7 +20,15 @@ no network. Run standalone: ``python3 tests/test_paper_qa_agentic.py``
 import os
 import sys
 
+TEST_OWNER_USER_ID = 1
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+try:
+    import pytest
+    pytestmark = pytest.mark.unit
+except ImportError:
+    pass
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -31,7 +39,7 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 # ─── Context builder ─────────────────────────────────────────────
 
 def test_split_into_sections_by_heading():
-    from lib.paper import split_into_sections
+    from lib.paper.qa_context import split_into_sections
     text = ('Title Line\nAbstract here.\n\n'
             '# Introduction\nIntro body.\n\n'
             '## Method\nMethod body.\n\n'
@@ -45,7 +53,7 @@ def test_split_into_sections_by_heading():
 
 
 def test_split_fallback_no_headings():
-    from lib.paper import split_into_sections
+    from lib.paper.qa_context import split_into_sections
     text = '\n\n'.join(['Paragraph %d %s' % (i, 'x' * 2000) for i in range(6)])
     secs = split_into_sections(text)
     assert len(secs) >= 2, 'no-heading text should still chunk into pieces'
@@ -53,7 +61,10 @@ def test_split_fallback_no_headings():
 
 
 def test_select_keeps_all_when_under_budget():
-    from lib.paper import split_into_sections, select_relevant_sections
+    from lib.paper.qa_context import (
+        split_into_sections,
+        select_relevant_sections,
+    )
     text = '# A\nshort\n\n# B\nalso short\n'
     secs = split_into_sections(text)
     sel = select_relevant_sections('anything', secs, budget_chars=100000)
@@ -63,7 +74,10 @@ def test_select_keeps_all_when_under_budget():
 
 def test_select_retrieves_relevant_tail_section():
     """The CORE long-paper guarantee: a relevant LATE section is retrieved."""
-    from lib.paper import split_into_sections, select_relevant_sections
+    from lib.paper.qa_context import (
+        split_into_sections,
+        select_relevant_sections,
+    )
     # Build a long paper: a unique tail section after lots of filler so blind
     # head-truncation would drop it.
     filler = '\n\n'.join('# Filler %d\n%s' % (i, 'lorem ipsum dolor ' * 400)
@@ -80,7 +94,7 @@ def test_select_retrieves_relevant_tail_section():
 
 
 def test_build_qa_messages_injects_report():
-    from lib.paper import build_qa_messages
+    from lib.paper.qa_context import build_qa_messages
     report = ('# Paper X\n## Limitations\nThe method degrades on out-of-domain '
               'data and was only tested on English.')
     paper = '# Intro\nWe propose X.\n\n# Method\nX works by foo.'
@@ -95,7 +109,7 @@ def test_build_qa_messages_injects_report():
 
 
 def test_build_qa_messages_long_paper_keeps_tail():
-    from lib.paper import build_qa_messages
+    from lib.paper.qa_context import build_qa_messages
     filler = '\n\n'.join('# Sec %d\n%s' % (i, 'padding words here ' * 500)
                          for i in range(30))
     tail = '# Appendix\nThe secret token is platypus-42.'
@@ -132,7 +146,8 @@ def _patch_dispatch(plan):
 def test_engine_answers_report_only_question_from_injected_report():
     """(a) Report-only claim → answered using the injected report, no tools."""
     import lib.paper.qa_engine as qe
-    from lib.paper import _new_qa_task, build_qa_messages
+    from lib.paper.qa_runtime import _new_qa_task
+    from lib.paper.qa_context import build_qa_messages
     orig = qe.dispatch_stream
     # The model answers in one shot (no tool call) — proving it had the report.
     cap = _patch_dispatch([
@@ -145,7 +160,7 @@ def test_engine_answers_report_only_question_from_injected_report():
         msgs, _ = build_qa_messages('what did you mean in Limitations?',
                                     '# Intro\nfoo', report)
         task = _new_qa_task('qa_t1', 'abcdef0000000000000000000000aa10', 'en', None,
-                            question='what did you mean in Limitations?')
+                            question='what did you mean in Limitations?', user_id=TEST_OWNER_USER_ID)
         qe._run_qa_task(task, msgs)
         assert task['status'] == 'done', task.get('error')
         answer = task['full_text']
@@ -162,9 +177,9 @@ def test_engine_answers_report_only_question_from_injected_report():
 def test_engine_triggers_web_search_for_external_question():
     """(b) External-info question → the loop actually calls web_search."""
     import lib.paper.qa_engine as qe
-    from lib.paper import _new_qa_task
+    from lib.paper.qa_runtime import _new_qa_task
     orig_disp = qe.dispatch_stream
-    orig_tool = qe._execute_report_tool
+    orig_tool = qe.execute_paper_tool
     tool_calls_seen = []
 
     # Round 1: model requests web_search. Round 2: model writes the answer.
@@ -178,10 +193,10 @@ def test_engine_triggers_web_search_for_external_question():
         tool_calls_seen.append(name)
         return ('Search results: ViT, Reformer, Performer …', [{'title': 'ViT'}], None, None, None)
 
-    qe._execute_report_tool = _fake_tool
+    qe.execute_paper_tool = _fake_tool
     try:
         task = _new_qa_task('qa_t2', 'abcdef0000000000000000000000aa11', 'en', None,
-                            question='what built on this paper?')
+                            question='what built on this paper?', user_id=TEST_OWNER_USER_ID)
         qe._run_qa_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'what built on this paper?'},
@@ -196,24 +211,24 @@ def test_engine_triggers_web_search_for_external_question():
         assert any(m.get('role') == 'tool' for m in last_msgs), 'tool result not fed back'
     finally:
         qe.dispatch_stream = orig_disp
-        qe._execute_report_tool = orig_tool
+        qe.execute_paper_tool = orig_tool
     _ok('(b) external question triggers web_search and feeds the result back')
 
 
 def test_engine_discards_interim_draft_with_tool_call():
     """A draft emitted alongside a tool call must not concatenate with the final answer."""
     import lib.paper.qa_engine as qe
-    from lib.paper import _new_qa_task
-    orig_disp, orig_tool = qe.dispatch_stream, qe._execute_report_tool
+    from lib.paper.qa_runtime import _new_qa_task
+    orig_disp, orig_tool = qe.dispatch_stream, qe.execute_paper_tool
     _patch_dispatch([
         ('PARTIAL DRAFT ', [{'id': 't', 'function': {'name': 'web_search',
                                                      'arguments': '{"query":"x"}'}}]),
         ('FINAL ANSWER.', []),
     ])
-    qe._execute_report_tool = lambda *a, **k: ('results', [], None, None, None)
+    qe.execute_paper_tool = lambda *a, **k: ('results', [], None, None, None)
     try:
         task = _new_qa_task('qa_t3', 'abcdef0000000000000000000000aa12', 'en', None,
-                            question='q')
+                            question='q', user_id=TEST_OWNER_USER_ID)
         qe._run_qa_task(task, [{'role': 'system', 'content': 's'},
                                {'role': 'user', 'content': 'q'}])
         assert task['full_text'] == 'FINAL ANSWER.', repr(task['full_text'])
@@ -221,8 +236,44 @@ def test_engine_discards_interim_draft_with_tool_call():
         reset = [e for e in task['events'] if e.get('type') == 'delta_reset']
         assert reset, 'delta_reset event not emitted'
     finally:
-        qe.dispatch_stream, qe._execute_report_tool = orig_disp, orig_tool
+        qe.dispatch_stream, qe.execute_paper_tool = orig_disp, orig_tool
     _ok('engine discards interim draft emitted alongside a tool call')
+
+
+def test_engine_abort_is_never_projected_as_done():
+    """A pre-dispatch abort settles once as aborted with no done event."""
+    import lib.paper.qa_engine as qe
+    from lib.paper.qa_runtime import _new_qa_task
+
+    original_dispatch = qe.dispatch_stream
+
+    def _must_not_dispatch(*_args, **_kwargs):
+        raise AssertionError('pre-aborted Q&A task reached the model')
+
+    qe.dispatch_stream = _must_not_dispatch
+    try:
+        task = _new_qa_task(
+            'qa_abort_contract',
+            'abcdef0000000000000000000000ab01',
+            'en',
+            None,
+            question='stop before work',
+            user_id=TEST_OWNER_USER_ID,
+        )
+        task['abort_event'].set()
+        qe._run_qa_task(task, [
+            {'role': 'system', 'content': 's'},
+            {'role': 'user', 'content': 'q'},
+        ])
+
+        assert task['status'] == 'aborted'
+        event_types = [event.get('type') for event in task['events']]
+        assert 'aborted' in event_types
+        assert 'done' not in event_types
+    finally:
+        qe.dispatch_stream = original_dispatch
+
+    _ok('Q&A abort remains aborted and never emits done')
 
 
 # ─── HTTP endpoint wiring (real Quart app) ──────────────────────
@@ -239,7 +290,7 @@ def test_qa_http_endpoints_wired():
 
     import asyncio
     import lib.paper.qa_engine as qe
-    from lib.paper import _qa_runtime
+    from lib.paper.qa_runtime import _qa_runtime
 
     # Mock dispatch so the spawned task answers instantly without network.
     orig = qe.dispatch_stream

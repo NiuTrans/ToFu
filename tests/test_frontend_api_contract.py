@@ -192,7 +192,9 @@ def _api_js_path_verbs():
     """
     s = _strip_comments(_api_surface_source())
     bases = _base_literals(s)
-    opener = re.compile(r'(get|post|put|patch|del|stream|request|_resolve)\(\s*$')
+    opener = re.compile(
+        r'(get|post|put|patch|del|stream|request|_resolve|'
+        r'_idempotentResponseWrite)\(\s*$')
 
     pairs: set[tuple[str, str]] = set()
     unresolved: list[tuple[str, str]] = []

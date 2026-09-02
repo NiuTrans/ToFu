@@ -50,6 +50,8 @@ def build_citation_audit(report_text: str) -> dict | None:
     if not report_text:
         return None
     try:
+        from lib.search_runtime import ensure_search_runtime
+        ensure_search_runtime()
         from tofu_search.verify import (
             extract_citations_from_text,
             summarize,

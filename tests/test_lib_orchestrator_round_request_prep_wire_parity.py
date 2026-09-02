@@ -1,5 +1,3 @@
-# Incident anchor: born in commit 25134920 — refactor(orchestrator): pt_03f4cdf1 slice 28 — extract round-request ...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 28 — extract the
 round-request preamble cluster from _run.py's stream loop into
 lib.tasks_pkg.orchestrator._round_request_prep.build_round_request().
@@ -13,9 +11,7 @@ the streaming-tool accumulator construction:
        (automatic prefix caching on OpenAI/Qwen),
     3. Emit the messages-snapshot debug event (AFTER the sort so the
        panel reflects the real outbound ordering),
-    4. Build the request body via the LATE-BOUND facade
-       (``_o.build_body`` — a test/consumer that reassigns
-       ``orchestrator.build_body`` MUST steer this call),
+    4. Build the request body through the explicit ``_ports`` dependency,
     5. Attach ``body['_task_id']`` for the session-stable TTL latch in
        add_cache_breakpoints (prevents mid-session cache key shift).
 
@@ -35,6 +31,8 @@ import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUN_PY = ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_run.py'
+ROOT_LOOP_PY = (
+    ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_root_agent_loop.py')
 LEAF_PY = ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_round_request_prep.py'
 
 
@@ -79,8 +77,8 @@ def test_prep_helper_signature():
 # 3. _run.py imports and delegates to the extracted helper
 # ---------------------------------------------------------------------------
 def test_run_py_imports_prep_helper():
-    """_run.py imports build_round_request at module scope."""
-    src = RUN_PY.read_text()
+    """The root loop adapter imports build_round_request."""
+    src = ROOT_LOOP_PY.read_text()
     assert 'from lib.tasks_pkg.orchestrator._round_request_prep import' in src, (
         '_run.py must import the extracted prep helper — expected a '
         '`from lib.tasks_pkg.orchestrator._round_request_prep import ...` '
@@ -93,9 +91,9 @@ def test_run_py_imports_prep_helper():
 def test_run_task_delegates_to_prep_helper():
     """The stream loop's preamble must unpack the 2-tuple from a single
     call to ``build_round_request(...)`` — no inline body left behind."""
-    src = RUN_PY.read_text()
-    assert '_tools_this_round, body = build_round_request(' in src, (
-        '_run.py must unpack `_tools_this_round, body = '
+    src = ROOT_LOOP_PY.read_text()
+    assert 'tools_this_round, body = build_round_request(' in src, (
+        'the adapter must unpack `tools_this_round, body = '
         'build_round_request(...)` in the stream loop')
 
 
@@ -110,13 +108,9 @@ def test_run_py_no_longer_sorts_tool_results_inline():
 
 
 def test_run_py_no_longer_builds_body_inline():
-    """The late-bound facade build_body call must have moved to the
-    leaf. (The string `build_body` legitimately survives in _run.py
-    comments / the facade re-export note, so the guard keys on the
-    `_o.build_body(` call shape.)"""
+    """The request-body dependency belongs to the extracted leaf."""
     src = RUN_PY.read_text()
-    assert '_o.build_body(' not in src, (
-        '_o.build_body(...) must live in _round_request_prep.py, not _run.py')
+    assert 'build_request_body(' not in src
 
 
 def test_run_py_no_longer_attaches_task_id_inline():
@@ -142,25 +136,18 @@ def test_leaf_preserves_step_ordering():
     src = LEAF_PY.read_text()
     i_sort = src.index('sort_tool_results(')
     i_snap = src.index('emit_messages_snapshot_event(')
-    i_body = src.index('_o.build_body(')
+    i_body = src.index('orchestrator_ports.build_request_body(')
     assert i_sort < i_snap < i_body, (
         'leaf must order sort_tool_results → emit_messages_snapshot_event '
-        '→ _o.build_body (snapshot sees the sorted wire ordering; body is '
+        '→ orchestrator_ports.build_request_body (snapshot sees the sorted wire ordering; body is '
         'built from the sorted messages)')
 
 
-def test_leaf_builds_body_via_late_bound_facade():
-    """The leaf MUST call ``_o.build_body`` (module-attribute access on
-    the orchestrator facade at CALL time) — never a from-import binding
-    — so a test/consumer reassigning ``orchestrator.build_body`` steers
-    this call. This invariant is documented at _run.py's own import of
-    the facade."""
+def test_leaf_builds_body_through_the_explicit_port_owner():
+    """All phases must share the concrete, patchable dependency owner."""
     src = LEAF_PY.read_text()
-    assert 'import lib.tasks_pkg.orchestrator as _o' in src, (
-        'leaf must bind the facade module (import lib.tasks_pkg.orchestrator '
-        'as _o) for late-bound build_body access')
-    assert '_o.build_body(' in src, (
-        'leaf must call _o.build_body(...) — late binding preserved')
+    assert 'import lib.tasks_pkg.orchestrator._ports as orchestrator_ports' in src
+    assert 'orchestrator_ports.build_request_body(' in src
 
 
 def test_leaf_attaches_task_id_for_cache_ttl():

@@ -46,7 +46,7 @@ mockups, no competitor logos, no "Chrome" branding.
 2. **The extension popup, connected** — click the toolbar icon; show the green
    "Connected" dot, the server URL field, and the stats grid.
 3. **An assistant task using a tab** — a Tofu chat where the assistant called
-   `browser_read_tab` or `browser_screenshot` and returned a result. Shows the
+   `browser_read_page` or `browser_screenshot` and returned a result. Shows the
    value.
 4. *(optional)* **A full-page screenshot result** — demonstrates the
    `debugger`-backed capture feature that justifies that permission.

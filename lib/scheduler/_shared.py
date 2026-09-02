@@ -1,16 +1,7 @@
-"""lib/scheduler/_shared.py — Shared utilities for timer and proactive subsystems.
+"""Shared scheduler predicates, task configuration, and decision parsing.
 
-Extracted to eliminate duplication between ``timer._execute_continuation()``
-and ``proactive.execute_proactive_task()``, which both follow the same
-seven-step sequence:
-
-  1. Load conversation messages + settings from DB
-  2. Append a caller-provided user message
-  3. Append a placeholder assistant message
-  4. Write messages back with full-text search indexing
-  5. Build an agentic task config from tools_config + conversation settings
-  6. Create the agentic task and set ``activeTaskId``
-  7. Run the task via the unified ``spawn_task`` entry point
+Conversation writes are delegated to :mod:`lib.scheduler.conversation_dispatch`;
+this module never edits a transcript projection directly.
 """
 
 from __future__ import annotations
@@ -19,11 +10,7 @@ import json
 import os as _os
 import re as _re
 import subprocess
-import time
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any
-
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -355,163 +342,9 @@ def build_task_config(tools_config: dict, conv_settings: dict) -> dict:
         'codeExecEnabled': tools_config.get('codeExecEnabled', conv_settings.get('codeExecEnabled', False)),
         'browserEnabled': tools_config.get('browserEnabled', conv_settings.get('browserEnabled', False)),
         'memoryEnabled': tools_config.get('memoryEnabled', conv_settings.get('memoryEnabled', True)),
-        'swarmEnabled': tools_config.get('swarmEnabled', conv_settings.get('swarmEnabled', False)),
         'imageGenEnabled': tools_config.get('imageGenEnabled', conv_settings.get('imageGenEnabled', False)),
         'schedulerEnabled': True,
     }
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  Inject user message + start agentic task
-# ═════════════════════════════════════════════════════════════════════════════
-
-def inject_and_run_task(
-    conv_id: str,
-    user_message: dict[str, Any],
-    tools_config_json: str | dict,
-    log_prefix: str = '',
-) -> str | None:
-    """Load conversation, inject messages, and start an agentic task.
-
-    This is the shared execution core used by both *timer continuation*
-    and *proactive agent execution*.
-
-    Args:
-        conv_id: Target conversation ID.
-        user_message: Complete user message dict (must include ``role``,
-            ``content``, ``timestamp``, and any domain-specific tags like
-            ``_timer`` or ``_proactive``).
-        tools_config_json: Tool configuration — JSON string **or**
-            already-parsed dict.
-        log_prefix: Logging prefix for traceability
-            (e.g. ``'[Timer:tmr_abc123]'``).
-
-    Returns:
-        The agentic ``task_id`` on success, or ``None`` on failure.
-    """
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    from lib.tasks_pkg import spawn_task
-    from lib.tasks_pkg.manager import create_task as create_agentic_task
-
-    try:
-        db = get_thread_db(DOMAIN_CHAT)
-
-        # 1. Load conversation ────────────────────────────────────────
-        from lib.database.conversation_repository import load_conversation
-        snapshot = load_conversation(
-            db, conv_id, metadata_columns=('settings',))
-        if snapshot is None:
-            logger.error('%s Conversation %s not found', log_prefix, conv_id)
-            return None
-        messages = snapshot.messages
-
-        try:
-            settings = json.loads(snapshot.get('settings') or '{}')
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.debug('%s Failed to parse conv settings, defaulting to {}: %s',
-                         log_prefix, e)
-            settings = {}
-
-        # 2. Append caller-provided user message ─────────────────────
-        # Stamp the authoritative _initiator from the legacy source tag the
-        # caller carried (timer / proactive), so the turn is attributable
-        # through the ONE resolver rather than each reader re-sniffing tags.
-        from lib.conversations.turn_initiation import (INITIATOR_PROACTIVE,
-                                                       INITIATOR_TIMER,
-                                                       stamp_initiator)
-        _initiator = (INITIATOR_TIMER if user_message.get('_timer')
-                      else INITIATOR_PROACTIVE if user_message.get('_proactive')
-                      else None)
-        if _initiator:
-            stamp_initiator(user_message, _initiator)
-        messages.append(user_message)
-
-        # 3. Append placeholder assistant message ────────────────────
-        assistant_msg: dict[str, Any] = {
-            'role': 'assistant',
-            'content': '',
-            'thinking': '',
-            'timestamp': datetime.now().isoformat(),
-        }
-        # Propagate source tags so the frontend can style them
-        for tag in ('_timer', '_proactive'):
-            if user_message.get(tag):
-                assistant_msg[tag] = True
-        if _initiator:
-            stamp_initiator(assistant_msg, _initiator)
-        messages.append(assistant_msg)
-
-        # 4. Write messages back to DB ───────────────────────────────
-        from lib.conversations import build_search_text
-
-        search_text = build_search_text(messages)
-        now_ms = int(time.time() * 1000)
-        from lib.database.conversation_repository import replace_messages
-        write_result = replace_messages(
-            db, conv_id, messages,
-            expected_rev=snapshot['rev'],
-            metadata={
-                'updated_at': now_ms,
-                'msg_count': len(messages),
-                'search_text': search_text,
-            })
-        if not write_result.applied:
-            logger.info('%s Conversation %s advanced during scheduler inject; '
-                        'standing down so the next poll can retry safely',
-                        log_prefix, conv_id)
-            return None
-
-        # Event-driven cross-device sync: a proactive/timer turn appended a new
-        # user+assistant pair, so push the post-write rev → a sibling tab with
-        # this conv open surfaces the new turn without a manual refresh.
-        try:
-            from lib.conversations import notify_conv_changed as _notify_cc
-            _notify_cc(conv_id, rev=write_result.rev)
-        except Exception as _ne:
-            logger.debug('%s conv-changed notify skipped: %s', log_prefix, _ne)
-
-        # 5. Build config ────────────────────────────────────────────
-        if isinstance(tools_config_json, str):
-            try:
-                tools_cfg = json.loads(tools_config_json or '{}')
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.debug('%s Failed to parse tools_config, defaulting to {}: %s',
-                             log_prefix, e)
-                tools_cfg = {}
-        else:
-            tools_cfg = tools_config_json or {}
-
-        config = build_task_config(tools_cfg, settings)
-
-        # 6. Create agentic task + set activeTaskId ──────────────────
-        agentic_task = create_agentic_task(conv_id, messages, config)
-        agentic_task_id = agentic_task['id']
-
-        # Serialized read-merge-write (settings_store) so this activeTaskId
-        # stamp doesn't clobber a concurrent tool-state / autopilot settings
-        # write on the same row (reuses this thread's `db`).
-        from lib.conversations import set_conversation_settings
-        # notify=False: notify_conv_changed was already emitted after the
-        # messages write above (no double push); gate still invalidates cache.
-        set_conversation_settings(conv_id, {'activeTaskId': agentic_task_id},
-                                  db=db, notify=False)
-
-        logger.info('%s Created agentic task %s in conv=%s',
-                     log_prefix, agentic_task_id[:8], conv_id[:12])
-
-        # 7. Run via the unified spawn entry point ───────────────────
-        # spawn_task is loop-aware: inside the Quart event loop it runs
-        # run_task in asyncio.to_thread (tracked/cancellable); outside a
-        # loop it falls back to a daemon thread. This replaces the bare
-        # threading.Thread that bypassed the event loop.
-        spawn_task(agentic_task)
-
-        return agentic_task_id
-
-    except Exception as e:
-        logger.error('%s Failed to inject and run task: %s',
-                     log_prefix, e, exc_info=True)
-        return None
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -576,7 +409,7 @@ def build_poll_system_prompt(decision_key: str, tools_available: bool,
     if tools_available:
         tool_line = (
             "\n\nYou have access to tools (web_search, fetch_url, run_command, "
-            "list_dir, read_files, grep_search, find_files, etc.) to actively "
+            "read_files, grep_search, find_files, etc.) to actively "
             "gather information. Use them only when the provided data is "
             "insufficient, and minimise tool calls.")
     rules = _POLL_COMMON_RULES.format(key=decision_key) + extra_rules

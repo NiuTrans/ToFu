@@ -1,16 +1,13 @@
-"""Tests for the unified turn-initiation seam (lib/conversations/turn_initiation).
+"""Tests for the canonical turn-initiation vocabulary.
 
 Covers the ONE resolver (``resolve_initiator``) + the ONE write seam
 (``stamp_initiator``), and proves each of the three backend injection choke
 points stamps the right ``_initiator`` value:
 
   * message_queue.dispatch_next_queued  → brain / peer / operator
-  * scheduler._shared.inject_and_run_task → proactive / timer
+  * scheduler.conversation_dispatch.dispatch_scheduled_turn → proactive / timer
   * swarm.integration._start_autocontinue_turn → swarm  (marker asserted via
     the resolver; the DB path itself is exercised elsewhere)
-
-Also proves the one-directional migration: a message carrying ONLY a legacy
-boolean (no ``_initiator``) still resolves to the correct initiator.
 
 Pure logic — no DB / network. Run under pytest or standalone.
 """
@@ -24,7 +21,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.conversations.turn_initiation import (  # noqa: E402
+from lib.turn_initiation import (  # noqa: E402
     INITIATOR_AUTOPILOT, INITIATOR_BRAIN, INITIATOR_HUMAN, INITIATOR_OPERATOR,
     INITIATOR_PEER, INITIATOR_PROACTIVE, INITIATOR_SWARM, INITIATOR_TIMER,
     is_auto_initiated, resolve_initiator, stamp_initiator)
@@ -47,10 +44,10 @@ def test_stamp_human_is_noop():
     assert '_initiator' not in m
 
 
-def test_stamp_unknown_value_ignored():
+def test_stamp_unknown_value_rejected():
     m = {'role': 'user'}
-    stamp_initiator(m, 'nonsense')
-    assert '_initiator' not in m
+    with pytest.raises(ValueError, match='unknown turn initiator'):
+        stamp_initiator(m, 'nonsense')
 
 
 # ─────────────────────────── resolve_initiator ──────────────────────────
@@ -61,33 +58,28 @@ def test_resolve_defaults_to_human():
     assert resolve_initiator(None) == INITIATOR_HUMAN
 
 
-def test_resolve_prefers_explicit_initiator_over_legacy():
-    """_initiator is authoritative even if a stale legacy boolean disagrees."""
+def test_resolve_uses_only_explicit_initiator():
     m = {'_initiator': INITIATOR_BRAIN, '_isVirtualUser': True}
     assert resolve_initiator(m) == INITIATOR_BRAIN
 
 
-@pytest.mark.parametrize('legacy,expected', [
-    ({'_isVirtualUser': True}, INITIATOR_AUTOPILOT),
-    ({'_autopilotRunId': 'ar-1'}, INITIATOR_AUTOPILOT),
-    ({'_proactive': True}, INITIATOR_PROACTIVE),
-    ({'_timer': True}, INITIATOR_TIMER),
-    ({'_brainDispatch': True}, INITIATOR_BRAIN),
-    ({'_swarmAutoContinue': True}, INITIATOR_SWARM),
-    ({'_peerMessage': True}, INITIATOR_PEER),
-    ({'_peerMessage': True, '_peerHuman': True}, INITIATOR_OPERATOR),
+@pytest.mark.parametrize('feature_flag', [
+    {'_isVirtualUser': True},
+    {'_autopilotRunId': 'ar-1'},
+    {'_proactive': True},
+    {'_timer': True},
+    {'_brainDispatch': True},
+    {'_swarmAutoContinue': True},
+    {'_peerMessage': True, '_peerHuman': True},
 ])
-def test_resolve_legacy_boolean_fallback(legacy, expected):
-    """One-directional migration: a pre-migration message carrying ONLY a
-    legacy boolean still resolves to the correct initiator."""
-    legacy['role'] = 'user'
-    assert resolve_initiator(legacy) == expected
+def test_resolve_does_not_infer_identity_from_feature_flags(feature_flag):
+    assert resolve_initiator(feature_flag) == INITIATOR_HUMAN
 
 
 def test_is_auto_initiated():
     assert not is_auto_initiated({'role': 'user', 'content': 'hi'})
     assert is_auto_initiated({'_initiator': INITIATOR_TIMER})
-    assert is_auto_initiated({'_proactive': True})  # legacy fallback
+    assert not is_auto_initiated({'_proactive': True})
 
 
 # ────────────── choke point 1: message_queue.dispatch mapping ────────────
@@ -125,6 +117,19 @@ def test_queue_operator_stamps_operator():
     assert resolve_initiator(m) == INITIATOR_OPERATOR
 
 
+def test_shared_queue_mapper_covers_v1_and_v2_consumers():
+    from lib.message_queue import _stamp_queued_turn_initiator
+
+    brain = {'role': 'user', 'content': 'do epic'}
+    _stamp_queued_turn_initiator(brain, {'_brainDispatch': True})
+    assert resolve_initiator(brain) == INITIATOR_BRAIN
+
+    operator = {'role': 'user', 'content': 'human nudge'}
+    _stamp_queued_turn_initiator(
+        operator, {'_peerMessage': True, '_peerHuman': True})
+    assert resolve_initiator(operator) == INITIATOR_OPERATOR
+
+
 # ─────────── source-structure pins (the real seams call stamp_initiator) ──
 #
 # The mapping tests above use a local mirror; these pins prove the SHIPPED
@@ -144,7 +149,7 @@ def test_queue_seam_source_contains_stamp():
 
 
 def test_scheduler_seam_source_contains_stamp():
-    src = _read('lib/scheduler/_shared.py')
+    src = _read('lib/scheduler/conversation_dispatch.py')
     assert 'stamp_initiator' in src
     assert 'INITIATOR_TIMER' in src and 'INITIATOR_PROACTIVE' in src
 
@@ -154,23 +159,7 @@ def test_swarm_seam_source_contains_stamp():
     assert 'stamp_initiator' in src and 'INITIATOR_SWARM' in src
 
 
-# ─────────── reconcile._is_special_turn routes through the resolver ───────
-
-def test_reconcile_special_turn_protects_all_auto_initiators():
-    from lib.conversations.reconcile import _is_special_turn
-    # Every auto-initiated empty turn must be protected from the ghost sweep.
-    for marker in ({'_initiator': INITIATOR_PROACTIVE},
-                   {'_initiator': INITIATOR_TIMER},
-                   {'_initiator': INITIATOR_BRAIN},
-                   {'_initiator': INITIATOR_SWARM},
-                   {'_proactive': True}):     # legacy fallback too
-        m = {'role': 'assistant', 'content': '', **marker}
-        assert _is_special_turn(m), f'not protected: {marker}'
-    # A plain empty human/assistant turn is NOT special.
-    assert not _is_special_turn({'role': 'assistant', 'content': ''})
-
-
 if __name__ == '__main__':
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_turn_initiation.__main__')
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_turn_initiation.__main__')
     sys.exit(pytest.main([__file__, '-v']))

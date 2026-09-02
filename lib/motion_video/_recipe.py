@@ -1,7 +1,7 @@
 """lib/motion_video/_recipe.py — Topic → scenes.json front-half (P4).
 
 The missing first half of the motion-video pipeline
-(docs/PRODUCTION_PIPELINE_DESIGN.md §2.2): turn a bare NEWS TOPIC into a
+(docs/modules/production.md): turn a bare NEWS TOPIC into a
 validated ``scenes.json`` the existing engine can render. Three stages,
 built on the reusable stage-graph contract (:mod:`lib.production.stages`) so
 every stage
@@ -71,11 +71,12 @@ _RESEARCH_CHECKPOINT_VERSION = evidence_checkpoint_version(freshness='week')
 
 def _web_search(query: str, *, user_question: str = '', freshness: str = '',
                 max_results: int = 12, deepen: bool = False):
-    """Run one web search through the tofu-search facade. Returns results."""
-    from lib.tasks_pkg.handlers import search as _facade
-    return _facade.perform_web_search(query, user_question=user_question,
-                                      freshness=freshness,
-                                      max_results=max_results, deepen=deepen)
+    """Run one web search through the tofu-search service. Returns results."""
+    from lib.search_runtime import ensure_search_runtime
+    search_runtime = ensure_search_runtime()
+    return search_runtime.perform_web_search(
+        query, user_question=user_question, freshness=freshness,
+        max_results=max_results, deepen=deepen)
 
 
 def _llm_chat(messages, **kwargs):

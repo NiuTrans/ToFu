@@ -18,6 +18,8 @@ UI users have admin scope locally so the settings panel keeps working.
 
 from __future__ import annotations
 
+import time
+
 from quart import Blueprint
 
 from lib.api_response import (
@@ -46,6 +48,9 @@ api_v1_mcp_bp = Blueprint('api_v1_mcp', __name__)
         'and (when connected) the upstream server\'s reported version. '
         'The ``env`` block is intentionally stripped from each entry; '
         'use ``stored_env_keys`` to learn which keys have stored values. '
+        'A logically connected local server may report ``parked=true`` when '
+        'its idle stdio child has exited; its catalog remains available and '
+        'the next tool call reconnects transparently. '
         'When a server\'s automatic reconnect is failing, ``breaker`` is '
         '``{failures, retry_in, next_retry_ts}`` (else ``null``).'
     ),
@@ -58,7 +63,9 @@ def list_servers_v1():
 
     config = load_mcp_config()
     bridge = get_bridge()
-    connected_servers = {s['name'] for s in bridge.list_servers()}
+    connected_servers = {
+        row['name']: row for row in bridge.list_servers()
+    }
 
     servers = []
     for name, srv_cfg in config.items():
@@ -69,16 +76,16 @@ def list_servers_v1():
         server_impl_name = ''
         protocol_version = ''
         compatibility_notice = None
+        parked = False
         if is_connected:
-            for s in bridge.list_servers():
-                if s['name'] == name:
-                    tools_count = s['tools_count']
-                    tool_names = s['tool_names']
-                    server_version = s.get('server_version', '') or ''
-                    server_impl_name = s.get('server_impl_name', '') or ''
-                    protocol_version = s.get('protocol_version', '') or ''
-                    compatibility_notice = s.get('compatibility_notice')
-                    break
+            server_row = connected_servers[name]
+            tools_count = server_row['tools_count']
+            tool_names = server_row['tool_names']
+            server_version = server_row.get('server_version', '') or ''
+            server_impl_name = server_row.get('server_impl_name', '') or ''
+            protocol_version = server_row.get('protocol_version', '') or ''
+            compatibility_notice = server_row.get('compatibility_notice')
+            parked = bool(server_row.get('parked'))
         # Circuit-breaker status: present only for servers whose automatic
         # reconnect is currently failing+backing off, so the UI can show
         # "retrying in N min" instead of a bare "disconnected".
@@ -96,6 +103,7 @@ def list_servers_v1():
             'header_env_keys': header_env_keys(srv_cfg),
             'enabled': srv_cfg.get('enabled', True),
             'connected': is_connected,
+            'parked': parked,
             'tools_count': tools_count,
             'tool_names': tool_names,
             'disabled_tools': disabled_tools,
@@ -345,7 +353,7 @@ def set_server_tools_v1(name):
     description=(
         'Returns each catalog entry annotated with ``installed`` / '
         '``connected`` / ``tools_count`` / ``server_version`` / '
-        '``protocol_version`` / ``compatibility_notice`` / '
+        '``protocol_version`` / ``compatibility_notice`` / ``parked`` / '
         '``stored_env_keys`` (which env vars already have a stored value, '
         '*without* leaking the value) / ``cred_health`` (``expired`` when the '
         'stored session cookie/token no longer authenticates a live server). '
@@ -361,20 +369,24 @@ def get_catalog_v1():
 
     config = load_mcp_config()
     bridge = get_bridge()
-    connected_names = {s['name'] for s in bridge.list_servers()}
+    connected_servers = {
+        row['name']: row for row in bridge.list_servers()
+    }
+    connected_names = set(connected_servers)
 
     def _live_meta(sid):
         """Runtime metadata for one connected server."""
-        for s in bridge.list_servers():
-            if s['name'] == sid:
-                return {
-                    'tools_count': s['tools_count'],
-                    'server_version': s.get('server_version', '') or '',
-                    'server_impl_name': s.get('server_impl_name', '') or '',
-                    'protocol_version': s.get('protocol_version', '') or '',
-                    'compatibility_notice': s.get('compatibility_notice'),
-                }
-        return {}
+        server_row = connected_servers.get(sid)
+        if server_row is None:
+            return {}
+        return {
+            'tools_count': server_row['tools_count'],
+            'server_version': server_row.get('server_version', '') or '',
+            'server_impl_name': server_row.get('server_impl_name', '') or '',
+            'protocol_version': server_row.get('protocol_version', '') or '',
+            'compatibility_notice': server_row.get('compatibility_notice'),
+            'parked': bool(server_row.get('parked')),
+        }
 
     entries = []
     catalog_ids = set()
@@ -392,6 +404,7 @@ def get_catalog_v1():
             **entry,
             'installed': installed,
             'connected': connected,
+            'parked': bool(live.get('parked')),
             'tools_count': tools_count,
             'disabled_tools': [t for t in ((config.get(sid, {}) or {}).get('disabled_tools') or [])
                                if isinstance(t, str)],
@@ -439,6 +452,7 @@ def get_catalog_v1():
             'custom': True,
             'installed': True,
             'connected': connected,
+            'parked': bool(live.get('parked')),
             'tools_count': tools_count,
             'disabled_tools': [t for t in (srv_cfg.get('disabled_tools') or [])
                                if isinstance(t, str)],
@@ -683,5 +697,83 @@ def uninstall_from_catalog_v1():
                    server_id)
     return api_ok(message=f'{server_id} was not installed', purged=False)
 
+
+# ── Upstream version updates ───────────────────────────────────────
+
+@api_v1_mcp_bp.route('/api/v1/mcp/updates', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Check installed servers for upstream updates',
+    description=(
+        'Compares each configured stdio server\'s launch spec (npx/uvx) '
+        'against its upstream registry (npm/PyPI). Returns ``{updates: '
+        '{name: {updatable, source, package, current, latest, pinned, '
+        'update_available, ...}}}``. ``update_available`` is ``null`` when '
+        'the current version cannot be determined (floating spec + not '
+        'connected); non-updatable servers carry ``updatable: false`` + '
+        'a ``reason``. Latest-version sightings are cached server-side.'
+    ),
+    tags=['mcp'],
+)
+async def check_updates_v1():
+    from lib.mcp.updates import check_all_updates
+
+    try:
+        updates = await check_all_updates()
+    except Exception as e:
+        logger.error('[MCP.v1] updates check failed: %s', e, exc_info=True)
+        return api_internal_error(e, source='api_v1.mcp.updates_check')
+    return api_ok({'updates': updates, 'checked_at': time.time()})
+
+
+@api_v1_mcp_bp.route('/api/v1/mcp/updates/apply', methods=['POST'])
+@require_auth
+@api_meta(
+    summary='Pin a server to the latest upstream release and reconnect',
+    description=(
+        'Body: ``{id}``. Rewrites the stored launch args to pin the '
+        'registry-latest version (env/credentials preserved), then '
+        'reconnects an enabled server so the new code is what runs. A '
+        'reconnect failure after the config was rewritten returns 500 '
+        'with ``config_saved: true`` (mirrors the install flow).'
+    ),
+    tags=['mcp'],
+)
+async def apply_update_v1():
+    from lib.mcp.client import MCPConnectError
+    from lib.mcp.updates import apply_update
+    from lib.request_parser import async_parse_body
+
+    data = await async_parse_body()
+    server_id = data.get('id', '').strip()
+    if not server_id:
+        return api_bad_request('server id is required', field='id')
+
+    try:
+        result = await apply_update(server_id)
+    except KeyError:
+        return api_not_found(f'Server "{server_id}" not in config')
+    except ValueError as e:
+        return api_bad_request(
+            f'Server "{server_id}" is not updatable ({e})')
+    except MCPConnectError as e:
+        logger.error('[MCP.v1] update apply %s: reconnect failed: %s',
+                     server_id, e)
+        return api_error(
+            f'Updated but reconnection failed.\n\n{e}', status=500,
+            config_saved=True, updated=True,
+            stderr_tail=e.stderr_tail or '')
+    except Exception as e:
+        logger.error('[MCP.v1] update apply %s crashed: %s', server_id, e,
+                     exc_info=True)
+        return api_internal_error(e, source='api_v1.mcp.update_apply')
+
+    if result.get('error'):
+        return api_error(
+            f'Upstream version lookup failed for '
+            f'{result.get("package", server_id)}', status=502,
+            package=result.get('package', ''),
+            source=result.get('source', ''))
+    return api_ok(**result)
 
 __all__ = ['api_v1_mcp_bp']

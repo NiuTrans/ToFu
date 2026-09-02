@@ -44,6 +44,7 @@ def _mk_task(**over):
     t = {
         'id': 'grade-task-1',
         'convId': 'cv-grade-1',
+        '_userId': 1,
         'status': 'running',
         'aborted': False,
         'events': [],
@@ -52,6 +53,9 @@ def _mk_task(**over):
         '_t_last_event': 0.0,
     }
     t.update(over)
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+    with tasks_lock:
+        tasks[t['id']] = t
     return t
 
 
@@ -64,7 +68,7 @@ def _mk_item(fn, status='searching', fn_args=None, tc_id='tc-1'):
 @pytest.fixture()
 def captured_events(monkeypatch):
     """Capture the heartbeat's emitted events (append_event facade stub)."""
-    from lib.tasks_pkg import tool_dispatch
+    import lib.tasks_pkg.tool_dispatch._heartbeat as tool_dispatch
     events = []
     monkeypatch.setattr(tool_dispatch, 'append_event',
                         lambda task, ev: events.append(ev))
@@ -86,7 +90,7 @@ def test_nonexempt_heartbeat_marks_selftick_and_skips_clock(captured_events):
     """web_search is NOT in the human-wait table: its heartbeat tick must be
     marked ``_selfTick`` (transport only) and must NOT refresh
     ``_dispatch_heartbeat`` — otherwise a hung ordinary tool is reap-proof."""
-    from lib.tasks_pkg.tool_dispatch import _emit_tool_heartbeat
+    from lib.tasks_pkg.tool_dispatch._heartbeat import _emit_tool_heartbeat
     task = _mk_task()
     n = _emit_tool_heartbeat(task, [_mk_item('web_search')], time.time() - 12)
     assert n == 1
@@ -105,7 +109,7 @@ def test_nonexempt_heartbeat_tick_does_not_bump_event_clock(no_db_persist):
     """END-TO-END through the REAL append_event: a marked tick must not bump
     ``_t_last_event`` either (both reaper clocks must go stale for a hung
     ordinary tool)."""
-    from lib.tasks_pkg.tool_dispatch import _emit_tool_heartbeat
+    from lib.tasks_pkg.tool_dispatch._heartbeat import _emit_tool_heartbeat
     task = _mk_task()
     stale = time.time() - 2400
     task['_t_last_event'] = stale
@@ -121,7 +125,7 @@ def test_nonexempt_heartbeat_tick_does_not_bump_event_clock(no_db_persist):
 def test_exempt_ask_human_keeps_clock_refresh_and_unmarked(captured_events):
     """ANCHOR (ratified 2026-07-25): ask_human may wait days — its heartbeat
     still refreshes ``_dispatch_heartbeat`` and its tick stays unmarked."""
-    from lib.tasks_pkg.tool_dispatch import _emit_tool_heartbeat
+    from lib.tasks_pkg.tool_dispatch._heartbeat import _emit_tool_heartbeat
     task = _mk_task()
     t0 = time.time() - 12
     n = _emit_tool_heartbeat(task, [_mk_item('ask_human')], t0)
@@ -133,7 +137,7 @@ def test_exempt_ask_human_keeps_clock_refresh_and_unmarked(captured_events):
 def test_exempt_await_task_wait_vs_status(captured_events):
     """await_task is exempt ONLY when action='wait' (the match callable) —
     a plain status/list call is an ordinary tool and must NOT be protected."""
-    from lib.tasks_pkg.tool_dispatch import _emit_tool_heartbeat
+    from lib.tasks_pkg.tool_dispatch._heartbeat import _emit_tool_heartbeat
     task = _mk_task()
     _emit_tool_heartbeat(task, [_mk_item('await_task', fn_args={'action': 'wait'})],
                          time.time() - 5)
@@ -152,7 +156,7 @@ def test_mixed_round_human_wait_keeps_round_alive(captured_events):
     """A round containing a LIVE human-wait tool is alive by design: the
     exempt member's tick stays unmarked (bumps the event clock), the hung
     ordinary member's tick is marked."""
-    from lib.tasks_pkg.tool_dispatch import _emit_tool_heartbeat
+    from lib.tasks_pkg.tool_dispatch._heartbeat import _emit_tool_heartbeat
     task = _mk_task()
     items = [_mk_item('ask_human', tc_id='tc-h'),
              _mk_item('web_search', tc_id='tc-w')]
@@ -204,16 +208,13 @@ def test_run_command_stdout_chunk_is_real_evidence(no_db_persist):
 # ═════════════════════════════════════════════════════════════════════
 
 def _reaper_harness(monkeypatch, task):
-    from lib.tasks_pkg.manager import _maintenance, _registry
+    import lib.tasks_pkg.manager._maintenance as _maintenance
+    from tests.support.chat_tasks import chat_task_registry
     monkeypatch.setattr(_maintenance, '_stuck_task_max_silent_secs',
                         lambda: 1800, raising=True)
     monkeypatch.setattr(_maintenance, '_finalize_reaped_stuck_task',
                         lambda t: None, raising=True)
-    fake = {task['id']: task}
-    monkeypatch.setattr(_registry, 'tasks', fake, raising=True)
-    monkeypatch.setattr(_registry, 'tasks_lock', threading.Lock(), raising=True)
-    monkeypatch.setattr(_maintenance, 'tasks', fake, raising=True)
-    monkeypatch.setattr(_maintenance, 'tasks_lock', threading.Lock(), raising=True)
+    monkeypatch.setitem(chat_task_registry, task['id'], task)
     return _maintenance
 
 
@@ -221,7 +222,7 @@ def test_reaper_reaps_hung_nonexempt_tool_with_heartbeat_ticking(monkeypatch, no
     """THE incident shape: a task wedged 40min inside run_command while the
     heartbeat ticks every 15s. With grading, the ticks prove nothing — the
     reaper must fire."""
-    from lib.tasks_pkg.tool_dispatch import _emit_tool_heartbeat
+    from lib.tasks_pkg.tool_dispatch._heartbeat import _emit_tool_heartbeat
     now = time.time()
     task = _mk_task(created_at=now - 2400,
                     _t_last_event=now - 2400,
@@ -239,7 +240,7 @@ def test_reaper_reaps_hung_nonexempt_tool_with_heartbeat_ticking(monkeypatch, no
 def test_reaper_spares_exempt_human_wait(monkeypatch, no_db_persist):
     """ANCHOR: the same doubly-stale task, but the in-flight tool is
     ask_human — the ratified human-wait exemption must spare it."""
-    from lib.tasks_pkg.tool_dispatch import _emit_tool_heartbeat
+    from lib.tasks_pkg.tool_dispatch._heartbeat import _emit_tool_heartbeat
     now = time.time()
     task = _mk_task(created_at=now - 2400,
                     _t_last_event=now - 2400,

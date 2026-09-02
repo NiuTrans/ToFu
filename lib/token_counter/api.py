@@ -79,9 +79,6 @@ def count_tokens(messages: list, *,
     else:
         candidates = force_backend(effective_mode)
 
-    # --- Cheap pre-estimate, used to gate network tiers ---
-    cheap_pre = cheap_estimate(messages, system=system, tools=tools)
-
     # --- Walk the list ---
     kwargs = {
         'system': system,
@@ -91,21 +88,43 @@ def count_tokens(messages: list, *,
         'api_key': api_key,
         'context_limit': context_limit,
     }
+    # Most calls finish in the usage cache or a local tokenizer.  The cheap
+    # estimate cannot affect either successful result, so do not scan a long
+    # request merely to throw that work away.  Materialize it only when a
+    # network tier needs its threshold decision or all stronger tiers fall
+    # through to the heuristic.  The same value is handed to that fallback so
+    # the failure path also scans at most once.
+    cheap_pre: int | None = None
+
+    def _get_cheap_pre() -> int:
+        nonlocal cheap_pre
+        if cheap_pre is None:
+            cheap_pre = cheap_estimate(
+                messages, system=system, tools=tools)
+        return cheap_pre
+
     for counter in candidates:
         # Skip network tiers when the cheap estimate is far below the
         # context limit (saves the round-trip).
         if counter.needs_network and context_limit and effective_mode == 'auto':
-            if cheap_pre < context_limit * API_THRESHOLD:
+            current_cheap = _get_cheap_pre()
+            if current_cheap < context_limit * API_THRESHOLD:
                 logger.debug(
                     '[TokenCounter] Skipping %s (needs network, cheap=%d < %.0f%% of %d)',
-                    counter.name, cheap_pre, API_THRESHOLD*100, context_limit)
+                    counter.name, current_cheap,
+                    API_THRESHOLD*100, context_limit)
                 continue
 
         if not counter.supports(model):
             continue
 
         try:
-            n = counter.count(messages, model=model, **kwargs)
+            n = counter.count(
+                messages,
+                model=model,
+                cheap_estimate_tokens=cheap_pre,
+                **kwargs,
+            )
         except Exception as e:
             # TokenCounter.count() must never raise, but guard anyway.
             logger.warning('[TokenCounter] Backend %s raised: %s',
@@ -121,7 +140,7 @@ def count_tokens(messages: list, *,
 
     # Should be impossible (heuristic always succeeds), but defend anyway.
     return CountResult(
-        tokens=cheap_pre,
+        tokens=_get_cheap_pre(),
         method='heuristic',
         elapsed_ms=int((time.time() - t0) * 1000),
         confidence='approx',

@@ -3,53 +3,95 @@ stuck-task reaper (dual-clock wedged-task detection + full finalization).
 """
 
 import json
+import threading
 import time
 
 from lib.agent_core.events import EventType, build_event
 from lib.error_envelope import to_json as _err_to_json
 from lib.log import get_logger
 
-from lib.tasks_pkg.manager._state import (
-    _chat_runtime,
+from lib.tasks_pkg.manager.runtime import (
+    chat_task_runtime,
     _clear_latest_task,
     _conv_latest_task,
     _conv_latest_task_lock,
-    tasks,
-    tasks_lock,
 )
 from lib.tasks_pkg.manager._events import append_event
 from lib.tasks_pkg.manager._persist import _upsert_task_row, build_result_meta
-from lib.tasks_pkg.manager._sync import (
-    _dispatch_queued_message,
-    _sync_result_to_conversation,
-)
 
 logger = get_logger(__name__)
+
+
+# The in-memory stuck-task reaper and queue-lease reaper are cheap liveness
+# checks and intentionally run on every 60 s cleanup tick.  Result-level
+# reconciliation is different: it scans the durable task-results projection.
+# Running that storage scan every minute used to deserialize and ship the full
+# task-result blobs (133 MiB on the 2026-08-23 authority) and continued to
+# reread them every minute even after the compact projection fixed the 64 MiB
+# protocol-frame failure.  Give this heavier consistency audit its own cadence.
+_ORPHAN_RESULT_REPORT_INTERVAL_SECS = 15 * 60.0
+_ORPHAN_RESULT_REPORT_RETRY_SECS = 60.0
+_orphan_result_report_gate_lock = threading.Lock()
+_next_orphan_result_report_monotonic = 0.0
+
+# Terminal persistence drops the task's full input context immediately, but
+# CPython/glibc may keep those now-free arenas mapped indefinitely once shared
+# cgroup pressure subsides.  The existing 60-second maintenance owner consumes
+# this event, coalescing any number of task completions into one heap trim.
+_released_task_heap_trim_requested = threading.Event()
+_released_task_heap_trim_lock = threading.Lock()
+
+
+def _claim_orphan_result_report(now_monotonic: float | None = None) -> bool:
+    """Claim one process-wide orphan-result audit when its cadence is due.
+
+    The short provisional deadline is deliberate: if the claimed scan raises,
+    another cleanup tick retries in one minute.  A successful caller promotes
+    the deadline to the normal 15-minute cadence via
+    :func:`_finish_orphan_result_report`.
+    """
+    global _next_orphan_result_report_monotonic
+    now = time.monotonic() if now_monotonic is None else now_monotonic
+    with _orphan_result_report_gate_lock:
+        if now < _next_orphan_result_report_monotonic:
+            return False
+        _next_orphan_result_report_monotonic = (
+            now + _ORPHAN_RESULT_REPORT_RETRY_SECS
+        )
+        return True
+
+
+def _finish_orphan_result_report(now_monotonic: float | None = None) -> None:
+    """Advance a successful orphan-result audit to its steady-state cadence."""
+    global _next_orphan_result_report_monotonic
+    now = time.monotonic() if now_monotonic is None else now_monotonic
+    with _orphan_result_report_gate_lock:
+        _next_orphan_result_report_monotonic = max(
+            _next_orphan_result_report_monotonic,
+            now + _ORPHAN_RESULT_REPORT_INTERVAL_SECS,
+        )
 
 
 def cleanup_old_tasks():
     """Drop finished tasks past TTL and prune the conv-latest-task index.
 
     Notes:
-      - Legacy semantics removed tasks based on ``created_at`` regardless of
-        finish time. TaskRuntime uses ``finished_at`` instead, which is more
-        accurate (a task that ran for 30 minutes shouldn't be wiped 30 minutes
-        after starting if it's still streaming).
+      - Retention is based on ``finished_at``. A long-running task must never be
+        evicted merely because its creation timestamp is old.
       - We snapshot the task ids ABOUT to be cleaned BEFORE calling
         cleanup_stale() so we can prune the conv-latest-task index too.
     """
     now = time.time()
     finished_ids: set = set()
-    with _chat_runtime._lock:
-        for tid, t in _chat_runtime._tasks.items():
-            if t['status'] in ('done', 'error', 'aborted'):
-                finished_at = t.get('finished_at')
-                # Fall back to created_at for tasks that don't have finished_at
-                # (e.g. tests that mark status='done' directly without finish()).
-                ref_t = finished_at if finished_at else t.get('created_at', 0)
-                if now - ref_t > _chat_runtime.ttl:
-                    finished_ids.add(tid)
-    n = _chat_runtime.cleanup_stale()
+    for task in chat_task_runtime.snapshot():
+        if task['status'] in ('done', 'error', 'aborted'):
+            finished_at = task.get('finished_at')
+            # Fall back to created_at for records completed by an external
+            # terminal policy that predates ``finished_at``.
+            ref_t = finished_at if finished_at else task.get('created_at', 0)
+            if now - ref_t > chat_task_runtime.ttl:
+                finished_ids.add(str(task.get('id') or ''))
+    n = chat_task_runtime.cleanup_stale()
     # Clean up _conv_latest_task entries whose tasks were just removed
     # (mirror-inclusive: a local-only prune strands the store mirror corpse)
     if finished_ids:
@@ -60,14 +102,14 @@ def cleanup_old_tasks():
             _clear_latest_task(cid)
     if n:
         logger.debug('[Manager] cleanup_old_tasks removed %d tasks', n)
-    # ★ Stuck-task backstop (rides the same tick). cleanup_stale only evicts
+    # Stuck-task backstop (rides the same tick). cleanup_stale only evicts
     #   FINISHED tasks, so a purely-wedged running task (never superseded) would
     #   otherwise live forever with no terminal state. See reap_stuck_running_tasks.
     try:
         reap_stuck_running_tasks()
     except Exception as e:
         logger.warning('[Manager] reap_stuck_running_tasks failed: %s', e, exc_info=True)
-    # ★ Queue-lease reaper (rides the same tick, pt_4ab943fa): reclaim leases
+    # Queue-lease reaper (rides the same tick, ): reclaim leases
     #   orphaned by a crash/exception mid-dispatch and re-dispatch them, so a
     #   queued human message is retried automatically instead of silently lost.
     try:
@@ -75,14 +117,18 @@ def cleanup_old_tasks():
         reap_expired_queue_leases()
     except Exception as e:
         logger.warning('[Manager] reap_expired_queue_leases failed: %s', e, exc_info=True)
-    # ★ Result-level reconciliation (DB, not registry). The reaper above can
+    # Result-level reconciliation (DB, not registry). The reaper above can
     #   only see tasks still IN MEMORY; a carrier that finished and left the
     #   registry without a terminal write is invisible to it. See
     #   find_orphan_running_results.
-    try:
-        report_orphan_running_results()
-    except Exception as e:
-        logger.warning('[Manager] report_orphan_running_results failed: %s', e, exc_info=True)
+    if _claim_orphan_result_report():
+        try:
+            report_orphan_running_results()
+        except Exception as e:
+            logger.warning('[Manager] report_orphan_running_results failed: %s', e, exc_info=True)
+        else:
+            _finish_orphan_result_report()
+    trim_released_task_heap()
 
 
 def _malloc_trim() -> bool:
@@ -102,6 +148,29 @@ def _malloc_trim() -> bool:
     except (OSError, AttributeError, Exception) as e:  # noqa: BLE001 - best-effort
         logger.debug('[Manager] malloc_trim unavailable/failed: %s', e)
         return False
+
+
+def request_released_task_heap_trim() -> None:
+    """Ask the next task-maintenance tick to return freed arenas to the OS."""
+    with _released_task_heap_trim_lock:
+        _released_task_heap_trim_requested.set()
+
+
+def trim_released_task_heap() -> bool:
+    """Consume one coalesced terminal-state trim request.
+
+    Returns whether a trim was attempted successfully.  The request is cleared
+    before calling libc so a completion racing with the trim remains pending
+    for the next maintenance tick instead of being lost.
+    """
+    with _released_task_heap_trim_lock:
+        if not _released_task_heap_trim_requested.is_set():
+            return False
+        _released_task_heap_trim_requested.clear()
+    trimmed = _malloc_trim()
+    logger.debug(
+        '[Manager] coalesced terminal-task heap trim completed: %s', trimmed)
+    return trimmed
 
 
 def shed_memory_under_pressure() -> dict:
@@ -129,11 +198,12 @@ def shed_memory_under_pressure() -> dict:
     # Snapshot terminal ids for the conv-latest-task prune (mirror cleanup_old_tasks).
     finished_ids: set = set()
     try:
-        with _chat_runtime._lock:
-            for tid, t in _chat_runtime._tasks.items():
-                if t['status'] in ('done', 'error', 'aborted'):
-                    finished_ids.add(tid)
-        evicted = _chat_runtime.cleanup_stale(max_age=0)
+        finished_ids = {
+            str(task.get('id') or '')
+            for task in chat_task_runtime.snapshot()
+            if task.get('status') in ('done', 'error', 'aborted')
+        }
+        evicted = chat_task_runtime.cleanup_stale(max_age=0)
         if finished_ids:
             with _conv_latest_task_lock:
                 stale_convs = [c for c, tid in _conv_latest_task.items()
@@ -203,7 +273,7 @@ def reap_stuck_running_tasks() -> int:
                                  phases). A rate-limited-but-alive turn keeps
                                  emitting retry phases → stays fresh. Events
                                  marked ``_selfTick`` (the tool-heartbeat
-                                 pinging itself, pt_8524e0ec) deliberately do
+                                 pinging itself, ) deliberately do
                                  NOT bump this clock: they prove the
                                  dispatcher is alive, not the tool.
       • ``_dispatch_heartbeat`` — refreshed while a dispatch / cooldown-wait /
@@ -215,7 +285,7 @@ def reap_stuck_running_tasks() -> int:
                                  → never reaped; a hung ordinary tool (silent
                                  >30min) gets NO such refresh → reaped.
 
-    One exception refines the second clock (2026-08-01, pt_232244fb): a task
+    One exception refines the second clock (2026-08-01, ): a task
     blocked INSIDE a run_command subprocess (``_subprocess_pid`` set) is not
     force-failed — the reaper issues a per-command interrupt instead
     (``_cmd_interrupt``, consumed by the run_command read loop within ~0.2s),
@@ -240,96 +310,95 @@ def reap_stuck_running_tasks() -> int:
         return 0
     now = time.time()
     stuck = []
-    with tasks_lock:
-        for tid, t in tasks.items():
-            if t.get('status') != 'running' or t.get('aborted'):
-                continue
-            created = t.get('created_at', now)
-            # Both clocks fall back to created_at so a task that never set them
-            # (legacy zero-output) is a subset: its clocks == created_at.
-            last_event = t.get('_t_last_event', created)
-            heartbeat = t.get('_dispatch_heartbeat', created)
-            event_silent = now - last_event
-            dispatch_silent = now - heartbeat
-            # Reap ONLY when BOTH clocks are stale past the threshold. Either
-            # one fresh = alive (slow/rate-limited dispatch, or emitting events,
-            # or a human-input wait keeping the heartbeat warm).
-            if event_silent < max_silent or dispatch_silent < max_silent:
-                continue
-            # ★ run_command-blocked: INTERRUPT the command, don't kill the
-            #   task (owner directive 2026-08-01, pt_232244fb). A silent
-            #   long-running subprocess (measured: a `find` over the FUSE
-            #   workspace ran 1h12m with zero output) is indistinguishable
-            #   from a wedge from here, but it is RECOVERABLE — killing the
-            #   process tree hands the partial output back to the model and
-            #   the turn CONTINUES. Force-failing the whole task threw the
-            #   work away and pushed the recovery onto the user.
-            if t.get('_subprocess_pid'):
-                pending = t.get('_cmd_interrupt')
-                if isinstance(pending, dict):
-                    issued_at = pending.get('ts', now)
-                    try:
-                        issued_at = float(issued_at)
-                    except (ValueError, TypeError) as e:
-                        logger.debug('[Manager] bad _cmd_interrupt ts (%s) — treating as fresh', e)
-                        issued_at = now
-                    if now - issued_at < _cmd_interrupt_grace_secs():
-                        # Interrupt already issued; the read loop polls every
-                        # ~0.2s — give it the grace window to consume.
-                        continue
-                    # Flag sat UNCONSUMED past the grace → the read loop
-                    # itself is wedged (not just the subprocess) → fall
-                    # through to the full task reap below.
-                else:
-                    t['_cmd_interrupt'] = {
-                        'source': 'watchdog',
-                        'ts': now,
-                        'note': ('no output for %ds'
-                                 % int(min(event_silent, dispatch_silent))),
-                        'pid': t.get('_subprocess_pid'),
-                    }
-                    logger.warning(
-                        '[Task %s] conv=%s ⚠️ silent in run_command for %.0fs — '
-                        'interrupting the COMMAND (task spared, partial output '
-                        'returns to the model)',
-                        t['id'][:8], (t.get('convId') or '')[:8],
-                        min(event_silent, dispatch_silent))
-                    continue
-            had_output = bool((t.get('content') or '') or (t.get('thinking') or ''))
-            if not had_output:
+
+    def _inspect_and_reap(task):
+        created = task.get('created_at', now)
+        # Both clocks fall back to created_at so a task that never emitted
+        # output is judged by the same dual-clock rule.
+        last_event = task.get('_t_last_event', created)
+        heartbeat = task.get('_dispatch_heartbeat', created)
+        event_silent = now - last_event
+        dispatch_silent = now - heartbeat
+        if event_silent < max_silent or dispatch_silent < max_silent:
+            return
+        # A silent subprocess is recoverable: interrupt the command first and
+        # let the tool loop return partial output. Only an unconsumed interrupt
+        # past its grace window escalates to failing the whole task.
+        if task.get('_subprocess_pid'):
+            pending = task.get('_cmd_interrupt')
+            if isinstance(pending, dict):
+                issued_at = pending.get('ts', now)
                 try:
-                    with t['events_lock']:
-                        had_output = len(t['events']) > 0
-                except Exception as e:
-                    logger.debug('[reap] task %s has no readable events '
-                                 'structure: %s', t.get('id', '?'), e)
-                    had_output = False
-            t['aborted'] = True
-            t['_abort_timestamp'] = now
-            t['_abort_reason'] = 'stuck_no_progress'
-            t['status'] = 'error'
-            t['_reap_had_output'] = had_output
-            from lib.error_envelope import make_envelope as _make_env
-            # ★ worker_lost, NOT internal (pt_9f5a51ba). 'internal' is
-            #   retryable=False and its entire hint is "go read
-            #   logs/error.log" — for an event the user did not cause, cannot
-            #   diagnose, and whose only correct recovery (re-run) that
-            #   envelope actively HIDES by suppressing the retry affordance.
-            #   'worker_lost' is the kind this exact situation was registered
-            #   for (TaskRuntime.reap_if_stalled already uses it): warning
-            #   severity, retryable=True, and a hint that leads with "re-running
-            #   is safe; partial output may be lost".
-            t['error'] = _make_env(
-                'worker_lost',
-                detail=('Task made no progress for %d seconds and was '
-                        'terminated as wedged.' % int(min(event_silent, dispatch_silent))),
-                model=(t.get('config') or {}).get('model', '') or '',
-                context='stuck-task-reaper',
-                source='lib.tasks_pkg.manager',
-            )
-            t['finishReason'] = 'error'
-            t['finished_at'] = now
-            stuck.append(t)
+                    issued_at = float(issued_at)
+                except (ValueError, TypeError) as error:
+                    logger.debug(
+                        '[Manager] bad _cmd_interrupt ts (%s) — treating as fresh',
+                        error,
+                    )
+                    issued_at = now
+                if now - issued_at < _cmd_interrupt_grace_secs():
+                    return
+            else:
+                task['_cmd_interrupt'] = {
+                    'source': 'watchdog',
+                    'ts': now,
+                    'note': (
+                        'no output for %ds'
+                        % int(min(event_silent, dispatch_silent))
+                    ),
+                    'pid': task.get('_subprocess_pid'),
+                }
+                logger.warning(
+                    '[Task %s] conv=%s ⚠️ silent in run_command for %.0fs — '
+                    'interrupting the command; the task remains live',
+                    str(task.get('id') or '')[:8],
+                    str(task.get('convId') or '')[:8],
+                    min(event_silent, dispatch_silent),
+                )
+                return
+        had_output = bool(
+            (task.get('content') or '') or (task.get('thinking') or '')
+        )
+        if not had_output:
+            try:
+                with task['events_lock']:
+                    had_output = bool(task['events'])
+            except Exception as error:
+                logger.debug(
+                    '[reap] task %s has no readable events structure: %s',
+                    task.get('id', '?'),
+                    error,
+                )
+                had_output = False
+        task['aborted'] = True
+        abort_event = task.get('abort_event')
+        if abort_event is not None:
+            abort_event.set()
+        task['_abort_timestamp'] = now
+        task['_abort_reason'] = 'stuck_no_progress'
+        task['status'] = 'error'
+        task['_reap_had_output'] = had_output
+        from lib.error_envelope import make_envelope as _make_env
+        task['error'] = _make_env(
+            'worker_lost',
+            detail=(
+                'Task made no progress for %d seconds and was terminated as wedged.'
+                % int(min(event_silent, dispatch_silent))
+            ),
+            model=(task.get('config') or {}).get('model', '') or '',
+            context='stuck-task-reaper',
+            source='lib.tasks_pkg.manager',
+        )
+        task['finishReason'] = 'error'
+        task['finished_at'] = now
+        stuck.append(task)
+
+    chat_task_runtime.update_matching(
+        predicate=lambda task: (
+            task.get('status') == 'running' and not task.get('aborted')
+        ),
+        updater=_inspect_and_reap,
+    )
     for t in stuck:
         logger.warning('[Task %s] conv=%s ⚠️ WEDGED — no event/dispatch progress for '
                        '%.0fs (had_output=%s), force-failed and finalizing',
@@ -363,7 +432,7 @@ def find_orphan_running_results(limit: int = 200) -> list[dict]:
     IN-MEMORY registry and therefore *structurally cannot* see this class: a
     carrier (autopilot VU sub-task / inline reporter) is discarded from the
     registry the moment its synchronous run returns, and it never reaches
-    ``persist_task_result`` (``_endpoint_managed=True`` suppresses the terminal
+    ``persist_task_result`` (``_flow_managed=True`` suppresses the terminal
     write). Its last ``checkpoint_task_partial`` therefore leaves a row at
     ``status='running'`` that no in-memory pass will ever revisit.
 
@@ -389,37 +458,35 @@ def find_orphan_running_results(limit: int = 200) -> list[dict]:
     max_age = _orphan_result_max_age_secs()
     if max_age <= 0:
         return []
-    from lib.database import DOMAIN_CHAT, pooled_db
+    from lib.storage import get_storage_client
     now_ms = int(time.time() * 1000)
-    cutoff = now_ms - max_age * 1000
-    try:
-        with pooled_db(DOMAIN_CHAT) as db:
-            rows = db.execute(
-                "SELECT task_id, conv_id, completed_at FROM task_results "
-                "WHERE status='running' AND completed_at IS NOT NULL "
-                "  AND completed_at < ? ORDER BY completed_at ASC LIMIT ?",
-                (cutoff, limit),
-            ).fetchall()
-    except Exception as e:
-        logger.warning('[Manager] orphan-result scan failed: %s', e, exc_info=True)
-        return []
-    if not rows:
-        return []
-    # A task still in the registry is someone's live work (or is about to be
-    # finalized) — never report it, regardless of how stale its ROW looks.
-    with tasks_lock:
-        live_ids = set(tasks.keys())
+    result = get_storage_client().query(
+        'task_results.summary_list', {
+            'status': 'running',
+            'completed_before_ms': now_ms - max_age * 1000,
+            'limit': min(max(1, int(limit)), 1000),
+            'scan_limit': 10_000,
+            'order_by': 'completed_at_asc',
+        }, deadline=30) or {}
+    if result.get('capped'):
+        logger.warning(
+            '[Manager] orphan-result summary scan hit its 10000-row '
+            'work cap; reporting the bounded oldest subset')
+    live_ids = chat_task_runtime.task_ids()
     out = []
-    for r in rows:
-        tid = r[0]
-        if tid in live_ids:
+    for record in result.get('records') or []:
+        task_id = record.get('key') or record.get('task_id')
+        if not task_id or task_id in live_ids:
             continue
+        completed = int(record.get('completed_at') or 0)
         out.append({
-            'task_id': tid,
-            'conv_id': r[1] or '',
-            'age_secs': int((now_ms - (r[2] or 0)) / 1000),
+            'task_id': task_id,
+            'conv_id': record.get('conv_id') or '',
+            'age_secs': int((now_ms - completed) / 1000),
         })
-    return out
+    return sorted(
+        out, key=lambda item: item['age_secs'], reverse=True
+    )[:limit]
 
 
 def report_orphan_running_results() -> int:
@@ -483,23 +550,16 @@ def _finalize_reaped_stuck_task(task) -> None:
     Steps (each independently guarded so one failure can't abort the rest):
       1. Terminal floor FIRST — a poll always resolves terminally, even if a
          later step throws.
-      2. Terminal ``DONE(error)`` SSE — any still-connected client settles.
-      3. ``_sync_result_to_conversation`` — appends/fills the assistant error
-         bubble AND clears ``settings.activeTaskId`` (its normal side effect).
-      4. ``_dispatch_queued_message`` — drains a turn queued behind the wedge.
-
-    The reaper set ``_abort_reason='stuck_no_progress'``, which the anti-
-    resurrection guard in ``_sync_result_to_conversation`` treats as an
-    EXCEPTION (it owns the trailing user turn and is still the conv's latest
-    task) so the error bubble is allowed to answer an unanswered user message.
+      2. Terminal ``DONE(error)`` event — the turn authority settles the
+         assistant projection and drains the durable queue in one event path.
     """
     tid = task.get('id', '?')[:8]
-    conv_id = (task.get('convId') or '')[:8]
 
     # (1) Terminal floor first — poll resolves terminally regardless.
     _write_stuck_terminal_floor(task)
 
-    # (2) Terminal DONE(error) SSE so a live client settles immediately.
+    # (2) The event bridge persists the terminal turn before publishing it and
+    # performs the canonical post-settlement queue drain.
     try:
         err_done = build_event(EventType.DONE,
                                error=task.get('error'), finishReason='error')
@@ -511,18 +571,3 @@ def _finalize_reaped_stuck_task(task) -> None:
     except Exception as e:
         logger.warning('[Task %s] reaped-finalize: DONE(error) SSE failed: %s',
                        tid, e, exc_info=True)
-
-    # (3) Sync the assistant error bubble onto the conversation + clear the
-    #     pinned activeTaskId (a normal side effect of the conv sync).
-    try:
-        _sync_result_to_conversation(task, build_result_meta(task))
-    except Exception as e:
-        logger.warning('[Task %s] conv=%s reaped-finalize: conv sync failed: %s',
-                       tid, conv_id, e, exc_info=True)
-
-    # (4) Drain any turn queued behind the wedged one.
-    try:
-        _dispatch_queued_message(task)
-    except Exception as e:
-        logger.warning('[Task %s] conv=%s reaped-finalize: queue drain failed: %s',
-                       tid, conv_id, e, exc_info=True)

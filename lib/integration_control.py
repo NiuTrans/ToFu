@@ -33,11 +33,17 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
-from lib.database import integration_control_repository as _state
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
 from lib.runtime_paths import data_root
+from lib import integration_state_repository as _state
+from lib.integration_state_repository import IntegrationStateError
+from lib.storage import StorageError
+from lib.git_checkpoint_policy import (
+    PROJECT_GATE_REQUIRED_SUFFIXES as _PROJECT_GATE_REQUIRED_SUFFIXES,
+    forbidden_checkpoint_paths as _forbidden_checkpoint_paths,
+)
 
 logger = get_logger(__name__)
 
@@ -46,23 +52,22 @@ _REF_ROOT = 'refs/tofu'
 _CANDIDATE_REF = f'{_REF_ROOT}/candidate'
 _STABLE_REF = f'{_REF_ROOT}/stable'
 _WORKER_LOCK = threading.Lock()
+_WORKER_CONDITION = threading.Condition(_WORKER_LOCK)
 _WORKER: threading.Thread | None = None
-_STATUS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_WORKER_WAKE_GENERATION = 0
+_WORKER_STOP_REQUESTED = False
+_WORKER_AUTHORITY_ARMED = False
+_STATUS_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
 _STATUS_CACHE_LOCK = threading.Lock()
+_STATUS_CACHE_TTL_SECONDS = 10.0
 
-
-IntegrationError = _state.IntegrationStateError
+IntegrationError = RuntimeError
 
 
 def _control_root() -> Path:
     root = Path(data_root()) / 'integration'
     root.mkdir(parents=True, exist_ok=True)
     return root
-
-
-def _db_path() -> Path:
-    override = os.environ.get('TOFU_INTEGRATION_DB', '').strip()
-    return Path(override).expanduser().resolve() if override else _control_root() / 'control.sqlite3'
 
 
 def _workspace_root() -> Path:
@@ -125,12 +130,38 @@ def _safe_task(task_id: str) -> str:
     return f'{slug}-{digest}'
 
 
-def _checkpoint_ref(task_id: str) -> str:
-    return f'{_REF_ROOT}/checkpoints/{_safe_task(task_id)}'
+def _require_user_id(user_id: int) -> int:
+    if (isinstance(user_id, bool)
+            or not isinstance(user_id, int)
+            or user_id < 1):
+        raise IntegrationError('A positive user_id is required')
+    return user_id
 
 
-def _quarantine_ref(task_id: str) -> str:
-    return f'{_REF_ROOT}/quarantine/{_safe_task(task_id)}'
+def _checkpoint_ref(user_id: int, task_id: str) -> str:
+    return f'{_REF_ROOT}/checkpoints/u{user_id}/{_safe_task(task_id)}'
+
+
+def _quarantine_ref(user_id: int, task_id: str) -> str:
+    return f'{_REF_ROOT}/quarantine/u{user_id}/{_safe_task(task_id)}'
+
+
+def _env_float(name: str, default: float) -> float:
+    """Guarded env float: garbage values fall back to the default instead of
+    raising ValueError into an unrelated operation (audit 2026-08-20)."""
+    try:
+        return float(os.environ.get(name, '') or default)
+    except (TypeError, ValueError):
+        logger.warning('[Integration] bad %s value, using default %s', name, default)
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, '') or default)
+    except (TypeError, ValueError):
+        logger.warning('[Integration] bad %s value, using default %s', name, default)
+        return default
 
 
 def _now() -> float:
@@ -144,27 +175,29 @@ def _iso(ts: float | int | None) -> str:
 
 
 def _record_event(project_root: str, task_id: str, kind: str,
-                  message: str, detail: Any = '') -> None:
+                  message: str, detail: Any = '', *, user_id: int) -> None:
     if not isinstance(detail, str):
         detail = json.dumps(detail, ensure_ascii=False, sort_keys=True)
     _state.record_event(
-        _db_path(), project_root=project_root, task_id=task_id, kind=kind,
+        user_id=_require_user_id(user_id), project_root=project_root,
+        task_id=task_id, kind=kind,
         message=message, detail=detail, now=_now())
 
 
-def _invalidate(project_root: str) -> None:
+def _invalidate(project_root: str, *, user_id: int) -> None:
     with _STATUS_CACHE_LOCK:
-        _STATUS_CACHE.pop(project_root, None)
+        _STATUS_CACHE.pop((_require_user_id(user_id), project_root), None)
 
 
-def _push(project_root: str) -> None:
-    _invalidate(project_root)
+def _push(project_root: str, *, user_id: int) -> None:
+    owner_user_id = _require_user_id(user_id)
+    _invalidate(project_root, user_id=owner_user_id)
     try:
         from lib.agent_core.push import push_event
         from lib.conversations.project_feed import project_channel_key
         push_event('project', project_channel_key(project_root), {
             'type': 'integration', 'projectPath': project_root,
-        })
+        }, user_id=owner_user_id)
     except Exception as exc:
         logger.debug('[Integration] push skipped: %s', exc)
 
@@ -212,8 +245,37 @@ def _ensure_refs(root: Path) -> tuple[str, str]:
     return candidate, stable
 
 
+def _clean_origin(origin: Any) -> dict[str, Any]:
+    """Validate the caller-supplied origin metadata (epic/conv provenance).
+
+    Origin is how a workspace row answers "who started this and why" — the
+    epic id it was created for, the conversation that owns it, and the
+    creation channel ('board' / 'manual' / 'agent' / 'repair'). Keys and
+    values are coerced to short strings so the meta row stays small.
+    """
+    if not origin:
+        return {}
+    if not isinstance(origin, dict):
+        raise IntegrationError('origin must be an object')
+    cleaned: dict[str, Any] = {}
+    for key, value in origin.items():
+        k = str(key or '').strip()[:64]
+        if not k:
+            continue
+        if isinstance(value, (list, tuple)):
+            cleaned[k] = [str(v)[:300] for v in value[:64]]
+        elif value is None:
+            continue
+        else:
+            cleaned[k] = str(value)[:300]
+    return cleaned
+
+
 def register_workspace(project_path: str, task_id: str, workspace_path: str,
-                       title: str = '', *, managed: bool = False) -> dict[str, Any]:
+                       title: str = '', *, managed: bool = False,
+                       user_id: int,
+                       origin: dict[str, Any] | None = None) -> dict[str, Any]:
+    owner_user_id = _require_user_id(user_id)
     task_id = str(task_id or '').strip()
     if not task_id:
         raise IntegrationError('taskId is required')
@@ -227,24 +289,31 @@ def register_workspace(project_path: str, task_id: str, workspace_path: str,
     if not base:
         raise IntegrationError('Workspace has no HEAD commit')
     now = _now()
+    cleaned_origin = _clean_origin(origin)
     with _repo_lock(str(root)):
         _state.register_workspace(
-            _db_path(), project_root=str(root), task_id=task_id,
+            user_id=owner_user_id, project_root=str(root), task_id=task_id,
             title=str(title or '').strip(), workspace_path=str(workspace),
-            managed=managed, base_sha=base, now=now)
-    _push(str(root))
+            managed=managed, base_sha=base, now=now,
+            origin=cleaned_origin or None)
+    _push(str(root), user_id=owner_user_id)
     return {'ok': True, 'taskId': task_id, 'workspacePath': str(workspace),
-            'baseSha': base, 'state': 'running', 'managed': bool(managed)}
+            'baseSha': base, 'state': 'running', 'managed': bool(managed),
+            'origin': cleaned_origin}
 
 
 def create_workspace(project_path: str, task_id: str,
-                     title: str = '') -> dict[str, Any]:
+                     title: str = '', *,
+                     user_id: int,
+                     origin: dict[str, Any] | None = None) -> dict[str, Any]:
+    owner_user_id = _require_user_id(user_id)
     root = _repo_root(project_path)
     task_id = str(task_id or '').strip()
     if not task_id:
         raise IntegrationError('taskId is required')
     repo_key = hashlib.sha256(str(root).encode('utf-8')).hexdigest()[:12]
-    destination = _workspace_root() / repo_key / _safe_task(task_id)
+    destination = (
+        _workspace_root() / repo_key / f'u{owner_user_id}' / _safe_task(task_id))
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         raise IntegrationError(f'Managed workspace already exists: {destination}')
@@ -256,7 +325,8 @@ def create_workspace(project_path: str, task_id: str,
             raise IntegrationError((cp.stderr or cp.stdout).strip()[:1000])
     try:
         return register_workspace(str(root), task_id, str(destination), title,
-                                  managed=True)
+                                  managed=True, user_id=owner_user_id,
+                                  origin=origin)
     except Exception:
         # The worktree was created solely for this failed operation and has not
         # been handed to a writer, so cleanup is safe and keeps the registry sane.
@@ -297,63 +367,381 @@ def _alternate_index_checkpoint(workspace: Path, parent: str,
             os.unlink(index_path)
 
 
-def checkpoint_workspace(project_path: str, task_id: str) -> dict[str, Any]:
+def checkpoint_workspace(
+    project_path: str, task_id: str, *, user_id: int,
+) -> dict[str, Any]:
+    owner_user_id = _require_user_id(user_id)
     root = _repo_root(project_path)
     root_s = str(root)
     task_id = str(task_id or '').strip()
     with _repo_lock(root_s):
-        row = _state.get_workspace(_db_path(), root_s, task_id)
+        row = _state.get_workspace(
+            root_s, task_id, user_id=owner_user_id)
         if row['state'] in {'ready', 'integrating'}:
             raise IntegrationError(
                 'The submitted checkpoint is immutable while it is in the integration queue')
+        if row['state'] in {'discarded', 'merged'}:
+            raise IntegrationError(
+                f"The workspace is {row['state']}; register a new isolated "
+                'epic instead of resurrecting a terminal integration record')
         workspace = Path(row['workspace_path'])
         if not workspace.exists():
             raise IntegrationError(f'Workspace is missing: {workspace}')
-        parent = row['checkpoint_sha'] or row['base_sha'] or _rev(workspace, 'HEAD')
+        workspace_head = _rev(workspace, 'HEAD')
+        recorded_base = str(row['base_sha'] or '')
+        recorded_checkpoint = str(row['checkpoint_sha'] or '')
+        # A repair task may explicitly rebase/reset the writer checkout onto
+        # the latest candidate before editing.  The old implementation always
+        # preferred checkpoint_sha, so the new checkpoint stayed on the stale
+        # parent chain and deterministically reproduced the same conflict.
+        # Treat a moved writer HEAD as an explicit re-anchor while retaining
+        # chained checkpoints when HEAD has not moved.
+        reanchored = bool(
+            workspace_head
+            and workspace_head not in {recorded_base, recorded_checkpoint})
+        if reanchored and row['state'] in {'quarantined', 'failed'}:
+            candidate, _stable = _ensure_refs(root)
+            if _git(
+                    root,
+                    ['merge-base', '--is-ancestor', candidate, workspace_head],
+            ).returncode != 0:
+                raise IntegrationError(
+                    'Repair workspace HEAD does not include the latest candidate; '
+                    'rebase or reset the isolated worktree onto candidate before '
+                    'checkpointing the repair')
+        parent = (
+            workspace_head if reanchored
+            else recorded_checkpoint or recorded_base or workspace_head)
         checkpoint = _alternate_index_checkpoint(workspace, parent, task_id)
-        _git(root, ['update-ref', _checkpoint_ref(task_id), checkpoint], check=True)
+        _git(
+            root,
+            ['update-ref', _checkpoint_ref(owner_user_id, task_id), checkpoint],
+            check=True,
+        )
         _state.save_checkpoint(
-            _db_path(), project_root=root_s, task_id=task_id,
-            checkpoint_sha=checkpoint, now=_now())
-    _push(root_s)
+            user_id=owner_user_id, project_root=root_s, task_id=task_id,
+            checkpoint_sha=checkpoint,
+            base_sha=parent if reanchored else '', now=_now())
+        if reanchored:
+            _set_meta(
+                root_s, task_id,
+                {'conflict_files': [], 'repair_base_sha': parent},
+                user_id=owner_user_id,
+            )
+    _push(root_s, user_id=owner_user_id)
     return {'ok': True, 'taskId': task_id, 'checkpointSha': checkpoint,
-            'checkpointRef': _checkpoint_ref(task_id), 'state': 'checkpointed'}
+            'checkpointRef': _checkpoint_ref(owner_user_id, task_id),
+            'state': 'checkpointed', 'reanchored': reanchored}
 
 
-def submit_workspace(project_path: str, task_id: str) -> dict[str, Any]:
-    result = checkpoint_workspace(project_path, task_id)
+def submit_workspace(
+    project_path: str, task_id: str, *, user_id: int,
+) -> dict[str, Any]:
+    owner_user_id = _require_user_id(user_id)
+    result = checkpoint_workspace(
+        project_path, task_id, user_id=owner_user_id)
     root = _repo_root(project_path)
     now = _now()
     _state.submit_checkpoint(
-        _db_path(), project_root=str(root), task_id=task_id, now=now)
-    ensure_worker_started()
-    _push(str(root))
+        user_id=owner_user_id, project_root=str(root), task_id=task_id, now=now)
+    _start_or_wake_worker()
+    _push(str(root), user_id=owner_user_id)
     result['state'] = 'ready'
     return result
 
 
-def retry_workspace(project_path: str, task_id: str) -> dict[str, Any]:
+def board_completion_gate(
+    project_path: str, task_id: str, *, user_id: int,
+) -> dict[str, Any]:
+    """Require an isolated board epic to reach candidate before ``done``.
+
+    A board task without an integration row is ordinary shared-tree work and
+    is unaffected.  For an isolated task, only ``merged`` proves that its
+    immutable checkpoint has passed the gate and moved candidate; completing
+    earlier would release dependent epics against stale source.
+    """
+    owner_user_id = _require_user_id(user_id)
+    try:
+        project_root = str(_repo_root(project_path))
+    except IntegrationError:
+        # Ordinary board projects need not be Git repositories. Isolation
+        # creation cannot succeed there, but a previously registered row may
+        # still be found by its normalized path if the checkout was removed.
+        project_root = str(Path(project_path).expanduser().resolve())
+    row = _state.find_workspace(
+        project_root, str(task_id or '').strip(), user_id=owner_user_id)
+    if row is None:
+        return {'ok': True, 'integrationRequired': False, 'state': ''}
+    state = str(row.get('state') or '')
+    return {
+        'ok': state == 'merged',
+        'integrationRequired': True,
+        'state': state,
+        'error': '' if state == 'merged' else 'integration_not_merged',
+    }
+
+
+def update_workspace_write_set(
+    project_path: str,
+    task_id: str,
+    write_set: Iterable[str],
+    *,
+    user_id: int,
+) -> dict[str, Any]:
+    """Keep an active integration gate aligned with a board scope edit."""
+    owner_user_id = _require_user_id(user_id)
+    try:
+        project_root = str(_repo_root(project_path))
+    except IntegrationError:
+        project_root = str(Path(project_path).expanduser().resolve())
+    row = _state.find_workspace(
+        project_root, str(task_id or '').strip(), user_id=owner_user_id)
+    if row is None:
+        return {'ok': True, 'integrationRequired': False, 'updated': False}
+    state = str(row.get('state') or '')
+    if state in {'ready', 'integrating', 'merged', 'discarded'}:
+        raise IntegrationError(
+            f'Integration workspace is {state}; its submitted scope is immutable')
+    normalized = []
+    for item in write_set or ():
+        value = str(item or '').strip()[:300]
+        if value and value not in normalized:
+            normalized.append(value)
+    _set_meta(
+        project_root, str(task_id), {'writeSet': normalized},
+        user_id=owner_user_id)
+    _push(project_root, user_id=owner_user_id)
+    return {
+        'ok': True,
+        'integrationRequired': True,
+        'updated': True,
+        'state': state,
+        'writeSet': normalized,
+    }
+
+
+def retry_workspace(
+    project_path: str, task_id: str, *, user_id: int,
+) -> dict[str, Any]:
+    owner_user_id = _require_user_id(user_id)
     root = _repo_root(project_path)
     now = _now()
     _state.retry_checkpoint(
-        _db_path(), project_root=str(root), task_id=task_id, now=now)
-    ensure_worker_started()
-    _push(str(root))
+        user_id=owner_user_id, project_root=str(root), task_id=task_id, now=now)
+    _start_or_wake_worker()
+    _push(str(root), user_id=owner_user_id)
     return {'ok': True, 'taskId': task_id, 'state': 'ready'}
+
+def discard_workspace(
+    project_path: str, task_id: str, *, user_id: int,
+) -> dict[str, Any]:
+    """Human discard — the terminal park for a row the queue must skip.
+
+    The Git refs (checkpoint / quarantine) and the worktree directory are
+    deliberately kept: discard is a queue decision, not data destruction.
+    """
+    owner_user_id = _require_user_id(user_id)
+    root = _repo_root(project_path)
+    now = _now()
+    _state.discard_workspace(
+        user_id=owner_user_id, project_root=str(root), task_id=task_id, now=now)
+    _push(str(root), user_id=owner_user_id)
+    return {'ok': True, 'taskId': task_id, 'state': 'discarded'}
+
+
+def _set_meta(
+    project_root: str, task_id: str, patch: dict[str, Any], *, user_id: int,
+) -> None:
+    """Best-effort origin-metadata merge — never raises into a caller."""
+    try:
+        _state.set_workspace_meta(
+            user_id=_require_user_id(user_id), project_root=project_root,
+            task_id=task_id,
+            patch=patch, now=_now())
+    except Exception as exc:
+        # A transient storage error here silently drops conflict_files /
+        # submitSummary / checkpoint notes — the reviewer and the dispatcher
+        # then act on an empty origin document.  Loud, not debug.
+        logger.warning('[Integration] set_meta failed for %s: %s', task_id, exc)
+
+
+def peek_workspace_for_epic(
+    project_path: str, task_id: str, *, user_id: int,
+) -> dict[str, Any] | None:
+    """Light lookup used by dispatch: does an integration workspace exist for
+    this epic id? One storage read, no Git calls; None when absent or on any
+    error (dispatch must never break on an integration peek)."""
+    owner_user_id = _require_user_id(user_id)
+    if not project_path or not task_id:
+        return None
+    # Registration keys rows by ``str(_repo_root(...))`` — resolve() plus the
+    # git toplevel — so a raw board path that is symlinked or a subdirectory
+    # of the repo would miss the row.  No subprocess on this dispatch hot
+    # path: resolve() first, then a bounded parent walk for a .git marker.
+    try:
+        resolved = Path(project_path).expanduser().resolve()
+    except OSError:
+        resolved = Path(project_path)
+    candidates = [str(resolved)]
+    node = resolved
+    for _ in range(8):
+        if (node / '.git').exists():
+            candidates.append(str(node))
+            break
+        parent = node.parent
+        if parent == node:
+            break
+        node = parent
+    row = None
+    # get_workspace RAISES IntegrationStateError when no row exists for a
+    # candidate — that is the expected miss signal, not a failure: keep
+    # walking to the git-toplevel parent anchor.  Bailing out on the first
+    # miss (the previous except-Exception-return-None) made the whole parent
+    # walk dead code, so subdirectory/symlinked project paths never found
+    # their workspace and dispatch silently downgraded an isolated epic to
+    # shared-tree work on the canonical checkout.
+    for candidate in candidates:
+        try:
+            row = _state.get_workspace(
+                candidate, task_id, user_id=owner_user_id)
+        except IntegrationStateError:
+            continue
+        except Exception as exc:
+            logger.warning('[Integration] workspace peek failed for %s: %s',
+                           candidate, exc)
+            return None
+        if row:
+            break
+    if not row:
+        return None
+    # Only ACTIVE writer states mean "an isolated writer owns this epic".
+    # ready/integrating/merged/failed/quarantined rows describe a worktree
+    # that is sealed, under merge, or parked — injecting the ISOLATED brief
+    # for those sends the assignee to edit an immutable or already-merged
+    # checkout.
+    if row.get('state') not in ('running', 'checkpointed'):
+        return None
+    return row
+
+
+_CONFLICT_IN_FILE_RE = re.compile(r'merge conflict in (.+)', re.IGNORECASE)
+
+
+def _conflict_files_from(text: str) -> list[str]:
+    """Extract conflicting file paths from merge output (git merge stderr or
+    merge-tree detail). Best-effort; an empty list just means 'unparsed'."""
+    files: list[str] = []
+    for line in (text or '').splitlines():
+        match = _CONFLICT_IN_FILE_RE.search(line)
+        if match:
+            path = match.group(1).strip().strip('"').rstrip('.')
+            if path and path not in files:
+                files.append(path)
+    return files[:64]
+
+
+def _path_allowed_by_write_set(path: str, write_set: list[str]) -> bool:
+    normalized = str(path or '').replace('\\', '/').strip()
+    while normalized.startswith('./'):
+        normalized = normalized[2:]
+    normalized = normalized.lstrip('/')
+    for raw in write_set:
+        declared = str(raw or '').replace('\\', '/').strip()
+        while declared.startswith('./'):
+            declared = declared[2:]
+        declared = declared.lstrip('/')
+        if declared in {'', '*', '**'}:
+            if declared:
+                return True
+            continue
+        declared = declared.rstrip('/*')
+        if (normalized == declared
+                or normalized.startswith(declared + '/')):
+            return True
+    return False
+
+
+def _gate_argv(configured_command: str, old: str, target: str) -> list[str]:
+    """Parse one direct command and expand safe SHA placeholders.
+
+    No shell is involved. ``{base}`` and ``{target}`` let a repository-owned
+    test selector inspect the exact candidate delta without command
+    substitution or environment-dependent quoting.
+    """
+    return [
+        token.replace('{base}', old).replace('{target}', target)
+        for token in shlex.split(configured_command)
+    ]
 
 
 def _gate_commands(root: Path, old: str, target: str,
-                   configured_command: str = '') -> tuple[bool, str]:
+                   configured_command: str = '',
+                   declared_write_set: list[str] | None = None,
+                   ) -> tuple[bool, str]:
     diff_check = _git(root, ['diff', '--check', old, target])
     if diff_check.returncode != 0:
         return False, (diff_check.stdout or diff_check.stderr).strip()[:3000]
+
+    status_cp = _git(
+        root,
+        ['diff', '--name-status', '--find-renames',
+         '--diff-filter=ACMRD', '-z', old, target],
+        check=True)
+    tokens = [token for token in status_cp.stdout.split('\0') if token]
+    changed_entries: list[tuple[str, list[str]]] = []
+    index = 0
+    while index < len(tokens):
+        status = tokens[index]
+        index += 1
+        path_count = 2 if status[:1] in {'R', 'C'} else 1
+        paths = tokens[index:index + path_count]
+        if len(paths) != path_count:
+            return False, 'Git returned a malformed name-status gate payload'
+        index += path_count
+        changed_entries.append((status[:1], paths))
+    all_changed = [
+        path for _status, paths in changed_entries for path in paths
+    ]
+    # Existing forbidden artifacts must be removable. Reject every added or
+    # modified destination, but allow a pure deletion (and a rename out of a
+    # forbidden tree) so historical debt cannot become permanent.
+    forbidden_candidates = [
+        paths[-1] for status, paths in changed_entries if status != 'D'
+    ]
+    forbidden = _forbidden_checkpoint_paths(forbidden_candidates)
+    if forbidden:
+        return False, (
+            'Checkpoint contains forbidden dependency/generated/runtime paths: '
+            + ', '.join(forbidden))
+    write_set = [
+        str(item) for item in (declared_write_set or [])
+        if str(item or '').strip()
+    ]
+    outside_write_set = [
+        name for name in all_changed
+        if write_set and not _path_allowed_by_write_set(name, write_set)
+    ]
+    if outside_write_set:
+        return False, (
+            'Checkpoint changed paths outside the epic declared write-set: '
+            + ', '.join(outside_write_set[:64]))
+    project_gate_files = [
+        name for name in all_changed
+        if Path(name).suffix.lower() in _PROJECT_GATE_REQUIRED_SUFFIXES
+    ]
+    if project_gate_files and not configured_command:
+        return False, (
+            'Project integration tests are required for semantic code/config '
+            'changes; configure TOFU_INTEGRATION_TEST_CMD. Changed: '
+            + ', '.join(project_gate_files[:64]))
 
     names_cp = _git(root, ['diff', '--name-only', '--diff-filter=ACMR', '-z', old, target],
                     check=True)
     changed = [name for name in names_cp.stdout.split('\0') if name]
     python_files = [name for name in changed if name.endswith('.py')]
     js_files = [name for name in changed if name.endswith(('.js', '.mjs', '.cjs'))]
-    if not python_files and not js_files and not configured_command:
+    json_files = [name for name in changed if name.endswith('.json')]
+    if not python_files and not js_files and not json_files and not configured_command:
         return True, ''
 
     gate_parent = _workspace_root() / '.gates'
@@ -376,28 +764,48 @@ def _gate_commands(root: Path, old: str, target: str,
                 return False, (cp.stderr or cp.stdout).strip()[:3000]
         if js_files and shutil.which('node'):
             for name in js_files:
+                input_type = (
+                    'commonjs' if name.lower().endswith('.cjs') else 'module'
+                )
                 cp = subprocess.run(
-                    ['node', '--check', '--', name], cwd=str(temp_path), text=True,
+                    ['node', f'--input-type={input_type}', '--check'],
+                    cwd=str(temp_path), text=True,
+                    input=(temp_path / name).read_text(encoding='utf-8'),
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     timeout=30.0, check=False,
                 )
                 if cp.returncode != 0:
-                    return False, (cp.stderr or cp.stdout).strip()[:3000]
+                    detail = (cp.stderr or cp.stdout).strip()[:2800]
+                    return False, f'{name}: {detail}'
+        for name in json_files:
+            cp = subprocess.run(
+                [sys.executable, '-m', 'json.tool', name],
+                cwd=str(temp_path), text=True, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE, timeout=30.0, check=False,
+            )
+            if cp.returncode != 0:
+                return False, (cp.stderr or '').strip()[:3000]
         if configured_command:
-            command = shlex.split(configured_command)
+            command = _gate_argv(configured_command, old, target)
             if not command:
                 return False, 'Configured gate command is empty'
+            gate_env = os.environ.copy()
+            gate_env.update({
+                'TOFU_INTEGRATION_GATE_BASE_SHA': old,
+                'TOFU_INTEGRATION_GATE_TARGET_SHA': target,
+            })
             cp = subprocess.run(
                 command, cwd=str(temp_path), text=True,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                timeout=float(os.environ.get('TOFU_INTEGRATION_TEST_TIMEOUT', '600')),
-                check=False,
+                timeout=_env_float('TOFU_INTEGRATION_TEST_TIMEOUT', 600.0),
+                env=gate_env, check=False,
             )
             if cp.returncode != 0:
                 output = '\n'.join(part for part in [cp.stdout, cp.stderr] if part)
                 return False, output.strip()[-3000:]
         return True, ''
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, UnicodeError, ValueError,
+            subprocess.TimeoutExpired) as exc:
         logger.debug('[Integration] scratch gate execution failed: %s', exc)
         return False, str(exc)
     finally:
@@ -497,57 +905,127 @@ def _merge_checkpoint(root: Path, candidate: str, checkpoint: str,
 
 
 def _quarantine(root: Path, row: Mapping[str, Any], reason: str) -> None:
+    owner_user_id = int(row['user_id'])
     checkpoint = row['checkpoint_sha']
     if checkpoint:
-        _git(root, ['update-ref', _quarantine_ref(row['task_id']), checkpoint],
-             check=True)
+        _git(
+            root,
+            ['update-ref', _quarantine_ref(
+                owner_user_id, str(row['task_id'])), checkpoint],
+            check=True,
+        )
     _state.quarantine(
-        _db_path(), row_id=int(row['id']), project_root=str(root),
-        task_id=str(row['task_id']), reason=reason, now=_now())
+        row_id=int(row['id']), reason=reason, now=_now())
+    # Structured quarantine context for the repair flow: the conflicting
+    # files become the repair epic's write_set, so the dispatcher avoids
+    # handing the fix to a conversation that will fight over the same paths.
+    conflict_files = _conflict_files_from(reason)
+    if conflict_files:
+        _set_meta(
+            str(root), str(row['task_id']),
+            {'conflict_files': conflict_files}, user_id=owner_user_id)
 
 
 def _integrate_row(row: Mapping[str, Any]) -> None:
     root = Path(row['project_root'])
     task_id = row['task_id']
+    owner_user_id = int(row['user_id'])
+    merged_origin: Mapping[str, Any] | None = None
     with _repo_lock(str(root)):
-        fresh = _state.get_integrating(_db_path(), int(row['id']))
+        fresh = _state.get_integrating(int(row['id']))
         if fresh is None:
             return
         checkpoint = fresh['checkpoint_sha']
         if not checkpoint or not _rev(root, checkpoint):
             _quarantine(root, fresh, 'Checkpoint commit is missing')
-            _push(str(root))
+            _push(str(root), user_id=owner_user_id)
             return
         candidate, _stable = _ensure_refs(root)
         target, conflict = _merge_checkpoint(root, candidate, checkpoint, task_id)
         if conflict:
             _quarantine(root, fresh, conflict)
-            _push(str(root))
+            _push(str(root), user_id=owner_user_id)
             return
         command = os.environ.get('TOFU_INTEGRATION_TEST_CMD', '').strip()
-        passed, detail = _gate_commands(root, candidate, target, command)
+        # The system-scoped claim/get_integrating rows deliberately stay
+        # narrow and do not join owner metadata. Fetch the owner-scoped row
+        # before enforcing its declared write-set; otherwise the persisted
+        # contract silently disappears at the exact gate that needs it.
+        origin = fresh.get('origin') or {}
+        if not origin:
+            owner_row = _state.get_workspace(
+                str(root), str(task_id), user_id=owner_user_id)
+            origin = owner_row.get('origin') or {}
+        passed, detail = _gate_commands(
+            root, candidate, target, command,
+            declared_write_set=(origin.get('writeSet') or []),
+        )
         if not passed:
             _quarantine(root, fresh, f'Gate failed:\n{detail}')
-            _push(str(root))
+            _push(str(root), user_id=owner_user_id)
             return
         cp = _git(root, ['update-ref', _CANDIDATE_REF, target, candidate])
         if cp.returncode != 0:
             # A different process advanced the ref despite our filesystem lock
             # (e.g. a remote administrator). Requeue instead of losing work.
             _state.requeue(
-                _db_path(), row_id=int(fresh['id']),
+                row_id=int(fresh['id']),
                 error='Candidate moved concurrently; retrying', now=_now())
-            return
-        _state.mark_merged(
-            _db_path(), row_id=int(fresh['id']), project_root=str(root),
-            task_id=str(task_id), candidate_sha=target, now=_now())
-    _push(str(root))
+        else:
+            if _state.mark_merged(
+                    row_id=int(fresh['id']), candidate_sha=target, now=_now()):
+                merged_origin = origin
+    _push(str(root), user_id=owner_user_id)
+    if merged_origin is not None:
+        _complete_board_epic_after_merge(
+            str(root), str(task_id), owner_user_id, merged_origin)
+
+
+def _complete_board_epic_after_merge(
+    project_root: str,
+    task_id: str,
+    user_id: int,
+    origin: Mapping[str, Any],
+) -> None:
+    """Release board dependencies only after candidate contains the epic."""
+    if str(origin.get('source') or '') != 'board':
+        return
+    epic_id = str(origin.get('epicId') or task_id).strip()
+    if not epic_id:
+        return
+    conv_id = str(origin.get('convId') or '').strip()
+    try:
+        from lib.conversations.project_board import complete_task
+
+        result = complete_task(
+            project_root, conv_id, epic_id, user_id=int(user_id))
+        if not result.get('ok'):
+            logger.warning(
+                '[Integration] candidate merged but board completion failed '
+                'task=%s error=%s', epic_id, result.get('error'))
+    except Exception as exc:
+        logger.warning(
+            '[Integration] candidate merged but board completion crashed '
+            'task=%s: %s', epic_id, exc, exc_info=True)
 
 
 def _claim_next() -> dict | None:
     # One repository transaction recovers abandoned claims, selects an
     # eligible project, and performs the ready→integrating CAS.
-    return _state.claim_next(_db_path(), now=_now())
+    return _state.claim_next(now=_now())
+
+
+def _peek_ready() -> dict | None:
+    """Read-only claimability probe — rides the storage read pool, never the
+    single writer lane."""
+    return _state.peek_ready(now=_now())
+
+
+# Idle polls are entirely read-only. The peek reports both claimable ready
+# rows and integrating rows past the 660-second recovery horizon, so the full
+# claim transaction (recovery sweep + CAS + fsync) runs only when useful.
+# The previous periodic write heartbeat could starve user/event writers during
+# IO stalls even when no integration work existed.
 
 
 def process_ready_once() -> bool:
@@ -559,10 +1037,9 @@ def process_ready_once() -> bool:
     except Exception as exc:
         logger.exception('[Integration] task %s failed', row['task_id'])
         _state.mark_failed(
-            _db_path(), row_id=int(row['id']),
-            project_root=str(row['project_root']), task_id=str(row['task_id']),
+            row_id=int(row['id']),
             error=str(exc), now=_now())
-        _push(row['project_root'])
+        _push(row['project_root'], user_id=int(row['user_id']))
     return True
 
 
@@ -572,59 +1049,356 @@ def _autorun_enabled() -> bool:
     }
 
 
+def _idle_poll_bounds() -> tuple[float, float]:
+    base = max(0.5, min(30.0, _env_float(
+        'TOFU_INTEGRATION_IDLE_POLL_BASE_SECONDS', 3.0)))
+    maximum = max(base, min(600.0, _env_float(
+        'TOFU_INTEGRATION_IDLE_POLL_MAX_SECONDS', 60.0)))
+    return base, maximum
+
+
+def _next_idle_poll_delay(current: float) -> float:
+    base, maximum = _idle_poll_bounds()
+    try:
+        delay = float(current)
+    except (TypeError, ValueError, OverflowError):
+        delay = base
+    return min(maximum, max(base, delay * 2.0))
+
+
+def _worker_generation() -> int:
+    with _WORKER_CONDITION:
+        return _WORKER_WAKE_GENERATION
+
+
+def _wait_for_worker(
+    delay: float,
+    observed_generation: int,
+    *,
+    wake_on_generation: bool,
+) -> tuple[bool, bool]:
+    """Wait to one deadline without losing a concurrent durable-work signal."""
+    deadline = time.monotonic() + max(0.0, float(delay))
+    with _WORKER_CONDITION:
+        while True:
+            if _WORKER_STOP_REQUESTED:
+                return False, False
+            if (wake_on_generation
+                    and _WORKER_WAKE_GENERATION != observed_generation):
+                return True, True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True, False
+            _WORKER_CONDITION.wait(remaining)
+
+
 def _worker_loop() -> None:
-    while _autorun_enabled():
-        if not process_ready_once():
-            time.sleep(3.0)
+    global _WORKER
+    current_thread = threading.current_thread()
+    backoff = 5.0
+    idle_delay = _idle_poll_bounds()[0]
+    # Boot with a full claim so a crash-interrupted claim from the previous
+    # process is considered immediately rather than one cadence later.
+    boot_claim_pending = True
+    try:
+        while _autorun_enabled():
+            observed_generation = _worker_generation()
+            try:
+                claim_due = boot_claim_pending or _peek_ready() is not None
+                boot_claim_pending = False
+                progressed = process_ready_once() if claim_due else False
+            except StorageError as exc:
+                logger.warning(
+                    '[Integration] storage error in worker loop '
+                    '(retryable=%s code=%s): %s',
+                    exc.retryable, exc.code, exc)
+                keep_running, _woken = _wait_for_worker(
+                    backoff, observed_generation, wake_on_generation=False)
+                if not keep_running:
+                    break
+                backoff = min(30.0, backoff * 2.0)
+                continue
+            except Exception as exc:
+                logger.warning('[Integration] uncaught error in worker loop: %s',
+                               exc, exc_info=True)
+                keep_running, _woken = _wait_for_worker(
+                    backoff, observed_generation, wake_on_generation=False)
+                if not keep_running:
+                    break
+                backoff = min(30.0, backoff * 2.0)
+                continue
+            backoff = 5.0
+            if progressed:
+                idle_delay = _idle_poll_bounds()[0]
+                continue
+            keep_running, work_woke = _wait_for_worker(
+                idle_delay, observed_generation, wake_on_generation=True)
+            if not keep_running:
+                break
+            idle_delay = (
+                _idle_poll_bounds()[0]
+                if work_woke else _next_idle_poll_delay(idle_delay))
+    finally:
+        with _WORKER_CONDITION:
+            if _WORKER is current_thread:
+                _WORKER = None
+            _WORKER_CONDITION.notify_all()
+
+
+def _start_or_wake_worker() -> bool:
+    global _WORKER, _WORKER_STOP_REQUESTED, _WORKER_WAKE_GENERATION
+    if not _autorun_enabled():
+        return False
+    with _WORKER_CONDITION:
+        # Durable submit/retry may run in an API replica. Only the process whose
+        # lifecycle owns CAPABILITY_TASK_WORKERS is allowed to execute Git gates.
+        if not _WORKER_AUTHORITY_ARMED:
+            return False
+        worker = _WORKER
+        if worker is not None and worker.is_alive():
+            if _WORKER_STOP_REQUESTED:
+                return False
+            _WORKER_WAKE_GENERATION += 1
+            _WORKER_CONDITION.notify_all()
+            return True
+        _WORKER_STOP_REQUESTED = False
+        _WORKER_WAKE_GENERATION += 1
+        worker = threading.Thread(
+            target=_worker_loop, name='tofu-integration', daemon=True)
+        _WORKER = worker
+        try:
+            worker.start()
+        except Exception:
+            if _WORKER is worker:
+                _WORKER = None
+            raise
+        _WORKER_CONDITION.notify_all()
+        return True
 
 
 def ensure_worker_started() -> bool:
-    global _WORKER
+    global _WORKER_AUTHORITY_ARMED
     # Bootstrap/upgrade the separate control authority once at server start.
     # Read-only status calls can then remain genuinely side-effect free while
     # still seeing rows written by the pre-repository schema.
-    _state.initialize_store(_db_path())
-    if not _autorun_enabled():
-        return False
-    with _WORKER_LOCK:
-        if _WORKER is None or not _WORKER.is_alive():
-            _WORKER = threading.Thread(
-                target=_worker_loop, name='tofu-integration', daemon=True,
-            )
-            _WORKER.start()
-    return True
+    _state.initialize_store()
+    with _WORKER_CONDITION:
+        _WORKER_AUTHORITY_ARMED = True
+    return _start_or_wake_worker()
 
 
-def promote_stable(project_path: str) -> dict[str, Any]:
+def stop_worker(timeout: float = 2.0) -> bool:
+    """Stop the exact integration owner without permitting a duplicate."""
+    global _WORKER, _WORKER_STOP_REQUESTED, _WORKER_WAKE_GENERATION
+    global _WORKER_AUTHORITY_ARMED
+    with _WORKER_CONDITION:
+        _WORKER_AUTHORITY_ARMED = False
+        worker = _WORKER
+        if worker is None:
+            return True
+        _WORKER_STOP_REQUESTED = True
+        _WORKER_WAKE_GENERATION += 1
+        _WORKER_CONDITION.notify_all()
+    try:
+        wait_seconds = max(0.0, float(timeout))
+    except (TypeError, ValueError, OverflowError):
+        wait_seconds = 2.0
+    if worker is not threading.current_thread():
+        worker.join(wait_seconds)
+    stopped = not worker.is_alive()
+    if stopped:
+        with _WORKER_CONDITION:
+            if _WORKER is worker:
+                _WORKER = None
+    return stopped
+
+
+def reconcile_candidate_with_head(
+    project_path: str, *, user_id: int,
+) -> dict[str, Any]:
+    """Merge committed canonical HEAD history into candidate under gates.
+
+    This is the explicit topology-repair verb for a canonical branch that
+    advanced independently. It never stages or moves the canonical checkout,
+    and it refuses a dirty checkout so visible-but-uncommitted files cannot be
+    mistaken for reconciled history.
+    """
+    owner_user_id = _require_user_id(user_id)
+    root = _repo_root(project_path)
+    root_s = str(root)
+    with _repo_lock(root_s):
+        candidate, stable = _ensure_refs(root)
+        if _git(
+                root,
+                ['merge-base', '--is-ancestor', stable, candidate],
+        ).returncode != 0:
+            raise IntegrationError(
+                'Candidate and stable have diverged; repair that topology '
+                'before reconciling canonical HEAD')
+        dirty = _porcelain(root)
+        if dirty['total']:
+            raise IntegrationError(
+                'Canonical checkout is dirty. Reconcile includes committed '
+                'HEAD history only; commit or stash visible changes first')
+        head = _rev(root, 'HEAD')
+        if not head:
+            raise IntegrationError('Canonical HEAD is missing')
+        if head == candidate or _git(
+                root,
+                ['merge-base', '--is-ancestor', head, candidate],
+        ).returncode == 0:
+            return {
+                'ok': True, 'changed': False, 'headSha': head,
+                'candidateSha': candidate, 'stableSha': stable,
+                'headAlreadyContained': True,
+            }
+
+        target, conflict = _merge_checkpoint(
+            root, candidate, head, 'canonical-head-reconcile')
+        if conflict:
+            _record_event(
+                root_s, '', 'head_reconcile_failed',
+                'Canonical HEAD could not be reconciled into candidate',
+                conflict, user_id=owner_user_id)
+            _push(root_s, user_id=owner_user_id)
+            raise IntegrationError(
+                f'Canonical HEAD reconciliation conflicted: {conflict}')
+        command = os.environ.get('TOFU_INTEGRATION_TEST_CMD', '').strip()
+        passed, detail = _gate_commands(root, candidate, target, command)
+        if not passed:
+            _record_event(
+                root_s, '', 'head_reconcile_failed',
+                'Canonical HEAD reconciliation gate failed', detail,
+                user_id=owner_user_id)
+            _push(root_s, user_id=owner_user_id)
+            raise IntegrationError(
+                f'Canonical HEAD reconciliation gate failed: {detail}')
+        if _rev(root, 'HEAD') != head:
+            raise IntegrationError(
+                'Canonical HEAD moved during reconciliation; refresh and retry')
+        cp = _git(root, ['update-ref', _CANDIDATE_REF, target, candidate])
+        if cp.returncode != 0:
+            raise IntegrationError(
+                'Candidate moved concurrently; refresh and retry reconciliation')
+        merge_commit = target not in {candidate, head}
+        _record_event(
+            root_s, '', 'head_reconciled',
+            f'Canonical HEAD {_short(head)} reconciled into candidate '
+            f'{_short(target)}',
+            {'previousCandidate': candidate, 'mergeCommit': merge_commit},
+            user_id=owner_user_id)
+    _push(root_s, user_id=owner_user_id)
+    return {
+        'ok': True, 'changed': True, 'headSha': head,
+        'previousCandidateSha': candidate, 'candidateSha': target,
+        'stableSha': stable, 'mergeCommit': merge_commit,
+    }
+
+
+def promote_stable(
+    project_path: str, *, user_id: int,
+    acknowledge_head_divergence: bool = False,
+) -> dict[str, Any]:
+    owner_user_id = _require_user_id(user_id)
+    if not isinstance(acknowledge_head_divergence, bool):
+        raise IntegrationError('acknowledge_head_divergence must be a boolean')
     root = _repo_root(project_path)
     with _repo_lock(str(root)):
         candidate, stable = _ensure_refs(root)
         if _git(root, ['merge-base', '--is-ancestor', stable, candidate]).returncode != 0:
             raise IntegrationError(
                 'Candidate and stable have diverged; stable promotion must be fast-forward')
-        command = os.environ.get('TOFU_INTEGRATION_STABLE_TEST_CMD', '').strip()
+        head = _rev(root, 'HEAD')
+        head_ahead = _git(
+            root, ['rev-list', '--count', f'{candidate}..{head}'])
+        candidate_ahead_head = _git(
+            root, ['rev-list', '--count', f'{head}..{candidate}'])
+        try:
+            head_ahead_count = int(head_ahead.stdout.strip())
+            candidate_ahead_head_count = int(candidate_ahead_head.stdout.strip())
+        except (AttributeError, ValueError):
+            head_ahead_count = candidate_ahead_head_count = 0
+        head_diverged = bool(head_ahead_count and candidate_ahead_head_count)
+        if head_diverged and not acknowledge_head_divergence:
+            raise IntegrationError(
+                'Canonical HEAD and candidate have diverged; promotion does not '
+                'update the canonical branch. Refresh, review both histories, '
+                'and explicitly acknowledge the divergence to promote stable')
+        stable_command = os.environ.get(
+            'TOFU_INTEGRATION_STABLE_TEST_CMD', '').strip()
+        project_command = os.environ.get(
+            'TOFU_INTEGRATION_TEST_CMD', '').strip()
+        # A separate stable command is an optional stronger release gate. If
+        # absent, rerun the candidate project gate against stable..candidate;
+        # never turn "optional" into an unexplained semantic-change refusal.
+        command = stable_command or project_command
         passed, detail = _gate_commands(root, stable, candidate, command)
         if not passed:
             _record_event(str(root), '', 'promotion_failed',
-                          'Stable promotion gate failed', detail)
-            _push(str(root))
+                          'Stable promotion gate failed', detail,
+                          user_id=owner_user_id)
+            _push(str(root), user_id=owner_user_id)
             raise IntegrationError(f'Stable promotion gate failed: {detail}')
         cp = _git(root, ['update-ref', _STABLE_REF, candidate, stable])
         if cp.returncode != 0:
             raise IntegrationError('Stable ref moved concurrently; refresh and retry')
         _record_event(str(root), '', 'promoted',
-                      f'Stable promoted to {_short(candidate)}')
-    _push(str(root))
-    return {'ok': True, 'stableSha': candidate, 'candidateSha': candidate}
+                      f'Stable promoted to {_short(candidate)}',
+                      ({'headDiverged': head_diverged,
+                        'headAheadCandidate': head_ahead_count,
+                        'candidateAheadHead': candidate_ahead_head_count}
+                       if head_diverged else ''),
+                      user_id=owner_user_id)
+    _push(str(root), user_id=owner_user_id)
+    return {
+        'ok': True, 'stableSha': candidate, 'candidateSha': candidate,
+        'headDiverged': head_diverged,
+    }
 
 
-def prune_worktree_metadata(project_path: str) -> dict[str, Any]:
+def _diffstat(root: Path, old: str, new: str, *, cap: int = 200) -> dict[str, Any]:
+    """Files-changed summary between two revs — the answer to "what is in
+    this checkpoint?" that a bare SHA can never give. Bounded: the file list
+    caps at ``cap`` entries while totals always reflect the full diff."""
+    if not old or not new or old == new:
+        return {'files': [], 'totalFiles': 0, 'adds': 0, 'dels': 0}
+    try:
+        cp = _git(root, ['diff', '--numstat', old, new], timeout=30.0)
+    except IntegrationError:
+        # Same degrade-as-empty contract as the returncode!=0 branch and as
+        # _porcelain's timedOut degrade: one slow diff (IO-stall-prone
+        # mounts) must never take down the whole status endpoint.
+        return {'files': [], 'totalFiles': 0, 'adds': 0, 'dels': 0}
+    if cp.returncode != 0:
+        return {'files': [], 'totalFiles': 0, 'adds': 0, 'dels': 0}
+    files: list[dict[str, Any]] = []
+    adds = dels = 0
+    total = 0
+    for line in cp.stdout.splitlines():
+        parts = line.split('\t')
+        if len(parts) < 3:
+            continue
+        total += 1
+        try:
+            a = int(parts[0]) if parts[0] != '-' else 0
+            d = int(parts[1]) if parts[1] != '-' else 0
+        except ValueError:
+            a = d = 0
+        adds += a
+        dels += d
+        if len(files) < cap:
+            files.append({'path': parts[-1], 'adds': a, 'dels': d})
+    return {'files': files, 'totalFiles': total, 'adds': adds, 'dels': dels}
+
+
+def prune_worktree_metadata(project_path: str, *, user_id: int) -> dict[str, Any]:
     """Prune Git records whose worktree directories are already missing.
 
     This never removes a live worktree directory. The explicit UI confirmation
     authorises ``--expire=now`` so already-missing temporary checkouts do not
     linger for Git's default expiry window; active writer directories remain.
     """
+    owner_user_id = _require_user_id(user_id)
     root = _repo_root(project_path)
     with _repo_lock(str(root)):
         before_total, before_prunable = _worktree_count(root)
@@ -637,8 +1411,9 @@ def prune_worktree_metadata(project_path: str) -> dict[str, Any]:
             str(root), '', 'worktrees_pruned',
             f'Pruned {max(0, before_total - after_total)} stale Git worktree records',
             (cp.stderr or cp.stdout).strip(),
+            user_id=owner_user_id,
         )
-    _push(str(root))
+    _push(str(root), user_id=owner_user_id)
     return {
         'ok': True, 'removed': max(0, before_total - after_total),
         'beforePrunable': before_prunable, 'remainingPrunable': after_prunable,
@@ -711,12 +1486,26 @@ def _row_payload(row: Mapping[str, Any], *, scan: bool = True) -> dict[str, Any]
     dirty = (_porcelain(workspace, timeout=4.0) if scan and workspace.exists()
              else {'modified': 0, 'deleted': 0, 'untracked': 0, 'total': 0,
                    'timedOut': False, 'scanned': False})
+    origin = row.get('origin') or {}
+    checkpoint = row['checkpoint_sha'] or ''
+    base = row['base_sha'] or ''
+    # The checkpoint's CONTENT summary — "what is in this package?" — computed
+    # off the shared object store (never the writer's checkout), so it works
+    # even for a deleted worktree. Bounded by the same scan budget as the
+    # per-row porcelain scan.
+    diffstat = (_diffstat(Path(row['project_root']), base, checkpoint)
+                if scan and checkpoint and base else
+                {'files': [], 'totalFiles': 0, 'adds': 0, 'dels': 0})
     return {
         'taskId': row['task_id'], 'title': row['title'],
         'workspacePath': row['workspace_path'], 'managed': bool(row['managed']),
         'exists': workspace.exists(), 'state': row['state'],
         'baseSha': row['base_sha'], 'checkpointSha': row['checkpoint_sha'],
         'candidateSha': row['candidate_sha'], 'error': row['error'],
+        'origin': origin,
+        'conflictFiles': [str(f) for f in (origin.get('conflict_files') or [])],
+        'repairEpicId': str(origin.get('repair_epic_id') or ''),
+        'diffstat': diffstat,
         'dirty': dirty, 'createdAt': _iso(row['created_at']),
         'updatedAt': _iso(row['updated_at']),
     }
@@ -753,13 +1542,16 @@ def _server_identity(root: Path, candidate: str, stable: str,
     }
 
 
-def integration_status(project_path: str, *, use_cache: bool = True) -> dict[str, Any]:
+def integration_status(
+    project_path: str, *, user_id: int, use_cache: bool = True,
+) -> dict[str, Any]:
+    owner_user_id = _require_user_id(user_id)
     root = _repo_root(project_path)
     root_s = str(root)
     if use_cache:
         with _STATUS_CACHE_LOCK:
-            cached = _STATUS_CACHE.get(root_s)
-            if cached and _now() - cached[0] < 3.0:
+            cached = _STATUS_CACHE.get((owner_user_id, root_s))
+            if cached and _now() - cached[0] < _STATUS_CACHE_TTL_SECONDS:
                 return cached[1]
     head = _rev(root, 'HEAD')
     candidate = _rev(root, _CANDIDATE_REF) or head
@@ -768,17 +1560,32 @@ def integration_status(project_path: str, *, use_cache: bool = True) -> dict[str
     inventory = _worktree_inventory(root)
     total_worktrees = len(inventory)
     prunable = sum(1 for item in inventory if item['prunable'])
-    rows, event_rows = _state.status_rows(_db_path(), root_s)
-    scan_limit = max(0, min(32, int(os.environ.get(
-        'TOFU_INTEGRATION_STATUS_SCAN_LIMIT', '12'))))
-    scanned_rows = rows[:scan_limit]
+    rows, event_rows = _state.status_rows(
+        root_s, user_id=owner_user_id)
+    scan_limit = max(0, min(32, _env_int(
+        'TOFU_INTEGRATION_STATUS_SCAN_LIMIT', 8)))
+    scan_states = {
+        'running', 'checkpointed', 'ready', 'integrating',
+        'quarantined', 'failed',
+    }
+    scannable_rows = [row for row in rows if row['state'] in scan_states]
+    scanned_rows = scannable_rows[:scan_limit]
     if scanned_rows:
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=min(4, len(scanned_rows))) as pool:
-            workspaces = list(pool.map(_row_payload, scanned_rows))
+            scanned_payloads = list(pool.map(_row_payload, scanned_rows))
     else:
-        workspaces = []
-    workspaces.extend(_row_payload(row, scan=False) for row in rows[scan_limit:])
+        scanned_payloads = []
+    scanned_by_id = {
+        int(row['id']): payload
+        for row, payload in zip(scanned_rows, scanned_payloads, strict=True)
+    }
+    # Preserve durable newest-first ordering while avoiding porcelain/diffstat
+    # subprocesses for terminal merged/discarded history.
+    workspaces = [
+        scanned_by_id.get(int(row['id'])) or _row_payload(row, scan=False)
+        for row in rows
+    ]
     registered_paths = {
         str(Path(item['workspacePath']).resolve()) for item in workspaces
         if item.get('workspacePath')
@@ -793,24 +1600,71 @@ def integration_status(project_path: str, *, use_cache: bool = True) -> dict[str
         counts[item['state']] = counts.get(item['state'], 0) + 1
     ahead_cp = _git(root, ['rev-list', '--count', f'{stable}..{candidate}'])
     behind_cp = _git(root, ['rev-list', '--count', f'{candidate}..{stable}'])
+    candidate_ahead_head_cp = (
+        _git(root, ['rev-list', '--count', f'{head}..{candidate}'])
+        if head else None)
+    head_ahead_candidate_cp = (
+        _git(root, ['rev-list', '--count', f'{candidate}..{head}'])
+        if head else None)
     try:
         ahead = int(ahead_cp.stdout.strip()) if ahead_cp.returncode == 0 else 0
         behind = int(behind_cp.stdout.strip()) if behind_cp.returncode == 0 else 0
+        candidate_ahead_head = (
+            int(candidate_ahead_head_cp.stdout.strip())
+            if candidate_ahead_head_cp is not None
+            and candidate_ahead_head_cp.returncode == 0 else 0)
+        head_ahead_candidate = (
+            int(head_ahead_candidate_cp.stdout.strip())
+            if head_ahead_candidate_cp is not None
+            and head_ahead_candidate_cp.returncode == 0 else 0)
     except ValueError as exc:
         logger.debug('[Integration] invalid ahead/behind count; using zero: %s', exc)
-        ahead = behind = 0
+        ahead = behind = candidate_ahead_head = head_ahead_candidate = 0
+    head_candidate_diverged = bool(
+        candidate_ahead_head and head_ahead_candidate)
     warnings: list[str] = []
     if dirty['total']:
         warnings.append(
             'The canonical checkout is dirty. Its files are not part of candidate or stable.')
+    integration_gate_configured = bool(
+        os.environ.get('TOFU_INTEGRATION_TEST_CMD', '').strip())
+    stable_gate_configured = bool(
+        os.environ.get('TOFU_INTEGRATION_STABLE_TEST_CMD', '').strip())
+    if not integration_gate_configured:
+        warnings.append(
+            'TOFU_INTEGRATION_TEST_CMD is not configured. Semantic code/config '
+            'changes will quarantine instead of receiving syntax-only acceptance.')
+    if not stable_gate_configured:
+        warnings.append(
+            'TOFU_INTEGRATION_STABLE_TEST_CMD is not configured. Stable promotion '
+            'still requires the candidate gate for semantic code/config changes.')
     if prunable:
         warnings.append(f'{prunable} Git worktree registration(s) are prunable.')
     if behind:
         warnings.append('Candidate and stable have diverged; automatic promotion is unsafe.')
-    if len(rows) > scan_limit:
+    if head_candidate_diverged:
         warnings.append(
-            f'{len(rows) - scan_limit} older workspaces were not individually scanned '
+            'Canonical HEAD and candidate have diverged '
+            f'(HEAD +{head_ahead_candidate}, candidate +{candidate_ahead_head}). '
+            'Promoting stable does not update the canonical branch.')
+    elif head_ahead_candidate:
+        warnings.append(
+            f'Candidate is behind canonical HEAD by {head_ahead_candidate} commit(s).')
+    unscanned_active = max(0, len(scannable_rows) - len(scanned_rows))
+    if unscanned_active:
+        warnings.append(
+            f'{unscanned_active} older active/problem workspaces were not individually scanned '
             'to keep status latency bounded.')
+    events: list[dict[str, Any]] = []
+    for row in event_rows:
+        full_detail = str(row['detail'] or '')
+        detail = full_detail[:1200]
+        events.append({
+            'id': row['id'], 'taskId': row['task_id'], 'kind': row['kind'],
+            'message': row['message'], 'detail': detail,
+            'detailTruncated': len(full_detail) > len(detail),
+            'createdAt': _iso(row['created_at']),
+        })
     payload = {
         'ok': True, 'enabled': True, 'autorun': _autorun_enabled(),
         'repo': {
@@ -826,31 +1680,187 @@ def integration_status(project_path: str, *, use_cache: bool = True) -> dict[str
             'candidateInitialized': bool(_rev(root, _CANDIDATE_REF)),
             'stableInitialized': bool(_rev(root, _STABLE_REF)),
             'candidateAheadStable': ahead, 'stableAheadCandidate': behind,
+            # Keep the historical field for existing clients; its name was
+            # ambiguous, so new clients use the two explicit directions.
+            'headBehindCandidate': candidate_ahead_head,
+            'candidateAheadHead': candidate_ahead_head,
+            'headAheadCandidate': head_ahead_candidate,
+            'headCandidateDiverged': head_candidate_diverged,
         },
-        'counts': counts, 'workspaces': workspaces,
-        'events': [{
-            'id': row['id'], 'taskId': row['task_id'], 'kind': row['kind'],
-            'message': row['message'], 'detail': row['detail'],
-            'createdAt': _iso(row['created_at']),
-        } for row in event_rows],
+        'counts': counts, 'workspaces': workspaces, 'events': events,
         'gates': {
-            'builtIn': ['git diff --check', 'Python syntax', 'JavaScript syntax'],
-            'testCommandConfigured': bool(os.environ.get('TOFU_INTEGRATION_TEST_CMD', '').strip()),
-            'stableCommandConfigured': bool(os.environ.get('TOFU_INTEGRATION_STABLE_TEST_CMD', '').strip()),
+            'builtIn': [
+                'git diff --check', 'forbidden-path policy',
+                'declared write-set', 'Python syntax', 'JavaScript syntax',
+                'JSON syntax',
+            ],
+            'testCommandConfigured': integration_gate_configured,
+            'stableCommandConfigured': stable_gate_configured,
+            'projectGateRequiredSuffixes': sorted(_PROJECT_GATE_REQUIRED_SUFFIXES),
         },
         'server': _server_identity(
             root, candidate, stable, dirty['total'] == 0),
         'warnings': warnings,
     }
     with _STATUS_CACHE_LOCK:
-        _STATUS_CACHE[root_s] = (_now(), payload)
-    ensure_worker_started()
+        _STATUS_CACHE[(owner_user_id, root_s)] = (_now(), payload)
     return payload
+
+
+# ── Agent-facing tool executor (integration_checkpoint / _submit / _status) ──
+# The writer of an ISOLATED epic drives its worktree through these. Resolution
+# rule for an omitted task_id: exactly ONE active (running/checkpointed)
+# workspace whose origin.convId is the calling conversation — anything else is
+# a clear error naming the fix, never a guess.
+
+_ACTIVE_WRITER_STATES = {'running', 'checkpointed'}
+
+
+def _resolve_writer_task_id(
+    project_root: str, conv_id: str, *, user_id: int,
+) -> tuple[str, str]:
+    """Return (task_id, error). Exactly one active workspace owned by conv_id
+    resolves; zero or many returns ('', guidance)."""
+    try:
+        rows, _events = _state.status_rows(
+            project_root, user_id=_require_user_id(user_id))
+    except Exception as exc:
+        logger.warning('[Integration] status_rows failed for tool executor: %s', exc)
+        return '', f'Error: could not read integration state: {exc}'
+    owned = [r for r in rows
+             if r.get('state') in _ACTIVE_WRITER_STATES
+             and str((r.get('origin') or {}).get('convId') or '') == conv_id]
+    if len(owned) == 1:
+        return str(owned[0]['task_id']), ''
+    if not owned:
+        return '', ('Error: this conversation owns no active isolated workspace. '
+                    'These tools are only for an epic whose kickoff said ISOLATED; '
+                    'pass its task_id (pt_…) explicitly if you meant another epic.')
+    ids = ', '.join(str(r['task_id']) for r in owned)
+    return '', (f'Error: ambiguous — this conversation owns {len(owned)} active '
+                f'isolated workspaces ({ids}). Pass task_id explicitly.')
+
+
+def execute_integration_tool(fn_name: str, fn_args: dict, *,
+                             project_path: str, user_id: int,
+                             conv_id: str = '') -> str:
+    """Agent-tool entry: integration_status / integration_checkpoint /
+    integration_submit. Returns the model-facing text; never raises."""
+    owner_user_id = _require_user_id(user_id)
+    if not project_path:
+        return 'Error: integration tools require project mode (no active project).'
+    try:
+        root_s = str(_repo_root(project_path))
+    except IntegrationError as exc:
+        # Never-raises contract: a non-git / empty project must surface as a
+        # curated tool result, not a raw rev-parse traceback in error.log.
+        return f'Error: {exc}'
+
+    if fn_name == 'integration_status':
+        try:
+            rows, _events = _state.status_rows(
+                root_s, user_id=owner_user_id)
+        except Exception as exc:
+            logger.warning('[Integration] integration_status tool failed: %s', exc)
+            return f'Error: could not read integration state: {exc}'
+        if not rows:
+            return ('No integration workspaces for this project yet. One appears '
+                    'when an epic is posted with isolated=true.')
+        lines = [f'{len(rows)} integration workspace(s), newest first:']
+        for r in rows:
+            origin = r.get('origin') or {}
+            owner = str(origin.get('convId') or '')
+            mine = ' ← yours' if owner and owner == conv_id else ''
+            cp = str(r.get('checkpoint_sha') or '')[:10] or '—'
+            summary = str(origin.get('submitSummary')
+                          or origin.get('lastCheckpointNote') or '')
+            extra = f' — {summary[:80]}' if summary else ''
+            lines.append(
+                f"- {r['task_id']} [{r['state']}] {(r.get('title') or '')[:60]} "
+                f"(checkpoint {cp}{mine}){extra}")
+        lines.append('States: running/checkpointed = writer active; ready = '
+                     'queued; integrating = gate/merge running; merged = '
+                     'candidate updated and the board epic auto-completed; '
+                     'quarantined = merge failed, needs repair; discarded = '
+                     'rejected by the human.')
+        return '\n'.join(lines)
+
+    if fn_name in ('integration_checkpoint', 'integration_submit'):
+        task_id = str((fn_args or {}).get('task_id') or '').strip()
+        if not task_id:
+            task_id, err = _resolve_writer_task_id(
+                root_s, conv_id, user_id=owner_user_id)
+            if err:
+                return err
+        try:
+            row = _state.get_workspace(
+                root_s, task_id, user_id=owner_user_id)
+        except Exception as e:
+            logger.debug('[Integration] get_workspace failed task=%s: %s',
+                         task_id, e)
+            return (f'Error: no integration workspace named {task_id}. '
+                    'Check the id from your kickoff or integration_status.')
+        state = str(row.get('state') or '')
+        if state in ('discarded', 'merged'):
+            return (f'Error: workspace {task_id} is {state} — it is no longer '
+                    'writable. Do not resurrect it; if more work is needed, '
+                    'post a NEW isolated epic.')
+        # Quarantined/failed workspaces remain writable so their assigned
+        # conversation can repair the isolated checkout and resubmit it.
+        try:
+            if fn_name == 'integration_checkpoint':
+                note = str((fn_args or {}).get('note') or '').strip()
+                if note:
+                    _set_meta(
+                        root_s, task_id,
+                        {'lastCheckpointNote': note[:500]},
+                        user_id=owner_user_id,
+                    )
+                res = checkpoint_workspace(
+                    root_s, task_id, user_id=owner_user_id)
+                audit_log('integration_checkpoint', project_path=root_s,
+                          task_id=task_id, conv_id=conv_id)
+                return (f'Checkpoint saved for {task_id}: '
+                        f"{str(res.get('checkpointSha') or '')[:12]} "
+                        f'(ref {res.get("checkpointRef", "")}). The shared '
+                        'checkout is untouched; keep working, and run '
+                        'integration_submit when the epic is DONE.')
+            summary = str((fn_args or {}).get('summary') or '').strip()
+            if not summary:
+                return ('Error: integration_submit requires `summary` — tell '
+                        'the human reviewer what changed, why, and how you '
+                        'verified it.')
+            _set_meta(
+                root_s, task_id, {'submitSummary': summary[:2000]},
+                user_id=owner_user_id,
+            )
+            res = submit_workspace(
+                root_s, task_id, user_id=owner_user_id)
+            audit_log('integration_submit', project_path=root_s,
+                      task_id=task_id, conv_id=conv_id)
+            return (f'Submitted {task_id} for HUMAN review '
+                    f"(final checkpoint {str(res.get('checkpointSha') or '')[:12]}). "
+                    'The workspace is now IMMUTABLE — do not edit it further. '
+                    'The board epic completes automatically only after the '
+                    'checkpoint passes its gate and moves candidate. Use '
+                    'integration_status to inspect a delay or quarantine; do '
+                    'not complete the board epic early.')
+        except IntegrationError as exc:
+            return f'Error: {exc}'
+        except Exception as exc:
+            logger.warning('[Integration] %s failed for %s: %s',
+                           fn_name, task_id, exc, exc_info=True)
+            return f'Error: {fn_name} failed: {exc}'
+
+    return f'Unknown integration tool: {fn_name}'
 
 
 __all__ = [
     'IntegrationError', 'checkpoint_workspace', 'create_workspace',
-    'ensure_worker_started', 'integration_status', 'process_ready_once',
-    'promote_stable', 'register_workspace', 'retry_workspace',
+    'discard_workspace', 'ensure_worker_started', 'execute_integration_tool',
+    'integration_status', 'peek_workspace_for_epic',
+    'process_ready_once',
+    'promote_stable', 'reconcile_candidate_with_head', 'register_workspace',
+    'retry_workspace',
     'prune_worktree_metadata', 'submit_workspace',
 ]

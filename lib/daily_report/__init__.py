@@ -1,127 +1,108 @@
-"""lib.daily_report — Daily task-centric report engine.
+"""Lazy compatibility facade for owner-scoped daily report services."""
 
-Decomposed from the original 2405-LOC ``routes/daily_report.py``. The
-Blueprint and route handlers live in ``routes/daily_report.py`` and stay
-deliberately thin; everything else (storage, prompts, cost calculation,
-TODO carryover/fuzzy-match, conversation extraction + LLM analysis,
-async generator, scheduler) lives here as focused submodules.
+from __future__ import annotations
 
-Public surface — what existing callers import. New code should import
-from this package facade rather than from submodules directly; the
-submodule layout is implementation detail.
-"""
-
-# Storage (report JSON I/O + active-job tracking)
-from .storage import (
-    DEFAULT_USER_ID,
-    _REPORTS_DIR,
-    _active_jobs,
-    _jobs_lock,
-    _update_job,
-    _get_job,
-    _clear_job,
-    _report_path,
-    _is_report_date,
-    _save_report,
-    _save_generated_report,
-    _update_report,
-    _load_report,
-)
-
-# Prompts + persona constants
-from .prompts import (
-    _ANALYSIS_SYSTEM,
-    _TODO_TOOL_DEFAULTS,
-    _TODO_TOOL_MAP,
-    _QUOTES,
-)
-
-# Cost calculation (per-message, per-day, per-month)
-from .cost import (
-    _calendar_cache,
-    _CALENDAR_CACHE_TTL,
-    _LEGACY_PRESET_TO_MODEL,
-    _qwen_cny,
-    _calc_msg_cost_cny,
-    _scan_costs_in_range,
-    _load_cached_day_costs,
-    _persist_day_cost,
-    _persisted_cost_dates,
-    _should_pin_day,
-    invalidate_day_cost_cache,
-    invalidate_cost_cache_for_messages,
-    _get_monthly_costs,
-)
-
-# TODO carryover + fuzzy matching
-from .todos import (
-    _normalize_todo_text,
-    _fuzzy_todo_match,
-    _get_yesterday_carryover,
-    _get_today_inherited_todos,
-    _get_yesterday_todo_accountability,
-    _mark_yesterday_todos_done,
-    _close_yesterday_remaining_todos,
-    _merge_manual_state,
-)
-
-# Conversation extraction + analysis
-from .conversations import (
-    _safe_int_ts,
-    _build_transcript_from_messages,
-    _extract_convs_for_date,
-    _count_convs_for_date,
-    _activity_counts_for_range,
-    _analyse_conversations,
-)
-
-# LLM analysis + persona pick
-from .llm import (
-    _extract_json_result,
-    _run_llm_analysis,
-    _pick_persona,
-)
-
-# Async generator + scheduler
-from .generator import _generate_in_background
-from .scheduler import (
-    _backfill_yesterday_if_missing,
-    _scheduler_loop,
-    start_report_scheduler,
-    stop_report_scheduler,
-)
+from importlib import import_module
 
 __all__ = [
-    # storage
-    'DEFAULT_USER_ID',
     '_REPORTS_DIR', '_active_jobs', '_jobs_lock',
     '_update_job', '_get_job', '_clear_job',
-    '_report_path', '_is_report_date', '_save_report', '_save_generated_report',
-    '_update_report', '_load_report',
-    # prompts
+    '_reports_dir_for_owner', '_report_path', '_is_report_date',
+    '_save_report', '_save_generated_report', '_update_report', '_load_report',
     '_ANALYSIS_SYSTEM', '_TODO_TOOL_DEFAULTS', '_TODO_TOOL_MAP', '_QUOTES',
-    # cost
     '_calendar_cache', '_CALENDAR_CACHE_TTL', '_LEGACY_PRESET_TO_MODEL',
     '_qwen_cny', '_calc_msg_cost_cny', '_scan_costs_in_range',
-    '_load_cached_day_costs', '_persist_day_cost',
-    '_persisted_cost_dates', '_should_pin_day',
-    'invalidate_day_cost_cache', 'invalidate_cost_cache_for_messages',
-    '_get_monthly_costs',
-    # todos
-    '_normalize_todo_text', '_fuzzy_todo_match',
-    '_get_yesterday_carryover', '_get_today_inherited_todos',
-    '_get_yesterday_todo_accountability',
+    '_load_cached_day_costs', '_persist_day_cost', '_persisted_cost_dates',
+    '_should_pin_day', 'invalidate_day_cost_cache',
+    'invalidate_cost_cache_for_messages', '_get_monthly_costs',
+    '_normalize_todo_text', '_fuzzy_todo_match', '_get_yesterday_carryover',
+    '_get_today_inherited_todos', '_get_yesterday_todo_accountability',
     '_mark_yesterday_todos_done', '_close_yesterday_remaining_todos',
-    '_merge_manual_state',
-    # conversations
-    '_safe_int_ts', '_build_transcript_from_messages',
+    '_merge_manual_state', '_safe_int_ts', '_build_transcript_from_messages',
     '_extract_convs_for_date', '_count_convs_for_date',
-    '_activity_counts_for_range',
-    '_analyse_conversations',
-    # llm
+    '_activity_counts_for_range', '_analyse_conversations',
     '_extract_json_result', '_run_llm_analysis', '_pick_persona',
-    # async
-    '_generate_in_background',
-    '_backfill_yesterday_if_missing', '_scheduler_loop',
+    '_generate_in_background', '_backfill_yesterday_if_missing',
     'start_report_scheduler', 'stop_report_scheduler',
 ]
+
+_EXPORT_MODULES = {
+    # Durable report and active-job state.
+    '_REPORTS_DIR': 'lib.daily_report.storage',
+    '_active_jobs': 'lib.daily_report.storage',
+    '_jobs_lock': 'lib.daily_report.storage',
+    '_update_job': 'lib.daily_report.storage',
+    '_get_job': 'lib.daily_report.storage',
+    '_clear_job': 'lib.daily_report.storage',
+    '_reports_dir_for_owner': 'lib.daily_report.storage',
+    '_report_path': 'lib.daily_report.storage',
+    '_is_report_date': 'lib.daily_report.storage',
+    '_save_report': 'lib.daily_report.storage',
+    '_save_generated_report': 'lib.daily_report.storage',
+    '_update_report': 'lib.daily_report.storage',
+    '_load_report': 'lib.daily_report.storage',
+    # Prompt constants.
+    '_ANALYSIS_SYSTEM': 'lib.daily_report.prompts',
+    '_TODO_TOOL_DEFAULTS': 'lib.daily_report.prompts',
+    '_TODO_TOOL_MAP': 'lib.daily_report.prompts',
+    '_QUOTES': 'lib.daily_report.prompts',
+    # Cost projection and bounded caches.
+    '_calendar_cache': 'lib.daily_report.cost',
+    '_CALENDAR_CACHE_TTL': 'lib.daily_report.cost',
+    '_LEGACY_PRESET_TO_MODEL': 'lib.daily_report.cost',
+    '_qwen_cny': 'lib.daily_report.cost',
+    '_calc_msg_cost_cny': 'lib.daily_report.cost',
+    '_scan_costs_in_range': 'lib.daily_report.cost',
+    '_load_cached_day_costs': 'lib.daily_report.cost',
+    '_persist_day_cost': 'lib.daily_report.cost',
+    '_persisted_cost_dates': 'lib.daily_report.cost',
+    '_should_pin_day': 'lib.daily_report.cost',
+    'invalidate_day_cost_cache': 'lib.daily_report.cost',
+    'invalidate_cost_cache_for_messages': 'lib.daily_report.cost',
+    '_get_monthly_costs': 'lib.daily_report.cost',
+    # TODO carryover and manual-state merge.
+    '_normalize_todo_text': 'lib.daily_report.todos',
+    '_fuzzy_todo_match': 'lib.daily_report.todos',
+    '_get_yesterday_carryover': 'lib.daily_report.todos',
+    '_get_today_inherited_todos': 'lib.daily_report.todos',
+    '_get_yesterday_todo_accountability': 'lib.daily_report.todos',
+    '_mark_yesterday_todos_done': 'lib.daily_report.todos',
+    '_close_yesterday_remaining_todos': 'lib.daily_report.todos',
+    '_merge_manual_state': 'lib.daily_report.todos',
+    # Conversation projection and report analysis.
+    '_safe_int_ts': 'lib.daily_report.conversations',
+    '_build_transcript_from_messages': 'lib.daily_report.conversations',
+    '_extract_convs_for_date': 'lib.daily_report.conversations',
+    '_count_convs_for_date': 'lib.daily_report.conversations',
+    '_activity_counts_for_range': 'lib.daily_report.conversations',
+    '_analyse_conversations': 'lib.daily_report.conversations',
+    '_extract_json_result': 'lib.daily_report.llm',
+    '_run_llm_analysis': 'lib.daily_report.llm',
+    '_pick_persona': 'lib.daily_report.llm',
+    # Explicit background execution.
+    '_generate_in_background': 'lib.daily_report.generator',
+    '_backfill_yesterday_if_missing': 'lib.daily_report.scheduler',
+    'start_report_scheduler': 'lib.daily_report.scheduler',
+    'stop_report_scheduler': 'lib.daily_report.scheduler',
+}
+
+_CHILD_MODULES = {
+    'conversations', 'cost', 'generator', 'llm', 'prompts', 'scheduler',
+    'storage', 'todos',
+}
+
+
+def __getattr__(name: str):
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None and name in _CHILD_MODULES:
+        module_name = f'lib.daily_report.{name}'
+    if module_name is None:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    module = import_module(module_name)
+    value = module if name in _CHILD_MODULES else getattr(module, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__) | _CHILD_MODULES)

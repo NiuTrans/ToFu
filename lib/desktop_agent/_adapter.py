@@ -6,7 +6,7 @@ subprocess: the upstream community maintains the 2026 cloaking arms race
 machine, and the Tofu server reaches the adapter exclusively through the
 bridge's ``target='loopback'`` relay (lib/desktop_agent/_egress.py).
 
-Owner-ratified distribution (docs/SUBSCRIPTION_RELAY_SCENARIOS_DESIGN.md
+Distribution contract (docs/modules/remote_execution.md
 §4.4/O1): download on first ensure from GitHub Releases + version pin +
 checksums.txt SHA-256 verification + weekly update check. The SERVER owns
 policy (port / random api-key / management secret — it needs the api-key
@@ -363,6 +363,11 @@ def _spawn(policy: dict) -> None:
     global _proc, _proc_started_at
     cfg = os.path.join(_adapter_root(), 'config.yaml')
     log_path = os.path.join(_adapter_root(), 'adapter.log')
+    try:
+        from lib.log_retention import register_external_log
+        register_external_log(log_path, 'desktop_adapter_console')
+    except Exception as exc:
+        logger.debug('[Adapter] log retention registration failed: %s', exc)
     logf = open(log_path, 'ab')
     kwargs = {}
     if sys.platform.startswith('win'):

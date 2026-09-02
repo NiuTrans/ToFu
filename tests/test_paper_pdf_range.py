@@ -53,7 +53,7 @@ _PDF_BYTES = b'%PDF-1.7\n' + (b'A' * 8192) + b'\n%%EOF\n'
 
 def _build_app(paper_dir):
     """Minimal Quart app exposing only serve_paper_pdf, pointed at paper_dir."""
-    import routes.paper as rp
+    import routes.paper_pkg._pdf as rp
     rp.PAPER_DIR = paper_dir
     app = _quart.Quart('range_test')
     app.add_url_rule('/api/paper/pdf/<filename>', 'serve_paper_pdf',
@@ -137,7 +137,7 @@ def test_neuter_without_conditional_falls_back_to_200():
     """NC: bypass the seam's conditional path → the Range request degrades
     to 200 + full length (the reproduced pre-fix bug)."""
     import server  # noqa: F401
-    import routes.paper as rp
+    import routes.paper_pkg._pdf as rp
     import lib.file_serving as fs
     tmp = tempfile.mkdtemp(prefix='tofu-pdfrange-nc-')
     fn = 'arxiv_range_nc.pdf'
@@ -176,7 +176,7 @@ def test_stream_fallback_serves_accurate_bytes_and_ranges():
     explicit Range returns a byte-accurate 206 slice. This is the path we land
     if the transport log proves the proxy buffers the whole-file 200."""
     import server  # noqa: F401
-    import routes.paper as rp
+    import routes.paper_pkg._pdf as rp
     tmp = tempfile.mkdtemp(prefix='tofu-pdfstream-')
     fn = 'arxiv_stream.pdf'
     _seed(tmp, fn)

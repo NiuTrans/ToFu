@@ -87,7 +87,7 @@ def test_todo_write_neuter_bites():
 # ── 3. merge_memories failed-delete surfacing ───────────────────────
 
 def test_merge_memories_reports_failed_deletes(tmp_path, monkeypatch):
-    import lib.memory.storage as storage
+    import lib.memory.storage._crud as memory_crud
 
     created = {}
 
@@ -104,19 +104,18 @@ def test_merge_memories_reports_failed_deletes(tmp_path, monkeypatch):
     def fake_delete(mid, project_path=None, extra_paths=None):
         return mid == 'x'
 
-    monkeypatch.setattr(storage, 'create_memory', fake_create)
-    monkeypatch.setattr(storage, 'list_all_memories', fake_list)
-    monkeypatch.setattr(storage, 'delete_memory', fake_delete)
+    monkeypatch.setattr(memory_crud, 'create_memory', fake_create)
+    monkeypatch.setattr(memory_crud, 'list_all_memories', fake_list)
+    monkeypatch.setattr(memory_crud, 'delete_memory', fake_delete)
 
     warnings = []
     # merge_memories logs via its own submodule logger (lib.memory.storage._crud)
     # after the storage package split; patch that logger where the warning fires.
-    import lib.memory.storage._crud as _crud
-    monkeypatch.setattr(_crud.logger, 'warning',
+    monkeypatch.setattr(memory_crud.logger, 'warning',
                         lambda *a, **k: warnings.append(a))
 
-    res = storage.merge_memories(['x', 'y'], 'Merged', 'desc', 'body',
-                                 project_path=str(tmp_path))
+    res = memory_crud.merge_memories(
+        ['x', 'y'], 'Merged', 'desc', 'body', project_path=str(tmp_path))
     assert res['deleted_ids'] == ['x']
     assert res['failed_ids'] == ['y'], res
     assert any('could not' in str(a) for a in warnings), (
@@ -230,7 +229,7 @@ def _run_ask_human(task, monkeypatch):
     ``blocked`` is True iff request_human_guidance was entered — on an
     unattended task that would be the 120s wedge the fix must avoid.
     """
-    from lib.tasks_pkg.handlers import misc
+    import lib.tasks_pkg.handlers.misc._human as human_handlers
 
     blocked = {'hit': False}
 
@@ -243,9 +242,9 @@ def _run_ask_human(task, monkeypatch):
 
     monkeypatch.setattr('lib.tasks_pkg.human_guidance.request_human_guidance',
                         _tripwire)
-    monkeypatch.setattr(misc, 'append_event', lambda *a, **k: None)
-    monkeypatch.setattr(misc, '_finalize_tool_round', lambda *a, **k: None)
-    monkeypatch.setattr(misc, '_build_simple_meta',
+    monkeypatch.setattr(human_handlers, 'append_event', lambda *a, **k: None)
+    monkeypatch.setattr(human_handlers, '_finalize_tool_round', lambda *a, **k: None)
+    monkeypatch.setattr(human_handlers, '_build_simple_meta',
                         lambda *a, **k: {'k': k})
     # Autopilot OFF for this path.
     monkeypatch.setattr('lib.tasks_pkg.autopilot.is_autopilot_enabled',
@@ -253,7 +252,7 @@ def _run_ask_human(task, monkeypatch):
 
     round_entry = {}
     fn_args = {'question': 'What is your name?', 'response_type': 'free_text'}
-    tc_id, tool_content, _ = misc._handle_ask_human(
+    tc_id, tool_content, _ = human_handlers._handle_ask_human(
         task, {}, 'ask_human', 'tc1', fn_args, 1, round_entry,
         {}, '', False, None)
     return tool_content, round_entry, blocked['hit']

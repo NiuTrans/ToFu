@@ -18,19 +18,15 @@ from lib.tasks_pkg.compaction._steps import (
     register_step,
 )
 
-from ._state import _log_id
+from ._shared import (
+    _apply_summary,
+    _raw_context_limit,
+    _select_middle_turns,
+    _tok,
+)
+from ._state import _cooldown_ok, _log_id
 
 logger = get_logger(__name__)
-
-
-# The tunable helpers (context-limit resolution, token counting, cooldown
-# gate, middle-turn selection, summary splicing) are resolved through the
-# package FACADE at CALL time — never bound at import — so that callers /
-# tests that patch ``lib.tasks_pkg.compaction._faithful_methods.<helper>``
-# take effect, exactly as when everything lived in one module.
-def _facade():
-    import lib.tasks_pkg.compaction._faithful_methods as _fm
-    return _fm
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -54,21 +50,20 @@ def summarize_openclaw(ctx: CompactionContext) -> int:
     (reserve floor 20k); summarize-only (no tool-output prune pre-pass);
     keep a recent tail; identifier-preservation STRICT; emulate the
     pre-compaction memory-flush as a durable in-context note."""
-    _fm = _facade()
-    ctx_window = _fm._raw_context_limit(ctx)
+    ctx_window = _raw_context_limit(ctx)
     reserve = int(getattr(ctx.constants, 'OPENCLAW_RESERVE', _OPENCLAW_RESERVE_FLOOR))
     threshold = max(0, ctx_window - reserve)
-    total = _fm._tok(ctx.messages, ctx.task)
+    total = _tok(ctx.messages, ctx.task)
     if total <= threshold:
         logger.debug('[OpenClaw] conv=%s under threshold (%d≤%d) — skip',
                      _log_id(ctx.conv_id), total, threshold)
         return 0
-    if not _fm._cooldown_ok(ctx.conv_id):
+    if not _cooldown_ok(ctx.conv_id):
         return 0
 
     keep_recent = int(getattr(ctx.constants, 'OPENCLAW_KEEP_RECENT', _OPENCLAW_KEEP_RECENT))
-    middle, text = _fm._select_middle_turns(ctx, keep_recent, protect_first_n=1,
-                                            protect_last_n=1)
+    middle, text = _select_middle_turns(
+        ctx, keep_recent, protect_first_n=1, protect_last_n=1)
     if not middle or len(text) < 400:
         return 0
 
@@ -80,9 +75,13 @@ def summarize_openclaw(ctx: CompactionContext) -> int:
                                                    'FAITHFUL_SUMMARY_MAX_TOKENS', 1800)))
     if not summary:
         return 0
-    saved = _fm._apply_summary(ctx, middle, summary,
-                               '[Compaction entry — earlier turns summarized '
-                               '(identifiers preserved)]', total)
+    saved = _apply_summary(
+        ctx,
+        middle,
+        summary,
+        '[Compaction entry — earlier turns summarized (identifiers preserved)]',
+        total,
+    )
     logger.info('[OpenClaw] conv=%s overflow %d>%d → summarize-only (%d turns, ~%d tok)',
                 _log_id(ctx.conv_id), total, threshold, len(middle), saved)
     return saved

@@ -6,7 +6,7 @@
 ``_feed_translated`` path consumes both).
 
 Extracted from ``lib/oauth/codex.py:CodexSSETranslator`` (2026-07-31, epic
-pt_b7a29ea7) with four generalisations the Codex-only original lacked:
+) with four generalisations the Codex-only original lacked:
 
   1. **``response.reasoning_text.delta``** — DeepSeek's reasoning channel
      (no summary variant), mapped to ``reasoning_content`` like summaries.

@@ -52,14 +52,136 @@ def _caps_cache_key() -> int:
         return 0
 
 
-def _models_summary() -> list[dict]:
-    """Describe each configured model.
+def _catalog_models_summary(config: dict) -> list[dict]:
+    """Describe one logical model per row with explicit provider offerings.
 
-    Reads the persisted server config (``lib._SAVED_CONFIG['providers']``) —
-    i.e. the providers/models saved via the Settings UI or auto-discovered
-    and persisted. Runtime-only dispatcher slots that were never written back
-    to config do not appear here.
+    Sources the normalized catalog (persisted ``model_catalog`` or an
+    in-memory migration from ``providers``). Compatibility fields on the top
+    level mirror the legacy per-(provider, model) row for the first offering;
+    the complete provider fan-out lives under ``offerings``.
     """
+    from lib.model_catalog import provider_shells, resolve_catalog
+    from lib.model_info import resolved_context_profile
+    from lib.model_profiles import build_model_profile
+
+    catalog = resolve_catalog(config)
+    shells = provider_shells(config)
+    provider_names: dict[str, str] = {}
+    for shell in shells:
+        pid = str(shell.get('id') or shell.get('key')
+                  or shell.get('brand') or '')
+        if pid:
+            provider_names[pid] = str(shell.get('name') or pid)
+
+    out: list[dict] = []
+    for model_id in sorted(catalog['models'], key=str.casefold):
+        model = catalog['models'][model_id]
+        offerings = [
+            catalog['offerings'][oid]
+            for oid in catalog['routes'][model_id]['offering_ids']
+            if oid in catalog['offerings']
+        ]
+        caps = list(model.get('capabilities') or [])
+        first = offerings[0] if offerings else None
+        first_provider = (first or {}).get('provider_id') or ''
+        first_config = (first or {}).get('configuration') or {}
+
+        try:
+            context = resolved_context_profile(model_id, first_provider)
+        except Exception as exc:
+            logger.warning(
+                '[Capabilities] context profile failed model=%s provider=%s: %s',
+                model_id, first_provider or '-', exc,
+            )
+            context = {}
+        try:
+            # Catalog profiles may contain only the operator-authored fields.
+            # Always pass them through the profile boundary so the public API
+            # also carries derived routing fields and explicit compatibility
+            # identity for the selected top-level offering.
+            profile = build_model_profile(
+                model_id,
+                provider_id=first_provider,
+                model_entry={
+                    **dict(first_config),
+                    'model_id': model_id,
+                    'capability_profile': model.get('capability_profile'),
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                '[Capabilities] model profile failed model=%s provider=%s: %s',
+                model_id, first_provider or '-', exc,
+            )
+            profile = {}
+
+        aliases: list[str] = []
+        offering_rows: list[dict] = []
+        for offering in offerings:
+            cfg = offering.get('configuration') or {}
+            wire_ids = list(cfg.get('request_ids')
+                            or cfg.get('aliases') or [])
+            if not wire_ids:
+                wire_ids = [offering.get('model_id')]
+            for alias in (cfg.get('aliases') or []):
+                if alias not in aliases:
+                    aliases.append(alias)
+            try:
+                off_context = resolved_context_profile(
+                    offering.get('model_id'), offering.get('provider_id'))
+            except Exception as exc:
+                logger.warning(
+                    '[Capabilities] offering context failed model=%s provider=%s: %s',
+                    offering.get('model_id'), offering.get('provider_id'), exc,
+                )
+                off_context = {}
+            offering_rows.append({
+                'offering_id': offering.get('offering_id'),
+                'provider': offering.get('provider_id'),
+                'provider_id': offering.get('provider_id'),
+                'provider_name': provider_names.get(
+                    offering.get('provider_id'), offering.get('provider_id')),
+                'capabilities': list(cfg.get('capabilities') or ['text']),
+                'enabled': bool(offering.get('enabled')),
+                'pricing': cfg.get('pricing'),
+                'context': off_context,
+                'wire_ids': wire_ids,
+            })
+
+        row: dict = {
+            'id': model_id,
+            'enabled': bool(model.get('enabled')),
+            'provider': first_provider,
+            'provider_name': provider_names.get(first_provider,
+                                                first_provider),
+            'providers': [o['provider'] for o in offering_rows],
+            'capabilities': caps,
+            'thinking': 'thinking' in caps,
+            'vision': 'vision' in caps,
+            'embedding': 'embedding' in caps,
+            'image_gen': 'image_gen' in caps,
+            'transcription': 'transcription' in caps,
+            'audio_chat': 'audio_chat' in caps,
+            'cheap': 'cheap' in caps,
+            'aliases': aliases,
+            'context': context,
+            'capability_profile': profile,
+            'offerings': offering_rows,
+        }
+        if first is not None:
+            pricing = first_config.get('pricing')
+            row['rpm'] = first_config.get('rpm')
+            row['cost_per_1k'] = first_config.get('cost')
+            row['input_price_per_1m'] = (
+                pricing.get('input') if isinstance(pricing, dict) else None)
+            row['output_price_per_1m'] = (
+                pricing.get('output') if isinstance(pricing, dict) else None)
+        out.append(row)
+    return out
+
+
+def _legacy_models_summary() -> list[dict]:
+    """Legacy per-(provider, model) summary used when the catalog is absent."""
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
     try:
@@ -111,6 +233,23 @@ def _models_summary() -> list[dict]:
                 'output_price_per_1m': m.get('output_price'),
             })
     return out
+
+
+def _models_summary() -> list[dict]:
+    """Describe configured models as logical rows with per-provider offerings.
+
+    Uses the normalized catalog when the saved config carries providers or a
+    persisted catalog, otherwise falls back to the legacy per-(provider, model)
+    projection so an empty/fresh config still yields ``[]``.
+    """
+    try:
+        from lib import _SAVED_CONFIG  # type: ignore
+        config = _SAVED_CONFIG if isinstance(_SAVED_CONFIG, dict) else {}
+        if config.get('providers') or config.get('model_catalog'):
+            return _catalog_models_summary(config)
+    except Exception as e:
+        logger.debug('[capabilities] catalog models summary failed: %s', e)
+    return _legacy_models_summary()
 
 
 def _tools_summary() -> list[dict]:
@@ -172,7 +311,8 @@ def _agents_summary() -> list[dict]:
         {'id': 'search.async', 'path': '/api/v1/agents/search/async',
          'scope': 'agents:search'},
         # NOTE: swarm has NO /agents/swarm/run route — a swarm is launched
-        # in-band via `config.swarmEnabled=true` on /chat/completions; only
+        # in-band by the model calling spawn_agents on any chat turn (the
+        # swarm tools are default tools, always in the schema); only
         # status/abort are exposed (see routes/api_v1/agents.py swarm block).
         {'id': 'agent.run', 'path': '/api/v1/agent/run',
          'scope': 'agents:run'},
@@ -305,16 +445,15 @@ def _config_schema() -> dict:
                                     'prompt. See personal_scope.'},
             'browserEnabled': {'type': 'boolean'},
             'desktopEnabled': {'type': 'boolean'},
-            'swarmEnabled': {'type': 'boolean'},
             'imageGenEnabled': {'type': 'boolean'},
             'humanGuidanceEnabled': {'type': 'boolean'},
             'schedulerEnabled': {'type': 'boolean'},
             'mcpEnabled': {'type': 'boolean', 'default': True},
             'agentBackend': {'type': 'string',
                               'enum': ['builtin', 'codex', 'claude_code']},
-            'endpointMode': {'type': 'boolean',
-                              'description': 'Planner→Worker→Critic loop'},
-            'autopilot': {'type': 'boolean'},
+            'autopilot': {'type': 'boolean',
+                           'description': 'Goal mode: virtual-user autonomous '
+                                          'loop until the task is done'},
             'disableModelFallback': {
                 'type': 'boolean', 'default': False,
                 'description': 'Opt OUT of automatic model fallback for this '
@@ -436,6 +575,12 @@ def _build_capabilities() -> dict:
         # use ``chat_excluded_caps`` to filter model pickers; the dispatcher's
         # own ``issubset`` set is exposed for parity/debugging.
         'capability_taxonomy': taxonomy_payload(),
+        # Advertise the normalized model-catalog surface + its machine contract
+        # so a foreign frontend can edit logical models/offerings through CAS.
+        'model_catalog': {
+            'endpoint': '/api/v1/model-catalog',
+            'contract_version': 'tofu.model-catalog/v1',
+        },
         'compat': {
             'openai_chat_completions': '/v1/chat/completions',
             'openai_models': '/v1/models',

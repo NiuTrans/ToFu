@@ -48,10 +48,22 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+# Incremental satisfied-path cache for the O(history) messages scan. Keyed
+# by (conv namespace, project_path); the value records the message count +
+# list identity at scan time so appends fold only NEW messages and a
+# reassigned/rewritten messages list invalidates to a full rescan. The
+# per-turn ``toolRounds`` list is deliberately NOT cached here: it is reset
+# every turn, is small, and its round entries mutate status in place
+# (``searching`` → ``done``), so a count/identity key would not see those
+# flips. The toolRounds scan stays a fresh cheap per-turn pass.
+_satisfied_cache: dict = {}
+_satisfied_cache_lock = threading.Lock()
 
 
 _GATED_TOOLS = (
@@ -228,16 +240,20 @@ def _collect_satisfied_paths_from_rounds(task: dict, project_path: str | None) -
     return out
 
 
-def _collect_satisfied_paths_from_messages(task: dict, project_path: str | None) -> set[str]:
+def _collect_satisfied_paths_from_messages(task: dict, project_path: str | None,
+                                           start: int = 0) -> set[str]:
     """Return the set of absolute paths satisfied by prior assistant turns
-    in ``task['messages']``.
+    in ``task['messages'][start:]``.
 
     Walks every assistant message with ``tool_calls`` and pairs each call
     with its corresponding ``role: tool`` result message by ``tool_call_id``.
     Only pairs whose tool result is non-empty AND does not start with the
-    standard error markers count.
+    standard error markers count. ``start`` is the incremental-cache seam:
+    the suffix it cuts is always a whole-message boundary, and a tool result
+    always follows its assistant message, so indexing only the suffix is
+    equivalent to indexing the whole list.
     """
-    msgs = task.get('messages') or []
+    msgs = (task.get('messages') or [])[start:]
     if not msgs:
         return set()
     # Index tool result messages by tool_call_id for O(N) lookup.
@@ -301,6 +317,57 @@ def _collect_satisfied_paths_from_messages(task: dict, project_path: str | None)
     return out
 
 
+def _cached_satisfied_paths_from_messages(task: dict, project_path: str | None) -> set[str]:
+    """Incremental wrapper over ``_collect_satisfied_paths_from_messages``.
+
+    The message-history scan JSON-parses every historical tool call on each
+    gated write; on a long conversation that is the dominant gate cost. This
+    cache makes the scan append-only: an unchanged prefix is reused and only
+    newly-appended messages are folded in. A replaced or shrunk messages list
+    invalidates to a full rescan.
+    """
+    conv_key = task.get('convId') or task.get('id') or ''
+    key = (conv_key, os.path.abspath(project_path or ''))
+    msgs = task.get('messages') or []
+    msg_count = len(msgs)
+    msg_list_id = id(msgs)
+
+    with _satisfied_cache_lock:
+        entry = _satisfied_cache.get(key)
+        if entry is not None and entry['msg_list_id'] == msg_list_id:
+            if msg_count == entry['msg_count']:
+                return set(entry['satisfied'])
+            if msg_count > entry['msg_count']:
+                start = entry['msg_count']
+                base = entry['satisfied']
+            else:
+                start = 0
+                base = set()
+        else:
+            start = 0
+            base = set()
+
+    if start == 0:
+        satisfied = _collect_satisfied_paths_from_messages(task, project_path)
+    else:
+        satisfied = base | _collect_satisfied_paths_from_messages(
+            task, project_path, start=start)
+
+    with _satisfied_cache_lock:
+        _satisfied_cache[key] = {
+            'msg_count': msg_count,
+            'msg_list_id': msg_list_id,
+            'satisfied': set(satisfied),
+        }
+    return set(satisfied)
+
+
+def _reset_satisfied_cache_for_tests() -> None:
+    """Clear the incremental cache — test isolation helper (process-global)."""
+    with _satisfied_cache_lock:
+        _satisfied_cache.clear()
+
+
 def _result_indicates_success(name: str, result_text: str) -> bool:
     """Return True when *result_text* suggests the tool succeeded.
 
@@ -352,7 +419,7 @@ def check_read_before_edit(task: dict, fn_name: str, fn_args: dict,
         return None
 
     satisfied = _collect_satisfied_paths_from_rounds(task, project_path)
-    satisfied |= _collect_satisfied_paths_from_messages(task, project_path)
+    satisfied |= _cached_satisfied_paths_from_messages(task, project_path)
 
     unread: list[tuple[str, str]] = []
     for raw, ap in targets:
@@ -422,7 +489,7 @@ def partition_batch_edits(task: dict, fn_name: str, fn_args: dict,
 
     conv_id = task.get('convId')
     satisfied = _collect_satisfied_paths_from_rounds(task, project_path)
-    satisfied |= _collect_satisfied_paths_from_messages(task, project_path)
+    satisfied |= _cached_satisfied_paths_from_messages(task, project_path)
 
     skip_indices: list[int] = []
     unread_raw: list[str] = []

@@ -1,7 +1,8 @@
 """Context generation for project co-pilot.
 
 The LLM relies entirely on tool-based exploration (grep_search, find_files,
-list_dir, read_files) to understand project structure at runtime.
+read_files, and bounded ``ls`` routing through run_command) to understand
+project structure at runtime.
 
 This module provides ``get_context_for_prompt()`` which assembles the
 SYSTEM-LEVEL context block: the project header, multi-root workspace topology,
@@ -201,7 +202,7 @@ def get_context_for_prompt(base_path=None, conv_id=None):
     ``lib/tools/*.py``); cross-cutting routing meta lives in
     ``lib.tasks_pkg.system_prompt_cc.section_using_tools``.
 
-    ★ ``conv_id`` (2026-06-03): when provided, the advertised multi-root
+    ``conv_id`` (2026-06-03): when provided, the advertised multi-root
     table is sourced from this conversation's per-conv registry
     (``get_conv_roots``) instead of the global ``_roots``.  This MUST match
     the registry that ``resolve_namespaced_path`` consults at tool-call
@@ -240,7 +241,7 @@ def get_context_for_prompt(base_path=None, conv_id=None):
     ctx = (f"[PROJECT CO-PILOT MODE]\n"
            f"Project: {path}\n\n")
 
-    # ★ Cross-DC warning — let the LLM know about latency constraints
+    # Cross-DC warning — let the LLM know about latency constraints
     try:
         from lib.cross_dc import get_latency_class, get_timeout_multiplier
         lat_class = get_latency_class(path)
@@ -290,7 +291,7 @@ def get_context_for_prompt(base_path=None, conv_id=None):
             ctx += (
                 "\nREAD-ONLY roots are attached for reference only: you may "
                 "read / grep / list them, but write_file, apply_diff, "
-                "insert_content, create_project, and file-modifying "
+                "insert_content, and file-modifying "
                 "run_command targeting a read-only root will be REFUSED. "
                 "Make your edits in a writable root.\n"
             )

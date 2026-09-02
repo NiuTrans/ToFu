@@ -1,10 +1,4 @@
-"""Stable application-error contract for orchestration service boundaries.
-
-Concrete Definition, Run and Runtime Start services re-export these names for
-compatibility. HTTP adapters import this module instead, so replacing a service
-implementation does not require depending on its concrete module just to map
-failures.
-"""
+"""Stable application-error contract for orchestration service boundaries."""
 
 from __future__ import annotations
 
@@ -12,7 +6,7 @@ from __future__ import annotations
 class OrchestrationServiceError(RuntimeError):
     """Base class for expected failures below an application-service port."""
 
-    def public_fields(self) -> dict[str, str]:
+    def public_fields(self) -> dict[str, object]:
         """Return safe top-level fields preserved by the HTTP boundary."""
         return {}
 
@@ -40,9 +34,14 @@ class RuntimeStartError(OrchestrationServiceError):
         super().__init__(message)
         self.run_id = str(run_id or '')
 
-    def public_fields(self) -> dict[str, str]:
+    def public_fields(self) -> dict[str, object]:
         """Expose a durable row that survived a failed worker handoff."""
-        return {'run_id': self.run_id} if self.run_id else {}
+        if not self.run_id:
+            return {}
+        from lib.orchestration.runtime_wire_contracts import (
+            project_runtime_start,
+        )
+        return {'start': project_runtime_start(self.run_id, 'durable')}
 
 
 class RuntimeMutationError(OrchestrationServiceError):

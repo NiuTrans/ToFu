@@ -1,8 +1,7 @@
-"""lib/browser/handlers/_capture.py — Data capture + scripting handlers.
+"""Current browser capture, scripting, cookies, and history handlers.
 
 Handlers for taking screenshots, executing JS, and reading cookies/history.
-Each takes fn_args (dict) and returns a result for the LLM, communicating
-with the browser extension via send_browser_command().
+Each bridge call uses an explicit request-scoped runtime.
 """
 
 import json
@@ -12,28 +11,18 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 
-def _facade():
-    """Return the package facade so collaborators resolve at call time."""
-    import lib.browser.handlers as _pkg
-    return _pkg
-
-
-def send_browser_command(*args, **kwargs):
-    """Facade-resolving proxy for lib.browser.queue.send_browser_command."""
-    return _facade().send_browser_command(*args, **kwargs)
-
-
-def _handle_execute_js(fn_args):
+def _handle_execute_js(fn_args, runtime):
     code = fn_args.get('code', '')
     if not code:
         return 'Error: code is required.'
-    # v2: tab_id optional — defaults to the working tab (pt_869e5648403e4745)
+    # v2: tab_id optional — defaults to the working tab ()
     from lib.browser._resolve import resolve_work_tab
-    tab_id = resolve_work_tab(fn_args, send_browser_command)
+    tab_id = resolve_work_tab(
+        fn_args, route_key=runtime.route_key, send=runtime.send)
     if tab_id is None:
         return ('Error: no tab to run JS in. Pass tab_id, or call '
                 'browser_list_tabs / browser_navigate first.')
-    result, error = send_browser_command('execute_js', {
+    result, error = runtime.send('execute_js', {
         'tabId': int(tab_id),
         'code': code,
     }, timeout=30)
@@ -48,7 +37,7 @@ def _handle_execute_js(fn_args):
     return str(result)
 
 
-def _handle_screenshot(fn_args):
+def _handle_screenshot(fn_args, runtime):
     params = {}
     if fn_args.get('tabId') is not None:
         params['tabId'] = int(fn_args['tabId'])
@@ -66,7 +55,8 @@ def _handle_screenshot(fn_args):
     # values safely under the extension's 55s cap.
     full_page_requested = fn_args.get('fullPage', True) is not False
     timeout = 60 if full_page_requested else 30
-    result, error = send_browser_command('screenshot_tab', params, timeout=timeout)
+    result, error = runtime.send(
+        'screenshot_tab', params, timeout=timeout)
     if error:
         return f'Error taking screenshot: {error}'
     if isinstance(result, dict) and result.get('dataUrl'):
@@ -151,47 +141,65 @@ def _handle_screenshot(fn_args):
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-def _handle_get_cookies(fn_args):
+def _handle_get_cookies(fn_args, runtime):
+    """Return browser-cookie metadata without exporting replayable secrets.
+
+    The extension's internal ``get_cookies`` command remains available to the
+    verified login-capture owner, but the model-facing handler never serializes
+    values. Authenticated HTTP/file work stays in Chrome through ``fetch_url``
+    or ``download_url_to_server``.
+    """
     params = {}
     if fn_args.get('url'): params['url'] = fn_args['url']
     if fn_args.get('domain'): params['domain'] = fn_args['domain']
     if fn_args.get('name'): params['name'] = fn_args['name']
-    result, error = send_browser_command('get_cookies', params, timeout=10)
+    result, error = runtime.send('get_cookies', params, timeout=10)
     if error:
         return f'Error getting cookies: {error}'
     if isinstance(result, list):
         try:
             from lib.browser.access import is_read_allowed
-            from lib.browser.queue import _get_active_client, client_user_id
-            uid = client_user_id(_get_active_client())
             result = [row for row in result if is_read_allowed(
-                uid, row.get('domain') or fn_args.get('url') or '')]
+                runtime.owner_user_id,
+                row.get('domain') or fn_args.get('url') or '')]
         except Exception as exc:
             logger.debug('cookie access filtering failed closed: %s', exc)
             result = []
-        lines = [f'Cookies ({len(result)} found):\n']
+        lines = [f'{len(result)} cookies found (values redacted):\n']
         for c in result:
-            lines.append(f'  {c.get("name", "?")} = {str(c.get("value", ""))[:100]}')
-            lines.append(f'    domain={c.get("domain", "")} path={c.get("path", "")} secure={c.get("secure", "")}')
+            lines.append(f'  {c.get("name", "?")} = <redacted>')
+            lines.append(
+                f'    domain={c.get("domain", "")} '
+                f'path={c.get("path", "")} '
+                f'secure={c.get("secure", "")} '
+                f'httpOnly={c.get("httpOnly", "")} '
+                f'sameSite={c.get("sameSite", "")}'
+            )
+        lines.extend([
+            '',
+            'Cookie values stay in the browser and cannot be replayed by shell commands.',
+            'For an authenticated server file, call '
+            'download_url_to_server({"url":"<exact file URL>"}); it selects '
+            'server HTTP or the logged-in browser automatically.',
+        ])
         return '\n'.join(lines)
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-def _handle_get_history(fn_args):
+def _handle_get_history(fn_args, runtime):
     params = {
         'query': fn_args.get('query', ''),
         'maxResults': fn_args.get('maxResults', 100),
     }
-    result, error = send_browser_command('get_history', params, timeout=10)
+    result, error = runtime.send('get_history', params, timeout=10)
     if error:
         return f'Error getting history: {error}'
     if isinstance(result, list):
         try:
             from lib.browser.access import is_read_allowed
-            from lib.browser.queue import _get_active_client, client_user_id
-            uid = client_user_id(_get_active_client())
             result = [row for row in result
-                      if is_read_allowed(uid, row.get('url') or '')]
+                      if is_read_allowed(
+                          runtime.owner_user_id, row.get('url') or '')]
         except Exception as exc:
             logger.debug('history access filtering failed closed: %s', exc)
             result = []

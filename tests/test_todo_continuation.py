@@ -1,7 +1,7 @@
 """tests/test_todo_continuation.py — structured todo tracking + continuation enforcer.
 
 Backport of OMC TodoWrite + continuation enforcer / Claude Code TodoWriteTool
-(Rec 1+2 of docs/omc-claude-code-backport-analysis.md). Three surfaces:
+(Rec 1+2 of docs/modules/task_engine.md). Three surfaces:
 
   1. ``lib.tools.todo`` — the pure ``todo_write`` core (normalize / summarize /
      incomplete filter). Unit-testable without a task or LLM.
@@ -30,13 +30,13 @@ import time
 import pytest
 
 import lib.tools.todo as todo
-from lib.tasks_pkg.stream_handler import analyse_stream_result
+from lib.tasks_pkg.stream_handler.api import analyse_stream_result
 
 
 def _task(**kw):
     """A minimal task dict with the event plumbing analyse_stream_result's
     append_event needs (events list + lock), like a real orchestrator task."""
-    t = {'id': 'tttttttt', 'aborted': False,
+    t = {'id': 'tttttttt', '_userId': 1, 'aborted': False,
          'events': [], 'events_lock': threading.Lock()}
     t.update(kw)
     return t
@@ -181,7 +181,7 @@ def test_same_round_todo_calls_execute_in_model_order(monkeypatch):
     """
     from lib.tasks_pkg.executor import tool_registry
     from lib.tasks_pkg.handlers.misc._human import _handle_todo_write
-    from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline, parse_tool_calls
+    from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline, parse_tool_calls
 
     original = tool_registry.lookup('todo_write')
     starts = []
@@ -248,7 +248,7 @@ def test_replay_compacts_todo_revisions_but_keeps_audit_input_unchanged():
 
 
 def test_wire_replay_contains_only_latest_effective_todo_revision():
-    from lib.tasks_pkg.conv_message_builder import _reconstruct_tool_call_messages
+    from lib.tasks_pkg.conv_message_builder._toolcalls import _reconstruct_tool_call_messages
 
     rounds = []
     for n in range(3):
@@ -289,13 +289,13 @@ def test_continue_resume_restores_authoritative_checklist_stack():
 
 
 def test_live_task_metadata_exposes_todo_state_and_blocked_verdict():
-    from lib.chat.persistence import extract_task_meta
+    from lib.tasks_pkg.manager import build_result_meta
 
     state = todo.apply_todo_operation(None, {'todos': [
         {'id': 'blocked', 'content': 'Need credential', 'status': 'blocked'},
     ]})['state']
     blocked = {'reason': 'todo_items_blocked', 'incomplete': 1}
-    meta = extract_task_meta({'_todoState': state, '_todo_blocked': blocked})
+    meta = build_result_meta({'_todoState': state, '_todo_blocked': blocked})
     assert meta['todoState']['stack'][0]['todos'][0]['status'] == 'blocked'
     assert meta['todoBlocked'] == blocked
 
@@ -369,6 +369,12 @@ def test_enforcer_redrive_on_incomplete_todos(monkeypatch):
     decision = _run(task, messages)
     assert decision['action'] == 'continue'
     assert task['_todo_continuation_count'] == 1
+    # The completed assistant response must precede the reminder. Otherwise
+    # the next LLM call loses its own immediately-prior reasoning and receives
+    # a user/user adjacency.
+    assert [item['role'] for item in messages] == [
+        'user', 'assistant', 'user']
+    assert messages[-2]['content'] == 'Final answer here.'
     # A reminder user-message was injected carrying the incomplete item.
     assert messages[-1]['role'] == 'user'
     assert 'TODO CONTINUATION' in messages[-1]['content']
@@ -474,7 +480,7 @@ def test_NC1_incomplete_filter_neutered(monkeypatch):
 def test_NC2_cap_neutered_to_zero(monkeypatch):
     """NC-2: force the cap function to 0 (disabled) on the module the enforcer
     reads → no re-drive even with a real incomplete item."""
-    import lib.tasks_pkg.stream_handler as sh
+    import lib.tasks_pkg.stream_handler._budget as sh
     monkeypatch.setattr(sh, '_todo_continuation_max', lambda: 0)
     task = _task(_todos=[{'id': '2', 'content': 'pending', 'status': 'pending'}])
     messages = [{'role': 'user', 'content': 'x'}]
@@ -490,7 +496,7 @@ def test_todos_survive_force_compaction(monkeypatch):
     """★ Epic hard requirement: task['_todos'] lives on the task dict, not in
     messages, so a full L2 force-compaction (which rewrites messages) leaves it
     byte-identical."""
-    import lib.tasks_pkg.compaction._layer2 as l2
+    import lib.tasks_pkg.compaction._layer2._compact as l2
 
     # Deterministic fake summary so no LLM is called.
     monkeypatch.setattr(l2, '_generate_query_aware_summary',
@@ -502,7 +508,7 @@ def test_todos_survive_force_compaction(monkeypatch):
         {'id': '2', 'content': 'second step', 'status': 'in_progress'},
         {'id': '3', 'content': 'third step', 'status': 'pending'},
     ]
-    task = {'convId': 'c', 'id': 't', '_todos': todos}
+    task = {'convId': 'c', 'id': 't', '_userId': 1, '_todos': todos}
 
     # Build a long message list so a boundary exists to compact.
     messages = [{'role': 'system', 'content': 'sys'},

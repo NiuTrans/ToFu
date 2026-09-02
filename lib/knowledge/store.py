@@ -1,8 +1,7 @@
 """Domain facade for the durable local knowledge corpus.
 
-File parsing and content-addressed source files live here.  SQLite driver,
-schema, transaction and query ownership belong exclusively to
-``lib.database.knowledge_repository``.
+File parsing and owner-segregated source files live here. Durable metadata is
+accessed only through :class:`lib.knowledge.repository.KnowledgeRepository`.
 """
 
 from __future__ import annotations
@@ -12,12 +11,11 @@ import json
 import os
 from pathlib import Path
 import re
-import threading
 import time
 import uuid
 
-from lib.database import knowledge_repository as _repository
 from lib.log import get_logger
+from lib.identity import require_user_id
 from lib.runtime_paths import data_root
 
 from .chunking import chunk_document
@@ -26,36 +24,52 @@ from .assets import proxy_text
 
 logger = get_logger(__name__)
 
-_LOCK = threading.RLock()
-_DB_PATH_OVERRIDE: str | None = None  # tests only
+
 _SOURCE_ROOT_OVERRIDE: str | None = None  # tests only
 _ASSET_ROOT_OVERRIDE: str | None = None  # tests only
 
 
-def _root() -> Path:
-    return Path(data_root()) / 'knowledge'
+def _source_root(user_id: int) -> Path:
+    base = (Path(_SOURCE_ROOT_OVERRIDE) if _SOURCE_ROOT_OVERRIDE
+            else Path(data_root()) / 'knowledge-files')
+    return base / str(require_user_id(user_id, context='knowledge source owner')) / 'sources'
 
 
-def _db_path() -> Path:
-    return Path(_DB_PATH_OVERRIDE) if _DB_PATH_OVERRIDE else _root() / 'knowledge.sqlite3'
+def _asset_root(user_id: int) -> Path:
+    base = (Path(_ASSET_ROOT_OVERRIDE) if _ASSET_ROOT_OVERRIDE
+            else Path(data_root()) / 'knowledge-files')
+    return base / str(require_user_id(user_id, context='knowledge asset owner')) / 'assets'
 
 
-def _source_root() -> Path:
-    return Path(_SOURCE_ROOT_OVERRIDE) if _SOURCE_ROOT_OVERRIDE else _root() / 'sources'
+def _repository(user_id: int):
+    from .repository import KnowledgeRepository
+
+    return KnowledgeRepository(user_id)
 
 
-def _asset_root() -> Path:
-    if _ASSET_ROOT_OVERRIDE:
-        return Path(_ASSET_ROOT_OVERRIDE)
-    if _SOURCE_ROOT_OVERRIDE:
-        return Path(_SOURCE_ROOT_OVERRIDE).parent / 'assets'
-    return _root() / 'assets'
+def _mutation_command_id(
+    operation: str, *, user_id: int, command_id: str | None,
+) -> str:
+    """Bind one storage receipt to one application-level mutation intent."""
+    owner_user_id = require_user_id(user_id, context=f'{operation} owner')
+    supplied = str(command_id or '').strip()
+    if supplied:
+        return supplied
+    return f'{operation}:{owner_user_id}:{uuid.uuid4().hex}'
 
 
-# Pure registration: no file, connection, schema or thread is created. The
-# server installs the interposer before tool/plugin discovery, so importing
-# this built-in feature closes the raw-driver bypass even for an empty corpus.
-_repository.register_store(_db_path())
+def _public_document(document: dict) -> dict:
+    row = dict(document)
+    if 'assets' in row:
+        assets = row.get('assets') or []
+        row['asset_count'] = len(assets)
+        row['pending_asset_count'] = sum(
+            1 for asset in assets
+            if asset.get('enrichment_status') in ('pending', 'running'))
+        row['asset_issue_count'] = sum(
+            1 for asset in assets
+            if asset.get('enrichment_status') in ('no_vision', 'failed'))
+    return _row_to_document(row)
 
 
 _CJK_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff]+')
@@ -94,7 +108,7 @@ def _index_text(
     name: str, section: str, content: str, *, cap: int = 256
 ) -> str:
     # Repeat high-signal metadata once. The search body is tokenized rather
-    # than indexed verbatim so Chinese works with stock unicode61 FTS5.
+    # than indexed verbatim so retrieval is deterministic across backends.
     return ' '.join(search_tokens(
         f'{name} {section} {section} {content}', cap=cap))
 
@@ -150,84 +164,85 @@ def _row_to_document(row: dict) -> dict:
     }
 
 
-def list_documents() -> list[dict]:
-    return [
-        _row_to_document(row)
-        for row in _repository.list_documents(_db_path())
-    ]
+def list_documents(*, user_id: int) -> list[dict]:
+    return [_public_document(row) for row in _repository(user_id).documents()]
 
 
 def get_document_content(
-    document_id: str, *, offset: int = 0, limit: int = 80,
+    document_id: str, *, user_id: int, offset: int = 0, limit: int = 80,
 ) -> dict | None:
     """Expose the durable parsed evidence for an explicit user inspection."""
-    row = _repository.find_document_by_id(
-        _db_path(), str(document_id or ''))
-    if row is None:
+    page = _repository(user_id).document_content(
+        str(document_id or ''),
+        offset=max(0, int(offset)),
+        limit=max(1, min(200, int(limit))),
+    )
+    if page is None:
         return None
-    clean_offset = max(0, int(offset))
-    clean_limit = max(1, min(200, int(limit)))
-    chunks = _repository.list_document_chunks(
-        _db_path(), row['id'], offset=clean_offset, limit=clean_limit)
-    total = int(row.get('chunk_count') or 0)
-    return {
-        'document': _row_to_document(row),
-        'chunks': chunks,
-        'pagination': {
-            'offset': clean_offset,
-            'limit': clean_limit,
-            'total_items': total,
-            'has_more': clean_offset + len(chunks) < total,
-        },
-    }
+    page['document'] = _public_document(dict(page['document']))
+    return page
 
 
-def is_enabled() -> bool:
-    return _repository.is_enabled(_db_path())
+def is_enabled(*, user_id: int) -> bool:
+    return bool(_repository(user_id).settings().get('enabled'))
 
 
-def set_enabled(enabled: bool) -> dict:
-    _repository.set_enabled(_db_path(), enabled)
-    return get_status()
+def set_enabled(
+    enabled: bool, *, user_id: int, command_id: str | None = None,
+) -> dict:
+    _repository(user_id).patch_settings(
+        enabled=bool(enabled),
+        command_id=_mutation_command_id(
+            'knowledge.settings.enabled', user_id=user_id,
+            command_id=command_id),
+    )
+    return get_status(user_id=user_id)
 
 
-def visual_enrichment_enabled() -> bool:
-    return _repository.visual_enrichment_enabled(_db_path())
+def visual_enrichment_enabled(*, user_id: int) -> bool:
+    return bool(_repository(user_id).settings().get('visual_enrichment'))
 
 
-def get_activity() -> dict:
-    return _repository.enrichment_activity(_db_path())
+def get_activity(*, user_id: int) -> dict:
+    return _repository(user_id).enrichment_activity()
 
 
-def set_visual_enrichment(enabled: bool) -> dict:
-    _repository.set_visual_enrichment(_db_path(), enabled)
+def set_visual_enrichment(
+    enabled: bool, *, user_id: int, command_id: str | None = None,
+) -> dict:
+    _repository(user_id).patch_settings(
+        visual_enrichment=bool(enabled),
+        command_id=_mutation_command_id(
+            'knowledge.settings.visual', user_id=user_id,
+            command_id=command_id),
+    )
     if enabled:
         from .enrichment import start_visual_enrichment
-        start_visual_enrichment()
-    return get_status()
+        start_visual_enrichment(user_id=user_id)
+    else:
+        from .enrichment import stop_visual_enrichment
+        stop_visual_enrichment(user_id=user_id)
+    return get_status(user_id=user_id)
 
 
-def tool_available() -> bool:
+def tool_available(*, user_id: int) -> bool:
     """Cheap gate used while building every model tool schema."""
     try:
-        return _repository.tool_available(_db_path())
+        return _repository(user_id).available()
     except Exception as exc:
         logger.debug('[Knowledge] availability gate failed closed: %s', exc)
         return False
 
 
 def get_status(
-    *, page: int = 1, page_size: int = 30, query: str = '',
+    *, user_id: int, page: int = 1, page_size: int = 30, query: str = '',
     category: str = 'all', sort: str = 'updated_desc',
 ) -> dict:
-    snapshot = _repository.catalog_snapshot(
-        _db_path(), page=page, page_size=page_size, query=query,
+    snapshot = _repository(user_id).catalog(
+        page=page, page_size=page_size, query=query,
         category=category, sort=sort)
     snapshot['documents'] = [
-        _row_to_document(row) for row in snapshot.get('documents', [])]
-    snapshot['available'] = bool(
-        snapshot.get('enabled')
-        and int(snapshot.get('totals', {}).get('documents') or 0))
+        _row_to_document(row) for row in snapshot.get('documents') or []]
     return snapshot
 
 
@@ -237,8 +252,8 @@ def _safe_source_name(digest: str, kind: str, document_id: str) -> str:
     return f'{digest}-{document_id}{suffix}'
 
 
-def _write_source(raw: bytes, stored_name: str) -> Path:
-    source_root = _source_root()
+def _write_source(raw: bytes, stored_name: str, *, user_id: int) -> Path:
+    source_root = _source_root(user_id)
     source_root.mkdir(parents=True, exist_ok=True)
     final_path = source_root / stored_name
     temp_path = source_root / f'.{stored_name}.{uuid.uuid4().hex}.tmp'
@@ -253,8 +268,8 @@ def _write_source(raw: bytes, stored_name: str) -> Path:
         temp_path.unlink(missing_ok=True)
 
 
-def _write_asset(raw: bytes, stored_name: str) -> Path:
-    asset_root = _asset_root()
+def _write_asset(raw: bytes, stored_name: str, *, user_id: int) -> Path:
+    asset_root = _asset_root(user_id)
     asset_root.mkdir(parents=True, exist_ok=True)
     final_path = asset_root / stored_name
     temp_path = asset_root / f'.{stored_name}.{uuid.uuid4().hex}.tmp'
@@ -300,11 +315,13 @@ def _prepare_visual_index(
     document_id: str,
     now: float,
     chunks: list[dict],
+    *,
+    user_id: int,
 ) -> tuple[list[dict], list[dict], list[Path]]:
     """Write immutable assets and add one primary searchable proxy per asset."""
     rows: list[dict] = []
     paths: list[Path] = []
-    enrich_visuals = visual_enrichment_enabled()
+    enrich_visuals = visual_enrichment_enabled(user_id=user_id)
     try:
         for ordinal, extracted in enumerate(parsed.get('assets') or []):
             raw = extracted.get('raw')
@@ -315,7 +332,7 @@ def _prepare_visual_index(
             if not re.fullmatch(r'\.[a-z0-9]{1,8}', suffix):
                 suffix = '.bin'
             stored_name = f'{document_id}-{ordinal:04d}-{asset_id}{suffix}'
-            path = _write_asset(bytes(raw), stored_name)
+            path = _write_asset(bytes(raw), stored_name, user_id=user_id)
             paths.append(path)
             row = {
                 'id': asset_id,
@@ -359,7 +376,10 @@ def _prepare_visual_index(
     return chunks, rows, paths
 
 
-def add_document(raw: bytes, filename: str) -> dict:
+def add_document(
+    raw: bytes, filename: str, *, user_id: int,
+    command_id: str | None = None,
+) -> dict:
     """Parse, chunk, persist and atomically index one uploaded document."""
     if not raw:
         raise KnowledgeIngestError('Empty file')
@@ -374,7 +394,8 @@ def add_document(raw: bytes, filename: str) -> dict:
     if not display_name:
         display_name = 'document'
 
-    existing = _repository.find_document_by_sha(_db_path(), digest)
+    repository = _repository(user_id)
+    existing = repository.document_by_digest(digest)
     if existing:
         result = _row_to_document(existing)
         result['duplicate'] = True
@@ -385,13 +406,13 @@ def add_document(raw: bytes, filename: str) -> dict:
     chunks = chunk_document(parsed['text']) if parsed['text'].strip() else []
     now = time.time()
     chunks, assets, asset_paths = _prepare_visual_index(
-        display_name, parsed, document_id, now, chunks)
+        display_name, parsed, document_id, now, chunks, user_id=user_id)
     if not chunks:
         raise KnowledgeIngestError('The document produced no searchable evidence')
 
     stored_name = _safe_source_name(digest, parsed['kind'], document_id)
     try:
-        final_path = _write_source(raw, stored_name)
+        final_path = _write_source(raw, stored_name, user_id=user_id)
     except BaseException:
         _unlink_files(asset_paths, reason='source write rollback')
         raise
@@ -414,8 +435,13 @@ def add_document(raw: bytes, filename: str) -> dict:
     indexed_chunks = _indexed_chunks(display_name, chunks)
 
     try:
-        row, inserted = _repository.insert_document(
-            _db_path(), document, indexed_chunks, assets)
+        document = {**document, 'chunks': indexed_chunks, 'assets': assets}
+        row, inserted = repository.create_document(
+            document,
+            command_id=_mutation_command_id(
+                'knowledge.document.create', user_id=user_id,
+                command_id=command_id),
+        )
     except BaseException:
         # Every candidate owns a unique source path, so its rollback cleanup
         # can never unlink another process's successfully indexed document.
@@ -449,26 +475,29 @@ def add_document(raw: bytes, filename: str) -> dict:
         '[Knowledge] indexed %s: %d chars, %d chunks via %s',
         display_name, result['text_chars'], result['chunk_count'],
         result['method'])
-    if assets and visual_enrichment_enabled():
+    if assets and visual_enrichment_enabled(user_id=user_id):
         from .enrichment import start_visual_enrichment
-        start_visual_enrichment()
+        start_visual_enrichment(user_id=user_id)
     return result
 
 
-def reindex_document(document_id: str) -> dict | None:
+def reindex_document(
+    document_id: str, *, user_id: int, command_id: str | None = None,
+) -> dict | None:
     """Re-run the current parser over an immutable stored source.
 
     This is intentionally a replace-in-one-transaction operation: readers see
     either the previous complete index or the new complete index, never the
     transient empty state between deleting old chunks and inserting new ones.
     """
-    row = _repository.find_document_by_id(_db_path(), document_id)
+    repository = _repository(user_id)
+    row = repository.document(document_id)
     if row is None:
         return None
     stored_name = str(row.get('stored_name') or '')
     if not stored_name or Path(stored_name).name != stored_name:
         raise KnowledgeIngestError('Stored source path is invalid')
-    source_path = _source_root() / stored_name
+    source_path = _source_root(user_id) / stored_name
     try:
         raw = source_path.read_bytes()
     except FileNotFoundError as exc:
@@ -481,7 +510,7 @@ def reindex_document(document_id: str) -> dict | None:
     chunks = chunk_document(parsed['text']) if parsed['text'].strip() else []
     now = time.time()
     chunks, assets, asset_paths = _prepare_visual_index(
-        display_name, parsed, document_id, now, chunks)
+        display_name, parsed, document_id, now, chunks, user_id=user_id)
     if not chunks:
         raise KnowledgeIngestError('The document produced no searchable evidence')
     metadata = {
@@ -495,9 +524,18 @@ def reindex_document(document_id: str) -> dict | None:
         'updated_at': now,
     }
     try:
-        updated = _repository.replace_document_index(
-            _db_path(), document_id, metadata,
-            _indexed_chunks(display_name, chunks), assets)
+        replacement = {
+            **row,
+            **metadata,
+            'chunks': _indexed_chunks(display_name, chunks),
+            'assets': assets,
+        }
+        updated = repository.replace_document(
+            replacement,
+            command_id=_mutation_command_id(
+                'knowledge.document.replace', user_id=user_id,
+                command_id=command_id),
+        )
     except BaseException:
         _unlink_files(asset_paths, reason='reindex rollback')
         raise
@@ -505,7 +543,7 @@ def reindex_document(document_id: str) -> dict | None:
         _unlink_files(asset_paths, reason='vanished reindex candidate')
         return None
     old_paths = [
-        _asset_root() / name
+        _asset_root(user_id) / name
         for name in (str(item) for item in
                      (updated.get('_replaced_asset_names') or []))
         if name and Path(name).name == name
@@ -517,45 +555,52 @@ def reindex_document(document_id: str) -> dict | None:
         '[Knowledge] reindexed %s: %d chars, %d chunks via %s',
         result['name'], result['text_chars'], result['chunk_count'],
         result['method'])
-    if assets and visual_enrichment_enabled():
+    if assets and visual_enrichment_enabled(user_id=user_id):
         from .enrichment import start_visual_enrichment
-        start_visual_enrichment()
+        start_visual_enrichment(user_id=user_id)
     return result
 
 
-def delete_document(document_id: str) -> bool:
-    deleted = _repository.delete_document(_db_path(), document_id)
+def delete_document(
+    document_id: str, *, user_id: int, command_id: str | None = None,
+) -> bool:
+    deleted = _repository(user_id).delete_document(
+        document_id,
+        command_id=_mutation_command_id(
+            'knowledge.document.delete', user_id=user_id,
+            command_id=command_id),
+    )
     if deleted is None:
         return False
-    stored_name = str(deleted.get('source') or '')
+    stored_name = str(deleted.get('source') or deleted.get('stored_name') or '')
     try:
         if stored_name and Path(stored_name).name == stored_name:
-            (_source_root() / stored_name).unlink(missing_ok=True)
+            (_source_root(user_id) / stored_name).unlink(missing_ok=True)
     except OSError as exc:
         logger.warning(
             '[Knowledge] source cleanup failed for %s: %s', stored_name, exc)
-    asset_paths = [
-        _asset_root() / name
-        for name in (str(item) for item in (deleted.get('assets') or []))
-        if name and Path(name).name == name
-    ]
+    asset_paths = []
+    for item in (deleted.get('assets') or []):
+        name = item.get('stored_name') if isinstance(item, dict) else str(item)
+        if name and Path(name).name == name:
+            asset_paths.append(_asset_root(user_id) / name)
     _unlink_files(asset_paths, reason='deleted asset')
     return True
 
 
-def get_asset(asset_id: str) -> dict | None:
-    return _repository.find_asset_by_id(_db_path(), str(asset_id or ''))
+def get_asset(asset_id: str, *, user_id: int) -> dict | None:
+    return _repository(user_id).asset(str(asset_id or ''))
 
 
-def read_asset(asset_id: str) -> tuple[dict, bytes] | None:
-    row = get_asset(asset_id)
+def read_asset(asset_id: str, *, user_id: int) -> tuple[dict, bytes] | None:
+    row = get_asset(asset_id, user_id=user_id)
     if row is None:
         return None
     stored_name = str(row.get('stored_name') or '')
     if not stored_name or Path(stored_name).name != stored_name:
         return None
     try:
-        return row, (_asset_root() / stored_name).read_bytes()
+        return row, (_asset_root(user_id) / stored_name).read_bytes()
     except (FileNotFoundError, OSError) as exc:
         logger.warning('[Knowledge] asset %s could not be read: %s', asset_id, exc)
         return None

@@ -7,7 +7,6 @@ Contents:
   data/config/server_config.json  — providers, models, presets, search
   data/config/features.json       — feature flags (trading_enabled etc.)
   data/config/daily_reports/      — daily task reports
-  data/config/api_keys.json       — Bearer-token store (lib/api_keys.py)
   data/config/.first_run_token    — plaintext bootstrap admin token (0600)
   data/config/auth.json           — auth-mode policy (lib/auth_mode.py)
   data/config/pricing.json        — model price table (lib/billing/pricing.py)
@@ -35,10 +34,7 @@ Note:
 
 import os
 
-from lib.log import get_logger
 from lib.runtime_paths import data_root
-
-logger = get_logger(__name__)
 
 # ── Per-project config directory ──
 # Anchored to the WRITABLE data root (see lib/runtime_paths) so a frozen
@@ -47,13 +43,20 @@ logger = get_logger(__name__)
 CONFIG_DIR = os.path.join(data_root(), 'config')
 
 
-def _ensure_config_dir():
-    """Create data/config/ if it doesn't exist."""
+def ensure_config_dir() -> str:
+    """Create the config directory for an imminent write and return it.
+
+    Path lookup and read-only imports deliberately do not call this function.
+    On a high-latency data volume even ``makedirs(exist_ok=True)`` is a remote
+    metadata round trip, while the shared atomic-write boundary already makes
+    parents lazily before mutation.
+    """
     os.makedirs(CONFIG_DIR, exist_ok=True)
+    return CONFIG_DIR
 
 
 def config_path(*parts):
-    """Build a path under data/config/.
+    """Build a path under data/config/ without touching the filesystem.
 
     Usage:
         config_path('server_config.json')
@@ -77,5 +80,4 @@ def fetched_path(*parts):
     return os.path.join(FETCHED_DIR, *parts)
 
 
-# ── Auto-create config dir on import ──
-_ensure_config_dir()
+__all__ = ['CONFIG_DIR', 'config_path', 'ensure_config_dir', 'fetched_path']

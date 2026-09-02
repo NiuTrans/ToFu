@@ -1,12 +1,10 @@
-"""API integration tests — Quart test client hitting all core endpoints.
+"""HTTP smoke tests for the retained first-party surfaces.
 
-Uses the (sync-adapted) test client from conftest.py. Tests the core
-/api/v1 routes for correct status codes, response shapes, and error
-handling. The suite runs in open auth mode (the conftest ``flask_client``
-fixture forces ``TOFU_AUTH_MODE=open`` unless a marker overrides it).
-
-Run:  pytest tests/test_api_integration.py -m api
+Conversation setup uses the same Sidecar turn authority as production. There
+are deliberately no archive-array PUT fixtures or incident-specific merge
+tests: the route that made those states possible no longer exists.
 """
+
 from __future__ import annotations
 
 import re
@@ -17,678 +15,260 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _no_background_llm(monkeypatch):
-    """These route-shape checks never need a model call."""
-    import lib.tasks_pkg as tasks_pkg
+    import lib.tasks_pkg.spawn as task_spawn
 
-    monkeypatch.setattr(tasks_pkg, 'spawn_task', lambda _task: None)
+    monkeypatch.setattr(task_spawn, "spawn_task", lambda _task: None)
 
-# ═══════════════════════════════════════════════════════════
-#  Auth & Meta (post /api/v1 migration)
-# ═══════════════════════════════════════════════════════════
+
+def _create_turn_conversation(monkeypatch, conv_id: str, pairs: int = 1):
+    from lib.turn_lifecycle import (
+        bind_task,
+        claim_attempt_start,
+        create_turn_pair,
+        record_task_event,
+    )
+
+    created = []
+    for index in range(pairs):
+        result = create_turn_pair(
+            conv_id,
+            command_id=f"{conv_id}:pair:{index}",
+            input_projection={
+                "content": f"question {index}",
+                "_msgId": f"{conv_id}:input:{index}",
+            },
+            config={},
+            user_id=1,
+            conversation_defaults={
+                "allowCreate": index == 0,
+                "title": "Turn authority",
+            },
+        )
+        attempt_id = result["attempt"]["attemptId"]
+        claim_attempt_start(attempt_id, user_id=1)
+        bind_task(attempt_id, f"{conv_id}:task:{index}", user_id=1)
+        record_task_event(
+            {
+                "_attemptId": attempt_id,
+                "_userId": 1,
+                "content": f"answer {index}",
+                "_msgId": f"{conv_id}:output:{index}",
+                "thinking": "",
+                "toolRounds": [],
+                "segments": [
+                    {
+                        "type": "text",
+                        "text": f"answer {index}",
+                        "deliverable": True,
+                        "terminal": True,
+                    }
+                ],
+                "status": "done",
+            },
+            {"type": "done", "finishReason": "stop"},
+        )
+        created.append(result)
+    return created
+
 
 @pytest.mark.api
 class TestAuthRoutes:
-    """In open auth mode the current principal is always authenticated."""
+    def test_open_mode_principal_and_session_endpoints(self, flask_client):
+        me = flask_client.get("/api/v1/users/me")
+        assert me.status_code == 200
+        assert me.get_json()["authenticated"] is True
+        assert me.get_json()["ownerId"] == 1
 
-    def test_me(self, flask_client):
-        resp = flask_client.get("/api/v1/users/me")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["ok"] is True
-        assert data["authenticated"] is True
+        login = flask_client.post(
+            "/api/v1/users/login",
+            json={"email": "nobody@example.com", "password": "wrong"},
+        )
+        assert login.status_code == 401
+        assert flask_client.post("/api/v1/users/logout").status_code == 200
 
-    def test_login_bad_credentials(self, flask_client):
-        resp = flask_client.post("/api/v1/users/login",
-                                 json={"email": "nobody@example.com",
-                                       "password": "wrong"})
-        # No such user → 401 with a structured error envelope.
-        assert resp.status_code == 401
-        assert resp.get_json()["ok"] is False
-
-    def test_logout(self, flask_client):
-        resp = flask_client.post("/api/v1/users/logout")
-        assert resp.status_code == 200
-        assert resp.get_json()["ok"] is True
-
-
-# ═══════════════════════════════════════════════════════════
-#  Conversations CRUD
-# ═══════════════════════════════════════════════════════════
 
 @pytest.mark.api
 class TestConversations:
-    """Conversation list, save, load, delete under /api/v1."""
+    def test_first_turn_derives_title_when_new_shell_sends_no_real_title(
+        self, flask_client, monkeypatch
+    ):
+        """The browser's ``New Chat`` label is never durable metadata."""
+        import lib.conversation_sync.task_start as task_start_runtime
+        from tests._seed import delete_conversation
 
-    def test_list_conversations_empty(self, flask_client):
-        resp = flask_client.get("/api/v1/conversations")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        # api-contract §4 (batch 9): the bare array moved under the api_ok
-        # envelope's ``items`` key — a documented, coordinated shape change.
-        assert data["ok"] is True
-        assert isinstance(data["items"], list)
+        conv_id = f"derived-title-{time.time_ns()}"
 
-    def test_save_and_load_conversation(self, flask_client):
-        conv_id = f"test-conv-{int(time.time()*1000)}"
-        now = int(time.time() * 1000)
+        def fake_start(*args, **kwargs):
+            kwargs["on_task_registered"]("title-task")
+            return "title-task", None
 
-        save_resp = flask_client.put(f"/api/v1/conversations/{conv_id}", json={
-            "title": "Test Conversation",
-            "messages": [
-                {"role": "user", "content": "Hello", "timestamp": now},
-                {"role": "assistant", "content": "Hi there!", "timestamp": now + 1},
-            ],
-            "createdAt": now,
-            "updatedAt": now,
-        })
-        assert save_resp.status_code == 200
-
-        load_resp = flask_client.get(f"/api/v1/conversations/{conv_id}")
-        assert load_resp.status_code == 200
-        data = load_resp.get_json()
-        assert data["id"] == conv_id
-        assert len(data["messages"]) == 2
-
-        list_resp = flask_client.get("/api/v1/conversations")
-        assert list_resp.status_code == 200
-        # api-contract §4 (batch 9): the list array rides the envelope's
-        # ``items`` key.
-        conv_ids = [c["id"] for c in list_resp.get_json()["items"]]
-        assert conv_id in conv_ids
-
-        del_resp = flask_client.delete(f"/api/v1/conversations/{conv_id}")
-        assert del_resp.status_code == 200
-
-        load_after = flask_client.get(f"/api/v1/conversations/{conv_id}")
-        assert load_after.status_code in (404, 200)
-
-    def test_save_conversation_minimal(self, flask_client):
-        conv_id = f"test-minimal-{int(time.time()*1000)}"
-        now = int(time.time() * 1000)
-        resp = flask_client.put(f"/api/v1/conversations/{conv_id}", json={
-            "title": "Minimal",
-            "messages": [],
-            "createdAt": now,
-            "updatedAt": now,
-        })
-        assert resp.status_code == 200
-        flask_client.delete(f"/api/v1/conversations/{conv_id}")
-
-    def test_segments_survive_get_load_path(self, flask_client):
-        """END-TO-END delivery (epic pt_8b406df8fbe24ae5): a conversation whose
-        persisted assistant message carries `segments` (as the backend persist
-        path writes onto the messages column) must deliver those segments,
-        intact and interleaved-shaped, through the REAL GET route that the
-        frontend `loadConversationMessages` Phase-2 fetch hits — so
-        `msg.segments` reaches renderSegmentTimelineHTML, not a stub.
-
-        Seeded via a DIRECT DB write (the PUT wire intentionally strips segments
-        — the client never echoes the backend SoT), mirroring what
-        `_sync_result_to_conversation` writes. Then GET and assert the
-        server-authoritative reconcile + `_conv_to_dict` preserve segments.
-        """
-        import json
-        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
-        from lib.database._core_schema import CONVERSATIONS, upsert
-
-        conv_id = f"test-segs-{int(time.time()*1000)}"
-        now = int(time.time() * 1000)
-        # A finished assistant turn with the interleaved segment shape the
-        # renderer expects: thinking → narration → tool_use, then deliverable.
-        segments = [
-            {"type": "thinking", "text": "reason0", "deliverable": False, "llmRound": 0},
-            {"type": "text", "text": "Let me search.", "deliverable": False, "llmRound": 0},
-            {"type": "tool_use", "id": "tc1", "name": "web_search",
-             "input": "{}", "llmRound": 0, "result": {"content": "hit", "status": "done"}},
-            {"type": "text", "text": "The answer.", "deliverable": True, "terminal": True},
-        ]
-        messages = [
-            {"role": "user", "content": "q", "timestamp": now},
-            {"role": "assistant", "content": "The answer.", "thinking": "reason0",
-             "toolRounds": [{"toolCallId": "tc1", "toolName": "web_search",
-                             "status": "done", "toolContent": "hit", "llmRound": 0}],
-             "segments": segments, "timestamp": now + 1},
-        ]
-        db = get_thread_db(DOMAIN_CHAT)
-        upsert(db, CONVERSATIONS, {
-            "id": conv_id, "user_id": 1, "title": "seg-e2e",
-            "messages": json_dumps_pg(messages), "msg_count": len(messages),
-            "created_at": now, "updated_at": now,
-        }, insert_cols=["id", "user_id", "title", "messages", "msg_count",
-                        "created_at", "updated_at"], retry=True)
-        db.commit()
-
+        monkeypatch.setattr(
+            task_start_runtime,
+            "start_conversation_attempt_executor",
+            fake_start,
+        )
         try:
-            resp = flask_client.get(f"/api/v1/conversations/{conv_id}")
-            assert resp.status_code == 200
-            data = resp.get_json()
-            asst = [m for m in data["messages"] if m.get("role") == "assistant"]
-            assert asst, "assistant message missing from GET response"
-            segs = asst[-1].get("segments")
-            # THE PROOF: segments survive the GET/reconcile/_conv_to_dict path.
-            assert isinstance(segs, list) and len(segs) == 4, \
-                f"segments did not survive the load path: {segs!r}"
-            types = [s.get("type") for s in segs]
-            assert types == ["thinking", "text", "tool_use", "text"], types
-            # Interleaved shape intact: a tool_use with its result nested, and
-            # exactly one terminal deliverable.
-            tu = next(s for s in segs if s["type"] == "tool_use")
-            assert tu["id"] == "tc1" and tu["name"] == "web_search"
-            deliverables = [s for s in segs if s["type"] == "text" and s.get("deliverable")]
-            assert len(deliverables) == 1 and deliverables[0]["text"] == "The answer."
+            response = flask_client.post(
+                f"/api/v3/conversations/{conv_id}/turns",
+                json={
+                    "commandId": f"{conv_id}:first",
+                    "message": {
+                        "text": "<notranslate>Repair sidebar titles</notranslate>",
+                    },
+                    "config": {"model": "gpt-4o"},
+                    "conversation": {
+                        "allowCreate": True,
+                        "title": "",
+                        "createdAt": int(time.time() * 1000),
+                        "settings": {},
+                    },
+                },
+            )
+            assert response.status_code == 200
+            detail = flask_client.get(
+                f"/api/v1/conversations/{conv_id}"
+            )
+            assert detail.status_code == 200
+            assert detail.get_json()["title"] == "Repair sidebar titles"
         finally:
-            flask_client.delete(f"/api/v1/conversations/{conv_id}")
+            delete_conversation(conv_id, user_id=1)
 
-    def test_segments_preserved_across_client_strip_put(self, flask_client):
-        """PRIMARY FIX (epic pt_cb8f98b0cb9b47fb): the client PUT strips
-        `segments` on every full-conversation sync (`_trimMsgForPersist`), yet
-        `segments` is a backend-authoritative server-authored field. `save_conv`
-        must merge it back from the existing DB message (keyed on _msgId /
-        _taskId) so the persisted row keeps segments — otherwise the FIRST
-        post-turn sync wipes them and the reloaded message renders grouped.
+    def test_turn_projection_list_detail_window_metadata_and_delete(
+        self, flask_client, monkeypatch
+    ):
+        conv_id = f"authority-{time.time_ns()}"
+        _create_turn_conversation(monkeypatch, conv_id, pairs=4)
 
-        Reproduces the REAL path the existing e2e test does NOT: seed a message
-        WITH segments → PUT the same conversation with segments stripped (the
-        exact shape `_trimMsgForPersist` produces: no `segments` key) → assert
-        the persisted+served row STILL has segments (preservation), and that the
-        strip-PUT did not bump the CAS `rev` (byte-identical merged messages).
-        """
-        import json
-        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
-        from lib.database._core_schema import CONVERSATIONS, upsert
+        listed = flask_client.get("/api/v1/conversations?meta=1")
+        assert listed.status_code == 200
+        item = next(row for row in listed.get_json()["items"] if row["id"] == conv_id)
+        assert item["msgCount"] == 8
+        assert "messages" not in item
 
-        conv_id = f"test-segpreserve-{int(time.time()*1000)}"
-        now = int(time.time() * 1000)
-        msg_id = "m-asst-1"
-        segments = [
-            {"type": "thinking", "text": "reason0", "deliverable": False, "llmRound": 0},
-            {"type": "text", "text": "Let me search.", "deliverable": False, "llmRound": 0},
-            {"type": "tool_use", "id": "tc1", "name": "web_search",
-             "input": "{}", "llmRound": 0, "result": {"content": "hit", "status": "done"}},
-            {"type": "text", "text": "The answer.", "deliverable": True, "terminal": True},
-        ]
-        # Seed WITH segments (as _sync_result_to_conversation writes). Note the
-        # `segments` key is LAST in the assistant dict so a re-merge that appends
-        # it back is byte-identical → the rev trigger must not fire.
-        seed_msgs = [
-            {"role": "user", "content": "q", "_msgId": "m-user-1", "timestamp": now},
-            {"role": "assistant", "content": "The answer.", "thinking": "reason0",
-             "toolRounds": [{"toolCallId": "tc1", "toolName": "web_search",
-                             "status": "done", "toolContent": "hit", "llmRound": 0}],
-             "_msgId": msg_id, "_taskId": "task-abc", "timestamp": now + 1,
-             "segments": segments},
-        ]
-        db = get_thread_db(DOMAIN_CHAT)
-        upsert(db, CONVERSATIONS, {
-            "id": conv_id, "user_id": 1, "title": "seg-preserve",
-            "messages": json_dumps_pg(seed_msgs), "msg_count": len(seed_msgs),
-            "created_at": now, "updated_at": now,
-        }, insert_cols=["id", "user_id", "title", "messages", "msg_count",
-                        "created_at", "updated_at"], retry=True)
-        db.commit()
-        rev_before = db.execute(
-            "SELECT rev FROM conversations WHERE id=? AND user_id=?",
-            (conv_id, 1)).fetchone()[0]
+        detail = flask_client.get(
+            f"/api/v1/conversations/{conv_id}?window=3"
+        )
+        assert detail.status_code == 200
+        body = detail.get_json()
+        assert body["windowed"] is True
+        assert body["totalCount"] == 8
+        assert body["firstLoadedSeq"] == 5
+        assert body["lastLoadedSeq"] == 7
+        assert body["hasMore"] is True
+        assert len(body["messages"]) == 3
+        assert body["messages"][-1]["segments"][0]["terminal"] is True
 
-        try:
-            # The client PUT: identical messages MINUS `segments` (what
-            # _trimMsgForPersist deletes). Same _msgId/_taskId identity.
-            stripped = [dict(m) for m in seed_msgs]
-            for m in stripped:
-                m.pop("segments", None)
-            put_resp = flask_client.put(f"/api/v1/conversations/{conv_id}", json={
-                "title": "seg-preserve",
-                "messages": stripped,
-                "createdAt": now, "updatedAt": now + 100,
-            })
-            assert put_resp.status_code == 200, put_resp.get_json()
+        title = flask_client.patch(
+            f"/api/v1/conversations/{conv_id}/title",
+            json={"title": "Renamed without transcript replay"},
+            headers={"Idempotency-Key": f"rename:{conv_id}"},
+        )
+        assert title.status_code == 200
+        settings = flask_client.patch(
+            f"/api/v1/conversations/{conv_id}/settings",
+            json={"folderId": "folder-a", "autoTranslate": True},
+            headers={"Idempotency-Key": f"settings:{conv_id}"},
+        )
+        assert settings.status_code == 200
+        refreshed = flask_client.get(f"/api/v1/conversations/{conv_id}").get_json()
+        assert refreshed["title"] == "Renamed without transcript replay"
+        assert refreshed["settings"]["folderId"] == "folder-a"
+        assert len(refreshed["messages"]) == 8
 
-            # THE PROOF (preservation): the persisted row STILL carries segments.
-            get_resp = flask_client.get(f"/api/v1/conversations/{conv_id}")
-            assert get_resp.status_code == 200
-            asst = [m for m in get_resp.get_json()["messages"]
-                    if m.get("role") == "assistant"]
-            segs = asst[-1].get("segments")
-            assert isinstance(segs, list) and len(segs) == 4, \
-                f"segments were NOT preserved across the strip-PUT: {segs!r}"
-            assert [s["type"] for s in segs] == ["thinking", "text", "tool_use", "text"]
+        clone_id = f"{conv_id}-copy"
+        cloned = flask_client.post(
+            f"/api/v1/conversations/{conv_id}/clone",
+            json={"conversationId": clone_id, "title": "Atomic copy"},
+            headers={"Idempotency-Key": f"clone:{conv_id}"},
+        )
+        assert cloned.status_code == 200
+        clone = flask_client.get(f"/api/v1/conversations/{clone_id}").get_json()
+        assert clone["title"] == "Atomic copy"
+        assert len(clone["messages"]) == 8
+        assert clone["messages"][0]["_turnId"] != refreshed["messages"][0]["_turnId"]
 
-            # rev-CAS neutrality: the merge re-materializes the SAME bytes the
-            # row already held, so the messages-change trigger must not bump rev.
-            rev_after = db.execute(
-                "SELECT rev FROM conversations WHERE id=? AND user_id=?",
-                (conv_id, 1)).fetchone()[0]
-            assert rev_after == rev_before, \
-                f"strip-PUT falsely bumped rev {rev_before}->{rev_after}"
-        finally:
-            flask_client.delete(f"/api/v1/conversations/{conv_id}")
+        assert flask_client.put(
+            f"/api/v1/conversations/{conv_id}", json={"messages": []}
+        ).status_code == 405
+        assert flask_client.delete(
+            f"/api/v1/conversations/{conv_id}",
+            headers={"Idempotency-Key": f"delete:{conv_id}"},
+        ).status_code == 200
+        assert flask_client.get(f"/api/v1/conversations/{conv_id}").status_code == 404
+        restored = flask_client.post(
+            f"/api/v1/conversations/{conv_id}/restore",
+            headers={"Idempotency-Key": f"restore:{conv_id}"},
+        )
+        assert restored.status_code == 200
+        assert restored.get_json()["turnCount"] == 8
+        assert len(flask_client.get(
+            f"/api/v1/conversations/{conv_id}"
+        ).get_json()["messages"]) == 8
 
-    def test_vu_segments_preserved_across_client_strip_put(self, flask_client):
-        """RELOAD FIDELITY (autopilot VU inline timeline): an autopilot VU turn
-        is a ``role=user`` row carrying ``segments`` (a NEW shape — the existing
-        segment machinery was built for assistant rows). The GET backstop is
-        assistant/_taskId-only, so a VU row can ONLY survive reload via the
-        save_conv preserve-on-write merge, keyed on ``_msgId`` (which the
-        ``_isVirtualUser`` row carries). Without it the timeline would render
-        live+settle then VANISH on refresh — the exact snap-back being fixed.
+        from tests._seed import delete_conversation
 
-        Reproduces the real path: seed a VU user row WITH segments (as
-        ``_append_vu_message_to_conv`` writes) → PUT the same conversation with
-        segments stripped (what ``_trimMsgForPersist`` produces) → assert the
-        persisted+served VU row STILL carries segments, and the strip-PUT did
-        not bump the CAS ``rev`` (byte-identical merged messages).
-        """
-        import json
-        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
-        from lib.database._core_schema import CONVERSATIONS, upsert
+        delete_conversation(conv_id)
+        delete_conversation(clone_id)
 
-        conv_id = f"test-vusegpreserve-{int(time.time()*1000)}"
-        now = int(time.time() * 1000)
-        vu_msg_id = "vu-msg-1"
-        segments = [
-            {"type": "thinking", "text": "verify claim", "deliverable": False, "llmRound": 0},
-            {"type": "text", "text": "Let me check the exporter.", "deliverable": False, "llmRound": 0},
-            {"type": "tool_use", "id": "tc1", "name": "read_files",
-             "input": "{}", "llmRound": 0, "result": {"content": "ok", "status": "done"}},
-            {"type": "text", "text": "Keep going.", "deliverable": True, "terminal": True},
-        ]
-        # A VU user row exactly as _append_vu_message_to_conv writes it:
-        # role=user, _isVirtualUser, _msgId, toolRounds + segments co-persisted.
-        seed_msgs = [
-            {"role": "user", "content": "q", "_msgId": "m-user-1", "timestamp": now},
-            {"role": "assistant", "content": "attempt", "_msgId": "m-asst-1",
-             "timestamp": now + 1},
-            {"role": "user", "content": "Keep going.", "_isVirtualUser": True,
-             "_msgId": vu_msg_id, "_autopilotRunId": "RX", "timestamp": now + 2,
-             "toolRounds": [{"toolCallId": "tc1", "toolName": "read_files",
-                             "status": "done", "toolContent": "ok", "llmRound": 0}],
-             "segments": segments},
-        ]
-        db = get_thread_db(DOMAIN_CHAT)
-        upsert(db, CONVERSATIONS, {
-            "id": conv_id, "user_id": 1, "title": "vu-seg-preserve",
-            "messages": json_dumps_pg(seed_msgs), "msg_count": len(seed_msgs),
-            "created_at": now, "updated_at": now,
-        }, insert_cols=["id", "user_id", "title", "messages", "msg_count",
-                        "created_at", "updated_at"], retry=True)
-        db.commit()
-        rev_before = db.execute(
-            "SELECT rev FROM conversations WHERE id=? AND user_id=?",
-            (conv_id, 1)).fetchone()[0]
+    def test_full_list_and_recency_touch_are_rejected(self, flask_client):
+        assert flask_client.get("/api/v1/conversations?full=1").status_code == 400
+        missing = flask_client.patch(
+            "/api/v1/conversations/missing/settings",
+            json={"touchUpdatedAt": True},
+        )
+        assert missing.status_code == 400
 
-        try:
-            # The client PUT: identical messages MINUS `segments` (what
-            # _trimMsgForPersist deletes on EVERY full-conv sync, role-agnostic).
-            stripped = [dict(m) for m in seed_msgs]
-            for m in stripped:
-                m.pop("segments", None)
-            put_resp = flask_client.put(f"/api/v1/conversations/{conv_id}", json={
-                "title": "vu-seg-preserve",
-                "messages": stripped,
-                "createdAt": now, "updatedAt": now + 100,
-            })
-            assert put_resp.status_code == 200, put_resp.get_json()
-
-            # THE PROOF: the persisted VU (role=user) row STILL carries segments.
-            get_resp = flask_client.get(f"/api/v1/conversations/{conv_id}")
-            assert get_resp.status_code == 200
-            vu = [m for m in get_resp.get_json()["messages"]
-                  if m.get("_isVirtualUser")]
-            assert vu, "VU message missing from GET response"
-            segs = vu[-1].get("segments")
-            assert isinstance(segs, list) and len(segs) == 4, \
-                f"VU segments were NOT preserved across the strip-PUT: {segs!r}"
-            assert [s["type"] for s in segs] == ["thinking", "text", "tool_use", "text"]
-
-            # rev-CAS neutrality: the merge re-materializes the SAME bytes, so
-            # the messages-change trigger must not bump rev.
-            rev_after = db.execute(
-                "SELECT rev FROM conversations WHERE id=? AND user_id=?",
-                (conv_id, 1)).fetchone()[0]
-            assert rev_after == rev_before, \
-                f"VU strip-PUT falsely bumped rev {rev_before}->{rev_after}"
-        finally:
-            flask_client.delete(f"/api/v1/conversations/{conv_id}")
-
-    def test_segments_preservation_neutered_loses_them(self, flask_client):
-        """NEUTER of the PRIMARY fix: simulate the pre-fix save_conv by PUTting a
-        stripped payload into a conversation whose DB copy has segments, but with
-        NO matching identity (different _msgId AND _taskId) — the merge cannot
-        find a source, so segments are genuinely lost. Proves the preservation is
-        IDENTITY-DRIVEN and load-bearing: without a matching id it does NOT fire,
-        and the message reloads segment-less (the exact pre-fix failure).
-        """
-        import json
-        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
-        from lib.database._core_schema import CONVERSATIONS, upsert
-
-        conv_id = f"test-segneuter-{int(time.time()*1000)}"
-        now = int(time.time() * 1000)
-        segments = [
-            {"type": "tool_use", "id": "tc1", "name": "web_search",
-             "input": "{}", "llmRound": 0, "result": {"content": "hit", "status": "done"}},
-            {"type": "text", "text": "The answer.", "deliverable": True, "terminal": True},
-        ]
-        seed_msgs = [
-            {"role": "user", "content": "q", "_msgId": "u1", "timestamp": now},
-            {"role": "assistant", "content": "The answer.", "_msgId": "server-side-id",
-             "_taskId": "server-task", "timestamp": now + 1, "segments": segments},
-        ]
-        db = get_thread_db(DOMAIN_CHAT)
-        upsert(db, CONVERSATIONS, {
-            "id": conv_id, "user_id": 1, "title": "seg-neuter",
-            "messages": json_dumps_pg(seed_msgs), "msg_count": len(seed_msgs),
-            "created_at": now, "updated_at": now,
-        }, insert_cols=["id", "user_id", "title", "messages", "msg_count",
-                        "created_at", "updated_at"], retry=True)
-        db.commit()
-        try:
-            # Stripped PUT whose assistant carries DIFFERENT ids → no merge match.
-            stripped = [
-                {"role": "user", "content": "q", "_msgId": "u1", "timestamp": now},
-                {"role": "assistant", "content": "The answer.",
-                 "_msgId": "client-different-id", "_taskId": "client-different-task",
-                 "timestamp": now + 1},
-            ]
-            put_resp = flask_client.put(f"/api/v1/conversations/{conv_id}", json={
-                "title": "seg-neuter", "messages": stripped,
-                "createdAt": now, "updatedAt": now + 100,
-            })
-            assert put_resp.status_code == 200
-            get_resp = flask_client.get(f"/api/v1/conversations/{conv_id}")
-            asst = [m for m in get_resp.get_json()["messages"]
-                    if m.get("role") == "assistant"]
-            # No identity match → segments genuinely gone (proves the merge is
-            # gated on identity, not a blanket resurrect).
-            assert not asst[-1].get("segments"), \
-                "segments should NOT survive when no _msgId/_taskId matches"
-        finally:
-            flask_client.delete(f"/api/v1/conversations/{conv_id}")
-
-    def test_segments_rehydrated_from_task_results_on_get(self, flask_client):
-        """BACKSTOP (epic pt_cb8f98b0cb9b47fb): a turn persisted BEFORE the
-        save_conv fix has NO segments in the messages column but its `_taskId`
-        still has a `task_results.segments` row (the backend SoT). The GET path
-        must rehydrate segments from task_results so the reloaded message renders
-        the timeline. Display-only: the served payload gets segments, but they
-        are NOT written back (no rev bump).
-
-        This is exactly the state of the owner's on-screen conversation:
-        `segments=0` on the message, but 58 segments in task_results.
-        """
-        import json
-        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
-        from lib.database._core_schema import CONVERSATIONS, TASK_RESULTS, upsert
-
-        conv_id = f"test-segrehy-{int(time.time()*1000)}"
-        task_id = f"task-rehy-{int(time.time()*1000)}"
-        now = int(time.time() * 1000)
-        # Message has NO segments (stripped long ago), but carries _taskId.
-        messages = [
-            {"role": "user", "content": "q", "_msgId": "u1", "timestamp": now},
-            {"role": "assistant", "content": "The answer.", "_msgId": "a1",
-             "_taskId": task_id,
-             "toolRounds": [{"toolCallId": "tc1", "toolName": "web_search",
-                             "status": "done", "toolContent": "hit", "llmRound": 0}],
-             "timestamp": now + 1},
-        ]
-        # The backend-authoritative segments live in task_results (thin form).
-        tr_segments = [
-            {"type": "thinking", "text": "reason0", "deliverable": False, "llmRound": 0},
-            {"type": "tool_use", "id": "tc1", "name": "web_search",
-             "input": "{}", "llmRound": 0, "result": {"content": "hit", "status": "done"}},
-            {"type": "text", "text": "The answer.", "deliverable": True, "terminal": True},
-        ]
-        db = get_thread_db(DOMAIN_CHAT)
-        upsert(db, CONVERSATIONS, {
-            "id": conv_id, "user_id": 1, "title": "seg-rehy",
-            "messages": json_dumps_pg(messages), "msg_count": len(messages),
-            "created_at": now, "updated_at": now,
-        }, insert_cols=["id", "user_id", "title", "messages", "msg_count",
-                        "created_at", "updated_at"], retry=True)
-        upsert(db, TASK_RESULTS, {
-            "task_id": task_id, "conv_id": conv_id, "content": "The answer.",
-            "thinking": "reason0", "status": "done",
-            "segments": json.dumps(tr_segments),
-            "created_at": now, "completed_at": now + 1,
-        }, insert_cols=["task_id", "conv_id", "content", "thinking", "status",
-                        "segments", "created_at", "completed_at"], retry=True)
-        db.commit()
-        try:
-            resp = flask_client.get(f"/api/v1/conversations/{conv_id}")
-            assert resp.status_code == 200
-            asst = [m for m in resp.get_json()["messages"]
-                    if m.get("role") == "assistant"]
-            segs = asst[-1].get("segments")
-            # THE PROOF (rehydration): segments came from task_results.
-            assert isinstance(segs, list) and len(segs) == 3, \
-                f"segments were NOT rehydrated from task_results: {segs!r}"
-            assert [s["type"] for s in segs] == ["thinking", "tool_use", "text"]
-
-            # Display-only: NOT persisted back to the messages column.
-            row = db.execute("SELECT messages FROM conversations WHERE id=? AND user_id=?",
-                             (conv_id, 1)).fetchone()
-            db_msgs = json.loads(row[0])
-            db_asst = [m for m in db_msgs if m.get("role") == "assistant"][-1]
-            assert not db_asst.get("segments"), \
-                "rehydration must be display-only (not written back to the column)"
-        finally:
-            flask_client.delete(f"/api/v1/conversations/{conv_id}")
-
-    def test_rehydration_neutered_no_task_results_row(self, flask_client):
-        """NEUTER of the BACKSTOP: identical to the rehydration test but with NO
-        `task_results` row for the message's _taskId. The GET path must fall
-        through cleanly — the message stays segment-less (→ grouped render),
-        never a crash. Proves the rehydration is the load-bearing source and
-        that its absence degrades gracefully.
-        """
-        import json
-        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
-        from lib.database._core_schema import CONVERSATIONS, upsert
-
-        conv_id = f"test-segrehy-none-{int(time.time()*1000)}"
-        now = int(time.time() * 1000)
-        messages = [
-            {"role": "user", "content": "q", "_msgId": "u1", "timestamp": now},
-            {"role": "assistant", "content": "The answer.", "_msgId": "a1",
-             "_taskId": "task-with-no-results-row", "timestamp": now + 1},
-        ]
-        db = get_thread_db(DOMAIN_CHAT)
-        upsert(db, CONVERSATIONS, {
-            "id": conv_id, "user_id": 1, "title": "seg-rehy-none",
-            "messages": json_dumps_pg(messages), "msg_count": len(messages),
-            "created_at": now, "updated_at": now,
-        }, insert_cols=["id", "user_id", "title", "messages", "msg_count",
-                        "created_at", "updated_at"], retry=True)
-        db.commit()
-        try:
-            resp = flask_client.get(f"/api/v1/conversations/{conv_id}")
-            assert resp.status_code == 200
-            asst = [m for m in resp.get_json()["messages"]
-                    if m.get("role") == "assistant"]
-            assert not asst[-1].get("segments"), \
-                "no task_results row → message must stay segment-less (grouped)"
-        finally:
-            flask_client.delete(f"/api/v1/conversations/{conv_id}")
-
-
-# ═══════════════════════════════════════════════════════════
-#  Chat Start & Polling
-# ═══════════════════════════════════════════════════════════
 
 @pytest.mark.api
-class TestChatAPI:
-    """Chat task lifecycle: start → poll."""
+class TestRetainedAPIs:
+    def test_task_and_swarm_shapes(self, flask_client):
+        tasks = flask_client.get("/api/v1/tasks")
+        assert tasks.status_code == 200
+        assert isinstance(tasks.get_json()["tasks"], list)
 
-    def test_chat_start_requires_messages(self, flask_client):
-        resp = flask_client.post("/api/v1/chat/start", json={
-            "convId": "test-conv",
-            "config": {},
-        })
-        assert resp.status_code in (400, 404)
+        swarm = flask_client.get("/api/v1/swarm/config")
+        assert swarm.status_code == 200
+        assert isinstance(swarm.get_json()["roles"], list)
+        missing = flask_client.get("/api/v1/swarm/status/nonexistent-task")
+        assert missing.status_code == 200
+        assert missing.get_json().get("known") is False
+        assert missing.get_json().get("active") is None
 
-    def test_chat_start_creates_task(self, flask_client):
-        resp = flask_client.post("/api/v1/chat/start", json={
-            "convId": "test-conv",
-            "messages": [{"role": "user", "content": "Hello"}],
-            "config": {"model": "mock-model"},
-        })
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert "taskId" in data
-        task_id = data["taskId"]
+    def test_invalid_task_starts_fail_closed(self, flask_client):
+        chat = flask_client.post(
+            "/api/v1/chat/start", json={"convId": "missing", "config": {}}
+        )
+        assert chat.status_code in {400, 404}
 
-        time.sleep(0.5)
+    def test_misc_read_surfaces(self, flask_client):
+        assert flask_client.get("/api/v1/memory").status_code == 200
+        assert flask_client.get("/api/v1/scheduler/tasks").status_code == 200
+        # The browser bridge is a single POST poll transport.  The retired
+        # split GET command endpoint must stay absent instead of quietly
+        # reviving a second delivery contract.
+        from lib.api_keys import create_key
+        _row, bridge_token = create_key(
+            owner_user_id=1,
+            name='api-integration-browser',
+            scopes=['agents:bridge'],
+        )
 
-        poll_resp = flask_client.get(f"/api/v1/chat/poll/{task_id}")
-        assert poll_resp.status_code == 200
+        bridge = flask_client.get(
+            "/api/browser/commands",
+            headers={"X-Bridge-Secret": bridge_token},
+        )
+        assert bridge.status_code == 404
 
-    def test_chat_active_tasks(self, flask_client):
-        resp = flask_client.get("/api/v1/chat/active")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        # api-contract §4 (batch 11): the bare array moved under ``items``;
-        # every other consumer of this endpoint already unwraps it.
-        assert data["ok"] is True
-        assert isinstance(data["items"], list)
-
-
-# ═══════════════════════════════════════════════════════════
-#  Endpoint Mode
-# ═══════════════════════════════════════════════════════════
 
 @pytest.mark.api
-class TestEndpointAPI:
-    """Endpoint mode task lifecycle."""
-
-    def test_endpoint_requires_user_message(self, flask_client):
-        resp = flask_client.post("/api/v1/endpoint/start", json={
-            "messages": [{"role": "system", "content": "You are helpful"}],
-            "config": {},
-        })
-        assert resp.status_code == 400
-
-    def test_endpoint_requires_messages(self, flask_client):
-        resp = flask_client.post("/api/v1/endpoint/start", json={
-            "messages": [],
-            "config": {},
-        })
-        assert resp.status_code in (400, 404)
-
-    def test_endpoint_start_success(self, flask_client):
-        resp = flask_client.post("/api/v1/endpoint/start", json={
-            "convId": "test-endpoint",
-            "messages": [{"role": "user", "content": "Build a calculator"}],
-            "config": {"model": "mock-model"},
-        })
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert "taskId" in data
-        assert "convId" in data
-
-
-# ═══════════════════════════════════════════════════════════
-#  Swarm Config
-# ═══════════════════════════════════════════════════════════
-
-@pytest.mark.api
-class TestSwarmAPI:
-    """Swarm configuration endpoint."""
-
-    def test_swarm_config(self, flask_client):
-        resp = flask_client.get("/api/v1/swarm/config")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["available"] is True
-        assert "roles" in data
-        assert isinstance(data["roles"], list)
-
-    def test_swarm_status_nonexistent(self, flask_client):
-        resp = flask_client.get("/api/v1/swarm/status/nonexistent-task")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data.get("active") is False
-
-
-# ═══════════════════════════════════════════════════════════
-#  Translate
-# ═══════════════════════════════════════════════════════════
-
-@pytest.mark.api
-class TestTranslateAPI:
-    """Translation endpoint under /api/v1."""
-
-    def test_translate_requires_text(self, flask_client):
-        resp = flask_client.post("/api/v1/translate", json={})
-        assert resp.status_code in (400, 200)
-
-    def test_translate_with_text(self, flask_client):
-        resp = flask_client.post("/api/v1/translate", json={
-            "text": "Hello world",
-            "targetLang": "zh",
-        })
-        # May succeed or fail depending on LLM availability.
-        assert resp.status_code in (200, 500)
-
-
-# ═══════════════════════════════════════════════════════════
-#  Static Pages
-# ═══════════════════════════════════════════════════════════
-
-@pytest.mark.api
-class TestStaticPages:
-    """Core HTML pages load successfully."""
-
-    def test_index_page(self, flask_client):
-        resp = flask_client.get("/")
-        assert resp.status_code == 200
-        html = resp.data.decode("utf-8")
-        assert "Tofu" in html
-        assert '<!-- TOFU_APP_ASSETS -->' not in html
-        assert 'id="tofu-boot-config"' in html
-        assert 'src="static/vite/assets/' in html
-        assert 'src="static/js/core.js' not in html
-
-    def test_css_loads(self, flask_client):
-        resp = flask_client.get("/static/styles.css")
-        assert resp.status_code == 200
-        assert len(resp.data) > 1000
-
-    def test_main_js_loads(self, flask_client):
-        index = flask_client.get('/')
-        match = re.search(
-            r'src="(static/vite/assets/[^"?]+\.js)(?:\?[^" ]*)?"',
-            index.data.decode('utf-8'))
-        assert match, 'rendered shell has no Vite JavaScript entry asset'
-        resp = flask_client.get('/' + match.group(1))
-        assert resp.status_code == 200
-        assert len(resp.data) > 10000
-
-
-# ═══════════════════════════════════════════════════════════
-#  Memory / Browser / Scheduler stubs
-# ═══════════════════════════════════════════════════════════
-
-@pytest.mark.api
-class TestMiscEndpoints:
-    """Various other endpoints return valid responses."""
-
-    def test_memory_list(self, flask_client):
-        resp = flask_client.get("/api/v1/memory")
-        assert resp.status_code == 200
-
-    def test_browser_commands(self, flask_client):
-        # /api/browser/commands is bridge-scoped (B0): a credential is
-        # required regardless of peer address. Use the in-process loopback
-        # agent token, as the desktop bridge tests do.
-        from routes.api_v1.auth import loopback_agent_token
-        resp = flask_client.get("/api/browser/commands", headers={
-            'X-Bridge-Secret': loopback_agent_token(),
-        })
-        assert resp.status_code == 200
-
-    def test_scheduler_tasks(self, flask_client):
-        resp = flask_client.get("/api/v1/scheduler/tasks")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["ok"] is True
+def test_static_shell_uses_built_frontend(flask_client):
+    index = flask_client.get("/")
+    assert index.status_code == 200
+    html = index.data.decode("utf-8")
+    assert '<!-- TOFU_APP_ASSETS -->' not in html
+    assert 'id="tofu-boot-config"' in html
+    match = re.search(r'src="(static/vite/assets/[^"?]+\.js)', html)
+    assert match
+    asset = flask_client.get("/" + match.group(1))
+    assert asset.status_code == 200
+    assert len(asset.data) > 10_000

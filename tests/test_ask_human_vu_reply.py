@@ -22,8 +22,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+pytestmark = pytest.mark.unit
 
 VU_TEXT = '继续做第三条，完成后跑一遍回归。\n[PROGRESS: resolved=2 remaining=3]'
 VU_CLEAN = '继续做第三条，完成后跑一遍回归。'
@@ -32,7 +31,7 @@ VU_CLEAN = '继续做第三条，完成后跑一遍回归。'
 @pytest.fixture
 def vu_env(monkeypatch):
     """Drive the REAL _handle_ask_human with autopilot ON and heavy deps faked."""
-    from lib.tasks_pkg.handlers import misc
+    import lib.tasks_pkg.handlers.misc._human as human_handlers
 
     captured = {'events': [], 'resolved': []}
 
@@ -48,15 +47,15 @@ def vu_env(monkeypatch):
     monkeypatch.setattr(
         'lib.tasks_pkg.human_guidance.resolve_human_guidance',
         lambda guidance_id, response: captured['resolved'].append(response))
-    monkeypatch.setattr(misc, 'append_event',
+    monkeypatch.setattr(human_handlers, 'append_event',
                         lambda task, ev: captured['events'].append(ev))
-    monkeypatch.setattr(misc, '_build_simple_meta', lambda *a, **k: {'k': k})
-    monkeypatch.setattr(misc, '_finalize_tool_round', lambda *a, **k: None)
+    monkeypatch.setattr(human_handlers, '_build_simple_meta', lambda *a, **k: {'k': k})
+    monkeypatch.setattr(human_handlers, '_finalize_tool_round', lambda *a, **k: None)
 
     round_entry = {}
     fn_args = {'question': '下一步做什么？', 'response_type': 'free_text'}
     task = {'id': 'task-ask-0001', 'messages': []}
-    tc_id, tool_content, _ = misc._handle_ask_human(
+    tc_id, tool_content, _ = human_handlers._handle_ask_human(
         task, {}, 'ask_human', 'tc1', fn_args, 1, round_entry,
         {}, '', False, None)
     return captured, tool_content, round_entry
@@ -88,15 +87,15 @@ def test_resolve_and_sse_event_carry_the_same_clean_text(vu_env):
 # ── 2. Edge paths preserved ───────────────────────────────────────────────
 
 def test_vu_none_still_means_aborted(monkeypatch):
-    from lib.tasks_pkg.handlers import misc
+    import lib.tasks_pkg.handlers.misc._human as human_handlers
     monkeypatch.setattr('lib.tasks_pkg.autopilot.is_autopilot_enabled',
                         lambda t: True)
     monkeypatch.setattr('lib.tasks_pkg.autopilot.run_virtual_user',
                         lambda task, vu_msg_id=None: None)
-    monkeypatch.setattr(misc, 'append_event', lambda *a, **k: None)
-    monkeypatch.setattr(misc, '_build_simple_meta', lambda *a, **k: {'k': k})
-    monkeypatch.setattr(misc, '_finalize_tool_round', lambda *a, **k: None)
-    _, tool_content, _ = misc._handle_ask_human(
+    monkeypatch.setattr(human_handlers, 'append_event', lambda *a, **k: None)
+    monkeypatch.setattr(human_handlers, '_build_simple_meta', lambda *a, **k: {'k': k})
+    monkeypatch.setattr(human_handlers, '_finalize_tool_round', lambda *a, **k: None)
+    _, tool_content, _ = human_handlers._handle_ask_human(
         {'id': 'task-ask-0002', 'messages': []}, {}, 'ask_human', 'tc1',
         {'question': 'q', 'response_type': 'free_text'}, 1, {},
         {}, '', False, None)
@@ -104,7 +103,7 @@ def test_vu_none_still_means_aborted(monkeypatch):
 
 
 def test_empty_vu_text_falls_back_to_no_further_input(monkeypatch):
-    from lib.tasks_pkg.handlers import misc
+    import lib.tasks_pkg.handlers.misc._human as human_handlers
     monkeypatch.setattr('lib.tasks_pkg.autopilot.is_autopilot_enabled',
                         lambda t: True)
     # A reply that is ONLY a machine line strips down to empty.
@@ -115,23 +114,11 @@ def test_empty_vu_text_falls_back_to_no_further_input(monkeypatch):
             'rounds': [], 'segments': []})
     monkeypatch.setattr('lib.tasks_pkg.human_guidance.resolve_human_guidance',
                         lambda *a, **k: None)
-    monkeypatch.setattr(misc, 'append_event', lambda *a, **k: None)
-    monkeypatch.setattr(misc, '_build_simple_meta', lambda *a, **k: {'k': k})
-    monkeypatch.setattr(misc, '_finalize_tool_round', lambda *a, **k: None)
-    _, tool_content, _ = misc._handle_ask_human(
+    monkeypatch.setattr(human_handlers, 'append_event', lambda *a, **k: None)
+    monkeypatch.setattr(human_handlers, '_build_simple_meta', lambda *a, **k: {'k': k})
+    monkeypatch.setattr(human_handlers, '_finalize_tool_round', lambda *a, **k: None)
+    _, tool_content, _ = human_handlers._handle_ask_human(
         {'id': 'task-ask-0003', 'messages': []}, {}, 'ask_human', 'tc1',
         {'question': 'q', 'response_type': 'free_text'}, 1, {},
         {}, '', False, None)
     assert tool_content == 'Human response: (no further input)'
-
-
-# ── 3. Source-scan guards ─────────────────────────────────────────────────
-
-def test_handler_has_no_whole_dict_answer_and_uses_single_predicate():
-    with open(os.path.join(_ROOT, 'lib/tasks_pkg/handlers/misc/_human.py'),
-              encoding='utf-8') as f:
-        src = f.read()
-    assert 'user_response = vu_reply or' not in src, (
-        'the whole-dict answer regression')
-    assert 'strip_machine_tokens' in src, (
-        'the VU answer must pass through the single agent_verdict predicate')

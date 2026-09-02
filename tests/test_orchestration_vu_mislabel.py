@@ -2,19 +2,19 @@
 
 Root-cause regression guard for the "编排里的自动驾驶比模式开关更蠢" bug:
 when autopilot runs through the FlowExecutor engine (the "编排流程" dropdown),
-the ``EndpointEventAdapter`` used to stamp EVERY user-side turn with
-``_isEndpointReview`` — including the virtual_user (VU) turns. That marker
+the flow event adapter used to stamp EVERY user-side turn with
+``_isFlowReview`` — including the virtual_user (VU) turns. That marker
 makes ``_transform_messages`` (the LLM context builder) SKIP the row
-(``_transform.py``: ``if msg.get('_isEndpointReview'): continue``). So the
+(``_transform.py``: ``if msg.get('_isFlowReview'): continue``). So the
 VU's instruction ("stop analyzing and execute — here is the checklist")
 was SILENTLY DROPPED from the model's context, starving the next worker
 turn. This is a correctness bug, not a cosmetic label.
 
 These tests assert the fix along the whole marker chain:
-  1. adapter stamps ``_isVirtualUser`` (not ``_isEndpointReview``) for a
+  1. adapter stamps ``_isVirtualUser`` (not ``_isFlowReview``) for a
      virtual_user node, and NEVER stamps a VU row with an endpoint marker;
   2. such a VU row SURVIVES ``_transform_messages`` (reaches context);
-  3. a critic flow (control) still stamps ``_isEndpointReview`` and that row
+  3. a critic flow (control) still stamps ``_isFlowReview`` and that row
      is still correctly SKIPPED by ``_transform_messages``.
 """
 
@@ -22,16 +22,17 @@ import unittest
 
 import pytest
 
-from lib.orchestration import (
-    build_autopilot_definition, build_endpoint_definition,
-)
+from lib.orchestration._builtin_definitions import build_autopilot_definition
+from lib.orchestration_chat_flow_adapter import FlowEventAdapter
 from lib.orchestration_engine import FlowExecutor
-from lib.orchestration_endpoint_adapter import EndpointEventAdapter
 from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
+from tests.support.orchestration_definitions import (
+    build_verifier_loop_definition,
+)
 
 
 def _run(defn, runner):
-    adapter = EndpointEventAdapter()
+    adapter = FlowEventAdapter()
     FlowExecutor(defn, agent_runner=runner, on_event=adapter.on_event).run()
     return adapter.messages
 
@@ -61,7 +62,7 @@ pytestmark = pytest.mark.unit
 
 
 class VuMarkerTest(unittest.TestCase):
-    def test_vu_turn_marked_virtual_user_not_endpoint_review(self):
+    def test_vu_turn_marked_virtual_user_not_flow_review(self):
         msgs = _run(build_autopilot_definition(max_iterations=4),
                     _autopilot_runner())
         vu_rows = [m for m in msgs
@@ -70,12 +71,12 @@ class VuMarkerTest(unittest.TestCase):
         for m in vu_rows:
             self.assertTrue(m.get('_isVirtualUser'),
                             'VU turn must carry _isVirtualUser')
-            self.assertFalse(m.get('_isEndpointReview'),
-                             'VU turn must NOT carry _isEndpointReview '
+            self.assertFalse(m.get('_isFlowReview'),
+                             'VU turn must NOT carry _isFlowReview '
                              '(that marker makes _transform skip it)')
             # It must carry NONE of the three context-skip markers.
-            self.assertFalse(m.get('_epIteration'))
-            self.assertFalse(m.get('_isEndpointPlanner'))
+            self.assertFalse(m.get('_flowIteration'))
+            self.assertFalse(m.get('_isFlowPlanner'))
             # Parity with the live autopilot path (autopilot.py:1081): a VU
             # row carries a routable _msgId.
             self.assertTrue(m.get('_msgId'), 'VU turn should carry a _msgId')
@@ -87,7 +88,7 @@ class VuMarkerTest(unittest.TestCase):
         vu_text = 'Stop analyzing and execute — here is the checklist.'
         raw = [
             {'role': 'user', 'content': 'Add kimi-k3 to the templates.'},
-            {'role': 'assistant', 'content': 'analysis only', '_epIteration': 1},
+            {'role': 'assistant', 'content': 'analysis only', '_flowIteration': 1},
             {'role': 'user', 'content': vu_text, '_isVirtualUser': True,
              '_msgId': 'vu-1'},
         ]
@@ -97,7 +98,7 @@ class VuMarkerTest(unittest.TestCase):
                       'VU instruction was dropped from LLM context')
 
     def test_critic_control_still_marked_and_still_skipped(self):
-        # Adapter still stamps critic reviews _isEndpointReview.
+        # Adapter still stamps critic reviews _isFlowReview.
         seq = {'w': 0}
 
         def runner(node, ctx, it):
@@ -111,20 +112,20 @@ class VuMarkerTest(unittest.TestCase):
                         'error': ''}
             return {'output': 'PLAN', 'status': 'completed', 'error': ''}
 
-        msgs = _run(build_endpoint_definition(max_iterations=3), runner)
+        msgs = _run(build_verifier_loop_definition(max_iterations=3), runner)
         critics = [m for m in msgs if m.get('role') == 'user']
         self.assertTrue(critics)
         for m in critics:
-            self.assertTrue(m.get('_isEndpointReview'))
+            self.assertTrue(m.get('_isFlowReview'))
             self.assertFalse(m.get('_isVirtualUser'))
 
         # And a critic row is STILL skipped by the context builder (its
-        # feedback is injected via a different mechanism in endpoint mode).
+        # feedback is injected via a different mechanism in Flow execution).
         raw = [
             {'role': 'user', 'content': 'do the work'},
-            {'role': 'assistant', 'content': 'worked', '_epIteration': 1},
+            {'role': 'assistant', 'content': 'worked', '_flowIteration': 1},
             {'role': 'user', 'content': 'CRITIC FEEDBACK TEXT',
-             '_isEndpointReview': True, '_epIteration': 1},
+             '_isFlowReview': True, '_flowIteration': 1},
         ]
         out = _transform_messages(raw, {})
         user_texts = [m.get('content') for m in out if m.get('role') == 'user']
@@ -136,75 +137,65 @@ class VuConsumerTest(unittest.TestCase):
     """The marker change must be honored by the DOWNSTREAM consumers too,
     not just the producer + context builder."""
 
-    def test_sync_boundary_treats_vu_as_engine_turn(self):
-        """``_sync_endpoint_turns_to_conversation``'s base/endpoint boundary
-        scan must count a marker-less VU row as an ENGINE turn, else it lands
-        the boundary after the VU row and re-appends it on every incremental
-        sync (duplicated VU turns)."""
-        from lib.tasks_pkg.endpoint._translate import (
-            _sync_endpoint_turns_to_conversation,
+    def test_sync_boundary_forwards_vu_as_an_explicit_visible_turn(self):
+        """Endpoint projection preserves VU identity at the turn authority."""
+        from lib.orchestration_chat_turn_sync import (
+            sync_flow_turns_to_conversation,
         )
-        import lib.tasks_pkg.endpoint._translate as tr
+        import lib.turn_lifecycle as turn_lifecycle
 
-        # A conversation already carrying one endpoint run (worker + VU).
-        persisted = [
-            {'role': 'user', 'content': 'the ask'},
-            {'role': 'assistant', 'content': 'w1', '_epIteration': 1},
+        engine_turns = [
+            {'role': 'assistant', 'content': 'w1', '_flowIteration': 1},
             {'role': 'user', 'content': 'keep going', '_isVirtualUser': True,
              '_msgId': 'vu-1'},
         ]
         captured = {}
 
-        class _Store:
-            def load_conversation_messages(self, cid):
-                return list(persisted), 0, 0
+        def capture(task, messages):
+            captured['task'] = task
+            captured['messages'] = messages
 
-            def sync_conversation_with_search(self, cid, msgs, *,
-                                              expected_rev=None, rebuild=None):
-                captured['msgs'] = msgs
-
-        import types
-        fake_mod = types.SimpleNamespace(get_conversation_store=lambda: _Store())
-        import sys
-        orig = sys.modules.get('lib.agent_core.store')
-        sys.modules['lib.agent_core.store'] = fake_mod
+        original = turn_lifecycle.sync_visible_run_turns
+        turn_lifecycle.sync_visible_run_turns = capture
         try:
-            # Re-sync the SAME two engine turns (idempotent incremental sync).
-            engine_turns = [persisted[1], persisted[2]]
-            _sync_endpoint_turns_to_conversation(
-                {'id': 'tid12345', 'convId': 'c1'}, engine_turns)
+            sync_flow_turns_to_conversation(
+                {
+                    'id': 'task-1',
+                    'convId': 'conversation-1',
+                    '_turnId': 'turn-1',
+                    '_attemptId': 'attempt-1',
+                },
+                engine_turns,
+            )
         finally:
-            if orig is not None:
-                sys.modules['lib.agent_core.store'] = orig
-            else:
-                del sys.modules['lib.agent_core.store']
+            turn_lifecycle.sync_visible_run_turns = original
 
-        out = captured.get('msgs')
-        self.assertIsNotNone(out)
-        vu_rows = [m for m in out if m.get('_isVirtualUser')]
+        vu_rows = [
+            message for message in captured['messages']
+            if message.get('_isVirtualUser')
+        ]
         self.assertEqual(len(vu_rows), 1,
-                         'VU row must not be duplicated by incremental sync')
-        # Base = just the human ask (1 msg) + the 2 engine turns = 3.
-        self.assertEqual(len(out), 3)
+                         'VU row must reach the turn authority exactly once')
+        self.assertEqual(captured['messages'], engine_turns)
 
     def test_historical_collapse_preserves_vu_instructions(self):
         """A historical flow-autopilot run must NOT be flattened to one worker
         output — the VU instructions are real user turns and must survive into
         follow-up context (parity with the live autopilot path)."""
         from lib.tasks_pkg.conv_message_builder._dedup import (
-            _collapse_historical_endpoint_sessions,
+            _collapse_historical_flow_sessions,
         )
         vu_text = 'Stop analyzing and execute.'
         src = [
             {'role': 'user', 'content': 'the ask'},
-            {'role': 'assistant', 'content': 'analysis', '_epIteration': 1},
+            {'role': 'assistant', 'content': 'analysis', '_flowIteration': 1},
             {'role': 'user', 'content': vu_text, '_isVirtualUser': True,
              '_msgId': 'vu-1'},
-            {'role': 'assistant', 'content': 'did edit', '_epIteration': 2},
+            {'role': 'assistant', 'content': 'did edit', '_flowIteration': 2},
             # A NON-endpoint follow-up makes the above a HISTORICAL run.
             {'role': 'user', 'content': 'follow-up question'},
         ]
-        out = _collapse_historical_endpoint_sessions(src)
+        out = _collapse_historical_flow_sessions(src)
         user_texts = [m.get('content') for m in out if m.get('role') == 'user']
         self.assertIn(vu_text, user_texts,
                       'VU instruction lost when collapsing a historical run')

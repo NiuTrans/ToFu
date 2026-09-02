@@ -1,12 +1,13 @@
 """Frontend full-list sidebar hydrate — cold-boot paints the ENTIRE sidebar.
 
 Epic ①: the IndexedDB `ConvCache` gained a lightweight full-list mirror
-(`putSidebarList` / `getSidebarList`, schema v3) DISTINCT from the opened-conv
-`conv_meta` store. On a cold boot `hydrateSidebarFromCache()` now paints EVERY
-conversation the server last reported (not just the handful opened on this
+(`putSidebarList` / `getSidebarList`, schema v3) DISTINCT from the locally
+observed `conv_meta` store. On a cold boot
+`hydrateConversationCatalogFromCache()` paints EVERY conversation the server
+last reported (not just the rows observed on this
 device), so the sidebar is "打开即在" before the server ?meta=1 round-trip.
 
-Runs the REAL shipped `hydrateSidebarFromCache` body under node with a minimal
+Runs the REAL shipped `hydrateConversationCatalogFromCache` body under node with a minimal
 global harness (no bundler, no DOM). Proves:
   • the full-list mirror is PREFERRED over getAllMeta (paints all N convs);
   • it FALLS BACK to getAllMeta when the mirror is empty (first run / v2→v3);
@@ -19,15 +20,19 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
+
+from tests._runtime_sections import runtime_section_path
+
+
+pytestmark = pytest.mark.unit
+
 REPO = Path(__file__).resolve().parent.parent
-CONV_JS = REPO / "static" / "js" / "core" / "conversations.js"
-# hydrateSidebarFromCache lives in its own leaf as of pt_3879f00e slice 6.
-# Point the fn-body extract at the leaf so the harness stays green post-split.
-HYDRATE_JS = REPO / "static" / "js" / "core" / "conv_hydrate_cache.js"
+HYDRATE_JS = Path(runtime_section_path("core/conversation_catalog.js"))
 
 
 def _extract_fn(src: str, name: str) -> str:
-    m = re.search(r"async function %s\s*\(" % re.escape(name), src)
+    m = re.search(r"(?:async\s+)?function %s\s*\(" % re.escape(name), src)
     assert m, f"{name} not found in source"
     i = src.index("{", m.start())
     depth = 0
@@ -42,7 +47,7 @@ def _extract_fn(src: str, name: str) -> str:
 
 
 # The mirror (getSidebarList) reports THREE convs — the full server list — while
-# getAllMeta reports only ONE (the single conv opened on this device). A correct
+# getAllMeta reports only ONE locally observed row. A correct
 # hydrate paints all three from the mirror; a fallback would paint only the one.
 _HARNESS = r"""
 'use strict';
@@ -55,7 +60,7 @@ function _applySettingsToConv(conv, settings) {
   if (!settings) return;
   if (settings.model) conv.model = settings.model;
 }
-function _serverConvCount(sc) {
+function _catalogTurnCount(sc) {
   if (!sc) return 0;
   const v = sc.messageCount != null ? sc.messageCount
     : (sc.msgCount != null ? sc.msgCount : sc.msg_count);
@@ -68,7 +73,7 @@ const ConvCache = {
   isAvailable: () => true,
   // Full-list mirror: the ENTIRE server list (3 convs), each with a rev.
   getSidebarList: async () => (__FULL_LIST__),
-  // Opened-conv metas: only ONE conv (opened on this device), no rev.
+  // Locally observed metadata: only ONE row, no rev.
   getAllMeta: async () => ([
     { id: 'c-opened', title: 'Opened', updatedAt: 50, cachedAt: 50, settings: {}, msgCount: 2 },
   ]),
@@ -77,7 +82,7 @@ const ConvCache = {
 __FN__
 
 (async () => {
-  const added = await hydrateSidebarFromCache();
+  const added = await hydrateConversationCatalogFromCache();
   const ids = conversations.map(c => c.id).sort();
   const byId = {};
   conversations.forEach(c => { byId[c.id] = c; });
@@ -88,9 +93,9 @@ __FN__
     renderCount: _renderCount,
     firstIsNewest: conversations[0] && conversations[0].id === 'c-a',  // updatedAt 300
     aRev: byId['c-a'] ? byId['c-a']._serverRev : 'MISSING',
-    aNeedsLoad: byId['c-a'] ? byId['c-a']._needsLoad === true : 'MISSING',
+    aNeedsLoad: byId['c-a'] ? byId['c-a']._turnSnapshotRequired === true : 'MISSING',
     aFromCache: byId['c-a'] ? byId['c-a']._fromCache === true : 'MISSING',
-    emptyNeedsLoad: byId['c-empty'] ? byId['c-empty']._needsLoad : 'MISSING',
+    emptyNeedsLoad: byId['c-empty'] ? byId['c-empty']._turnSnapshotRequired : 'MISSING',
     openedRev: byId['c-opened'] ? (byId['c-opened']._serverRev === undefined ? 'UNDEF' : byId['c-opened']._serverRev) : 'MISSING',
   }));
 })();
@@ -113,11 +118,18 @@ def _run(fn_src: str, full_list_js: str = _FULL_LIST) -> dict:
     return json.loads(last)
 
 
+def _hydrate_source_bundle(source: str) -> str:
+    return "\n".join(_extract_fn(source, name) for name in (
+        "_catalogRevision", "_newCatalogShell",
+        "hydrateConversationCatalogFromCache",
+    ))
+
+
 def test_prefers_full_list_mirror():
     """REAL fn: paints ALL THREE convs from the full-list mirror (not the one
     from getAllMeta), sorted newest-first, with rev adopted as _serverRev."""
     src = HYDRATE_JS.read_text()
-    fn = _extract_fn(src, "hydrateSidebarFromCache")
+    fn = _hydrate_source_bundle(src)
     r = _run(fn)
     assert r["added"] == 3, r
     assert r["count"] == 3, r
@@ -126,16 +138,16 @@ def test_prefers_full_list_mirror():
     assert r["firstIsNewest"], "sidebar not sorted newest-first via _convSorter"
     # rev from the mirror row is adopted as the CAS base.
     assert r["aRev"] == 7, r
-    assert r["aNeedsLoad"] is True, "msgCount>0 → _needsLoad shell"
+    assert r["aNeedsLoad"] is True, "msgCount>0 → _turnSnapshotRequired shell"
     assert r["aFromCache"] is True, "shell must carry _fromCache marker"
-    assert r["emptyNeedsLoad"] is False, "msgCount==0 → NOT _needsLoad"
+    assert r["emptyNeedsLoad"] is False, "msgCount==0 → NOT _turnSnapshotRequired"
 
 
 def test_falls_back_to_getallmeta_when_mirror_empty():
     """Empty mirror (first run / v2→v3 upgrade) → fall back to getAllMeta so the
-    OLD behaviour (paint opened convs) is preserved, never a blank sidebar."""
+    locally observed fallback is preserved, never a blank sidebar."""
     src = HYDRATE_JS.read_text()
-    fn = _extract_fn(src, "hydrateSidebarFromCache")
+    fn = _hydrate_source_bundle(src)
     r = _run(fn, full_list_js="[]")
     assert r["added"] == 1, r
     assert r["ids"] == ["c-opened"], r
@@ -148,7 +160,7 @@ def test_neuter_paints_nothing():
     proving the full-list hydrate is load-bearing (the cold-boot blank bug)."""
     neutered = textwrap.dedent(
         """
-        async function hydrateSidebarFromCache() {
+        async function hydrateConversationCatalogFromCache() {
           return 0;  // NEUTER
         }
         """

@@ -5,3 +5,4 @@
 # hosts when this framework was validated, so pin the audited upstream commit.
 harbor @ git+https://github.com/harbor-framework/harbor.git@ea2fee78517f2e591bad69fcf1e6731f9c23ec99
 swebench==4.1.0
+pycdlib==1.16.0

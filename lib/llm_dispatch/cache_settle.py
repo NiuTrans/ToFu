@@ -144,7 +144,7 @@ def settle_max_wait_ms() -> float:
 def settle_cold_enabled() -> bool:
     """Whether the LONG cold-write blocking window is active. DEFAULT OFF.
 
-    ★ Deliberately opt-in. The cold-write case (large write, ~0 read) is the
+    Deliberately opt-in. The cold-write case (large write, ~0 read) is the
     typical shape of a conversation's FIRST round, so a long blocking window
     would add up to ~cold_window of wall-clock latency to the SECOND round of
     almost every conversation — punishing the main path. Measured live: a cold
@@ -199,7 +199,7 @@ _DEFAULT_SETTLE_THRESHOLD_TOKENS = 30_000
 def settle_threshold_tokens() -> int:
     """Prefix-size (est. tokens) above which settle applies. Default 30000.
 
-    ★ This is DELIBERATELY DECOUPLED from — and far lower than — the big-prefix
+    This is DELIBERATELY DECOUPLED from — and far lower than — the big-prefix
     ADMISSION threshold (150k). Those two gates trade off differently:
 
       * Admission QUEUES a request behind others on the same key. Queuing is

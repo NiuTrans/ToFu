@@ -1,7 +1,11 @@
 """Consecutive tool-timeout circuit breaker (Phase 4b).
 
-Extracted 2026-07-31 (pt_03f4cdf1 slice 21) from
+Extracted 2026-07-31 (slice 21) from
 ``lib/tasks_pkg/orchestrator/_run.py`` run_task stream loop.
+
+After the root-loop chassis migration this module retains the root-specific
+diagnostic/error/event projection; ``run_agent_loop`` owns the counter when
+``chassis_consecutive_count`` is supplied.
 
 Runs after ``execute_tool_pipeline`` returns. The pipeline reports
 whether THIS round's tool execution timed out; the breaker counts
@@ -44,6 +48,7 @@ def handle_tool_timeout_circuit_breaker(
     tid: str,
     tool_timed_out: bool,
     max_consecutive_tool_timeouts: int,
+    chassis_consecutive_count: int | None = None,
 ) -> bool:
     """Count consecutive tool timeouts; force-stop at the ceiling.
 
@@ -63,6 +68,11 @@ def handle_tool_timeout_circuit_breaker(
         ``execute_tool_pipeline``).
     max_consecutive_tool_timeouts : int
         Force-stop ceiling (``_MAX_CONSECUTIVE_TOOL_TIMEOUTS`` = 3).
+    chassis_consecutive_count : int | None
+        When supplied, the shared ``run_agent_loop`` chassis already owns the
+        counter and this helper only mirrors that authoritative value while
+        retaining the root orchestrator's logs, error envelope, and ROUND_END
+        wire behavior. ``None`` preserves the standalone compatibility path.
 
     Returns
     -------
@@ -70,11 +80,16 @@ def handle_tool_timeout_circuit_breaker(
         ``True`` when the caller must ``break`` (force-stop fired),
         ``False`` to proceed to the checkpoint + round close.
     """
+    if chassis_consecutive_count is not None:
+        rs.consecutive_tool_timeouts = max(0, int(chassis_consecutive_count))
+    elif not tool_timed_out:
+        rs.consecutive_tool_timeouts = 0  # compatibility counter reset
+
     if not tool_timed_out:
-        rs.consecutive_tool_timeouts = 0  # Reset on successful tool execution
         return False
 
-    rs.consecutive_tool_timeouts += 1
+    if chassis_consecutive_count is None:
+        rs.consecutive_tool_timeouts += 1
     logger.warning(
         '[%s] conv=%s Tool timeout at round %d (%d/%d consecutive) model=%s',
         tid, task.get('convId', ''), round_num + 1, rs.consecutive_tool_timeouts,
@@ -95,7 +110,7 @@ def handle_tool_timeout_circuit_breaker(
         raw=f'consecutive_tool_timeouts={rs.consecutive_tool_timeouts}',
     )
     rs.exit_reason = f'consecutive_tool_timeouts_{rs.consecutive_tool_timeouts}'
-    # ★ RENDER_CONTRACT Phase 3: close THIS round's boundary —
+    # RENDER_CONTRACT Phase 3: close THIS round's boundary —
     #   the FORCE-STOP break otherwise strands the ROUND_START
     #   emitted at this round's top with no pairing ROUND_END
     #   (the ONLY exit path that skipped it: budget x2 /

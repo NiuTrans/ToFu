@@ -67,7 +67,7 @@ def is_synthetic_inbox_round(round_dict) -> bool:
 # partial answer is a perfectly valid prefill prefix — excluding it made a
 # Stop→Continue on a no-tools turn fall back to a full regeneration that
 # discarded the partial prose (the manual-stop lossless gap, epic
-# pt_a4484f3ad3134ea8). An empty aborted turn is still correctly declined
+# ). An empty aborted turn is still correctly declined
 # downstream (resume_prefill_from_segments returns None on empty text).
 RESUMABLE_FINISH_REASONS = frozenset({
     'interrupted', 'server_offline', 'premature_close', 'length', 'aborted',

@@ -38,7 +38,7 @@ def _read_pdf(path: str, file_size: int) -> str:
         return f'Error: Failed to read PDF: {e}'
 
     try:
-        from lib.pdf_parser import extract_pdf_text
+        from lib.pdf_parser.text import extract_pdf_text
         text = extract_pdf_text(pdf_bytes, MAX_TEXT_CHARS)
         if not text:
             return f'Error: PDF appears to be scanned/image-only — no text could be extracted from: {os.path.basename(path)}'

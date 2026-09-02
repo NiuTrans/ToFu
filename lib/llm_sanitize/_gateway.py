@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 # The filter is key-specific (key_1 only) but since dispatch rotates keys,
 # any request containing blocked terms will intermittently fail.
 #
-# Strategy (owner-ratified 2026-07-26, board epic pt_871a26c73d494a83,
+# Strategy (owner-ratified 2026-07-26, board ,
 # question-block answer "A: Invisible-separator insertion"): insert a
 # ZERO-WIDTH SPACE (U+200B) after the first character of each blocked
 # term. Properties:

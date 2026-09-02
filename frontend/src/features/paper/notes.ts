@@ -1,5 +1,6 @@
 import { featureRegistry } from '../../feature-registry';
 import { createLifecycleScope } from '../../lifecycle';
+import type { I18nKey } from '../../i18n';
 
 type ViewKey = '_paperNotes' | '_paperNotesLang';
 
@@ -80,7 +81,7 @@ function escape(value: unknown): string {
   return span.innerHTML;
 }
 
-function translate(key: string): string {
+function translate(key: I18nKey): string {
   const fn = globals().t;
   return typeof fn === 'function' ? fn(key) : key;
 }

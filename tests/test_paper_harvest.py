@@ -51,6 +51,7 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 
 try:
     import pytest
+    pytest_plugins = ('tests._artifact_sidecar',)
     pytestmark = [pytest.mark.unit, pytest.mark.auth_mode('open')]
 except ImportError:
     pytest = None
@@ -60,32 +61,15 @@ _APP = None
 
 
 def _load_app():
-    """Boot the real server.app against a temp SQLite DB with a bootstrapped
-    schema (paper_library must exist). Cached across tests. Mirrors
-    tests/test_paper_ingest_persist.py so the two suites share conventions."""
+    """Start isolated storage and return the shared native application."""
     global _APP
     if _APP is not None:
         return _APP
-    import tempfile
-    os.environ['TOFU_DB_BACKEND'] = 'sqlite'
-    if not os.environ.get('TOFU_DB_PATH'):
-        _dbf = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
-        _dbf.close()
-        os.environ['TOFU_DB_PATH'] = _dbf.name
     os.environ.setdefault('TOFU_AUTH_MODE', 'open')
-
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        'server', os.path.join(os.path.dirname(os.path.dirname(__file__)), 'server.py'))
-    mod = importlib.util.module_from_spec(spec)
-    mod.__name__ = 'server'
-    spec.loader.exec_module(mod)
-    try:
-        from lib.database import init_db
-        init_db()
-    except Exception as e:
-        print(f'[paper_harvest_test] init_db: {e}')
-    _APP = mod.app
+    from lib.storage import start_storage
+    import server
+    start_storage()
+    _APP = server.app
     return _APP
 
 
@@ -142,59 +126,58 @@ def _patch_harvest(*, parse=None, text=_FAKE_TEXT, pages=7):
 
 
 def _count_rows_for_arxiv(arxiv_id, user_id=1):
-    from lib.database._core import _pool_get, _pool_put
-    db = _pool_get()
-    try:
-        row = db.execute(
-            'SELECT COUNT(*) AS n FROM paper_library WHERE arxiv_id=? AND user_id=?',
-            (arxiv_id, user_id)).fetchone()
-        return int(row['n'])
-    finally:
-        _pool_put(db)
+    from lib.paper.library_repository import PaperLibraryRepository
+    return sum(
+        entry.arxiv_id == arxiv_id
+        for entry in PaperLibraryRepository(user_id).list_entries()
+    )
 
 
 def _phash_row_for_arxiv(arxiv_id, user_id=1):
-    from lib.database._core import _pool_get, _pool_put
-    db = _pool_get()
-    try:
-        row = db.execute(
-            'SELECT paper_hash FROM paper_library WHERE arxiv_id=? AND user_id=? '
-            'ORDER BY updated_at DESC LIMIT 1', (arxiv_id, user_id)).fetchone()
-        return (row['paper_hash'] if row else '') or ''
-    finally:
-        _pool_put(db)
+    from lib.paper.library_repository import PaperLibraryRepository
+    rows = [
+        entry for entry in PaperLibraryRepository(user_id).list_entries()
+        if entry.arxiv_id == arxiv_id
+    ]
+    return max(rows, key=lambda entry: entry.updated_at).paper_hash if rows else ''
 
 
-def _seed_library_row(row_id, arxiv_id, *, parsed_text, parser_version, user_id=1):
-    """Insert a paper_library row directly (full-row upsert — every Core
-    column supplied), so a test controls the exact parser_version stamp."""
-    from lib.database._core import _pool_get, _pool_put
-    from lib.database._core_schema import PAPER_LIBRARY, upsert
+def _seed_library_row(
+        row_id, arxiv_id, *, parsed_text, parser_version,
+        paper_hash='seedhash', user_id=1):
+    """Persist a library row with an exact parser-version stamp."""
+    import uuid
+    from lib.paper.library_repository import (
+        PaperLibraryEntry,
+        PaperLibraryRepository,
+    )
     now = int(time.time() * 1000)
-    db = _pool_get()
-    try:
-        upsert(db, PAPER_LIBRARY, {
-            'id': row_id, 'user_id': user_id, 'title': 'seeded',
-            'pdf_url': '', 'pdf_filename': '', 'arxiv_id': arxiv_id,
-            'paper_hash': 'seedhash', 'parsed_text': parsed_text,
-            'parser_version': parser_version, 'qa_history': '[]',
-            'images': '[]', 'babel_cache': '{}', 'page_count': 3,
-            'folder_id': '', 'created_at': now, 'updated_at': now,
-        }, retry=True)
-    finally:
-        _pool_put(db)
+    assert PaperLibraryRepository(user_id).put(
+        PaperLibraryEntry(
+            paper_id=row_id,
+            title='seeded',
+            arxiv_id=arxiv_id,
+            paper_hash=paper_hash,
+            parsed_text=parsed_text,
+            parser_version=parser_version,
+            page_count=3,
+            created_at=now,
+            updated_at=now,
+        ),
+        command_id=f'harvest-seed:{row_id}:{uuid.uuid4().hex}',
+    )
 
 
 def _parser_version_for_arxiv(arxiv_id, user_id=1):
-    from lib.database._core import _pool_get, _pool_put
-    db = _pool_get()
-    try:
-        row = db.execute(
-            'SELECT parser_version FROM paper_library WHERE arxiv_id=? AND user_id=? '
-            'ORDER BY updated_at DESC LIMIT 1', (arxiv_id, user_id)).fetchone()
-        return (row['parser_version'] if row else None)
-    finally:
-        _pool_put(db)
+    from lib.paper.library_repository import PaperLibraryRepository
+    rows = [
+        entry for entry in PaperLibraryRepository(user_id).list_entries()
+        if entry.arxiv_id == arxiv_id
+    ]
+    return (
+        max(rows, key=lambda entry: entry.updated_at).parser_version
+        if rows else None
+    )
 
 
 # ── Test 1: phash byte-identity (the load-bearing one) + NEUTER ───────────
@@ -203,12 +186,12 @@ def test_harvest_phash_identical_to_reading_mode():
     """Harvest's stored phash == the canonical _paper_hash(parse_text) that
     reading-mode ingest would compute. Driven through the REAL harvest path."""
     _load_app()
-    from lib.paper.hashing import _paper_hash
+    from lib.paper_identity import _paper_hash
     counter, restore = _patch_harvest()
     aid = f'2301.{int(time.time()) % 100000:05d}'
     try:
         import lib.paper.harvest as h
-        res = h.harvest_arxiv_id(aid, folder_id='research-x')
+        res = h.harvest_arxiv_id(aid, folder_id='research-x', user_id=1)
         assert res.status == 'parsed', f'expected parsed, got {res.status}: {res.error}'
         # The canonical identity reading-mode would mint from the same text:
         canonical = _paper_hash(_FAKE_TEXT)
@@ -226,7 +209,7 @@ def test_harvest_phash_identity_NEUTER():
     seam (the exact parse-once-breaking bug the design warns about) → the
     harvested phash no longer matches the canonical one."""
     _load_app()
-    from lib.paper.hashing import _paper_hash
+    from lib.paper_identity import _paper_hash
     counter, restore = _patch_harvest()
     import lib.paper.harvest as h
     orig_ph = h._paper_hash
@@ -235,7 +218,7 @@ def test_harvest_phash_identity_NEUTER():
     h._paper_hash = lambda text: orig_ph(_re.sub(r'\s+', ' ', text or ''))
     aid = f'2302.{int(time.time()) % 100000:05d}'
     try:
-        res = h.harvest_arxiv_id(aid)
+        res = h.harvest_arxiv_id(aid, user_id=1)
         canonical = _paper_hash(_FAKE_TEXT)
         assert res.phash != canonical, \
             'NEUTER FAILED: normalization did not change the phash (identity ' \
@@ -256,10 +239,10 @@ def test_cache_hit_skips_reparse():
     aid = f'2303.{int(time.time()) % 100000:05d}'
     try:
         import lib.paper.harvest as h
-        r1 = h.harvest_arxiv_id(aid)
+        r1 = h.harvest_arxiv_id(aid, user_id=1)
         assert r1.status == 'parsed', r1.error
         assert counter.calls == 1, f'first harvest should parse once, got {counter.calls}'
-        r2 = h.harvest_arxiv_id(aid)
+        r2 = h.harvest_arxiv_id(aid, user_id=1)
         assert r2.status == 'cache_hit', f'second harvest should hit, got {r2.status}'
         assert counter.calls == 1, \
             f'cache hit MUST NOT reparse — parser called {counter.calls}x'
@@ -275,24 +258,11 @@ def test_empty_parsed_text_is_not_a_cache_hit_NEUTER():
     _load_app()
     counter, restore = _patch_harvest()
     aid = f'2304.{int(time.time()) % 100000:05d}'
-    # Seed a row with the arxiv_id but no parsed_text (a saved rec card).
-    from lib.database._core import _pool_get, _pool_put
-    from lib.database._core_schema import PAPER_LIBRARY, upsert
-    now = int(time.time() * 1000)
-    db = _pool_get()
-    try:
-        upsert(db, PAPER_LIBRARY, {
-            'id': f'rec_{aid}', 'user_id': 1, 'title': 'saved rec',
-            'pdf_url': '', 'pdf_filename': '', 'arxiv_id': aid, 'paper_hash': '',
-            'parsed_text': '', 'parser_version': '', 'qa_history': '[]', 'images': '[]',
-            'babel_cache': '{}', 'page_count': 0, 'folder_id': '',
-            'created_at': now, 'updated_at': now,
-        }, retry=True)
-    finally:
-        _pool_put(db)
+    _seed_library_row(
+        f'rec_{aid}', aid, parsed_text='', parser_version='', paper_hash='')
     try:
         import lib.paper.harvest as h
-        res = h.harvest_arxiv_id(aid)
+        res = h.harvest_arxiv_id(aid, user_id=1)
         assert res.status == 'parsed', \
             f'empty-text row must NOT be a hit; expected parsed, got {res.status}'
         assert counter.calls == 1, 'should have parsed to fill the empty row'
@@ -312,13 +282,13 @@ def test_batch_second_run_zero_reparse():
     ids = [f'2305.{base:05d}', f'2305.{base+1:05d}', f'2305.{base+2:05d}']
     try:
         import lib.paper.harvest as h
-        out1 = h.harvest_arxiv_batch(ids, folder_id='research-y')
+        out1 = h.harvest_arxiv_batch(ids, folder_id='research-y', user_id=1)
         assert out1['total'] == 3, out1
         assert out1['parsed'] == 3, f"first run should parse 3, got {out1['parsed']}"
         assert out1['reparse_count'] == 3
         assert counter.calls == 3, f'parser should run 3x, got {counter.calls}'
 
-        out2 = h.harvest_arxiv_batch(ids, folder_id='research-y')
+        out2 = h.harvest_arxiv_batch(ids, folder_id='research-y', user_id=1)
         assert out2['cache_hits'] == 3, \
             f"second run should be all cache hits, got {out2['cache_hits']}"
         assert out2['reparse_count'] == 0, \
@@ -350,7 +320,7 @@ def test_transient_download_failure_is_retried():
     orig_sleep = h.time.sleep
     h.time.sleep = lambda s: None
     try:
-        res = h.harvest_arxiv_id(aid)
+        res = h.harvest_arxiv_id(aid, user_id=1)
         assert res.status == 'parsed', f'transient failure should recover, got {res.status}: {res.error}'
         assert calls['n'] == 2, f'should have retried the download once, got {calls["n"]} attempts'
     finally:
@@ -376,7 +346,7 @@ def test_persistent_download_failure_gives_up_NEUTER():
     orig_sleep = h.time.sleep
     h.time.sleep = lambda s: None
     try:
-        res = h.harvest_arxiv_id(aid)
+        res = h.harvest_arxiv_id(aid, user_id=1)
         assert res.status == 'error', res.status
         assert calls['n'] == h._HARVEST_FETCH_ATTEMPTS, \
             f'should exhaust exactly {h._HARVEST_FETCH_ATTEMPTS} attempts, got {calls["n"]}'
@@ -394,7 +364,7 @@ def test_batch_dedups_input_ids():
     aid = f'2306.{int(time.time()) % 100000:05d}'
     try:
         import lib.paper.harvest as h
-        out = h.harvest_arxiv_batch([aid, aid, aid])
+        out = h.harvest_arxiv_batch([aid, aid, aid], user_id=1)
         assert out['total'] == 1, f'input should dedup to 1, got {out["total"]}'
         assert counter.calls == 1
     finally:
@@ -409,8 +379,8 @@ def test_reading_mode_ingest_then_harvest_is_cache_hit():
     later — the shared paper_library + phash makes the two paths reuse one
     parsed copy (the '降低开销' integration the design promises)."""
     _load_app()
-    import routes.paper as rp
-    from lib.paper.hashing import _paper_hash
+    from routes.paper_pkg._library import _persist_ingested_library_row
+    from lib.paper_identity import _paper_hash
     counter, restore = _patch_harvest()
     aid = f'2307.{int(time.time()) % 100000:05d}'
     # Reading-mode ingest persists a row directly (server-authoritative path),
@@ -418,15 +388,15 @@ def test_reading_mode_ingest_then_harvest_is_cache_hit():
     canonical = _paper_hash(_FAKE_TEXT)
     try:
         from lib.pdf_parser._common import expected_parser_version
-        assert rp._persist_ingested_library_row(
-            f'paper_read_{aid}', title='Read in reading mode',
+        assert _persist_ingested_library_row(
+            f'paper_read_{aid}', user_id=1, title='Read in reading mode',
             pdf_url=f'/api/paper/pdf/arxiv_{aid}.pdf',
             pdf_filename=f'arxiv_{aid}.pdf', arxiv_id=aid,
             paper_hash=canonical, parsed_text=_FAKE_TEXT, images=[], page_count=7,
             parser_version=expected_parser_version())
         # Now harvest the same arxiv_id → must be a cache hit, no parse.
         import lib.paper.harvest as h
-        res = h.harvest_arxiv_id(aid)
+        res = h.harvest_arxiv_id(aid, user_id=1)
         assert res.status == 'cache_hit', \
             f'harvest of a reading-mode paper should hit, got {res.status}'
         assert counter.calls == 0, 'harvest must NOT reparse a reading-mode paper'
@@ -454,7 +424,7 @@ def test_stale_parser_version_reparses():
                       parser_version='pymupdf4llm-0.0.0-stale')
     try:
         import lib.paper.harvest as h
-        res = h.harvest_arxiv_id(aid)
+        res = h.harvest_arxiv_id(aid, user_id=1)
         assert res.status == 'parsed', \
             f'a stale-version row must NOT hit; expected parsed, got {res.status}'
         assert counter.calls == 1, 'should have re-parsed the stale row'
@@ -485,7 +455,7 @@ def test_raw_tagged_row_is_not_a_cache_hit():
                       parser_version=wrong)
     try:
         import lib.paper.harvest as h
-        res = h.harvest_arxiv_id(aid)
+        res = h.harvest_arxiv_id(aid, user_id=1)
         assert res.status == 'parsed', \
             f'a degraded-tagged row must NOT hit; expected parsed, got {res.status}'
         assert counter.calls == 1, 'should have re-parsed the degraded-tagged row'
@@ -505,7 +475,7 @@ def test_null_legacy_row_is_not_a_cache_hit():
                       parser_version='')
     try:
         import lib.paper.harvest as h
-        res = h.harvest_arxiv_id(aid)
+        res = h.harvest_arxiv_id(aid, user_id=1)
         assert res.status == 'parsed', \
             f'a legacy NULL-version row must NOT hit; expected parsed, got {res.status}'
         assert counter.calls == 1, 'should have re-parsed the legacy row'
@@ -534,7 +504,7 @@ def test_degraded_parse_is_tagged_flagged_and_reparsed():
     aid = f'2313.{int(time.time()) % 100000:05d}'
     try:
         import lib.paper.harvest as h
-        r1 = h.harvest_arxiv_id(aid)
+        r1 = h.harvest_arxiv_id(aid, user_id=1)
         assert r1.status == 'parsed', r1.error
         assert r1.degraded is True, \
             'a raw-fallback parse in a markdown env must be FLAGGED degraded'
@@ -544,7 +514,7 @@ def test_degraded_parse_is_tagged_flagged_and_reparsed():
         # The very next harvest must NOT treat the degraded row as a hit —
         # it re-parses (self-heal), which is exactly what un-poisons a corpus
         # after the extractor is fixed.
-        r2 = h.harvest_arxiv_id(aid)
+        r2 = h.harvest_arxiv_id(aid, user_id=1)
         assert r2.status == 'parsed', \
             f'a degraded row must NOT freeze: second harvest should re-parse, got {r2.status}'
         assert counter.calls == 2, \
@@ -588,4 +558,6 @@ def main():
 
 
 if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_paper_harvest.standalone')
     main()

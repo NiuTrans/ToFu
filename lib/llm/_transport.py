@@ -2,6 +2,8 @@
 """Shared transport layer: retry config, HTTP helpers, sleep utilities."""
 
 import asyncio
+from dataclasses import dataclass
+import math
 import os
 import random
 import threading
@@ -12,6 +14,7 @@ import httpx
 import requests
 
 import lib as _lib
+from lib.llm.stream_result import ProviderStreamEvidence
 from lib.llm_errors import AbortedError
 from lib.log import get_logger
 
@@ -48,11 +51,11 @@ LLM_KEEPALIVE_EXPIRY_S = _bounded_env_int(
 # box fails over to a healthy slot fast instead of burning a full minute
 # per attempt.
 #
-# This is the ONLY timeout left on an LLM request, and deliberately so: it
-# bounds "the box never answered the SYN", i.e. a crash, not a wait. Once
-# the handshake succeeds there is NO read timeout at all — generation may
-# take as long as it takes, and a user who does not want to wait presses
-# Stop (honored by StreamIdleWatchdog's abort poll below).
+# This is the socket-connect bound: it covers "the box never answered the
+# SYN", not model generation. Once the handshake succeeds there is no socket
+# read timeout; the watchdog separately bounds silence and the period before
+# first stream activity, then allows an active generation to run without a
+# request-wide wall-clock deadline.
 # Override per-deployment with TOFU_LLM_CONNECT_TIMEOUT.
 try:
     CONNECT_TIMEOUT = float(os.environ.get('TOFU_LLM_CONNECT_TIMEOUT', '10'))
@@ -66,8 +69,8 @@ except (ValueError, TypeError) as e:
 # A blocked socket read sits OUTSIDE the SSE line loop, so the in-loop
 # ``abort_check`` cannot observe a Stop pressed while the upstream is
 # silent. StreamIdleWatchdog polls the same predicate on this cadence and
-# closes the response, which is what makes "no timeouts, I will stop it
-# myself" actually true rather than a promise the transport cannot keep.
+# closes the response, preserving Stop control independently of socket reads
+# and the stream-idle timeout.
 # 0.5s: a Stop feels instant to a human, and the poll is one flag read.
 try:
     ABORT_POLL_INTERVAL = float(
@@ -88,11 +91,10 @@ except (ValueError, TypeError) as e:
 #   2. the stuck-task reaper (lib/tasks_pkg/manager/_maintenance.py), which
 #      force-fails a task once BOTH ``_t_last_event`` and
 #      ``_dispatch_heartbeat`` have been silent past
-#      TOFU_STUCK_TASK_MAX_SILENT_SECS (30 min). With no read timeout left
-#      to interrupt a long silence, this beat is the ONLY thing keeping
-#      those clocks fresh — remove it and the reaper becomes the new
-#      30-minute timeout, killing exactly the long waits we just made
-#      legal. Aliveness is proven by beating, never by not-timing-out.
+#      TOFU_STUCK_TASK_MAX_SILENT_SECS (30 min). With no socket read timeout,
+#      the beat keeps those clocks fresh throughout the configured stream-idle
+#      window (including deployments that disable or extend it). Aliveness is
+#      proven by beating, never inferred from a blocked read.
 # 20s is well inside the reaper window while adding only a handful of
 # transient phase events. 0 disables beats.
 # Override with TOFU_LLM_IDLE_HEARTBEAT_S.
@@ -106,10 +108,365 @@ except (ValueError, TypeError) as e:
     IDLE_HEARTBEAT_S = 20.0
 
 
-class StreamIdleWatchdog:
-    """Watches one HTTP attempt while it is idle — without bounding it.
+# ── Rolling stream-activity idle timeout (seconds) ──
+# Match native Codex's stream contract: each received transport event renews a
+# 300-second idle window. SSE comments/keep-alives and WebSocket messages count
+# as activity even when they carry no reasoning, content, or tool delta. The
+# bound is not a total request deadline; an active stream may run indefinitely.
+# A genuinely silent stream is closed and enters the existing transport-
+# interruption diagnostics/retry path. The socket itself keeps read=None so
+# user Stop remains independently enforced by the abort poll.
+_STREAM_IDLE_TIMEOUT_ENV = 'TOFU_LLM_IDLE_STREAM_TIMEOUT_S'
+_DEPRECATED_STREAM_IDLE_TIMEOUT_ENVS = (
+    'TOFU_LLM_SEMANTIC_IDLE_TIMEOUT_S',
+    'TOFU_LLM_NO_ACTIONABLE_TIMEOUT_S',
+)
 
-    ``start()`` arms two independent schedules:
+
+def _stream_idle_timeout_from_environment() -> float:
+    configured = os.environ.get(_STREAM_IDLE_TIMEOUT_ENV)
+    configured_by = _STREAM_IDLE_TIMEOUT_ENV
+    if configured is None:
+        for alias in _DEPRECATED_STREAM_IDLE_TIMEOUT_ENVS:
+            configured = os.environ.get(alias)
+            if configured is not None:
+                configured_by = alias
+                logger.warning(
+                    '[Transport] %s is deprecated; use %s. The value now '
+                    'bounds transport inactivity, and keep-alives renew it.',
+                    alias,
+                    _STREAM_IDLE_TIMEOUT_ENV,
+                )
+                break
+    if configured is None:
+        configured = '300'
+    try:
+        value = float(configured)
+    except (TypeError, ValueError, OverflowError) as error:
+        logger.warning(
+            '[Transport] invalid %s=%r; using 300s: %s',
+            configured_by, configured, error,
+        )
+        return 300.0
+    if not math.isfinite(value):
+        logger.warning(
+            '[Transport] non-finite %s=%r; using 300s',
+            configured_by, configured,
+        )
+        return 300.0
+    if value <= 0:
+        return 0.0
+    # Preserve the existing operator-safety floor: a typo must not turn into a
+    # near-instant, repeatedly billed reconnect loop.
+    return max(30.0, value)
+
+
+IDLE_STREAM_TIMEOUT_S = _stream_idle_timeout_from_environment()
+
+
+def stream_idle_timeout_seconds() -> float:
+    """Return the live transport-idle window (tests may retune the symbol)."""
+    try:
+        value = float(IDLE_STREAM_TIMEOUT_S)
+    except (TypeError, ValueError, OverflowError):
+        return 300.0
+    return max(0.0, value) if math.isfinite(value) else 300.0
+
+
+# Read compatibility for plugins and stored-attempt adapters. Production
+# transports no longer arm a semantic-progress deadline; old environment names
+# are consumed above only as deprecated aliases for the transport-idle window.
+SEMANTIC_IDLE_TIMEOUT_S = 0.0
+NO_ACTIONABLE_OUTPUT_TIMEOUT_S = 0.0
+
+
+def semantic_idle_timeout_seconds() -> float:
+    """Deprecated compatibility seam; semantic inactivity never terminates."""
+    return 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class StreamWaitStatus:
+    """Current-attempt status delivered to the waiting HUD."""
+
+    kind: str
+    request_elapsed_s: float
+    transport_idle_s: float
+    semantic_idle_s: float
+    response_headers_seen: bool
+    transport_byte_count: int
+    sse_event_count: int
+    reasoning_chars: int
+    content_chars: int
+    tool_call_count: int
+
+
+class StreamProgress:
+    """Single monotonic progress state machine for one provider attempt."""
+
+    _MAX_DIAGNOSTICS = 4
+    _MAX_DIAGNOSTIC_CHARS = 240
+
+    def __init__(self, timeout_s=0, *, monotonic=None, started_at=None):
+        self._timeout_s = max(0.0, float(timeout_s or 0))
+        self._monotonic = monotonic or time.monotonic
+        self._lock = threading.Lock()
+        origin = (self._monotonic() if started_at is None
+                  else float(started_at))
+        self._request_started_at = origin
+        self._last_transport_activity_at = origin
+        self._last_semantic_progress_at = origin
+        self._response_headers_seen = False
+        self._transport_byte_count = 0
+        self._sse_event_count = 0
+        self._reasoning_chars = 0
+        self._reasoning_chunks = 0
+        self._content_chars = 0
+        self._content_chunks = 0
+        self._tool_call_count = 0
+        self._tool_argument_chars = 0
+        self._tool_argument_chunks = 0
+        self._provider_finish_seen = False
+        self._done_seen = False
+        self._client_aborted = False
+        self._semantic_timeout = False
+        self._malformed_frame_count = 0
+        self._diagnostics: list[str] = []
+
+    def _now(self, value=None) -> float:
+        return self._monotonic() if value is None else float(value)
+
+    def mark_response_headers(self, now=None) -> None:
+        current = self._now(now)
+        with self._lock:
+            self._response_headers_seen = True
+            self._last_transport_activity_at = current
+
+    def mark_transport_activity(self, now=None) -> None:
+        """Renew the raw stream clock without inventing a byte count."""
+        current = self._now(now)
+        with self._lock:
+            self._last_transport_activity_at = current
+
+    def mark_transport_bytes(self, byte_count: int, now=None) -> None:
+        count = max(0, int(byte_count or 0))
+        if count == 0:
+            return
+        current = self._now(now)
+        with self._lock:
+            self._transport_byte_count += count
+            self._last_transport_activity_at = current
+
+    def mark_sse_event(self, now=None) -> None:
+        current = self._now(now)
+        with self._lock:
+            self._sse_event_count += 1
+            self._last_transport_activity_at = current
+
+    def mark_reasoning(self, text: object, now=None) -> bool:
+        if not isinstance(text, str) or not text.strip():
+            return False
+        current = self._now(now)
+        with self._lock:
+            self._reasoning_chars += len(text)
+            self._reasoning_chunks += 1
+            self._last_semantic_progress_at = current
+        return True
+
+    def mark_content(self, text: object, now=None) -> bool:
+        if not isinstance(text, str) or not text.strip():
+            return False
+        current = self._now(now)
+        with self._lock:
+            self._content_chars += len(text)
+            self._content_chunks += 1
+            self._last_semantic_progress_at = current
+        return True
+
+    def mark_tool_delta(
+            self, *, recognized: bool = False, argument_delta: object = '',
+            now=None) -> bool:
+        argument = argument_delta if isinstance(argument_delta, str) else ''
+        if not recognized and not argument:
+            return False
+        current = self._now(now)
+        with self._lock:
+            if recognized:
+                self._tool_call_count += 1
+            if argument:
+                self._tool_argument_chars += len(argument)
+                self._tool_argument_chunks += 1
+            self._last_semantic_progress_at = current
+        return True
+
+    def mark_provider_finish(self, now=None) -> None:
+        with self._lock:
+            self._provider_finish_seen = True
+
+    def mark_done(self, now=None) -> None:
+        current = self._now(now)
+        with self._lock:
+            self._done_seen = True
+            self._last_transport_activity_at = current
+
+    def mark_client_aborted(self) -> None:
+        with self._lock:
+            self._client_aborted = True
+
+    def mark_semantic_timeout(self) -> None:
+        with self._lock:
+            self._semantic_timeout = True
+
+    def mark_malformed(
+            self, count: int = 1, diagnostics=()) -> None:
+        issue_count = max(0, int(count or 0))
+        with self._lock:
+            self._malformed_frame_count += issue_count
+            for raw in diagnostics or ():
+                if len(self._diagnostics) >= self._MAX_DIAGNOSTICS:
+                    break
+                diagnostic = ' '.join(str(raw or '').split())[
+                    :self._MAX_DIAGNOSTIC_CHARS]
+                if diagnostic:
+                    self._diagnostics.append(diagnostic)
+
+    def timed_out(self, now=None) -> bool:
+        current = self._now(now)
+        with self._lock:
+            if (self._timeout_s <= 0 or self._provider_finish_seen
+                    or self._client_aborted):
+                return False
+            return current - self._last_semantic_progress_at >= self._timeout_s
+
+    def remaining_seconds(self, now=None):
+        current = self._now(now)
+        with self._lock:
+            if (self._timeout_s <= 0 or self._provider_finish_seen
+                    or self._client_aborted):
+                return None
+            return max(
+                0.0,
+                self._timeout_s
+                - (current - self._last_semantic_progress_at),
+            )
+
+    def transport_idle_seconds(self, now=None) -> float:
+        current = self._now(now)
+        with self._lock:
+            return max(0.0, current - self._last_transport_activity_at)
+
+    def transport_timed_out(self, timeout_s, now=None) -> bool:
+        try:
+            timeout = max(0.0, float(timeout_s or 0))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if timeout <= 0:
+            return False
+        return self.transport_idle_seconds(now) >= timeout
+
+    def transport_remaining_seconds(self, timeout_s, now=None):
+        try:
+            timeout = max(0.0, float(timeout_s or 0))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if timeout <= 0:
+            return None
+        return max(0.0, timeout - self.transport_idle_seconds(now))
+
+    def wait_status(self, now=None) -> StreamWaitStatus:
+        current = self._now(now)
+        with self._lock:
+            has_semantic_progress = bool(
+                self._reasoning_chunks or self._content_chunks
+                or self._tool_call_count or self._tool_argument_chunks)
+            if has_semantic_progress:
+                kind = 'stream_stalled'
+            elif self._response_headers_seen:
+                kind = 'waiting_event'
+            else:
+                kind = 'waiting_headers'
+            return StreamWaitStatus(
+                kind=kind,
+                request_elapsed_s=max(
+                    0.0, current - self._request_started_at),
+                transport_idle_s=max(
+                    0.0, current - self._last_transport_activity_at),
+                semantic_idle_s=max(
+                    0.0, current - self._last_semantic_progress_at),
+                response_headers_seen=self._response_headers_seen,
+                transport_byte_count=self._transport_byte_count,
+                sse_event_count=self._sse_event_count,
+                reasoning_chars=self._reasoning_chars,
+                content_chars=self._content_chars,
+                tool_call_count=self._tool_call_count,
+            )
+
+    def evidence(self, now=None) -> ProviderStreamEvidence:
+        current = self._now(now)
+        with self._lock:
+            return ProviderStreamEvidence(
+                request_elapsed_ms=round(max(
+                    0.0, current - self._request_started_at) * 1000),
+                response_headers_seen=self._response_headers_seen,
+                transport_byte_count=self._transport_byte_count,
+                sse_event_count=self._sse_event_count,
+                reasoning_chars=self._reasoning_chars,
+                reasoning_chunks=self._reasoning_chunks,
+                content_chars=self._content_chars,
+                content_chunks=self._content_chunks,
+                tool_call_count=self._tool_call_count,
+                tool_argument_chars=self._tool_argument_chars,
+                tool_argument_chunks=self._tool_argument_chunks,
+                provider_finish_seen=self._provider_finish_seen,
+                done_seen=self._done_seen,
+                malformed_frame_count=self._malformed_frame_count,
+                semantic_progress_timeout=self._semantic_timeout,
+                semantic_idle_timeout_ms=round(self._timeout_s * 1000),
+                client_aborted=self._client_aborted,
+                last_semantic_progress_age_ms=round(max(
+                    0.0, current - self._last_semantic_progress_at) * 1000),
+                last_transport_activity_age_ms=round(max(
+                    0.0, current - self._last_transport_activity_at) * 1000),
+                diagnostics=tuple(self._diagnostics),
+            )
+
+    def snapshot(self, now=None) -> dict:
+        """Compatibility dictionary for existing bounded diagnostics."""
+        evidence = self.evidence(now)
+        return {
+            'timeout_s': self._timeout_s,
+            'request_elapsed_s': evidence.request_elapsed_ms / 1000,
+            'last_progress_age_s': (
+                evidence.last_semantic_progress_age_ms / 1000),
+            'reasoning_chars': evidence.reasoning_chars,
+            'reasoning_chunks': evidence.reasoning_chunks,
+            'content_chars': evidence.content_chars,
+            'content_chunks': evidence.content_chunks,
+            'tool_calls': evidence.tool_call_count,
+            'actionable_output_seen': bool(
+                evidence.content_chunks or evidence.tool_call_count
+                or evidence.tool_argument_chunks),
+        }
+
+    # Transitional callback names used by provider accumulators.
+    notify_reasoning_progress = mark_reasoning
+
+    def notify_actionable_output(self) -> None:
+        """Renew the rolling window at a legacy callback seam."""
+        current = self._now()
+        with self._lock:
+            self._last_semantic_progress_at = current
+
+
+# Import compatibility for plugins. Production transports instantiate
+# ``StreamProgress`` directly.
+SemanticStallClock = StreamProgress
+
+
+class StreamIdleWatchdog:
+    """Watches one HTTP attempt while it is idle.
+
+    ``start()`` arms three independent schedules:
 
       * **heartbeat** — ``on_beat(idle_seconds)`` once the attempt has been
         silent for ``heartbeat_interval``, and every interval thereafter
@@ -118,6 +475,10 @@ class StreamIdleWatchdog:
         the first True latches ``aborted`` and fires ``on_abort()`` (the
         transport supplies a closure that closes the response, unblocking
         the read).
+      * **idle timeout** — when ``idle_timeout`` is positive and the attempt
+        has been silent that long, latch ``idle_timed_out`` and fire
+        ``on_idle_timeout()`` (the transport closes the response). Every raw
+        event, including an SSE keep-alive, renews this rolling window.
 
     ``notify_activity()`` resets the idle clock but does NOT disarm: a
     stream that delivers a byte and then goes quiet again resumes beating,
@@ -125,8 +486,6 @@ class StreamIdleWatchdog:
     that matters now that no read timeout exists — a mid-stream stall is
     just as unbounded as a pre-first-byte one, so both need the beat and
     both need the abort poll.
-
-    There is deliberately NO time-based kill. A wait is not a failure.
 
     Callback exceptions are swallowed + debug-logged: a HUD-side bug must
     never take the request watchdog down with it.
@@ -138,26 +497,47 @@ class StreamIdleWatchdog:
     """
 
     def __init__(self, *, heartbeat_interval=0, on_beat=None,
-                 abort_check=None, on_abort=None):
+                 on_progress=None, progress=None,
+                 abort_check=None, on_abort=None, idle_timeout=0,
+                 on_idle_timeout=None, actionable_timeout=0,
+                 on_actionable_timeout=None):
         self._interval = float(heartbeat_interval or 0)
         self._on_beat = on_beat
+        self._on_progress = on_progress
         self._abort_check = abort_check
         self._on_abort = on_abort
+        self._idle_timeout = float(idle_timeout or 0)
+        self._on_idle_timeout = on_idle_timeout
+        # Accepted for plugin compatibility only. Semantic inactivity remains
+        # observable in ``progress`` but no longer arms a termination schedule.
         self._done = threading.Event()
         self._aborted = False
-        self._lock = threading.Lock()
-        self._last_activity = time.monotonic()
+        self._idle_timed_out = False
+        self._actionable_timed_out = False
+        self._started_at = time.monotonic()
+        self.progress = progress or StreamProgress(
+            0, started_at=self._started_at)
         self._thread = None
 
     @property
     def aborted(self):
         return self._aborted
 
+    @property
+    def idle_timed_out(self):
+        return self._idle_timed_out
+
+    @property
+    def actionable_timed_out(self):
+        return self._actionable_timed_out
+
     def _beats_on(self):
-        return self._interval > 0 and self._on_beat is not None
+        return self._interval > 0 and (
+            self._on_beat is not None or self._on_progress is not None)
 
     def start(self):
-        if not self._beats_on() and self._abort_check is None:
+        if (not self._beats_on() and self._abort_check is None
+                and self._idle_timeout <= 0):
             return  # nothing to watch
         self._thread = threading.Thread(
             target=self._run, name='stream-idle-watchdog', daemon=True)
@@ -165,8 +545,30 @@ class StreamIdleWatchdog:
 
     def notify_activity(self):
         """Record upstream activity — resets the idle clock, keeps watching."""
-        with self._lock:
-            self._last_activity = time.monotonic()
+        self.progress.mark_transport_activity()
+
+    def notify_response_headers(self):
+        self.notify_activity()
+        self.progress.mark_response_headers()
+
+    def notify_transport_bytes(self, byte_count):
+        self.notify_activity()
+        self.progress.mark_transport_bytes(byte_count)
+
+    def notify_sse_event(self):
+        self.progress.mark_sse_event()
+
+    def notify_reasoning_progress(self, text) -> bool:
+        """Renew the rolling semantic clock for non-blank reasoning."""
+        return self.progress.mark_reasoning(text)
+
+    def notify_actionable_output(self):
+        """Renew the rolling semantic deadline at a legacy callback seam."""
+        self.progress.notify_actionable_output()
+
+    def semantic_stall_snapshot(self) -> dict:
+        """Return bounded timeout diagnostics for the current attempt."""
+        return self.progress.snapshot()
 
     def cancel(self):
         self._done.set()
@@ -187,18 +589,44 @@ class StreamIdleWatchdog:
                 except Exception as e:
                     logger.debug('[Watchdog] abort_check raised: %s', e)
             now = time.monotonic()
-            with self._lock:
-                idle = now - self._last_activity
+            idle = self.progress.transport_idle_seconds(now)
+            if self._idle_timeout > 0 and idle >= self._idle_timeout:
+                self._idle_timed_out = True
+                if self._on_idle_timeout is not None:
+                    try:
+                        self._on_idle_timeout()
+                    except Exception as e:
+                        logger.debug('[Watchdog] on_idle_timeout raised: %s', e)
+                return
             if (self._beats_on() and idle >= self._interval
                     and (now - last_beat) >= self._interval):
                 last_beat = now
-                try:
-                    self._on_beat(idle)
-                except Exception as e:
-                    logger.debug('[Watchdog] on_beat raised: %s', e)
+                if self._on_progress is not None:
+                    try:
+                        self._on_progress(self.progress.wait_status(now))
+                    except Exception as e:
+                        logger.debug('[Watchdog] on_progress raised: %s', e)
+                if self._on_beat is not None:
+                    try:
+                        self._on_beat(idle)
+                    except Exception as e:
+                        logger.debug('[Watchdog] on_beat raised: %s', e)
             wait = ABORT_POLL_INTERVAL if self._abort_check is not None else self._interval
             if self._beats_on():
                 wait = min(wait, self._interval)
+            if self._idle_timeout > 0:
+                if wait <= 0:
+                    wait = self._idle_timeout
+                else:
+                    wait = min(wait, self._idle_timeout)
+            idle_remaining = self.progress.transport_remaining_seconds(
+                self._idle_timeout, now)
+            if idle_remaining is not None:
+                idle_remaining = max(0.01, idle_remaining)
+                if wait <= 0:
+                    wait = idle_remaining
+                else:
+                    wait = min(wait, idle_remaining)
             if self._done.wait(max(wait, 0.01)):
                 return
 

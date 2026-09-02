@@ -684,7 +684,7 @@ def markers_ttl_flipped(prev: dict | None, cur: dict | None) -> bool:
     # rounds. A value flip on a surviving slot is the signal; an added/removed
     # slot is a count change (markers_regressed's job).
     #
-    # ★ SET, not multiset. Every marker within a slot carries the SAME ttl in
+    # SET, not multiset. Every marker within a slot carries the SAME ttl in
     #   normal operation (all `sys` markers use `_cc_stable`; `tools` is one
     #   marker; each `msg:<canonical_key>` slot is one unique message with one
     #   marker), so a slot's value set is homogeneous. The ONLY way a multiset

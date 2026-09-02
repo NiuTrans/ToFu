@@ -158,7 +158,7 @@ def test_turn_count_increments_and_persists(store, monkeypatch):
     ]
     turns = []
     for text in distinct:
-        res = ap._record_vu_turn_and_check_budget('c1', text)
+        res = ap._record_vu_turn_and_check_budget('c1', text, user_id=1)
         turns.append(res)
     assert [r['turn'] for r in turns] == [1, 2, 3, 4]
     assert all(r['stop'] is False for r in turns)
@@ -170,9 +170,9 @@ def test_budget_exhausted_fires_at_ceiling(store, monkeypatch):
     ap = _reload_ap()
     store.ensure('c2', autopilotRunId='ar-2')
 
-    r1 = ap._record_vu_turn_and_check_budget('c2', 'alpha distinct one')
-    r2 = ap._record_vu_turn_and_check_budget('c2', 'beta distinct two')
-    r3 = ap._record_vu_turn_and_check_budget('c2', 'gamma distinct three')
+    r1 = ap._record_vu_turn_and_check_budget('c2', 'alpha distinct one', user_id=1)
+    r2 = ap._record_vu_turn_and_check_budget('c2', 'beta distinct two', user_id=1)
+    r3 = ap._record_vu_turn_and_check_budget('c2', 'gamma distinct three', user_id=1)
     assert r1['stop'] is False and r2['stop'] is False
     assert r3['stop'] is True
     assert r3['reason'] == 'budget_exhausted'
@@ -187,9 +187,9 @@ def test_stuck_fires_on_three_near_identical(store, monkeypatch):
     store.ensure('c3', autopilotRunId='ar-3')
 
     nudge = 'run the failing unit test and paste the exact stack trace here'
-    r1 = ap._record_vu_turn_and_check_budget('c3', nudge)
-    r2 = ap._record_vu_turn_and_check_budget('c3', nudge)
-    r3 = ap._record_vu_turn_and_check_budget('c3', nudge)
+    r1 = ap._record_vu_turn_and_check_budget('c3', nudge, user_id=1)
+    r2 = ap._record_vu_turn_and_check_budget('c3', nudge, user_id=1)
+    r3 = ap._record_vu_turn_and_check_budget('c3', nudge, user_id=1)
     assert r1['stop'] is False and r2['stop'] is False
     assert r3['stop'] is True
     assert r3['reason'] == 'stuck'
@@ -206,7 +206,7 @@ def test_varied_nudges_never_stuck(store, monkeypatch):
         'document the new environment variable in the readme file',
     ]
     for text in varied:
-        r = ap._record_vu_turn_and_check_budget('c4', text)
+        r = ap._record_vu_turn_and_check_budget('c4', text, user_id=1)
         assert r['stop'] is False
 
 
@@ -219,14 +219,14 @@ def test_crash_resume_continues_count_not_reset(store, monkeypatch):
     store.ensure('c5', autopilotRunId='ar-5')
 
     # Two turns before the "crash".
-    ap._record_vu_turn_and_check_budget('c5', 'aaa one')
-    ap._record_vu_turn_and_check_budget('c5', 'bbb two')
+    ap._record_vu_turn_and_check_budget('c5', 'aaa one', user_id=1)
+    ap._record_vu_turn_and_check_budget('c5', 'bbb two', user_id=1)
     assert store.rows['c5']['autopilotTurnCount'] == 2
 
     # Simulate crash+resume: run id UNCHANGED, counters NOT cleared (kick does
     # not call _clear_run_id). Next turns continue the count → cap still bites.
-    r3 = ap._record_vu_turn_and_check_budget('c5', 'ccc three')
-    r4 = ap._record_vu_turn_and_check_budget('c5', 'ddd four')
+    r3 = ap._record_vu_turn_and_check_budget('c5', 'ccc three', user_id=1)
+    r4 = ap._record_vu_turn_and_check_budget('c5', 'ddd four', user_id=1)
     assert r3['turn'] == 3 and r3['stop'] is False
     assert r4['turn'] == 4 and r4['stop'] is True
     assert r4['reason'] == 'budget_exhausted'
@@ -241,11 +241,11 @@ def test_clear_run_id_resets_counters_atomically(store, monkeypatch):
     ap = _reload_ap()
     store.ensure('c6', autopilotRunId='ar-6',
                  autopilotObjective='do the thing')
-    ap._record_vu_turn_and_check_budget('c6', 'one')
-    ap._record_vu_turn_and_check_budget('c6', 'two')
+    ap._record_vu_turn_and_check_budget('c6', 'one', user_id=1)
+    ap._record_vu_turn_and_check_budget('c6', 'two', user_id=1)
     assert store.rows['c6']['autopilotTurnCount'] == 2
 
-    ap._clear_run_id('c6')
+    ap._clear_run_id('c6', user_id=1)
     # Run-scoped keys gone → a fresh run starts at 0.
     for k in ('autopilotRunId', 'autopilotTurnCount', 'autopilotVuHistory',
               'autopilotProgress'):
@@ -255,7 +255,7 @@ def test_clear_run_id_resets_counters_atomically(store, monkeypatch):
 
     # New run mints a fresh id; count restarts.
     store.rows['c6']['autopilotRunId'] = 'ar-7'
-    r = ap._record_vu_turn_and_check_budget('c6', 'fresh run turn')
+    r = ap._record_vu_turn_and_check_budget('c6', 'fresh run turn', user_id=1)
     assert r['turn'] == 1 and r['stop'] is False
 
 
@@ -264,7 +264,7 @@ def test_fail_open_on_missing_conv(store, monkeypatch):
     monkeypatch.setenv('TOFU_AUTOPILOT_MAX_TURNS', '1')
     ap = _reload_ap()
     # 'ghost' never ensured → store.update returns None.
-    res = ap._record_vu_turn_and_check_budget('ghost', 'text')
+    res = ap._record_vu_turn_and_check_budget('ghost', 'text', user_id=1)
     assert res == {'stop': False, 'reason': '', 'turn': 0}
 
 
@@ -300,7 +300,7 @@ def test_NC_budget_check_removed_never_stops(store, monkeypatch):
     nudge = 'identical nudge that would normally trip the stuck guard hard'
     stops = []
     for _ in range(6):
-        stops.append(ap._record_vu_turn_and_check_budget('c7', nudge)['stop'])
+        stops.append(ap._record_vu_turn_and_check_budget('c7', nudge, user_id=1)['stop'])
     assert stops == [False] * 6, 'neutered guards must never stop the loop'
 
 
@@ -402,7 +402,7 @@ def test_no_progress_fires_end_to_end(store, monkeypatch):
     results = []
     for text in nudges:
         results.append(ap._record_vu_turn_and_check_budget(
-            'cp', text, targets=['lib/config.py']))
+            'cp', text, targets=['lib/config.py'], user_id=1))
     # Turns 1–4 accumulate; turn 5 completes a fully-flat 4-turn window → stop.
     assert [r['stop'] for r in results] == [False, False, False, False, True]
     assert results[-1]['reason'] == 'no_progress'
@@ -421,7 +421,7 @@ def test_no_progress_not_when_files_differ(store, monkeypatch):
         'document newly added environment variable in readme [PROGRESS: resolved=2 remaining=3]',
     ]
     for f, text in zip(files, nudges):
-        r = ap._record_vu_turn_and_check_budget('cq', text, targets=[f])
+        r = ap._record_vu_turn_and_check_budget('cq', text, targets=[f], user_id=1)
         assert r['stop'] is False  # different targets each turn → not fixation
 
 
@@ -444,7 +444,7 @@ def test_NC_diminishing_returns_disabled_never_fires(store, monkeypatch):
     stops = []
     for text in nudges:
         stops.append(ap._record_vu_turn_and_check_budget(
-            'cr', text, targets=['lib/config.py'])['stop'])
+            'cr', text, targets=['lib/config.py'], user_id=1)['stop'])
     assert stops == [False] * 5
 
 

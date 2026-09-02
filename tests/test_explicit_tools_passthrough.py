@@ -23,7 +23,6 @@ class ExplicitToolsTest(unittest.TestCase):
             'code_exec_enabled': False,
             'browser_enabled': False,
             'desktop_enabled': False,
-            'swarm_enabled': False,
             'image_gen_enabled': False,
             'human_guidance_enabled': False,
             'scheduler_enabled': False,

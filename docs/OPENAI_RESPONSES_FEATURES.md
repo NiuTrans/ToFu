@@ -38,9 +38,11 @@ the effective value.
     "transport": "sse",
     "reasoningMode": "standard",
     "verbosity": "medium",
-    "imageDetail": "auto",
+    "imageDetail": "auto"
+  },
+  "orchestration": {
     "multiAgent": "off",
-    "maxConcurrentSubagents": 3
+    "maxConcurrentAgents": 3
   }
 }
 ```
@@ -52,8 +54,8 @@ Allowed alternatives are:
 - `responses.reasoningMode`: `standard | pro`
 - `responses.verbosity`: `low | medium | high`
 - `responses.imageDetail`: `auto | original`
-- `responses.multiAgent`: `off | read_only`
-- `responses.maxConcurrentSubagents`: integer `1..8`
+- `orchestration.multiAgent`: `off | auto | read_only`
+- `orchestration.maxConcurrentAgents`: integer `1..8`
 
 These controls are available in Settings → Advanced and are carried through
 the same server-authoritative conversation-config resolver used by normal,
@@ -101,12 +103,22 @@ falls back to SSE. A failure after send is treated as a retryable transport
 failure; it is not silently replayed on SSE inside the attempt. A terminal
 assistant response closes the task-local connection.
 
-## Native Multi-agent beta
+## Composable Multi-agent routing
 
-`responses.multiAgent=read_only` emits the beta request/header and an explicit
-developer constraint that native subagents perform analysis only. The existing
-root-agent write partition and approval gates remain authoritative. This mode
-is off by default and must not be treated as a replacement for Tofu Swarm.
+`orchestration.multiAgent=read_only` forces the analysis lane; `auto` enables
+it only for a first-round task with independent complex workstreams. On a
+verified public GPT-5.6 Responses face, the lane emits the native beta
+request/header and an explicit analysis-only developer constraint. Every other
+tool-capable model uses Tofu's local `spawn_agents` backend when that tool is in
+the task-owned authority catalog. Native and local workers share the same
+read-only dispatch filter, per-wave concurrency ceiling, and root-only final
+answer rule.
+
+Multi-agent and Programmatic Tool Calling are independent. A request may use
+agents to partition independent workstreams while the root or a local worker
+uses bounded PTC inside one workstream. Native control-plane and local
+`spawn_agents` tools are alternatives for the same lane and are never exposed
+together.
 
 Native tool-search, multi-agent, hosted-tool and unknown Responses output items
 are retained when replay-safe. Unknown event/item types are logged instead of
@@ -115,15 +127,21 @@ which the beta API does not support.
 
 ## Operational prerequisite
 
-Programmatic Tool Calling, Tool Search, Pro mode, WebSocket and native
-Multi-agent require a real public Responses provider. A Chat-Completions slot
-does not exercise these paths, and the Codex subscription profile is
-deliberately excluded from public-only fields.
+Native Programmatic Tool Calling, native Tool Search, Pro mode, WebSocket and
+native Multi-agent require a real public Responses provider. Provider-neutral
+PTC and Multi-agent semantics do not: other tool-capable faces receive the
+local `execute_tools` ToolScript and `spawn_agents` backends under the same
+authority and budget contracts. Codex subscription and compatible Responses
+profiles remain deliberately excluded from public-only fields.
 
 Recommended rollout: first select `protocol=responses` with
 `responses_profile=compatible` and run the existing access-matrix probe. After
 the core request returns verified generated text, change the profile to
 `openai` only for an official endpoint or a gateway whose advanced-field
-support has been independently confirmed. Enable WebSocket/PTC/Multi-agent one
-at a time; Tool Search may remain `auto` because frontend/API-selected tools
-are pinned direct at the protocol boundary.
+support has been independently confirmed. Probe each native capability in
+isolation before rollout; after those capability probes pass, PTC and
+Multi-agent may be composed by task shape. Tool Search may remain `auto`
+because frontend/API-selected tools are pinned direct at the protocol boundary.
+If a request-shape 400/404/422 explicitly names a rejected native PTC or
+Multi-agent field, the transport retry projects only that lane onto its local
+backend. Unrelated request errors are never masked by this fallback.

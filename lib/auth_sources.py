@@ -517,7 +517,8 @@ def _with_spec(row: dict) -> dict:
     """Merge catalog spec fields into a FULL row copy (consumer chain).
 
     tofu-search receives rows via the provider seam — per the registry
-    design (docs/SITE_KNOWLEDGE_LAYER_DESIGN.md §3.1) the row must carry the
+    browser automation contract (docs/modules/browser_automation.md) requires
+    the row to carry the
     new registry fields with it: access_strategy (path ORDER is data),
     login_url, cookie ``fields`` (the login flow's hint source). The stored
     row's own value wins when present; spec fills the rest;
@@ -692,7 +693,13 @@ _live_session_cache: dict = {}
 _live_session_lock = threading.Lock()
 
 
-def live_session_status(domain: str, *, refresh: bool = False) -> dict:
+def live_session_status(
+    domain: str,
+    *,
+    owner_user_id: int | str,
+    client_id: str = '',
+    refresh: bool = False,
+) -> dict:
     """Probe the user's REAL browser for a live login on ``domain``.
 
     The bridge's ``get_cookies`` reads the browser's own jar (never stored
@@ -707,22 +714,45 @@ def live_session_status(domain: str, *, refresh: bool = False) -> dict:
         cookies (OpenCLI-parity: login once in the daily browser, done).
     """
     dom = normalize_domain(domain)
+    owner_user_id = str(owner_user_id or '').strip()
+    if not owner_user_id.isdigit() or int(owner_user_id) < 1:
+        raise ValueError('owner_user_id must be a positive integer')
     if not dom:
         return {'extension': False, 'live_session': False,
                 'matched': [], 'missing_required': []}
+    client_id = str(client_id or '').strip()
+    if not client_id:
+        try:
+            from lib.browser.queue import get_connected_clients
+            clients = get_connected_clients(owner_user_id=owner_user_id)
+            if clients:
+                client_id = str(max(
+                    clients, key=lambda row: row.get('last_poll', 0)
+                ).get('client_id') or '')
+        except Exception as exc:
+            logger.debug('[AuthSrc] browser selection failed: %s', exc)
     now = time.time()
     with _live_session_lock:
-        hit = _live_session_cache.get(dom)
+        hit = _live_session_cache.get((owner_user_id, client_id, dom))
         if hit and not refresh and now - hit[0] < _LIVE_SESSION_TTL_S:
             return dict(hit[1])
     out = {'extension': False, 'live_session': False,
            'matched': [], 'missing_required': []}
     try:
-        from lib.browser import is_extension_connected, send_browser_command
-        if is_extension_connected():
+        from lib.browser.queue import (
+            is_extension_connected,
+            send_browser_command,
+        )
+        if is_extension_connected(
+                client_id, owner_user_id=owner_user_id):
             out['extension'] = True
-            res, err = send_browser_command('get_cookies', {'domain': dom},
-                                            timeout=10)
+            res, err = send_browser_command(
+                'get_cookies',
+                {'domain': dom},
+                timeout=10,
+                client_id=client_id,
+                owner_user_id=owner_user_id,
+            )
             if err:
                 logger.info('[AuthSrc] live-session probe failed for %s: %s',
                             dom, str(err)[:120])
@@ -743,7 +773,8 @@ def live_session_status(domain: str, *, refresh: bool = False) -> dict:
     except Exception as e:
         logger.debug('[AuthSrc] live-session probe crashed for %s: %s', dom, e)
     with _live_session_lock:
-        _live_session_cache[dom] = (now, dict(out))
+        _live_session_cache[(owner_user_id, client_id, dom)] = (
+            now, dict(out))
     return out
 
 

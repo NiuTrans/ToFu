@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """authed_fetch_capture.py — one-shot authenticated-SPA capture harness.
 
-Purpose (docs/FETCH_IDENTITY_PATHS_DESIGN.md, your-llm-gateway.example.com acceptance):
+Purpose (docs/modules/browser_automation.md, your-llm-gateway.example.com acceptance):
 load an SSO-protected SPA through Playwright with the cookies stored in
 lib/auth_sources, RECORD every XHR/fetch request + response status during
 the render, and dump the extracted text — one run yields both the content

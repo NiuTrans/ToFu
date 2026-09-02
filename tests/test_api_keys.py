@@ -1,146 +1,122 @@
-"""tests/test_api_keys.py — lib.api_keys unit tests.
+"""Executable service contract for Sidecar-backed bearer credentials."""
 
-Exercises the issuance, validation, scope, persistence, and revocation
-paths. Uses a temporary config_dir so the production data/config/
-file is never touched.
-"""
+from __future__ import annotations
 
-import os
-import tempfile
-import unittest
-from unittest.mock import patch
+import pytest
 
+pytest_plugins = ('tests._credential_sidecar',)
+pytestmark = pytest.mark.unit
 
-class ApiKeysTest(unittest.TestCase):
-
-    def setUp(self):
-        # Patch CONFIG_DIR to a fresh tempdir for each test so api_keys.json
-        # writes never collide with the real project file.
-        self._tmp = tempfile.TemporaryDirectory()
-        self._patch = patch('lib.api_keys._STORE_PATH',
-                             os.path.join(self._tmp.name, 'api_keys.json'))
-        self._patch.start()
-        # Force a fresh cache load.
-        from lib import api_keys
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-
-    def tearDown(self):
-        self._patch.stop()
-        self._tmp.cleanup()
-
-    def _reload(self):
-        from lib import api_keys
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-
-    def test_create_returns_plaintext_once(self):
-        from lib.api_keys import create_key, list_keys
-        row, plaintext = create_key(name='build-bot',
-                                     scopes=['chat', 'tasks'],
-                                     rate_limit_rpm=60)
-        self.assertTrue(plaintext.startswith('tofu_live_'))
-        self.assertEqual(row['name'], 'build-bot')
-        self.assertEqual(sorted(row['scopes']), ['chat', 'tasks'])
-        self.assertNotIn('secret_hash', row)
-        # list_keys should NEVER expose the hash.
-        for k in list_keys():
-            self.assertNotIn('secret_hash', k)
-
-    def test_admin_token_has_admin_scope(self):
-        from lib.api_keys import create_key
-        row, plaintext = create_key(name='admin-bot', scopes=[], admin=True)
-        self.assertTrue(plaintext.startswith('tofu_admin_'))
-        self.assertIn('admin', row['scopes'])
-
-    def test_validate_token_returns_context(self):
-        from lib.api_keys import create_key, validate_token
-        row, plaintext = create_key(name='build-bot', scopes=['chat'])
-        ctx = validate_token(plaintext)
-        self.assertIsNotNone(ctx)
-        self.assertEqual(ctx.key_id, row['id'])
-        self.assertEqual(ctx.name, 'build-bot')
-        self.assertIn('chat', ctx.scopes)
-        self.assertTrue(ctx.is_authenticated)
-
-    def test_validate_unknown_token_returns_none(self):
-        from lib.api_keys import validate_token
-        self.assertIsNone(validate_token('tofu_live_' + 'z' * 32))
-        self.assertIsNone(validate_token('not-a-tofu-token'))
-        self.assertIsNone(validate_token(''))
-
-    def test_disabled_token_rejected(self):
-        from lib.api_keys import create_key, update_key, validate_token
-        row, plaintext = create_key(name='b', scopes=['chat'])
-        update_key(row['id'], disabled=True)
-        self.assertIsNone(validate_token(plaintext))
-
-    def test_expired_token_rejected(self):
-        from lib.api_keys import create_key, update_key, validate_token
-        row, plaintext = create_key(name='b', scopes=['chat'])
-        update_key(row['id'], expires_at=1.0)  # very long ago
-        self.assertIsNone(validate_token(plaintext))
-
-    def test_revoke(self):
-        from lib.api_keys import create_key, get_key_by_id, revoke_key, validate_token
-        row, plaintext = create_key(name='b', scopes=['chat'])
-        self.assertTrue(revoke_key(row['id']))
-        self.assertIsNone(get_key_by_id(row['id']))
-        self.assertIsNone(validate_token(plaintext))
-
-    def test_revoke_unknown_returns_false(self):
-        from lib.api_keys import revoke_key
-        self.assertFalse(revoke_key('k_doesnotexist'))
-
-    def test_unknown_scope_dropped(self):
-        from lib.api_keys import create_key
-        row, _ = create_key(name='b', scopes=['chat', 'nonsense'])
-        self.assertEqual(row['scopes'], ['chat'])
-
-    def test_update_key_cannot_grant_admin(self):
-        # A non-admin (tofu_live_) key must never gain 'admin' via PATCH;
-        # privilege tier is fixed at mint time and tied to the prefix.
-        from lib.api_keys import create_key, get_key_by_id, update_key
-        row, plaintext = create_key(name='b', scopes=['chat'])
-        self.assertTrue(plaintext.startswith('tofu_live_'))
-        update_key(row['id'], scopes=['chat', 'tasks', 'admin'])
-        updated = get_key_by_id(row['id'])
-        self.assertNotIn('admin', updated['scopes'])
-        self.assertEqual(sorted(updated['scopes']), ['chat', 'tasks'])
-
-    def test_update_key_preserves_admin(self):
-        # An admin key keeps admin even if a scopes update omits it
-        # (tier is immutable through update_key).
-        from lib.api_keys import create_key, get_key_by_id, update_key
-        row, _ = create_key(name='a', scopes=[], admin=True)
-        update_key(row['id'], scopes=['chat'])
-        updated = get_key_by_id(row['id'])
-        self.assertIn('admin', updated['scopes'])
-        self.assertIn('chat', updated['scopes'])
-
-    def test_persistence_round_trip(self):
-        from lib.api_keys import create_key, validate_token
-        row, plaintext = create_key(name='persistent', scopes=['chat'])
-        # Drop and reload the cache → should re-read from disk.
-        self._reload()
-        ctx = validate_token(plaintext)
-        self.assertIsNotNone(ctx)
-        self.assertEqual(ctx.name, 'persistent')
-
-    def test_authcontext_admin_implicit_grant(self):
-        from lib.api_keys import AuthContext
-        ctx = AuthContext(key_id='x', name='a',
-                          scopes=frozenset({'admin'}))
-        self.assertTrue(ctx.has_scope('chat'))
-        self.assertTrue(ctx.has_scope('tasks'))
-        self.assertTrue(ctx.has_scope('agents:trading'))
-
-    def test_authcontext_tunnel_full_grant(self):
-        from lib.api_keys import AuthContext
-        ctx = AuthContext(via_tunnel_token=True, scopes=frozenset())
-        self.assertTrue(ctx.has_scope('chat'))
-        self.assertTrue(ctx.has_scope('admin'))
+OWNER = 1
 
 
-if __name__ == '__main__':
-    unittest.main()
+def test_plaintext_is_returned_once_and_hash_never_leaves_storage():
+    from lib.api_keys import create_key, list_keys
+
+    row, plaintext = create_key(
+        name='build-bot', scopes=['chat', 'tasks'], owner_user_id=OWNER)
+
+    assert plaintext.startswith('tofu_live_')
+    assert row['name'] == 'build-bot'
+    assert row['scopes'] == ['chat', 'tasks']
+    assert 'secret_hash' not in row
+    assert all('secret_hash' not in key for key in list_keys(
+        owner_user_id=OWNER))
+
+
+def test_validation_carries_separate_owner_and_account_identity():
+    from lib.api_keys import create_key, validate_token
+
+    row, token = create_key(
+        name='owner-key', scopes=['chat'], owner_user_id=OWNER)
+    context = validate_token(token)
+
+    assert context is not None
+    assert context.key_id == row['id']
+    assert context.owner_user_id == OWNER
+    assert context.account_user_id == ''
+    assert context.has_scope('chat')
+
+
+def test_disabled_expired_and_revoked_credentials_fail_closed():
+    from lib.api_keys import (
+        create_key, identify_known_token, revoke_key, update_key,
+        validate_token,
+    )
+
+    disabled, disabled_token = create_key(
+        name='disabled', scopes=['chat'], owner_user_id=OWNER)
+    assert update_key(
+        disabled['id'], owner_user_id=OWNER, disabled=True)
+    assert validate_token(disabled_token) is None
+
+    expired, expired_token = create_key(
+        name='expired', scopes=['chat'], owner_user_id=OWNER)
+    assert update_key(expired['id'], owner_user_id=OWNER, expires_at=1.0)
+    assert validate_token(expired_token) is None
+
+    revoked, revoked_token = create_key(
+        name='revoked', scopes=['chat'], owner_user_id=OWNER)
+    assert revoke_key(revoked['id'], owner_user_id=OWNER)
+    assert validate_token(revoked_token) is None
+    tombstone = identify_known_token(revoked_token)
+    assert tombstone is not None
+    assert tombstone['owner_user_id'] == OWNER
+    assert tombstone['revoked_at'] is not None
+    assert 'secret_hash' not in tombstone
+    assert revoke_key(revoked['id'], owner_user_id=OWNER) is False
+
+
+def test_owner_boundary_hides_credentials_from_other_principals():
+    from lib.api_keys import create_key, get_key_by_id, revoke_key
+
+    row, _ = create_key(
+        name='private', scopes=['chat'], owner_user_id=OWNER)
+
+    assert get_key_by_id(row['id'], owner_user_id=99) is None
+    assert revoke_key(row['id'], owner_user_id=99) is False
+    assert get_key_by_id(row['id'], owner_user_id=OWNER) is not None
+
+
+def test_scope_updates_cannot_change_token_privilege_tier():
+    from lib.api_keys import create_key, get_key_by_id, update_key
+
+    live, live_token = create_key(
+        name='live', scopes=['chat'], owner_user_id=OWNER)
+    assert live_token.startswith('tofu_live_')
+    assert update_key(
+        live['id'], owner_user_id=OWNER,
+        scopes=['chat', 'tasks', 'admin'])
+    updated_live = get_key_by_id(live['id'], owner_user_id=OWNER)
+    assert updated_live['scopes'] == ['chat', 'tasks']
+
+    admin, admin_token = create_key(
+        name='admin', scopes=[], admin=True, owner_user_id=OWNER)
+    assert admin_token.startswith('tofu_admin_')
+    assert update_key(
+        admin['id'], owner_user_id=OWNER, scopes=['chat'])
+    updated_admin = get_key_by_id(admin['id'], owner_user_id=OWNER)
+    assert {'admin', 'chat'} <= set(updated_admin['scopes'])
+
+
+def test_unknown_token_shape_is_rejected_without_storage_lookup(monkeypatch):
+    from lib.api_keys import validate_token
+
+    monkeypatch.setattr(
+        'lib.api_keys._validate.get_storage_client',
+        lambda **_kwargs: pytest.fail('storage should not be called'),
+    )
+    assert validate_token('not-a-tofu-token') is None
+    assert validate_token('') is None
+
+
+def test_authcontext_admin_implicitly_grants_closed_scopes():
+    from lib.api_keys import AuthContext
+
+    context = AuthContext(
+        key_id='x', name='a', owner_user_id=OWNER,
+        scopes=frozenset({'admin'}),
+    )
+    assert context.has_scope('chat')
+    assert context.has_scope('tasks')
+    assert context.has_scope('agents:trading')

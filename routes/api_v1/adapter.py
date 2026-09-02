@@ -38,7 +38,7 @@ api_v1_adapter_bp = Blueprint('api_v1_adapter', __name__)
 def _caller_uid() -> str:
     from .auth import current_auth
     auth = current_auth()
-    return (auth.user_id if auth and getattr(auth, 'user_id', '') else '')
+    return str(auth.owner_user_id or '') if auth else ''
 
 
 def _known_agent(agent_id: str, uid: str) -> dict:

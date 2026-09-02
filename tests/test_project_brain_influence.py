@@ -24,32 +24,26 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _INFL_SRC = os.path.join(ROOT, 'lib', 'conversations',
                          'project_brain_influence.py')
 
 
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
-
-
 @pytest.fixture(autouse=True)
-def _clean(flask_app, monkeypatch):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_tasks')
-        db.execute('DELETE FROM project_events')
-        db.execute('DELETE FROM project_charter')
-        db.commit()
-    import lib.push as push_mod
+def _clean(chat_sidecar, monkeypatch):
+    import lib.agent_core.push as push_mod
     monkeypatch.setattr(push_mod, 'push_event', lambda *a, **k: None)
     monkeypatch.setattr('lib.agent_core.push.push_event', lambda *a, **k: None)
+    monkeypatch.setattr(
+        'lib.conversations.project_status.build_status_snapshot',
+        lambda *_a, **_k: {'ok': True})
+    monkeypatch.setattr(
+        'lib.conversations.project_watch.address_open_items',
+        lambda *_a, **_k: {'ok': True})
     yield
 
 
@@ -63,14 +57,14 @@ def _seed(flask_app, p):
     # content and add_decision are mutually exclusive (commit_charter refuses
     # the combination outright — a partial application is worse than none), so
     # the north star and the decision are two separate commits.
-    commit_charter(p, content='North star: ship it.', updated_by_conv='convA')
-    commit_charter(p, add_decision='Use PostgreSQL', updated_by_conv='convA')
-    ta = post_task(p, 'convA', 'Refactor parser')['id']
-    claim_task(p, 'convA', ta)
-    tb = post_task(p, 'convB', 'Rewrite docs')['id']
-    claim_task(p, 'convB', tb)
-    post_task(p, 'convA', 'Add tests')  # open
-    propose_amendment(p, 'convB', 'Adopt trunk-based dev')
+    commit_charter(p, content='North star: ship it.', updated_by_conv='convA', user_id=TEST_OWNER_USER_ID)
+    commit_charter(p, add_decision='Use PostgreSQL', updated_by_conv='convA', user_id=TEST_OWNER_USER_ID)
+    ta = post_task(p, 'convA', 'Refactor parser', user_id=TEST_OWNER_USER_ID)['id']
+    claim_task(p, 'convA', ta, user_id=TEST_OWNER_USER_ID)
+    tb = post_task(p, 'convB', 'Rewrite docs', user_id=TEST_OWNER_USER_ID)['id']
+    claim_task(p, 'convB', tb, user_id=TEST_OWNER_USER_ID)
+    post_task(p, 'convA', 'Add tests', user_id=TEST_OWNER_USER_ID)  # open
+    propose_amendment(p, 'convB', 'Adopt trunk-based dev', user_id=TEST_OWNER_USER_ID)
 
 
 def test_influence_split_from_conv_a(flask_app):
@@ -78,7 +72,7 @@ def test_influence_split_from_conv_a(flask_app):
     p = os.path.abspath('/tmp/infl-a')
     with flask_app.app_context():
         _seed(flask_app, p)
-        inf = build_conv_influence(p, 'convA')
+        inf = build_conv_influence(p, 'convA', user_id=TEST_OWNER_USER_ID)
     # From convA's lens: owns "Refactor parser", must AVOID "Rewrite docs".
     assert [t['title'] for t in inf['board']['mine']] == ['Refactor parser']
     assert [(t['title'], t['owner']) for t in inf['board']['avoid']] == \
@@ -109,7 +103,7 @@ def test_influence_split_is_per_conversation(flask_app):
     p = os.path.abspath('/tmp/infl-b')
     with flask_app.app_context():
         _seed(flask_app, p)
-        inf = build_conv_influence(p, 'convB')
+        inf = build_conv_influence(p, 'convB', user_id=TEST_OWNER_USER_ID)
     # From convB's lens the ownership FLIPS.
     assert [t['title'] for t in inf['board']['mine']] == ['Rewrite docs']
     assert [(t['title'], t['owner']) for t in inf['board']['avoid']] == \
@@ -125,7 +119,7 @@ def test_influence_injected_flags_follow_render_blocks(flask_app):
     from lib.conversations.project_brain_influence import build_conv_influence
     p = os.path.abspath('/tmp/infl-empty-inject')
     with flask_app.app_context():
-        inf = build_conv_influence(p, 'convA')
+        inf = build_conv_influence(p, 'convA', user_id=TEST_OWNER_USER_ID)
     assert inf['charter']['injected'] is False
     assert inf['board']['injected'] is False
 
@@ -133,28 +127,26 @@ def test_influence_injected_flags_follow_render_blocks(flask_app):
 def test_influence_empty_project_shape(flask_app):
     from lib.conversations.project_brain_influence import build_conv_influence
     with flask_app.app_context():
-        inf = build_conv_influence(os.path.abspath('/tmp/infl-empty'), 'convA')
+        inf = build_conv_influence(os.path.abspath('/tmp/infl-empty'), 'convA', user_id=TEST_OWNER_USER_ID)
     assert inf['board']['mine'] == [] and inf['board']['avoid'] == []
     assert inf['board']['open'] == [] and inf['pendingDecisions'] == []
     assert inf['charter']['exists'] is False
     # Falsy project path → empty shell, no raise.
-    assert build_conv_influence('', 'convA')['board']['mine'] == []
+    assert build_conv_influence('', 'convA', user_id=TEST_OWNER_USER_ID)['board']['mine'] == []
 
 
 def test_influence_expired_claim_reads_open(flask_app):
     """A peer's expired lease reads as open (via read_board), so a formerly-
     avoided epic becomes 'open' for everyone — reuses the anti-deadlock path."""
-    from lib.conversations.project_board import claim_task, post_task
     from lib.conversations.project_brain_influence import build_conv_influence
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    from tests._seed import seed_board_task
     p = os.path.abspath('/tmp/infl-expired')
     with flask_app.app_context():
-        tb = post_task(p, 'convB', 'Expiring epic')['id']
-        claim_task(p, 'convB', tb)
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('UPDATE project_tasks SET lease_expires_at=1 WHERE id=?', (tb,))
-        db.commit()
-        inf = build_conv_influence(p, 'convA')
+        seed_board_task(
+            'pt_influence_expired', p, user_id=TEST_OWNER_USER_ID,
+            title='Expiring epic', status='claimed', owner_conv_id='convB',
+            lease_expires_at=1, created_by_conv='convB')
+        inf = build_conv_influence(p, 'convA', user_id=TEST_OWNER_USER_ID)
     assert [t['title'] for t in inf['board']['avoid']] == []
     assert [t['title'] for t in inf['board']['open']] == ['Expiring epic']
 
@@ -193,22 +185,21 @@ def test_NC_ownership_split_is_load_bearing(flask_app):
     restore."""
     def run():
         import lib.conversations.project_brain_influence as infl
+        from tests._seed import clear_board, clear_records
         p = os.path.abspath('/tmp/infl-nc')
         with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            db = get_thread_db(DOMAIN_CHAT)
-            db.execute('DELETE FROM project_tasks WHERE project_path=?', (p,))
-            db.commit()
+            clear_board(p, user_id=TEST_OWNER_USER_ID)
+            clear_records('project_charter')
             _seed(flask_app, p)
-            inf = infl.build_conv_influence(p, 'convA')
+            inf = infl.build_conv_influence(p, 'convA', user_id=TEST_OWNER_USER_ID)
         # With the ownership match broken, convA's own epic is NOT in `mine`.
         assert 'Refactor parser' not in [t['title'] for t in inf['board']['mine']], \
             'NC: breaking owner==conv_id must drop the conv\'s own epic from mine'
 
     _patch_restore(
         _INFL_SRC,
-        "if status == 'claimed' and owner and conv_id and owner == conv_id:",
-        "if status == 'claimed' and owner and conv_id and owner == '__never__':",
+        'if status == "claimed" and owner and conv_id and owner == conv_id:',
+        'if status == "claimed" and owner and conv_id and owner == "__never__":',
         run,
     )
 
@@ -230,7 +221,7 @@ def test_NC_ownership_split_is_load_bearing(flask_app):
 
 def _seed_goal(flask_app, p, text='Ship it cheaply and correctly.'):
     from lib.conversations.project_watch import add_watch_item
-    return add_watch_item(p, 'goal', text)['item']['item_id']
+    return add_watch_item(p, 'goal', text, user_id=TEST_OWNER_USER_ID)['item']['item_id']
 
 
 def test_goals_lane_present_and_mirrors_the_injected_block(flask_app):
@@ -241,8 +232,8 @@ def test_goals_lane_present_and_mirrors_the_injected_block(flask_app):
     p = os.path.abspath('/tmp/infl-goals')
     with flask_app.app_context():
         _seed_goal(flask_app, p, 'Long-term extensibility over quick patches.')
-        inf = build_conv_influence(p, 'convA')
-        block = render_goals_injection_block(p)
+        inf = build_conv_influence(p, 'convA', user_id=TEST_OWNER_USER_ID)
+        block = render_goals_injection_block(p, user_id=TEST_OWNER_USER_ID)
     assert inf['goals']['injected'] is True
     assert [g['text'] for g in inf['goals']['items']] == \
         ['Long-term extensibility over quick patches.']
@@ -259,8 +250,8 @@ def test_goals_lane_withdraws_when_resolved(flask_app):
     p = os.path.abspath('/tmp/infl-goals-resolved')
     with flask_app.app_context():
         gid = _seed_goal(flask_app, p)
-        set_watch_status(gid, 'resolved')
-        inf = build_conv_influence(p, 'convA')
+        set_watch_status(gid, 'resolved', user_id=TEST_OWNER_USER_ID)
+        inf = build_conv_influence(p, 'convA', user_id=TEST_OWNER_USER_ID)
     assert inf['goals']['injected'] is False
     assert inf['goals']['items'] == []
     assert inf['goals']['chars'] == 0
@@ -284,10 +275,10 @@ def test_board_injected_uses_the_PROMPT_renderer_not_the_tool_renderer(flask_app
         # A long epic title is what makes the two renderers diverge at all —
         # abridgement only bites past _INJECT_TITLE_MAX_CHARS.
         from lib.conversations.project_board import post_task
-        post_task(p, 'convB', 'X' * 900)
-        inf = build_conv_influence(p, 'convA')
-        prompt_block = render_board_injection_block(p, current_conv_id='convA')
-        tool_block = render_board_block(p, current_conv_id='convA')
+        post_task(p, 'convB', 'X' * 900, user_id=TEST_OWNER_USER_ID)
+        inf = build_conv_influence(p, 'convA', user_id=TEST_OWNER_USER_ID)
+        prompt_block = render_board_injection_block(p, current_conv_id='convA', user_id=TEST_OWNER_USER_ID)
+        tool_block = render_board_block(p, current_conv_id='convA', user_id=TEST_OWNER_USER_ID)
     assert len(tool_block) > len(prompt_block), \
         'fixture is inert: the two renderers must differ for this to test anything'
     assert inf['board']['chars'] == len(prompt_block)
@@ -303,10 +294,10 @@ def test_board_reports_prompt_side_abridgement(flask_app):
     p_long = os.path.abspath('/tmp/infl-abridged')
     p_short = os.path.abspath('/tmp/infl-not-abridged')
     with flask_app.app_context():
-        post_task(p_long, 'convB', 'Y' * 900)
-        inf_long = build_conv_influence(p_long, 'convA')
-        post_task(p_short, 'convB', 'Short epic')
-        inf_short = build_conv_influence(p_short, 'convA')
+        post_task(p_long, 'convB', 'Y' * 900, user_id=TEST_OWNER_USER_ID)
+        inf_long = build_conv_influence(p_long, 'convA', user_id=TEST_OWNER_USER_ID)
+        post_task(p_short, 'convB', 'Short epic', user_id=TEST_OWNER_USER_ID)
+        inf_short = build_conv_influence(p_short, 'convA', user_id=TEST_OWNER_USER_ID)
     assert inf_long['board']['abridgedInPrompt'] is True
     # A board of short epics is NOT abridged — the flag must discriminate,
     # otherwise it is decoration that always fires.
@@ -321,8 +312,8 @@ def test_charter_chars_is_the_injection_block_size(flask_app):
     p = os.path.abspath('/tmp/infl-charter-chars')
     with flask_app.app_context():
         _seed(flask_app, p)
-        inf = build_conv_influence(p, 'convA')
-        block = render_charter_injection_block(p)
+        inf = build_conv_influence(p, 'convA', user_id=TEST_OWNER_USER_ID)
+        block = render_charter_injection_block(p, user_id=TEST_OWNER_USER_ID)
     assert inf['charter']['chars'] == len(block) > 0
 
 
@@ -336,7 +327,7 @@ def test_tool_visible_lane_names_only_real_tools(flask_app):
     )
     known = BOARD_TOOL_NAMES | CHARTER_TOOL_NAMES | PEER_TOOL_NAMES
     with flask_app.app_context():
-        inf = build_conv_influence(os.path.abspath('/tmp/infl-tools'), 'convA')
+        inf = build_conv_influence(os.path.abspath('/tmp/infl-tools'), 'convA', user_id=TEST_OWNER_USER_ID)
     names = [t['tool'] for t in inf['toolVisible']]
     assert names, 'the tool-visible channel must not be empty'
     for n in names:
@@ -350,7 +341,7 @@ def test_empty_shape_carries_the_new_lanes(flask_app):
     """A falsy project path returns the SAME shape — a consumer must never get
     `undefined` for goals/toolVisible and silently render nothing."""
     from lib.conversations.project_brain_influence import build_conv_influence
-    inf = build_conv_influence('', 'convA')
+    inf = build_conv_influence('', 'convA', user_id=TEST_OWNER_USER_ID)
     assert inf['goals'] == {'injected': False, 'chars': 0, 'items': []}
     assert [t['tool'] for t in inf['toolVisible']]
     assert inf['board']['chars'] == 0
@@ -365,13 +356,14 @@ def test_NC_goals_lane_is_load_bearing(flask_app):
         p = os.path.abspath('/tmp/infl-nc-goals')
         with flask_app.app_context():
             _seed_goal(flask_app, p)
-            inf = infl.build_conv_influence(p, 'convA')
+            inf = infl.build_conv_influence(p, 'convA', user_id=TEST_OWNER_USER_ID)
         assert inf['goals']['injected'] is False, \
             'NC: emptying the goals block must make the lane report not-injected'
 
     _patch_restore(
         _INFL_SRC,
-        "_goals_block = render_goals_injection_block(project_path)",
+        "_goals_block = render_goals_injection_block(\n"
+        "            project_path, user_id=user_id)",
         "_goals_block = ''",
         run,
     )
@@ -388,19 +380,20 @@ def test_NC_board_prompt_renderer_is_load_bearing(flask_app):
         )
         p = os.path.abspath('/tmp/infl-nc-renderer')
         with flask_app.app_context():
-            post_task(p, 'convB', 'Z' * 900)
-            inf = infl.build_conv_influence(p, 'convA')
-            prompt_block = render_board_injection_block(p, current_conv_id='convA')
+            post_task(p, 'convB', 'Z' * 900, user_id=TEST_OWNER_USER_ID)
+            inf = infl.build_conv_influence(p, 'convA', user_id=TEST_OWNER_USER_ID)
+            prompt_block = render_board_injection_block(p, current_conv_id='convA', user_id=TEST_OWNER_USER_ID)
         assert inf['board']['chars'] != len(prompt_block), \
             'NC: sourcing the flag from the tool renderer must break the match'
 
     _patch_restore(
         _INFL_SRC,
         "        _board_block = render_board_injection_block(\n"
-        "            project_path, current_conv_id=conv_id)",
+        "            project_path, current_conv_id=conv_id, user_id=user_id\n"
+        "        )",
         "        from lib.conversations.project_board import render_board_block\n"
         "        _board_block = render_board_block(\n"
-        "            project_path, current_conv_id=conv_id)",
+        "            project_path, current_conv_id=conv_id, user_id=user_id)",
         run,
     )
 
@@ -413,14 +406,14 @@ def test_NC_abridged_flag_discriminates(flask_app):
         from lib.conversations.project_board import post_task
         p = os.path.abspath('/tmp/infl-nc-abridge')
         with flask_app.app_context():
-            post_task(p, 'convB', 'Short epic')
-            inf = infl.build_conv_influence(p, 'convA')
+            post_task(p, 'convB', 'Short epic', user_id=TEST_OWNER_USER_ID)
+            inf = infl.build_conv_influence(p, 'convA', user_id=TEST_OWNER_USER_ID)
         assert inf['board']['abridgedInPrompt'] is True, \
             'NC: hard-wiring the flag must make a short board claim abridgement'
 
     _patch_restore(
         _INFL_SRC,
-        "        out['board']['abridgedInPrompt'] = bool(_board_block) and any(",
-        "        out['board']['abridgedInPrompt'] = bool(_board_block) or any(",
+        '        out["board"]["abridgedInPrompt"] = bool(_board_block) and any(',
+        '        out["board"]["abridgedInPrompt"] = bool(_board_block) or any(',
         run,
     )

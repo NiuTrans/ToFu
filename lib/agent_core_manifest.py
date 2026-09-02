@@ -7,24 +7,17 @@ are *plugins* (concrete tools, concrete provider dialects).
 
 Manifest first, directory second
 --------------------------------
-The base is what makes Tofu reusable across projects: the run loop, the
-Planner→Worker→Critic endpoint mode, swarm scheduling, compaction, the push
-hub.  Plugins are the swappable bits: individual tools and provider body
+The base is what makes Tofu reusable across projects: the run loop,
+Flow-backed chat orchestration, swarm scheduling, compaction, and the push
+hub. Plugins are the swappable bits: individual tools and provider body
 dialects.  The *guarantee* that the base never reaches back into a concrete
 plugin is what keeps it a clean foundation — and that guarantee is enforced by
 the AST test, not by the folder layout.
 
-The directory IS being migrated to mirror this manifest, in stages:
-* **Stage 1 (done, 2026-06):** self-contained leaves with no core-sibling
-  back-imports — ``push.py``, ``task_runtime.py``, ``profiles.py`` — physically
-  moved into ``lib/agent_core/``.  Thin shims at the old paths ``lib.push`` and
-  ``lib.task_runtime`` re-export from the new homes for their remaining call
-  sites; ``profiles`` had no remaining external importer, so its old
-  ``lib.agent_profiles`` shim was deleted outright (2026-06).
-* **Later stages:** the cross-cutting members (orchestrator, model_config,
-  endpoint, …) stay named-in-place for now — moving them naively would create
-  ``agent_core → tasks_pkg`` back-imports and rewrite ~960 import sites.  They
-  migrate only when their sibling coupling is untangled.
+Self-contained base leaves live in ``lib/agent_core/``. Cross-cutting members
+remain in their owning packages until their dependency direction permits a
+physical move. There are no alternate import paths: consumers import the
+concrete owner module, while this manifest declares the boundary.
 
 Either way a folder can't stop an import — what enforces the boundary is the
 AST test ``tests/test_agent_core_boundary.py``, which reads THIS manifest and
@@ -52,13 +45,25 @@ from __future__ import annotations
 # ── The reusable agent base (module path prefixes, relative to repo root) ──
 # A file is "core" if its dotted module path starts with any of these.
 CORE_MODULES: tuple[str, ...] = (
-    # Task orchestration + the run loop, endpoint mode, compaction, dispatch.
+    # Task orchestration + the run loop, chat flows, compaction, dispatch.
     'lib.tasks_pkg.orchestrator',
     'lib.tasks_pkg.model_config',
-    'lib.tasks_pkg.endpoint',
     'lib.tasks_pkg.compaction',
     'lib.tasks_pkg.tool_dispatch',
     'lib.tasks_pkg.executor',
+    'lib.orchestration_chat_autopilot',
+    'lib.orchestration_chat_completion',
+    'lib.orchestration_chat_event_sink',
+    'lib.orchestration_chat_failure',
+    'lib.orchestration_chat_flow_adapter',
+    'lib.orchestration_chat_flow_projection',
+    'lib.orchestration_chat_flow_runner',
+    'lib.orchestration_chat_flow_runtime',
+    'lib.orchestration_chat_flow_selection',
+    'lib.orchestration_chat_launch',
+    'lib.orchestration_chat_turn_persistence',
+    'lib.orchestration_chat_turn_sync',
+    'lib.orchestration_message_compat',
     # Model communication + routing / load balancing.
     'lib.llm',
     'lib.llm_dispatch.dispatcher',
@@ -70,12 +75,9 @@ CORE_MODULES: tuple[str, ...] = (
     'lib.swarm.master',
     'lib.swarm.agent',
     # Cross-cutting base infrastructure.
-    'lib.task_runtime',
-    'lib.push',
-    # The browsable facade package that mirrors this manifest (see
-    # lib/agent_core/__init__.py).  It is itself part of the base and must
-    # obey the no-concrete-plugin rule — it imports only core modules + the
-    # registry seams.
+    'lib.agent_core.task_runtime',
+    'lib.agent_core.push',
+    # Every physically owned agent-core leaf and the namespace root.
     'lib.agent_core',
 )
 
@@ -89,28 +91,13 @@ REGISTRY_SEAMS: tuple[str, ...] = (
 # ── Persistence modules core must NOT import directly ──
 # The agent base must reach all persistence through the ConversationStore seam
 # (lib.protocols.ConversationStore via lib.agent_core.store.get_conversation_store),
-# never by importing the DB / conversation layer inline.  These prefixes name
+# never by importing storage or the conversation layer inline. These prefixes name
 # the host persistence layer that a standalone tofu-agent would leave behind.
 FORBIDDEN_PERSISTENCE_MODULES: tuple[str, ...] = (
-    'lib.database',
     'lib.conversations',
+    'lib.storage',
+    'lib.storage_sidecar',
 )
-
-# Per-file ratchet of remaining direct persistence imports inside CORE_MODULES,
-# keyed by dotted module path → count of lines that still import a
-# FORBIDDEN_PERSISTENCE_MODULES symbol.  The boundary test asserts each file's
-# count is <= its baseline here (monotonic-decrease ratchet, mirroring
-# tests/test_frontend_api_isolation.py).  Drive a number DOWN by routing the
-# call through the store seam; NEVER raise one.  When a file hits 0, delete its
-# entry — the test then forbids the file from re-growing ANY persistence import.
-#
-# All stages done (2026-06): the agent base (CORE_MODULES) no longer
-# imports lib.database / lib.conversations anywhere.  Persistence flows
-# entirely through the ConversationStore seam
-# (lib.agent_core.store.get_conversation_store).  An empty baseline means
-# the boundary test now enforces ZERO direct persistence imports in core
-# — any new one fails CI.  Keep it empty.
-_PERSISTENCE_IMPORT_BASELINE: dict[str, int] = {}
 
 
 # ── Concrete plugins core must NOT import directly ──
@@ -128,9 +115,7 @@ CONCRETE_PLUGIN_MODULES: tuple[str, ...] = (
 )
 
 
-# Package facades whose public symbols are all defined in CORE_MODULES
-# submodules.  The facade re-exports them, so importing the bare package is a
-# core import even though the package dir itself isn't a single CORE_MODULES leaf.
+# Package APIs whose public symbols are all defined in CORE_MODULES submodules.
 _CORE_PACKAGE_FACADES: frozenset[str] = frozenset({
     'lib.llm',
     'lib.llm_dispatch',
@@ -142,7 +127,7 @@ def is_core_module(dotted: str) -> bool:
 
     The registry seams (:data:`REGISTRY_SEAMS`) count as core — they are the
     base's own bridge to plugins.  The ``lib.llm_dispatch`` / ``lib.llm``
-    package facades count as core because their public symbols are defined in
+    package APIs count as core because their public symbols are defined in
     the core submodules listed in :data:`CORE_MODULES`.
     """
     if any(dotted == s or dotted.startswith(s + '.') for s in REGISTRY_SEAMS):
@@ -175,7 +160,6 @@ __all__ = [
     'REGISTRY_SEAMS',
     'CONCRETE_PLUGIN_MODULES',
     'FORBIDDEN_PERSISTENCE_MODULES',
-    '_PERSISTENCE_IMPORT_BASELINE',
     'is_core_module',
     'is_concrete_plugin_import',
     'is_forbidden_persistence_import',

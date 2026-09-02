@@ -31,10 +31,13 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _BOARD_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_board.py')
-_SYNC_SRC = os.path.join(ROOT, 'lib', 'tasks_pkg', 'manager', '_sync.py')
+_SYNC_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_settlement.py')
 _PEER_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_peer.py')
 
 from tests._nc_harness import patch_restore as _patch_restore  # noqa: E402
@@ -49,32 +52,21 @@ def _clear_task_registry():
     completes, so it lingers as 'running') can't make a later conv look busy
     via _conv_has_live_task. Best-effort."""
     try:
-        from lib.tasks_pkg.manager import tasks, tasks_lock
+        from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
         with tasks_lock:
             tasks.clear()
     except Exception:
         pass
 
 
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
-
-
 @pytest.fixture(autouse=True)
-def _clean(flask_app, monkeypatch):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        for tbl in ('project_tasks', 'project_events', 'project_charter',
-                    'message_queue', 'conversations'):
-            db.execute(f'DELETE FROM {tbl}')
-        db.commit()
+def _clean(chat_sidecar, monkeypatch):
+    _clear_task_registry()
     # Best-effort push stub (feed/presence emit) — no live WS in the test.
     monkeypatch.setattr('lib.agent_core.push.push_event', lambda *a, **k: None)
+    monkeypatch.setattr(
+        'lib.conversations.project_summary.ensure_summary',
+        lambda *_a, **_k: None)
     # Fresh peer rate-limit window per test.
     try:
         import lib.conversations.project_peer as pp
@@ -83,42 +75,49 @@ def _clean(flask_app, monkeypatch):
     except Exception:
         pass
     yield
+    _clear_task_registry()
 
 
 def _seed_conv(flask_app, conv_id, project_path='', settings=None):
     """Create a real conversation row so dispatch_next_queued can append to it."""
-    from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        now = int(time.time() * 1000)
-        st = {'projectPath': project_path, 'projectEnabled': True} \
-            if project_path else (settings or {})
-        db.execute(
-            'INSERT INTO conversations (id, user_id, title, messages, '
-            ' settings, created_at, updated_at, search_text) '
-            'VALUES (?, 1, ?, ?, ?, ?, ?, ?)',
-            (conv_id, 'Worker conv', json_dumps_pg(
-                [{'role': 'user', 'content': 'seed'}]),
-             json_dumps_pg(st), now, now, 'seed'))
-        db.commit()
+    del flask_app
+    from tests._seed import delete_conversation, seed_conversation
+    st = ({'projectPath': project_path, 'projectEnabled': True}
+          if project_path else (settings or {}))
+    delete_conversation(conv_id, user_id=TEST_OWNER_USER_ID)
+    result = seed_conversation(
+        conv_id, user_id=TEST_OWNER_USER_ID, title='Worker conv',
+        messages=[{'role': 'user', 'content': 'seed'}], settings=st,
+        created_at=int(time.time() * 1000))
+    assert result.get('applied') is True
+
+
+def _wipe(project_path, *conv_ids):
+    """Reset fixed-key negative-control fixtures through storage.v1."""
+    from lib.message_queue import clear_queue
+    from tests._seed import clear_board, delete_conversation
+    clear_board(project_path, user_id=TEST_OWNER_USER_ID)
+    for conv_id in conv_ids:
+        clear_queue(conv_id, user_id=TEST_OWNER_USER_ID)
+        delete_conversation(conv_id, user_id=TEST_OWNER_USER_ID)
 
 
 def _stub_spawn(monkeypatch):
-    """Replace the LLM-running spawner with a recorder (patched at the package
-    so the ``from lib.tasks_pkg import spawn_task`` inside dispatch_next_queued
-    resolves the stub)."""
+    """Replace the authoritative LLM-running spawner with a recorder."""
     spawned = []
-    import lib.tasks_pkg as tp
-    monkeypatch.setattr(tp, 'spawn_task', lambda task: spawned.append(task))
+    import lib.tasks_pkg.spawn as task_spawn
+    monkeypatch.setattr(
+        task_spawn, 'spawn_task', lambda task: spawned.append(task))
     return spawned
 
 
 def _mark_busy(conv_id, task_id='busytask0000001'):
     """Register a fake LIVE task so the conv reads busy (the production-real
     shape of an agent posting mid-turn). Clear with _clear_task_registry()."""
-    from lib.tasks_pkg.manager import tasks, tasks_lock
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
     with tasks_lock:
         tasks[task_id] = {'id': task_id, 'convId': conv_id, 'status': 'running',
+                          '_userId': TEST_OWNER_USER_ID,
                           'aborted': False, 'config': {}, 'toolRounds': []}
     return task_id
 
@@ -126,25 +125,21 @@ def _mark_busy(conv_id, task_id='busytask0000001'):
 def _board_row(flask_app, project_path, task_id):
     from lib.conversations.project_board import read_board
     with flask_app.app_context():
-        board = read_board(project_path)
+        board = read_board(project_path, user_id=TEST_OWNER_USER_ID)
     return next((t for t in board['tasks'] if t['id'] == task_id), None)
 
 
 def _queue_rows(flask_app, conv_id):
     from lib.message_queue import get_queue
     with flask_app.app_context():
-        return get_queue(conv_id)
+        return get_queue(conv_id, user_id=TEST_OWNER_USER_ID)
 
 
 def _persisted_last_user(flask_app, conv_id):
-    import json as _json
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)).fetchone()
-        msgs = _json.loads(row['messages'] or '[]') if row else []
+    del flask_app
+    from tests._seed import conv_document
+    msgs = (conv_document(
+        conv_id, user_id=TEST_OWNER_USER_ID) or {}).get('messages') or []
     users = [m for m in msgs if m.get('role') == 'user']
     return users[-1] if users else {}
 
@@ -174,7 +169,7 @@ def test_post_starts_immediately_when_target_idle(flask_app, monkeypatch):
     spawned = _stub_spawn(monkeypatch)
 
     with flask_app.app_context():
-        epic = post_task(proj, conv, 'Start me now')['id']
+        epic = post_task(proj, conv, 'Start me now', user_id=TEST_OWNER_USER_ID)['id']
 
     row = _board_row(flask_app, proj, epic)
     assert row['status'] == 'claimed', \
@@ -186,8 +181,8 @@ def test_post_starts_immediately_when_target_idle(flask_app, monkeypatch):
     assert (spawned[0]['config'] or {}).get('projectPath') == proj
     assert _queue_rows(flask_app, conv) == [], 'the kickoff must be drained, not queued'
     last_user = _persisted_last_user(flask_app, conv)
-    assert last_user.get('_brainDispatch') is True
-    assert last_user.get('_boardTaskId') == epic
+    assert (last_user.get('origin') or {}).get('initiator') == 'brain'
+    assert (last_user.get('origin') or {}).get('boardTaskId') == epic
     _clear_task_registry()
 
 
@@ -206,9 +201,9 @@ def test_post_with_unmet_deps_waits_for_completion_trigger(flask_app, monkeypatc
         # Busy poster (the production-real shape: an agent posts mid-turn) so
         # A itself stays open for this test's drive.
         _mark_busy(conv)
-        a_id = post_task(proj, conv, 'Epic A — foundation')['id']
+        a_id = post_task(proj, conv, 'Epic A — foundation', user_id=TEST_OWNER_USER_ID)['id']
         b_id = post_task(proj, conv, 'Epic B — depends on A',
-                         depends_on=[a_id])['id']
+                         depends_on=[a_id], user_id=TEST_OWNER_USER_ID)['id']
         _clear_task_registry()
 
     assert _board_row(flask_app, proj, a_id)['status'] == 'open'
@@ -217,13 +212,14 @@ def test_post_with_unmet_deps_waits_for_completion_trigger(flask_app, monkeypatc
     assert spawned == []
 
     with flask_app.app_context():
-        complete_task(proj, conv, a_id)
+        complete_task(proj, conv, a_id, user_id=TEST_OWNER_USER_ID)
 
     row_b = _board_row(flask_app, proj, b_id)
     assert row_b['status'] == 'claimed', \
         'completing the dependency must dispatch B IMMEDIATELY (event, not tick)'
     assert len(spawned) == 1
-    assert _persisted_last_user(flask_app, conv).get('_boardTaskId') == b_id
+    assert (_persisted_last_user(flask_app, conv).get('origin') or {}).get(
+        'boardTaskId') == b_id
     _clear_task_registry()
 
 
@@ -240,7 +236,7 @@ def test_post_with_busy_target_waits_for_nudge(flask_app, monkeypatch):
 
     with flask_app.app_context():
         _mark_busy(conv)
-        epic = post_task(proj, conv, 'Posted mid-turn')['id']
+        epic = post_task(proj, conv, 'Posted mid-turn', user_id=TEST_OWNER_USER_ID)['id']
 
     row = _board_row(flask_app, proj, epic)
     assert row['status'] == 'open', \
@@ -261,7 +257,7 @@ def test_post_with_missing_target_conv_keeps_heartbeat_behaviour(flask_app,
     proj = os.path.abspath('/tmp/ec-post-dead')
     spawned = _stub_spawn(monkeypatch)
     with flask_app.app_context():
-        epic = post_task(proj, 'conv-does-not-exist', 'Dead target')['id']
+        epic = post_task(proj, 'conv-does-not-exist', 'Dead target', user_id=TEST_OWNER_USER_ID)['id']
 
     row = _board_row(flask_app, proj, epic)
     assert row['status'] == 'open', \
@@ -288,13 +284,13 @@ def test_reopen_starts_immediately_when_target_idle(flask_app, monkeypatch):
 
     with flask_app.app_context():
         _mark_busy(conv)                       # production-real: posted mid-turn
-        epic = post_task(proj, conv, 'Revive me later')['id']
+        epic = post_task(proj, conv, 'Revive me later', user_id=TEST_OWNER_USER_ID)['id']
         _clear_task_registry()
-        complete_task(proj, conv, epic)        # done … the human changes course
+        complete_task(proj, conv, epic, user_id=TEST_OWNER_USER_ID)        # done … the human changes course
         assert _board_row(flask_app, proj, epic)['status'] == 'done'
         assert spawned == [], 'nothing runs for the done epic'
 
-        res = reopen_task(proj, 'conv-operator', epic)
+        res = reopen_task(proj, 'conv-operator', epic, user_id=TEST_OWNER_USER_ID)
 
     assert res.get('ok'), res
     row = _board_row(flask_app, proj, epic)
@@ -302,7 +298,8 @@ def test_reopen_starts_immediately_when_target_idle(flask_app, monkeypatch):
         'a reopened epic with an idle existing target must start AT reopen time'
     assert row['owner_conv_id'] == conv, 'routed back to its creator'
     assert len(spawned) == 1
-    assert _persisted_last_user(flask_app, conv).get('_boardTaskId') == epic
+    assert (_persisted_last_user(flask_app, conv).get('origin') or {}).get(
+        'boardTaskId') == epic
     _clear_task_registry()
 
 
@@ -318,7 +315,7 @@ def test_completion_nudge_starts_open_epic_on_empty_queue(flask_app, monkeypatch
     moment the current task completes with an empty queue — not ≤30 s later at
     the next sweep."""
     from lib.conversations.project_board import post_task
-    from lib.tasks_pkg.manager._sync import _dispatch_queued_message
+    from lib.tasks_pkg.project_settlement_sink import settle_project_task
 
     proj = os.path.abspath('/tmp/ec-nudge')
     conv = 'conv-ec-nudge'
@@ -328,19 +325,21 @@ def test_completion_nudge_starts_open_epic_on_empty_queue(flask_app, monkeypatch
 
     with flask_app.app_context():
         _mark_busy(conv)
-        epic = post_task(proj, conv, 'Queued behind the current turn')['id']
+        epic = post_task(proj, conv, 'Queued behind the current turn', user_id=TEST_OWNER_USER_ID)['id']
         _clear_task_registry()  # the task now "completes"
         assert _board_row(flask_app, proj, epic)['status'] == 'open'
 
         # The REAL post-task completion hook, queue empty → nudge fires.
-        _dispatch_queued_message(_terminal_task(conv, proj))
+        settle_project_task(
+            _terminal_task(conv, proj), proj, user_id=TEST_OWNER_USER_ID)
 
     row = _board_row(flask_app, proj, epic)
     assert row['status'] == 'claimed', \
         'the completion nudge must dispatch the open epic immediately'
     assert len(spawned) == 1, 'the nudge must drain the kickoff → one task spawned'
     assert spawned[0]['convId'] == conv
-    assert _persisted_last_user(flask_app, conv).get('_boardTaskId') == epic
+    assert (_persisted_last_user(flask_app, conv).get('origin') or {}).get(
+        'boardTaskId') == epic
     _clear_task_registry()
 
 
@@ -348,7 +347,7 @@ def test_completion_nudge_no_project_noop(flask_app, monkeypatch):
     """A completing task WITHOUT a projectPath never nudges (non-project convs
     are untouched by the brain)."""
     from lib.conversations.project_board import post_task
-    from lib.tasks_pkg.manager._sync import _dispatch_queued_message
+    from lib.tasks_pkg.project_settlement_sink import settle_project_task
 
     proj = os.path.abspath('/tmp/ec-nudge-noproj')
     conv = 'conv-ec-nudge-noproj'
@@ -358,10 +357,10 @@ def test_completion_nudge_no_project_noop(flask_app, monkeypatch):
 
     with flask_app.app_context():
         _mark_busy(conv)
-        epic = post_task(proj, conv, 'Orphan epic')['id']
+        epic = post_task(proj, conv, 'Orphan epic', user_id=TEST_OWNER_USER_ID)['id']
         _clear_task_registry()
         task = _terminal_task(conv, '')          # no projectPath on the task
-        _dispatch_queued_message(task)
+        settle_project_task(task, '', user_id=TEST_OWNER_USER_ID)
 
     assert _board_row(flask_app, proj, epic)['status'] == 'open'
     assert spawned == []
@@ -374,7 +373,7 @@ def test_completion_nudge_skips_when_queue_nonempty(flask_app, monkeypatch):
     pre-empted by board work."""
     from lib.conversations.project_board import post_task
     from lib.message_queue import enqueue_message
-    from lib.tasks_pkg.manager._sync import _dispatch_queued_message
+    from lib.tasks_pkg.project_settlement_sink import settle_project_task
 
     proj = os.path.abspath('/tmp/ec-nudge-queue')
     conv = 'conv-ec-nudge-queue'
@@ -384,15 +383,15 @@ def test_completion_nudge_skips_when_queue_nonempty(flask_app, monkeypatch):
 
     with flask_app.app_context():
         _mark_busy(conv)
-        epic = post_task(proj, conv, 'Board work waits its turn')['id']
+        epic = post_task(proj, conv, 'Board work waits its turn', user_id=TEST_OWNER_USER_ID)['id']
         _clear_task_registry()
-        enqueue_message(conv, {'text': 'a real human follow-up'}, {})
+        enqueue_message(conv, {'text': 'a real human follow-up'}, {}, user_id=TEST_OWNER_USER_ID)
 
-        _dispatch_queued_message(_terminal_task(conv, proj))
+        settle_project_task(
+            _terminal_task(conv, proj), proj, user_id=TEST_OWNER_USER_ID)
 
-    assert len(spawned) == 1, 'the queued human turn must dispatch first'
-    assert _persisted_last_user(flask_app, conv).get('content') == \
-        'a real human follow-up'
+    assert spawned == [], 'settlement must leave the queued human turn first'
+    assert len(_queue_rows(flask_app, conv)) == 1
     assert _board_row(flask_app, proj, epic)['status'] == 'open', \
         'the epic must NOT pre-empt a non-empty queue'
     _clear_task_registry()
@@ -402,7 +401,7 @@ def test_completion_nudge_ignores_epics_routed_elsewhere(flask_app, monkeypatch)
     """The nudge is conv-scoped: an open epic routed to ANOTHER conv is not
     this completion's business (its own completion hook / the sweep owns it)."""
     from lib.conversations.project_board import post_task
-    from lib.tasks_pkg.manager._sync import _dispatch_queued_message
+    from lib.tasks_pkg.project_settlement_sink import settle_project_task
 
     proj = os.path.abspath('/tmp/ec-nudge-other')
     conv_a = 'conv-ec-nudge-a'
@@ -414,11 +413,12 @@ def test_completion_nudge_ignores_epics_routed_elsewhere(flask_app, monkeypatch)
 
     with flask_app.app_context():
         _mark_busy(conv_b)
-        epic = post_task(proj, conv_b, 'B owns this one')['id']
+        epic = post_task(proj, conv_b, 'B owns this one', user_id=TEST_OWNER_USER_ID)['id']
         _clear_task_registry()
 
         # A's task completes with an empty queue — must NOT touch B's epic.
-        _dispatch_queued_message(_terminal_task(conv_a, proj))
+        settle_project_task(
+            _terminal_task(conv_a, proj), proj, user_id=TEST_OWNER_USER_ID)
 
     assert _board_row(flask_app, proj, epic)['status'] == 'open'
     assert spawned == []
@@ -452,15 +452,16 @@ def test_peer_message_to_idle_conv_delivers_at_send_time(flask_app, monkeypatch)
     spawned = _stub_spawn(monkeypatch)
 
     res = send_peer_message('/proj', sender, target,
-                            'confirm you are not touching lib/parser/')
+                            'confirm you are not touching lib/parser/', user_id=TEST_OWNER_USER_ID)
     assert res.get('ok'), res
 
     assert _queue_rows(flask_app, target) == [], \
         'the durable row must be consumed at send time (no heartbeat wait)'
     assert len(spawned) == 1 and spawned[0]['convId'] == target
     last_user = _persisted_last_user(flask_app, target)
-    assert last_user.get('_peerMessage') is True
-    assert last_user.get('_fromConv') == sender
+    origin = last_user.get('origin') or {}
+    assert origin.get('initiator') == 'peer'
+    assert origin.get('sourceConversationId') == sender
     assert 'lib/parser/' in last_user.get('content', '')
     assert agent_inbox.peek(target) == 0, 'an idle target gets NO inbox twin'
     _clear_task_registry()
@@ -480,13 +481,16 @@ def test_peer_message_to_live_conv_keeps_twin_path(flask_app, monkeypatch):
     spawned = _stub_spawn(monkeypatch)
 
     _mark_busy(target)  # a live, drain-eligible task
-    res = send_peer_message('/proj', sender, target, 'boundary check?')
+    res = send_peer_message('/proj', sender, target, 'boundary check?', user_id=TEST_OWNER_USER_ID)
     assert res.get('ok'), res
 
     assert len(_queue_rows(flask_app, target)) == 1, \
         'the durable row stays for the live turn / completion hook'
     assert agent_inbox.peek(target) == 1, 'the fast-path twin is offered'
     assert spawned == [], 'no new task is spawned into a live conv'
+    _wipe('/proj', sender, target)
+    agent_inbox.reset_for_test(sender)
+    agent_inbox.reset_for_test(target)
     _clear_task_registry()
 
 
@@ -508,7 +512,7 @@ def test_peer_heartbeat_still_catches_when_send_time_drain_fails(flask_app,
         raise RuntimeError('simulated send-time drain failure')
 
     monkeypatch.setattr(mq, 'dispatch_next_queued', _boom)
-    res = send_peer_message('/proj', sender, target, 'net test')
+    res = send_peer_message('/proj', sender, target, 'net test', user_id=TEST_OWNER_USER_ID)
     assert res.get('ok'), f'a drain failure must not fail the SEND: {res}'
     assert len(_queue_rows(flask_app, target)) == 1, \
         'the durable row survives a send-time drain failure (never a loss)'
@@ -519,7 +523,8 @@ def test_peer_heartbeat_still_catches_when_send_time_drain_fails(flask_app,
     with flask_app.app_context():
         mq.drain_idle_peer_messages()
     assert len(spawned) == 1 and spawned[0]['convId'] == target
-    assert _persisted_last_user(flask_app, target).get('_peerMessage') is True
+    assert (_persisted_last_user(flask_app, target).get('origin') or {}).get(
+        'initiator') == 'peer'
     assert _queue_rows(flask_app, target) == []
     _clear_task_registry()
 
@@ -537,16 +542,12 @@ def test_NC_post_trigger_is_load_bearing(flask_app, monkeypatch):
 
     def _post_and_observe():
         from lib.conversations.project_board import post_task
-        from lib.database import DOMAIN_CHAT, get_thread_db
         _clear_task_registry()
         spawned = _stub_spawn(monkeypatch)
+        _wipe(proj, conv)
         _seed_conv(flask_app, conv, proj)
         with flask_app.app_context():
-            db = get_thread_db(DOMAIN_CHAT)
-            db.execute('DELETE FROM project_tasks WHERE project_path=?', (proj,))
-            db.execute('DELETE FROM message_queue WHERE conv_id=?', (conv,))
-            db.commit()
-            epic = post_task(proj, conv, 'NC epic')['id']
+            epic = post_task(proj, conv, 'NC epic', user_id=TEST_OWNER_USER_ID)['id']
         row = _board_row(flask_app, proj, epic)
         _clear_task_registry()
         return len(spawned), row['status']
@@ -556,11 +557,7 @@ def test_NC_post_trigger_is_load_bearing(flask_app, monkeypatch):
         'baseline: the post trigger starts an idle-target epic immediately'
 
     def _wipe_conv():
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        with flask_app.app_context():
-            db = get_thread_db(DOMAIN_CHAT)
-            db.execute('DELETE FROM conversations WHERE id=?', (conv,))
-            db.commit()
+        _wipe(proj, conv)
     _wipe_conv()
 
     def run():
@@ -570,8 +567,8 @@ def test_NC_post_trigger_is_load_bearing(flask_app, monkeypatch):
 
     _patch_restore(
         _BOARD_SRC,
-        '        from lib.conversations.project_dispatch import on_epic_posted\n'
-        '        on_epic_posted(project_path, task_id)',
+        '        from lib.conversations.project_dispatch import on_epic_posted\n\n'
+        '        on_epic_posted(normalized_path, task_id, user_id=int(user_id))',
         '        pass  # NC: post-time dispatch trigger removed',
         run,
     )
@@ -586,21 +583,19 @@ def test_NC_completion_nudge_is_load_bearing(flask_app, monkeypatch):
     conv = 'conv-ec-nc-nudge'
 
     def _drive_hook_and_observe():
-        import lib.tasks_pkg.manager._sync as S
         from lib.conversations.project_board import post_task
-        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.tasks_pkg.project_settlement_sink import settle_project_task
         _clear_task_registry()
         spawned = _stub_spawn(monkeypatch)
+        _wipe(proj, conv)
         _seed_conv(flask_app, conv, proj)
         with flask_app.app_context():
-            db = get_thread_db(DOMAIN_CHAT)
-            db.execute('DELETE FROM project_tasks WHERE project_path=?', (proj,))
-            db.execute('DELETE FROM message_queue WHERE conv_id=?', (conv,))
-            db.commit()
             _mark_busy(conv)
-            epic = post_task(proj, conv, 'NC nudge epic')['id']
+            epic = post_task(proj, conv, 'NC nudge epic', user_id=TEST_OWNER_USER_ID)['id']
             _clear_task_registry()
-            S._dispatch_queued_message(_terminal_task(conv, proj))
+            settle_project_task(
+                _terminal_task(conv, proj), proj,
+                user_id=TEST_OWNER_USER_ID)
         row = _board_row(flask_app, proj, epic)
         _clear_task_registry()
         return len(spawned), row['status']
@@ -610,11 +605,7 @@ def test_NC_completion_nudge_is_load_bearing(flask_app, monkeypatch):
         'baseline: the completion nudge starts the open epic immediately'
 
     def _wipe_conv():
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        with flask_app.app_context():
-            db = get_thread_db(DOMAIN_CHAT)
-            db.execute('DELETE FROM conversations WHERE id=?', (conv,))
-            db.commit()
+        _wipe(proj, conv)
     _wipe_conv()
 
     def run():
@@ -624,10 +615,8 @@ def test_NC_completion_nudge_is_load_bearing(flask_app, monkeypatch):
 
     _patch_restore(
         _SYNC_SRC,
-        '            _nudge_brain_dispatch(task, conv_id)\n'
-        '            return',
-        '            pass  # NC: completion nudge removed\n'
-        '            return',
+        '        on_conv_idle(project_path, conv_id, user_id=user_id)',
+        '        pass  # NC: completion nudge removed',
         run,
     )
     _wipe_conv()
@@ -643,10 +632,11 @@ def test_NC_send_time_drain_is_load_bearing(flask_app, monkeypatch):
         import lib.conversations.project_peer as pp
         _clear_task_registry()
         spawned = _stub_spawn(monkeypatch)
+        _wipe('/proj', sender, target)
         _seed_peer_convs(flask_app, sender, target)
         with pp._rate_lock:
             pp._peer_msg_history.clear()
-        res = pp.send_peer_message('/proj', sender, target, 'NC peer note')
+        res = pp.send_peer_message('/proj', sender, target, 'NC peer note', user_id=TEST_OWNER_USER_ID)
         assert res.get('ok'), res
         q_len = len(_queue_rows(flask_app, target))
         _clear_task_registry()
@@ -657,13 +647,7 @@ def test_NC_send_time_drain_is_load_bearing(flask_app, monkeypatch):
         'baseline: the send-time drain delivers an idle-target peer note at once'
 
     def _wipe_convs():
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        with flask_app.app_context():
-            db = get_thread_db(DOMAIN_CHAT)
-            for cid in (sender, target):
-                db.execute('DELETE FROM conversations WHERE id=?', (cid,))
-                db.execute('DELETE FROM message_queue WHERE conv_id=?', (cid,))
-            db.commit()
+        _wipe('/proj', sender, target)
     _wipe_convs()
 
     def run():
@@ -673,9 +657,9 @@ def test_NC_send_time_drain_is_load_bearing(flask_app, monkeypatch):
 
     _patch_restore(
         _PEER_SRC,
-        '            if not _live_drain_eligible_task(to_conv_id):\n'
-        '                from lib.message_queue import dispatch_next_queued\n'
-        '                _tid = dispatch_next_queued(to_conv_id)',
+        '            if not _live_drain_eligible_task(to_conv_id, user_id=user_id):\n'
+        '                from lib.message_queue import dispatch_next_queued\n\n'
+        '                _tid = dispatch_next_queued(to_conv_id, user_id=user_id)',
         '            if False:  # NC: send-time idle drain removed\n'
         '                from lib.message_queue import dispatch_next_queued\n'
         '                _tid = dispatch_next_queued(to_conv_id)',

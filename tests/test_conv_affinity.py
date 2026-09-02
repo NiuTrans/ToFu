@@ -102,6 +102,32 @@ class ConvAffinityTest(unittest.TestCase):
         self._slot_b.latency_ema = 1.0
         self.assertEqual(self._pick().key_name, 'key_B')
 
+    def test_auxiliary_model_pick_does_not_overwrite_main_model_key(self):
+        """A compaction/translation model must not cause main-key A→B→A churn."""
+        from lib.llm_dispatch import conv_affinity
+        from lib.llm_dispatch.slot import Slot
+
+        auxiliary = Slot(
+            key_name='aux_key', api_key='sk-aux', model='affinity-aux-model',
+            capabilities={'text'}, provider_id='sankuai', latency_ema=1.0,
+        )
+        with self.d._lock:
+            self.d.slots.append(auxiliary)
+        try:
+            conv_affinity.set_conv_affinity('conv-aux-scope')
+            self.assertEqual(self._pick().key_name, 'key_A')
+            self.assertEqual(self.d.pick_slot(
+                capability='text', prefer_model='affinity-aux-model').key_name,
+                'aux_key')
+            # B would win a fresh score race.  The main model must nevertheless
+            # retain A because the auxiliary pick lives in another route scope.
+            self._slot_b.latency_ema = 1.0
+            self.assertEqual(self._pick().key_name, 'key_A')
+        finally:
+            with self.d._lock:
+                if auxiliary in self.d.slots:
+                    self.d.slots.remove(auxiliary)
+
     def test_recency_map_ttl_expiry(self):
         from lib.llm_dispatch import conv_affinity
         conv_affinity.record_conv_key('conv-4', 'key_B')

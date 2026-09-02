@@ -49,12 +49,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 
 import pytest
 
-from tests._runtime_sections import runtime_section_path
+from tests._jsdom import run_harness
+from tests._runtime_sections import native_module_path, runtime_section_path
 
 pytestmark = pytest.mark.unit
 
@@ -62,7 +64,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 CORE_JS = runtime_section_path('core.js')
 TR_JS = runtime_section_path('ui/tool_rounds.js')
-SUI_JS = runtime_section_path('ui/streaming_ui.js')
+VIEW_MODEL_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'conversation', 'presentation',
+    'conversation-view-model.ts')
 
 _HAS_NODE = shutil.which('node') is not None
 _HAS_JSDOM = os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
@@ -151,83 +155,52 @@ def test_splice_and_rehydrate_position_before_anchor():
     assert out.count('PASS') >= 7, f'expected >=7 PASS, got:\n{out}'
 
 
-# ═══════════════════ Leg 3: live DOM reposition (jsdom) ══════════════════════
+# ═══════════════════ Leg 3: native live projection ordering ══════════════════
 
-def _extract_reposition_fn() -> str:
-    """Pull _repositionInjectGroups out of streaming_ui.js (DOM+CSS only, evals
-    standalone under jsdom)."""
-    src = open(SUI_JS, encoding='utf-8').read()
-    start = src.index('function _repositionInjectGroups(')
-    # End at the next top-level function definition after it.
-    end = src.index('\nfunction ', start + 1)
-    chunk = src[start:end]
-    assert '_repositionInjectGroups' in chunk
-    return chunk
-
-
-_L3_HARNESS = r"""
-const path = require('path');
-const ROOT = process.env.ROOT;
-const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
-const dom = new JSDOM('<!DOCTYPE html><body><div id="body"></div></body>', { url: 'http://localhost/' });
-global.window = dom.window; global.document = dom.window.document; global.CSS = dom.window.CSS;
-eval(process.env.FN_SRC);
-
-const out = [];
-function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
-
-function build() {
-  // Mimic the live DOM AFTER the main _syncToolRoundsDOM loop: real groups L0,
-  // L1 (L0 preceded by its prose siblings), and the synthetic S-group appended
-  // to the TAIL (the incremental-append bug).
-  const body = document.getElementById('body');
-  body.innerHTML = '';
-  const mk = (cls, key, txt) => { const d = document.createElement('div'); d.className = cls; if (key != null) d.setAttribute('data-llm-round', key); if (cls.indexOf('seg-') === 0 && key) d.setAttribute('data-seg-round', key); d.textContent = txt || ''; body.appendChild(d); return d; };
-  mk('seg-thinking', null, 'think0'); body.lastChild.setAttribute('data-seg-round', 'L0');
-  mk('seg-narration', null, 'narr0'); body.lastChild.setAttribute('data-seg-round', 'L0');
-  const L0 = mk('ptool-turn', 'L0', 'TOOLS0');
-  const L1 = mk('ptool-turn', 'L1', 'TOOLS1');
-  const S  = mk('ptool-turn', 'S9000001', 'CHIP');   // appended to tail
-  return { body, L0, L1, S };
-}
-
-// Positioned: the synthetic group moves ABOVE the anchor round's earliest prose.
-{
-  const { body, L0, S } = build();
-  const toolRounds = [
-    { roundNum: 1, llmRound: 0, toolCallId: 'tc_1', status: 'done' },
-    { roundNum: 2, llmRound: 1, toolCallId: 'tc_2', status: 'done' },
-    { roundNum: 9000001, _userSteerInject: true, steerRound: 1 },  // anchor L0
-  ];
-  _repositionInjectGroups(body, toolRounds);
-  const kids = Array.from(body.children);
-  const iChip = kids.indexOf(S);
-  // The chip must now sit ABOVE both L0's prose blocks and the L0 group.
-  const firstL0Prose = kids.findIndex(k => k.getAttribute('data-seg-round') === 'L0');
-  const iL0 = kids.indexOf(L0);
-  check('live_chip_above_anchor_prose', iChip >= 0 && iChip < firstL0Prose);
-  check('live_chip_above_anchor_group', iChip < iL0);
-  check('live_chip_not_tail', iChip !== kids.length - 1);
-}
-// NEUTER control: skip the reposition → the synthetic group stays at tail.
-{
-  const { body, S } = build();
-  // (do NOT call _repositionInjectGroups)
-  const kids = Array.from(body.children);
-  check('NC_chip_stays_tail_without_reposition', kids.indexOf(S) === kids.length - 1);
-}
-console.log(out.join('\n'));
+_NATIVE_INJECTION_HARNESS = r"""
+const { setup } = require(process.env.JSDOM_HARNESS);
+const { check, report } = setup({
+  root: process.argv[3], targets: [process.argv[2]],
+});
+const turn = {
+  turnId: 'turn-1', conversationId: 'conv-1', laneId: 'main', ordinal: 1,
+  actor: 'assistant', kind: 'reply', runId: '', status: 'completed',
+  currentAttemptId: null, projectionRevision: 1, settlement: {},
+  createdAt: 1, updatedAt: 1,
+  projection: {
+    segments: [
+      { type: 'thinking', blockId: 'thinking:0', text: 'think', llmRound: 0 },
+      { type: 'tool_use', blockId: 'tool:a', id: 'a', name: 'web_search',
+        input: {}, result: {}, llmRound: 0 },
+      { type: 'tool_use', blockId: 'tool:b', id: 'b', name: 'read_files',
+        input: {}, result: {}, llmRound: 1 },
+    ],
+    toolRounds: [
+      { toolCallId: 'a', llmRound: 0 }, { toolCallId: 'b', llmRound: 1 },
+    ],
+    _userSteerInjects: [{ blockId: 'inject:steer:1', round: 1,
+      count: 1, previews: [{ text: 'focus X' }] }],
+  },
+};
+const blocks = global.selectTurnBlocks(turn);
+const injectAt = blocks.findIndex(block => block.kind === 'injections');
+const anchorAt = blocks.findIndex(block => block.source?.llmRound === 0);
+check('native_inject_present', injectAt >= 0);
+check('native_inject_before_anchor', injectAt === anchorAt - 1);
+check('native_inject_not_tail', injectAt !== blocks.length - 1);
+report();
 """
 
 
-@pytest.mark.skipif(not (_HAS_NODE and _HAS_JSDOM),
-                    reason='node + jsdom not installed')
-def test_live_reposition_moves_chip_above_anchor():
-    out = _run_node(_L3_HARNESS, {'ROOT': ROOT, 'FN_SRC': _extract_reposition_fn()})
-    fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
-    assert not fails, 'live reposition failures:\n' + out
-    assert 'PASS NC_chip_stays_tail_without_reposition' in out, (
-        'NEUTER control missing — reposition not proven load-bearing:\n' + out)
+def test_native_live_projection_places_chip_before_anchor():
+    target = native_module_path(
+        'conversation-view-model.js', VIEW_MODEL_TS)
+    run_harness(
+        target_js=target,
+        body_js=_NATIVE_INJECTION_HARNESS,
+        expect_pass=3,
+        label='native-injection-order',
+    )
 
 
 # ═══════════════════ Leg 4: settled seg-timeline (node) ══════════════════════
@@ -248,6 +221,7 @@ _TIMELINE_STUBS = r"""
 function escapeHtml(s){ return String(s == null ? '' : s); }
 function renderMarkdown(s){ return '<md>' + String(s) + '</md>'; }
 function t(k){ return k; }
+function Icon(name, size){ return '<ICON name=' + name + ' size=' + size + '>'; }
 function getToolRoundsFromMsg(m){ return (m && m.toolRounds) || []; }
 function _toolPanelHeaderLabel(rounds, active){ return 'HDR[' + (rounds||[]).length + ']'; }
 function _renderToolGroupsHTML(rounds, allRounds){
@@ -393,12 +367,119 @@ def test_front_spliced_synthetic_row_is_wire_neutral():
         'a front-spliced synthetic row perturbed the wire')
 
 
+
+# ═══ Leg 6: synthetic-row roundNum is STABLE across streaming passes ══════
+# Incident anchor: conv mt2x5y77kk19qc (2026-08-21). One intent-stall nudge
+# rendered as THREE identical chips in the live tool panel: the rehydrated
+# row's roundNum was `9000000 + out.length`, so it drifted (9000001 → 9000003
+# → 9000004) as real rounds streamed in; `_syncToolRoundsDOM` keys groups
+# (`S{roundNum}`) and slots (`data-prn`) by roundNum and never collects stale
+# synthetic groups → one chip per drifted key. Fix: lane-base + injectRound.
+
+_L6_HARNESS = r"""
+const fnSrc = process.env.FN_SRC;
+eval(fnSrc);
+const out = [];
+function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+
+function realRound(n){ return { roundNum: n, llmRound: n - 1, toolCallId: 'tc_' + n,
+  toolName: 'grep_search', toolArgs: '{}', toolContent: 'r' + n, status: 'done' }; }
+
+// The SAME stall record, rehydrated against a growing real-round base — this
+// is exactly what successive live render passes see mid-turn.
+const stall = [{ round: 3, tool: 'run_command', failedRound: 1, badge: 'exit 6' }];
+const rowA = getToolRoundsFromMsg({ role: 'assistant', toolRounds: [realRound(1)], _stallNudges: stall })
+  .find(r => r._stallNudge);
+const rowB = getToolRoundsFromMsg({ role: 'assistant',
+  toolRounds: [realRound(1), realRound(2), realRound(3), realRound(4)], _stallNudges: stall })
+  .find(r => r._stallNudge);
+check('stall_chip_present_both_passes', !!rowA && !!rowB);
+check('stall_roundnum_stable_across_growth', !!rowA && !!rowB && rowA.roundNum === rowB.roundNum);
+check('stall_roundnum_above_real_range', !!rowA && rowA.roundNum >= 9000000);
+
+// The steer / peer / inbox lanes share the same stable-key scheme.
+const sidecars = {
+  _userSteerInjects: [{ round: 2, count: 1 }],
+  _peerInjects: [{ round: 2, count: 1 }],
+  _inboxInjects: [{ round: 2, count: 1 }],
+};
+const keyOf = (rows) => {
+  const o = {};
+  for (const r of rows) {
+    if (r._userSteerInject) o.steer = r.roundNum;
+    if (r._peerInject) o.peer = r.roundNum;
+    if (r._inboxInject) o.inbox = r.roundNum;
+  }
+  return o;
+};
+const small = keyOf(getToolRoundsFromMsg({ role: 'assistant', toolRounds: [realRound(1)], ...sidecars }));
+const grown = keyOf(getToolRoundsFromMsg({ role: 'assistant',
+  toolRounds: [realRound(1), realRound(2), realRound(3)], ...sidecars }));
+check('steer_peer_inbox_roundnum_stable',
+  small.steer === grown.steer && small.peer === grown.peer && small.inbox === grown.inbox);
+check('lane_roundnums_distinct',
+  small.steer !== small.peer && small.peer !== small.inbox && small.inbox !== small.steer);
+console.log(out.join('\n'));
+"""
+
+_L6_NC_HARNESS = r"""
+// NEUTER: restore the old length-derived formula for the stall lane and prove
+// the stability assertion above actually bites (roundNums DRIFT under it).
+let src = process.env.FN_SRC;
+const neutered = src.replace('roundNum: _INJECT_ROUND_BASE.stall + rnd,',
+                             'roundNum: 9000000 + out.length,');
+if (neutered === src) { console.log('FAIL nc_pattern_matched'); process.exit(0); }
+eval(neutered);
+const out = [];
+function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+function realRound(n){ return { roundNum: n, llmRound: n - 1, toolCallId: 'tc_' + n,
+  toolName: 'grep_search', toolArgs: '{}', toolContent: 'r' + n, status: 'done' }; }
+const stall = [{ round: 3, tool: 'run_command', failedRound: 1, badge: 'exit 6' }];
+const rowA = getToolRoundsFromMsg({ role: 'assistant', toolRounds: [realRound(1)], _stallNudges: stall })
+  .find(r => r._stallNudge);
+const rowB = getToolRoundsFromMsg({ role: 'assistant',
+  toolRounds: [realRound(1), realRound(2), realRound(3), realRound(4)], _stallNudges: stall })
+  .find(r => r._stallNudge);
+check('nc_length_derived_roundnum_drifts', !!rowA && !!rowB && rowA.roundNum !== rowB.roundNum);
+console.log(out.join('\n'));
+"""
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason='node not installed')
+def test_inject_row_roundnum_stable_across_streaming_passes():
+    out = _run_node(_L6_HARNESS, {'FN_SRC': _extract_core_inject_fns()})
+    fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'roundNum stability failures:\n' + out
+    assert out.count('PASS') >= 5, f'expected >=5 PASS, got:\n{out}'
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason='node not installed')
+def test_NC_length_derived_roundnum_drifts():
+    out = _run_node(_L6_NC_HARNESS, {'FN_SRC': _extract_core_inject_fns()})
+    assert 'PASS nc_length_derived_roundnum_drifts' in out, (
+        'NEUTER control failed — stability assertion not load-bearing, or the '
+        '_INJECT_ROUND_BASE.stall pattern drifted:\n' + out)
+
+
+def test_native_projection_owns_all_injection_lanes_and_anchor_rule():
+    """The declarative surface consumes stable wire block ids directly; the
+    deleted live-DOM lane-number shims must not be its identity authority."""
+    src = open(VIEW_MODEL_TS, encoding='utf-8').read()
+    for declaration in (
+        "['inbox', projection._inboxInjects]",
+        "['peer', projection._peerInjects]",
+        "['user-steer', projection._userSteerInjects]",
+        "['stall-nudge', projection._stallNudges]",
+    ):
+        assert declaration in src
+    assert 'const anchorLlmRound = round == null ? null : round - 1;' in src
+    assert 'blocks.splice(anchorIndex >= 0 ? anchorIndex : blocks.length, 0, block);' in src
+
+
 if __name__ == '__main__':
     test_front_spliced_synthetic_row_is_wire_neutral()
     if _HAS_NODE:
         print(_run_node(_L1_HARNESS, {'FN_SRC': _extract_core_inject_fns()}))
         print(_run_node(_L4_HARNESS, {'FN_SRC': _extract_timeline_fns()}))
         print(_run_node(_L4_NC_HARNESS, {'FN_SRC': _extract_timeline_fns()}))
-        if _HAS_JSDOM:
-            print(_run_node(_L3_HARNESS, {'ROOT': ROOT, 'FN_SRC': _extract_reposition_fn()}))
     print('DONE')

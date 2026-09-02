@@ -185,7 +185,7 @@ class TestCacheHitRendersSvg:
     the repeat read."""
 
     def test_cache_hit_meta_reattaches_svg_uris(self):
-        from lib.tasks_pkg.tool_dispatch import _build_cache_hit_meta
+        from lib.tasks_pkg.tool_dispatch._flags import _build_cache_hit_meta
         uris = [{'filename': 'a.svg', 'format': 'svg',
                  'uri': 'data:image/svg+xml;base64,PHN2Lz4='}]
         meta = _build_cache_hit_meta(
@@ -198,7 +198,7 @@ class TestCacheHitRendersSvg:
     def test_cache_hit_without_display_has_no_uris(self):
         """A non-SVG text read hit (no memoized display) must NOT fabricate
         an imageDataUris field."""
-        from lib.tasks_pkg.tool_dispatch import _build_cache_hit_meta
+        from lib.tasks_pkg.tool_dispatch._flags import _build_cache_hit_meta
         meta = _build_cache_hit_meta(
             'read_files', {'path': 'main.py'},
             'File: main.py\ndef f(): ...', False, cached_display=None,

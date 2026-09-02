@@ -1,11 +1,8 @@
 """Dependency-light paper identity and storage paths.
 
-This module deliberately lives outside the eager ``lib.paper`` package. Core
-database startup needs the one-shot paper hash repair, but importing any
-``lib.paper.*`` submodule first executes that package's broad compatibility
-barrel and used to pull PDF/ONNX/LLM runtimes into database-only maintenance
-commands. Keeping the identity primitive here breaks that accidental edge.
-``lib.paper.hashing`` remains a compatibility alias to this module.
+This module deliberately lives outside the eager ``lib.paper`` package so
+identity and path consumers do not import PDF, OCR, or LLM runtimes. It is the
+single import path for paper hashes and paper storage directories.
 """
 
 import hashlib

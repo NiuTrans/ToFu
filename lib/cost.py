@@ -1,6 +1,6 @@
 """lib/cost.py — Per-message cost calculation (THE single cost engine).
 
-★ Single source of truth (2026-06-24): this is the ONE place per-token cost
+Single source of truth (2026-06-24): this is the ONE place per-token cost
 arithmetic happens. Both surfaces delegate here:
 
   * **Display** — the headless ``/api/v1/messages/cost`` endpoint + the SSE
@@ -273,7 +273,7 @@ def _nested_cached(usage: dict) -> int:
 def _anthropic_residual_input(usage: Optional[dict], normalized_input: int) -> int:
     """Uncached RESIDUAL input for a payload already judged ``'anthropic'``.
 
-    ★ Exists because :func:`normalize_usage` and :func:`usage_cache_convention`
+    Exists because :func:`normalize_usage` and :func:`usage_cache_convention`
     can disagree about WHICH KEY carries the input on a HYBRID payload — one
     that spells BOTH conventions at once. ``normalize_usage`` documents the
     assumption that a payload "carries ONE convention only (OpenAI keys XOR

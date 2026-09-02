@@ -15,6 +15,7 @@ import re
 from datetime import datetime
 
 from lib.config_dir import config_path as _config_path
+from lib.identity import require_user_id
 from lib.log import get_logger
 
 from lib.optimizer import analyzer as _facade
@@ -40,10 +41,16 @@ def _domain_of(url: str) -> str:
     return host
 
 
-def _collect_daily_report_snippets(days: int = 7) -> list[dict]:
+def _collect_daily_report_snippets(
+    days: int = 7,
+    *,
+    owner_user_id: int,
+) -> list[dict]:
     """Return small snippets from the last N days of daily reports."""
     out: list[dict] = []
-    reports_dir = _config_path('daily_reports')
+    owner_id = require_user_id(
+        owner_user_id, context='optimizer daily reports')
+    reports_dir = _config_path('daily_reports', str(owner_id))
     if not os.path.isdir(reports_dir):
         return out
     files = sorted(glob.glob(os.path.join(reports_dir, '*.json')), reverse=True)[:days]

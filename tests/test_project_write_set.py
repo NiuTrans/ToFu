@@ -32,28 +32,17 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _DISPATCH_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_dispatch.py')
 
 
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
-
-
 @pytest.fixture(autouse=True)
-def _clean(flask_app):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_tasks')
-        db.execute('DELETE FROM project_events')
-        db.commit()
-    yield
+def _sidecar_authority(chat_sidecar):
+    return chat_sidecar
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +52,7 @@ def _stub_push(monkeypatch):
 
 def _claim_live(project_path, conv_id, task_id):
     from lib.conversations.project_board import claim_task
-    claim_task(project_path, conv_id, task_id)
+    claim_task(project_path, conv_id, task_id, user_id=TEST_OWNER_USER_ID)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -74,8 +63,8 @@ def test_post_task_persists_write_set(flask_app):
     from lib.conversations.project_board import post_task, read_board
     with flask_app.app_context():
         tid = post_task('/ws/post', 'cA', 'epic',
-                        write_set=['lib/x.py', 'static/js/y.js'])['id']
-        board = read_board('/ws/post')
+                        write_set=['lib/x.py', 'static/js/y.js'], user_id=TEST_OWNER_USER_ID)['id']
+        board = read_board('/ws/post', user_id=TEST_OWNER_USER_ID)
     row = [t for t in board['tasks'] if t['id'] == tid][0]
     assert row['write_set'] == ['lib/x.py', 'static/js/y.js']
 
@@ -83,8 +72,8 @@ def test_post_task_persists_write_set(flask_app):
 def test_undeclared_write_set_reads_empty(flask_app):
     from lib.conversations.project_board import post_task, read_board
     with flask_app.app_context():
-        tid = post_task('/ws/none', 'cA', 'epic')['id']
-        board = read_board('/ws/none')
+        tid = post_task('/ws/none', 'cA', 'epic', user_id=TEST_OWNER_USER_ID)['id']
+        board = read_board('/ws/none', user_id=TEST_OWNER_USER_ID)
     row = [t for t in board['tasks'] if t['id'] == tid][0]
     assert row['write_set'] == []
 
@@ -92,9 +81,9 @@ def test_undeclared_write_set_reads_empty(flask_app):
 def test_set_write_set_updates(flask_app):
     from lib.conversations.project_board import post_task, read_board, set_write_set
     with flask_app.app_context():
-        tid = post_task('/ws/set', 'cA', 'epic')['id']
-        res = set_write_set('/ws/set', 'cA', tid, ['lib/a.py', 'lib/a.py', ' '])
-        board = read_board('/ws/set')
+        tid = post_task('/ws/set', 'cA', 'epic', user_id=TEST_OWNER_USER_ID)['id']
+        res = set_write_set('/ws/set', 'cA', tid, ['lib/a.py', 'lib/a.py', ' '], user_id=TEST_OWNER_USER_ID)
+        board = read_board('/ws/set', user_id=TEST_OWNER_USER_ID)
     assert res['ok'] and res['write_set'] == ['lib/a.py']  # de-duped, trimmed
     row = [t for t in board['tasks'] if t['id'] == tid][0]
     assert row['write_set'] == ['lib/a.py']
@@ -111,13 +100,13 @@ def test_disjoint_epic_preferred_over_conflicting(flask_app):
     from lib.conversations.project_dispatch import select_dispatchable
     with flask_app.app_context():
         claimed = post_task('/ws/pref', 'cA', 'claimed work',
-                            write_set=['lib/shared.py'])['id']
+                            write_set=['lib/shared.py'], user_id=TEST_OWNER_USER_ID)['id']
         _claim_live('/ws/pref', 'cA', claimed)
         conflicting = post_task('/ws/pref', 'cB', 'conflicts',
-                                write_set=['lib/shared.py'])['id']
+                                write_set=['lib/shared.py'], user_id=TEST_OWNER_USER_ID)['id']
         disjoint = post_task('/ws/pref', 'cC', 'disjoint',
-                             write_set=['lib/other.py'])['id']
-        cands = [c['id'] for c in select_dispatchable('/ws/pref')]
+                             write_set=['lib/other.py'], user_id=TEST_OWNER_USER_ID)['id']
+        cands = [c['id'] for c in select_dispatchable('/ws/pref', user_id=TEST_OWNER_USER_ID)]
     # both are candidates (soft preference), disjoint one FIRST
     assert set(cands) == {conflicting, disjoint}
     assert cands.index(disjoint) < cands.index(conflicting), \
@@ -131,10 +120,10 @@ def test_conflicting_epic_not_dropped(flask_app):
     from lib.conversations.project_dispatch import select_dispatchable
     with flask_app.app_context():
         claimed = post_task('/ws/soft', 'cA', 'claimed',
-                            write_set=['lib/shared.py'])['id']
+                            write_set=['lib/shared.py'], user_id=TEST_OWNER_USER_ID)['id']
         _claim_live('/ws/soft', 'cA', claimed)
-        e1 = post_task('/ws/soft', 'cB', 'c1', write_set=['lib/shared.py'])['id']
-        cands = [c['id'] for c in select_dispatchable('/ws/soft')]
+        e1 = post_task('/ws/soft', 'cB', 'c1', write_set=['lib/shared.py'], user_id=TEST_OWNER_USER_ID)['id']
+        cands = [c['id'] for c in select_dispatchable('/ws/soft', user_id=TEST_OWNER_USER_ID)]
     assert e1 in cands, 'a conflicting epic must still be dispatchable (soft, not hard)'
 
 
@@ -145,10 +134,10 @@ def test_empty_write_set_never_demoted(flask_app):
     from lib.conversations.project_dispatch import select_dispatchable
     with flask_app.app_context():
         claimed = post_task('/ws/open', 'cA', 'claimed',
-                            write_set=['lib/shared.py'])['id']
+                            write_set=['lib/shared.py'], user_id=TEST_OWNER_USER_ID)['id']
         _claim_live('/ws/open', 'cA', claimed)
-        undeclared = post_task('/ws/open', 'cB', 'undeclared')['id']  # no write_set
-        cands = [c['id'] for c in select_dispatchable('/ws/open')]
+        undeclared = post_task('/ws/open', 'cB', 'undeclared', user_id=TEST_OWNER_USER_ID)['id']  # no write_set
+        cands = [c['id'] for c in select_dispatchable('/ws/open', user_id=TEST_OWNER_USER_ID)]
     assert undeclared in cands
     # undeclared is treated as non-conflicting → in the disjoint group (index 0)
     assert cands[0] == undeclared
@@ -159,11 +148,11 @@ def test_directory_containment_counts_as_conflict(flask_app):
     from lib.conversations.project_board import post_task
     from lib.conversations.project_dispatch import select_dispatchable
     with flask_app.app_context():
-        claimed = post_task('/ws/dir', 'cA', 'claimed', write_set=['lib/'])['id']
+        claimed = post_task('/ws/dir', 'cA', 'claimed', write_set=['lib/'], user_id=TEST_OWNER_USER_ID)['id']
         _claim_live('/ws/dir', 'cA', claimed)
-        nested = post_task('/ws/dir', 'cB', 'nested', write_set=['lib/x.py'])['id']
-        disjoint = post_task('/ws/dir', 'cC', 'disjoint', write_set=['static/a.js'])['id']
-        cands = [c['id'] for c in select_dispatchable('/ws/dir')]
+        nested = post_task('/ws/dir', 'cB', 'nested', write_set=['lib/x.py'], user_id=TEST_OWNER_USER_ID)['id']
+        disjoint = post_task('/ws/dir', 'cC', 'disjoint', write_set=['static/a.js'], user_id=TEST_OWNER_USER_ID)['id']
+        cands = [c['id'] for c in select_dispatchable('/ws/dir', user_id=TEST_OWNER_USER_ID)]
     assert cands.index(disjoint) < cands.index(nested), \
         'lib/ must be recognized as containing lib/x.py (directory-prefix conflict)'
 
@@ -174,9 +163,9 @@ def test_no_claimed_write_sets_leaves_order_untouched(flask_app):
     from lib.conversations.project_board import post_task
     from lib.conversations.project_dispatch import select_dispatchable
     with flask_app.app_context():
-        a = post_task('/ws/noop', 'cA', 'a', write_set=['lib/a.py'])['id']
-        b = post_task('/ws/noop', 'cB', 'b', write_set=['lib/b.py'])['id']
-        cands = [c['id'] for c in select_dispatchable('/ws/noop')]
+        a = post_task('/ws/noop', 'cA', 'a', write_set=['lib/a.py'], user_id=TEST_OWNER_USER_ID)['id']
+        b = post_task('/ws/noop', 'cB', 'b', write_set=['lib/b.py'], user_id=TEST_OWNER_USER_ID)['id']
+        cands = [c['id'] for c in select_dispatchable('/ws/noop', user_id=TEST_OWNER_USER_ID)]
     assert set(cands) == {a, b}
 
 
@@ -193,20 +182,18 @@ def test_NC_WS_no_reorder_leaves_conflicting_first(flask_app):
     def run():
         import lib.conversations.project_dispatch as pd
         from lib.conversations.project_board import claim_task, post_task
+        from tests._seed import clear_board
         with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            get_thread_db(DOMAIN_CHAT).execute(
-                "DELETE FROM project_tasks WHERE project_path='/ws/nc'")
-            get_thread_db(DOMAIN_CHAT).commit()
+            clear_board('/ws/nc', user_id=TEST_OWNER_USER_ID)
             claimed = post_task('/ws/nc', 'cA', 'claimed',
-                                write_set=['lib/shared.py'])['id']
-            claim_task('/ws/nc', 'cA', claimed)
+                                write_set=['lib/shared.py'], user_id=TEST_OWNER_USER_ID)['id']
+            claim_task('/ws/nc', 'cA', claimed, user_id=TEST_OWNER_USER_ID)
             # conflicting posted FIRST → without the reorder it stays ahead.
             conflicting = post_task('/ws/nc', 'cB', 'conflicts',
-                                    write_set=['lib/shared.py'])['id']
+                                    write_set=['lib/shared.py'], user_id=TEST_OWNER_USER_ID)['id']
             disjoint = post_task('/ws/nc', 'cC', 'disjoint',
-                                 write_set=['lib/other.py'])['id']
-            cands = [c['id'] for c in pd.select_dispatchable('/ws/nc')]
+                                 write_set=['lib/other.py'], user_id=TEST_OWNER_USER_ID)['id']
+            cands = [c['id'] for c in pd.select_dispatchable('/ws/nc', user_id=TEST_OWNER_USER_ID)]
         assert cands.index(conflicting) < cands.index(disjoint), \
             'NC-WS: with the reorder disabled the conflicting epic is not demoted'
 

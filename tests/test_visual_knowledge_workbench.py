@@ -370,11 +370,6 @@ def test_knowledge_upload_preview_toggle_and_responsive_fit(page, tmp_path):
     page.locator('.app-dialog-ok').click()
     page.locator('.kb-empty-state').wait_for(state='visible')
     assert not hard_errors, hard_errors
-    # Cleanup through the real UI and custom confirmation dialog.
-    page.locator('.kb-doc-delete').click()
-    page.locator('.app-dialog-ok').click()
-    page.locator('.kb-empty-state').wait_for(state='visible')
-    assert not hard_errors, hard_errors
 
 
 def test_knowledge_long_results_never_overlap_the_panel_footer(page, tmp_path):

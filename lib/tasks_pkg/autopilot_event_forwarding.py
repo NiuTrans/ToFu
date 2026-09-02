@@ -1,6 +1,6 @@
 """Autopilot VU event-forwarding cluster.
 
-Extracted from ``lib.tasks_pkg.autopilot`` under pt_00459503 slice 5 —
+Extracted from ``lib.tasks_pkg.autopilot`` under  slice 5 —
 the epic-named "event-forwarding" module.  Kept as a LEAF (imports only
 the shared event builder + logger, plus a lazy ``manager.append_event``
 inside the transform to avoid a cycle with the task manager) so
@@ -23,15 +23,15 @@ Contents:
     used to attribute the 2.5–26.7 s silent warmup window between
     ``autopilot_vu_start`` and the sub-task's first orchestrator phase.
 
-★ THE 2026-07-26 CONTRACT CHANGE (conv ms1rrjchpa5pqw incident)
+THE 2026-07-26 CONTRACT CHANGE (conv ms1rrjchpa5pqw incident)
 --------------------------------------------------------------
 Pre-fix, ``_VUEventForwarder`` (a list subclass) kept the carrier's own
 event list RAW and only forwarded WRAPPED frames to the parent — sound in
 the pre-cutover world where nobody ever attached to the carrier's stream.
-After the pt_8dc03017 cutover the client HOPS from the parent's closed
+After the  cutover the client HOPS from the parent's closed
 stream to the carrier's own stream (``latestLiveTaskId``), so the raw
 list + the agent ``state`` snapshot rendered the VU as a second "Agent"
-bubble, the machine sentinels stayed visible, and the (endpoint-managed,
+bubble, the machine sentinels stayed visible, and the (Flow-managed,
 never-terminal) carrier stream kept the sidebar pulsing forever.
 
 The transform replaces the list subclass: the carrier's own stream, push

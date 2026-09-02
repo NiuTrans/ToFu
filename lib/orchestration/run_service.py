@@ -43,13 +43,10 @@ class OrchestrationRunService:
 
     def __init__(
         self,
-        persistence: OrchestrationRunStorePort | None = None,
+        persistence: OrchestrationRunStorePort,
         *,
         runtime_mutation: RuntimeMutationServicePort | None = None,
     ):
-        if persistence is None:
-            from lib.orchestration_runs import database_run_store
-            persistence = database_run_store()
         self._persistence = bind_orchestration_run_store(persistence)
         context = DurableRunServiceContext(self._persistence)
         self._queries = DurableRunQueryService(

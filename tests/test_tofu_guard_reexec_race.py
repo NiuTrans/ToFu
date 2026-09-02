@@ -11,7 +11,7 @@ Epic pt_aa3cd224b3b346e7. Two production incidents drove this:
     duplicate relaunches (all died on the instance lock) and polluted the
     crash-storm counter into two false "NOT relaunching" trips.
 
-Fix (design: docs/TOFU_GUARD_REEXEC_RACE_DESIGN.md):
+Fix (design: docs/modules/infra_runtime.md):
   (b1) re-exec marker data/.reexec_in_progress (written by
        routes/api_v1/update.py::_perform_server_reexec, cleared by
        server.py at boot-ready) — yield while fresh (<300s);
@@ -30,6 +30,7 @@ hazard as the 14:21 incident, see tests/test_lifecycle_approval.py).
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -94,8 +95,9 @@ def _make_guard_copy(tmpdir: str, *, neuter: str | None = None,
     os.chmod(gpath, 0o755)
     # PY → /bin/true (or the caller's stub): a relaunch "dies during
     # startup" instantly (rc 1) and NEVER boots a real second server.
-    with open(os.path.join(tmpdir, '.tofu_env.json'), 'w') as f:
-        f.write('{"python": "%s"}\n' % py)
+    with open(os.path.join(tmpdir, '.tofu_env.json'), 'w', encoding='utf-8') as f:
+        json.dump({'python': py}, f)
+        f.write('\n')
     os.makedirs(os.path.join(tmpdir, 'data'), exist_ok=True)
     os.makedirs(os.path.join(tmpdir, 'logs'), exist_ok=True)
     return gpath
@@ -270,7 +272,9 @@ class TestReexecRace(unittest.TestCase):
         the launch line instead of dying as a would-be command name.
         """
         marker = os.path.join(tmp, 'launch_marker')
-        fakepy = os.path.join(tmp, 'fakepy.sh')
+        fake_directory = os.path.join(tmp, '运行 tools')
+        os.makedirs(fake_directory)
+        fakepy = os.path.join(fake_directory, 'fake python.sh')
         with open(fakepy, 'w') as f:
             f.write('#!/bin/bash\n'
                     'echo "TOFU_TLS=[${TOFU_TLS:-unset}]" >> "%s"\n' % marker)
@@ -352,6 +356,23 @@ class TestReexecRace(unittest.TestCase):
         self.assertIn("'.reexec_in_progress'", boot_report)
         self.assertIn('# (b1) re-exec marker', grd)
         self.assertIn('# (b2) boot-in-progress via the instance lock', grd)
+
+
+def test_guard_stale_environment_marker_fails_closed(tmp_path):
+    missing_python = tmp_path / 'old host' / 'missing python'
+    guard = _make_guard_copy(str(tmp_path), py=str(missing_python))
+
+    result = subprocess.run(
+        ['bash', guard, '--status'],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={**os.environ, 'PORT': str(_TEST_PORT)},
+    )
+
+    assert result.returncode == 1
+    assert '.tofu_env.json points to missing Python' in result.stderr
+    assert 'Rerun install.sh after moving this checkout' in result.stderr
 
 
 if __name__ == '__main__':

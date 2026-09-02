@@ -15,7 +15,7 @@ from tests._esm_feature_harness import compile_feature_owner
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / 'frontend/src/features/memory/panel.ts'
-ESBUILD = ROOT / 'node_modules/.bin/esbuild'
+ESBUILD = ROOT / 'scripts' / 'vite_test_bundle.mjs'
 
 
 def _node() -> str:
@@ -31,7 +31,7 @@ def _ready() -> bool:
     ).returncode == 0
 
 
-@pytest.mark.skipif(not _ready(), reason='jsdom + esbuild not installed')
+@pytest.mark.skipif(not _ready(), reason='jsdom + vite test bundler not installed')
 def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
     built = tmp_path / 'memory.js'
     compiled = compile_feature_owner(ESBUILD, MODULE, built, tmp_path)
@@ -64,8 +64,10 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
           .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
         window.debugLog = (...args) => calls.push(['debug', ...args]);
         window.showConfirm = async () => true;
-        window._applyMemoryUI = (enabled) => { global.memoryEnabled = enabled; };
-        window._saveConvToolState = () => calls.push(['saveState']);
+        window._applyMemoryUI = (enabled) => {
+          global.memoryEnabled = enabled; calls.push(['applyMemory', enabled]);
+        };
+        window.captureActiveConversationSettings = () => calls.push(['saveState']);
         window.updateSubmenuCounts = () => calls.push(['counts']);
         window._attachMemoryDropZone = () => calls.push(['drop']);
         window.Api = { memory: {
@@ -106,11 +108,14 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
           resolvers[1]({ memories: [{ id: 'new', name: 'NEW', enabled: true }] });
           await Promise.all([oldRequest, newRequest]);
           const reopenedApplied = list.textContent.includes('NEW');
+          window.toggleMemoryFromModal();
           console.log(JSON.stringify({ noInlineHandlers, initialRendered, toggledInstantly,
             toggleRolledBack, hiddenInstantly, deleteRolledBack, createRendered,
             oldIgnored, reopenedApplied, toggleCalls: calls.filter(x => x[0] === 'toggle').length,
             deleteCalls: calls.filter(x => x[0] === 'delete').length,
-            createCalls: calls.filter(x => x[0] === 'create').length }));
+            createCalls: calls.filter(x => x[0] === 'create').length,
+            settingsCaptures: calls.filter(x => x[0] === 'saveState').length,
+            memoryApply: calls.findLast(x => x[0] === 'applyMemory')?.[1] }));
         })().catch((error) => { console.error(error); process.exitCode = 1; });
         """
     ).replace('BUILT_PATH', json.dumps(str(built)))
@@ -124,3 +129,5 @@ def test_native_memory_modal_actions_rollback_and_request_ownership(tmp_path):
         'createRendered', 'oldIgnored', 'reopenedApplied',
     ))
     assert result['toggleCalls'] == result['deleteCalls'] == result['createCalls'] == 1
+    assert result['settingsCaptures'] == 1
+    assert result['memoryApply'] is False

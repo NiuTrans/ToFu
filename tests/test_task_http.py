@@ -35,12 +35,13 @@ class _Runtime:
             'cursor': {'requested': cursor, 'next': cursor, 'reset': False},
         }
 
-    def abort(self, task_id):
+    def abort_owned(self, task_id, *, user_id):
+        assert user_id == 1
         self.aborted.append(task_id)
         return True
 
-    def get(self, _task_id):
-        return None
+    def get_owned(self, task_id, *, user_id):
+        return {'id': task_id, 'status': 'running'} if user_id == 1 else None
 
 
 def _app():
@@ -132,14 +133,19 @@ def test_task_route_consumers_depend_on_shared_capability_ports():
     assert 'runtime: TaskAbortRuntimePort' in mutation_operations
     assert 'class TaskRouteRuntimePort(' in ports
     assert 'class TaskAbortRuntimePort(Protocol)' in ports
-    assert 'from lib.task_runtime import TaskRuntime' not in (
+    assert 'from lib.agent_core.task_runtime import TaskRuntime' not in (
         runtime + mutation_routes
     )
 
 
-def test_task_route_factory_preserves_default_poll_and_abort_behavior():
+def test_task_route_factory_preserves_default_poll_and_abort_behavior(
+    monkeypatch,
+):
     from quart import Blueprint
     from lib.openapi import build_spec
+    import routes._task_routes as task_routes
+
+    monkeypatch.setattr(task_routes, 'request_user_id', lambda: 1)
 
     app = _app()
     blueprint = Blueprint('task_factory_contract', __name__)

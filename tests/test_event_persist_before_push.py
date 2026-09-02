@@ -12,7 +12,7 @@ belt load-bearing. The fix reorders the persist BEFORE the push (via the
 runtime's ``before_push`` hook), so the durable log is never behind the bytes
 the client has received.
 
-Tests (real DB, real manager.append_event, instrumented push):
+Tests (real Sidecar, real manager.append_event, instrumented push):
   1. ``test_persist_precedes_push`` — install a push spy that, AT PUSH TIME,
      reads task_events for THIS seq. After the reorder the row is ALREADY
      present at every push → the fold at any push instant equals the client
@@ -37,6 +37,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import quart as _quart  # noqa: E402
 sys.modules.setdefault('flask', _quart)
 
+import pytest  # noqa: E402
+from lib.tasks_pkg.manager.runtime import chat_task_runtime  # noqa: E402
+
+pytest_plugins = ('tests._chat_sidecar',)
+pytestmark = [pytest.mark.unit, pytest.mark.usefixtures('chat_sidecar')]
+
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
 def _ok(msg): print(' ', _color('\u2713', '32'), msg)
@@ -46,8 +52,7 @@ def _fail(msg): print(' ', _color('\u2717', '31'), msg); sys.exit(1)
 def _make_task(task_id):
     """Register a real chat-runtime task so manager.append_event hits the
     runtime (before_push) path, not the legacy fallback."""
-    from lib.tasks_pkg import manager as _mgr
-    return _mgr._chat_runtime.create(task_id=task_id)
+    return chat_task_runtime.create(user_id=1, task_id=task_id)
 
 
 def _row_seqs(task_id):
@@ -59,22 +64,22 @@ def _row_seqs(task_id):
 def test_persist_precedes_push():
     """★ At the instant of each push, the row for that seq is ALREADY in the DB."""
     from lib.tasks_pkg import manager as _mgr
-    from lib.agent_core import push as _push
+    import lib.agent_core.push as _push
 
     tid = f'pbp-{uuid.uuid4().hex[:8]}'
     _make_task(tid)
     observations = []  # (seq, row_present_at_push_time)
     orig_push = _push.push_event
 
-    def _spy(channel, task_id, event):
+    def _spy(channel, task_id, event, *, user_id):
         if task_id == tid and event.get('type') == 'delta':
             seqs = _row_seqs(tid)
             observations.append((event.get('seq'), event.get('seq') in seqs))
-        return orig_push(channel, task_id, event)
+        return orig_push(channel, task_id, event, user_id=user_id)
 
     _push.push_event = _spy
     try:
-        task = _mgr._chat_runtime.get(tid)
+        task = chat_task_runtime.get(tid)
         for i in range(30):
             _mgr.append_event(task, {'type': 'delta', 'content': f'chunk{i} '})
     finally:
@@ -92,7 +97,7 @@ def test_persist_precedes_push():
 
 def test_cold_fold_equals_client_buffer_zero_missing():
     from lib.tasks_pkg import manager as _mgr
-    from lib.agent_core import push as _push
+    import lib.agent_core.push as _push
     from lib.tasks_pkg.event_fold import fold_cold_state_text
 
     tid = f'pbp-fold-{uuid.uuid4().hex[:8]}'
@@ -101,8 +106,8 @@ def test_cold_fold_equals_client_buffer_zero_missing():
     fold_at_push = []   # folded length observable at that same instant
     orig_push = _push.push_event
 
-    def _spy(channel, task_id, event):
-        r = orig_push(channel, task_id, event)
+    def _spy(channel, task_id, event, *, user_id):
+        r = orig_push(channel, task_id, event, user_id=user_id)
         if task_id == tid and event.get('type') == 'delta':
             client_buffer.append(event.get('content', ''))
             folded_c, _ = fold_cold_state_text(tid)
@@ -111,7 +116,7 @@ def test_cold_fold_equals_client_buffer_zero_missing():
 
     _push.push_event = _spy
     try:
-        task = _mgr._chat_runtime.get(tid)
+        task = chat_task_runtime.get(tid)
         for i in range(25):
             _mgr.append_event(task, {'type': 'delta', 'content': f'w{i} '})
     finally:
@@ -129,7 +134,7 @@ def test_cold_fold_equals_client_buffer_zero_missing():
 def test_persist_failure_does_not_block_push():
     """A persist that raises must NOT stop the push (best-effort ordering)."""
     from lib.tasks_pkg import manager as _mgr
-    from lib.agent_core import push as _push
+    import lib.agent_core.push as _push
     import lib.tasks_pkg.event_log as _elog
 
     tid = f'pbp-fail-{uuid.uuid4().hex[:8]}'
@@ -141,17 +146,17 @@ def test_persist_failure_does_not_block_push():
     def _boom(*a, **k):
         raise RuntimeError('simulated DB blip')
 
-    def _spy(channel, task_id, event):
+    def _spy(channel, task_id, event, *, user_id):
         if task_id == tid and event.get('type') == 'delta':
             pushed.append(event.get('seq'))
-        return orig_push(channel, task_id, event)
+        return orig_push(channel, task_id, event, user_id=user_id)
 
     # manager imports append_persistent_event inside _persist_before_push, so
     # patch it on the module it's imported FROM.
     _elog.append_persistent_event = _boom
     _push.push_event = _spy
     try:
-        task = _mgr._chat_runtime.get(tid)
+        task = chat_task_runtime.get(tid)
         for i in range(5):
             _mgr.append_event(task, {'type': 'delta', 'content': f'x{i}'})
     finally:
@@ -167,16 +172,7 @@ def test_persist_failure_does_not_block_push():
 
 def _cleanup(task_id):
     try:
-        from lib.tasks_pkg import manager as _mgr
-        with _mgr._chat_runtime._lock:
-            _mgr._chat_runtime._tasks.pop(task_id, None)
-    except Exception:
-        pass
-    try:
-        from lib.database import DOMAIN_CHAT, get_thread_db, db_execute_with_retry
-        db = get_thread_db(DOMAIN_CHAT)
-        db_execute_with_retry(db, 'DELETE FROM task_events WHERE task_id=?', (task_id,))
-        db.commit()
+        chat_task_runtime.discard(task_id)
     except Exception:
         pass
 
@@ -201,8 +197,8 @@ def main():
     print()
     print(_color('\u2550\u2550\u2550 durable-before-visible ordering \u2014 neuter \u2550\u2550\u2550', '36'))
     print()
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_event_persist_before_push')
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_event_persist_before_push')
 
     print(_color('Baseline (shipped code):', '36'))
     if not all(_run(fn) for fn in _POSITIVE):
@@ -214,7 +210,7 @@ def main():
     print()
     print(_color('NC \u2014 restore post-push persist order:', '36'))
     from lib.tasks_pkg import manager as _mgr
-    _orig_rt_append = _mgr._chat_runtime.append_event
+    _orig_rt_append = chat_task_runtime.append_event
 
     def _post_push_append(task_id, event, *, before_push=None):
         seq = _orig_rt_append(task_id, event, before_push=None)  # push WITHOUT persist
@@ -225,12 +221,12 @@ def main():
                 pass
         return seq
 
-    _mgr._chat_runtime.append_event = _post_push_append
+    chat_task_runtime.append_event = _post_push_append
     try:
         precede_ok = _run(test_persist_precedes_push)
         fail_ok = _run(test_persist_failure_does_not_block_push)
     finally:
-        _mgr._chat_runtime.append_event = _orig_rt_append
+        chat_task_runtime.append_event = _orig_rt_append
     if precede_ok:
         _fail('NC: persist-precedes-push PASSED with post-push order restored — '
               'the ordering guarantee is not real / the test does not pin it')

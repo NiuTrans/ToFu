@@ -309,7 +309,7 @@ class TestSearchMode:
 
 
 # ═══════════════════════════════════════════════════════════
-#  Tests: Tool Toggles (Swarm, Endpoint, etc.)
+#  Tests: Tool controls
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.visual
@@ -330,89 +330,8 @@ class TestToolToggles:
             _check(path, "Tools submenu dropdown open — showing available tools", [
                 "submenu dropdown panel",
                 "tool items with icons and labels",
-                "swarm toggle option",
-                "endpoint mode toggle option",
+                "available tool controls",
             ])
-
-    def test_endpoint_toggle(self, page, screenshot_dir):
-        """Toggling endpoint mode should update UI indicators."""
-        _wait_for_app_ready(page)
-
-        # Evaluate JS directly to toggle endpoint mode
-        page.evaluate("toggleEndpoint()")
-        time.sleep(0.3)
-
-        # Check if endpoint badge appeared
-        endpoint_enabled = page.evaluate("endpointEnabled")
-        assert endpoint_enabled is True, "Endpoint should be enabled after toggle"
-
-        path = _screenshot(page, screenshot_dir, "07_endpoint_enabled")
-        _check(path, "Endpoint mode enabled — badge/indicator should be visible", [
-            "endpoint mode badge or indicator",
-            "input area with endpoint mode active",
-        ])
-
-        # Toggle back off
-        page.evaluate("toggleEndpoint()")
-        time.sleep(0.3)
-        endpoint_disabled = page.evaluate("endpointEnabled")
-        assert endpoint_disabled is False, "Endpoint should be disabled after second toggle"
-
-    def test_swarm_toggle(self, page, screenshot_dir):
-        """Toggling swarm mode should update UI indicators."""
-        _wait_for_app_ready(page)
-
-        page.evaluate("toggleSwarm()")
-        time.sleep(0.3)
-
-        swarm_enabled = page.evaluate("swarmEnabled")
-        assert swarm_enabled is True, "Swarm should be enabled after toggle"
-
-        path = _screenshot(page, screenshot_dir, "08_swarm_enabled")
-        _check(path, "Swarm mode enabled — bee badge should be visible", [
-            "swarm badge (🐝) indicator",
-            "input area with swarm mode active",
-        ])
-
-        # Toggle back off
-        page.evaluate("toggleSwarm()")
-        time.sleep(0.3)
-
-
-# ═══════════════════════════════════════════════════════════
-#  Tests: Endpoint Mode Chat
-# ═══════════════════════════════════════════════════════════
-
-@pytest.mark.visual
-class TestEndpointModeChat:
-    """Test endpoint mode sends and renders like a natural conversation."""
-
-    def test_endpoint_mode_message(self, page, screenshot_dir):
-        """Send message in endpoint mode — should show worker+critic flow."""
-        _wait_for_app_ready(page)
-
-        # ★ Fresh conversation to avoid polluting existing conversations
-        page.evaluate("newChat()")
-        time.sleep(0.3)
-
-        # Enable endpoint mode
-        page.evaluate("_applyEndpointUI(true)")
-        time.sleep(0.3)
-
-        # Send a message
-        _send_message(page, "Build a simple function", wait_done=True, timeout=60000)
-
-        path = _screenshot(page, screenshot_dir, "09_endpoint_mode_chat")
-        verdict = _check(path, "Endpoint mode chat — message sent, multi-turn response expected", [
-            "user message",
-            "assistant response (possibly multi-turn with iterations)",
-            "endpoint mode indicator",
-            "natural conversation-like layout",
-        ])
-        assert verdict.ok or "Rule-based" in verdict.summary
-
-        # Disable endpoint mode
-        page.evaluate("_applyEndpointUI(false)")
 
 
 # ═══════════════════════════════════════════════════════════

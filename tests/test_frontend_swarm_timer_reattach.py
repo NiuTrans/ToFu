@@ -26,8 +26,12 @@ import sys
 import tempfile
 import unittest
 
+from tests._runtime_sections import runtime_section_path
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PANEL_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'streaming_swarm_panel.js')
+# Materialized migrated section (scope prelude included — the harness evals
+# it whole under jsdom, and the migrated source reads runtimeScope).
+PANEL_JS = runtime_section_path('ui/streaming_swarm_panel.js')
 
 import pytest  # noqa: E402
 

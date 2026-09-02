@@ -145,6 +145,121 @@ def test_failed_or_empty_fetch_keeps_last_good_models(tmp_path, monkeypatch):
     assert state.get('pending_removals') in (None, {})
 
 
+def test_failure_backoff_is_persisted_and_survives_restart(
+        tmp_path, monkeypatch):
+    monkeypatch.delenv('TOFU_MODEL_CATALOG_SYNC', raising=False)
+    monkeypatch.setattr(catalog, 'SYNC_INTERVAL_S', 100)
+    monkeypatch.setattr(catalog, 'FAILURE_MAX_INTERVAL_S', 800)
+    path = tmp_path / 'server_config.json'
+    provider = {
+        'id': 'empty', 'base_url': 'https://empty.example/v1',
+        'api_keys': ['secret'], 'enabled': True,
+        'models': [_model('last-good')],
+        'model_catalog_sync': {'mode': 'auto'},
+    }
+    _write_config(path, provider)
+
+    first = catalog.sync_once(
+        force=True, discover=lambda _provider: [], now=100,
+        config_path=str(path), rebuild=lambda: None)
+    state = _read(path)['providers'][0]['model_catalog_sync']
+    assert first['failed'] == 1
+    assert state['consecutive_failures'] == 1
+    assert state['next_attempt_at'] == 300
+
+    called = []
+    skipped = catalog.sync_once(
+        discover=lambda _provider: called.append('early') or [], now=299,
+        config_path=str(path), rebuild=lambda: None)
+    assert skipped['failed'] == 0
+    assert called == []
+
+    second = catalog.sync_once(
+        discover=lambda _provider: called.append('due') or [], now=300,
+        config_path=str(path), rebuild=lambda: None)
+    state = _read(path)['providers'][0]['model_catalog_sync']
+    assert second['failed'] == 1
+    assert called == ['due']
+    assert state['consecutive_failures'] == 2
+    assert state['next_attempt_at'] == 700
+
+
+def test_legacy_failure_count_immediately_projects_to_bounded_due_time(
+        tmp_path, monkeypatch):
+    monkeypatch.delenv('TOFU_MODEL_CATALOG_SYNC', raising=False)
+    monkeypatch.setattr(catalog, 'SYNC_INTERVAL_S', 100)
+    monkeypatch.setattr(catalog, 'FAILURE_MAX_INTERVAL_S', 800)
+    path = tmp_path / 'server_config.json'
+    _write_config(path, {
+        'id': 'legacy-empty', 'base_url': 'https://empty.example/v1',
+        'api_keys': ['secret'], 'enabled': True,
+        'models': [_model('last-good')],
+        'model_catalog_sync': {
+            'mode': 'auto', 'consecutive_failures': 80,
+            'last_finished_at': 100,
+        },
+    })
+
+    called = []
+    catalog.sync_once(
+        discover=lambda _provider: called.append('network') or [], now=899,
+        config_path=str(path), rebuild=lambda: None)
+
+    assert called == []
+
+
+def test_unchanged_success_backs_off_but_pending_retirement_does_not(
+        tmp_path, monkeypatch):
+    monkeypatch.delenv('TOFU_MODEL_CATALOG_SYNC', raising=False)
+    monkeypatch.setattr(catalog, 'SYNC_INTERVAL_S', 100)
+    monkeypatch.setattr(catalog, 'STABLE_MAX_INTERVAL_S', 200)
+    path = tmp_path / 'server_config.json'
+    provider = {
+        'id': 'stable', 'base_url': 'https://stable.example/v1',
+        'api_keys': ['secret'], 'enabled': True,
+        'models': [_model('kept')],
+        'model_catalog_sync': {'mode': 'auto'},
+    }
+    _write_config(path, provider)
+
+    catalog.sync_once(
+        force=True, discover=lambda _provider: [_model('kept')], now=100,
+        config_path=str(path), rebuild=lambda: None)
+    state = _read(path)['providers'][0]['model_catalog_sync']
+    assert state['unchanged_successes'] == 1
+    assert state['next_attempt_at'] == 300
+
+    provider['models'] = [_model('kept'), _model('possibly-retired')]
+    _write_config(path, provider)
+    catalog.sync_once(
+        force=True, discover=lambda _provider: [_model('kept')], now=500,
+        config_path=str(path), rebuild=lambda: None)
+    state = _read(path)['providers'][0]['model_catalog_sync']
+    assert state['pending_removals'] == {'possibly-retired': 1}
+    assert state['unchanged_successes'] == 0
+    assert state['next_attempt_at'] == 600
+
+
+def test_worker_waits_for_earliest_persisted_provider_deadline(
+        tmp_path, monkeypatch):
+    monkeypatch.delenv('TOFU_MODEL_CATALOG_SYNC', raising=False)
+    path = tmp_path / 'server_config.json'
+    providers = []
+    for provider_id, deadline in [('a', 500), ('b', 900)]:
+        providers.append({
+            'id': provider_id,
+            'base_url': f'https://{provider_id}.example/v1',
+            'api_keys': ['secret'],
+            'enabled': True,
+            'model_catalog_sync': {
+                'mode': 'auto', 'next_attempt_at': deadline},
+        })
+    path.write_text(json.dumps({'providers': providers}), encoding='utf-8')
+
+    assert catalog._next_worker_delay(
+        now=100, config_path=str(path)) == 400
+
+
 def test_changed_catalog_reloads_defaults_before_dispatcher_reset(
         tmp_path, monkeypatch):
     monkeypatch.delenv('TOFU_MODEL_CATALOG_SYNC', raising=False)
@@ -255,7 +370,8 @@ def test_changing_provider_connection_resets_old_catalog_state():
         'api_keys': ['old-key'], 'models': [_model('old-live')],
         'model_catalog_sync': {
             'mode': 'auto', 'claim_token': 'old-claim', 'lease_until': 999,
-            'last_success_at': 200, 'pending_removals': {'old-live': 1}},
+            'last_success_at': 200, 'pending_removals': {'old-live': 1},
+            'unchanged_successes': 4, 'next_attempt_at': 9999},
     }]
     incoming = [{
         'id': 'remote', 'base_url': 'https://new.example/v1',

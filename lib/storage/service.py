@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import threading
 
+from lib.log import get_logger
 from lib.storage.client import StorageClient
 from lib.storage.runtime import StorageRuntime
 
+logger = get_logger(__name__)
 
 _lock = threading.RLock()
 _runtime: StorageRuntime | None = None
@@ -49,13 +51,27 @@ def storage_status() -> dict[str, object]:
     return runtime.status()
 
 
+def storage_authority_status(mode: str | None = None) -> dict[str, object]:
+    """Return readiness for the sole runtime storage authority."""
+    if mode not in (None, 'sidecar'):
+        raise ValueError(f'unsupported storage authority: {mode!r}')
+    return storage_status()
+
+
 def stop_storage(timeout: float = 10.0) -> None:
     global _runtime
     with _lock:
         runtime = _runtime
-        _runtime = None
-    if runtime is not None:
+        if runtime is None:
+            return
+        # Keep the declared owner discoverable until its bounded stop has
+        # actually completed.  Clearing first creates a window in which another
+        # caller can construct a second runtime while the old Sidecar still
+        # holds the project lease; it also hides a failed stop from the re-exec
+        # gate.  The service lock serializes this rare lifecycle transition.
         runtime.stop(timeout=timeout)
+        if _runtime is runtime:
+            _runtime = None
 
 
 def install_runtime_for_test(runtime: StorageRuntime | None) -> None:
@@ -69,5 +85,6 @@ def install_runtime_for_test(runtime: StorageRuntime | None) -> None:
 
 __all__ = [
     'get_storage_client', 'install_runtime_for_test', 'start_storage',
-    'stop_storage', 'storage_runtime', 'storage_status',
+    'stop_storage', 'storage_authority_status', 'storage_runtime',
+    'storage_status',
 ]

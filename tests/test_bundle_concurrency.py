@@ -76,6 +76,8 @@ def test_server_import_and_request_paths_never_build_frontend_code():
     import server
 
     source = inspect.getsource(server._check_frontend_artifact)
-    assert 'validate_vite_artifact' in source
+    assert 'validate_published_vite_artifact' in source
     assert 'subprocess' not in source
-    assert 'build' not in source.lower()
+    # The actionable validation error names ``npm run build:frontend``. Guard
+    # behavior rather than banning that user-facing word from the source.
+    assert 'scripts/build_frontend.mjs' not in source

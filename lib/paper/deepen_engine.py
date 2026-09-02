@@ -1,5 +1,4 @@
-"""On-demand section deepening for Paper Reading Mode (design P3,
-docs/PAPER_READING_EXPERIENCE_DESIGN.md §3.1 route B).
+"""On-demand section deepening for Paper Reading Mode.
 
 The fidelity report deliberately cannot be infinitely deep — real depth is
 served ON DEMAND: a reader clicks "再深一层" on a section (or "逐步推导" on a
@@ -46,17 +45,19 @@ from lib.agent_loop import AbortSignal, run_agent_loop
 from lib.llm_dispatch.api import dispatch_stream
 from lib.llm_errors import AbortedError
 from lib.log import get_logger
-from lib.task_runtime import TaskRuntime
+from lib.tasks_pkg.tool_display import tool_round_label as _display_query_for
+from lib.tool_input_repair import parse_and_repair_tool_args
 
-from .prompts import _FULL_REPORT_TOOLS
+from .deepen_runtime import _deepen_runtime
 from .qa_context import build_qa_messages
+from .request_policy import paper_request_policy_telemetry
 from .tools import (
-    _execute_report_tool,
-    cap_tool_result,
-    display_query_for as _display_query_for,
+    PaperToolResultBudgetV2,
+    execute_paper_tool,
+    apply_paper_tool_epoch_guidance,
+    build_paper_full_tool_epoch,
     make_paper_exec_shim,
     paper_effective_tool_name,
-    parse_and_repair_tool_args,
 )
 
 logger = get_logger(__name__)
@@ -124,7 +125,9 @@ def extract_report_section(report_md, section_idx):
 
 # ── Cache (paper_reports composite key) ──────────────────────────────────
 
-def read_deepen_cache(phash, mode, section_idx, ui_lang, section_hash):
+def read_deepen_cache(
+    phash, mode, section_idx, ui_lang, section_hash, *, user_id: int,
+):
     """Return the cached deepen row ``{'content', 'usage'}`` when fresh, else None.
 
     Fresh = the row exists AND its meta's section_hash matches the CURRENT
@@ -132,17 +135,15 @@ def read_deepen_cache(phash, mode, section_idx, ui_lang, section_hash):
     stale depth).
     """
     try:
-        from lib.storage import get_storage_client
-        row = get_storage_client().query('paper.report.get', {
-            'paper_hash': phash,
-            'lang': deepen_lang_key(mode, section_idx, ui_lang),
-        })
+        from lib.paper.artifact_repository import PaperArtifactRepository
+        row = PaperArtifactRepository(user_id).get_report(
+            phash, deepen_lang_key(mode, section_idx, ui_lang))
     except Exception as e:
         logger.warning('[Paper:Deepen] cache read failed hash=%s: %s', phash, e)
         return None
-    if not row or not row['report']:
+    if not row or not row.report:
         return None
-    meta = row.get('meta')
+    meta = row.meta
     if not isinstance(meta, dict):
         logger.debug('[Paper:Deepen] bad cache meta (treated as miss)')
         return None
@@ -150,24 +151,30 @@ def read_deepen_cache(phash, mode, section_idx, ui_lang, section_hash):
         logger.info('[Paper:Deepen] cache stale (report regenerated) — hash=%s '
                     'mode=%s sec=%d', phash, mode, section_idx)
         return None
-    return {'content': row['report'], 'usage': meta.get('usage'),
-            'model': row.get('model')}
+    return {'content': row.report, 'usage': meta.get('usage'),
+            'model': row.model}
 
 
 def _write_deepen_cache(phash, mode, section_idx, ui_lang, section_hash,
-                        content, usage, model):
+                        content, usage, model, *, user_id: int):
     try:
-        from lib.storage import get_storage_client
+        from lib.paper.artifact_repository import (
+            PaperArtifactRepository,
+            PaperReport,
+        )
         meta = {'kind': 'deep', 'v': 1, 'mode': mode, 'section_idx': section_idx,
                 'section_hash': section_hash, 'usage': usage}
-        get_storage_client(write=True).command('paper.report.upsert', {
-            'paper_hash': phash,
-            'lang': deepen_lang_key(mode, section_idx, ui_lang),
-            'report': content,
-            'model': model or '',
-            'meta': meta,
-            'created_at': int(time.time()),
-        }, f'paper.deepen.upsert:{uuid.uuid4().hex}')
+        PaperArtifactRepository(user_id).put_report(
+            PaperReport(
+                paper_hash=phash,
+                lang=deepen_lang_key(mode, section_idx, ui_lang),
+                report=content,
+                model=model or '',
+                meta=meta,
+                created_at=int(time.time()),
+            ),
+            command_id=f'paper.deepen.upsert:{uuid.uuid4().hex}',
+        )
         logger.info('[Paper:Deepen] Cached — hash=%s key=%s %d chars',
                     phash, deepen_lang_key(mode, section_idx, ui_lang), len(content))
         return True
@@ -176,7 +183,7 @@ def _write_deepen_cache(phash, mode, section_idx, ui_lang, section_hash,
         return False
 
 
-def _accumulate_deepen_cost(phash, lang, usage, model):
+def _accumulate_deepen_cost(phash, lang, usage, model, *, user_id: int):
     """Fold a finished deepen's usage into the REPORT row's secondPasses.deepen.
 
     Accumulates across calls (each deepened section adds its own cost) and
@@ -188,20 +195,18 @@ def _accumulate_deepen_cost(phash, lang, usage, model):
         return
     try:
         from lib.cost import compute_cost
-        from lib.storage import get_storage_client
+        from lib.paper.artifact_repository import PaperArtifactRepository
         cost = compute_cost(usage, model_id=model or '') or {}
-        command_payload = {
-            'paper_hash': phash, 'lang': lang, 'name': 'deepen',
-            'usage': usage,
-        }
-        if cost.get('costCny') is not None:
-            command_payload['costCny'] = cost['costCny']
-        if cost.get('costUsd') is not None:
-            command_payload['costUsd'] = cost['costUsd']
-        response = get_storage_client(write=True).command(
-            'paper.report.second_pass.accumulate', command_payload,
-            f'paper.deepen.cost:{uuid.uuid4().hex}')
-        updated = response.get('meta') if response.get('found') else None
+        updated = PaperArtifactRepository(
+            user_id).accumulate_report_second_pass(
+                phash,
+                lang,
+                'deepen',
+                usage,
+                cost_cny=cost.get('costCny'),
+                cost_usd=cost.get('costUsd'),
+                command_id=f'paper.deepen.cost:{uuid.uuid4().hex}',
+            )
         if not isinstance(updated, dict):
             return
         calls = int(
@@ -215,23 +220,24 @@ def _accumulate_deepen_cost(phash, lang, usage, model):
 
 # ── Task store (mirrors qa_runtime) ──────────────────────────────────────
 
-_deepen_runtime = TaskRuntime(
-    'paper-deepen', ttl=1800,
-    push_channel='paper',
-    error_source='routes.paper:deepen',
-)
 _deepen_dedup: dict[tuple, str] = {}
 _deepen_dedup_lock = threading.Lock()
 
 
 def _new_deepen_task(task_id, phash, lang, model, *, section_idx, mode,
-                     section_heading):
+                     section_heading, user_id: int, config=None):
+    detached_config = dict(config or {})
+    request_policy = paper_request_policy_telemetry(
+        model=model, config=detached_config)
     task = _deepen_runtime.create(
+        user_id=user_id,
         task_id=task_id,
         meta={'paper_hash': phash, 'lang': lang, 'model': model,
-              'section_idx': section_idx, 'mode': mode},
+              'section_idx': section_idx, 'mode': mode,
+              'execution_fingerprint': request_policy[
+                  'executionFingerprint']},
     )
-    task.update({
+    _deepen_runtime.update_fields(task_id, fields={
         'task_id': task_id,
         'paper_hash': phash,
         'lang': lang,
@@ -239,8 +245,9 @@ def _new_deepen_task(task_id, phash, lang, model, *, section_idx, mode,
         'section_idx': section_idx,
         'mode': mode,
         'section_heading': section_heading,
-        'status': 'pending',
-        'finished_at': None,
+        'config': detached_config,
+        'execution_fingerprint': request_policy['executionFingerprint'],
+        'requestPolicyV1': request_policy,
         'full_text': '',
         'tool_rounds': [],
         'round_counter': 0,
@@ -318,7 +325,8 @@ def _build_deepen_messages(section, mode, paper_text, report_md, ui_lang):
 
 def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
     """Background worker: run the deepen tool loop and populate task events."""
-    task['status'] = 'running'
+    task_id = task['task_id']
+    _deepen_runtime.mark_running(task_id)
     _append_deepen_event(task, {'type': 'status', 'status': 'running'})
 
     model = task['model']
@@ -334,8 +342,24 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
     section_idx = task['section_idx']
 
     abort_signal = AbortSignal.from_event(abort_event)
+    paper_epoch = build_paper_full_tool_epoch(
+        owner_user_id=task.get('_userId'), model=model_name,
+        cfg=task.get('config'))
+    task['toolEpochV2'] = paper_epoch.telemetry()
+    paper_tools = list(paper_epoch.wire_schemas)
+    apply_paper_tool_epoch_guidance(
+        messages, paper_epoch, lang=task.get('lang') or 'en')
     _exec_shim = make_paper_exec_shim(task_id=task['task_id'],
-                                      abort=abort_signal.is_set)
+                                      abort=abort_signal.is_set,
+                                      owner_user_id=task.get('_userId'),
+                                      cfg=task.get('config'),
+                                      tool_epoch=paper_epoch,
+                                      model=model_name)
+    _result_budget = PaperToolResultBudgetV2(
+        owner_user_id=task.get('_userId'), model=model_name,
+        result_envelope=paper_epoch.result_envelope,
+        conv_id=task['task_id'])
+    task['toolResultPolicyV1'] = _result_budget.telemetry()
     _round = {'content': ''}
     _usage_total = {'prompt_tokens': 0, 'completion_tokens': 0,
                     'cache_read_tokens': 0, 'cache_write_tokens': 0,
@@ -369,7 +393,8 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
 
         logger.info('[Paper:Deepen] Task %s round %d — model=%s msgs=%d',
                     task['task_id'], rnd + 1, model_name, len(messages))
-        return dispatch_stream(
+        from lib.llm.stream_result import ensure_provider_stream_result
+        return ensure_provider_stream_result(dispatch_stream(
             messages,
             on_content=_on_content,
             abort_check=_abort_check,
@@ -380,7 +405,7 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
             temperature=0,
             thinking_enabled=False,
             log_prefix='[Paper:Deepen]',
-        )
+        ))
 
     def _on_round_result(rnd, msg, finish, usage):
         _acc_usage(usage)
@@ -404,7 +429,8 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
         display_query = _display_query_for(fn_name, fn_args)
         effective_name = paper_effective_tool_name(fn_name)
         round_entry = {
-            'roundNum': rn, 'toolName': effective_name, 'query': display_query,
+            'roundNum': rn, 'llmRound': rnd,
+            'toolName': effective_name, 'query': display_query,
             'toolCallId': tc_id,
             'toolArgs': (fn_args_raw if isinstance(fn_args_raw, str)
                          else json.dumps(fn_args, ensure_ascii=False)),
@@ -417,14 +443,16 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
             'toolArgs': round_entry['toolArgs'],
         })
         tool_t0 = time.time()
-        result, display_results, search_diag, engine_breakdown, verticals = _execute_report_tool(
+        result, display_results, search_diag, engine_breakdown, verticals = execute_paper_tool(
             fn_name, fn_args_raw, user_question=(section.get('heading') or '')[:300],
             abort=abort_signal.is_set,
             exec_shim=_exec_shim, round_entry=round_entry)
         tool_elapsed = time.time() - tool_t0
         logger.info('[Paper:Deepen:Tool] %s → %d chars in %.1fs',
                     fn_name, len(result), tool_elapsed)
-        round_entry['status'] = 'done'
+        tool_status = ('rejected' if round_entry.get('status') == 'rejected'
+                       else 'done')
+        round_entry['status'] = tool_status
         round_entry['_elapsed'] = f'{tool_elapsed:.1f}s'
         round_entry['results'] = display_results
         round_entry['toolContent'] = result[:4000]
@@ -432,7 +460,10 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
             'type': 'tool_done', 'roundNum': rn, 'toolName': effective_name,
             'toolCallId': tc_id, 'elapsed': round(tool_elapsed, 1),
             'toolContent': result[:4000], 'results': display_results,
+            'status': tool_status,
         }
+        if round_entry.get('contractError'):
+            done_ev['contractError'] = round_entry['contractError']
         if search_diag:
             done_ev['searchDiag'] = search_diag
         if engine_breakdown:
@@ -440,28 +471,31 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
         if verticals:
             done_ev['verticals'] = verticals
         _append_deepen_event(task, done_ev)
-        messages.append({
-            'role': 'tool',
-            'tool_call_id': tc_id,
-            'content': cap_tool_result(result, fn_name, tc_id,
-                                       conv_id=f"paper-deepen-{paper_hash}",
-                                       can_read=True),
-        })
+        _result_budget.append(
+            messages, round_index=rnd, tool_name=fn_name,
+            tool_call_id=tc_id, content=result, round_entry=round_entry,
+            world_version=str(task.get('_worldVersion') or ''),
+            tool_arguments=fn_args)
 
     try:
         _outcome = run_agent_loop(
             abort=abort_signal,
-            round_tools=_FULL_REPORT_TOOLS,
+            round_tools=paper_tools,
             dispatch=_dispatch,
             execute_tool=_execute_tool,
             on_round_result=_on_round_result,
             on_tool_round=_begin_tool_round,
+            on_round_end=_result_budget.finish_round,
         )
         aborted = _outcome.aborted
         if aborted:
-            task['status'] = 'aborted'
-            task['finished_at'] = time.time()
-            _append_deepen_event(task, {'type': 'aborted', 'partial': full_content})
+            _deepen_runtime.abort(task_id)
+            _deepen_runtime.finish(
+                task_id,
+                terminal_event_fields={
+                    'type': 'aborted', 'partial': full_content,
+                },
+            )
             return
 
         elapsed = time.time() - t0
@@ -471,24 +505,42 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
         report_model = _resolved_model or model or _lib.LLM_MODEL
         # Persist the cache row + accumulate cost into the report's
         # secondPasses.deepen (design §3.3).
-        _write_deepen_cache(paper_hash, mode, section_idx, ui_lang,
-                            section.get('hash') or '', full_content,
-                            dict(_usage_total), report_model)
-        _accumulate_deepen_cost(paper_hash, task['lang'], dict(_usage_total),
-                                report_model)
+        cache_isolated = (
+            (task.get('requestPolicyV1') or {}).get('cacheMode')
+            == 'request_local')
+        if not cache_isolated:
+            _write_deepen_cache(
+                paper_hash, mode, section_idx, ui_lang,
+                section.get('hash') or '', full_content,
+                dict(_usage_total), report_model,
+                user_id=int(task['_userId']))
+            _accumulate_deepen_cost(
+                paper_hash, task['lang'], dict(_usage_total), report_model,
+                user_id=int(task['_userId']))
+        else:
+            logger.info(
+                '[Paper:Deepen] Request-local policy — cache/cost mutation '
+                'suppressed hash=%s policy=%s',
+                paper_hash, str(task.get('execution_fingerprint') or '')[:12])
 
-        task['status'] = 'done'
-        task['finished_at'] = time.time()
-        _append_deepen_event(task, {
-            'type': 'done', 'content': full_content,
-            'paperHash': paper_hash, 'sectionIdx': section_idx, 'mode': mode,
-            'usage': dict(_usage_total), 'model': report_model,
-        })
+        _deepen_runtime.finish(
+            task_id,
+            result=full_content,
+            terminal_event_fields={
+                'type': 'done', 'content': full_content,
+                'paperHash': paper_hash, 'sectionIdx': section_idx, 'mode': mode,
+                'usage': dict(_usage_total), 'model': report_model,
+            },
+        )
 
     except AbortedError:
-        task['status'] = 'aborted'
-        task['finished_at'] = time.time()
-        _append_deepen_event(task, {'type': 'aborted', 'partial': full_content})
+        _deepen_runtime.abort(task_id)
+        _deepen_runtime.finish(
+            task_id,
+            terminal_event_fields={
+                'type': 'aborted', 'partial': full_content,
+            },
+        )
     except Exception as e:
         logger.error('[Paper:Deepen] Task %s failed after %.1fs: %s',
                      task['task_id'], time.time() - t0, e, exc_info=True)
@@ -497,17 +549,20 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
             e, model='', context='paper-deepen',
             source='routes.paper:deepen',
         )
-        task['status'] = 'error'
-        task['error'] = envelope
-        task['finished_at'] = time.time()
-        _append_deepen_event(task, {'type': 'error', 'error': envelope})
+        _deepen_runtime.finish(
+            task_id,
+            error=envelope,
+            error_context='paper-deepen',
+        )
     finally:
         with _deepen_dedup_lock:
-            _deepen_dedup.pop((paper_hash, task['lang'], mode, section_idx), None)
+            dedup_key = task.get('_dedupKey')
+            if isinstance(dedup_key, tuple):
+                _deepen_dedup.pop(dedup_key, None)
 
 
 def start_deepen(paper_hash, lang, mode, section_idx, paper_text, *,
-                 model=None, ui_lang=None):
+                 model=None, ui_lang=None, user_id: int, config=None):
     """Validate → cache-check → spawn a deepen task (or return the cache hit).
 
     Returns one of:
@@ -522,29 +577,33 @@ def start_deepen(paper_hash, lang, mode, section_idx, paper_text, *,
 
     # The stored report is authoritative — never a client-supplied body.
     try:
-        from lib.storage import get_storage_client
-        row = get_storage_client().query('paper.report.get', {
-            'paper_hash': paper_hash, 'lang': lang,
-        })
+        from lib.paper.artifact_repository import PaperArtifactRepository
+        row = PaperArtifactRepository(user_id).get_report(paper_hash, lang)
     except Exception as e:
         logger.warning('[Paper:Deepen] report lookup failed hash=%s: %s', paper_hash, e)
         row = None
-    if not row or not row['report']:
+    if not row or not row.report:
         return {'error': ('no generated report for this paper+language yet', 409)}
-    report_md = row['report']
+    report_md = row.report
 
     section = extract_report_section(report_md, section_idx)
     if not section:
         return {'error': (f'section index {section_idx} out of range', 400)}
 
-    cached = read_deepen_cache(paper_hash, mode, section_idx, ui_lang,
-                               section['hash'])
+    request_policy = paper_request_policy_telemetry(
+        model=model, config=config or {})
+    cache_isolated = request_policy['cacheMode'] == 'request_local'
+    cached = None if cache_isolated else read_deepen_cache(
+        paper_hash, mode, section_idx, ui_lang,
+        section['hash'], user_id=user_id)
     if cached:
         return {'cached': True, 'content': cached['content'],
                 'usage': cached.get('usage'), 'section': section['heading'],
                 'mode': mode, 'sectionIdx': section_idx}
 
-    dedup_key = (paper_hash, lang, mode, section_idx)
+    dedup_key = (
+        user_id, paper_hash, lang, mode, section_idx,
+        request_policy['executionFingerprint'])
     with _deepen_dedup_lock:
         existing_id = _deepen_dedup.get(dedup_key)
         existing = _deepen_runtime.get(existing_id) if existing_id else None
@@ -553,7 +612,9 @@ def start_deepen(paper_hash, lang, mode, section_idx, paper_text, *,
         task_id = f'deepen_{uuid.uuid4().hex[:16]}'
         task = _new_deepen_task(task_id, paper_hash, lang, model,
                                 section_idx=section_idx, mode=mode,
-                                section_heading=section['heading'])
+                                section_heading=section['heading'],
+                                user_id=user_id, config=config)
+        task['_dedupKey'] = dedup_key
         _deepen_dedup[dedup_key] = task_id
 
     messages = _build_deepen_messages(section, mode, paper_text or '',

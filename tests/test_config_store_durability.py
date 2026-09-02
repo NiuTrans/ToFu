@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from unittest import mock
 
 import pytest
@@ -99,7 +100,19 @@ def feature_store(tmp_path, monkeypatch):
     return features_store, path
 
 
-def test_concurrent_feature_updates_preserve_distinct_flags(feature_store):
+@pytest.fixture
+def feature_admin_principal():
+    from lib.identity import PrincipalContext
+
+    return PrincipalContext.user(
+        subject_id='feature-admin-23',
+        owner_user_id=23,
+        scopes={'admin'},
+    )
+
+
+def test_concurrent_feature_updates_preserve_distinct_flags(
+        feature_store, feature_admin_principal):
     features_store, _path = feature_store
     updates = [
         {'pptx_translate_enabled': True},
@@ -108,7 +121,11 @@ def test_concurrent_feature_updates_preserve_distinct_flags(feature_store):
     ]
 
     with ThreadPoolExecutor(max_workers=3) as pool:
-        results = list(pool.map(features_store.apply_feature_updates, updates))
+        apply_update = partial(
+            features_store.apply_feature_updates,
+            principal=feature_admin_principal,
+        )
+        results = list(pool.map(apply_update, updates))
 
     assert all('error' not in result for result in results)
     assert features_store.read_features() == {
@@ -118,34 +135,105 @@ def test_concurrent_feature_updates_preserve_distinct_flags(feature_store):
     }
 
 
-def test_failed_feature_update_preserves_old_file_and_live_value(feature_store):
+def test_failed_feature_update_preserves_old_file_and_live_value(
+        feature_store, feature_admin_principal):
     import lib
 
     features_store, path = feature_store
     assert 'error' not in features_store.apply_feature_updates(
-        {'debug_mode': False})
+        {'debug_mode': False}, principal=feature_admin_principal)
     before = path.read_bytes()
     lib.DEBUG_MODE = False
 
     with mock.patch('lib.json_store.os.replace',
                     side_effect=OSError('injected disk failure')):
-        result = features_store.apply_feature_updates({'debug_mode': True})
+        result = features_store.apply_feature_updates(
+            {'debug_mode': True}, principal=feature_admin_principal)
 
     assert result == {'error': 'internal_error'}
     assert path.read_bytes() == before
     assert lib.DEBUG_MODE is False
 
 
-def test_concurrent_feature_hot_reload_matches_last_persisted_value(feature_store):
+def test_concurrent_feature_hot_reload_matches_last_persisted_value(
+        feature_store, feature_admin_principal):
     import lib
 
     features_store, _path = feature_store
     updates = [{'debug_mode': bool(index % 2)} for index in range(24)]
 
     with ThreadPoolExecutor(max_workers=6) as pool:
-        list(pool.map(features_store.apply_feature_updates, updates))
+        apply_update = partial(
+            features_store.apply_feature_updates,
+            principal=feature_admin_principal,
+        )
+        list(pool.map(apply_update, updates))
 
     assert lib.DEBUG_MODE is features_store.read_features()['debug_mode']
+
+
+def test_feature_updates_default_deny_before_file_or_live_mutation(
+        feature_store):
+    import lib
+    from lib.identity import PrincipalContext
+
+    features_store, path = feature_store
+    principals = (
+        (None, TypeError),
+        (
+            PrincipalContext.user(
+                subject_id='feature-reader-23', owner_user_id=23,
+                scopes={'chat'}),
+            PermissionError,
+        ),
+        (
+            PrincipalContext.system(
+                subject_id='ownerless-feature-admin', scopes={'admin'}),
+            PermissionError,
+        ),
+    )
+    for principal, error in principals:
+        with pytest.raises(error):
+            features_store.apply_feature_updates(
+                {'debug_mode': True}, principal=principal)
+
+    assert not path.exists()
+    assert lib.DEBUG_MODE is False
+
+
+def test_optimizer_feature_toggle_uses_the_authenticated_owner(
+        feature_store, feature_admin_principal, monkeypatch):
+    import lib
+    import lib.scheduler.manager as scheduler_manager
+
+    features_store, _path = feature_store
+    monkeypatch.setattr(
+        features_store, '_managed_flags',
+        lambda: [('optimizer_enabled', 'OPTIMIZER_ENABLED')])
+    monkeypatch.setattr(lib, 'OPTIMIZER_ENABLED', False)
+    calls = []
+
+    class Scheduler:
+        def list_tasks(self, *, user_id, include_disabled):
+            calls.append(('list', user_id, include_disabled))
+            return [{
+                'id': 'owner-23-optimizer',
+                'task_type': 'optimizer',
+                'name': 'Daily Optimizer',
+            }]
+
+        def toggle_task(self, task_id, *, user_id, enabled):
+            calls.append(('toggle', task_id, user_id, enabled))
+
+    monkeypatch.setattr(scheduler_manager, 'get_scheduler', Scheduler)
+    result = features_store.apply_feature_updates(
+        {'optimizer_enabled': True}, principal=feature_admin_principal)
+
+    assert result['saved']['optimizer_enabled'] is True
+    assert calls == [
+        ('list', 23, True),
+        ('toggle', 'owner-23-optimizer', 23, True),
+    ]
 
 
 def test_search_updates_merge_with_concurrent_server_config_writer(

@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import type { I18nKey } from '../../i18n';
 type JsonObject = Record<string, unknown>;
 
 interface ArxivCard extends JsonObject {
@@ -49,7 +50,7 @@ function escape(value: unknown): string {
   return node.innerHTML;
 }
 
-function translate(key: string): string {
+function translate(key: I18nKey): string {
   return globals().t?.(key) ?? key;
 }
 

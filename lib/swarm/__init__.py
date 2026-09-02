@@ -35,69 +35,7 @@ What this package does NOT do anymore (removed in async migration):
     ``get_agent_result`` / ``ask_human``  — see ``SUB_AGENT_DENYLIST``.
 """
 
-# Core protocol types
-from lib.swarm.agent import SubAgent
-
-# Artifact storage (canonical location: artifact_store.py)
-from lib.swarm.artifact_store import (
-    ArtifactBackend,
-    ArtifactStore,
-    InMemoryBackend,
-)
-
-# Integration with existing system
-from lib.swarm.integration import (
-    execute_swarm_tool,
-    get_active_session,
-    has_live_or_pending_swarm,
-    rehydrate_swarms_on_startup,
-)
-from lib.swarm.master import MasterOrchestrator
-from lib.swarm.protocol import (
-    AgentMessage,
-    SubAgentResult,
-    SubAgentStatus,
-    SubTaskSpec,
-    SwarmEvent,
-    SwarmEventType,
-    resolve_execution_order,
-)
-from lib.swarm.rate_limiter import RateLimiter
-
-# Role definitions & model tiers
-from lib.swarm.registry import (
-    AGENT_ROLES,
-    MODEL_TIERS,
-    configure_model_tiers,
-    get_role_config,
-    get_role_system_suffix,
-    get_tools_for_role,
-    resolve_model_for_tier,
-    scope_tools_for_role,
-)
-
-# Result formatting (canonical location: result_format.py)
-from lib.swarm.result_format import compress_result, format_sub_results_for_master
-from lib.swarm.scheduler import AsyncStreamingScheduler, StreamingScheduler
-
-# Tool definitions
-from lib.swarm.tools import (
-    ARTIFACT_TOOLS,
-    AWAIT_AGENTS_TOOL,
-    GET_AGENT_RESULT_TOOL,
-    LIST_ARTIFACTS_TOOL,
-    MASTER_CONTROL_TOOLS,
-    MASTER_TOOLS,
-    augment_with_swarm_tools,
-    resolve_turn_swarm_tools,
-    READ_ARTIFACT_TOOL,
-    SPAWN_AGENTS_TOOL,
-    STORE_ARTIFACT_TOOL,
-    SUB_AGENT_DENYLIST,
-    SUB_AGENT_TOOLS,
-    SWARM_CONTROL_TOOL_NAMES,
-    SWARM_TOOL_NAMES,
-)
+from importlib import import_module
 
 __all__ = [
     # Protocol
@@ -111,7 +49,6 @@ __all__ = [
     'AsyncStreamingScheduler', 'RateLimiter',
     # Integration
     'execute_swarm_tool', 'get_active_session', 'rehydrate_swarms_on_startup',
-    'has_live_or_pending_swarm',
     # Registry
     'AGENT_ROLES', 'MODEL_TIERS',
     'scope_tools_for_role', 'get_tools_for_role',
@@ -120,7 +57,70 @@ __all__ = [
     # Tool defs
     'SPAWN_AGENTS_TOOL', 'AWAIT_AGENTS_TOOL', 'GET_AGENT_RESULT_TOOL',
     'STORE_ARTIFACT_TOOL', 'READ_ARTIFACT_TOOL', 'LIST_ARTIFACTS_TOOL',
-    'MASTER_TOOLS', 'SUB_AGENT_TOOLS', 'ARTIFACT_TOOLS', 'MASTER_CONTROL_TOOLS',
+    'MASTER_TOOLS', 'SUB_AGENT_TOOLS', 'ARTIFACT_TOOLS',
     'SWARM_TOOL_NAMES', 'SWARM_CONTROL_TOOL_NAMES', 'SUB_AGENT_DENYLIST',
-    'augment_with_swarm_tools', 'resolve_turn_swarm_tools',
 ]
+
+
+# Importing a child such as ``lib.swarm.registry`` must not initialize agent
+# execution, scheduler, task-manager, project-tool, or integration state. Keep
+# the historical package-level API through lazy attribute resolution instead.
+_EXPORT_MODULES = {
+    # Protocol and artifacts.
+    'SubTaskSpec': 'lib.swarm.protocol',
+    'SubAgentResult': 'lib.swarm.protocol',
+    'SubAgentStatus': 'lib.swarm.protocol',
+    'SwarmEvent': 'lib.swarm.protocol',
+    'SwarmEventType': 'lib.swarm.protocol',
+    'AgentMessage': 'lib.swarm.protocol',
+    'resolve_execution_order': 'lib.swarm.protocol',
+    'ArtifactStore': 'lib.swarm.artifact_store',
+    'ArtifactBackend': 'lib.swarm.artifact_store',
+    'InMemoryBackend': 'lib.swarm.artifact_store',
+    'compress_result': 'lib.swarm.result_format',
+    'format_sub_results_for_master': 'lib.swarm.result_format',
+    # Execution and integration.
+    'SubAgent': 'lib.swarm.agent',
+    'MasterOrchestrator': 'lib.swarm.master',
+    'StreamingScheduler': 'lib.swarm.scheduler',
+    'AsyncStreamingScheduler': 'lib.swarm.scheduler',
+    'RateLimiter': 'lib.swarm.rate_limiter',
+    'execute_swarm_tool': 'lib.swarm.integration',
+    'get_active_session': 'lib.swarm.integration',
+    'rehydrate_swarms_on_startup': 'lib.swarm.integration',
+    # Role registry.
+    'AGENT_ROLES': 'lib.swarm.registry',
+    'MODEL_TIERS': 'lib.swarm.registry',
+    'scope_tools_for_role': 'lib.swarm.registry',
+    'get_tools_for_role': 'lib.swarm.registry',
+    'get_role_system_suffix': 'lib.swarm.registry',
+    'get_role_config': 'lib.swarm.registry',
+    'resolve_model_for_tier': 'lib.swarm.registry',
+    'configure_model_tiers': 'lib.swarm.registry',
+    # Tool schemas.
+    'SPAWN_AGENTS_TOOL': 'lib.swarm.tools',
+    'AWAIT_AGENTS_TOOL': 'lib.swarm.tools',
+    'GET_AGENT_RESULT_TOOL': 'lib.swarm.tools',
+    'STORE_ARTIFACT_TOOL': 'lib.swarm.tools',
+    'READ_ARTIFACT_TOOL': 'lib.swarm.tools',
+    'LIST_ARTIFACTS_TOOL': 'lib.swarm.tools',
+    'MASTER_TOOLS': 'lib.swarm.tools',
+    'SUB_AGENT_TOOLS': 'lib.swarm.tools',
+    'ARTIFACT_TOOLS': 'lib.swarm.tools',
+    'SWARM_TOOL_NAMES': 'lib.swarm.tools',
+    'SWARM_CONTROL_TOOL_NAMES': 'lib.swarm.tools',
+    'SUB_AGENT_DENYLIST': 'lib.swarm.tools',
+}
+
+
+def __getattr__(name: str):
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()).union(__all__))

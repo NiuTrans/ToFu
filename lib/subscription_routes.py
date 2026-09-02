@@ -204,7 +204,9 @@ class RouteManager:
     path, callers wait only until the first successful probe.  If a healthy
     path already exists, it is returned immediately while stale and recovered
     routes are refreshed in the background.  Per-route singleflight prevents
-    a burst of requests from multiplying probes.
+    a burst of requests from multiplying probes.  Probe workers exist only
+    while a batch is in flight; the executor is rebuilt lazily for the next
+    network race so one cold request does not leave idle threads resident.
     """
 
     def __init__(self, *, probe=probe_route, clock=time.monotonic,
@@ -218,8 +220,9 @@ class RouteManager:
         self._preferred: dict[str, str] = {}
         self._inflight: dict[tuple[str, str], concurrent.futures.Future] = {}
         self._generation = 0
-        self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix='subscription-probe')
+        self._max_workers = max_workers
+        self._executor: 'concurrent.futures.ThreadPoolExecutor | None' = None
+        self._closed = False
 
     @staticmethod
     def _host(url: str) -> str:
@@ -244,15 +247,33 @@ class RouteManager:
             self._inflight.clear()
             self._health.clear()
             self._preferred.clear()
+            executor = self._executor
+            self._executor = None
         for future in futures:
             future.cancel()
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def close(self) -> None:
         """Release worker threads (primarily for isolated tests)."""
-        self.reset()
-        self._executor.shutdown(wait=True, cancel_futures=True)
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._generation += 1
+            futures = list(self._inflight.values())
+            self._inflight.clear()
+            self._health.clear()
+            self._preferred.clear()
+            executor = self._executor
+            self._executor = None
+        for future in futures:
+            future.cancel()
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
 
-    def _record(self, host: str, route: Route, result: ProbeResult) -> None:
+    def _record(self, host: str, route: Route, result: ProbeResult, *,
+                source: str = 'request') -> None:
         now = self._clock()
         recovered = False
         opened_for = 0.0
@@ -295,6 +316,14 @@ class RouteManager:
         if result.ok and recovered:
             logger.info('[SubscriptionRoute] %s via %s recovered',
                         host, route.label)
+        elif not result.ok and source == 'probe':
+            # A background reachability race is expected to reject unavailable
+            # alternatives; the circuit opening is the successful outcome.
+            # Real request failures still warn through ``report`` below.
+            logger.debug(
+                '[SubscriptionRoute] probe: %s via %s unavailable (%s) — '
+                'circuit open %.1fs',
+                host, route.label, result.verdict, opened_for)
         elif not result.ok:
             logger.warning(
                 '[SubscriptionRoute] %s via %s unavailable (%s) — '
@@ -325,27 +354,63 @@ class RouteManager:
         with self._lock:
             if generation != self._generation:
                 return result
-        self._record(host, route, result)
+        self._record(host, route, result, source='probe')
         return result
 
-    def _probe_done(self, key: tuple[str, str],
-                    future: concurrent.futures.Future) -> None:
+    def _probe_done(
+            self, key: tuple[str, str],
+            future: concurrent.futures.Future,
+            executor: concurrent.futures.ThreadPoolExecutor) -> None:
+        executor_to_shutdown = None
         with self._lock:
             current = self._inflight.get(key)
             if current is future:
                 self._inflight.pop(key, None)
+                if not self._inflight and self._executor is executor:
+                    self._executor = None
+                    executor_to_shutdown = executor
+        if executor_to_shutdown is not None:
+            # This callback can run on the executor's final worker. A
+            # non-waiting shutdown lets that worker return normally.
+            executor_to_shutdown.shutdown(wait=False, cancel_futures=False)
+
+    def _executor_locked(self) -> concurrent.futures.ThreadPoolExecutor:
+        if self._closed:
+            raise RuntimeError('subscription route manager is closed')
+        executor = self._executor
+        if executor is None:
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=self._max_workers,
+                thread_name_prefix='subscription-probe')
+            self._executor = executor
+        return executor
 
     def _ensure_probe(self, url: str, host: str, route: Route):
         key = (host, route.route_id)
-        with self._lock:
-            existing = self._inflight.get(key)
-            if existing is not None:
-                return existing
-            generation = self._generation
-            future = self._executor.submit(
-                self._run_probe, url, host, route, generation)
-            self._inflight[key] = future
-        future.add_done_callback(lambda done: self._probe_done(key, done))
+        executor_to_shutdown = None
+        try:
+            with self._lock:
+                existing = self._inflight.get(key)
+                if existing is not None:
+                    return existing
+                generation = self._generation
+                executor = self._executor_locked()
+                try:
+                    future = executor.submit(
+                        self._run_probe, url, host, route, generation)
+                except BaseException:
+                    if not self._inflight and self._executor is executor:
+                        self._executor = None
+                        executor_to_shutdown = executor
+                    raise
+                self._inflight[key] = future
+        except BaseException:
+            if executor_to_shutdown is not None:
+                executor_to_shutdown.shutdown(
+                    wait=False, cancel_futures=True)
+            raise
+        future.add_done_callback(
+            lambda done: self._probe_done(key, done, executor))
         return future
 
     def _healthy(self, host: str, routes: list[Route], now: float) -> list[Route]:

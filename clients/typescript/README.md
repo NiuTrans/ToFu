@@ -1,115 +1,87 @@
-# @tofu/sdk
+# @rangehow/tofu-sdk
 
-TypeScript / JavaScript client for the Tofu headless API.
+Dependency-free TypeScript/JavaScript client for the Tofu agent runtime and
+full headless API. It uses the standard Fetch API and runs on Node 18+, modern
+browsers, Cloudflare Workers, Vercel Edge, Deno, and Bun.
 
-Works in Node ≥18, modern browsers, Cloudflare Workers, Vercel Edge,
-Deno, and Bun. No external runtime dependencies.
-
-## Install (development)
+## Install
 
 ```bash
-cd clients/typescript
-npm install     # only if you want to compile to JS
-# or just import .ts directly:
-#   import { Tofu } from './clients/typescript/src/index.ts';
+npm install @rangehow/tofu-sdk
 ```
 
-## Quick start
+## Managed-model quick start
+
+Configure endpoint/key/model once on the Tofu sidecar. Application code keeps
+only the Tofu URL/token and may omit `model`:
 
 ```ts
-import { Tofu } from '@tofu/sdk';
+import { Tofu } from '@rangehow/tofu-sdk';
 
-const client = new Tofu({
-  baseUrl: 'https://your-tofu',
-  apiKey:  'tofu_live_…',
+const tofu = new Tofu({
+  baseUrl: 'https://tofu-agent.internal',
+  apiKey: 'sidecar-token',
 });
 
-// Sync chat
-const resp = await client.chat({
-  model: 'claude-opus-4-7',
-  messages: [{ role: 'user', content: 'Hi' }],
+const result = await tofu.agents.run({
+  messages: [{ role: 'user', content: 'Research this issue' }],
+  config: { thinking: 'high', tools: ['search', 'fetch'] },
 });
-console.log(resp.choices[0].message.content);
+console.log(result.content);
+```
 
-// Streaming
-for await (const ev of client.stream({
-  model: 'claude-opus-4-7',
-  messages: [{ role: 'user', content: 'Hi' }],
+For a request-owned model, provide exactly one block:
+
+```ts
+const result = await tofu.agents.run({
+  messages: [{ role: 'user', content: 'Evaluate this model' }],
+  provider: {
+    endpoint: 'https://models.example/v1',
+    api_key: 'sk-...',
+    model: 'model-name',
+  },
+});
+```
+
+## Resumable streaming
+
+```ts
+for await (const event of tofu.agents.stream({
+  messages: [{ role: 'user', content: 'Inspect this project' }],
+  config: { tools: ['search', 'fetch'] },
 })) {
-  const delta = (ev.choices as any[])?.[0]?.delta;
-  if (delta?.content) process.stdout.write(delta.content);
-}
-
-// Self-describe
-const caps = await client.capabilities();
-console.log('Models:', (caps.models as any[]).map(m => m.id));
-
-// Memory search
-const hits = await client.agents.memorySearch({ query: 'rate limit pattern' });
-console.log(hits.results);
-
-// Stream a task
-const task = await client.tasks.start('paper-report', {
-  paper_text: '…', lang: 'zh',
-});
-for await (const ev of client.tasks.stream(task.task_id as string)) {
-  console.log(ev);
+  console.log(event);
 }
 ```
 
-## Auth
+`agents.run` retries with one stable idempotency key. `agents.start` returns an
+HTTP 202 task handle. `agents.stream` submits once and resumes the existing SSE
+task stream from `last_seq + 1` after a transport drop.
 
-Pass your Tofu API key as `apiKey`. The SDK adds
-`Authorization: Bearer <key>` to every request. For Anthropic-compat
-clients that prefer `x-api-key`, the same key works there too.
+## Lightweight versus full server
 
-## API surface mapped 1:1
+| SDK call | Lightweight sidecar |
+|---|---|
+| `agents.run/start/stream` | Supported |
+| `tasks.get/events/stream/abort` | Supported |
+| `capabilities()` | Supported |
+| Chat compatibility, feature agents, keys, webhooks | Full application only |
 
-| SDK method                          | Endpoint                              |
-|-------------------------------------|---------------------------------------|
-| `client.chat(req)`                  | `POST /api/v1/chat/completions`       |
-| `client.stream(req)`                | `POST /api/v1/chat/completions` (SSE) |
-| `client.capabilities()`             | `GET  /api/v1/capabilities`           |
-| `client.tasks.start(kind, params)`  | (routed per kind)                     |
-| `client.tasks.get(id)`              | `GET  /api/v1/tasks/{id}`             |
-| `client.tasks.events(id, cursor)`   | `GET  /api/v1/tasks/{id}/events`      |
-| `client.tasks.stream(id)`           | `GET  /api/v1/tasks/{id}/stream`      |
-| `client.tasks.abort(id)`            | `POST /api/v1/tasks/{id}/abort`       |
-| `client.agents.paperReport(p)`      | `POST /api/v1/agents/paper/report`    |
-| `client.agents.translate(p)`        | `POST /api/v1/agents/translate`       |
-| `client.agents.imageGen(p)`         | `POST /api/v1/agents/image-gen`       |
-| `client.agents.memorySearch(p)`     | `POST /api/v1/agents/memory/search`   |
-| `client.agents.fetch({url})`        | `POST /api/v1/agents/browser/fetch`   |
-| `client.keys.list/create/revoke()`  | `/api/v1/keys/*`                       |
-| `client.webhooks.subscribe(p)`      | `POST /api/v1/webhooks`               |
+Unknown additive response fields and event types remain available as ordinary
+wire objects. Use `capabilities()` to select only installed features.
 
 ## Options
 
 ```ts
 new Tofu({
-  baseUrl: 'https://your-tofu',
-  apiKey: 'tofu_live_…',
-  timeoutMs: 600_000,        // default
-  userAgent: 'my-app/1.0',
-  fetchImpl: customFetch,    // useful for Cloudflare Workers etc.
+  baseUrl: 'https://tofu-agent.internal',
+  apiKey: 'sidecar-token',       // optional for loopback tokenless mode
+  timeoutMs: 600_000,
+  userAgent: 'my-product/1.0',
+  fetchImpl: customFetch,
 });
 ```
 
-## Cloudflare Worker example
-
-```ts
-import { Tofu } from '@tofu/sdk';
-
-export default {
-  async fetch(req: Request, env: { TOFU_KEY: string }) {
-    const client = new Tofu({
-      baseUrl: 'https://your-tofu',
-      apiKey: env.TOFU_KEY,
-    });
-    const resp = await client.chat({
-      messages: [{ role: 'user', content: await req.text() }],
-    });
-    return new Response(resp.choices[0].message.content);
-  },
-};
-```
+The client adds Bearer auth when `apiKey` is present. It retries safe GETs and
+idempotent agent submissions on transport errors, 429, and 5xx responses with
+bounded backoff. `TofuError` retains the HTTP status and structured body.

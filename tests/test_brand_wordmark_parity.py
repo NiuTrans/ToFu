@@ -355,7 +355,7 @@ def test_font_weight_matches_the_only_shipped_pixelify_face(css_text):
     """Pixelify Sans ships Bold ONLY, so the wordmark weight must be 700 wherever
     that face is used. Asking for 600 makes the browser synthesize, and it does
     so inconsistently across the two font sizes."""
-    fonts_css = os.path.join(ROOT, 'static', 'vendor', 'google-fonts-local.css')
+    fonts_css = os.path.join(ROOT, 'frontend', 'src', 'styles', 'fonts.css')
     with open(fonts_css, encoding='utf-8') as f:
         faces = set(re.findall(r'PixelifySans-(\w+)\.woff2', f.read()))
     assert faces == {'Bold'}, (

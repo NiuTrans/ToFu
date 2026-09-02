@@ -67,13 +67,50 @@ def test_measured_usage_cache_outranks_higher_heuristic(monkeypatch):
         lambda *a, **k: {'tokens': 111_552, 'method': 'usage_cache'})
     monkeypatch.setattr(token_mod, '_estimate_total_tokens', lambda _m: 164_562)
 
+    measurement = {}
     count, method = _count_tokens_authoritative(
         messages,
         {'config': {'model': 'gpt-5.6-sol'}, 'convId': 'measured-wins'},
+        measurement_out=measurement,
     )
 
     assert count == 111_552
     assert method == 'usage_cache'
+    assert measurement == {
+        'message_tokens': 164_562,
+        'message_count': 1,
+        'gate_tokens': 111_552,
+        'method': 'usage_cache',
+    }
+
+
+@pytest.mark.unit
+def test_counter_failure_reuses_single_message_estimate(monkeypatch):
+    """The fallback result and conservative gate floor share one scan."""
+    import lib.token_counter as token_counter
+    import lib.tasks_pkg.compaction._tokens as token_mod
+
+    estimate_calls = []
+
+    def estimate(messages):
+        estimate_calls.append(messages)
+        return 321
+
+    monkeypatch.setattr(
+        token_counter, 'count_tokens',
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError('offline')))
+    monkeypatch.setattr(token_mod, '_estimate_total_tokens', estimate)
+
+    measurement = {}
+    count, method = _count_tokens_authoritative(
+        [{'role': 'user', 'content': 'hello'}],
+        {'config': {'model': 'gpt-4o'}, 'convId': 'fallback-once'},
+        measurement_out=measurement,
+    )
+
+    assert (count, method) == (321, 'heuristic_fallback')
+    assert len(estimate_calls) == 1
+    assert measurement['message_tokens'] == 321
 
 
 @pytest.mark.unit

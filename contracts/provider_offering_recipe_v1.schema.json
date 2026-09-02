@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/provider_offering_recipe_v1.schema.json",
+  "title": "Tofu provider offering recipe v1",
+  "description": "An onboarding recipe for one provider account. Logical identity is model_id; provider wire spellings belong in request_ids. Applying the recipe derives provider.models for legacy consumers.",
+  "type": "object",
+  "required": [
+    "recipe_version",
+    "key",
+    "name",
+    "offering_recipes"
+  ],
+  "properties": {
+    "recipe_version": {"const": "tofu.provider-offering-recipe/v1"},
+    "key": {"type": "string", "minLength": 1, "maxLength": 160},
+    "name": {"type": "string", "minLength": 1, "maxLength": 240},
+    "brand": {"type": "string"},
+    "category": {"type": "string"},
+    "base_url": {"type": "string"},
+    "balance_url": {"type": "string"},
+    "protocol": {"type": "string"},
+    "responses_profile": {"type": "string"},
+    "faces": {"type": "object"},
+    "extra_headers": {"type": "object"},
+    "offering_recipes": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {"$ref": "#/$defs/offeringRecipe"}
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "offeringRecipe": {
+      "type": "object",
+      "required": ["model_id"],
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Exact logical model identity shared across providers."
+        },
+        "request_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true,
+          "description": "Provider wire ids tried for this logical model."
+        },
+        "enabled": {"type": "boolean"},
+        "capabilities": {
+          "type": "array",
+          "items": {"type": "string"},
+          "uniqueItems": true
+        },
+        "rpm": {"type": "integer", "minimum": 1},
+        "context_window": {"type": ["integer", "null"], "minimum": 1},
+        "pricing": {
+          "type": "object",
+          "required": ["input", "output"],
+          "properties": {
+            "input": {"type": "number", "minimum": 0},
+            "output": {"type": "number", "minimum": 0},
+            "currency": {"enum": ["USD", "CNY"]}
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

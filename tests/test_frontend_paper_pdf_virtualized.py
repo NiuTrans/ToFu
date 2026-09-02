@@ -38,7 +38,7 @@ pytestmark = pytest.mark.unit
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VIEWER_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'pdf-viewer.ts')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 def _node_deps_available():
@@ -222,7 +222,7 @@ def _assert_virtualized_render(out):
 
 
 @pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
-                    reason='node + jsdom + esbuild dev-deps not installed')
+                    reason='node + jsdom + vite test bundler dev-deps not installed')
 def test_vite_pdf_viewer_preserves_virtualization_contract(tmp_path):
     built = tmp_path / 'paper-pdf-viewer.js'
     compiled = compile_feature_owner(ESBUILD, VIEWER_TS, built, tmp_path)

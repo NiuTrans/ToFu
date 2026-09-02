@@ -1,116 +1,88 @@
-"""lib.translate — Translation engine + async runtime.
+"""Lazy compatibility facade for translation engines and task state.
 
-Decomposed from the original 1590-line ``routes/translate.py``. The
-Blueprint and route handlers live in ``routes/translate.py`` and stay
-deliberately thin; everything else (prompt building, notranslate block
-handling, chunking, deduplication, the LLM/MT retry loop, the async
-TaskRuntime layer, DB commit, and PPTX file translation) lives here as
-focused submodules.
-
-Public surface (what existing callers in chat.py, message_queue.py, the
-api_v1 facade, and the tests import). New code should import from this
-package facade rather than from submodules directly — the submodule
-layout is implementation detail.
+The stable package-level surface remains available while focused imports and
+HTTP route registration keep LLM, incremental, worker, and PPTX execution
+modules dormant until their corresponding operation starts.
 """
 
-# Constants (chunk thresholds, parallelism, TTL)
-from .constants import (
-    DEFAULT_USER_ID,
-    _TRANSLATE_TASK_TTL,
-    _SYNC_TRANSLATE_MAX_CHARS,
-)
+from __future__ import annotations
 
-# Prompt + notranslate block handling
-from .prompt import (
-    _build_translate_prompt,
-    _wrap_for_translation,
-    _strip_notranslate_tags,
-)
-from .notranslate import (
-    _extract_notranslate_blocks,
-    _reattach_notranslate_blocks,
-    _NOTRANSLATE_RE,
-    _NOTRANSLATE_ALIAS_RE,
-    _NT_PLACEHOLDER_FMT,
-    _NT_PLACEHOLDER_RE,
-    _NT_PLACEHOLDER_LOOSE_RE,
-)
-
-# Dedup
-from .dedup import _dedup_repetition_loop, _dedup_inline_loop
-
-# Engine (one-chunk LLM/MT dispatcher + retry loop, + chunked free-text wrapper)
-from .engine import TranslationContentRefused, _translate_one_chunk, _translate_freetext
-
-# Status formatter (used by routes/chat.py auto-translate flow)
-from .status import _format_status_message
-
-# Async runtime (TaskRuntime + worker functions)
-from .runtime import (
-    _translate_runtime,
-    _translate_tasks,
-    _translate_tasks_lock,
-    _cleanup_translate_tasks,
-    _do_translate,
-)
-
-# Commit (write translated content into the conversations table)
-from .commit import (
-    _commit_translation_to_db,
-    _commit_translation_inner,
-    _get_commit_lock,
-)
-
-# Incremental per-round translation (agent assistant replies)
-from .incremental import (
-    submit_round_segment,
-    finalize_incremental,
-    finalize_incremental_stamp_only,
-    cancel_incremental,
-)
-
-# Per-message in-flight dedup guard (pre-spawn double-fire prevention)
-from .inflight import (
-    claim_inflight,
-    release_inflight,
-    is_inflight,
-    msg_key,
-)
-
-# PPTX file translation
-from .pptx import (
-    _do_translate_pptx,
-    _ensure_pptx_upload_dir,
-    _PPTX_UPLOAD_DIR,
-    _MAX_PPTX_BYTES,
-)
+from importlib import import_module
 
 __all__ = [
-    # constants
-    'DEFAULT_USER_ID', '_TRANSLATE_TASK_TTL',
-    '_SYNC_TRANSLATE_MAX_CHARS',
-    # prompt + notranslate
+    '_TRANSLATE_TASK_TTL', '_SYNC_TRANSLATE_MAX_CHARS',
     '_build_translate_prompt', '_wrap_for_translation', '_strip_notranslate_tags',
     '_extract_notranslate_blocks', '_reattach_notranslate_blocks',
     '_NOTRANSLATE_RE', '_NOTRANSLATE_ALIAS_RE',
     '_NT_PLACEHOLDER_FMT', '_NT_PLACEHOLDER_RE', '_NT_PLACEHOLDER_LOOSE_RE',
-    # dedup
     '_dedup_repetition_loop', '_dedup_inline_loop',
-    # engine
     '_translate_one_chunk', '_translate_freetext', 'TranslationContentRefused',
-    # status
     '_format_status_message',
-    # runtime
-    '_translate_runtime', '_translate_tasks', '_translate_tasks_lock',
-    '_cleanup_translate_tasks', '_do_translate',
-    # commit
-    '_commit_translation_to_db', '_commit_translation_inner', '_get_commit_lock',
-    # incremental per-round translation
-    'submit_round_segment', 'finalize_incremental',
+    '_translate_runtime', '_cleanup_translate_tasks', '_do_translate',
+    'commit_translation_to_turn', 'mark_turn_translation_complete',
+    'submit_round_segment', 'submit_thinking_segment', 'finalize_incremental',
     'finalize_incremental_stamp_only', 'cancel_incremental',
-    # in-flight dedup guard
-    'claim_inflight', 'release_inflight', 'is_inflight', 'msg_key',
-    # pptx
     '_do_translate_pptx', '_ensure_pptx_upload_dir',
     '_PPTX_UPLOAD_DIR', '_MAX_PPTX_BYTES',
 ]
+
+_EXPORT_MODULES = {
+    # Constants and pure text transforms.
+    '_TRANSLATE_TASK_TTL': 'lib.translate.constants',
+    '_SYNC_TRANSLATE_MAX_CHARS': 'lib.translate.constants',
+    '_build_translate_prompt': 'lib.translate.prompt',
+    '_wrap_for_translation': 'lib.translate.prompt',
+    '_strip_notranslate_tags': 'lib.translate.prompt',
+    '_extract_notranslate_blocks': 'lib.translate.notranslate',
+    '_reattach_notranslate_blocks': 'lib.translate.notranslate',
+    '_NOTRANSLATE_RE': 'lib.translate.notranslate',
+    '_NOTRANSLATE_ALIAS_RE': 'lib.translate.notranslate',
+    '_NT_PLACEHOLDER_FMT': 'lib.translate.notranslate',
+    '_NT_PLACEHOLDER_RE': 'lib.translate.notranslate',
+    '_NT_PLACEHOLDER_LOOSE_RE': 'lib.translate.notranslate',
+    '_dedup_repetition_loop': 'lib.translate.dedup',
+    '_dedup_inline_loop': 'lib.translate.dedup',
+    # LLM/MT execution and typed failures.
+    '_translate_one_chunk': 'lib.translate.engine',
+    '_translate_freetext': 'lib.translate.engine',
+    'TranslationContentRefused': 'lib.translate.errors',
+    '_format_status_message': 'lib.translate.status',
+    # Shared task authority and background worker.
+    '_translate_runtime': 'lib.translate.runtime._state',
+    '_cleanup_translate_tasks': 'lib.translate.runtime._state',
+    '_do_translate': 'lib.translate.runtime._worker',
+    'commit_translation_to_turn': 'lib.translate.commit',
+    'mark_turn_translation_complete': 'lib.translate.commit',
+    # Incremental per-round translation.
+    'submit_round_segment': 'lib.translate.incremental',
+    'submit_thinking_segment': 'lib.translate.incremental',
+    'finalize_incremental': 'lib.translate.incremental',
+    'finalize_incremental_stamp_only': 'lib.translate.incremental',
+    'cancel_incremental': 'lib.translate.incremental',
+    # PPTX storage and execution.
+    '_do_translate_pptx': 'lib.translate.pptx',
+    '_ensure_pptx_upload_dir': 'lib.translate.pptx',
+    '_PPTX_UPLOAD_DIR': 'lib.translate.pptx',
+    '_MAX_PPTX_BYTES': 'lib.translate.pptx',
+}
+
+_CHILD_MODULES = {
+    'commit', 'constants', 'dedup', 'engine', 'errors', 'incremental',
+    'notranslate', 'pptx', 'prompt', 'runtime', 'status',
+}
+
+
+def __getattr__(name: str):
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None and name in _CHILD_MODULES:
+        module_name = f'lib.translate.{name}'
+    if module_name is None:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    module = import_module(module_name)
+    value = module if name in _CHILD_MODULES else getattr(module, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__) | _CHILD_MODULES)

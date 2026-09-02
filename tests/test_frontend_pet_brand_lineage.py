@@ -43,6 +43,7 @@ thresholds measured against the shipped frames.
 
 These are pure file + PIL assertions: no node, no browser, no network.
 """
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -50,9 +51,13 @@ from pathlib import Path
 import pytest
 
 from lib.mcp.registry import is_opensource_build
+from tests._runtime_sections import runtime_section
 
 REPO = Path(__file__).resolve().parent.parent
-PET_JS = REPO / "static" / "js" / "tofu-pet.js"
+# The pet owner moved to frontend/src/runtime/scene/tofu-pet.js with the Vite
+# migration; runtime_section() returns the migrated source text of exactly
+# that module, keeping this file's pure-text guards on the real owner.
+LOCALES = REPO / "frontend" / "src" / "i18n" / "locales"
 PET_DIR = REPO / "static" / "icons" / "pet" / "tofu"
 PIPELINE = REPO / "static" / "icons" / "_gen" / "tofu-pet" / "process_ai_frames.py"
 
@@ -286,9 +291,14 @@ def test_pipeline_is_the_single_source_of_the_frames():
     )
 
 
+def _pet_source():
+    """Source text of the migrated tofu-pet.js owner (lazy Vite chunk)."""
+    return runtime_section("tofu-pet.js")
+
+
 def test_engine_resolves_the_tofu_character_not_a_borrowed_sprite():
     """The shipped module must point at the brand art directory."""
-    src = PET_JS.read_text(encoding="utf-8")
+    src = _pet_source()
     assert "/static/icons/pet/tofu" in src, \
         "tofu-pet.js no longer resolves the brand-native tofu frames"
     assert "data-pet', 'tofu'" in src or 'data-pet", "tofu"' in src, \
@@ -299,7 +309,7 @@ def test_no_mascot_switcher_grows_back():
     """Mascot switching was vetoed TWICE (pet pack-switcher, then the logo-skin
     picker). Guard that a character registry / picker / try-on does not return
     to the pet module."""
-    src = PET_JS.read_text(encoding="utf-8")
+    src = _pet_source()
     for sym in ("PET_PACKS", "cyclePack", "setPack", "PACK_ORDER",
                 "setCharacter", "cycleCharacter", "CHARACTERS", "listPetSkins"):
         assert sym not in src, (
@@ -309,33 +319,65 @@ def test_no_mascot_switcher_grows_back():
 
 
 # ── NEUTER: each guard above must be shown to BITE, on a COPY, never on disk ──
+#
+# The static t()-call scanner used to live in lib/i18n_boot_keys.py; the Vite
+# migration deleted that module together with the boot/rest pack split it fed
+# (locale dictionaries are now whole-language JSON chunks under
+# frontend/src/i18n/locales/, parity-guarded by tests/test_i18n_packs.py).
+# The two scanner regexes below are verbatim copies of the deleted scanner's
+# T_CALL_KEY_RE / T_CALL_DYNAMIC_PREFIX_RE: the guards in this file exist to
+# prove the pet's keys stay DISCOVERABLE to a literal-first-argument scan, so
+# the scanner discipline they pinned is kept alive here rather than silently
+# dropped with the pack machinery.
+
+# Matches a literal-string t() call:  t('foo.bar')  or  t("foo.bar", args)
+# — captures the KEY. Requires the first argument to be a single-quoted or
+# double-quoted string literal FOLLOWED IMMEDIATELY BY ``)`` or ``,`` (no
+# concatenation operator). ``t('prefix.' + x)`` is a DYNAMIC call handled by
+# the prefix regex below.
+T_CALL_KEY_RE = re.compile(
+    r"""(?<![A-Za-z0-9_.])(?:i18n\.)?t\(\s*['"]([A-Za-z][A-Za-z0-9_.]*)['"]\s*(?=[,)])""",
+)
+
+# Matches a DYNAMIC t() call whose first argument is a string literal
+# CONCATENATED with something:  ``t('prefix.' + x)`` — captures the constant
+# prefix (which ends in ``.``). The only sound static completion is "every
+# dictionary key starting with this prefix".
+T_CALL_DYNAMIC_PREFIX_RE = re.compile(
+    r"""(?<![A-Za-z0-9_.])(?:i18n\.)?t\(\s*['"]([A-Za-z][A-Za-z0-9_.]*\.)['"]\s*\+""",
+)
+
+
+def _expand_dynamic_prefixes(prefixes, source_keys):
+    """Every dictionary key matching any dynamic ``t('prefix.' + x)`` prefix."""
+    return sorted({k for k in source_keys
+                   for p in prefixes if k.startswith(p)})
+
+
+def _defined_keys(language):
+    """Keys of one shipped locale dictionary (flat JSON: key → text)."""
+    return set(json.loads((LOCALES / f"{language}.json").read_text(encoding="utf-8")))
+
+
 def _pet_i18n_keys():
     """Every ``pet.*`` key the scanner can reach IN THE DEFERRED pet module.
 
-    tofu-pet.js + tofu-scene.js moved to ``lib.js_bundler._CLASSIC_ASSET_FILES``
-    2026-08-01, so ``discover_boot_keys`` (which walks only the core
-    ``_BUNDLE_FILES``) no longer sees ``pet.*`` — by design: the pet executes
-    after the deferred bundle lands, so its keys ride the deferred rest-pack,
-    never the boot pack. This helper scans the deferred module with the SAME
-    regexes the boot scanner uses (``T_CALL_KEY_RE`` /
-    ``T_CALL_DYNAMIC_PREFIX_RE`` + ``expand_dynamic_prefixes``) and returns
-    ``(pet_keys, source_keys, boot_union)`` so the guards assert both
-    "discoverable where the module lives" AND "absent from the boot pack".
+    The pet executes as an idle-scheduled lazy chunk, long after first paint,
+    so none of its keys are boot-critical — but they must stay DISCOVERABLE
+    to a static scan of the module they live in: a key the scanner cannot
+    see is a key the dictionary-completeness guards below cannot verify (and
+    would render as a raw key name if dropped from a locale). Returns
+    ``(pet_keys, source_keys)`` where ``source_keys`` is the defined-key set
+    of the zh locale (the dictionaries are exact mirrors —
+    tests/test_i18n_packs.py pins key-set parity).
     """
-    import sys
-    sys.path.insert(0, str(REPO))
-    from lib.i18n_boot_keys import (T_CALL_KEY_RE, T_CALL_DYNAMIC_PREFIX_RE,
-                                    discover_boot_keys, expand_dynamic_prefixes)
-    dict_src = (REPO / "static" / "js" / "i18n.js").read_text(encoding="utf-8")
-    source_keys = set(re.findall(r"^\s*'([A-Za-z][A-Za-z0-9_.]*)':\s*\{",
-                                 dict_src, re.M))
-    pet_src = PET_JS.read_text(encoding="utf-8")
+    source_keys = _defined_keys("zh")
+    pet_src = _pet_source()
     keys = {k for k in T_CALL_KEY_RE.findall(pet_src) if k.startswith("pet.")}
-    keys |= {k for k in expand_dynamic_prefixes(
+    keys |= {k for k in _expand_dynamic_prefixes(
         T_CALL_DYNAMIC_PREFIX_RE.findall(pet_src), source_keys)
              if k.startswith("pet.")}
-    boot = set(discover_boot_keys(str(REPO), source_keys=source_keys)["union"])
-    return keys, source_keys, boot
+    return keys, source_keys
 
 
 def test_pet_strings_are_localised_not_hardcoded_english():
@@ -348,7 +390,7 @@ def test_pet_strings_are_localised_not_hardcoded_english():
     module — rather than the mechanism, so a future refactor that keeps the
     strings localised by another route still passes.
     """
-    src = PET_JS.read_text(encoding="utf-8")
+    src = _pet_source()
     banned = ["'Meadow'", "'Pool'", "'Sky'", "'Off'",
               "'Scene: '", "'Tofu \u2014 '", "'fast asleep'", "'feeling great'",
               "'Hi there!'", "'Nothing logged yet today'"]
@@ -362,7 +404,7 @@ def test_pet_strings_are_localised_not_hardcoded_english():
 def test_every_pet_string_key_exists_in_the_dictionary():
     """Each key the pet asks for must be DEFINED — t() renders the raw key name
     otherwise, so a typo shows the user ``pet.scene.meadow`` verbatim."""
-    keys, source_keys, _ = _pet_i18n_keys()
+    keys, source_keys = _pet_i18n_keys()
     assert keys, "the scanner found no pet.* keys in the deferred tofu-pet.js"
     missing = sorted(k for k in keys if k not in source_keys)
     assert not missing, f"pet keys referenced but never defined: {missing}"
@@ -370,43 +412,42 @@ def test_every_pet_string_key_exists_in_the_dictionary():
 
 def test_pet_keys_are_bilingual():
     """Both languages must be present. A zh-only entry renders Chinese in an
-    English UI (and trips the i18n.js missing-translation tripwire).
+    English UI (and trips the i18n missing-translation tripwire).
 
-    NOTE the line-scoped regex: an entry's VALUE legitimately contains braces
-    (``'今日完成 {done}/{total}'``), so a ``[^}]*`` body match truncates at the
-    first placeholder and reports perfectly good bilingual entries as missing
-    ``en``. That false positive was observed while writing this guard — the
-    instrument was wrong, not the dictionary.
+    The dictionaries are now flat JSON chunks (key → text), so the check is a
+    direct membership test in both locales rather than a line-scoped regex
+    over the old i18n.js entries (whose ``[^}]*`` body match truncated at the
+    first ``{placeholder}`` and false-positived on perfectly good bilingual
+    entries — the instrument was wrong, not the dictionary).
     """
-    keys, _, _ = _pet_i18n_keys()
-    dict_src = (REPO / "static" / "js" / "i18n.js").read_text(encoding="utf-8")
-    incomplete = []
-    for k in sorted(keys):
-        m = re.search(r"^\s*'" + re.escape(k) + r"':\s*(.+)$", dict_src, re.M)
-        if not m or "zh:" not in m.group(1) or "en:" not in m.group(1):
-            incomplete.append(k)
+    keys, _ = _pet_i18n_keys()
+    zh = _defined_keys("zh")
+    en = _defined_keys("en")
+    incomplete = sorted(k for k in keys if k not in zh or k not in en)
     assert not incomplete, f"pet keys missing a zh or en translation: {incomplete}"
 
 
-def test_pet_keys_ride_the_rest_pack_not_the_boot_pack():
-    """CHARTER #18, updated for the 2026-08-01 deferral: the pet module is in
-    ``_CLASSIC_ASSET_FILES`` now, so its keys must NOT be in the boot pack (dead
-    weight on first paint) — they ride the deferred rest-pack, which lands
-    before the deferred bundle can execute. Two assertions, both load-bearing:
-    every pet key stays DISCOVERABLE by the scanner's own regexes where the
-    module lives (a key it cannot see is a key the rest-pack never carries,
-    and the pet renders raw key names), and NO pet key leaks into the boot
-    union (which would mean the module crept back into the core bundle).
+def test_pet_keys_stay_scanner_discoverable_where_the_module_lives():
+    """Every pet key must stay DISCOVERABLE to a static scan of the module.
 
-    The discoverability half is a real measured failure mode, not a
-    hypothetical: the day-report strings were read through a local ``_k()``
-    wrapper, and because ``T_CALL_KEY_RE`` only matches a literal string as
-    ``t()``'s FIRST argument, the scanner discovered **zero** ``pet.*`` keys
-    while four sat in the dict. Dynamic families must therefore be reached via
-    ``t('prefix.' + x)`` so ``T_CALL_DYNAMIC_PREFIX_RE`` can expand the whole
-    namespace.
+    This guard was born as "pet keys ride the rest-pack, never the boot pack"
+    (CHARTER #18). The Vite migration deleted that pack split — locale
+    dictionaries ship as whole-language JSON chunks, so there is no boot pack
+    left to leak into, and the boot-membership half of the old test pinned an
+    architecture that no longer exists (retired, not re-pinned).
+
+    The discoverability half survives unchanged and stays load-bearing: a key
+    the scanner cannot see in the module is a key the dictionary-completeness
+    guards above cannot verify — and one the locale pipeline can silently
+    drop, rendering a raw key name when the pet runs. This is a real measured
+    failure mode, not a hypothetical: the day-report strings were read
+    through a local ``_k()`` wrapper, and because ``T_CALL_KEY_RE`` only
+    matches a literal string as ``t()``'s FIRST argument, the scanner
+    discovered **zero** ``pet.*`` keys while four sat in the dict. Dynamic
+    families must therefore be reached via ``t('prefix.' + x)`` so
+    ``T_CALL_DYNAMIC_PREFIX_RE`` can expand the whole namespace.
     """
-    keys, _, boot = _pet_i18n_keys()
+    keys, _ = _pet_i18n_keys()
     # The three dynamic families + the composed tooltip must all be reachable.
     for expect in ("pet.scene.meadow", "pet.scene.off",
                    "pet.greet.deepNight", "pet.feel.great",
@@ -414,14 +455,9 @@ def test_pet_keys_ride_the_rest_pack_not_the_boot_pack():
                    "pet.dayGreeting"):
         assert expect in keys, (
             f"{expect!r} is invisible to the scanner in the deferred pet "
-            "module — it would be absent from the rest-pack and render as a "
-            "raw key when the pet runs"
+            "module — the dictionary guards cannot verify it and it would "
+            "render as a raw key when the pet runs"
         )
-    leaked = sorted(k for k in boot if k.startswith("pet."))
-    assert not leaked, (
-        "pet.* keys are back in the BOOT pack — the pet module is deferred, "
-        f"so these belong to the rest-pack only: {leaked}"
-    )
 
 
 def test_pet_never_aliases_t_behind_a_local_wrapper():
@@ -436,14 +472,14 @@ def test_pet_never_aliases_t_behind_a_local_wrapper():
     import sys
     sys.path.insert(0, str(REPO))
     from tests._source_scan import strip_comments
-    code = strip_comments(PET_JS.read_text(encoding="utf-8"), lang="js")
+    code = strip_comments(_pet_source(), lang="js")
     # A wrapper assigns t (or a call to it) to a local name; the scanner only
     # follows literal `t('...')`, so any such indirection hides keys.
     aliases = re.findall(r"var\s+(_?\w+)\s*=\s*\(?\s*typeof\s+t\s*===?", code)
     assert not aliases, (
         "tofu-pet.js aliases t() behind a local name "
-        f"({aliases}) — keys reached through it are INVISIBLE to "
-        "lib/i18n_boot_keys and would be dropped from the boot pack"
+        f"({aliases}) — keys reached through it are INVISIBLE to a static "
+        "t()-scan and would silently escape the dictionary-completeness guards"
     )
 
 

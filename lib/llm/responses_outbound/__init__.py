@@ -14,7 +14,7 @@ Sub-modules:
   _sse             — ``ResponsesSSETranslator`` (plugs into SSEAccumulator)
   _from_responses  — ``responses_response_to_openai(data)`` (non-stream)
 
-Extracted from ``lib/oauth/codex.py`` (2026-07-31, epic pt_b7a29ea7);
+Extracted from ``lib/oauth/codex.py`` (2026-07-31, );
 ``lib.oauth.codex`` re-exports the converter + translator under their
 legacy names so the Codex OAuth path rides this same layer.
 """

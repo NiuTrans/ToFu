@@ -36,7 +36,7 @@ def strip_cold_images(ctx: CompactionContext) -> int:
     ]
     images_stripped = 0
     image_tokens_saved = 0
-    image_chars = 0
+    total_image_chars = 0
 
     if len(image_tool_indices) > _IMAGE_HOT_TAIL:
         cold_image_indices = image_tool_indices[:-_IMAGE_HOT_TAIL]
@@ -63,18 +63,21 @@ def strip_cold_images(ctx: CompactionContext) -> int:
                 continue
 
             text_preview = ' '.join(text_parts).strip()[:200]
+            before_chars = image_chars + sum(len(text) for text in text_parts)
             msg['content'] = (
                 f'[{tool_name} image compacted — had {image_count} '
                 f'image(s) ({_human_size(image_chars)} base64) — '
                 f're-call tool if image needed]\n'
                 f'Text was: {text_preview}'
             )
+            ctx.stamp(msg, before_chars, len(msg['content']))
             image_tokens_saved += image_count * _c._IMAGE_TOKENS_DEFAULT
             images_stripped += 1
+            total_image_chars += image_chars
 
     if images_stripped > 0:
         logger.info('[L1-img] conv=%s  stripped %d cold image tool results '
                     '(~%d vision tokens, %s base64 data freed)',
                     _log_id(ctx.conv_id), images_stripped, image_tokens_saved,
-                    _human_size(image_chars))
+                    _human_size(total_image_chars))
     return image_tokens_saved

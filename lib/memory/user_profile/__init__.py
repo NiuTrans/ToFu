@@ -35,9 +35,8 @@ This package is storage + rendering ONLY. The propose-confirm capture loop
 
 No code lives in this file — it is a pure re-export facade. All implementations
 live in the sub-modules (``_paths`` / ``_io`` / ``_render`` / ``_mutate`` /
-``_pending``); importing them here keeps every historical
-``from lib.memory.user_profile import X`` AND
-``from lib.memory import user_profile as up`` working byte-identically.
+``_pending``). This module is the explicit public boundary for profile and
+durable-context operations.
 """
 
 from __future__ import annotations
@@ -91,12 +90,9 @@ from lib.memory.user_profile._io import (  # noqa: E402,F401
 
 # ── Rendering + tiering (._render) ──
 from lib.memory.user_profile._render import (  # noqa: E402,F401
-    _select_detail_items,
-    applied_profile_items,
+    context_items_for_event,
     profile_summary_for_event,
     render_profile_block,
-    render_profile_tiers,
-    split_profile_tiers,
 )
 
 # ── Consolidation write primitives (._mutate) ──
@@ -137,9 +133,7 @@ __all__ = [
     'profile_char_count',
     'profile_over_cap',
     'render_profile_block',
-    'split_profile_tiers',
-    'render_profile_tiers',
-    'applied_profile_items',
+    'context_items_for_event',
     'profile_summary_for_event',
     'apply_reinforcement',
     'apply_new_preference',

@@ -36,7 +36,8 @@ def _emit(task: dict, event: dict) -> None:
 
 
 #: Task fields persisted so a crashed process can re-spawn this job.
-_MANIFEST_FIELDS = ('task_id', 'direction', 'lang', 'n_ideas', 'conv_id', 'workdir')
+_MANIFEST_FIELDS = (
+    'task_id', 'user_id', 'direction', 'lang', 'n_ideas', 'conv_id', 'workdir')
 
 
 def _write_manifest(task: dict, state: str) -> None:
@@ -53,12 +54,12 @@ def run_research_task(task: dict) -> None:
     task_id = task['task_id']
     try:
         _write_manifest(task, 'running')
-        task['status'] = 'running'
+        _research_runtime.mark_running(task_id)
         _emit(task, build_phase(Phase.START,
                                 direction=task.get('direction', '')))
         result = build_research_from_direction(
             task['direction'], task['workdir'], lang=task.get('lang') or 'en',
-            user_id=task.get('user_id', 1), n_ideas=task.get('n_ideas') or 6,
+            user_id=int(task['user_id']), n_ideas=task.get('n_ideas') or 6,
             seed_arxiv_ids=task.get('seed_arxiv_ids'),
             abort_event=task.get('abort_event'),
             emit=lambda ev: _emit(task, {'type': 'stage', **ev}))
@@ -97,10 +98,13 @@ def resume_interrupted_research() -> int:
     from lib.research.runtime import _new_research_task, _research_runtime
 
     def _respawn(task_id: str, workdir: str, m: dict) -> None:
+        user_id = int(m['user_id'])
+        if user_id < 1:
+            raise ValueError('research manifest has no valid owner')
         task = _new_research_task(
             task_id, direction=m.get('direction') or '', workdir=workdir,
             lang=m.get('lang') or 'en', n_ideas=m.get('n_ideas') or 6,
-            conv_id=m.get('conv_id') or '')
+            conv_id=m.get('conv_id') or '', user_id=user_id)
         _research_runtime.spawn(task_id, run_research_task, task)
 
     return resume_running_jobs(
@@ -110,7 +114,8 @@ def resume_interrupted_research() -> int:
 
 
 def produce_research(direction: str, *, lang: str = 'en', n_ideas: int = 6,
-                     conv_id: str = '', seed_arxiv_ids=None) -> dict:
+                     conv_id: str = '', seed_arxiv_ids=None,
+                     user_id: int) -> dict:
     """Create + spawn an auto-research job; return {task_id, deduped}.
 
     The single "one direction → scored ideas" entry point. Poll/abort go
@@ -122,12 +127,12 @@ def produce_research(direction: str, *, lang: str = 'en', n_ideas: int = 6,
                                       _research_runtime, _research_task_id)
 
     _cleanup_stale_research_tasks()
-    key = (direction.strip(), lang)
+    key = (user_id, direction.strip(), lang)
     tid = _research_task_id()
     wd = os.path.join(research_root(), 'jobs', tid)
     task, existing = _claim_research_task(
         key, tid, direction=direction.strip(), workdir=wd,
-        lang=lang, n_ideas=n_ideas, conv_id=conv_id)
+        lang=lang, n_ideas=n_ideas, conv_id=conv_id, user_id=user_id)
     if existing:
         return {'task_id': existing, 'deduped': True}
     os.makedirs(wd, exist_ok=True)

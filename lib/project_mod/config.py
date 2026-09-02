@@ -19,7 +19,7 @@ IGNORE_DIRS = {
     'bower_components', '.parcel-cache', '.turbo', '.vercel',
     '.output', '.nuxt', '.svelte-kit', '.angular', 'obj', 'bin',
     '.project_indexes',
-    # ★ Bulk runtime/output dirs that explode rg's scan time on FUSE/NFS.
+    # Bulk runtime/output dirs that explode rg's scan time on FUSE/NFS.
     #   Mirrors the project's .gitignore but also applies in non-git roots
     #   (rg only auto-respects .gitignore inside a .git repo, and we're
     #   often run from exported/copied trees with no .git).  Keeping these
@@ -51,9 +51,9 @@ IGNORE_FILES = {
 MAX_FILE_SIZE    = 512 * 1024
 MAX_SCAN_FILES   = 5000
 MAX_TREE_ENTRIES = 500
-MAX_READ_CHARS   = 1_000_000     # ★ whole-file read cap lifted; MAX_FILE_SIZE (512KB) is the real bound
+MAX_READ_CHARS   = 1_000_000     # whole-file read cap lifted; MAX_FILE_SIZE (512KB) is the real bound
 MAX_GREP_RESULTS = 50
-LINE_COUNT_LIMIT = 50_000        # ★ skip line counting for files above this
+LINE_COUNT_LIMIT = 50_000        # skip line counting for files above this
 # Per-project undo/redo history store. Resolved through the single runtime-base
 # authority so a relocated / frozen / read-only install writes it next to the DB
 # instead of under a read-only <repo>/lib. Byte-identical to the legacy
@@ -66,11 +66,11 @@ except Exception as _rp_e:  # pragma: no cover — defensive (keeps import robus
     SESSIONS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 '.project_sessions')
 
-MAX_COMMAND_TIMEOUT = None      # ★ no timeout limit for run_command
-MAX_COMMAND_OUTPUT  = 100_000   # ★ max chars of command output to return
-SHELL_PREFIX = os.environ.get('SHELL_PREFIX', '')  # ★ e.g. 'source ~/.bashrc &&'
+MAX_COMMAND_TIMEOUT = None      # no timeout limit for run_command
+MAX_COMMAND_OUTPUT  = 100_000   # max chars of command output to return
+SHELL_PREFIX = os.environ.get('SHELL_PREFIX', '')  # e.g. 'source ~/.bashrc &&'
 
-# ★ Dangerous command patterns to block
+# Dangerous command patterns to block
 # Includes both Unix and Windows equivalents for cross-platform safety.
 #
 # NOTE: there is deliberately NO ``rm -rf /`` pattern here. Delete commands
@@ -109,7 +109,7 @@ CODE_EXTENSIONS = {
     '.md', '.txt', '.sh', '.dockerfile',
 }
 
-# ★ Data / bulk files — not binary but not worth reading in full
+# Data / bulk files — not binary but not worth reading in full
 DATA_EXTENSIONS = {
     '.jsonl', '.ndjson', '.csv', '.tsv', '.parquet',
     '.log', '.logs', '.out', '.err',
@@ -117,7 +117,7 @@ DATA_EXTENSIONS = {
     '.xml', '.xsd', '.dtd',
     '.arff', '.sav', '.rec', '.ftr', '.feather',
 }
-# ★ Max chars returned to LLM for data files in tool_read_file
+# Max chars returned to LLM for data files in tool_read_file
 MAX_DATA_FILE_PREVIEW = 2000
 
 
@@ -130,21 +130,21 @@ _state = {
     'path': None, 'tree': None,
     'fileCount': 0, 'dirCount': 0, 'totalSize': 0,
     'languages': {}, 'scannedAt': 0,
-    # ★ Async scanning
+    # Async scanning
     'scanning': False, 'scanProgress': '', 'scanDetail': '',
-    # ★ Modification history for undo (后悔药)
+    # Modification history for undo (后悔药)
     'sessionId': None, 'modifications': [],
 }
 
 # ═══════════════════════════════════════════════════════
-#  ★ Multi-Root Workspace Support
+#  Multi-Root Workspace Support
 # ═══════════════════════════════════════════════════════
 # Each root is stored as:  { name: { path, tree, fileCount, ... } }
 # The _state above remains the "primary" root for backward compat.
 # _roots dict stores *all* roots including the primary.
 #
 # ═══════════════════════════════════════════════════════
-#  ★ Per-Conversation Root Registries (2026-05-05 fix)
+#  Per-Conversation Root Registries (2026-05-05 fix)
 # ═══════════════════════════════════════════════════════
 # The global _roots dict was shared across every task on the server.
 # Under concurrency (e.g. SWE-bench 9 parallel workers), ``set_project``
@@ -183,7 +183,7 @@ _conv_roots: _collections.OrderedDict = _collections.OrderedDict()
 _conv_primary: dict[str, str] = {}
 
 # ═══════════════════════════════════════════════════════
-#  ★ Sticky per-conversation working directory (2026-07-09)
+#  Sticky per-conversation working directory (2026-07-09)
 # ═══════════════════════════════════════════════════════
 # conv_id → last-known abs cwd for run_command. This is DERIVED, stateless
 # session affinity — NOT a persistent shell and NOT an env snapshot. It exists
@@ -208,7 +208,7 @@ def _make_root_state(abs_path, access='rw'):
 
     ``access`` is the per-root write policy: ``'rw'`` (default, writable) or
     ``'ro'`` (read-only — reads/greps/find are allowed, but every write,
-    edit, create_project, and destructive run_command targeting this root is
+    edit, and destructive run_command targeting this root is
     refused). It lives on the root_state so it travels with the root through
     both the global ``_roots`` registry and the per-conv ``_conv_roots`` one
     — the same isolation seam every other multi-root attribute uses.
@@ -421,11 +421,14 @@ def _conv_has_live_task(conv_id):
     if not conv_id:
         return False
     try:
-        from lib.tasks_pkg.manager import _chat_runtime, _latest_task_for_conv
+        from lib.tasks_pkg.manager.runtime import (
+            _latest_task_for_conv,
+            chat_task_runtime,
+        )
         tid = _latest_task_for_conv(conv_id)
         if not tid:
             return False
-        t = _chat_runtime.get(tid)
+        t = chat_task_runtime.get(tid)
         return bool(t and t.get('status') in ('pending', 'running'))
     except Exception as e:
         logger.debug('[Config] live-task probe failed for conv=%s: %s — '
@@ -689,13 +692,13 @@ def get_state():
         s = dict(_state)
         # Include modification count for undo
         s['modificationsCount'] = len(_state.get('modifications', []))
-        # ★ Never serialize the raw undo log to clients. Each entry stores the
+        # Never serialize the raw undo log to clients. Each entry stores the
         #   full pre-image (originalContent) of every edited file, so a
         #   long-running project can balloon this response to tens of MB
         #   (Lighthouse flagged /api/v1/project/set at 28MB). The frontend only
         #   consumes modificationsCount; drop the heavy blobs from the payload.
         s.pop('modifications', None)
-        # ★ Always include extra roots so the frontend stays in sync
+        # Always include extra roots so the frontend stays in sync
         extra = []
         primary = _state.get('path')
         for rn, rs in _roots.items():
@@ -705,13 +708,13 @@ def get_state():
                               'scanning': rs['scanning'],
                               'readOnly': rs.get('access') == 'ro'})
         s['extraRoots'] = extra
-        # ★ Primary root's own access flag (the primary may itself be RO).
+        # Primary root's own access flag (the primary may itself be RO).
         if primary:
             for rs in _roots.values():
                 if rs['path'] == primary:
                     s['readOnly'] = rs.get('access') == 'ro'
                     break
-        # ★ Cross-DC latency indicator
+        # Cross-DC latency indicator
         try:
             from lib.cross_dc import get_cluster_for_path, get_latency_class, get_latency_s
             if primary:
@@ -798,44 +801,34 @@ def get_project_path():
 
 
 # ═══════════════════════════════════════════════════════
-#  ★ Recent Projects (server-side persistence)
+#  Recent Projects (server-side persistence)
 # ═══════════════════════════════════════════════════════
 
-def get_recent_projects():
+def get_recent_projects(*, user_id: int):
     """Return list of recent projects sorted by last_used desc.
 
     No LIMIT — callers (frontend) decide how many to display. Keeping
     the full list server-side ensures a newly-added project never gets
     hidden by an artificial window size.
     """
-    from lib.database import DOMAIN_SYSTEM, get_db
-    rows = get_db(DOMAIN_SYSTEM).execute(
-        'SELECT path, count, last_used FROM recent_projects ORDER BY last_used DESC'
-    ).fetchall()
-    return [{'path': r['path'], 'count': r['count'], 'last_used': r['last_used']} for r in rows]
+    from lib.project_mod.recent_repository import RecentProjectRepository
+
+    return RecentProjectRepository(user_id).list()
 
 
-def save_recent_project(path):
+def save_recent_project(path, *, user_id: int):
     """Insert or update a recent project entry."""
-    import time
+    from lib.project_mod.recent_repository import RecentProjectRepository
 
-    from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_db
-    db = get_db(DOMAIN_SYSTEM)
-    now = int(time.time())
-    db_execute_with_retry(
-        db,
-        '''INSERT INTO recent_projects (path, "count", last_used) VALUES (?, 1, ?)
-           ON CONFLICT(path) DO UPDATE SET "count" = recent_projects."count" + 1, last_used = EXCLUDED.last_used''',
-        (path, now),
-    )
+    RecentProjectRepository(user_id).touch(path)
 
 
-def clear_recent_projects():
+def clear_recent_projects(*, user_id: int):
     """Delete all recent project entries."""
-    from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_db
-    db = get_db(DOMAIN_SYSTEM)
-    db_execute_with_retry(db, 'DELETE FROM recent_projects')
+    from lib.project_mod.recent_repository import RecentProjectRepository
+
+    RecentProjectRepository(user_id).clear()
 
 
 # ═══════════════════════════════════════════════════════
-#  ★ Modification History (后悔药 / Undo)
+#  Modification History (后悔药 / Undo)

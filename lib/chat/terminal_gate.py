@@ -54,7 +54,7 @@ logger = get_logger(__name__)
 
 # Task statuses that mean "this turn is over". Derived from the real status
 # vocabulary written across lib/ + routes/ ('done' / 'error' / 'aborted' are
-# assigned by the orchestrator and endpoint loops; 'interrupted' is synthesized
+# assigned by the orchestrator and Flow runs; 'interrupted' is synthesized
 # by the poll/recovery path for a task whose process died mid-run).
 TERMINAL_STATUSES = frozenset({'done', 'error', 'aborted', 'interrupted'})
 

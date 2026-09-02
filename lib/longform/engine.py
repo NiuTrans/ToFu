@@ -34,7 +34,8 @@ def _emit(task: dict, event: dict) -> None:
 
 
 #: Task fields persisted so a crashed process can re-spawn this job.
-_MANIFEST_FIELDS = ('task_id', 'topic', 'lang', 'depth', 'conv_id', 'workdir')
+_MANIFEST_FIELDS = (
+    'task_id', 'user_id', 'topic', 'lang', 'depth', 'conv_id', 'workdir')
 
 
 def _write_manifest(task: dict, state: str) -> None:
@@ -52,7 +53,7 @@ def run_longform_task(task: dict) -> None:
     task_id = task['task_id']
     try:
         _write_manifest(task, 'running')
-        task['status'] = 'running'
+        _longform_runtime.mark_running(task_id)
         _emit(task, build_phase(Phase.START,
                                 topic=task.get('topic', '')))
         result = build_report_from_topic(
@@ -122,10 +123,13 @@ def resume_interrupted_reports() -> int:
     from lib.production.jobs import resume_running_jobs
 
     def _respawn(task_id: str, workdir: str, m: dict) -> None:
+        user_id = int(m['user_id'])
+        if user_id < 1:
+            raise ValueError('longform manifest has no valid owner')
         task = _new_longform_task(
             task_id, topic=m.get('topic') or '', workdir=workdir,
             lang=m.get('lang') or 'zh', depth=m.get('depth') or 'standard',
-            conv_id=m.get('conv_id') or '')
+            conv_id=m.get('conv_id') or '', user_id=user_id)
         _longform_runtime.spawn(task_id, run_longform_task, task)
 
     return resume_running_jobs(
@@ -135,7 +139,7 @@ def resume_interrupted_reports() -> int:
 
 
 def start_report_job(topic: str, *, lang: str = 'zh', depth: str = 'standard',
-                     conv_id: str = '') -> dict:
+                     conv_id: str = '', user_id: int) -> dict:
     """Create + spawn a report job; returns {task_id, deduped}."""
     from lib.longform.runtime import (
         _cleanup_stale_longform_tasks, _longform_index_get,
@@ -143,7 +147,7 @@ def start_report_job(topic: str, *, lang: str = 'zh', depth: str = 'standard',
         _new_longform_task)
 
     _cleanup_stale_longform_tasks()
-    key = (topic.strip(), lang, depth)
+    key = (user_id, topic.strip(), lang, depth)
     existing = _longform_index_get(key)
     if existing:
         return {'task_id': existing, 'deduped': True}
@@ -151,7 +155,7 @@ def start_report_job(topic: str, *, lang: str = 'zh', depth: str = 'standard',
     wd = os.path.join(longform_root(), 'jobs', tid)
     os.makedirs(wd, exist_ok=True)
     task = _new_longform_task(tid, topic=topic.strip(), workdir=wd, lang=lang,
-                              depth=depth, conv_id=conv_id)
+                              depth=depth, conv_id=conv_id, user_id=user_id)
     _longform_index_register(key, tid)
     _longform_runtime.spawn(tid, run_longform_task, task)
     logger.info('[Longform] started %s topic=%r lang=%s depth=%s',

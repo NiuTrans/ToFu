@@ -29,6 +29,8 @@ from lib.agent_core.admission import (
     await_terminal, controller, on_terminal, register_waiter,
     unregister_waiter, wait_for_event,
 )
+from lib.agent_core.principal import principal_key
+from lib.agent_core.sse_limit import limiter as sse_limiter
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
     sse_response,
@@ -36,6 +38,7 @@ from lib.api_response import (
 from lib.billing.request_flow import (
     estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
 )
+from lib.byo_resolve import resolve_model_and_provider
 from lib.idempotency import idempotent_post
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
@@ -45,8 +48,18 @@ from lib.usage_tracker import record as record_usage
 from lib.request_parser import (
     async_parse_body, optional_bool, optional_dict, optional_str, require_list,
 )
+from lib.turn_verdict import (
+    TerminalTaskFailure,
+    require_deliverable_task,
+    terminal_finish_reason,
+)
 
-from .auth import current_auth, guard_model_relay_or_dispose, require_scope
+from .auth import (
+    current_auth,
+    guard_model_relay_or_dispose,
+    request_user_id,
+    require_scope,
+)
 
 logger = get_logger(__name__)
 
@@ -113,16 +126,10 @@ def _completion_response(task, *, model: str, requested_id: str = '') -> dict:
     don't choke on unknown values. Tofu-internal reasons go in the
     Tofu-specific ``error`` / ``finish_reason_internal`` fields.
     """
-    raw_finish = task.get('finishReason') or 'stop'
-    # OpenAI spec: stop | length | tool_calls | content_filter | function_call
-    _OPENAI_FINISH = {'stop', 'length', 'tool_calls', 'content_filter',
-                       'function_call'}
-    finish = raw_finish if raw_finish in _OPENAI_FINISH else 'stop'
-    if task.get('status') == 'error':
-        finish = 'stop'
-    elif task.get('status') == 'aborted':
-        # Closest OpenAI mapping: caller cancelled = no completion.
-        finish = 'stop'
+    require_deliverable_task(task)
+    raw_finish = terminal_finish_reason(task)
+    finish = _openai_finish_reason(
+        raw_finish, aborted=bool(task.get('aborted')))
     from lib.cost import normalize_usage
     _un = normalize_usage(task.get('usage') or {})
     _agent_in = _un['input']
@@ -166,9 +173,53 @@ def _completion_response(task, *, model: str, requested_id: str = '') -> dict:
     return body
 
 
+def _openai_finish_reason(raw_finish: str, *, aborted: bool = False) -> str:
+    """Map one already-validated terminal reason to OpenAI's closed enum."""
+    if aborted:
+        return 'length'
+    mapping = {
+        'stop': 'stop',
+        'done': 'stop',
+        'completed': 'stop',
+        'end_turn': 'stop',
+        'length': 'length',
+        'max_tokens': 'length',
+        'context_length': 'length',
+        'budget_exceeded': 'length',
+        'incomplete': 'length',
+        'max_turns': 'length',
+        'aborted': 'length',
+        'interrupted': 'length',
+        'tool_calls': 'tool_calls',
+        'tool_use': 'tool_calls',
+        'function_call': 'function_call',
+        'content_filter': 'content_filter',
+    }
+    try:
+        return mapping[raw_finish]
+    except KeyError as exc:
+        raise ValueError(
+            f'unsupported verified finish reason: {raw_finish!r}') from exc
+
+
 def _sse_event(payload) -> str:
     """Format a single SSE message in OpenAI's wire shape."""
     return f'data: {json.dumps(payload, ensure_ascii=False)}\n\n'
+
+
+def _try_acquire_sse_slot(auth):
+    """Reserve one shared per-principal SSE slot or build a 429 response."""
+    token = sse_limiter.try_acquire(principal_key(auth))
+    if token is not None:
+        return token, None
+    response, status = api_error(
+        'Too many concurrent streams; retry shortly.',
+        status=429,
+        error_kind='ratelimit',
+        retry_after=5,
+    )
+    response.headers['Retry-After'] = '5'
+    return None, (response, status)
 
 
 def _settle_streaming_billing(task, *, user_id: str, model: str) -> None:
@@ -183,7 +234,8 @@ def _settle_streaming_billing(task, *, user_id: str, model: str) -> None:
 
 
 async def _stream_generator(task, model: str, requested_id: str,
-                            *, billing_user_id: str = ''):
+                            *, billing_user_id: str = '',
+                            sse_slot_token: str | None = None):
     """SSE generator: emits incremental chunks while the task runs.
 
     Wire format: each chunk is a ``chat.completion.chunk`` JSON line.
@@ -239,10 +291,32 @@ async def _stream_generator(task, model: str, requested_id: str,
                 chunk['tofu'] = ev
                 yield _sse_event(chunk)
             elif etype == 'done':
+                try:
+                    require_deliverable_task(task, ev)
+                except TerminalTaskFailure as exc:
+                    yield _sse_event({
+                        'error': {
+                            'message': str(exc),
+                            'type': 'server_error',
+                            'code': exc.verdict.cause,
+                        },
+                        'task_id': task_id,
+                    })
+                    if billing_user_id and not _billed:
+                        _settle_streaming_billing(
+                            task, user_id=billing_user_id, model=model)
+                        _billed = True
+                    yield 'data: [DONE]\n\n'
+                    return
                 final = dict(chunk)
                 final['choices'][0]['delta'] = {}
-                final['choices'][0]['finish_reason'] = (
-                    ev.get('finishReason') or task.get('finishReason') or 'stop')
+                raw_finish = (
+                    str(ev.get('finishReason') or '')
+                    if 'finishReason' in ev
+                    else terminal_finish_reason(task)
+                )
+                final['choices'][0]['finish_reason'] = _openai_finish_reason(
+                    raw_finish, aborted=bool(task.get('aborted')))
                 if ev.get('usage') or task.get('usage'):
                     final['usage'] = ev.get('usage') or task.get('usage')
                 if ev.get('error') or task.get('error'):
@@ -258,11 +332,30 @@ async def _stream_generator(task, model: str, requested_id: str,
         if task.get('status') in ('done', 'error', 'aborted') and not new_events:
             # Synthesise a terminal frame if the orchestrator already
             # emitted the 'done' event before we started reading.
+            try:
+                require_deliverable_task(task)
+            except TerminalTaskFailure as exc:
+                yield _sse_event({
+                    'error': {
+                        'message': str(exc),
+                        'type': 'server_error',
+                        'code': exc.verdict.cause,
+                    },
+                    'task_id': task_id,
+                })
+                if billing_user_id and not _billed:
+                    _settle_streaming_billing(
+                        task, user_id=billing_user_id, model=model)
+                    _billed = True
+                yield 'data: [DONE]\n\n'
+                return
             yield _sse_event({
                 'id': completion_id, 'object': 'chat.completion.chunk',
                 'created': int(time.time()), 'model': model,
                 'choices': [{'index': 0, 'delta': {},
-                             'finish_reason': task.get('finishReason') or 'stop'}],
+                             'finish_reason': _openai_finish_reason(
+                                 terminal_finish_reason(task),
+                                 aborted=bool(task.get('aborted')))}],
             })
             if task.get('usage'):
                 yield _sse_event({'usage': task['usage']})
@@ -276,6 +369,8 @@ async def _stream_generator(task, model: str, requested_id: str,
         # Block until the next event (or 15s heartbeat) — no busy-wait.
         woke = await wait_for_event(task_id, timeout=15.0)
         if not woke:
+            if sse_slot_token:
+                sse_limiter.refresh(sse_slot_token)
             yield ': heartbeat\n\n'
     except (GeneratorExit, asyncio.CancelledError):
         logger.info('[api_v1.chat] stream client disconnected task=%s',
@@ -283,136 +378,11 @@ async def _stream_generator(task, model: str, requested_id: str,
         raise
     finally:
         unregister_waiter(task_id)
+        if sse_slot_token:
+            sse_limiter.release(sse_slot_token)
 
 
 # ── Routes ──────────────────────────────────────────────────────────
-
-@api_v1_chat_bp.route('/api/v1/chat/conv-state', methods=['GET'],
-                      endpoint='v1_chat_conv_state')
-@require_scope('chat')
-def chat_conv_state():
-    """Running-task projection per conversation — the POLL transport's copy of
-    the push ``conv_state_snapshot`` frame.
-
-    WHY THIS IS NOT ``/api/v1/chat/active``.
-    That endpoint answers a DIFFERENT question: "which tasks may I reconnect an
-    SSE to?" It therefore EXCLUDES carriers, and correctly so — five frontend
-    callers feed its result to the PLAIN ``connectToTask`` path, and an
-    autopilot VU carrier there would bind a real assistant placeholder to a
-    stream that only ever emits the ``autopilot_vu_*`` contract (the
-    permanently-stuck "Waiting…" / ghost second-"Agent" bubble its carrier
-    filter exists to prevent).
-
-    This endpoint answers "which conversations are WORKING, and how may each be
-    attached?" — busy-ness, not reconnectability. A live VU carrier is exactly
-    the case where those two answers differ: its existence IS the fact that the
-    conversation is working, while it is attachable only through the VU
-    connector.
-
-    Without it the poll fallback was blind. When the push socket is down (a
-    flaky tunnel / VS Code port-forward), ``_crossDeviceReconcile`` is the only
-    remaining channel and its sole probe was ``/api/v1/chat/active`` — so a
-    multi-minute VU turn left the user on a finished-looking conversation with
-    no bubble and no stream until a manual refresh.
-
-    SINGLE SOURCE OF TRUTH: the body is built from the SAME
-    ``snapshot_running_by_conv`` projection ``build_conv_state_snapshot`` (the
-    push frame) uses, and ships the SAME ``runningTaskIds`` field with the
-    ``#vu`` carrier marker intact — so ONE client reducer
-    (``applyConvStateSnapshot``) consumes both transports. Adding a second
-    registry scan here is precisely how "busy" and "attachable" drifted apart
-    and produced this family of bugs; do not.
-
-    Scoped by the caller's tenant exactly like the push snapshot, so a poll can
-    never leak a sibling tenant's tasks.
-    """
-    # ── Frame-level rev on EVERY exit path (pt_781ae072d6ee4e84) ──────────
-    # ``{'convs': {...}}`` is not merely data: to the client reducer, a conv
-    # ABSENT from the projection means CLEAR. So an empty body is the maximally
-    # destructive frame this endpoint can emit — it extinguishes every busy dot
-    # the tab holds. A frame that says "clear everything" while carrying no rev
-    # is only HALF a frame: the client clears but cannot advance its gate, so
-    # nothing authoritative supersedes the clear and the correction waits for a
-    # later tick.
-    #
-    # Both failure branches below therefore ship a rev too. That needs the mint
-    # resolved BEFORE the import that can fail, hence this nested import with
-    # its own fallback: if even the mint is unreachable we emit no rev rather
-    # than a locally-invented one (the client's "no rev → clear but don't
-    # advance" branch is the correct conservative behaviour there, and is
-    # strictly better than shipping a value from a foreign clock domain).
-    try:
-        from lib.conversations.meta_cache import _running_task_ids_rev
-    except Exception as e:
-        logger.warning('[api_v1.chat] conv-state rev mint unavailable: %s', e)
-        _running_task_ids_rev = None
-
-    def _mint():
-        """Mint a rev, or None when the mint is unreachable.
-
-        Separating the mint import from the registry import (they used to share
-        one try block) means the mint can be absent while the projection still
-        works — so BOTH rev call sites must tolerate that. Routing both through
-        here is what keeps them from diverging: a bare
-        ``_running_task_ids_rev()`` at either site raises
-        ``'NoneType' is not callable`` and 500s the endpoint that exists
-        precisely to keep answering when everything else is broken.
-        """
-        if _running_task_ids_rev is None:
-            return None
-        try:
-            return _running_task_ids_rev()
-        except Exception as e:
-            logger.warning('[api_v1.chat] conv-state rev mint failed: %s', e)
-            return None
-
-    def _envelope(convs_payload):
-        """Wrap a projection in the wire envelope, always with a rev when one
-        can be minted. ONE construction site for every exit path so a future
-        edit cannot add another that forgets the rev."""
-        body = {'convs': convs_payload}
-        rev = _mint()
-        if rev is not None:
-            body['rev'] = rev
-        return api_ok(body)
-
-    try:
-        from lib.tasks_pkg.manager._registry import snapshot_running_by_conv
-    except Exception as e:
-        logger.warning('[api_v1.chat] conv-state imports failed: %s', e)
-        return _envelope({})
-
-    _auth = current_auth()
-    _uid = getattr(_auth, 'user_id', None) if _auth else None
-    # Mirror the sync-digest scoping in routes/api_v1/conversations.py: the
-    # single-user / pre-auth default is UNSCOPED (empty string), which makes
-    # this byte-identical to the push snapshot on a personal install.
-    _scope = '' if _uid in (None, '', 1, '1') else str(_uid)
-    try:
-        raw = snapshot_running_by_conv(user_id=_scope)
-    except Exception as e:
-        # Fail EMPTY, never fail loud. The client reads an empty projection as
-        # "nothing running", which is the safe direction: a false negative is
-        # re-lit by the next tick or the next notify frame, whereas a 500 would
-        # wedge the only channel left when push is down.
-        logger.warning('[api_v1.chat] conv-state projection failed: %s', e)
-        raw = {}
-
-    convs = {}
-    for conv_id, tids in raw.items():
-        entry = {'runningTaskIds': list(tids)}
-        _per_conv_rev = _mint()
-        if _per_conv_rev is not None:
-            entry['runningTaskIdsRev'] = _per_conv_rev
-        convs[conv_id] = entry
-    # Frame-level rev is added by _envelope() — minted AFTER the per-conv revs
-    # above, so it dominates them (the projection is by construction the newest
-    # view of the registry). Both transports feed the SAME reducer, so this
-    # lane missing the rev would leave the poll path unable to clear a conv
-    # without the client minting its own value — the cross-clock-domain bug
-    # this ticket removed.
-    return _envelope(convs)
-
 
 @api_v1_chat_bp.route('/api/v1/chat/completions', methods=['POST'])
 @require_scope('chat')
@@ -445,6 +415,7 @@ def chat_conv_state():
 )
 async def chat_completions():
     body = await async_parse_body()
+    owner_user_id = int(request_user_id())
     try:
         messages_in = require_list(body, 'messages')
         messages = _validate_messages(messages_in)
@@ -457,41 +428,30 @@ async def chat_completions():
     model = optional_str(body, 'model', default='', max_len=200)
     cfg = optional_dict(body, 'config') or {}
 
-    # ── BYO provider suffix resolution ──
-    # ``model="<name>@<prov_xxx>"`` pins this single request to a
-    # caller-registered endpoint. We mint an ephemeral slot whose
-    # lifetime equals the task; any other shape (plain alias, missing
-    # suffix) falls through to the normal dispatcher pool.
+    # ── Unified BYO provider resolution ──
+    # Every API surface crosses lib.byo_resolve, so suffix ownership,
+    # inline-provider validation, slot minting, and error semantics cannot
+    # drift between native and compatibility routes.
     _byo_handle = None
-    _byo_provider = None
-    if model and '@' in model:
-        from lib.byo_providers import resolve_model_string, touch_provider
-        from lib.llm_dispatch.ephemeral import mint_ephemeral_slot
+    if model:
         _auth_for_byo = current_auth()
-        _owner = (_auth_for_byo.key_id if _auth_for_byo else '') or ''
-        _resolved = resolve_model_string(model, _owner)
-        if _resolved is None:
-            return api_not_found(
-                f'model {model!r} references an unknown or disabled BYO '
-                f'provider; check the @prov_xxx suffix')
-        if _resolved.provider is not None:
-            _prov = _resolved.provider
-            try:
-                _byo_handle = mint_ephemeral_slot(
-                    base_url=_prov['base_url'],
-                    api_key=_prov.get('api_key') or '',
-                    model_id=_resolved.model_id,
-                    owner=f'{_owner}:{_prov["id"]}',
-                    extra_headers=_prov.get('extra_headers') or {},
-                    # Carry the persisted dialect so the dispatcher
-                    # uses the right body shape for this engine.
-                    thinking_format=_prov.get('thinking_format') or '',
-                )
-                _byo_provider = _prov
-                touch_provider(_prov['id'])
-                model = _resolved.model_id  # strip the suffix
-            except (ValueError, RuntimeError) as e:
-                return api_bad_request(str(e), field='model')
+        if _auth_for_byo is None or _auth_for_byo.owner_user_id is None:
+            return api_bad_request(
+                'caller has no repository owner identity', field='model')
+        model, _byo_handle, _byo_provider, _byo_error, _byo_status = (
+            resolve_model_and_provider(
+                model,
+                body.get('provider'),
+                _auth_for_byo.owner_user_id,
+                tenant_id=_auth_for_byo.tenant_id,
+            )
+        )
+        if _byo_error:
+            return (
+                api_not_found(_byo_error)
+                if _byo_status == 404
+                else api_bad_request(_byo_error, field='model')
+            )
 
     # ── BYO-only relay backstop ──
     # On a model_relay_enabled=false deployment, refuse requests that
@@ -565,8 +525,12 @@ async def chat_completions():
                                    'sending original text', _fail)
                 break
 
-    from lib.tasks_pkg import create_task, spawn_task
-    task = create_task(conversation_id, messages, cfg)
+    from lib.tasks_pkg.manager import create_task
+    from lib.tasks_pkg.spawn import spawn_task
+    task = create_task(
+        conversation_id, messages, cfg, user_id=owner_user_id
+    )
+    task['_tenant_id'] = (auth.tenant_id if auth else None)
     task['_inline_messages'] = True
     task['_api_v1'] = True
     if _translate_usage is not None:
@@ -588,8 +552,7 @@ async def chat_completions():
     # is held as a ledger entry under ``ref_id=task_id``; settle()
     # refunds the gap post-flight. Personal/private/open installs
     # (no ``user_id``) skip this entirely.
-    billing_user_id = (auth.user_id
-                       if auth and getattr(auth, 'user_id', '') else '')
+    billing_user_id = auth.account_user_id if auth else ''
     reservation_micro = 0
     if billing_user_id:
         from lib.billing import InsufficientFunds
@@ -611,8 +574,22 @@ async def chat_completions():
                 balance_micro=e.balance_micro,
                 needed_micro=e.needed_micro)
 
+    # Reserve a long-lived stream slot only after every preflight that can
+    # fail. From here onward every non-streaming-return path releases it, and
+    # the generator owns the normal disconnect/terminal release.
+    sse_slot_token = None
+    if stream:
+        sse_slot_token, sse_rejection = _try_acquire_sse_slot(auth)
+        if sse_rejection is not None:
+            if _byo_handle is not None:
+                from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
+                dispose_ephemeral_slot(_byo_handle)
+            return sse_rejection
+
     # ── Admission control: refuse with 503 when at capacity ───────
     if not controller.try_acquire():
+        if sse_slot_token:
+            sse_limiter.release(sse_slot_token)
         if _byo_handle is not None:
             from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
             dispose_ephemeral_slot(_byo_handle)
@@ -666,6 +643,8 @@ async def chat_completions():
     try:
         spawn_task(task)
     except Exception as e:
+        if sse_slot_token:
+            sse_limiter.release(sse_slot_token)
         # spawn failed → release slot + dispose synchronously, drop waiter.
         _on_done(task['id'])
         unregister_waiter(task['id'])
@@ -681,7 +660,8 @@ async def chat_completions():
     if stream:
         gen = _stream_generator(task, cfg.get('model', model or '?'),
                                  requested_id,
-                                 billing_user_id=billing_user_id)
+                                 billing_user_id=billing_user_id,
+                                 sse_slot_token=sse_slot_token)
         return sse_response(
             gen, extra_headers={'X-Tofu-Task-Id': task['id']})
 
@@ -694,8 +674,18 @@ async def chat_completions():
     finally:
         unregister_waiter(task['id'])
 
-    body_out = _completion_response(task, model=cfg.get('model', model or '?'),
-                                     requested_id=requested_id)
+    try:
+        body_out = _completion_response(
+            task, model=cfg.get('model', model or '?'),
+            requested_id=requested_id)
+    except TerminalTaskFailure as exc:
+        logger.warning(
+            '[api_v1.chat] refusing false-success task=%s cause=%s',
+            task['id'][:8], exc.verdict.cause)
+        return api_internal_error(
+            str(exc), context='api_v1.chat', log_traceback=False,
+            error_kind=exc.verdict.cause,
+        )
     # Record TPD usage + analytics post-hoc.
     try:
         if auth and auth.key_id:

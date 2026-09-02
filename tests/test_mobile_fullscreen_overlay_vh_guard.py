@@ -42,11 +42,14 @@ _CSS_PATH = os.path.join(ROOT, 'static', 'styles.css')
 # lives in settings.css, whose --vh100 guard sits at :838). The sweep must
 # scan BOTH.
 _CSS_PATH2 = os.path.join(ROOT, 'static', 'settings.css')
+_ORCHESTRATION_CSS_PATH = os.path.join(
+    ROOT, 'frontend', 'src', 'features', 'orchestration', 'task-mode.css')
 
 
 def _read_all_css() -> str:
     return (open(_CSS_PATH, encoding='utf-8').read()
-            + '\n' + open(_CSS_PATH2, encoding='utf-8').read())
+            + '\n' + open(_CSS_PATH2, encoding='utf-8').read()
+            + '\n' + open(_ORCHESTRATION_CSS_PATH, encoding='utf-8').read())
 
 # Full-screen overlay selectors that go edge-to-edge on phones and therefore
 # pin height to the full viewport. These are the ones the WebView collapses.
@@ -343,8 +346,8 @@ def _bodies_for(css, selector, *, phone):
 def test_sweep_base_overlays_use_vh100_guard():
     """Every A/B-list overlay's BASE rule that pins a viewport height must be
     guarded by var(--vh100, …). Governs the 837px coarse tablet.
-    Scans BOTH static/styles.css and static/settings.css (overlay rules are
-    split across them — .mcp-install-modal moved to settings.css)."""
+    Scans the application/settings bundles plus feature-owned orchestration
+    CSS, which is loaded lazily and therefore no longer lives in styles.css."""
     css = _read_all_css()
     for sel in _SWEEP_BASE_SELECTORS:
         bodies = _bodies_for(css, sel, phone=False)

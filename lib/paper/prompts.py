@@ -1,13 +1,10 @@
-"""Paper-report system prompts (EN + ZH) and tool list.
+"""Paper-report system prompts (EN + ZH).
 
 Kept separate from the engine so the prompt can evolve without churning
 the engine module.
 """
 
 from datetime import datetime, timezone
-
-from lib.tools.search import build_fetch_url_tool, build_search_tool
-
 
 def date_anchor_clause(ui_lang: str) -> str:
     """Return a system-message clause stating TODAY's date.
@@ -56,7 +53,7 @@ Write the full report in one pass. Be specific, quantitative, and analytical —
 
 ## 🔬 Quality bar — non-negotiable
 
-- **Related-work survey must be comprehensive AND current.** Do NOT stop at the references the paper itself cites. Your tool set is the full standard assistant set — use web_search / fetch_url for the literature scan itself, read_files to open any local file a fetch stages (or an oversized tool result spills to disk), and code_exec when a numeric check beats prose. Find (a) the closest precursors, (b) concurrent work from the same year, AND (c) follow-up work that built on this paper since publication. If the paper is older than 12 months, the "follow-ups since publication" subsection is mandatory and must name at least 3-5 concrete later papers (with venue/year) that extend, supersede, or critique this one. Missing recent work is the single most common failure of these reports — do not allow it.
+- **Related-work survey must be comprehensive AND current.** Do NOT stop at the references the paper itself cites. Use web_search / fetch_url for the literature scan itself, read_files for a local staged file, read_tool_artifact / search_tool_artifact to continue an oversized result by artifactRef, and the available code-execution capability when a numeric check beats prose. Find (a) the closest precursors, (b) concurrent work from the same year, AND (c) follow-up work that built on this paper since publication. If the paper is older than 12 months, the "follow-ups since publication" subsection is mandatory and must name at least 3-5 concrete later papers (with venue/year) that extend, supersede, or critique this one. Missing recent work is the single most common failure of these reports — do not allow it.
 - **Methodology must be reproducibility-grade.** For every architectural / training / data choice, do not only say *what* was chosen — explain *why this choice was forced by the problem*. The chain "problem property → constraint → option space → why option X dominates Y → resulting design" must be visible. A reader who only has your report should be able to defend the design choices to a reviewer.
 - **Surface implementation details that are easy to miss.** Initialization scheme, masking, position encoding, dropout placement, learning-rate schedule, batch construction, gradient clipping, regularization, normalization placement, tokenization details, evaluation protocol — if the paper specifies it, you specify it. If the paper is silent, mark it explicitly as "(not specified — common choice in this family is …)".
 - **Cite numbers, not vibes.** "Improves substantially" is forbidden — write "+2.0 BLEU on WMT14 EN-DE (28.4 vs. 26.4)". When the paper gives a comparison, give the comparison.
@@ -268,7 +265,7 @@ _REPORT_PROMPT_ZH = """\
 
 ## 🔬 质量底线（不可妥协）
 
-- **相关工作综述必须全面且最新。** 不要止步于论文自身引用的文献。你的工具集是完整的标准助手工具集——用 web_search / fetch_url 做文献检索本身，用 read_files 打开抓取落盘（或超长结果溢出落盘）的本地文件，用 code_exec 做数值核验。请主动搜索：(a) 最相近的前驱工作；(b) 同期独立的竞争方案；(c) **论文发表之后**在其基础上进一步推进的后续工作。如果论文发表已超过 12 个月，"后续工作"小节是**强制**的，必须列出至少 3–5 篇具体的后续论文（含会议/年份），说明它们如何扩展、超越或质疑这篇论文。**遗漏近期工作是这类报告最常见的失败模式，不允许出现。**
+- **相关工作综述必须全面且最新。** 不要止步于论文自身引用的文献。用 web_search / fetch_url 做文献检索，用 read_files 打开抓取暂存的本地文件，用 read_tool_artifact / search_tool_artifact 按 artifactRef 继续读取超长结果，在数值核验优于文字推断时使用可用的代码执行能力。请主动搜索：(a) 最相近的前驱工作；(b) 同期独立的竞争方案；(c) **论文发表之后**在其基础上进一步推进的后续工作。如果论文发表已超过 12 个月，"后续工作"小节是**强制**的，必须列出至少 3–5 篇具体的后续论文（含会议/年份），说明它们如何扩展、超越或质疑这篇论文。**遗漏近期工作是这类报告最常见的失败模式，不允许出现。**
 - **方法学描述必须达到可复现的颗粒度。** 对每一个架构 / 训练 / 数据决策，不能只写"做了什么"，必须写"为什么这个问题逼着你只能这样选"。要让"问题特性 → 约束条件 → 候选方案 → 为什么 X 胜出 → 由此得到的设计"这条因果链显式出现。读者仅凭你的报告，应能向审稿人辩护这些设计选择。
 - **暴露容易遗漏的实现细节。** 初始化方案、masking、位置编码、dropout 位置、学习率调度、batch 构造、梯度裁剪、正则化、归一化位置、tokenization、评估协议——论文写了你就写；论文没写就明确标注 "(论文未指定 — 该家族常见做法是…)"。
 - **用数字说话，不用感觉说话。** 禁止"显著提升"这类含糊措辞——写"WMT14 EN-DE 上 +2.0 BLEU（28.4 vs. 26.4）"。论文给出对比的，你也要把对比补全。
@@ -468,89 +465,3 @@ _REPORT_PROMPT_ZH = """\
 
 论文正文：
 {paper_text}"""
-
-
-# ── Report tool definitions ──
-class _ReportTools(list):
-    """The report tool set, resolved on each access.
-
-    Stays a ``list`` because eight call sites pass it straight to
-    ``run_agent_loop(round_tools=...)``. It cannot be a plain module-level
-    constant any more: the web_search schema now advertises only the vertical
-    domains whose credentials are configured, and that is a runtime property —
-    a list built at import time would freeze whatever was set when the process
-    started.
-    """
-
-    def _resolve(self):
-        return [build_search_tool(), build_fetch_url_tool()]
-
-    def __iter__(self):
-        return iter(self._resolve())
-
-    def __len__(self):
-        return 2
-
-    def __getitem__(self, idx):
-        return self._resolve()[idx]
-
-
-_REPORT_TOOLS = _ReportTools()
-
-
-def _build_full_tool_schemas() -> list[dict]:
-    """Assemble the paper FULL tool set = the chat mode's everyday tier.
-
-    Goes through the SHARED registry (``lib.tools.registry.assemble_tool_list``)
-    with the same flag profile the chat tier pins
-    (``lib/tasks_pkg/chat_mode.chat_mode_defaults('chat')``: searchMode=multi,
-    fetchEnabled, codeExecEnabled — memory/skills/todo/scheduler attach on
-    ``has_base_tools`` exactly as in chat) and NO project attached — so any
-    tool chat gains later lands here automatically and the two modes can never
-    silently drift again. Stateless assembly (``conv_id=''``), built per
-    access rather than at import: vertical-search credentials and MCP connectivity are
-    runtime state (same rationale as ``_ReportTools``).
-    """
-    from lib.tools import (
-        ToolContext,
-        assemble_tool_list,
-        resolve_enabled_plugins,
-    )
-    cfg: dict = {}
-    ctx = ToolContext(
-        cfg=cfg, task_id='', project_path='', project_enabled=False,
-        search_mode='multi', search_enabled=True, fetch_enabled=True,
-        code_exec_enabled=True,
-        browser_enabled=False, desktop_enabled=False, swarm_enabled=False,
-        enabled_plugins=resolve_enabled_plugins(cfg),
-    )
-    tools, _has_base = assemble_tool_list(ctx)
-    return tools
-
-
-class _PaperFullTools(list):
-    """The full (chat-tier) paper tool set, resolved on each access.
-
-    Same lazy-list contract as :class:`_ReportTools` — stays a ``list``
-    because engines pass it straight to ``run_agent_loop(round_tools=...)``.
-    Consumed by the report + Q&A engines; the research-only engines
-    (insight / recommend / ideate / survey) deliberately keep
-    ``_REPORT_TOOLS`` — their pipeline shape (forced verticals) is designed
-    around search+fetch and must NOT gain write or
-    execution tools.
-    """
-
-    def _resolve(self):
-        return _build_full_tool_schemas()
-
-    def __iter__(self):
-        return iter(self._resolve())
-
-    def __len__(self):
-        return len(self._resolve())
-
-    def __getitem__(self, idx):
-        return self._resolve()[idx]
-
-
-_FULL_REPORT_TOOLS = _PaperFullTools()

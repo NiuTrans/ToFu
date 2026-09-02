@@ -288,14 +288,14 @@ class TestAbortFinishRace:
     def test_abort_sets_event_under_lock(self):
         from lib.agent_core.task_runtime import TaskRuntime
         rt = TaskRuntime('test-abort')
-        task = rt.create()
+        task = rt.create(user_id=1)
         assert rt.abort(task['id']) is True
         assert task['abort_event'].is_set()
 
     def test_abort_after_finish_is_noop(self):
         from lib.agent_core.task_runtime import TaskRuntime
         rt = TaskRuntime('test-abort')
-        task = rt.create()
+        task = rt.create(user_id=1)
         rt.finish(task['id'], result='done')
         assert rt.abort(task['id']) is False
         assert task['status'] == 'done'
@@ -303,7 +303,7 @@ class TestAbortFinishRace:
     def test_finish_after_abort_marks_aborted(self):
         from lib.agent_core.task_runtime import TaskRuntime
         rt = TaskRuntime('test-abort')
-        task = rt.create()
+        task = rt.create(user_id=1)
         rt.abort(task['id'])
         rt.finish(task['id'])  # no error → abort_event decides 'aborted'
         assert task['status'] == 'aborted'

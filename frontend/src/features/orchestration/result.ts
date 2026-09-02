@@ -132,7 +132,7 @@ export function orchestrationContractFieldsMatch(
     if (!spec || typeof spec.name !== 'string' || !spec.name
         || ![
           'string', 'boolean', 'nullable_boolean',
-          'nullable_non_negative_integer',
+          'non_negative_integer', 'nullable_non_negative_integer',
         ].includes(String(spec.type))
         || names.includes(spec.name)
         || !Object.prototype.hasOwnProperty.call(value, spec.name)) {
@@ -144,9 +144,11 @@ export function orchestrationContractFieldsMatch(
     if (fieldType === 'nullable_boolean') {
       return fieldValue === null || typeof fieldValue === 'boolean';
     }
-    if (fieldType === 'nullable_non_negative_integer') {
-      return fieldValue === null
-        || Number.isSafeInteger(fieldValue) && Number(fieldValue) >= 0;
+    if (fieldType === 'non_negative_integer'
+        || fieldType === 'nullable_non_negative_integer') {
+      if (fieldType === 'nullable_non_negative_integer'
+          && fieldValue === null) return true;
+      return Number.isSafeInteger(fieldValue) && Number(fieldValue) >= 0;
     }
     return typeof fieldValue === fieldType;
   });

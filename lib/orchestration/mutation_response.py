@@ -64,13 +64,12 @@ def mutation_error_message(result: OrchestrationMutationResult) -> str:
 
 def mutation_response(
     result: OrchestrationMutationResult,
-    *,
-    compatibility: dict | None = None,
 ) -> tuple[dict, int]:
-    """Project a canonical result plus additive legacy response fields."""
-    payload = dict(compatibility or {})
-    payload['ok'] = bool(result.ok)
-    payload['mutation'] = result.payload()
+    """Project the canonical mutation result and HTTP status."""
+    payload = {
+        'ok': bool(result.ok),
+        'mutation': result.payload(),
+    }
     if not result.ok:
         payload['error'] = mutation_error_message(result)
     return payload, mutation_http_status(result)

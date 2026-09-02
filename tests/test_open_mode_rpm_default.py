@@ -63,7 +63,7 @@ def test_auto_default_off_for_loopback_only(spy):
     import lib.rate_limit_api as mod
     assert mod._open_mode_rpm() == 0
     for path in ('/api/v1/chat/completions', '/api/v1/search',
-                 '/api/chat/stream/abc'):
+                 '/api/v1/tasks/abc/stream'):
         allowed = _in_ctx(path, lambda: mod.check_open_mode_request().allowed)
         assert allowed, f'{path} throttled on an uncapped install'
     assert spy.calls == [], 'disarmed cap still consulted the store'
@@ -108,7 +108,7 @@ def test_owner_incident_regression_loopback_never_429(spy):
     busy UI (multiple tabs, several running tasks) issuing a mixed stream of
     polls and expensive calls NEVER sees a 429 from its own server."""
     import lib.rate_limit_api as mod
-    paths = ['/api/v1/chat/poll/t1', '/api/v1/chat/poll/t2',
+    paths = ['/api/v1/tasks/t1', '/api/v1/tasks/t2',
              '/api/v1/project/brain/summary', '/api/v1/chat/completions',
              '/api/v1/conversations/sync-digest']
     results = []

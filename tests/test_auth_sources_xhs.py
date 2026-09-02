@@ -124,7 +124,7 @@ class TestAuthSourceStore:
     def test_match_requires_enabled_and_cookies(self):
         # browser_first rows match with ZERO cookies — the user's LIVE
         # browser session is the credential (deliberate design,
-        # docs/SITE_KNOWLEDGE_LAYER_DESIGN.md:120), so enabling is enough.
+        # docs/modules/browser_automation.md), so enabling is enough.
         A.set_enabled('xiaohongshu.com', True)
         assert A.match_source('https://www.xiaohongshu.com/explore/1') is not None
 
@@ -403,7 +403,9 @@ class TestOrchestratorWiring:
         import inspect
 
         from tofu_search.search import orchestrator as o
-        src = inspect.getsource(o.perform_web_search)
+        # ``perform_web_search`` may be wrapped by the host's provider bridge;
+        # the engine census and availability gate live in the retained pipeline.
+        src = inspect.getsource(o._perform_web_search_impl)
         # Conditionally wired on availability, not unconditionally.
         assert 'xhs_search_available' in src
         assert 'Xiaohongshu' in src

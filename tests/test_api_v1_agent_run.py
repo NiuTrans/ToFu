@@ -10,10 +10,11 @@ Covers:
 * api_key is never echoed back in any response
 """
 
+pytest_plugins = ('tests._credential_sidecar',)
+
 import asyncio
 import os
 import sys
-import tempfile
 import unittest
 
 
@@ -27,21 +28,10 @@ def _new_loop_run(coro):
 
 class AgentRunRouteTest(unittest.TestCase):
 
+    OWNER_USER_ID = 12_010
+
     @classmethod
     def setUpClass(cls):
-        cls._tmp = tempfile.TemporaryDirectory()
-
-        # Isolate api_keys store
-        from lib import api_keys, byo_providers
-        cls._orig_keys = api_keys._STORE_PATH
-        cls._orig_byo = byo_providers._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(cls._tmp.name, 'api_keys.json')
-        byo_providers._STORE_PATH = os.path.join(cls._tmp.name, 'byo.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        byo_providers._cache.clear()
-        byo_providers._cache_loaded = False
-        os.environ['TUNNEL_TOKEN'] = 'test-no-real'
         # These tests stub spawn_task and exercise the BYO surface /
         # mint-dispose mechanics — NOT endpoint reachability. The mint-time
         # TCP probe (added 2026-06) would otherwise make a real network call
@@ -68,33 +58,21 @@ class AgentRunRouteTest(unittest.TestCase):
 
         # Mint a key with both scopes.
         from lib.api_keys import create_key
-        _row, cls.token = create_key(
+        _row, cls.token = create_key(owner_user_id=cls.OWNER_USER_ID,
             name='byo-bot', scopes=['providers', 'agents:run'])
 
     @classmethod
     def tearDownClass(cls):
-        from lib import api_keys, byo_providers
-        api_keys._STORE_PATH = cls._orig_keys
-        byo_providers._STORE_PATH = cls._orig_byo
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        byo_providers._cache.clear()
-        byo_providers._cache_loaded = False
         if cls._orig_preflight is None:
             os.environ.pop('TOFU_EPHEMERAL_PREFLIGHT', None)
         else:
             os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = cls._orig_preflight
-        cls._tmp.cleanup()
 
     def setUp(self):
-        from lib import byo_providers
+        from lib.byo_providers import delete_provider, list_providers
         from lib.idempotency import _cache as _id_cache
-        byo_providers._cache.clear()
-        byo_providers._cache_loaded = False
-        try:
-            os.remove(byo_providers._STORE_PATH)
-        except FileNotFoundError:
-            pass
+        for provider in list_providers(self.OWNER_USER_ID):
+            delete_provider(provider['id'], self.OWNER_USER_ID)
         _id_cache.clear()
 
         # The production `controller` counts in-flight slots in the SHARED
@@ -107,7 +85,7 @@ class AgentRunRouteTest(unittest.TestCase):
         rss.reset_for_test()
 
         # Stub spawn_task so the orchestrator doesn't try to call out.
-        import lib.tasks_pkg as pkg
+        import lib.tasks_pkg.spawn as pkg
 
         def _fake_spawn(task):
             task['content'] = 'hello from byo'
@@ -124,7 +102,7 @@ class AgentRunRouteTest(unittest.TestCase):
         pkg.spawn_task = _fake_spawn
 
     def tearDown(self):
-        import lib.tasks_pkg as pkg
+        import lib.tasks_pkg.spawn as pkg
         pkg.spawn_task = self._orig_spawn
         # Leave the shared runtime_state_store clean so this suite never
         # leaks an in-flight count forward to whatever runs next.
@@ -341,7 +319,7 @@ class AgentRunRouteTest(unittest.TestCase):
     def test_unauthorized_without_scope(self):
         async def go():
             from lib.api_keys import create_key
-            _row, no_scope_token = create_key(
+            _row, no_scope_token = create_key(owner_user_id=1, 
                 name='no-scope', scopes=['chat'])  # missing agents:run
             cli = self.app.test_client()
             r = await cli.post(
@@ -365,7 +343,7 @@ class AgentRunRouteTest(unittest.TestCase):
             cli = self.app.test_client()
             seen_cfg = {}
 
-            import lib.tasks_pkg as pkg
+            import lib.tasks_pkg.spawn as pkg
             orig = pkg.spawn_task
 
             def _cap(task):
@@ -429,7 +407,7 @@ class AgentRunRouteTest(unittest.TestCase):
         async def go():
             import threading
             import time as _time
-            import lib.tasks_pkg as pkg
+            import lib.tasks_pkg.spawn as pkg
             from lib.tasks_pkg.manager import append_event
 
             def _deferred_spawn(task):
@@ -487,7 +465,7 @@ class AgentRunRouteTest(unittest.TestCase):
         """When the admission controller is at capacity the handler refuses
         with 503 rather than spawning unbounded work."""
         async def go():
-            from lib.agent_core import admission
+            import lib.agent_core.admission as admission
             import routes.api_v1.agent_run as ar
             # Force a saturated controller for the duration of this test.
             orig_ctrl = ar.controller
@@ -513,6 +491,6 @@ class AgentRunRouteTest(unittest.TestCase):
 if __name__ == '__main__':
     import pathlib
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_api_v1_agent_run.py')
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_api_v1_agent_run.py')
     unittest.main()

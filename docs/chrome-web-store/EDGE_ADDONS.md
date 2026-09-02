@@ -41,7 +41,8 @@ harder, and stated as an absolute:
 > Microsoft: "Remote code is only supported for Manifest V2, not Manifest V3.
 > In Manifest V3, loading and executing remotely hosted code is not permitted."
 
-We ship MV3, and `browser_execute_js` runs JS the user's own Tofu server
+We ship MV3, and `browser_execute_js` plus DevTools expression/call-frame
+evaluation run JS the user's own Tofu server
 sends. Chrome's policy leaves argument room ("the user's own server, not an
 author-controlled endpoint"); Edge's MV3 wording leaves noticeably less. The
 Privacy page has an explicit **"Are you using remote code?"** radio with a
@@ -50,7 +51,8 @@ inaccurate disclosure can itself cause rejection, so a wrong "No" is worse
 than a declared "Yes".
 
 Practical consequence: the **reduced build** contemplated in
-`REVIEW_RISKS.md` outcome ladder #2 (no `browser_execute_js`, and optionally
+`REVIEW_RISKS.md` outcome ladder #2 (no `browser_execute_js` or
+`browser_devtools`, and optionally
 no `debugger`) is MORE likely to be required for Edge than for Chrome. Decide
 that before spending review cycles, not after.
 

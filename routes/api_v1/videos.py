@@ -1,6 +1,6 @@
 """routes/api_v1/videos.py — video upload + processing status + playback.
 
-P1 of the video-upload epic (pt_6aca988757cb4019): the client POSTs a video,
+P1 of the video-upload epic (): the client POSTs a video,
 gets a ``video_id`` immediately (202-style async pattern on a 200 envelope),
 and polls ``GET /api/v1/videos/<video_id>`` until ``status == 'ready'`` —
 the record then carries the full self-contained payload (durable frame URLs +
@@ -31,6 +31,8 @@ from lib.api_response import (
 )
 from lib.file_serving import send_file_conditional
 from lib.log import get_logger
+
+from .auth import request_user_id
 
 logger = get_logger(__name__)
 
@@ -65,6 +67,7 @@ _EXT_CONTAINER = {
 def upload_video():
     from lib import video_analysis as va
 
+    owner_user_id = int(request_user_id())
     if not va.video_analysis_enabled():
         return api_error('Video analysis is disabled on this server', status=503)
 
@@ -131,8 +134,18 @@ def upload_video():
         return api_bad_request('Payload does not match the declared video format')
 
     video_id = f'v_{int(time.time() * 1000)}_{os.urandom(4).hex()}'
-    va.create_record(video_id, name=file.filename, size_bytes=total)
-    va.start_processing(video_id, tmp_path, file.filename)
+    va.create_record(
+        video_id,
+        name=file.filename,
+        size_bytes=total,
+        user_id=owner_user_id,
+    )
+    va.start_processing(
+        video_id,
+        tmp_path,
+        file.filename,
+        user_id=owner_user_id,
+    )
     logger.info('[videos] accepted %s (%s, %d bytes) → processing',
                 video_id, file.filename, total)
     return api_ok({'video_id': video_id, 'status': 'processing',
@@ -154,7 +167,7 @@ def video_status(video_id: str):
 
     if not va.video_analysis_enabled():
         return api_error('Video analysis is disabled on this server', status=503)
-    rec = va.get_record(video_id)
+    rec = va.get_record(video_id, user_id=int(request_user_id()))
     if rec is None:
         return api_not_found('video_not_found')
     return api_ok(rec)
@@ -168,8 +181,10 @@ def serve_video(filename: str):
     must not 500 — see the 2026-08-03 file_serving consolidation)."""
     from lib import video_analysis as va
 
-    safe = os.path.basename(filename)
-    filepath = os.path.join(va.videos_dir(), safe)
-    if not os.path.isfile(filepath):
+    filepath = va.resolve_owned_video_asset(
+        filename,
+        user_id=int(request_user_id()),
+    )
+    if not filepath:
         return api_not_found('Not found')
     return send_file_conditional(filepath)

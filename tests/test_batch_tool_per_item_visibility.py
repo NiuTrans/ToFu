@@ -112,7 +112,7 @@ def rec(monkeypatch):
     """Capture events from every emission site the batch handlers reach."""
     r = _Recorder()
     from lib.tasks_pkg.executor import _finalize as exec_finalize
-    from lib.tasks_pkg.handlers.search import _handlers as search_handlers
+    import lib.tasks_pkg.handlers.search._handlers as search_handlers
 
     monkeypatch.setattr(search_handlers, 'append_event', r, raising=False)
     monkeypatch.setattr(exec_finalize, 'append_event', r, raising=False)
@@ -123,9 +123,7 @@ def rec(monkeypatch):
 def fake_search(monkeypatch):
     """Stub ``_web_search_one`` with per-query scripted latency.
 
-    Patched on the PACKAGE FACADE because the orchestrators deliberately
-    resolve it through ``lib.tasks_pkg.handlers.search`` at call time
-    (monkeypatch-parity contract documented in _handlers.py).
+    Patched on the authoritative primitive owner used by every orchestrator.
     """
     script: dict[str, float] = {}
     order: list[str] = []
@@ -140,8 +138,8 @@ def fake_search(monkeypatch):
                     'fetchedChars': 10}]
         return results, None, None, None
 
-    from lib.tasks_pkg.handlers import search as facade
-    monkeypatch.setattr(facade, '_web_search_one', _one, raising=False)
+    import lib.tasks_pkg.handlers.search._core as search_core
+    monkeypatch.setattr(search_core, '_web_search_one', _one)
     return script, order
 
 
@@ -154,8 +152,8 @@ def fake_fetch(monkeypatch):
         return {'url': url, 'page_content': 'body of %s' % url, 'is_pdf': False,
                 'raw_chars': 20, 'filtered_chars': 20, 'error_msg': None}
 
-    from lib.tasks_pkg.handlers import search as facade
-    monkeypatch.setattr(facade, '_fetch_url_one', _one, raising=False)
+    import lib.tasks_pkg.handlers.search._core as search_core
+    monkeypatch.setattr(search_core, '_fetch_url_one', _one)
     return script
 
 
@@ -365,8 +363,8 @@ def test_failed_item_is_still_reported(rec, monkeypatch):
         return ([{'title': 't', 'url': 'u', 'snippet': 's', 'source': 'x',
                   'fetched': True, 'fetchedChars': 1}], None, None, None)
 
-    from lib.tasks_pkg.handlers import search as facade
-    monkeypatch.setattr(facade, '_web_search_one', _one, raising=False)
+    import lib.tasks_pkg.handlers.search._core as search_core
+    monkeypatch.setattr(search_core, '_web_search_one', _one)
 
     from lib.tasks_pkg.handlers.search._handlers import _handle_web_search
     task = _mk_task()

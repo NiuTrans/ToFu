@@ -105,6 +105,7 @@ class TestStartFlowBindFirst(unittest.TestCase):
 
     def setUp(self):
         mgr._active_flows.pop('claude', None)
+        mgr._active_flows.pop('codex', None)
 
     def test_desktop_with_free_port_uses_loopback_and_runs_relay(self):
         fake_server = mock.MagicMock()
@@ -154,14 +155,35 @@ class TestStartFlowBindFirst(unittest.TestCase):
         self.assertEqual(_redirect_in(res['auth_url']), _CONSOLE)
         th.assert_not_called()
 
-    def test_codex_relay_is_unaffected(self):
-        """Codex always relays; this change must not alter that."""
+    def test_remote_codex_uses_manual_callback_capture_without_binding(self):
+        """A server-side listener cannot receive a remote browser's localhost."""
         with mock.patch('lib.oauth.manager._flow._loopback_callback_ok',
                         return_value=False), \
+             mock.patch('lib.oauth.manager._flow._bind_relay') as bind, \
              mock.patch('threading.Thread') as th:
-            mgr.start_oauth_flow('codex')
+            res = mgr.start_oauth_flow('codex')
+        bind.assert_not_called()
+        th.assert_not_called()
+        self.assertEqual(res['redirect_mode'], 'manual')
+        self.assertEqual(mgr._active_flows['codex']['redirect_mode'],
+                         'manual')
+
+    def test_local_codex_binds_before_returning_authorization_url(self):
+        """CLIProxyAPI parity: the callback listener is ready before open."""
+        fake_server = mock.MagicMock()
+        with mock.patch('lib.oauth.manager._flow._loopback_callback_ok',
+                        return_value=True), \
+             mock.patch('lib.oauth.manager._flow._bind_relay',
+                        return_value=fake_server) as bind, \
+             mock.patch('lib.oauth.manager._flow._run_relay_server') as run, \
+             mock.patch('threading.Thread') as th:
+            res = mgr.start_oauth_flow('codex')
+        bind.assert_called_once_with(
+            'codex', 1455, mgr._active_flows['codex']['state'])
         th.assert_called_once()
-        self.assertIsNone(th.call_args.kwargs['kwargs']['server'])
+        self.assertIs(th.call_args.kwargs['kwargs']['server'], fake_server)
+        self.assertIs(th.call_args.kwargs['target'], run)
+        self.assertEqual(res['redirect_mode'], 'loopback')
 
 
 class TestExchangeEchoesAuthorizeRedirect(unittest.TestCase):
@@ -299,7 +321,12 @@ class TestPreferConsoleEscapeHatch(unittest.TestCase):
 
     def test_prefer_console_is_inert_for_codex(self):
         """Codex has ONE registered redirect — the flag must not break it."""
-        with mock.patch('threading.Thread') as th:
+        fake_server = mock.MagicMock()
+        with mock.patch('lib.oauth.manager._flow._loopback_callback_ok',
+                        return_value=True), \
+             mock.patch('lib.oauth.manager._flow._bind_relay',
+                        return_value=fake_server), \
+             mock.patch('threading.Thread') as th:
             res = mgr.start_oauth_flow('codex', prefer_console=True)
         th.assert_called_once()
         self.assertEqual(res['redirect_mode'], 'loopback')

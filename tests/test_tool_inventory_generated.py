@@ -56,7 +56,7 @@ def _model_visible_write_tools():
     """
     import lib.tasks_pkg.handlers  # noqa: F401 — registration side-effect
     from lib.tasks_pkg.tool_dispatch._flags import _WRITE_TOOLS
-    from lib.tools import all_specs
+    from lib.tools.registry import all_specs
 
     provides = set()
     for s in all_specs():
@@ -103,7 +103,7 @@ class TestInventoryNotStale:
         sys.path.insert(0, _repo_root())
         from scripts.gen_tool_inventory import collect
 
-        from lib.tools import all_specs
+        from lib.tools.registry import all_specs
         inv = collect()
         rows = {r['tool'] for r in inv['builtin']}
         declared = set()

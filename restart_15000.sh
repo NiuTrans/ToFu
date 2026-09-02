@@ -28,8 +28,8 @@
 # reap can no longer SIGTERM it. Output still goes to ${LOG} (the shell does the
 # redirect, not nohup). Step [4b/5] asserts the live listener really left this
 # terminal (tty=?, no "+" in STAT, sid≠this shell). For a server that must also
-# survive OOM/crash, prefer the supervisord program instead — see
-# deploy/supervisor/tofu.conf (autostart/autorestart=true).
+# survive OOM/crash, prefer the rendered supervisord program instead — see
+# deploy/supervisor/tofu.conf.template (autostart/autorestart=true).
 #
 # MUTEX (2026-07-16): this script and the supervisord program are TWO owners of
 # :15000 and must never both drive it. Step [pre/5] detects when supervisord
@@ -44,9 +44,112 @@
 # instance that STARTED AFTER this restart began (start-time proof, not just
 # "port is occupied"), so a stale pre-existing process is still reloaded.
 
-PROJ="/path/to/your/project"
-PY="/path/to/your/project"
+_restart_usage() {
+  cat <<'EOF'
+usage: bash restart_15000.sh
+
+Linux-only legacy restart and deployment-verification compatibility entrypoint.
+For normal source installations use `python serverctl.py restart`; it owns the
+single managed worker, readiness checks, diagnostics, and human approval flow.
+
+  -h, --help  show this help without inspecting or changing live processes
+EOF
+}
+
+case "$#:${1:-}" in
+  0:) ;;
+  1:-h|1:--help) _restart_usage; exit 0 ;;
+  *)
+    echo "restart_15000.sh: unsupported arguments: $*" >&2
+    _restart_usage >&2
+    exit 2
+    ;;
+esac
+
+umask 077  # inherited server stdout can contain private diagnostic evidence
+
+[ "$(uname -s)" = "Linux" ] || {
+  echo "restart_15000.sh is Linux-only; use python serverctl.py restart." >&2
+  exit 1
+}
+
+SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+SCRIPT_PROJECT="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)"
+PROJ="${TOFU_PROJECT_ROOT:-$SCRIPT_PROJECT}"
+PROJ="$(cd -- "$PROJ" 2>/dev/null && pwd -P)" \
+  || { echo "FATAL: cannot resolve project directory: ${PROJ}"; exit 1; }
+
+# Explicit override wins; otherwise honor the installer marker, then the
+# project-local uv environment, then a Python 3 already on PATH. A stale marker
+# after a directory/host move fails closed with a concrete repair instead of
+# launching the wrong interpreter.
+PY="${TOFU_RUNTIME_PYTHON:-}"
+_resolve_runtime_python() {
+  local selected="$PY"
+  local marker="${PROJ}/.tofu_env.json"
+  local bootstrap="" candidate=""
+  if [ -z "$selected" ] && [ -f "$marker" ]; then
+    for candidate in "${PROJ}/.venv/bin/python" "$(command -v python3 2>/dev/null)"; do
+      if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        bootstrap="$candidate"
+        break
+      fi
+    done
+    [ -n "$bootstrap" ] || {
+      echo "FATAL: cannot parse ${marker}; set TOFU_RUNTIME_PYTHON." >&2
+      return 1
+    }
+    selected="$("$bootstrap" - "$marker" <<'PYEOF'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as stream:
+        value = json.load(stream).get('python')
+except (OSError, TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(value, str) or not value:
+    raise SystemExit(2)
+sys.stdout.write(value)
+PYEOF
+)" || {
+      echo "FATAL: invalid ${marker}; rerun install.sh or set TOFU_RUNTIME_PYTHON." >&2
+      return 1
+    }
+    [ -x "$selected" ] || {
+      echo "FATAL: ${marker} points to missing Python: ${selected}" >&2
+      echo "       Rerun install.sh after moving this checkout." >&2
+      return 1
+    }
+  fi
+  if [ -z "$selected" ] && [ -x "${PROJ}/.venv/bin/python" ]; then
+    selected="${PROJ}/.venv/bin/python"
+  fi
+  if [ -z "$selected" ]; then
+    selected="$(command -v python3 2>/dev/null || command -v python 2>/dev/null)"
+  fi
+  [ -n "$selected" ] && [ -x "$selected" ] || {
+    echo "FATAL: no runtime Python found; run install.sh or set TOFU_RUNTIME_PYTHON." >&2
+    return 1
+  }
+  printf '%s' "$selected"
+}
+PY="$(_resolve_runtime_python)" || exit 1
+"${PY}" - <<'PYEOF' >/dev/null 2>&1 || {
+import sys
+raise SystemExit(0 if sys.version_info[:2] >= (3, 12) else 1)
+PYEOF
+  echo "FATAL: runtime interpreter must be Python 3.12+: ${PY}" >&2
+  exit 1
+}
+
+REQUESTED_PORT="${PORT:-}"
 PORT=15000
+[ -z "$REQUESTED_PORT" ] || PORT="$REQUESTED_PORT"
+case "$PORT" in
+  ''|*[!0-9]*) echo "FATAL: PORT must be an integer in 1..65535" >&2; exit 2 ;;
+esac
+[ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] \
+  || { echo "FATAL: PORT must be an integer in 1..65535" >&2; exit 2; }
 LOG="server_${PORT}.log"
 
 # A test process must never turn this production lifecycle entrypoint into an
@@ -99,7 +202,8 @@ listener_pids() {
 }
 
 # ── [pre/5] MUTEX GUARD — refuse to run if supervisord already OWNS tofu. ──
-# The durable fix (deploy/supervisor/tofu.conf) hands :PORT to the host
+# The durable fix (rendered from deploy/supervisor/tofu.conf.template) hands
+# :PORT to the host
 # supervisord with autorestart=true. If BOTH mechanisms are live they FIGHT:
 # this script's [1/5] kill → supervisord instantly relaunches (grabbing the
 # port) → this script's [3/5] relaunch then aborts on the single-instance lock
@@ -116,8 +220,21 @@ listener_pids() {
 #       `supervisord`) — that proves supervisord, not a terminal, spawned it.
 # A clean STOPPED/absent program, or conf present but the listener is NOT a
 # supervisord child, means the script may proceed (manual mode).
-SUPERVISOR_CONF="/etc/supervisor/conf.d/tofu.conf"
 SUPERVISOR_PROG="tofu"
+
+_supervisor_conf_present() {
+  local candidate
+  if [ -n "${TOFU_SUPERVISOR_CONF:-}" ]; then
+    [ -f "${TOFU_SUPERVISOR_CONF}" ]
+    return
+  fi
+  for candidate in \
+      /etc/supervisor/conf.d/tofu.conf \
+      /etc/supervisord.d/tofu.ini; do
+    [ -f "$candidate" ] && return 0
+  done
+  return 1
+}
 
 _supervisorctl() {
   # Emit the program's status line ONLY on a genuine query success. Try an
@@ -165,7 +282,7 @@ if [ -n "${SV_STATUS}" ]; then
   case "${SV_STATUS}" in
     *RUNNING*|*STARTING*|*BACKOFF*) supervisord_owns=1 ;;
   esac
-elif [ -f "${SUPERVISOR_CONF}" ] && _listener_is_supervisord_child; then
+elif _supervisor_conf_present && _listener_is_supervisord_child; then
   # supervisorctl unreachable, but the conf is installed and the live listener
   # is genuinely a supervisord child — treat as owned.
   supervisord_owns=1
@@ -183,8 +300,8 @@ if [ "${supervisord_owns}" = "1" ]; then
   echo "        (status:  sudo supervisorctl status ${SUPERVISOR_PROG}"
   echo "         logs:    tail -f ${PROJ}/logs/supervisor_tofu.log )"
   [ -n "${SV_STATUS}" ] && echo "        current: ${SV_STATUS}"
-  echo "        To hand control BACK to this script, first uninstall the"
-  echo "        program:  sudo rm ${SUPERVISOR_CONF} && sudo supervisorctl update"
+  echo "        To hand control back, remove the rendered tofu.conf/tofu.ini from"
+  echo "        the supervisord include directory, then run supervisorctl update."
   echo "════════════════════════════════════════════════════════════════"
   exit 0
 fi
@@ -452,7 +569,9 @@ for attempt in 1 2 3; do
   fi
   LAUNCH_STAMP="$(date '+%F %T')"
   LOG_MARK="$(wc -l < "${LOG}" 2>/dev/null || echo 0)"
-  PORT="${PORT}" BIND_HOST="${BIND_HOST:-0.0.0.0}" setsid nohup "${PY}" server.py >> "${LOG}" 2>&1 9>&- &
+  PORT="${PORT}" BIND_HOST="${BIND_HOST:-0.0.0.0}" \
+    TOFU_EXTERNAL_CONSOLE_LOG="${PROJ}/${LOG}" \
+    setsid nohup "${PY}" server.py >> "${LOG}" 2>&1 9>&- &
   NEWPID=$!
   echo "      Launched pid ${NEWPID}; logging to ${LOG}"
 
@@ -538,7 +657,8 @@ else
     echo "         The server is STILL bound to this terminal's session — a"
     echo "         terminal/session reap will SIGTERM it again. The setsid launch"
     echo "         did not take effect (wrong shell, or started manually). The"
-    echo "         durable fix is the supervisord program (deploy/supervisor/tofu.conf)."
+    echo "         durable fix is the rendered supervisord program"
+    echo "         (deploy/supervisor/tofu.conf.template)."
   fi
 fi
 

@@ -1,6 +1,6 @@
 """tests/test_remote_worktree_devices.py — RWA P4b-1:伪路径解析 + Devices 端点.
 
-docs/REMOTE_WORKTREE_DESIGN.md §5 P4(拍板 5A Settings→Devices):
+docs/modules/remote_execution.md:
   * **伪路径**:conv.projectPath = ``remote:<agent_id>:<root>`` 复用全部既有
     持久化机制;resolve_conv_config 翻译为 ``cfg['project_remote']`` 并清掉
     projectPath(服务器侧无此路径);总闸 off → 逐字节不翻译;
@@ -14,6 +14,8 @@ Run:  pytest tests/test_remote_worktree_devices.py -m unit -v
 
 from __future__ import annotations
 
+pytest_plugins = ('tests._credential_sidecar',)
+
 import threading
 import time
 
@@ -24,10 +26,8 @@ from lib.desktop import bridge as db
 
 @pytest.fixture(autouse=True)
 def _clean_bridge(monkeypatch):
-    monkeypatch.setenv('TOFU_DESKTOP_ADDRESSING', '1')
     monkeypatch.delenv('TOFU_REMOTE_WORKTREE', raising=False)
     monkeypatch.setattr(db, '_last_poll', [0.0])
-    monkeypatch.setattr(db, '_v1_last_poll', 0.0)
     with db.command_queue_lock:
         db.command_queue.clear()
         db._agents.clear()
@@ -108,21 +108,22 @@ def _register(agent_id, user_id='', name='box'):
 
 @pytest.mark.api
 class TestDevicesEndpoints:
-    def _token(self, user_id='u-alice', scopes=('chat',)):
+    def _token(self, user_id='101', scopes=('chat',)):
         from lib.api_keys import create_key
-        _row, token = create_key(name='devices-test', scopes=list(scopes),
-                                 user_id=user_id)
+        _row, token = create_key(
+            owner_user_id=int(user_id), name='devices-test',
+            scopes=list(scopes))
         return token
 
     def test_devices_lists_agents_and_bridge_tokens(self, flask_client):
         token = self._token()
-        _register('agent-A', user_id='u-alice', name='mac')
-        _register('agent-B', user_id='u-bob', name='win')
+        _register('agent-A', user_id='101', name='mac')
+        _register('agent-B', user_id='202', name='win')
         from lib.api_keys import create_key
-        create_key(name='bridge-mac', scopes=['agents:bridge'],
-                   user_id='u-alice')
-        create_key(name='unrelated-chat-key', scopes=['chat'],
-                   user_id='u-alice')
+        create_key(owner_user_id=101, name='bridge-mac',
+                   scopes=['agents:bridge'])
+        create_key(owner_user_id=101, name='unrelated-chat-key',
+                   scopes=['chat'])
         r = flask_client.get('/api/v1/desktop/devices',
                              headers={'Authorization': f'Bearer {token}'})
         assert r.status_code == 200
@@ -146,20 +147,15 @@ class TestDevicesEndpoints:
         body = r.get_json()
         assert body['token'] and body['id']
         # 铸出的 token 真能过 poll 认证(scope + user 绑定)
-        import os
-        os.environ['TOFU_BRIDGE_SECRET'] = 'global-x'
-        try:
-            db.register_agent('agent-Z', {'name': 'z'}, user_id='')
-            with db.command_queue_lock:
-                db._agents.clear()
-            rp = flask_client.post('/api/desktop/poll',
-                                   json={'results': [], 'agent': {
-                                       'agent_id': 'agent-Z', 'name': 'z'}},
-                                   headers={'X-Bridge-Secret': body['token']})
-            assert rp.status_code == 200
-            assert db.online_agents()[0]['user_id'] == 'u-alice'
-        finally:
-            del os.environ['TOFU_BRIDGE_SECRET']
+        db.register_agent('agent-Z', {'name': 'z'}, user_id='')
+        with db.command_queue_lock:
+            db._agents.clear()
+        rp = flask_client.post('/api/desktop/poll',
+                               json={'results': [], 'agent': {
+                                   'agent_id': 'agent-Z', 'name': 'z'}},
+                               headers={'X-Bridge-Secret': body['token']})
+        assert rp.status_code == 200
+        assert db.online_agents()[0]['user_id'] == '101'
 
     def test_revoke_own_token(self, flask_client):
         token = self._token()
@@ -170,20 +166,15 @@ class TestDevicesEndpoints:
                                  headers={'Authorization': f'Bearer {token}'})
         assert rd.status_code == 200
         # 撤销后 poll 认证不再接受它
-        import os
-        os.environ['TOFU_BRIDGE_SECRET'] = 'global-x'
-        try:
-            minted = r.get_json()['token']
-            rp = flask_client.post('/api/desktop/poll',
-                                   json={'results': []},
-                                   headers={'X-Bridge-Secret': minted})
-            assert rp.status_code == 401
-        finally:
-            del os.environ['TOFU_BRIDGE_SECRET']
+        minted = r.get_json()['token']
+        rp = flask_client.post('/api/desktop/poll',
+                               json={'results': []},
+                               headers={'X-Bridge-Secret': minted})
+        assert rp.status_code == 401
 
     def test_revoke_foreign_token_refused(self, flask_client):
-        alice = self._token(user_id='u-alice')
-        bob = self._token(user_id='u-bob')
+        alice = self._token(user_id='101')
+        bob = self._token(user_id='202')
         r = flask_client.post('/api/v1/desktop/token', json={'name': 'a'},
                               headers={'Authorization': f'Bearer {alice}'})
         key_id = r.get_json()['id']
@@ -194,8 +185,8 @@ class TestDevicesEndpoints:
     def test_revoke_non_bridge_key_refused(self, flask_client):
         token = self._token()
         from lib.api_keys import create_key
-        row, _t = create_key(name='chat-key', scopes=['chat'],
-                             user_id='u-alice')
+        row, _t = create_key(
+            owner_user_id=101, name='chat-key', scopes=['chat'])
         rd = flask_client.delete(f"/api/v1/desktop/token/{row['id']}",
                                  headers={'Authorization': f'Bearer {token}'})
         assert rd.status_code in (403, 404)

@@ -11,8 +11,8 @@ expects a title:
   • a queued peer/operator turn in the input bar was labelled by the same
     raw id.
 
-The fix routes every id→title through ONE frontend seam, ``convTitleById``
-(``static/js/core/conversations.js``): match the full id, then a UNIQUE prefix
+The fix routes every id→title through one catalog seam, ``convTitleById`` in
+``core/conv_reducers.js``: match the full id, then a UNIQUE prefix
 (so an 8-char display id still resolves against the loaded ``conversations``
 list), else fall back to a localized "Untitled chat" — NEVER a bare id. The
 delivery card (``_renderPeerDelivery`` in ``ui/tool_rounds.js``) and the queue
@@ -41,14 +41,15 @@ import subprocess
 import tempfile
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 # NOTE: convTitleById / _renderPeerDelivery are NOT looked up by hard-coded
-# paths. convTitleById started in core/conversations.js and moved to
-# core/conv_reducers.js; _renderPeerDelivery started in ui/tool_rounds.js and
+# paths. convTitleById lives in core/conv_reducers.js; _renderPeerDelivery moved
+# from ui/tool_rounds.js to
 # moved to ui/tool_rounds_rich.js (Epic-E splits). A pinned path turns those
 # legitimate refactors into `<sym> not found`, which reads like the seam was
 # deleted. Resolve both by SYMBOL from the production bundle manifests so the

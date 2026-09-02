@@ -1,5 +1,5 @@
 """tests/test_frontend_folder_longpress.py — Mobile folder-tab long-press +
-swipe-overlay guard (static/js/main/main_folders_mobile.js).
+swipe-overlay guard (`runtime/sections/main/main_folders_mobile.js`).
 
 Two mobile-only UX fixes are exercised against the REAL shipped source under
 jsdom (indirect eval → globals, mirroring the concatenated feature bundle):

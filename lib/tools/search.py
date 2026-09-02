@@ -9,9 +9,15 @@ def _vertical_domains() -> list[dict]:
     """Capability metadata for every currently-usable vertical domain.
 
     Sourced from tofu_search rather than restated here: a domain whose
-    credential is missing must not appear in the enum, and that state is only
-    known at request time (the key is set in Settings, not at import).
+    credential is missing must not appear in the enum. Before the optional
+    runtime's first real use, return a conservative ``auto``/``off`` schema
+    instead of importing the whole search/fetch stack merely to build a prompt.
+    Auto-detection remains available; later turns gain the runtime-derived
+    explicit domain enum once the library is resident.
     """
+    from lib.search_runtime import search_library_is_loaded
+    if not search_library_is_loaded():
+        return []
     try:
         from tofu_search.search.vertical import describe_domains
         return describe_domains()
@@ -169,8 +175,14 @@ def build_fetch_url_tool() -> dict:
         "Do NOT use for local file paths or file:// URIs — use read_files with an absolute path instead.\n"
         "If the URL points to a file asset rather than a web page (e.g. an SVG, image, "
         "archive, font or Office document), it is handled automatically: text-like assets "
-        "(SVG/JSON/source code) are returned inline, while binary assets are downloaded to a "
-        "local staging path and the response tells you the path to open with read_files.\n"
+        "(SVG/JSON/source code) are returned inline, while binary assets are transferred to a "
+        "server staging path and the response tells you the path to open with read_files. "
+        "If the server lacks the site's login but the selected browser has it, bytes stream "
+        "from that authenticated browser session to server staging; they are never silently "
+        "saved in the browser device's Downloads folder. Server staging is temporary and is "
+        "NOT the user's requested final destination: when they named a project/path, perform "
+        "a separate authorized filesystem copy/move from the returned staging path, and only "
+        "claim success after that destination operation returns its own receipt.\n"
     )
     if filter_on:
         description += (
@@ -229,11 +241,63 @@ def build_fetch_url_tool() -> dict:
     }
 
 
+def build_download_url_to_server_tool() -> dict:
+    """Build the explicit remote-URL → server-staging contract.
+
+    ``fetch_url`` remains the page-reading tool and may discover a binary
+    response incidentally.  This tool is the unambiguous entry point when the
+    requested outcome is a file on the Tofu server.  Transport selection is an
+    implementation detail: server HTTP is tried first, then the selected
+    browser session streams the response when its login/network is required.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": "download_url_to_server",
+            "description": (
+                "Download one http:// or https:// URL into temporary storage ON "
+                "THE TOFU SERVER. Use this whenever the user asks to download, "
+                "save, install, unzip, or copy a remote file on the server or into "
+                "a server-side project. The tool automatically tries safe server "
+                "HTTP first and, when the server cannot reach/authenticate the URL, "
+                "streams the response through the user's selected logged-in browser "
+                "to server staging. Cookies remain inside Chrome: NEVER call "
+                "browser_get_cookies and replay them with curl/wget. This tool does "
+                "not use Chrome Downloads and never reports a device-local file as a "
+                "server file. Success returns location=server_staging, an absolute "
+                "path, byte size, SHA-256, and transport. Staging is temporary; if "
+                "the user named a final project path, perform a separate authorized "
+                "filesystem copy/move and verify that destination before claiming the "
+                "whole task is complete."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": (
+                            "Exact remote file URL starting with http:// or https://. "
+                            "Signed query parameters are accepted and are not logged."
+                        ),
+                    },
+                },
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 # Boot-time snapshot for static capability listing (routes/api_v1/capabilities.py).
 # Per-request consumers must call build_fetch_url_tool() instead — see its docstring.
 FETCH_URL_TOOL = build_fetch_url_tool()
+DOWNLOAD_URL_TO_SERVER_TOOL = build_download_url_to_server_tool()
 
-__all__ = ['build_search_tool', 'build_fetch_url_tool', 'FETCH_URL_TOOL']
+__all__ = [
+    'build_search_tool', 'build_fetch_url_tool',
+    'build_download_url_to_server_tool', 'FETCH_URL_TOOL',
+    'DOWNLOAD_URL_TO_SERVER_TOOL',
+]
 # Boot-time snapshot for static capability listing (routes/api_v1/capabilities.py).
 # Per-request consumers must call build_fetch_url_tool() instead — see its docstring.
 FETCH_URL_TOOL = build_fetch_url_tool()
@@ -342,5 +406,8 @@ def build_update_search_settings_tool() -> dict:
     }
 
 
-__all__ = ['build_search_tool', 'build_fetch_url_tool', 'FETCH_URL_TOOL',
-           'build_update_search_settings_tool']
+__all__ = [
+    'build_search_tool', 'build_fetch_url_tool',
+    'build_download_url_to_server_tool', 'FETCH_URL_TOOL',
+    'DOWNLOAD_URL_TO_SERVER_TOOL', 'build_update_search_settings_tool',
+]

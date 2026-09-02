@@ -1,10 +1,4 @@
-"""Report "finish tag" metadata builder for paper report generation.
-
-Split out of the flat ``report_engine.py`` into a cohesive sub-module while
-preserving ``from lib.paper.report_engine import _build_report_meta`` and
-``from .report_engine import _build_report_meta`` byte-for-byte via the package
-facade (``__init__.py``).
-"""
+"""Build the serializable cost and usage metadata for a finished report."""
 
 from lib.log import get_logger
 

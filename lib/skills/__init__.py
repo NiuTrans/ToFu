@@ -23,6 +23,7 @@ Public API::
 from lib.skills.registry import (
     get_skill,
     list_skills,
+    set_skill_enabled,
     set_skill_scope,
     uninstall_skill,
 )
@@ -32,10 +33,16 @@ from lib.skills.injection import (
 from lib.skills.load import (
     load_skill,
     list_skill_files,
+    read_skill_resource,
 )
 from lib.skills.tools import (
+    SEARCH_SKILLS_TOOL,
     LOAD_SKILL_TOOL,
+    READ_SKILL_RESOURCE_TOOL,
+    REQUEST_SKILL_INSTALL_TOOL,
     ALL_SKILL_TOOLS,
+    SKILL_INSTALL_TOOLS,
+    SKILL_READ_TOOLS,
     SKILL_TOOL_NAMES,
 )
 from lib.skills.installer import (
@@ -46,12 +53,32 @@ from lib.skills.catalog import (
     get_catalog,
     get_catalog_entry,
 )
+from lib.skills.catalog_install import (
+    CatalogInstallError,
+    install_catalog_skill,
+)
+from lib.skills.discovery import (
+    render_skill_search,
+    search_skill_catalog,
+    search_skills,
+)
+from lib.skills.online_catalog import (
+    OnlineCatalogError,
+    install_clawhub_skill,
+    search_online_skills,
+)
 
 __all__ = [
-    'list_skills', 'get_skill', 'uninstall_skill', 'set_skill_scope',
+    'list_skills', 'get_skill', 'uninstall_skill', 'set_skill_enabled',
+    'set_skill_scope',
     'build_skills_index',
-    'load_skill', 'list_skill_files',
-    'LOAD_SKILL_TOOL', 'ALL_SKILL_TOOLS', 'SKILL_TOOL_NAMES',
+    'load_skill', 'read_skill_resource', 'list_skill_files',
+    'SEARCH_SKILLS_TOOL', 'LOAD_SKILL_TOOL', 'READ_SKILL_RESOURCE_TOOL',
+    'REQUEST_SKILL_INSTALL_TOOL', 'ALL_SKILL_TOOLS', 'SKILL_TOOL_NAMES',
+    'SKILL_INSTALL_TOOLS', 'SKILL_READ_TOOLS',
     'InstallerError', 'install_skill_package',
     'get_catalog', 'get_catalog_entry',
+    'CatalogInstallError', 'install_catalog_skill',
+    'render_skill_search', 'search_skill_catalog', 'search_skills',
+    'OnlineCatalogError', 'install_clawhub_skill', 'search_online_skills',
 ]

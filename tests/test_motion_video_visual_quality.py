@@ -456,28 +456,35 @@ def test_a_partly_authored_film_is_not_marked_degraded_for_that():
 # the same assertion instead of silently shipping template cards.
 
 
-def _tracked_python_files(root: str) -> list[str]:
-    """Return tracked Python files that still exist in the worktree."""
+def _source_python_files(root: str) -> list[str]:
+    """Return Python files under the current construction-owner roots.
+
+    ``rg --files`` keeps this scan fast on the FUSE worktree and, unlike
+    ``git ls-files``, also works in the detached proof trees used by release
+    gates.  The latter deliberately have no ``.git`` directory.
+    """
     import subprocess
 
-    tracked = subprocess.run(
-        ['git', 'ls-files', 'lib', 'routes'],
-        capture_output=True, text=True, cwd=root, timeout=120).stdout.split()
-    return [rel for rel in tracked
+    discovered = subprocess.run(
+        ['rg', '--files', 'lib', 'routes'], capture_output=True, text=True,
+        cwd=root, timeout=120, check=True).stdout.split()
+    normalized = [os.path.relpath(rel, root) if os.path.isabs(rel) else rel
+                  for rel in discovered]
+    return [rel for rel in normalized
             if rel.endswith('.py') and os.path.isfile(os.path.join(root, rel))]
 
 
 def _motion_task_construction_sites() -> list[tuple[str, str]]:
     """Every ``_new_motion_task(...)`` call site, as (file, enclosing func).
 
-    AST-derived from the files git actually tracks — never a hand-written
+    AST-derived from the current source-owner roots — never a hand-written
     list (which would not grow when a new entry point lands) and never
     ``os.walk`` (which times out on this FUSE mount, charter note).
     """
     import ast
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sites: list[tuple[str, str]] = []
-    for rel in _tracked_python_files(root):
+    for rel in _source_python_files(root):
         try:
             with open(os.path.join(root, rel), encoding='utf-8') as f:
                 tree = ast.parse(f.read())
@@ -566,7 +573,7 @@ def test_no_entry_point_hand_copies_the_default(monkeypatch):
     import ast
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     offenders = []
-    for rel in _tracked_python_files(root):
+    for rel in _source_python_files(root):
         with open(os.path.join(root, rel), encoding='utf-8') as f:
             src = f.read()
         if "'scene_author'" not in src:
@@ -623,13 +630,13 @@ def test_paper_video_lookup_carries_the_quality_axis():
     """
     import inspect
 
-    from routes import paper as paper_routes
+    from routes.paper_pkg import _podcast as paper_video_routes
 
-    src = inspect.getsource(paper_routes.lookup_video_abstract)
+    src = inspect.getsource(paper_video_routes.lookup_video_abstract)
     assert 'artifact_quality' in src, (
         'the paper video lookup drops the product-quality axis — a degraded '
         'film re-attaches looking like a clean success')
-    disk = inspect.getsource(paper_routes._lookup_paper_video_on_disk)
+    disk = inspect.getsource(paper_video_routes._lookup_paper_video_on_disk)
     assert 'artifact_quality' in disk, (
         'the post-restart disk fallback drops the quality axis; that path has '
         'no later poll to correct it')

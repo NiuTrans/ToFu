@@ -15,11 +15,16 @@ import json
 import math
 import re
 from collections import Counter
+from collections.abc import Mapping
 from functools import lru_cache
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from lib.log import get_logger
+from lib.tools.contracts import (
+    ToolContractError,
+    validate_tool_arguments_from_documents,
+)
 
 
 logger = get_logger(__name__)
@@ -31,17 +36,25 @@ GATEWAY_TOOL_NAMES = frozenset({SEARCH_TOOLS_NAME, EXECUTE_TOOLS_NAME})
 LOCAL_TOOL_SEARCH_MIN_FUNCTIONS = 12
 LOCAL_TOOL_SEARCH_DEFAULT_LIMIT = 8
 LOCAL_TOOL_SEARCH_MAX_LIMIT = 20
+LOCAL_GATEWAY_MAX_TOKENS = 500
+CODE_CORE_DIRECT_TOOL_NAMES = frozenset({
+    'read_files', 'grep_search', 'find_files', 'edit_file', 'run_command',
+})
+
+ToolIsolationReporter = Callable[[dict[str, Any]], None]
 
 
-def search_tools_schema() -> dict[str, Any]:
+def search_tools_schema(*, compact: bool = False) -> dict[str, Any]:
+    description = (
+        'Find tools; run a result with execute_tools.' if compact else
+        'Find task-available tools by capability. This only finds '
+        'tools. To run a result, call execute_tools; copy its exact '
+        'name and provide arguments matching arguments_schema.')
     return {
         'type': 'function',
         'function': {
             'name': SEARCH_TOOLS_NAME,
-            'description': (
-                'Find task-available tools by capability. This only finds '
-                'tools. To run a result, call execute_tools; copy its exact '
-                'name and provide arguments matching arguments_schema.'),
+            'description': description,
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -59,58 +72,110 @@ def search_tools_schema() -> dict[str, Any]:
     }
 
 
-def execute_tools_schema() -> dict[str, Any]:
-    return {
+def execute_tools_schema(*, include_program: bool = True,
+                         ptc_note: str = '',
+                         compact: bool = False) -> dict[str, Any]:
+    """Return the ``execute_tools`` gateway schema.
+
+    Default output is byte-identical to the historical shape and exposes the
+    full ToolScript surface to every model.  ``include_program=False`` is the
+    explicit ``TOFU_PTC_TIER=batch`` operator/benchmark override shape (the
+    model batches parallel ``calls`` instead of authoring ToolScript), and
+    ``ptc_note`` (the bounded read-only routing contract) is spliced into the
+    description so the policy travels with the schema the model sees.
+    """
+    if compact:
+        description = (
+            'Run exact tool names from search_tools with calls; use program '
+            'for dependent reads.' if include_program else
+            'Run exact tool names from search_tools with calls.')
+    else:
+        description = (
+            'Run task-available tools found with search_tools. Provide '
+            'calls or program. Use calls for ordinary or independent '
+            'work. Use program only when later calls depend on earlier '
+            'results. ToolScript supports '
+            'catalog.search(query, namespace?, limit?, cursor?), '
+            'tools.call(name, arguments, callId?), '
+            'tools.callMany(calls, execution?), and tools.parallel(calls). '
+            'It has no eval, imports, filesystem, process, or network '
+            'access except through those tools.')
+    if not include_program and not compact:
+        description = (
+            'Run task-available tools found with search_tools. Provide calls '
+            'for one or more independent tool invocations; prefer a single '
+            'batched call with execution=parallel over issuing tools one per '
+            'turn.')
+    if ptc_note and not compact:
+        description = f'{description} {ptc_note}'
+    calls_property: dict[str, Any] = {
+        'type': 'array', 'maxItems': 16,
+    }
+    if not compact:
+        calls_property['description'] = (
+            'Tool calls. Copy each exact name from search_tools '
+            'and match its arguments_schema.')
+    calls_property['items'] = {
+        'type': 'object',
+        'properties': {
+            'name': {'type': 'string'},
+            'arguments': {'type': 'object'},
+            'call_id': {'type': 'string'},
+        },
+        'required': ['name', 'arguments'],
+        'additionalProperties': False,
+    }
+    properties: dict[str, Any] = {
+        'calls': calls_property,
+        'execution': {
+            'type': 'string',
+            'enum': ['auto', 'sequential', 'parallel'],
+            'default': 'auto',
+        },
+    }
+    if include_program:
+        properties['program'] = {
+            'type': 'string',
+        }
+        if not compact:
+            properties['program']['description'] = (
+                'JavaScript-like bounded ToolScript for '
+                'data-dependent search, calls, filtering, and '
+                'aggregation. Calls are synchronous; do not use '
+                'await.')
+    schema = {
         'type': 'function',
         'function': {
             'name': EXECUTE_TOOLS_NAME,
-            'description': (
-                'Run task-available tools found with search_tools. Provide '
-                'calls or program. Use calls for ordinary or independent '
-                'work. Use program only when later calls depend on earlier '
-                'results. ToolScript supports '
-                'catalog.search(query, namespace?, limit?, cursor?), '
-                'tools.call(name, arguments, callId?), '
-                'tools.callMany(calls, execution?), and tools.parallel(calls). '
-                'It has no eval, imports, filesystem, process, or network '
-                'access except through those tools.'),
+            'description': description,
             'parameters': {
                 'type': 'object',
-                'properties': {
-                    'calls': {
-                        'type': 'array', 'maxItems': 16,
-                        'description': (
-                            'Tool calls. Copy each exact name from search_tools '
-                            'and match its arguments_schema.'),
-                        'items': {
-                            'type': 'object',
-                            'properties': {
-                                'name': {'type': 'string'},
-                                'arguments': {'type': 'object'},
-                                'call_id': {'type': 'string'},
-                            },
-                            'required': ['name', 'arguments'],
-                            'additionalProperties': False,
-                        },
-                    },
-                    'execution': {
-                        'type': 'string',
-                        'enum': ['auto', 'sequential', 'parallel'],
-                        'default': 'auto',
-                    },
-                    'program': {
-                        'type': 'string',
-                        'description': (
-                            'JavaScript-like bounded ToolScript for '
-                            'data-dependent search, calls, filtering, and '
-                            'aggregation. Calls are synchronous; do not use '
-                            'await.'),
-                    },
-                },
+                'properties': properties,
                 'additionalProperties': False,
             },
         },
     }
+    return schema
+
+
+def _stable_local_execute_tools_schema(*, tier: str = 'program') -> dict[str, Any]:
+    """Return the cache-stable local execution gateway for one task tier.
+
+    Local Tool Search exists before the per-round PTC policy resolves.  Its
+    ordinary gateway and the later PTC projection must therefore use the same
+    bytes for the default program tier; otherwise merely observing (or no
+    longer observing) a read fan-out rewrites the hoisted tools prefix.  The
+    guidance is conditional on PTC and remains true while the generic gateway
+    is active without a PTC latch.
+    """
+    from lib.tools.programmatic import local_ptc_guidance
+
+    normalized_tier = (
+        'batch' if str(tier or '').strip().lower() == 'batch' else 'program')
+    return execute_tools_schema(
+        include_program=normalized_tier != 'batch',
+        ptc_note=local_ptc_guidance(normalized_tier, ()),
+    )
 
 
 def gateway_tool_schemas(*, include_search: bool = True,
@@ -128,8 +193,362 @@ def gateway_tool_schemas(*, include_search: bool = True,
     if include_search:
         out.append(search_tools_schema())
     if include_execute:
-        out.append(execute_tools_schema())
+        out.append(_stable_local_execute_tools_schema())
     return out
+
+
+def tool_schema_tokens(tools: Any, *, model: str = '') -> int:
+    """Count canonical schema JSON with the repository token authority."""
+    payload = json.dumps(
+        list(tools or ()), ensure_ascii=False, sort_keys=True,
+        separators=(',', ':'), default=str)
+    try:
+        from lib.token_counter import count_text
+        return max(0, int(count_text(payload, model=model or '')))
+    except Exception as exc:
+        logger.debug('[ToolGateway] schema token fallback: %s', exc)
+        return max(1, (len(payload) + 3) // 4) if payload else 0
+
+
+def tool_schema_fingerprint(tools: Any) -> str:
+    """Return a bounded digest of the exact final tool projection shape.
+
+    Insertion order is preserved deliberately: description changes, parameter
+    key reordering, wrapper changes, and cache-control metadata must all change
+    this diagnostic.  The full schema stays request-local; only its SHA-256 is
+    persisted by Request Inspector.
+    """
+    payload = json.dumps(
+        list(tools or ()), ensure_ascii=False, sort_keys=False,
+        separators=(',', ':'), default=str)
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+_SCHEMA_ANNOTATION_KEYS = frozenset({
+    '$comment', 'description', 'example', 'examples', 'title',
+})
+
+_SCHEMA_MAP_OF_SCHEMAS_KEYS = frozenset({
+    '$defs', 'definitions', 'dependentSchemas', 'patternProperties',
+    'properties',
+})
+_SCHEMA_LIST_OF_SCHEMAS_KEYS = frozenset({
+    'allOf', 'anyOf', 'oneOf', 'prefixItems',
+})
+_SCHEMA_SINGLE_SCHEMA_KEYS = frozenset({
+    'additionalProperties', 'contains', 'contentSchema', 'else', 'if',
+    'items', 'not', 'propertyNames', 'then', 'unevaluatedItems',
+    'unevaluatedProperties',
+})
+
+
+def _without_json_schema_annotations(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """Strip annotations only where keys are JSON-Schema keywords.
+
+    Values below ``properties``/``$defs`` are *named schema maps*: their keys
+    are argument/definition names, not annotation keywords.  A parameter may
+    therefore legitimately be named ``description``, ``title`` or ``example``.
+    Likewise, object-valued ``default``/``const``/``enum`` data is copied
+    verbatim instead of being mistaken for a nested schema.
+    """
+    out: dict[str, Any] = {}
+    for key, item in schema.items():
+        if key in _SCHEMA_ANNOTATION_KEYS:
+            continue
+        if key in _SCHEMA_MAP_OF_SCHEMAS_KEYS and isinstance(item, Mapping):
+            out[key] = {
+                name: _without_json_schema_annotations(child)
+                if isinstance(child, Mapping) else copy.deepcopy(child)
+                for name, child in item.items()
+            }
+            continue
+        if key in _SCHEMA_LIST_OF_SCHEMAS_KEYS and isinstance(item, list):
+            out[key] = [
+                _without_json_schema_annotations(child)
+                if isinstance(child, Mapping) else copy.deepcopy(child)
+                for child in item
+            ]
+            continue
+        if key in _SCHEMA_SINGLE_SCHEMA_KEYS:
+            if isinstance(item, Mapping):
+                out[key] = _without_json_schema_annotations(item)
+            elif isinstance(item, list):
+                out[key] = [
+                    _without_json_schema_annotations(child)
+                    if isinstance(child, Mapping) else copy.deepcopy(child)
+                    for child in item
+                ]
+            else:
+                out[key] = copy.deepcopy(item)
+            continue
+        out[key] = copy.deepcopy(item)
+    return out
+
+
+def _without_schema_annotations(value: Any) -> Any:
+    """Copy a schema without model-facing annotations.
+
+    Validation keywords, property names, required fields, defaults, and all
+    other execution semantics stay intact.  This is an emergency wire-size
+    projection only; the task-owned executable contract remains unchanged.
+    """
+    if not isinstance(value, Mapping):
+        return copy.deepcopy(value)
+
+    out = copy.deepcopy(dict(value))
+    function = out.get('function')
+    if isinstance(function, dict):
+        for key in _SCHEMA_ANNOTATION_KEYS:
+            function.pop(key, None)
+        parameters = function.get('parameters')
+        if isinstance(parameters, Mapping):
+            function['parameters'] = _without_json_schema_annotations(
+                parameters)
+        return out
+
+    # Anthropic/direct legacy shapes keep the schema at the top level.
+    for key in _SCHEMA_ANNOTATION_KEYS:
+        out.pop(key, None)
+    for key in ('input_schema', 'parameters'):
+        schema = out.get(key)
+        if isinstance(schema, Mapping):
+            out[key] = _without_json_schema_annotations(schema)
+    return out
+
+
+def _required_property_error(
+    schema: Mapping[str, Any], *, path: str = '$',
+) -> str:
+    """Return the first Moonshot-strict required/properties violation.
+
+    JSON Schema permits some cross-subschema constructions that Moonshot's
+    function-tool dialect rejects. Its stable requirement is simpler: every
+    name in an object schema's ``required`` array must be declared by that
+    same schema's ``properties`` map. Enforce that provider-compatible subset
+    recursively before a request leaves the process.
+    """
+    required = schema.get('required')
+    if required is not None:
+        if not isinstance(required, (list, tuple)) \
+                or any(not isinstance(name, str) for name in required):
+            return f'{path}.required must be an array of strings'
+        properties = schema.get('properties')
+        property_names = set(properties) if isinstance(properties, Mapping) \
+            else set()
+        missing = [name for name in required if name not in property_names]
+        if missing:
+            return (f'{path}.required references properties not declared at '
+                    f'that level: {", ".join(missing)}')
+
+    for key in _SCHEMA_MAP_OF_SCHEMAS_KEYS:
+        children = schema.get(key)
+        if not isinstance(children, Mapping):
+            continue
+        for name, child in children.items():
+            if isinstance(child, Mapping):
+                error = _required_property_error(
+                    child, path=f'{path}.{key}.{name}')
+                if error:
+                    return error
+    for key in _SCHEMA_LIST_OF_SCHEMAS_KEYS:
+        children = schema.get(key)
+        if not isinstance(children, list):
+            continue
+        for index, child in enumerate(children):
+            if isinstance(child, Mapping):
+                error = _required_property_error(
+                    child, path=f'{path}.{key}[{index}]')
+                if error:
+                    return error
+    for key in _SCHEMA_SINGLE_SCHEMA_KEYS:
+        child = schema.get(key)
+        if isinstance(child, Mapping):
+            error = _required_property_error(child, path=f'{path}.{key}')
+            if error:
+                return error
+        elif isinstance(child, list):
+            for index, item in enumerate(child):
+                if isinstance(item, Mapping):
+                    error = _required_property_error(
+                        item, path=f'{path}.{key}[{index}]')
+                    if error:
+                        return error
+    return ''
+
+
+def _wire_tool_schema_error(tool: Mapping[str, Any]) -> str:
+    """Return a provider-facing parameter-schema error, or ``''``."""
+    function = tool.get('function')
+    if isinstance(function, Mapping):
+        parameters = function.get('parameters')
+        path = '$.function.parameters'
+    else:
+        parameters = tool.get('input_schema')
+        path = '$.input_schema'
+        if parameters is None:
+            parameters = tool.get('parameters')
+            path = '$.parameters'
+    # Parameter-less legacy tools remain valid and preserve old behavior.
+    if parameters is None:
+        return ''
+    if not isinstance(parameters, Mapping):
+        return f'{path} must be an object schema'
+    return _required_property_error(parameters, path=path)
+
+
+def _compact_gateway_schemas(
+    tools: list[dict[str, Any]], *, model: str = '',
+) -> list[dict[str, Any]]:
+    """Return one concise canonical schema for each gateway name present."""
+    compacted: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tool in tools:
+        name = _schema_name(tool)
+        if name in seen or name not in GATEWAY_TOOL_NAMES:
+            continue
+        seen.add(name)
+        if name == SEARCH_TOOLS_NAME:
+            compacted.append(search_tools_schema(compact=True))
+            continue
+        fn = tool.get('function') if isinstance(tool, dict) else None
+        parameters = fn.get('parameters') if isinstance(fn, dict) else None
+        properties = (parameters.get('properties')
+                      if isinstance(parameters, dict) else None)
+        include_program = (
+            isinstance(properties, dict) and 'program' in properties)
+        compacted.append(execute_tools_schema(
+            include_program=include_program, compact=True))
+    compact_tokens = tool_schema_tokens(compacted, model=model)
+    if compact_tokens > LOCAL_GATEWAY_MAX_TOKENS:
+        # The limit is an application cost budget, not a provider validity
+        # rule.  A future tokenizer/schema change must not turn it into an
+        # availability failure; send the smallest functional pair and report
+        # the budget drift for maintainers.
+        logger.warning(
+            '[ToolGateway] compact gateway still exceeds target: tokens=%d '
+            'target=%d; continuing with functional schemas',
+            compact_tokens, LOCAL_GATEWAY_MAX_TOKENS)
+    return compacted
+
+
+def fit_tool_schema_budget(
+    tools: list[dict[str, Any]] | None, *, budget_tokens: int,
+    model: str = '', priority_names: set[str] | frozenset[str] = frozenset(),
+    required_names: set[str] | frozenset[str] = frozenset(),
+    on_tool_isolated: ToolIsolationReporter | None = None,
+) -> list[dict[str, Any]]:
+    """Fit optional schemas while retaining every valid required capability.
+
+    ``budget_tokens`` is a soft, model-neutral cost target. Required schemas
+    keep their full validation/help projection even when that means exceeding
+    the target; correctness must not depend on registry order or schema size.
+    """
+    values: list[dict[str, Any]] = []
+    for tool in tools or ():
+        if not isinstance(tool, dict):
+            _report_tool_isolation(
+                on_tool_isolated,
+                tool_name='',
+                stage='budget_preflight',
+                reason_code='non_object_schema',
+                detail=f'expected object, got {type(tool).__name__}',
+            )
+            continue
+        schema_error = _wire_tool_schema_error(tool)
+        if schema_error:
+            logger.error(
+                '[ToolGateway] omitted invalid tool schema before budget fit: '
+                'tool=%s error=%s', _schema_name(tool) or '?', schema_error)
+            _report_tool_isolation(
+                on_tool_isolated,
+                tool_name=_schema_name(tool),
+                stage='budget_preflight',
+                reason_code='invalid_schema',
+                detail=schema_error,
+            )
+            continue
+        values.append(tool)
+    budget = max(0, int(budget_tokens or 0))
+    gateway = [tool for tool in values
+               if _schema_name(tool) in GATEWAY_TOOL_NAMES]
+    gateway_tokens = tool_schema_tokens(gateway, model=model)
+    if gateway and gateway_tokens > LOCAL_GATEWAY_MAX_TOKENS:
+        gateway = _compact_gateway_schemas(gateway, model=model)
+        values = [tool for tool in values
+                  if _schema_name(tool) not in GATEWAY_TOOL_NAMES]
+        values.extend(gateway)
+        logger.warning(
+            '[ToolGateway] compacted oversized gateway schemas: tokens=%d '
+            '-> %d target=%d; request continues',
+            gateway_tokens, tool_schema_tokens(gateway, model=model),
+            LOCAL_GATEWAY_MAX_TOKENS)
+    if not budget or tool_schema_tokens(values, model=model) <= budget:
+        return values
+    direct = [(index, tool) for index, tool in enumerate(values)
+              if _schema_name(tool) not in GATEWAY_TOOL_NAMES]
+    required = {str(name) for name in required_names if str(name)}
+    essential = {
+        *CODE_CORE_DIRECT_TOOL_NAMES, 'web_search', 'fetch_url',
+        'read_tool_artifact', 'search_tool_artifact',
+    }
+    ranked = sorted(
+        (row for row in direct if _schema_name(row[1]) not in required),
+        key=lambda row: (
+            0 if _schema_name(row[1]) in essential else
+            1 if _schema_name(row[1]) in priority_names else 2,
+            row[0],
+        ),
+    )
+    selected_tools: dict[int, dict[str, Any]] = {}
+    compacted_names: list[str] = []
+    selected = list(gateway)
+    for index, tool in direct:
+        if _schema_name(tool) not in required:
+            continue
+        selected.append(tool)
+        selected_tools[index] = tool
+    required_tokens = tool_schema_tokens(selected, model=model)
+    if required_tokens > budget:
+        logger.warning(
+            '[ToolGateway] required direct schemas exceed cost target: '
+            'tokens=%d target=%d required=%s; retaining functional floor',
+            required_tokens, budget, ','.join(sorted(required)))
+    for index, tool in ranked:
+        candidate = tool
+        if tool_schema_tokens([*selected, candidate], model=model) > budget:
+            candidate = _without_schema_annotations(tool)
+            schema_error = _wire_tool_schema_error(candidate)
+            if schema_error:
+                logger.error(
+                    '[ToolGateway] annotation compaction violated the schema '
+                    'contract; omitting tool=%s error=%s',
+                    _schema_name(tool) or '?', schema_error)
+                _report_tool_isolation(
+                    on_tool_isolated,
+                    tool_name=_schema_name(tool),
+                    stage='annotation_compaction',
+                    reason_code='invalid_schema_after_compaction',
+                    detail=schema_error,
+                )
+                continue
+            if tool_schema_tokens([*selected, candidate], model=model) > budget:
+                continue
+            compacted_names.append(_schema_name(tool))
+        selected.append(candidate)
+        selected_tools[index] = candidate
+    result = [selected_tools[index] for index, _tool in direct
+              if index in selected_tools]
+    result.extend(gateway)
+    dropped = [_schema_name(tool) for index, tool in direct
+               if index not in selected_tools]
+    if compacted_names or dropped:
+        logger.info(
+            '[ToolGateway] schema budget=%d selected=%d compacted=%d (%s) '
+            'dropped=%d (%s)',
+            budget, len(result), len(compacted_names),
+            ','.join(compacted_names[:12]), len(dropped),
+            ','.join(dropped[:12]))
+    return result
 
 
 def _schema_name(tool: Any) -> str:
@@ -139,6 +558,122 @@ def _schema_name(tool: Any) -> str:
     if isinstance(fn, dict):
         return str(fn.get('name') or '')
     return str(tool.get('name') or '')
+
+
+def _report_tool_isolation(
+    reporter: ToolIsolationReporter | None,
+    *,
+    tool_name: str,
+    stage: str,
+    reason_code: str,
+    detail: str,
+) -> None:
+    """Notify the task-owned observer without making diagnostics a dependency."""
+    if not callable(reporter):
+        return
+    try:
+        reporter({
+            'toolName': str(tool_name or 'unknown tool')[:160],
+            'stage': str(stage or 'wire_preflight')[:80],
+            'reasonCode': str(reason_code or 'invalid_schema')[:160],
+            'detail': str(detail or '')[:400],
+            'action': 'omitted',
+        })
+    except Exception as exc:
+        logger.warning(
+            '[ToolGateway] tool-isolation observer failed (request continues): %s',
+            exc,
+        )
+
+
+def sanitize_wire_tools(
+    tools: Any,
+    *,
+    log_prefix: str = '',
+    on_tool_isolated: ToolIsolationReporter | None = None,
+) -> list[dict[str, Any]]:
+    """Enforce the provider wire contract on a request's ``tools`` array.
+
+    The Chat Completions wire requires every element to be an object; a
+    function tool additionally requires ``type='function'`` (kimi rejects the
+    request with "unknown tool type: " when it is absent) and any ``null``
+    element hard-400s Gemini ("Expected a(n) 'tools' array element to be an
+    object").  Producers are all validated upstream, but the array crosses
+    many hands (registry assembly, conversation-latched catalogs, headless
+    custom tools, rescue-body re-dispatch), so the LAST common boundary
+    re-asserts the invariant instead of trusting every future producer:
+
+    • non-dict, nameless, or structurally invalid entries are DROPPED — one
+      bad apple must not 400 the whole request;
+    • a function entry missing ``type`` is REPAIRED to ``'function'`` on a
+      copy (the caller's canonical catalog is never mutated);
+    • a clean array is returned AS THE SAME OBJECT so prompt-cache bytes and
+      identity-based fast paths are untouched on the hot path.
+
+    Every intervention is logged loudly with the offending index and shape
+    so the regressing producer is named in the logs.
+    """
+    if not isinstance(tools, list):
+        return []
+    offenders: list[str] = []
+    repaired: list[str] = []
+    out: list[dict[str, Any]] | None = None
+    for idx, tool in enumerate(tools):
+        keep = tool
+        drop = False
+        if not isinstance(tool, dict):
+            drop = True
+            offenders.append(f'#{idx}:non-dict({type(tool).__name__})')
+            _report_tool_isolation(
+                on_tool_isolated,
+                tool_name='',
+                stage='wire_preflight',
+                reason_code='non_object_schema',
+                detail=f'expected object, got {type(tool).__name__}',
+            )
+        else:
+            name = _schema_name(tool)
+            if not name:
+                drop = True
+                offenders.append(
+                    f'#{idx}:nameless(keys={sorted(map(str, tool))[:6]})')
+                _report_tool_isolation(
+                    on_tool_isolated,
+                    tool_name='',
+                    stage='wire_preflight',
+                    reason_code='missing_tool_name',
+                    detail='tool schema has no function/name field',
+                )
+            else:
+                schema_error = _wire_tool_schema_error(tool)
+                if schema_error:
+                    drop = True
+                    offenders.append(
+                        f'#{idx}:{name}:invalid-schema({schema_error})')
+                    _report_tool_isolation(
+                        on_tool_isolated,
+                        tool_name=name,
+                        stage='wire_preflight',
+                        reason_code='invalid_schema',
+                        detail=schema_error,
+                    )
+            if not drop and isinstance(tool.get('function'), dict) \
+                    and tool.get('type') != 'function':
+                keep = {**tool, 'type': 'function'}
+                repaired.append(f'#{idx}:{name}')
+        if out is None and (drop or keep is not tool):
+            out = list(tools[:idx])
+        if out is not None and not drop:
+            out.append(keep)
+    if out is None:
+        return tools
+    if offenders or repaired:
+        logger.warning(
+            '%s[ToolGateway] wire tools invariant enforced: dropped=%s '
+            'repaired_type=%s — a producer emitted non-conforming entries; '
+            'fix the producer, this boundary only contains the blast radius',
+            log_prefix or '', offenders or '-', repaired or '-')
+    return out
 
 
 def catalog_index(catalog: Any) -> dict[str, dict[str, Any]]:
@@ -217,6 +752,12 @@ def local_wire_tools(
     discovery_catalog_size: int | None = None,
     searchable_count: int | None = None,
     include_search: bool = True,
+    schema_budget_tokens: int = 0,
+    model: str = '',
+    priority_names: set[str] | frozenset[str] = frozenset(),
+    required_names: set[str] | frozenset[str] = frozenset(),
+    apply_schema_budget: bool = True,
+    on_tool_isolated: ToolIsolationReporter | None = None,
 ) -> list[dict[str, Any]]:
     """Build a deterministic local surface from a stable schema projection.
 
@@ -249,18 +790,36 @@ def local_wire_tools(
         logger.debug('[ToolGateway] invalid searchable tool count: %s', exc)
         searchable = visible_searchable
 
-    # Small catalogs cost less than a discovery round.  A large all-eager
-    # catalog also has nothing for search to discover, so avoid teaching the
-    # model an unnecessary extra hop.
+    def _fit(surface):
+        if not apply_schema_budget:
+            return list(surface)
+        return fit_tool_schema_budget(
+            list(surface), budget_tokens=schema_budget_tokens, model=model,
+            priority_names=priority_names, required_names=required_names,
+            on_tool_isolated=on_tool_isolated)
+
+    # Small catalogs cost less than a discovery round. A large all-eager
+    # catalog also has nothing to defer. If an explicit budget would omit any
+    # schema, however, the gateway must remain present so every hidden member
+    # of the executable catalog still has a live discovery path.
     if total < LOCAL_TOOL_SEARCH_MIN_FUNCTIONS or searchable <= 0:
-        return tools
+        budget_pressure = bool(
+            schema_budget_tokens
+            and tool_schema_tokens(tools, model=model) > schema_budget_tokens)
+        surface = tools
+        if budget_pressure:
+            surface = tools + [
+                gateway for gateway in gateways
+                if _schema_name(gateway) not in names]
+        return _fit(surface)
 
     eager = [
         tool for tool in tools
         if policy.get(_schema_name(tool), 'eager') == 'eager'
     ]
     eager_names = {_schema_name(tool) for tool in eager}
-    return eager + [g for g in gateways if _schema_name(g) not in eager_names]
+    surface = eager + [g for g in gateways if _schema_name(g) not in eager_names]
+    return _fit(surface)
 
 
 def full_wire_tools(
@@ -270,15 +829,55 @@ def full_wire_tools(
     return [tool for tool in (catalog or []) if isinstance(tool, dict)]
 
 
-def full_wire_tools_with_gateway(
+def ptc_local_wire_tools(
     catalog: list[dict[str, Any]] | None,
+    *,
+    tier: str,
+    eligible: list[str] | tuple | set,
 ) -> list[dict[str, Any]]:
-    """Deprecated compatibility alias for :func:`full_wire_tools`.
+    """Project the PTC-local ``execute_tools`` surface for one round.
 
-    Kept for out-of-tree imports; despite its historical name it appends no
-    gateway schema.
+    Follows the Tool Search dual-backend precedent: the projection runs at
+    the last common wire boundary and only shapes what the model sees —
+    execution authority is unchanged.  The round's ordinary tools stay
+    byte-stable and in order; exactly one tier-shaped ``execute_tools``
+    schema carries the bounded read-only routing contract (``ptc_note``), so
+    the policy travels with the tool the model actually calls.  Per-round
+    observations (including eligible-name visibility and the serial-read-chain
+    adoption signal) are not interpolated: for a fixed tier this gateway schema
+    is a byte fixpoint, preserving the provider prompt-cache prefix.  An existing
+    gateway schema (local Tool Search) is replaced rather than duplicated.
+    Every model sees the free-form ``program`` parameter by default; only the
+    explicit ``batch`` override shape strips it.
     """
-    return full_wire_tools(catalog)
+    include_program = str(tier or '').strip().lower() != 'batch'
+    normalized_tier = 'program' if include_program else 'batch'
+    execute = _stable_local_execute_tools_schema(tier=normalized_tier)
+    # PTC guidance is advisory; it must never make the fixed local gateway
+    # pair unusable.  Leave headroom for model-tokenizer variance, and if an
+    # unusually long future stable guidance edit consumes it, retain the
+    # complete execution contract while dropping advisory text. Execution
+    # authority still comes from the task-owned catalog in either shape.
+    projected_pair = [search_tools_schema(), execute]
+    guidance_target = max(0, LOCAL_GATEWAY_MAX_TOKENS - 50)
+    if tool_schema_tokens(projected_pair) > guidance_target:
+        execute = _stable_local_execute_tools_schema(tier=normalized_tier)
+        logger.info(
+            '[ToolGateway] compacted PTC guidance to preserve the %d-token '
+            'gateway contract', LOCAL_GATEWAY_MAX_TOKENS)
+    projected_pair = [search_tools_schema(), execute]
+    if tool_schema_tokens(projected_pair) > LOCAL_GATEWAY_MAX_TOKENS:
+        compacted_pair = _compact_gateway_schemas(projected_pair)
+        execute = next(
+            tool for tool in compacted_pair
+            if _schema_name(tool) == EXECUTE_TOOLS_NAME)
+        logger.warning(
+            '[ToolGateway] compacted the fixed PTC gateway; request continues')
+    out = [tool for tool in (catalog or [])
+           if isinstance(tool, dict)
+           and _schema_name(tool) != EXECUTE_TOOLS_NAME]
+    out.append(execute)
+    return out
 
 
 _WORD_RE = re.compile(r'[a-z0-9_./:+-]+|[\u3400-\u9fff]+', re.I)
@@ -437,7 +1036,35 @@ def _cursor_encode(offset: int) -> str:
         'ascii').rstrip('=')
 
 
-def search_enabled_catalog(
+# A snake_case query is almost always the model looking up ONE tool by its
+# exact name.  When that name is absent, fuzzy part-matches are noise that
+# otherwise invites an endless re-search loop (the catalog is task-fixed, so
+# re-searching can never make a missing tool appear).
+_NAME_SHAPED_RE = re.compile(r'[a-z][a-z0-9_]+')
+
+_SEARCH_NOTICE = ("Call execute_tools with a result's exact name and "
+                  'arguments matching arguments_schema.')
+
+
+def _search_notice(missing_name: str, hint_ns: str, total: int) -> str:
+    if missing_name:
+        return (
+            f"No tool named '{missing_name}' exists in this task's catalog "
+            '(exact-name lookup). The catalog is fixed for the whole task — '
+            're-searching the same name cannot make it appear. The '
+            f'{total} result(s) only matched PARTS of the name and are not '
+            'substitutes. Do not search for this name again: pick a returned '
+            'tool that genuinely fits, or treat the capability as unavailable '
+            'this turn and proceed without it.')
+    if hint_ns:
+        return (
+            f'A tool with this exact name exists under namespace {hint_ns!r} '
+            '— re-run with that namespace (or omit the namespace filter). '
+            + _SEARCH_NOTICE)
+    return _SEARCH_NOTICE
+
+
+def search_executable_catalog(
     catalog: list[dict[str, Any]] | None,
     query: Any,
     *,
@@ -446,6 +1073,7 @@ def search_enabled_catalog(
     cursor: Any = '',
     namespace_by_name: dict[str, str] | None = None,
     search_text_by_name: dict[str, Any] | None = None,
+    contract_documents_by_name: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """BM25-rank the immutable task catalog without issuing authority."""
     query_text = str(query or '').strip()
@@ -469,7 +1097,12 @@ def search_enabled_catalog(
                      if isinstance(namespace_by_name, dict) else {})
     search_text_map = (search_text_by_name
                        if isinstance(search_text_by_name, dict) else {})
+    contract_map = (contract_documents_by_name
+                    if isinstance(contract_documents_by_name, dict) else {})
     ns_filter = str(namespace or '').strip().lower()
+    qlower = query_text.lower()
+    name_case = {name.lower(): name for name in catalog_index(catalog)
+                 if name not in GATEWAY_TOOL_NAMES}
     docs: list[tuple[str, dict[str, Any], str, list[str]]] = []
     for name, tool in catalog_index(catalog).items():
         if name in GATEWAY_TOOL_NAMES:
@@ -501,20 +1134,32 @@ def search_enabled_catalog(
     # Repeating a word in a user sentence should not amplify it indefinitely.
     qterms = list(dict.fromkeys(_terms(query_text)))
     qconcepts = {term for term in qterms if term.startswith('@')}
+    # Exact-name lookup honesty: a snake_case query matching NO catalog name
+    # must be told the tool is absent — otherwise the fuzzy part-matches read
+    # as "keep searching" and the model loops on the same keyword.
+    missing_name = ''
+    hint_ns = ''
+    if '_' in qlower and _NAME_SHAPED_RE.fullmatch(qlower):
+        exact = name_case.get(qlower)
+        if exact is None:
+            missing_name = query_text
+        elif ns_filter and all(row[0] != exact for row in docs):
+            hint_ns = str(namespace_map.get(exact) or 'general').lower()
     if not docs:
-        return {
+        out: dict[str, Any] = {
             'status': 'ok', 'query': query_text, 'items': [],
             'execute_with': EXECUTE_TOOLS_NAME,
             'next_cursor': None, 'total': 0,
-            'notice': ("Call execute_tools with a result's exact name and "
-                       'arguments matching arguments_schema.'),
+            'notice': _search_notice(missing_name, hint_ns, 0),
         }
+        if missing_name:
+            out['missing_name'] = missing_name
+        return out
     doc_freq = Counter()
     for _name, _tool, _ns, terms in docs:
         doc_freq.update(set(terms))
     avg_len = sum(len(row[3]) for row in docs) / max(1, len(docs))
     scored = []
-    qlower = query_text.lower()
     for position, (name, tool, ns, terms) in enumerate(docs):
         counts = Counter(terms)
         score = 0.0
@@ -555,25 +1200,39 @@ def search_enabled_catalog(
     for negative, _pos, name, tool, ns in page:
         fn = tool.get('function') if isinstance(tool.get('function'), dict) \
             else tool
-        items.append({
+        contract = contract_map.get(name)
+        contract = contract if isinstance(contract, dict) else {}
+        item = {
             'name': name,
             'namespace': ns,
             'description': str(fn.get('description') or ''),
-            'arguments_schema': fn.get('parameters') or {
+            'arguments_schema': contract.get('arguments_schema') or fn.get('parameters') or {
                 'type': 'object', 'properties': {}},
             'score': round(-negative, 6),
-        })
+        }
+        if contract:
+            item.update({
+                'contract_version': contract.get('contractVersion'),
+                'help': contract.get('help') or item['description'],
+                'permission': contract.get('permission'),
+                'idempotency': contract.get('idempotency'),
+                'ptc_eligible': bool(contract.get('ptcEligible')),
+                'errors': contract.get('errors') or [],
+            })
+        items.append(item)
     next_offset = offset + len(page)
-    return {
+    out = {
         'status': 'ok', 'query': query_text, 'namespace': ns_filter or None,
         'items': items,
         'execute_with': EXECUTE_TOOLS_NAME,
         'next_cursor': (_cursor_encode(next_offset)
                         if next_offset < len(scored) else None),
         'total': len(scored),
-        'notice': ("Call execute_tools with a result's exact name and "
-                   'arguments matching arguments_schema.'),
+        'notice': _search_notice(missing_name, hint_ns, len(scored)),
     }
+    if missing_name:
+        out['missing_name'] = missing_name
+    return out
 
 
 def _tool_parameters(tool: dict[str, Any]) -> dict[str, Any]:
@@ -827,6 +1486,7 @@ def normalize_gateway_call(
     gateway_call_id: str,
     index: int,
     source: str,
+    contract_documents_by_name: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     if not isinstance(raw_call, dict):
         return None, {'code': 'invalid_call', 'index': index,
@@ -886,6 +1546,23 @@ def normalize_gateway_call(
             detail = {'code': 'invalid_arguments', 'message': str(exc)}
         return None, {**detail, 'index': index, 'name': name}
 
+    try:
+        before_contract = args
+        args = validate_tool_arguments_from_documents(
+            contract_documents_by_name, name, args)
+        if args != before_contract:
+            added = sorted(set(args) - set(before_contract))
+            repairs.extend({
+                'path': f'$.arguments.{key}', 'kind': 'contract_default',
+            } for key in added)
+            if not added:
+                repairs.append({
+                    'path': '$.arguments', 'kind': 'contract_default'})
+    except ToolContractError as exc:
+        detail = exc.to_dict()
+        detail['retry_hint'] = exc.next_action
+        return None, {**detail, 'index': index, 'name': name}
+
     supplied_id = (raw_call.get('call_id') or raw_call.get('id')
                    or function.get('call_id'))
     if supplied_id:
@@ -916,6 +1593,7 @@ def normalize_execute_request(
     namespace_by_name: dict[str, str] | None,
     gateway_call_id: str,
     source: str = 'execute_calls',
+    contract_documents_by_name: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {'calls': [], 'program': None, 'execution': 'auto',
@@ -972,7 +1650,8 @@ def normalize_execute_request(
         call, error = normalize_gateway_call(
             raw_call, catalog=catalog,
             namespace_by_name=namespace_by_name,
-            gateway_call_id=gateway_call_id, index=position, source=source)
+            gateway_call_id=gateway_call_id, index=position, source=source,
+            contract_documents_by_name=contract_documents_by_name)
         if error:
             errors.append(error)
         elif call:
@@ -986,11 +1665,12 @@ def normalize_execute_request(
 
 __all__ = [
     'EXECUTE_TOOLS_NAME', 'GATEWAY_TOOL_NAMES', 'SEARCH_TOOLS_NAME',
+    'CODE_CORE_DIRECT_TOOL_NAMES', 'LOCAL_GATEWAY_MAX_TOKENS',
     'catalog_index', 'full_wire_tools',
     'execute_tools_schema',
-    'full_wire_tools_with_gateway',
-    'gateway_tool_schemas', 'local_wire_tools', 'normalize_execute_request',
-    'normalize_gateway_call', 'resolve_catalog_name',
-    'resolve_tool_search_backend', 'search_enabled_catalog',
-    'search_tools_schema',
+    'fit_tool_schema_budget', 'gateway_tool_schemas', 'local_wire_tools',
+    'normalize_execute_request',
+    'normalize_gateway_call', 'ptc_local_wire_tools', 'resolve_catalog_name',
+    'resolve_tool_search_backend', 'search_executable_catalog',
+    'search_tools_schema', 'tool_schema_tokens',
 ]

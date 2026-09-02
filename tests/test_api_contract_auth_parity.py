@@ -129,7 +129,7 @@ def test_shipped_source_converted():
     assert 'apply_headers(resp, decision)' in src, (
         'the 429 must keep apply_headers(resp, decision) AFTER the '
         'envelope is built — the X-RateLimit-* headers ride the same resp')
-    assert src.count('api_typed_error(') == 3
+    assert src.count('api_typed_error(') == 4
     assert "'permission'" in src and "'ratelimit'" in src
 
 

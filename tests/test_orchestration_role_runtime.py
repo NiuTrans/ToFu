@@ -9,7 +9,7 @@ from lib.orchestration_budget import OrchestrationAgentBudget
 from lib.orchestration_dataflow import OrchestrationDataflow
 from lib.orchestration_feedback import OrchestrationFeedbackState
 from lib.orchestration_graph import FlowExecutionError
-from lib.orchestration_outcome import OrchestrationOutcomeLedger
+from lib.orchestration.outcome_ledger import OrchestrationOutcomeLedger
 from lib.orchestration_progress import OrchestrationProgressLedger
 from lib.orchestration_role_runtime import OrchestrationRoleRuntime
 from lib.orchestration_runner_result import OrchestrationAgentResult

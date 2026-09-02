@@ -46,7 +46,6 @@ isn't a known alias passes through to the orchestrator unchanged.
   | search          | searchMode         | 'multi' / 'off'    |
   | memory          | memoryEnabled      | bool               |
   | preferences     | preferencesEnabled | bool               |
-  | swarm           | swarmEnabled       | bool               |
   | mcp             | mcpEnabled         | bool               |
   | browser         | browserEnabled     | bool               |
   | desktop         | desktopEnabled     | bool               |
@@ -82,23 +81,25 @@ import asyncio
 import json
 import time
 
-from quart import Blueprint
+from quart import Blueprint, request
 
 from lib.agent_core.admission import (
     await_terminal, controller, on_terminal, register_waiter,
     unregister_waiter, wait_for_event,
 )
+from lib.agent_core.run_contract import (
+    build_agent_config, project_agent_result,
+)
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
-    sse_response,
+    api_payload, sse_response,
 )
 from lib.billing.request_flow import (
     estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
 )
-from lib.byo_resolve import resolve_model_and_provider
+from lib.byo_resolve import dispose_ephemeral_slot, resolve_model_and_provider
 from lib.idempotency import idempotent_post
 from lib.ids import short_id
-from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import (
@@ -107,7 +108,7 @@ from lib.request_parser import (
 from lib.tools.tool_env import (
     CustomToolError, dispose_tool_env, mint_tool_env,
 )
-from lib.trajectory import AVAILABLE_FORMATS, flatten
+from lib.trajectory import AVAILABLE_FORMATS
 
 from .auth import current_auth, guard_model_relay_or_dispose, require_scope
 
@@ -117,82 +118,6 @@ api_v1_agent_run_bp = Blueprint('api_v1_agent_run', __name__)
 
 
 # ── Capability translation ──────────────────────────────────────────
-
-
-_THINKING_DEPTHS = {'low', 'medium', 'high', 'xhigh', 'max', 'ultra'}
-
-# Friendly tool tags → orchestrator cfg toggles.
-_TOOL_TAG_MAP = {
-    'search':       ('searchMode', 'multi'),
-    'search:multi': ('searchMode', 'multi'),
-    'fetch':        ('fetchEnabled', True),
-    'memory':       ('memoryEnabled', True),
-    'swarm':        ('swarmEnabled', True),
-    'mcp':          ('mcpEnabled', True),
-    'browser':      ('browserEnabled', True),
-    'desktop':      ('desktopEnabled', True),
-    'code_exec':    ('codeExecEnabled', True),
-    'image_gen':    ('imageGenEnabled', True),
-    'human_guidance': ('humanGuidanceEnabled', True),
-    'scheduler':    ('schedulerEnabled', True),
-}
-
-# When tools='*' or tools=['all'] is requested, enable every safe
-# capability. Excludes anything that requires external setup (browser
-# extension, desktop agent, project path) — those are explicit opt-ins.
-_TOOLS_ALL = {
-    'searchMode': 'multi', 'fetchEnabled': True, 'memoryEnabled': True,
-    'swarmEnabled': False, 'mcpEnabled': True, 'codeExecEnabled': False,
-    'imageGenEnabled': False, 'humanGuidanceEnabled': False,
-    'schedulerEnabled': False,
-}
-
-# Top-level alias keys → orchestrator cfg keys. Applied AFTER the
-# tools[] expansion so a direct alias wins over an entry in tools[].
-# The right-hand side is a callable that mutates the cfg dict; this
-# lets multi-key aliases (like ``thinking`` setting both
-# thinkingDepth + thinkingEnabled) live in one place.
-def _set_thinking(cfg: dict, value):
-    if isinstance(value, str) and value.lower() in _THINKING_DEPTHS:
-        cfg['thinkingEnabled'] = True
-        cfg['thinkingDepth'] = value.lower()
-    elif isinstance(value, bool):
-        cfg['thinkingEnabled'] = bool(value)
-
-
-def _set_search(cfg: dict, value):
-    if isinstance(value, str) and value.lower() in ('off', 'multi'):
-        cfg['searchMode'] = value.lower()
-    elif value is False:
-        cfg['searchMode'] = 'off'
-    elif value is True:
-        cfg['searchMode'] = 'multi'
-
-
-_ALIAS_SETTERS = {
-    'thinking':       _set_thinking,
-    'search':         _set_search,
-    'memory':         lambda c, v: c.__setitem__('memoryEnabled', bool(v)),
-    'preferences':    lambda c, v: c.__setitem__('preferencesEnabled', bool(v)),
-    'swarm':          lambda c, v: c.__setitem__('swarmEnabled', bool(v)),
-    'mcp':            lambda c, v: c.__setitem__('mcpEnabled', bool(v)),
-    'browser':        lambda c, v: c.__setitem__('browserEnabled', bool(v)),
-    'desktop':        lambda c, v: c.__setitem__('desktopEnabled', bool(v)),
-    'code_exec':      lambda c, v: c.__setitem__('codeExecEnabled', bool(v)),
-    'image_gen':      lambda c, v: c.__setitem__('imageGenEnabled', bool(v)),
-    'human_guidance': lambda c, v: c.__setitem__('humanGuidanceEnabled', bool(v)),
-    'scheduler':      lambda c, v: c.__setitem__('schedulerEnabled', bool(v)),
-    'project':        lambda c, v: c.__setitem__('projectPath', str(v)) if v else None,
-    'max_tokens':     lambda c, v: c.__setitem__('maxTokens', v),
-    'temperature':    lambda c, v: c.__setitem__('temperature', v),
-    # Third-party tool-plugin allow-list. Accepts a list of plugin names
-    # (entry-point names from the tofu.tools group), a comma/space string, or
-    # '*' / ['*'] for "all installed plugins". Passes straight through to the
-    # orchestrator cfg, where resolve_enabled_plugins() turns it into the
-    # ToolContext gate. Omit → deployment default (TOFU_DEFAULT_TOOL_PLUGINS)
-    # → fail-closed (no plugins). See docs/TOOL_PLUGINS.md.
-    'plugins':        lambda c, v: c.__setitem__('plugins', v),
-}
 
 
 def _apply_remote_alias(cfg: dict, value, *, user_id: str = ''):
@@ -221,74 +146,8 @@ def _apply_remote_alias(cfg: dict, value, *, user_id: str = ''):
 
 def _build_cfg(model_id: str, raw_config: dict | None,
                 capabilities_legacy: dict | None) -> dict:
-    """Translate the unified ``config`` dict into an orchestrator cfg.
-
-    ``raw_config`` accepts both curated aliases (``thinking``,
-    ``tools``, ``memory``, …) AND raw orchestrator keys
-    (``thinkingDepth``, ``searchMode``, …). Aliases are translated
-    first; raw keys flow through unchanged.
-
-    ``capabilities_legacy`` is the deprecated ``capabilities`` field
-    name — accepted for back-compat and merged into ``config`` (with
-    ``config`` winning).
-    """
-    cfg: dict = {'model': model_id}
-
-    # Merge legacy `capabilities` into the unified shape (config wins).
-    merged: dict = {}
-    if capabilities_legacy:
-        merged.update(capabilities_legacy)
-    if raw_config:
-        merged.update(raw_config)
-
-    # Tools list FIRST (so direct aliases below can override).
-    tools = merged.pop('tools', None)
-    if tools == '*' or tools == 'all':
-        cfg.update(_TOOLS_ALL)
-    elif isinstance(tools, list):
-        # Magic single-element list values for "all".
-        if tools == ['*'] or tools == ['all']:
-            cfg.update(_TOOLS_ALL)
-        else:
-            for t in tools:
-                mapping = _TOOL_TAG_MAP.get(str(t))
-                if mapping:
-                    key, val = mapping
-                    cfg[key] = val
-                else:
-                    logger.debug('[agent.run] unknown tool tag: %r', t)
-    elif isinstance(tools, dict):
-        # ``config.tools`` also hosts request-local context-efficiency
-        # switches (nativeExposure / programmaticCalling).  The headless
-        # alias predates those switches and used to pop then silently discard
-        # every mapping, so a request for routed exposure actually ran the
-        # full catalog.  Preserve mappings; the orchestrator normalizer owns
-        # validation and fails safe to the shipped defaults.
-        cfg['tools'] = dict(tools)
-    elif tools is not None:
-        logger.debug('[agent.run] ignoring unknown tools shape: %r', tools)
-
-    # Aliases.
-    for alias_key, setter in _ALIAS_SETTERS.items():
-        if alias_key in merged:
-            setter(cfg, merged.pop(alias_key))
-
-    # Anything left passes through as a raw orchestrator key. Don't
-    # filter — the orchestrator's own _resolve_model_config is the
-    # final authority on what's valid; we treat unknown keys as
-    # forward-compat extensions.
-    cfg.update(merged)
-
-    # ── App-personal capabilities fail closed on the headless surface ──
-    # The `memory` alias (→ memoryEnabled) and `preferences` alias (→
-    # preferencesEnabled), or tools='*', explicitly opt the caller in above.
-    # Absent an opt-in, force the fail-closed headless default so the
-    # operator's personal memory store / preference profile is NEVER spliced
-    # into a BYO caller's prompt. setdefault = explicit opt-in still wins.
-    # Single source of truth: lib/agent_core/personal_scope.
-    from lib.agent_core.personal_scope import apply_headless_personal_defaults
-    apply_headless_personal_defaults(cfg)
-    return cfg
+    """Compatibility name for the transport-neutral contract helper."""
+    return build_agent_config(model_id, raw_config, capabilities_legacy)
 
 
 # ── Streaming + blocking response shapes ────────────────────────────
@@ -382,51 +241,14 @@ async def _stream_generator(task, model: str, completion_id: str,
 def _final_response(task: dict, *, model: str, requested_id: str,
                     trajectory_fmt: str | None,
                     byo_provider: dict | None) -> dict:
-    """Build the JSON response for a finished task.
-
-    Top-level fields:
-      id, object, created, model, task_id, status, finish_reason,
-      content, thinking, usage, n_tool_rounds, [tool_calls],
-      [provider_id], [trajectory_format + trajectory].
-    """
-    rounds = task.get('toolRounds') or []
-    last_round = rounds[-1] if rounds else None
-    out: dict = {
-        'id': requested_id or short_id('run-'),
-        'object': 'agent.run',
-        'created': int(time.time()),
-        'model': model,
-        'task_id': task.get('id'),
-        'status': task.get('status'),
-        'finish_reason': task.get('finishReason') or 'stop',
-        'content': task.get('content') or '',
-        'thinking': task.get('thinking') or '',
-        'usage': task.get('usage') or {},
-        'n_tool_rounds': len(rounds),
-    }
-    # Compaction's own LLM usage (L2 + advanced-host summarizers), already
-    # folded into `usage` above; surfaced separately so callers can break
-    # out the compaction-overhead share of total cost.
-    if task.get('compactionUsage'):
-        out['compaction_usage'] = task['compactionUsage']
-    if last_round and isinstance(last_round, dict) and last_round.get('tool_calls'):
-        out['tool_calls'] = last_round['tool_calls']
-    if task.get('error'):
-        out['error'] = task['error']
-    if byo_provider:
-        out['provider_id'] = byo_provider['id']
-    if trajectory_fmt:
-        try:
-            shaped = flatten(task, trajectory_fmt)
-            # FLAT envelope: top-level format + trajectory body, never
-            # wrapped in another `trajectory: {...}` dict.
-            out['trajectory_format'] = shaped['format']
-            out['trajectory'] = shaped['trajectory']
-        except ValueError as e:
-            logger.warning('[agent.run] trajectory flatten failed fmt=%s task=%s: %s',
-                           trajectory_fmt, task.get('id', '?')[:8], e)
-            out['trajectory_error'] = str(e)
-    return out
+    """Compatibility name for the transport-neutral result projector."""
+    return project_agent_result(
+        task,
+        model=model,
+        requested_id=requested_id,
+        trajectory_fmt=trajectory_fmt,
+        byo_provider=byo_provider,
+    )
 
 
 # ── Route ───────────────────────────────────────────────────────────
@@ -439,9 +261,11 @@ def _final_response(task: dict, *, model: str, requested_id: str,
     summary='Single-call agent runtime',
     description=(
         'Run an agent turn end-to-end. Bring your own model — either '
-        'register it once via /api/v1/providers and pin runs with '
+        'use the deployment default, register one via /api/v1/providers and '
+        'pin runs with '
         '`model="name@prov_xxx"`, or pass an inline `provider: '
-        '{base_url, api_key}` block. Plain alias names route to the '
+        '{base_url, api_key, model}` block. When `model` is omitted the '
+        'provider block or deployment default supplies it. Plain aliases route to the '
         'operator-curated slot pool.\n\n'
         '`config` accepts both curated aliases (`thinking`, `tools`, '
         '`memory`, `swarm`, `mcp`, `project`, `max_tokens`, `temperature`, '
@@ -451,20 +275,23 @@ def _final_response(task: dict, *, model: str, requested_id: str,
         'When `trajectory` is set the response carries top-level '
         '`trajectory_format` + `trajectory` fields (no nested envelope) '
         'in sharegpt / openai-finetune / anthropic / tofu-native shape.\n\n'
-        'Set `stream=true` for SSE; otherwise blocks until terminal. '
+        'Set `stream=true` for SSE, or `async=true` / '
+        '`Prefer: respond-async` for an HTTP 202 task handle; otherwise '
+        'the request blocks until terminal. '
         'The response always carries `task_id` so callers can switch '
         'to `/api/v1/tasks/{id}/...` for replay or abort.'),
     tags=['agents'], scope='agents:run',
     request_body={'required': True, 'content': {'application/json': {
         'schema': {
             'type': 'object',
-            'required': ['messages', 'model'],
+            'required': ['messages'],
             'properties': {
                 'messages': {'type': 'array',
                               'items': {'$ref': '#/components/schemas/ChatMessage'}},
                 'model': {'type': 'string',
                             'description': (
-                                'Model name. May be a plain alias '
+                                'Optional model name; the deployment default '
+                                'is used when absent. May be a plain alias '
                                 '(`deepseek-v4-pro`), a BYO suffix '
                                 '(`deepseek-v4-pro@prov_a3f2c1`), or '
                                 'any name when paired with an inline '
@@ -474,10 +301,15 @@ def _final_response(task: dict, *, model: str, requested_id: str,
                     'description': (
                         'Inline BYO endpoint. Mints a one-shot slot '
                         'scoped to this single task; never persisted.'),
-                    'required': ['base_url'],
                     'properties': {
                         'base_url': {'type': 'string'},
+                        'endpoint': {
+                            'type': 'string',
+                            'description': 'Friendly alias for base_url.'},
                         'api_key': {'type': 'string'},
+                        'model': {
+                            'type': 'string',
+                            'description': 'Used when top-level model is absent.'},
                         'extra_headers': {'type': 'object'},
                         'thinking_format': {
                             'type': 'string',
@@ -505,11 +337,19 @@ def _final_response(task: dict, *, model: str, requested_id: str,
                 'trajectory': {'type': 'string',
                                 'enum': list(AVAILABLE_FORMATS)},
                 'stream': {'type': 'boolean'},
+                'async': {
+                    'type': 'boolean',
+                    'description': (
+                        'Return HTTP 202 with Location and task_id instead '
+                        'of waiting for terminal settlement.')},
                 'timeout_s': {'type': 'number'},
                 'conversation_id': {'type': 'string'},
             }}}}})
 async def agent_run():
     body = await async_parse_body()
+    from routes.api_v1.auth import request_user_id
+
+    owner_user_id = int(request_user_id())
     try:
         messages_in = require_list(body, 'messages')
     except ValueError as e:
@@ -518,15 +358,26 @@ async def agent_run():
         return api_bad_request('messages is empty', field='messages')
 
     auth = current_auth()
-    owner_key_id = (auth.key_id if auth else '') or 'anonymous'
+    credential_key_id = (auth.key_id if auth else '') or ''
+    tenant_id = auth.tenant_id if auth else None
 
     # ── 1. Resolve the model ──────────────────────────────────────
     model_str = optional_str(body, 'model', default='', max_len=200)
     provider_block = optional_dict(body, 'provider')
     if not model_str:
-        return api_bad_request('`model` is required', field='model')
+        model_str = str((provider_block or {}).get('model') or '').strip()
+    if not model_str:
+        # Managed-default mode: callers only need the Tofu endpoint/token.
+        # Composition owns the provider/model selection; no lower agent layer
+        # reaches for an ambient user or provider.
+        from lib import LLM_MODEL
+        model_str = str(LLM_MODEL or '').strip()
+    if not model_str:
+        return api_bad_request(
+            'no model is configured; pass `model`, set `provider.model`, or '
+            'configure the deployment default', field='model')
     model_id, handle, byo_prov, err, err_status = resolve_model_and_provider(
-        model_str, provider_block, owner_key_id)
+        model_str, provider_block, owner_user_id, tenant_id=tenant_id)
     if err:
         if err_status == 404:
             return api_not_found(err)
@@ -558,18 +409,19 @@ async def agent_run():
     if _remote_val is not None:
         cfg, _remote_err = _apply_remote_alias(
             cfg, _remote_val,
-            user_id=(auth.user_id if auth and getattr(auth, 'user_id', '')
-                     else ''))
+            user_id=(str(auth.owner_user_id or '') if auth else ''))
         if _remote_err:
             if handle:
                 dispose_ephemeral_slot(handle)
             return api_bad_request(_remote_err, field='config.remote')
-        audit_log('agent_run_remote_bind', key_id=owner_key_id,
+        audit_log('agent_run_remote_bind', key_id=credential_key_id,
+                  owner_user_id=owner_user_id,
                   agent_id=cfg['project_remote']['agent_id'],
                   root=cfg['project_remote']['root'])
 
     # ── 3. Other request knobs ────────────────────────────────────
     stream = optional_bool(body, 'stream', default=False)
+    respond_async = optional_bool(body, 'async', default=False)
     timeout_s = float(body.get('timeout_s') or 600)
     requested_id = optional_str(body, 'id', default='', max_len=200)
     conversation_id = optional_str(body, 'conversation_id',
@@ -594,7 +446,8 @@ async def agent_run():
     custom_tools = body.get('tools')
     if custom_tools:
         try:
-            tool_env = mint_tool_env(tools=custom_tools, owner=owner_key_id)
+            tool_env = mint_tool_env(
+                tools=custom_tools, owner=f'owner:{owner_user_id}')
         except CustomToolError as e:
             if handle:
                 dispose_ephemeral_slot(handle)
@@ -605,19 +458,24 @@ async def agent_run():
             return api_internal_error(e, context='api_v1.agent_run.tools')
         cfg['_customToolSchemas'] = tool_env.schemas
 
-    audit_log('agent_run_start', key_id=owner_key_id,
+    audit_log('agent_run_start', key_id=credential_key_id,
+              owner_user_id=owner_user_id,
               model=model_id, byo=bool(handle), provider_id=(byo_prov or {}).get('id'),
               n_messages=len(messages_in), stream=stream,
               trajectory=trajectory_fmt, n_custom_tools=len(tool_env.tools) if tool_env else 0)
 
     # ── 4. Dispatch ───────────────────────────────────────────────
-    from lib.tasks_pkg import create_task, spawn_task
-    task = create_task(conversation_id, messages_in, cfg)
+    from lib.tasks_pkg.manager import create_task
+    from lib.tasks_pkg.spawn import spawn_task
+    task = create_task(
+        conversation_id, messages_in, cfg, user_id=owner_user_id
+    )
+    task['_tenant_id'] = tenant_id
     task['_inline_messages'] = True
     task['_api_v1'] = True
     task['_via_agent_run'] = True
-    if owner_key_id:
-        task['_api_key_id'] = owner_key_id
+    if credential_key_id:
+        task['_api_key_id'] = credential_key_id
     if tool_env is not None:
         task['_tool_env'] = tool_env
     # ── Hard provider isolation ──
@@ -633,8 +491,7 @@ async def agent_run():
     # empty user_id and short-circuit to a no-op. The headline BYOM
     # endpoint must bill identically to /chat/completions — stream and
     # block alike (see _settle_once in _stream_generator + settle below).
-    billing_user_id = (auth.user_id
-                       if auth and getattr(auth, 'user_id', '') else '')
+    billing_user_id = auth.account_user_id if auth else ''
     reservation_micro = 0
     if billing_user_id:
         from lib.billing import InsufficientFunds
@@ -670,7 +527,7 @@ async def agent_run():
         logger.warning('[agent.run] admission refused (in_flight=%d/%d) '
                        'key=%s model=%s',
                        controller.in_flight, controller.capacity,
-                       owner_key_id, model_id)
+                       credential_key_id or 'open-mode', model_id)
         return api_error(
             'Server at capacity; retry shortly.', status=503,
             error_kind='overloaded', retry_after=5)
@@ -729,10 +586,29 @@ async def agent_run():
 
     logger.info('[agent.run] spawned task=%s conv=%s key=%s model=%s byo=%s '
                 'stream=%s in_flight=%d/%d', task['id'][:8],
-                conversation_id, owner_key_id, model_id, bool(handle),
+                conversation_id, credential_key_id or 'open-mode',
+                model_id, bool(handle),
                 stream, controller.in_flight, controller.capacity)
 
-    # ── 5. Stream or block ────────────────────────────────────────
+    # ── 5. Return a handle, stream, or block ──────────────────────
+    if respond_async or 'respond-async' in str(
+            request.headers.get('Prefer') or '').lower():
+        # The terminal callback remains registered and owns admission,
+        # provider/tool cleanup, and billing. Only the HTTP waiter can be
+        # released now; the caller resumes through the task endpoints.
+        unregister_waiter(task['id'])
+        response, status = api_payload({
+            'ok': True,
+            'id': requested_id or short_id('run-'),
+            'object': 'agent.run',
+            'task_id': task['id'],
+            'status': task.get('status') or 'running',
+            'model': model_id,
+        }, status=202)
+        response.headers['Location'] = f'/api/v1/tasks/{task["id"]}'
+        response.headers['X-Tofu-Task-Id'] = task['id']
+        return response, status
+
     if stream:
         completion_id = requested_id or short_id('run-')
         return sse_response(

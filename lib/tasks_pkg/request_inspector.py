@@ -1,11 +1,10 @@
 """Request Inspector — server-authoritative per-task request fold (P2).
 
-Design: ``docs/DEBUG_PANEL_REDESIGN.md`` (row schemas FROZEN in §3.3 — do not
+Design: ``docs/FRONTEND_ARCHITECTURE.md`` (row schemas FROZEN in §3.3 — do not
 rename keys). The frontend drawer renders ONLY what this module folds from
 the persisted ``task_events`` log (durable-before-visible, 6h TTL). The
-in-browser ``_debugRequests`` log (P1) is a live accelerator with gaps —
-``sse_poll_fallback.js`` never processes ``messages_snapshot``, so a poll
-window drops rounds client-side; the server log never does. The server fold
+in-browser ``_debugRequests`` log is a live accelerator with gaps. A reconnect
+window can drop rounds client-side; the server log never does. The server fold
 is therefore the authority for both live and finished tasks.
 
 Row shapes
@@ -21,7 +20,7 @@ Row shapes
     State row: ``{roundNum, label, messageCount, ts, legacy}``
 ``get_request_payload(task_id, round_num)`` → full payload for ONE round
     (messages + tools + params + model) — the on-demand detail fetch.
-``list_conv_tasks(conv_id)`` → ``{convId, tasks}`` — Task rows for the
+``list_conv_tasks(conv_id, user_id=…)`` → ``{convId, tasks}`` — Task rows for the
     drawer (live registry + task_results, exact kind-counted tallies via
     one json_extract GROUP BY — no payload bulk).
 
@@ -37,30 +36,17 @@ from __future__ import annotations
 
 import json
 
-from lib.database import DOMAIN_CHAT, pooled_db
 from lib.log import get_logger
+from lib.orchestration_message_compat import is_flow_event_type
 
 logger = get_logger(__name__)
 
 _SNAPSHOT = 'messages_snapshot'
 _ROUND_USAGE = 'round_usage'
+_WIRE_PROJECTION = 'tool_wire_projection'
 _STATE_ROUND_LABELS = ('final', 'fallback')
 # Legacy-only state markers (pre-contract snapshots carried no kind=).
 _LEGACY_STATE_LABEL_MARKERS = ('工具结果后', '最终回复后', 'Fallback')
-
-
-def _row_get(r, key, idx):
-    """Row access tolerant of mapping vs positional rows (mirrors
-    event_log.read_events)."""
-    try:
-        if key in r.keys():
-            return r[key]
-    except Exception as _e:
-        logger.debug('row get: failed (%s)', _e)
-        pass
-    return r[idx]
-
-
 def _read_events(task_id: str) -> list:
     """Return [{event_id, type, payload, ts_ms}] ordered by event_id.
 
@@ -123,64 +109,56 @@ def _read_events_uncached(task_id: str) -> list:
     """Uncached read + rebuild (see :func:`_read_events`).
 
     Reads ONLY the structural slice the inspector renders (snapshots, round
-    usage, endpoint markers) — NEVER the streaming noise (delta / phase /
+    usage, Flow markers) — NEVER the streaming noise (delta / phase /
     tool_progress / …). Every SSE delta is persisted as its own row, so an
     unfiltered read is dominated by noise: measured on a real 51,754-row
     task, the FIRST-10000-rows cap below cut every snapshot past round 6,
     and rounds 7+ all rendered "mirror expired". Structural rows are a few
     per round, so the same cap now spans thousands of rounds.
     """
-    from lib.tasks_pkg.event_log import (
-        STRUCTURAL_EVENT_TYPES, pending_event_rows)
-    # Lane-aware (docs/STORAGE_REDESIGN.md §4): snapshot the write-behind
-    # lane's pending structural rows BEFORE the DB read — a row mid
-    # commit→shadow-pop must not vanish from the inspector for one poll.
-    _pending = [r for r in pending_event_rows(task_id)
-                if r['type'] in STRUCTURAL_EVENT_TYPES
-                or r['type'].startswith('endpoint_')]
-    _struct_ph = ','.join(['?'] * len(STRUCTURAL_EVENT_TYPES))
     try:
-        with pooled_db(DOMAIN_CHAT) as db:
-            rows = db.execute(
-                'SELECT event_id, type, payload, ts_ms FROM task_events '
-                f'WHERE task_id=? AND (type IN ({_struct_ph}) '
-                "OR type LIKE 'endpoint\\_%' ESCAPE '\\') "
-                'ORDER BY event_id ASC LIMIT 10000',
-                (task_id, *STRUCTURAL_EVENT_TYPES)).fetchall()
+        from lib.storage import get_storage_client
+        from lib.task_event_contract import STRUCTURAL_EVENT_TYPES
+
+        structural = []
+        after = -1
+        scanned = 0
+        client = get_storage_client()
+        while True:
+            rows = client.query(
+                'event.list', {'task_id': task_id, 'after_sequence': after,
+                               'limit': 1000}) or []
+            if not rows:
+                break
+            scanned += len(rows)
+            for row in rows:
+                payload = row.get('event') or {}
+                event_type = payload.get('type') or ''
+                if (event_type not in STRUCTURAL_EVENT_TYPES
+                        and not is_flow_event_type(event_type)):
+                    continue
+                structural.append({
+                    'event_id': int(row.get('sequence', 0)),
+                    'type': event_type,
+                    'payload': payload,
+                    'ts_ms': int(row.get('created_at_ms') or 0),
+                })
+            after = int(rows[-1].get('sequence', after))
+            if (len(rows) < 1000
+                    or len(structural) >= 10_000
+                    or scanned >= 200_000):
+                break
+        return _rebuild_snapshot_rows(structural)
     except Exception as e:
-        logger.warning('[RequestInspector] read failed for task=%s: %s',
+        logger.warning('[RequestInspector] Sidecar event read failed task=%s: %s',
                        task_id[:8], e)
         return []
-    out = []
-    for r in rows:
-        payload = _row_get(r, 'payload', 2)
-        if not isinstance(payload, dict):
-            try:
-                payload = json.loads(payload or '{}')
-            except (TypeError, ValueError, json.JSONDecodeError) as _e:
-                logger.debug('read events uncached: unexpected type/unparseable/malformed JSON (%s)', _e)
-                payload = {}
-        try:
-            out.append({
-                'event_id': int(_row_get(r, 'event_id', 0)),
-                'type': _row_get(r, 'type', 1),
-                'payload': payload,
-                'ts_ms': int(_row_get(r, 'ts_ms', 3) or 0),
-            })
-        except (TypeError, ValueError) as e:
-            logger.debug('[RequestInspector] row skipped for task=%s: %s',
-                         task_id[:8], e)
-    if _pending:
-        seen = {r['event_id'] for r in out}
-        out.extend(r for r in _pending if r['event_id'] not in seen)
-        out.sort(key=lambda r: r['event_id'])
-    return _rebuild_snapshot_rows(out)
 
 
 def _rebuild_snapshot_rows(rows: list) -> list:
     """Restore full ``messages``/``tools`` on delta-stored snapshot rows.
 
-    Storage is incremental (docs/DEBUG_PANEL_REDESIGN.md §10) but every
+    Storage is incremental (docs/FRONTEND_ARCHITECTURE.md §10) but every
     consumer of this module — the fold, the payload endpoint, the frontend —
     sees the FULL payload, exactly as before. Rebuild is server-side and
     total: a row that cannot be reconstructed is marked ``degraded`` by
@@ -319,10 +297,11 @@ def fold_request_log(task_id: str) -> dict:
     requests = []
     states = []
     attempts: dict[str, list] = {}
+    wire_projections: dict[tuple[str, str], dict] = {}
     operation_keys: set[str] = set()
     operation_count_exact = True
     operation_count_available = False
-    endpoint_seen = False
+    flow_seen = False
     for e in events:
         p = e['payload']
         et = e['type']
@@ -345,7 +324,7 @@ def fold_request_log(task_id: str) -> dict:
                     'roundNum': p.get('roundNum'),
                     'ts': e['ts_ms'],
                     'model': p.get('model') or '',
-                    # Endpoint turns tag their phase (P4) so same-numbered
+                    # Flow node turns tag their phase (P4) so same-numbered
                     # planner/worker/critic rounds stay distinct rows.
                     'turn': p.get('turn') or '',
                     'params': p.get('params') or {},
@@ -382,15 +361,31 @@ def fold_request_log(task_id: str) -> dict:
                 'cacheWrite': int(nu.get('cache_write') or 0),
                 'ts': e['ts_ms'],
             })
-        elif et.startswith('endpoint_'):
-            # Endpoint-driven task. Planner/Worker/Critic turns all run
+        elif et == _WIRE_PROJECTION:
+            wire_projections[(
+                p.get('turn') or '', str(p.get('roundNum')),
+            )] = p
+        elif is_flow_event_type(et):
+            # Flow-driven task. Planner/Worker/Critic turns all run
             # run_task (snapshots fire) — but each re-numbers rounds from
             # 1, so a task whose snapshots carry NO turn tag (pre-P4 log)
             # is genuinely ambiguous, not uncovered.
-            endpoint_seen = True
+            flow_seen = True
     for row in requests:
         row['attempts'] = attempts.get(
             (row['turn'], str(row['roundNum'])), [])
+        wire = wire_projections.get(
+            (row['turn'], str(row['roundNum'])))
+        if wire:
+            row['wireToolsCount'] = int(wire.get('toolCount') or 0)
+            row['wireSchemaTokens'] = int(wire.get('schemaTokens') or 0)
+            row['wireSchemaFingerprint'] = str(
+                wire.get('schemaFingerprint') or '')
+            row['wireBackend'] = wire.get('backend') or ''
+            row['schemaBudgetTokens'] = int(
+                wire.get('schemaBudgetTokens') or 0)
+            row['budgetDroppedCount'] = len(
+                wire.get('budgetDroppedNames') or [])
     has_turn_tags = any(r['turn'] for r in requests)
     out = {
         'taskId': task_id,
@@ -402,11 +397,11 @@ def fold_request_log(task_id: str) -> dict:
         'operationCountAvailable': operation_count_available,
         'operationCountApproximate': not operation_count_exact,
     }
-    if endpoint_seen and not has_turn_tags:
-        # Legacy endpoint log: planner/worker/critic rounds share numbers
+    if flow_seen and not has_turn_tags:
+        # Untagged Flow log: planner/worker/critic rounds share numbers
         # with no phase tag — rows exist but cannot be told apart.
         out['coverage'] = 'partial'
-        out['coverageReason'] = 'endpoint-untagged'
+        out['coverageReason'] = 'flow-untagged'
     else:
         out['coverage'] = 'full'
     return out
@@ -416,14 +411,14 @@ def get_request_payload(task_id: str, round_num, turn: str = '',
                         kind: str = 'request') -> dict | None:
     """Full payload for ONE snapshot round (the on-demand detail fetch).
 
-    ``turn`` (optional): endpoint phase tag ('planning'|'working'|
+    ``turn`` (optional): Flow node phase tag ('planning'|'working'|
     'reviewing') or 'swarm-agent' — disambiguates same-numbered rounds.
     When given, only snapshots with a matching turn qualify; when empty,
     the last matching snapshot wins (legacy / untagged behavior).
 
     ``kind``: 'request' (default) reads pre-request snapshots; 'state'
     reads the post-tool / final / fallback mirrors. Both share the SAME
-    roundNum axis (docs/DEBUG_PANEL_REDESIGN.md §3.1: the post-tool mirror
+    roundNum axis (docs/FRONTEND_ARCHITECTURE.md §3.1: the post-tool mirror
     of loop round N carries roundNum=N+1, exactly the request that produced
     those tool calls), so ONE addressing scheme serves both — this is what
     the in-chat state inspector fetches.
@@ -434,8 +429,30 @@ def get_request_payload(task_id: str, round_num, turn: str = '',
     if kind not in ('request', 'state'):
         return None
     best = None
+    wire_projection = None
     for e in _read_events(task_id):
         p = e['payload']
+        if e['type'] == _WIRE_PROJECTION:
+            if str(p.get('roundNum')) != str(round_num):
+                continue
+            if turn and (p.get('turn') or '') != turn:
+                continue
+            wire_projection = {
+                'backend': p.get('backend') or '',
+                'toolNames': list(p.get('toolNames') or []),
+                'toolCount': int(p.get('toolCount') or 0),
+                'schemaTokens': int(p.get('schemaTokens') or 0),
+                'schemaFingerprint': str(
+                    p.get('schemaFingerprint') or ''),
+                'schemaBudgetTokens': int(
+                    p.get('schemaBudgetTokens') or 0),
+                'budgetDroppedNames': list(
+                    p.get('budgetDroppedNames') or []),
+                'compactedNames': list(p.get('compactedNames') or []),
+                'executableToolCount': int(
+                    p.get('executableToolCount') or 0),
+            }
+            continue
         if e['type'] != _SNAPSHOT or _snapshot_kind(p) != kind:
             continue
         if str(p.get('roundNum')) != str(round_num):
@@ -459,6 +476,8 @@ def get_request_payload(task_id: str, round_num, turn: str = '',
         'tools': p.get('tools') or [],
         'contextManifest': p.get('contextManifest') or [],
     }
+    if wire_projection is not None:
+        out['wireProjection'] = wire_projection
     # §10.3: a round that could not be exactly reconstructed says so — the
     # UI must never present a partial rebuild as the real request.
     if p.get('degraded'):
@@ -467,7 +486,7 @@ def get_request_payload(task_id: str, round_num, turn: str = '',
     return out
 
 
-def list_conv_tasks(conv_id: str, limit: int = 15) -> dict:
+def list_conv_tasks(conv_id: str, *, user_id: int, limit: int = 15) -> dict:
     """Task rows for the drawer: live chat registry + persisted
     task_results, newest first, each annotated with EXACT kind-counted
     snapshot tallies (one json_extract GROUP BY — translates to PG jsonb
@@ -478,10 +497,11 @@ def list_conv_tasks(conv_id: str, limit: int = 15) -> dict:
     """
     rows: dict[str, dict] = {}
     try:
-        from lib.tasks_pkg.manager import _chat_runtime
-        with _chat_runtime._lock:  # type: ignore[attr-defined]
-            live = [t for t in _chat_runtime._tasks.values()  # type: ignore[attr-defined]
-                    if t.get('convId') == conv_id]
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+        live = [
+            task for task in chat_task_runtime.snapshot_owned(user_id=user_id)
+            if task.get('convId') == conv_id
+        ]
         for t in live:
             rows[t['id']] = {
                 'taskId': t['id'],
@@ -493,21 +513,29 @@ def list_conv_tasks(conv_id: str, limit: int = 15) -> dict:
     except Exception as e:
         logger.debug('[RequestInspector] live registry read failed: %s', e)
     try:
-        with pooled_db(DOMAIN_CHAT) as db:
-            trs = db.execute(
-                'SELECT task_id, status, created_at, completed_at '
-                'FROM task_results WHERE conv_id=? '
-                'ORDER BY created_at DESC LIMIT ?',
-                (conv_id, limit)).fetchall()
-        for r in trs:
-            tid = _row_get(r, 'task_id', 0)
+        from lib.storage import get_storage_client
+
+        result = get_storage_client().query(
+            'task_results.summary_list', {
+                'conv_id': conv_id,
+                'limit': min(max(1, int(limit)), 1000),
+                'user_id': user_id,
+                'scan_limit': 10_000,
+                'order_by': 'created_at_desc',
+            }, deadline=30) or {}
+        if result.get('capped'):
+            logger.warning(
+                '[RequestInspector] task summary scan hit its 10000-row '
+                'work cap for conv=%s', (conv_id or '')[:8])
+        for row in result.get('records') or []:
+            tid = row.get('key')
             if tid in rows:
                 continue
             rows[tid] = {
                 'taskId': tid,
-                'status': _row_get(r, 'status', 1),
-                'createdAt': int(_row_get(r, 'created_at', 2) or 0),
-                'completedAt': _row_get(r, 'completed_at', 3),
+                'status': row.get('status') or '',
+                'createdAt': int(row.get('created_at') or 0),
+                'completedAt': row.get('completed_at'),
                 'live': False,
             }
     except Exception as e:
@@ -515,86 +543,54 @@ def list_conv_tasks(conv_id: str, limit: int = 15) -> dict:
                        'conv=%s: %s', (conv_id or '')[:8], e)
     tasks = sorted(rows.values(), key=lambda x: x['createdAt'] or 0,
                    reverse=True)[:limit]
-    # Swarm sub-agent rows (P4): sub-agents persist their LLM-request
-    # snapshots under '{parent_task_id}#agent:{agent_id}' (see
-    # lib/swarm/agent.py::_emit_request_snapshot). Surface them as child
-    # rows of their parent so the drawer can drill into agent calls.
     parent_ids = {t['taskId'] for t in tasks}
     if parent_ids:
         try:
-            # The old leading-wildcard query scanned the entire event table
-            # every time the drawer opened (12M rows / 10 GiB in the live DB).
-            # Child ids have a strict ``{parent}#agent:{id}`` namespace, so
-            # probe only each visible parent's lexicographic prefix range.
-            # Managed PostgreSQL databases use C collation; SQLite's binary
-            # text order has the same property.  The existing
-            # (task_id, type) index then serves this as a bounded index scan.
-            ranges = []
-            range_params = []
-            for parent in sorted(parent_ids):
-                prefix = f'{parent}#agent:'
-                # ':' + 1 == ';': every string beginning with ``prefix`` is
-                # in [prefix, parent#agent;) under the supported collations.
-                ranges.append('(task_id >= ? AND task_id < ?)')
-                range_params.extend((prefix, f'{parent}#agent;'))
-            with pooled_db(DOMAIN_CHAT) as db:
-                like_rows = db.execute(
-                    "SELECT DISTINCT task_id FROM task_events "
-                    "WHERE type='messages_snapshot' AND (" +
-                    ' OR '.join(ranges) + ')', tuple(range_params)).fetchall()
+            from lib.storage import get_storage_client
+
+            summary = get_storage_client().query(
+                'event.inspector_summary', {
+                    'task_ids': sorted(parent_ids),
+                }, deadline=30) or {}
             by_parent = {t['taskId']: t for t in tasks}
-            for r in like_rows:
-                cid = _row_get(r, 'task_id', 0)
-                parent, _, agent_id = cid.partition('#agent:')
-                if parent not in parent_ids or not agent_id:
+            by_id = dict(by_parent)
+            for record in summary.get('records') or []:
+                task_id = str(record.get('task_id') or '')
+                parent, marker, agent_id = task_id.partition('#agent:')
+                if not marker or parent not in parent_ids or not agent_id:
                     continue
-                tasks.append({
-                    'taskId': cid,
+                child = {
+                    'taskId': task_id,
                     'parentTaskId': parent,
                     'agentId': agent_id,
                     'isSwarmAgent': True,
                     'status': 'swarm-agent',
-                    'createdAt': by_parent[parent]['createdAt'],
+                    'createdAt': (int(record.get('first_event_at_ms') or 0)
+                                  or by_parent[parent]['createdAt']),
                     'completedAt': None,
                     'live': False,
-                })
-        except Exception as e:
-            logger.debug('[RequestInspector] swarm-agent discovery failed: %s', e)
-    ids = [t['taskId'] for t in tasks]
-    if ids:
-        try:
-            placeholders = ','.join(['?'] * len(ids))
-            with pooled_db(DOMAIN_CHAT) as db:
-                counts = db.execute(
-                    "SELECT task_id, json_extract(payload, '$.kind') AS k, "
-                    "COUNT(*) AS n FROM task_events "
-                    f"WHERE task_id IN ({placeholders}) "
-                    "AND type='messages_snapshot' GROUP BY task_id, k",
-                    tuple(ids)).fetchall()
-            by_id = {t['taskId']: t for t in tasks}
-            for c in counts:
-                row = by_id.get(_row_get(c, 'task_id', 0))
-                if row is None:
+                }
+                tasks.append(child)
+                by_id[task_id] = child
+            for record in summary.get('records') or []:
+                task = by_id.get(str(record.get('task_id') or ''))
+                if task is None:
                     continue
-                k = _row_get(c, 'k', 1)
-                n = int(_row_get(c, 'n', 2) or 0)
-                if k == 'state':
-                    row['stateCount'] = row.get('stateCount', 0) + n
-                elif k == 'request':
-                    row['requestCount'] = row.get('requestCount', 0) + n
-                else:
-                    # Pre-contract rows (no kind) — exact request/state split
-                    # needs the label shim; surface as a legacy tally so the
-                    # UI can mark the count approximate.
-                    row['legacyCount'] = row.get('legacyCount', 0) + n
+                task['requestCount'] = int(record.get('request_count') or 0)
+                task['stateCount'] = int(record.get('state_count') or 0)
+                task['legacyCount'] = int(record.get('legacy_count') or 0)
+                task['hasEvents'] = bool(record.get('event_count'))
         except Exception as e:
-            logger.debug('[RequestInspector] kind tally failed: %s', e)
+            logger.warning(
+                '[RequestInspector] event summary read failed conv=%s: %s',
+                (conv_id or '')[:8], e)
     for t in tasks:
         t.setdefault('requestCount', 0)
         t.setdefault('stateCount', 0)
         t.setdefault('legacyCount', 0)
         t['hasEvents'] = bool(
-            t['requestCount'] or t['stateCount'] or t['legacyCount'])
+            t.get('hasEvents')
+            or t['requestCount'] or t['stateCount'] or t['legacyCount'])
     return {'convId': conv_id, 'tasks': tasks}
 
 

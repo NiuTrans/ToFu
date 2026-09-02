@@ -50,7 +50,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 PAPER_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'pdf-responsive.ts')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 def _node_deps_available() -> bool:

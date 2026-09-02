@@ -49,6 +49,7 @@ def workspace(tmp_path):
 
 def _task(conv_id):
     return {'id': f'task-{conv_id}', 'convId': conv_id,
+            '_userId': 1,
             'messages': [], 'toolRounds': [],
             'events_lock': threading.Lock(), 'events': []}
 

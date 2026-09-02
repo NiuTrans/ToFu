@@ -7,12 +7,16 @@ and conflict semantics aligned without teaching each CRUD route its own copy.
 
 from __future__ import annotations
 
-from lib.orchestration.definition_wire_contracts import (
+from lib.orchestration.definition_conflict_schema import (
     definition_conflict_response_schema,
+)
+from lib.orchestration.definition_contract_registry import (
+    definition_write_contract,
+)
+from lib.orchestration.definition_contract_schema import (
     definition_delete_response_schema,
     definition_entry_response_schema,
     definition_list_response_schema,
-    definition_write_contract,
 )
 
 from .orchestration_openapi import (
@@ -36,15 +40,14 @@ def _json_response(description: str, schema: dict, *, etag: bool = False) \
 
 
 def definition_precondition_parameters() -> list[dict]:
-    """Publish the optional optimistic-concurrency header once."""
+    """Publish the required optimistic-concurrency header once."""
     contract = definition_write_contract()
     return [{
         'name': contract['preconditionHeader'],
         'in': 'header',
-        'required': not contract['legacyUnguarded'],
-        'description': 'Quoted updatedAt token from the response ETag. '
-                       'Omitted by legacy clients for an unguarded write.',
-        'schema': {'type': 'string'},
+        'required': True,
+        'description': 'Required quoted updatedAt token from the response ETag.',
+        'schema': {'type': 'string', 'pattern': r'^(?:W/)?"[0-9]+"$'},
     }]
 
 

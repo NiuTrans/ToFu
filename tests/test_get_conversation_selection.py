@@ -58,19 +58,14 @@ def _install_fake_row(monkeypatch, messages, title='T'):
     from lib.conv_ref import _detail
     row = _FakeRow({
         'id': 'c1', 'user_id': 1, 'title': title,
-        'messages': json.dumps(messages), 'created_at': 1, 'updated_at': 2,
-        'settings': '{}', 'msg_count': len(messages), 'rev': 3,
+        'messages': messages, 'created_at': 1, 'updated_at': 2,
+        'settings': {}, 'msg_count': len(messages), 'rev': 3,
     })
-
-    class _Cur:
-        def fetchone(self):
-            return row
-
-    class _DB:
-        def execute(self, sql, params=()):
-            return _Cur()
-
-    monkeypatch.setattr(_detail, '_get_db', lambda: _DB())
+    monkeypatch.setattr(
+        _detail,
+        '_read_conversation_snapshot',
+        lambda conversation_id, *, user_id: row,
+    )
     return row
 
 
@@ -80,28 +75,28 @@ class TestSelectionKeepsTheEnding:
         from lib.conv_ref._detail import get_conversation
         msgs = _mk_messages(400)
         _install_fake_row(monkeypatch, msgs)
-        out = get_conversation('c1')
+        out = get_conversation('c1', user_id=1)
         assert 'MSG0399' in out, (
             'the final message was dropped — head-only truncation again')
 
     def test_long_conversation_also_keeps_the_opening(self, monkeypatch):
         from lib.conv_ref._detail import get_conversation
         _install_fake_row(monkeypatch, _mk_messages(400))
-        out = get_conversation('c1')
+        out = get_conversation('c1', user_id=1)
         assert 'MSG0000' in out
 
     def test_omission_is_stated_not_silent(self, monkeypatch):
         """A gap the reader can't see is worse than a smaller window."""
         from lib.conv_ref._detail import get_conversation
         _install_fake_row(monkeypatch, _mk_messages(400))
-        out = get_conversation('c1')
+        out = get_conversation('c1', user_id=1)
         low = out.lower()
         assert 'omitted' in low or 'skipped' in low
 
     def test_short_conversation_is_untouched(self, monkeypatch):
         from lib.conv_ref._detail import get_conversation
         _install_fake_row(monkeypatch, _mk_messages(6))
-        out = get_conversation('c1')
+        out = get_conversation('c1', user_id=1)
         for i in range(6):
             assert f'MSG{i:04d}' in out
         assert 'omitted' not in out.lower()
@@ -121,9 +116,9 @@ class TestNoFalseRecoveryPath:
         truncated blob that L0 then advertises as 'Full output saved'.
         """
         from lib.conv_ref._detail import get_conversation
-        from lib.tasks_pkg.compaction import budget_tool_result
+        from lib.tasks_pkg.compaction.api import budget_tool_result
         _install_fake_row(monkeypatch, _mk_messages(400))
-        out = get_conversation('c1')
+        out = get_conversation('c1', user_id=1)
         after_l0 = budget_tool_result('get_conversation', out)
         if 'Full output saved' in after_l0:
             import re
@@ -150,7 +145,7 @@ class TestNoFalseRecoveryPath:
         # selection cannot help, so the char path is what runs.
         huge = [{'role': 'user', 'content': 'HEADMARK ' + ('z' * 300000) + ' TAILMARK'}]
         _install_fake_row(monkeypatch, huge)
-        out = get_conversation('c1')
+        out = get_conversation('c1', user_id=1)
         assert 'HEADMARK' in out
         assert 'TAILMARK' in out, (
             'char-level clamp dropped the tail — same head-only bug, one '
@@ -161,7 +156,7 @@ class TestRawStaysParseable:
     def test_raw_is_valid_json(self, monkeypatch):
         from lib.conv_ref._detail import get_conversation
         _install_fake_row(monkeypatch, _mk_messages(400))
-        out = get_conversation('c1', raw=True)
+        out = get_conversation('c1', raw=True, user_id=1)
         assert '```json' in out
         body = out.split('```json', 1)[1].rsplit('```', 1)[0]
         json.loads(body)  # must not raise
@@ -170,7 +165,7 @@ class TestRawStaysParseable:
         from lib.conv_ref._detail import get_conversation
         msgs = _mk_messages(4)
         _install_fake_row(monkeypatch, msgs)
-        out = get_conversation('c1', raw=True)
+        out = get_conversation('c1', raw=True, user_id=1)
         body = out.split('```json', 1)[1].rsplit('```', 1)[0]
         rec = json.loads(body)
         assert len(rec['messages']) == 4
@@ -180,7 +175,7 @@ class TestRawStaysParseable:
         """A windowed raw read must SAY it is windowed, in-band."""
         from lib.conv_ref._detail import get_conversation
         _install_fake_row(monkeypatch, _mk_messages(400))
-        out = get_conversation('c1', raw=True)
+        out = get_conversation('c1', raw=True, user_id=1)
         body = out.split('```json', 1)[1].rsplit('```', 1)[0]
         rec = json.loads(body)
         assert rec.get('truncated') is True
@@ -197,7 +192,7 @@ class TestRawStaysParseable:
         from lib.conv_ref._detail import MAX_CHARS, get_conversation
         _install_fake_row(monkeypatch,
                           [{'role': 'user', 'content': 'q' * 800000}])
-        out = get_conversation('c1', raw=True)
+        out = get_conversation('c1', raw=True, user_id=1)
         assert len(out) <= MAX_CHARS * 1.1, (
             f'raw payload is {len(out):,} chars — unbounded')
         body = out.split('```json', 1)[1].rsplit('```', 1)[0]
@@ -208,7 +203,7 @@ class TestRawStaysParseable:
         from lib.conv_ref._detail import get_conversation
         _install_fake_row(monkeypatch,
                           [{'role': 'user', 'content': 'q' * 800000}])
-        out = get_conversation('c1', raw=True)
+        out = get_conversation('c1', raw=True, user_id=1)
         body = out.split('```json', 1)[1].rsplit('```', 1)[0]
         rec = json.loads(body)
         assert rec.get('truncated') is True
@@ -231,7 +226,8 @@ class TestPaging:
         """
         from lib.conv_ref._detail import get_conversation
         _install_fake_row(monkeypatch, _mk_messages(400))
-        out = get_conversation('c1', limit=10, before=200)
+        out = get_conversation(
+            'c1', limit=10, before=200, user_id=1)
         assert 'MSG0198' in out, 'cursor did not land on the message before it'
         assert 'MSG0399' not in out, 'cursor window still shows the tail'
 
@@ -239,5 +235,5 @@ class TestPaging:
         """Truncation without a next step is a dead end."""
         from lib.conv_ref._detail import get_conversation
         _install_fake_row(monkeypatch, _mk_messages(400))
-        out = get_conversation('c1')
+        out = get_conversation('c1', user_id=1)
         assert 'before=' in out

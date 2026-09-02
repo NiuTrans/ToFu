@@ -1,4 +1,4 @@
-"""Browser tab leases bound to a user, client/profile, and task."""
+"""Browser tab leases bound to one authenticated owner and one device."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class BrowserSessionMode(str, Enum):
 @dataclass
 class BrowserSessionLease:
     lease_id: str
-    user_id: str
+    owner_user_id: str
     client_id: str
     profile: str = ''
     task_id: str = ''
@@ -39,7 +39,7 @@ class BrowserSessionLease:
     def public_dict(self) -> dict:
         return {
             'lease_id': self.lease_id,
-            'user_id': self.user_id,
+            'owner_user_id': self.owner_user_id,
             'client_id': self.client_id,
             'profile': self.profile,
             'task_id': self.task_id,
@@ -72,17 +72,18 @@ def _expire_lease(lease_id: str) -> None:
     release_browser_lease(lease, reason='timeout')
 
 
-def _choose_client(user_id: str | None, client_id: str | None) -> tuple[str, str]:
-    from .queue import _get_active_client, get_connected_clients
+def _normalize_owner(owner_user_id) -> str:
+    owner = str(owner_user_id or '').strip()
+    if not owner.isdigit() or int(owner) < 1:
+        raise ValueError('owner_user_id must be a positive integer')
+    return owner
 
-    clients = get_connected_clients(user_id=user_id) if user_id is not None \
-        else get_connected_clients()
+
+def _choose_client(owner_user_id: str, client_id: str | None) -> tuple[str, str]:
+    from .queue import get_connected_clients
+
+    clients = get_connected_clients(owner_user_id=owner_user_id)
     cid = str(client_id or '')
-    # The queue's active-client pointer is process-global legacy state.  It is
-    # safe only for an unscoped operator call; a user-scoped lease selects
-    # strictly from that user's connected clients below.
-    if not cid and user_id is None:
-        cid = str(_get_active_client() or '')
     if cid:
         match = next((c for c in clients if c.get('client_id') == cid), None)
         if match is None:
@@ -95,18 +96,19 @@ def _choose_client(user_id: str | None, client_id: str | None) -> tuple[str, str
     return cid, str((match or {}).get('profile') or '')
 
 
-def acquire_browser_lease(*, user_id: str | None = None, client_id: str | None = None,
+def acquire_browser_lease(*, owner_user_id: str, client_id: str | None = None,
                           profile: str = '', task_id: str = '',
                           session: str | BrowserSessionMode = 'ephemeral',
                           tab_id: int | None = None, timeout: float = 120) \
         -> BrowserSessionLease:
     cleanup_expired_leases()
+    owner = _normalize_owner(owner_user_id)
     mode = session if isinstance(session, BrowserSessionMode) \
         else BrowserSessionMode(str(session))
-    cid, detected_profile = _choose_client(user_id, client_id)
+    cid, detected_profile = _choose_client(owner, client_id)
     now = time.time()
     lease = BrowserSessionLease(
-        lease_id=str(uuid.uuid4()), user_id=str(user_id or ''), client_id=cid,
+        lease_id=str(uuid.uuid4()), owner_user_id=owner, client_id=cid,
         profile=str(profile or detected_profile), task_id=str(task_id or ''),
         mode=mode, tab_id=int(tab_id) if tab_id is not None else None,
         created_at=now, expires_at=(now + max(1.0, float(timeout))) if timeout else 0,
@@ -157,7 +159,8 @@ def release_browser_lease(lease: BrowserSessionLease, *, reason: str = 'complete
     for capture_id in captures:
         try:
             send('network_capture_stop', {'captureId': capture_id}, timeout=5,
-                 client_id=lease.client_id)
+                 client_id=lease.client_id,
+                 owner_user_id=lease.owner_user_id)
         except Exception as exc:
             logger.warning(
                 '[Browser] capture cleanup failed for lease %s (%s): %s',
@@ -165,7 +168,8 @@ def release_browser_lease(lease: BrowserSessionLease, *, reason: str = 'complete
     if should_close:
         try:
             send('close_tab', {'tabId': int(tab_id)}, timeout=5,
-                 client_id=lease.client_id)
+                 client_id=lease.client_id,
+                 owner_user_id=lease.owner_user_id)
         except Exception as exc:
             logger.warning(
                 '[Browser] tab cleanup failed for lease %s (tab %s): %s',
@@ -184,13 +188,14 @@ def cleanup_expired_leases(*, sender=None) -> int:
     return len(expired)
 
 
-def lease_status(*, user_id: str | None = None, client_id: str | None = None) -> list[dict]:
+def lease_status(*, owner_user_id: str, client_id: str | None = None) -> list[dict]:
+    owner = _normalize_owner(owner_user_id)
     cleanup_expired_leases()
     with _leases_lock:
         leases = list(_leases.values())
     return [lease.public_dict() for lease in leases
             if lease.active
-            and (user_id is None or lease.user_id == str(user_id or ''))
+            and lease.owner_user_id == owner
             and (client_id is None or lease.client_id == client_id)]
 
 

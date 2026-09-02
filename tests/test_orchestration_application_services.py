@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from lib.orchestration import service as service_facade
 from lib.orchestration.application_services import (
     OrchestrationApplicationServices,
 )
@@ -63,15 +62,10 @@ def test_application_services_are_late_bound_and_share_one_runtime_start_seam():
         runs=replacement_runs,
     )
     starts = services.runtime_starts()
-    mutations = services.runtime_mutations()
+    mutations = services.runtime_mutations(41)
     assert services.definitions() is replacement_definitions
     assert services.runs() is replacement_runs
     assert starts._definition_service() is replacement_definitions
     assert starts._run_service() is replacement_runs
     assert mutations._runtime is services.runtime
-
-
-def test_application_services_are_exported_by_the_compatibility_facade():
-    assert service_facade.OrchestrationApplicationServices is \
-        OrchestrationApplicationServices
-    assert hasattr(service_facade, 'OrchestrationRuntimeMutationService')
+    assert mutations.owner_user_id == 41

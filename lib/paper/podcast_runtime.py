@@ -3,7 +3,7 @@
 Rides :class:`lib.production.runtime.ProductionRuntime` — the dedup index,
 create-with-field-shape, append+touch, stale sweep and id minting that used to
 be hand-rolled here now live in the substrate (P6, driven by the P7
-measurement in docs/PRODUCTION_PIPELINE_DESIGN.md §9).
+shared lifecycle contract in docs/modules/production.md).
 
 Background podcast generation (report → script → TTS → audio) with a
 dedup-by-(paper_hash, mode, lang, voice, model) index so a second request
@@ -26,30 +26,32 @@ _production = ProductionRuntime(
     error_source='routes.paper:podcast', log_label='Paper:Podcast',
     stall_timeout=120)
 
-#: The underlying TaskRuntime. Compatibility shims: legacy code in paper.py
-#: and tests reference these names directly.
+#: The underlying TaskRuntime discovered by the generic task API.
 _podcast_runtime = _production.runtime
-_podcast_tasks = _production.tasks
-_podcast_tasks_lock = _production.lock
-#: (paper_hash, mode, lang, voice, model) -> task_id
-_podcast_dedup_index = _production.dedup_index
 
 
-def _podcast_index_get(paper_hash, mode, lang, voice, model=''):
+def _podcast_index_get(
+    paper_hash, mode, lang, voice, model='', *, user_id: int,
+):
     """Return a live task_id for the dedup key, pruning stale entries."""
-    return _production.index_get((paper_hash, mode, lang, voice, model or ''))
+    return _production.index_get(
+        (user_id, paper_hash, mode, lang, voice, model or ''))
 
 
-def _podcast_index_register(paper_hash, mode, lang, voice, model, task_id):
-    _production.index_register((paper_hash, mode, lang, voice, model or ''),
+def _podcast_index_register(
+    paper_hash, mode, lang, voice, model, task_id, *, user_id: int,
+):
+    _production.index_register((user_id, paper_hash, mode, lang, voice, model or ''),
                                task_id)
 
 
-def _new_podcast_task(task_id, paper_hash, mode, lang, voice, model):
-    """Create + register a pending podcast task, augmented with the
-    legacy-field shape the worker and poll route read."""
+def _new_podcast_task(
+    task_id, paper_hash, mode, lang, voice, model, *, user_id: int,
+):
+    """Create and register a pending podcast task for the worker."""
     return _production.create_task(
         task_id,
+        user_id=user_id,
         meta={'paper_hash': paper_hash, 'mode': mode, 'lang': lang,
               'voice': voice, 'model': model},
         fields={
@@ -84,9 +86,6 @@ def _podcast_task_id():
 __all__ = [
     '_production',
     '_podcast_runtime',
-    '_podcast_tasks',
-    '_podcast_tasks_lock',
-    '_podcast_dedup_index',
     '_podcast_index_get',
     '_podcast_index_register',
     '_new_podcast_task',

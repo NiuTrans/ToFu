@@ -29,6 +29,11 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from lib.log import get_logger
+from lib.turn_verdict import (
+    TurnStatus,
+    derive_task_verdict,
+    terminal_finish_reason,
+)
 
 logger = get_logger(__name__)
 
@@ -94,30 +99,44 @@ class ChatResult:
     thinking: str = ''
     tool_calls: list = field(default_factory=list)
     usage: dict = field(default_factory=dict)
-    finish_reason: str = 'stop'
+    finish_reason: str = 'error'
     error: dict | None = None
     task_id: str = ''
     status: str = ''
     raw_task: dict | None = None
+    stream_state: str | None = None
 
     @property
     def ok(self) -> bool:
-        return (self.status == 'done' and self.error is None
-                and self.finish_reason != 'incomplete')
+        verdict = derive_task_verdict({
+            'status': self.status,
+            'finishReason': self.finish_reason,
+            'streamState': self.stream_state,
+            'error': self.error,
+            'aborted': self.status == 'aborted',
+        })
+        return self.status == 'done' and verdict.status is TurnStatus.COMPLETED
 
 
-def _start_task(messages: list, cfg: dict) -> dict:
+def _start_task(messages: list, cfg: dict, *, user_id: int) -> dict:
     """Create + spawn a chat task from ready messages + cfg. Returns the task."""
-    from lib.tasks_pkg import create_task, spawn_task
+    from lib.agent_core.run_contract import apply_storage_free_runtime_policy
+    from lib.tasks_pkg.manager import create_task
+    from lib.tasks_pkg.spawn import spawn_task
 
     if not messages:
         raise ValueError('run_chat requires a non-empty messages list')
 
+    apply_storage_free_runtime_policy(cfg)
     conv_id = cfg.pop('_conversation_id', '') or ''
-    task = create_task(conv_id, messages, cfg)
-    # Messages are supplied inline (not loaded from a conversation store),
-    # exactly as the HTTP route flags them.
-    task['_inline_messages'] = True
+    task = create_task(
+        conv_id,
+        messages,
+        cfg,
+        user_id=int(user_id),
+        supersede=False,
+        transient=True,
+    )
     spawn_task(task)
     return task
 
@@ -136,7 +155,9 @@ def _assemble_result(task: dict) -> ChatResult:
         thinking=task.get('thinking') or '',
         tool_calls=tool_calls,
         usage=dict(usage) if isinstance(usage, dict) else {},
-        finish_reason=task.get('finishReason') or 'stop',
+        finish_reason=terminal_finish_reason(task),
+        stream_state=(
+            str(task['streamState']) if task.get('streamState') else None),
         error=task.get('error'),
         task_id=task.get('id') or '',
         status=task.get('status') or '',
@@ -147,6 +168,7 @@ def _assemble_result(task: dict) -> ChatResult:
 def run_chat_sync(
     messages: list,
     *,
+    user_id: int,
     model: str = '',
     config: dict | None = None,
     timeout_s: float = 600.0,
@@ -162,7 +184,7 @@ def run_chat_sync(
     within ``timeout_s``.
     """
     cfg = build_chat_config(model, config, **knobs)
-    task = _start_task(messages, cfg)
+    task = _start_task(messages, cfg, user_id=user_id)
 
     deadline = time.time() + timeout_s
     poll = 0.05
@@ -180,6 +202,7 @@ def run_chat_sync(
 def run_chat_stream(
     messages: list,
     *,
+    user_id: int,
     model: str = '',
     config: dict | None = None,
     timeout_s: float = 600.0,
@@ -198,7 +221,7 @@ def run_chat_stream(
     switch on ``ev['type']`` directly.
     """
     cfg = build_chat_config(model, config, **knobs)
-    task = _start_task(messages, cfg)
+    task = _start_task(messages, cfg, user_id=user_id)
 
     deadline = time.time() + timeout_s
     cursor = 0
@@ -219,7 +242,8 @@ def run_chat_stream(
             # stop cleanly.
             yield {
                 'type': 'done',
-                'finishReason': task.get('finishReason') or 'stop',
+                'finishReason': terminal_finish_reason(task),
+                'streamState': task.get('streamState'),
                 'usage': task.get('usage') or {},
                 'error': task.get('error'),
             }

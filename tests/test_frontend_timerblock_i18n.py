@@ -34,11 +34,12 @@ import shutil
 import subprocess
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 I18N_FILE = os.path.join(JS_DIR, 'i18n.js')
 TOOL_ROUNDS_FILE = os.path.join(JS_DIR, 'ui', 'tool_rounds.js')

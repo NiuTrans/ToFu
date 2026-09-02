@@ -49,7 +49,6 @@ def test_plan_compiler_is_not_implemented_by_executor_or_inspection_boundary():
     root = Path(__file__).resolve().parents[1]
     engine = (root / 'lib' / 'orchestration_engine.py').read_text()
     plan = (root / 'lib' / 'orchestration_plan.py').read_text()
-    service = (root / 'lib' / 'orchestration' / 'service.py').read_text()
     definition_service = (
         root / 'lib' / 'orchestration' / 'definition_service.py'
     ).read_text()
@@ -65,7 +64,6 @@ def test_plan_compiler_is_not_implemented_by_executor_or_inspection_boundary():
     assert 'def compile_plan(' not in definition_inspection
     assert 'from lib.orchestration_plan import compile_plan' \
         in definition_inspection
-    assert 'from lib.orchestration_plan import compile_plan' not in service
     assert 'GraphNavigator.from_edges(' in plan
     assert "resolve_node_runtime_param(node, 'scope')" in plan
     assert "'scope': 'isolated'" not in plan

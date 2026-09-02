@@ -43,8 +43,8 @@ use the read-only `search_knowledge` tool.
 7. Structure-aware chunking preserves headings, sheet/table context, line
    locations, and bounded overlap.
 8. Persist documents, immutable image assets, textual proxy chunks, asset links,
-   and FTS rows as one semantic unit. Database failure rolls back the unit;
-   file candidates are cleaned without racing concurrent writers.
+   and deduplicated search terms as one semantic unit. Storage failure rolls
+   back the unit; file candidates are cleaned without racing concurrent writers.
 
 Ingestion is bounded to 50 MB per file, 20 files and 200 MB per HTTP batch by
 the management API. Extracted text and OCR page limits are configurable through
@@ -63,10 +63,10 @@ or renders the entire document catalogue:
   active page in the DOM.
 - Corpus totals and type facets are computed with aggregate queries. Per-file
   asset counts run only for the selected page, using the document/asset index.
-- Stable indexes cover updated time, creation time, type, and case-insensitive
-  filename order. This keeps ordinary browsing bounded when the corpus grows to
-  hundreds of thousands of files; filtered result counts remain authoritative
-  on the server.
+- Stable indexes cover owner/time browsing, document dependencies, enrichment
+  queues, and the inverted search projection. Catalogue responses and browser
+  state stay bounded even when the stored corpus is much larger than one page;
+  filtered result counts remain authoritative on the server.
 - Types are derived from sniffed canonical formats rather than an untrusted
   upload suffix: PDF, documents, spreadsheets, presentations, images, email,
   ebooks, text/code, and other. The same category keys drive backend filtering
@@ -78,13 +78,32 @@ or renders the entire document catalogue:
   If a visible row really changed, both the library scroll position and the
   parsed-body scroll position are restored after the targeted render.
 
+## Storage authority
+
+The Sidecar is the only durable authority. It owns normalized, owner-scoped
+tables for settings, documents, chunks, assets, chunk/asset links, and inverted
+terms. `KnowledgeRepository` injects an explicit owner into every semantic
+query or receipted command; routes, workers, and tools do not open a database
+driver or send SQL. Create, replace, and delete keep every dependent row in the
+same transaction.
+
+Original sources and image assets live below
+`<data>/knowledge-files/<owner_user_id>/{sources,assets}`. Stored names are
+validated immutable basenames, and every rollback candidate has a unique path,
+so one concurrent request cannot delete another request's committed file.
+The removed application-owned auxiliary database is intentionally not imported:
+it did not carry trustworthy owner identity. Parser and search projections can
+instead be rebuilt from the retained source bytes.
+
 ## Multimodal retrieval
 
-The index uses SQLite FTS5 with normalized word tokens plus CJK bi/tri-grams.
-Ranking combines lexical relevance, token coverage, exact compact phrases, and
-title/section evidence. Results are diversified across documents and bounded by
-both result count and total output characters. SQLite builds without FTS5 use a
-bounded lexical fallback.
+The backend-neutral inverted index stores normalized word tokens plus CJK
+bi/tri-grams. Candidate selection is index-backed and ranks chunks matching
+more distinct query terms before applying a hard response bound; it never scans
+or serializes the complete corpus into an application process. Application
+reranking combines token coverage, exact compact phrases, deterministic intent
+expansion, and title/section evidence. Results are diversified across documents
+and bounded by both result count and total output characters.
 
 Each image is represented by two deliberately separate layers:
 
@@ -99,17 +118,17 @@ real `image_url` blocks. A text-only model receives the same grounded excerpt,
 OCR/caption/description text, and an explicit notice that visual verification is
 unavailable. The system never represents generated prose as the original image.
 
-The SQLite corpus is the authority. Model descriptions and any future dense or
-ColPali-style visual index are projections that can be rebuilt. This preserves
-simple deletion, atomic reindexing, deterministic rollback, and a useful
-local-only baseline instead of making an external vector database or VLM a
-correctness dependency.
+Normalized Sidecar rows and original files are authoritative. Model descriptions
+and any future dense or ColPali-style visual index are rebuildable projections.
+This preserves simple deletion, atomic reindexing, deterministic rollback, and
+a useful local-only baseline instead of making an external vector database or
+VLM a correctness dependency.
 
 When visual enrichment is enabled, a single daemon worker leases pending assets,
 uses the configured `vision` capability pool (including its normal health and
-fallback routing), and updates the asset plus its FTS proxy in one transaction.
-Expired leases resume after restart; missing vision capacity and failures remain
-visible in status rather than silently dropping image evidence.
+routing), and updates the asset, proxy chunk, and inverted terms in one
+transaction. Expired leases resume after restart; missing vision capacity and
+failures remain visible in status rather than silently dropping image evidence.
 
 Model tool availability is fail-closed and conditional on both an enabled flag
 and a non-empty corpus. The management preview endpoint intentionally bypasses
@@ -137,10 +156,11 @@ All endpoints require the normal API authentication policy.
 ## Verification
 
 The focused backend suite covers conditional tool exposure, disabled-state
-preservation, content deduplication, CJK retrieval, sparse spreadsheets,
+preservation, content deduplication, CJK retrieval, inverted-candidate ranking,
+bounded parsed-body reads, owner isolation, sparse spreadsheets,
 misleading suffixes, DOCX, HTML sanitization, RTF unicode, email attachments,
 OpenDocument detection, image magic/limits, captioned and uncaptioned PDF
-visuals, atomic asset links and enrichment, v1 migration, concurrent upload and
+visuals, atomic asset links and enrichment, concurrent upload and
 visual reindex, authenticated asset CRUD, and text-only/vision model behavior.
 The browser suite drives upload, indexing, preview retrieval with a real image
 thumbnail, both switches through their full cycles, explicit provider consent,

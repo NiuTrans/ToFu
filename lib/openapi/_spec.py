@@ -79,11 +79,9 @@ def build_spec(app, *, title: str = 'Tofu API',
             if not (meta and meta.get('public')):
                 scope = meta.get('scope') if meta else ''
                 if scope:
-                    op['security'] = [{'bearerAuth': [scope]},
-                                       {'tunnelTokenHeader': []}]
+                    op['security'] = [{'bearerAuth': [scope]}]
                 else:
-                    op['security'] = [{'bearerAuth': []},
-                                       {'tunnelTokenHeader': []}]
+                    op['security'] = [{'bearerAuth': []}]
             else:
                 op['security'] = []
             path_item[method.lower()] = op
@@ -96,7 +94,7 @@ def build_spec(app, *, title: str = 'Tofu API',
             'description': description or _default_description(),
         },
         'servers': [{'url': '/', 'description': 'Same-origin'}],
-        'security': [{'bearerAuth': []}, {'tunnelTokenHeader': []}],
+        'security': [{'bearerAuth': []}],
         'paths': paths,
         'components': _components(),
         'tags': [

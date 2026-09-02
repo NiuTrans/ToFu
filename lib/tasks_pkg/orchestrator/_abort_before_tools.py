@@ -1,6 +1,6 @@
 """Abort-before-tools gate: skip tool execution when the task was aborted.
 
-Extracted 2026-07-31 (pt_03f4cdf1 slice 19) from
+Extracted 2026-07-31 ( slice 19) from
 ``lib/tasks_pkg/orchestrator/_run.py`` run_task stream loop.
 
 Runs after the tool-call prelude (live-tail assistant/tool_call
@@ -12,7 +12,7 @@ execution pipeline. When ``task['aborted']`` is set:
    prelude — skipping tool execution while leaving it would create
    orphaned tool_use blocks without matching tool_result, which the
    gateway rejects with HTTP 400 on the next turn when
-   server_message_store replays the full history. If the popped
+   turn-native transcript reconstruction replays the full history. If the popped
    message carried prose content alongside the tool_calls, the
    content is re-appended as a plain assistant message so the user's
    visible reply is preserved.
@@ -69,10 +69,10 @@ def handle_abort_before_tools(
 
     rs.abort_phase = f'before_tool_exec_round_{round_num}'
     rs.exit_reason = f'aborted_before_tools_round_{round_num}'
-    # ★ Remove the assistant message with tool_calls that we just
+    # Remove the assistant message with tool_calls that we just
     #   appended — since we're skipping tool execution, leaving it
     #   creates orphaned tool_use blocks without matching tool_result.
-    #   This causes HTTP 400 on the next turn when server_message_store
+    #   This causes HTTP 400 on the next turn when transcript reconstruction
     #   replays the full message history.
     if messages and messages[-1].get('tool_calls'):
         _popped = messages.pop()

@@ -10,9 +10,10 @@ ran 2.5h with zero output, the task wedged, and NO timeout existed to end it
 The guard (owner ruling 2026-07-31, ``_unbounded_recursive_scan_target`` +
 its call site in ``tool_run_command``): refuse a recursive scan whose target
 is (a) an ANCESTOR of the workspace cwd, or (b) a shallow FUSE-mount path
-(≤3 components under /mnt) — but ONLY when the invocation is unbounded.
-Escape hatches, all legitimate: scan a subdir, pass an explicit ``timeout``,
-or wrap the scan in coreutils ``timeout``.
+(≤3 components under /mnt) — but ONLY when the command that will execute is
+unbounded. Direct ``find`` segments are internally timeout-wrapped before this
+verdict. Other escape hatches: scan a subdir, pass an explicit ``timeout``, or
+wrap the scan in coreutils ``timeout``.
 
 Pinned here:
   1. classifier matrix — incident shapes refused; in-workspace / sibling /
@@ -144,8 +145,16 @@ class TestFindSegmentBudget:
         rewritten, count = _bound_scan_segments(command, '/usr/bin/timeout', 40)
         assert count == 1
         assert rewritten == (
-            'printf ready; /usr/bin/timeout --verbose --signal=TERM '
+            'printf ready; /usr/bin/timeout --signal=TERM '
             '--kill-after=2s 40s find . -name "*.py" | sort | head -5')
+
+    def test_timeout_wrapper_accepts_host_specific_option_set(self):
+        rewritten, count = _bound_scan_segments(
+            'find . -type f', '/bin/timeout', 7,
+            ('-s', 'TERM', '-k', '2s'))
+        assert count == 1
+        assert rewritten == (
+            '/bin/timeout -s TERM -k 2s 7s find . -type f')
 
     def test_does_not_double_wrap_bounded_find(self):
         command = 'timeout 5 find . -name "*.py" | sort'
@@ -170,10 +179,27 @@ class TestScanGuardEndToEnd:
         result = tool_run_command(
             ws, 'grep -rn "mcp>=1.0.0" ../ --include=pyproject.toml '
                 '2>/dev/null | grep -v "<2" | head -3')
-        assert 'blocked for safety' in result
+        assert 'blocked by resource guard' in result
         assert 'unbounded recursive scan' in result
         # The error is ACTIONABLE: it must teach the three escape hatches.
         assert 'timeout' in result
+
+    def test_ancestor_find_uses_internal_budget_instead_of_false_refusal(
+            self, ws, monkeypatch):
+        """The resource guard judges the timeout-wrapped execution plan.
+
+        This pins the reported incident: a bounded, depth-limited ``find`` of
+        the workspace parent is not destructive and must reach the tiny test
+        tree under the internal segment deadline.
+        """
+        monkeypatch.setenv('TOFU_RUN_SCAN_SEGMENT_TIMEOUT_S', '5')
+        result = tool_run_command(
+            ws,
+            'ls -d ./xuecheng-mcp 2>/dev/null; '
+            'find .. -maxdepth 2 -type d -name chatui 2>/dev/null | head -1',
+        )
+        assert 'blocked by resource guard' not in result
+        assert 'chatui' in result
 
     def test_in_workspace_scan_actually_runs(self, ws, monkeypatch):
         # TOFU_RUN_GREP_GUARD=0: the newer filesystem-grep redirect guard

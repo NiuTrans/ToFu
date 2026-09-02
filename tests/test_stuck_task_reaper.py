@@ -55,14 +55,14 @@ def put_task(monkeypatch):
     no DB — we assert the in-memory transition (status/finishReason/aborted),
     which is what ``/api/chat/active`` and ``/poll`` read from memory.
     """
-    from lib.tasks_pkg import tasks, tasks_lock
-    from lib.tasks_pkg import manager
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+    from lib.tasks_pkg.manager import _maintenance
 
     # Stub the full finalizer (terminal-floor DB write + conv sync + terminal
     # SSE + queue drain) to a no-op so these unit tests need no DB — they
     # assert the in-memory transition (status/finishReason/aborted), which is
     # set BEFORE the finalizer runs and is what /api/chat/active + /poll read.
-    monkeypatch.setattr(manager, '_finalize_reaped_stuck_task',
+    monkeypatch.setattr(_maintenance, '_finalize_reaped_stuck_task',
                         lambda t: None, raising=True)
 
     added = []
@@ -105,7 +105,7 @@ def _reap():
 
 
 def _get(task_id):
-    from lib.tasks_pkg import tasks, tasks_lock
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
     with tasks_lock:
         return dict(tasks.get(task_id) or {})
 

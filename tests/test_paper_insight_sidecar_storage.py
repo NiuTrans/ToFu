@@ -9,6 +9,8 @@ from lib.paper.insight_engine._run import _persist_insight
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+
 
 class _RecordingClient:
     def __init__(self, error: BaseException | None = None) -> None:
@@ -31,6 +33,7 @@ def test_insight_uses_semantic_paper_report_operation(monkeypatch):
 
     assert _persist_insight(
         'paper-hash', 'zh', '# 洞察', 'model-a',
+        user_id=TEST_OWNER_USER_ID,
         items={'connections': []}, usage={'prompt_tokens': 4}, baseline=3.5,
     ) is True
 
@@ -38,6 +41,7 @@ def test_insight_uses_semantic_paper_report_operation(monkeypatch):
     assert operation == 'paper.report.upsert'
     assert payload == {
         'paper_hash': 'paper-hash', 'lang': 'insight:zh',
+        'user_id': TEST_OWNER_USER_ID,
         'report': '# 洞察', 'model': 'model-a',
         'meta': {
             'kind': 'insight', 'v': 2, 'items': {'connections': []},
@@ -53,4 +57,7 @@ def test_insight_storage_failure_preserves_best_effort_contract(monkeypatch):
     monkeypatch.setattr(
         'lib.storage.get_storage_client', lambda *, write=False: client)
 
-    assert _persist_insight('paper-hash', 'en', 'body', 'model-a') is False
+    assert _persist_insight(
+        'paper-hash', 'en', 'body', 'model-a',
+        user_id=TEST_OWNER_USER_ID,
+    ) is False

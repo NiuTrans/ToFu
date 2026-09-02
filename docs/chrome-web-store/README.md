@@ -10,8 +10,8 @@
 > verified — the trimmed manifest is correct, the zip builds, the parity guard
 > is green (see "Kit readiness" below). What stopped it was the trade-off in
 > `REVIEW_RISKS.md` §"Decision to make NOW": the only realistic path to
-> acceptance is shipping a **reduced build** with `browser_execute_js` and
-> `debugger` removed, which is a code change that narrows what the extension
+> acceptance is shipping a **reduced build** with `browser_execute_js`,
+> `browser_devtools`, and `debugger` removed, which is a code change that narrows what the extension
 > can do. The owner chose to keep the full-capability extension and the
 > three-step manual install instead.
 >
@@ -23,15 +23,16 @@
 > (`--disable-extensions-except` in 139). Requesting admin rights does not
 > change any of that. Users install the extension in three steps; the
 > remaining friction worth attacking is the copy-paste of the bridge secret,
-> which `docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md` §B3 (pairing code) addresses
+> which the authenticated device-pairing boundary addresses
 > INDEPENDENTLY of this kit.
 >
-> **Kit readiness, measured 2026-07-31** — so a future submitter starts from
+> **Kit readiness, measured 2026-08-27** — so a future submitter starts from
 > facts rather than re-deriving them:
-> - `manifest.store.json` = 11 permissions, version 5.0.0, matching the
->   shipped manifest; `downloads` and `webRequest` present, `activeTab` absent.
+> - `manifest.store.json` = 12 permissions, version 5.4.1, matching the
+>   shipped manifest; `downloads`, `webRequest`, and `webNavigation` present,
+>   `activeTab` absent.
 > - `bash scripts/package_extension.sh --store` produces a valid
->   `tofu-browser-bridge-5.0.0-store.zip` (7 files, `<all_urls>`).
+>   `tofu-browser-bridge-5.4.1-store.zip` (7 files, `<all_urls>`).
 > - `tests/test_chrome_store_manifest_parity.py` — 25/25, and it DERIVES the
 >   required permissions from the extension's real `chrome.*` calls, so it
 >   keeps this kit honest while it sits idle.
@@ -62,8 +63,8 @@ both.
 
 > **⚠️ Honest expectation setting.**
 > This extension uses `debugger`, `<all_urls>`, `cookies`, `history`,
-> `bookmarks`, and a tool (`browser_execute_js`) that runs JavaScript sent
-> from the Tofu server. Both stores' **remote-code** and
+> `bookmarks`, and tools (`browser_execute_js`, DevTools evaluation/debugging)
+> that run JavaScript sent from the Tofu server. Both stores' **remote-code** and
 > **minimum-permissions / single-purpose** policies are exactly the policies
 > this design strains — and Edge's MV3 remote-code wording is *stricter* than
 > Chrome's, not looser. A rejection on the first pass is the *likely* outcome,

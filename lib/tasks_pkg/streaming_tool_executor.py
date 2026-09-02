@@ -41,6 +41,10 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
 
 from lib.log import get_logger
+from lib.tools.contracts import (
+    ToolContractError,
+    validate_tool_arguments_from_documents,
+)
 
 logger = get_logger(__name__)
 
@@ -74,6 +78,24 @@ class _ContentWithDisplayResults(str):
         instance.engine_breakdown = None
         instance.vertical = None
         return instance
+
+
+class _ContentWithResultProjection(str):
+    """String result carrying bounded, request-local model projection items.
+
+    Batched ``read_files`` still returns its legacy plain-text representation,
+    but the V2 result budget needs the producer's per-file boundaries to avoid
+    spending the entire preview budget on the first file.  A ``str`` subclass
+    keeps every existing read/freshness caller compatible while transporting
+    the sidecar through the streaming future into the dedup cache.
+    """
+
+    def __new__(cls, content: str, projection_items: list | None = None):
+        instance = super().__new__(cls, content)
+        instance.result_projection_items = (
+            projection_items if projection_items is not None else [])
+        return instance
+
 
 # ── Read-only tools safe to pre-execute during streaming ──
 # These must have NO side effects (idempotent) and be concurrency-safe.
@@ -282,11 +304,11 @@ class StreamingToolAccumulator:
                 'interrupted': True,
             }
             try:
+                # The verdict goes THROUGH the seam so the emitted tool_result
+                # frame and the persisted round agree — a post-hoc downgrade
+                # would ship a 'done' frame for an 'aborted' round.
                 _finalize_tool_round(self._task, rn, entry, [meta],
-                                     query_override=query)
-                # _finalize_tool_round sets status='done'; downgrade to the more
-                # accurate 'aborted' so the renderer shows the interrupted state.
-                entry['status'] = 'aborted'
+                                     query_override=query, status='aborted')
                 finalized += 1
                 logger.info(
                     '[%s] StreamingToolExec: settled orphan early-announced '
@@ -368,17 +390,36 @@ class StreamingToolAccumulator:
             logger.debug('[streaming_tool_executor] on_tool_call_ready caught %s: %s', type(_e_audit).__name__, _e_audit)
             fn_args = {}
 
+        # A read-only prefetch still executes real code. Validate it against
+        # the same request-owned contract before submitting the future; the
+        # post-stream parser will render the typed rejection. ``None`` keeps
+        # old standalone/test callers read-compatible, while a present map
+        # (including an empty one) fails closed on schema drift.
+        contract_allows_prefetch = True
+        try:
+            fn_args = validate_tool_arguments_from_documents(
+                (self._task.get('_toolContractDocumentsByName')
+                 if '_toolContractDocumentsByName' in self._task else None),
+                fn_name, fn_args)
+        except ToolContractError as exc:
+            contract_allows_prefetch = False
+            logger.warning(
+                '[%s] StreamingToolExec: contract rejected pre-execution '
+                'tool=%s code=%s path=%s',
+                self._tid, fn_name, exc.code, exc.path)
+
         # ── Emit tool_start SSE event immediately ──
         try:
             self._emit_tool_start(
-                fn_name, fn_args, tc_id, fn_args_raw or '{}',
+                fn_name, fn_args, tc_id,
+                json.dumps(fn_args, ensure_ascii=False, separators=(',', ':')),
                 caller=tool_call.get('caller'))
         except Exception as e:
             logger.debug('[%s] StreamingToolExec: tool_start emission failed '
                          'for %s: %s', self._tid, fn_name, e)
 
         # ── Pre-execute read-only tools ──
-        if (fn_name in _STREAMABLE_TOOLS and fn_args
+        if (contract_allows_prefetch and fn_name in _STREAMABLE_TOOLS and fn_args
                 and _has_executable_target(fn_name, fn_args)):
             self._submitted_count += 1
             t0 = time.time()
@@ -412,6 +453,7 @@ class StreamingToolAccumulator:
             fn_name, fn_args, tc_id, tc_args_str,
             self._tool_round_num, self._project_enabled,
             conv_id=self._task.get('convId') or self._task.get('id'),
+            task=self._task,
         )
         rn = round_entry['roundNum']
 
@@ -445,7 +487,7 @@ class StreamingToolAccumulator:
         Returns:
             Tool result content as string.
         """
-        # ★ Abort check: skip execution if user already clicked Stop
+        # Abort check: skip execution if user already clicked Stop
         if self._task.get('aborted'):
             logger.info('[%s] StreamingToolExec: skipping %s — task aborted',
                         self._tid, fn_name)
@@ -455,13 +497,19 @@ class StreamingToolAccumulator:
             if fn_name in ('read_files', 'grep_search', 'find_files',
                            'list_dir'):
                 from lib.project_mod.tools import execute_tool
-                # ★ Pass conv_id so namespaced paths resolve against this
+                # Pass conv_id so namespaced paths resolve against this
                 #   conversation's root registry (prevents concurrent-task
                 #   clobber — see lib/project_mod/config.py::set_conv_roots).
                 _conv_id = self._task.get('convId') or self._task.get('id') or ''
                 _base = self._project_path or '.'
-                _content = execute_tool(fn_name, fn_args, _base, conv_id=_conv_id)
-                # ★ Write-freshness token — THIS pre-exec path bypasses
+                _projection_items = [] if fn_name == 'read_files' else None
+                _execute_kwargs = {}
+                if _projection_items is not None:
+                    _execute_kwargs['result_projection_items'] = _projection_items
+                _content = execute_tool(
+                    fn_name, fn_args, _base, conv_id=_conv_id,
+                    **_execute_kwargs)
+                # Write-freshness token — THIS pre-exec path bypasses
                 #   _handle_project_tool (its result is cached as authoritative
                 #   and the serial pipeline skips re-execution), so the
                 #   handler's record_read_paths never runs for streamed reads.
@@ -481,6 +529,9 @@ class StreamingToolAccumulator:
                         logger.debug('[%s] StreamingToolExec: freshness '
                                      'read-token record failed (non-fatal): %s',
                                      self._tid, _fe)
+                    if isinstance(_content, str) and _projection_items:
+                        _content = _ContentWithResultProjection(
+                            _content, _projection_items)
                 return _content
 
             elif fn_name == 'web_search':
@@ -495,14 +546,16 @@ class StreamingToolAccumulator:
                 # hazard as the fetch_url fix: this result is cached and the
                 # serial pipeline SKIPS re-execution, so any drift here was
                 # silently served. (Lazy import avoids a cycle.)
-                from lib.tasks_pkg.handlers.search import (
-                    _web_search_one, _format_search_display_for_results,
-                    _vertical_to_sse_payload, _vertical_header_for_llm,
+                from lib.tasks_pkg.handlers.search._core import _web_search_one
+                from lib.tasks_pkg.handlers.search._display import (
+                    _format_search_display_for_results,
+                    _vertical_header_for_llm,
+                    _vertical_to_sse_payload,
                 )
                 from tofu_search.search import format_search_for_tool_response
                 user_question = self._task.get('lastUserQuery', '')
 
-                # ★ Batch mode: run concurrent searches (lightweight, no SSE events)
+                # Batch mode: run concurrent searches (lightweight, no SSE events)
                 # Parity with serial _handle_web_search_batch (handlers/search.py):
                 # same (query, freshness, vertical) specs, run_batch_concurrent
                 # orchestration, per-query `_q` tagging, and {'batch': [...]}
@@ -592,12 +645,12 @@ class StreamingToolAccumulator:
                 # the serial pipeline then SKIPPED re-execution — so the loss
                 # was invisible. (Lazy import avoids a cycle: search.py imports
                 # from executor, which streaming_tool_executor also uses.)
-                from lib.tasks_pkg.handlers.search import (
-                    _fetch_url_one, _format_fetch_display)
+                from lib.tasks_pkg.handlers.search._core import _fetch_url_one
+                from lib.tasks_pkg.handlers.search._display import _format_fetch_display
                 from lib.tasks_pkg.tool_display import _short_url
                 user_question = self._task.get('lastUserQuery', '')
 
-                # ★ Batch mode: run concurrent fetches (lightweight, no SSE events)
+                # Batch mode: run concurrent fetches (lightweight, no SSE events)
                 # Parity with the serial batch worker (handlers/search.py:614) —
                 # it passes fetch_reason='' for batch URLs (no per-URL reason).
                 urls = fn_args.get('urls')
@@ -734,7 +787,10 @@ class StreamingToolAccumulator:
             # Log compressed size instead of len(dict) which would be key count
             sz = content.get('compressedSize', 0)
             return content, sz
-        content_str = str(content) if not isinstance(content, str) else content
+        # Normalize ``str`` subclasses too: their metadata has already been
+        # copied into explicit bounded cache slots above, so retaining the
+        # subclass would duplicate the sidecar in ``raw_state``.
+        content_str = content if type(content) is str else str(content)
         return content_str, len(content_str)
 
     def inject_into_cache(self, task: dict) -> int:
@@ -752,7 +808,7 @@ class StreamingToolAccumulator:
             task['_tool_result_cache'] = {}
         cache = task['_tool_result_cache']
 
-        from lib.tasks_pkg.tool_dispatch import _make_cache_key
+        from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key
 
         injected = 0
         # First pass: collect already-done futures immediately
@@ -768,8 +824,19 @@ class StreamingToolAccumulator:
                     _disp = getattr(content, 'display_results', None)
                     _eng_bkdn = getattr(content, 'engine_breakdown', None)
                     _vert = getattr(content, 'vertical', None)
+                    # Zero-result searches carry the diagnostic explaining WHY
+                    # (network outage vs no matches) — cache it too, or a
+                    # prefetch hit renders a fake single "result" row.
+                    _sd = getattr(content, 'search_diag', None)
+                    _projection = getattr(
+                        content, 'result_projection_items', None)
                     cache_val, content_len = self._prepare_cache_value(content, fn_name)
-                    cache[cache_key] = (cache_val, is_search, 'prefetch', _disp, _eng_bkdn, _vert)
+                    cache_entry = (
+                        cache_val, is_search, 'prefetch', _disp, _eng_bkdn,
+                        _vert, _sd)
+                    if _projection is not None:
+                        cache_entry += (_projection,)
+                    cache[cache_key] = cache_entry
                     injected += 1
                     logger.info('[%s] StreamingToolExec: injected %s into '
                                 'dedup cache (%.1fs, %d chars%s)',
@@ -806,7 +873,7 @@ class StreamingToolAccumulator:
                     future.cancel()
                     continue
                 try:
-                    # ★ Timeout should match the underlying tool's I/O
+                    # Timeout should match the underlying tool's I/O
                     #   timeout (cross-DC multiplier adjusts for slow
                     #   FUSE/NFS mounts — see lib.cross_dc).  The old
                     #   hard-coded 60s threw away in-flight rg work on
@@ -841,8 +908,16 @@ class StreamingToolAccumulator:
                     _disp = getattr(content, 'display_results', None)
                     _eng_bkdn = getattr(content, 'engine_breakdown', None)
                     _vert = getattr(content, 'vertical', None)
+                    _sd = getattr(content, 'search_diag', None)
+                    _projection = getattr(
+                        content, 'result_projection_items', None)
                     cache_val, content_len = self._prepare_cache_value(content, fn_name)
-                    cache[cache_key] = (cache_val, is_search, 'prefetch', _disp, _eng_bkdn, _vert)
+                    cache_entry = (
+                        cache_val, is_search, 'prefetch', _disp, _eng_bkdn,
+                        _vert, _sd)
+                    if _projection is not None:
+                        cache_entry += (_projection,)
+                    cache[cache_key] = cache_entry
                     injected += 1
                     logger.info('[%s] StreamingToolExec: waited and injected '
                                 '%s into dedup cache (%.1fs, %d chars%s)',

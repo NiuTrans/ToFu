@@ -92,7 +92,7 @@ def test_search_memories_corpus_excludes_packages(isolated):
 
 @pytest.mark.unit
 def test_memory_count_hint_ignores_packages(isolated):
-    from lib.memory import build_memory_context
+    from lib.memory.injection import build_memory_context
     proj = _proj(isolated)
     # Only a skill package installed → memory hint is absent (None), as if
     # no memories existed at all.

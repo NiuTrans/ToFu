@@ -41,6 +41,17 @@ def resolve_image_store(
 ) -> tuple[Path, str, str]:
     """Resolve one immutable payload without trusting task-controlled paths."""
 
+    iso, expected_sha256, loaded_reference, _metadata = resolve_image_store_entry(
+        store_value, image_reference
+    )
+    return iso, expected_sha256, loaded_reference
+
+
+def resolve_image_store_entry(
+    store_value: str | os.PathLike[str], image_reference: str
+) -> tuple[Path, str, str, dict[str, object]]:
+    """Resolve a payload and its validated, non-authoritative task metadata."""
+
     store = _checked_private_dir(store_value, "image_store")
     index_path = store / "index.json"
     if index_path.is_symlink() or not index_path.is_file():
@@ -85,7 +96,15 @@ def resolve_image_store(
         stat.st_size,
         stat.st_mtime_ns,
     )
-    return iso, expected_sha256, loaded_reference
+    metadata: dict[str, object] = {}
+    for key in ("task", "agent_timeout_sec", "verifier_timeout_sec"):
+        value = entry.get(key)
+        if key.endswith("_timeout_sec") and value is not None:
+            if not isinstance(value, (int, float)) or not 1 <= float(value) <= 86400:
+                raise ValueError(f"image_store {key} must be between 1 and 86400")
+        if value is not None:
+            metadata[key] = value
+    return iso, expected_sha256, loaded_reference, metadata
 
 
 @functools.lru_cache(maxsize=256)

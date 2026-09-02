@@ -1,6 +1,6 @@
 """tests/test_desktop_agent_project.py — RWA P1:agent 项目命令集 + 安全网.
 
-docs/REMOTE_WORKTREE_DESIGN.md §5 P1 + 硬约束③⑤:
+docs/modules/remote_execution.md:
   * ``project_*`` 七命令(list/read/write/apply_diff/grep/find/run_command),
     wire type = 完整命令名(约束①,键与 wire 逐字相等);
   * 路径校验**下沉 agent 侧**(约束⑤):root 名 + root 相对路径,
@@ -110,6 +110,22 @@ class TestReadSide:
         assert 'README.md' in names and 'src' in names and 'new.txt' in names
         assert '.tofu' not in names
 
+    def test_shell_compatible_list_keeps_ignored_hidden_and_symlink(self, proj):
+        (proj['root'] / 'node_modules').mkdir()
+        (proj['root'] / '.hidden.txt').write_text('hidden', encoding='utf-8')
+        (proj['root'] / 'readme-link').symlink_to(
+            proj['root'] / 'README.md')
+        out = pj.cmd_project_list_dir({
+            'root': 'app',
+            'path': '.',
+            'show_hidden': True,
+            'shell_compatible': True,
+        })
+        by_name = {entry['name']: entry for entry in out['entries']}
+        assert 'node_modules' in by_name
+        assert '.hidden.txt' in by_name
+        assert by_name['readme-link']['type'] == 'symlink'
+
     def test_read_text_stamps_freshness(self, proj):
         out = pj.cmd_project_read_files({'root': 'app', 'path': 'README.md'})
         assert out['content'].startswith('# app')
@@ -217,6 +233,43 @@ class TestWriteSafetyNet:
         assert out.startswith('Applied 2/2 edits')
         assert (proj['root'] / 'README.md').read_text() == (
             '# app\ninserted\nhello remote\n')
+
+    @pytest.mark.parametrize(('operation', 'replace_all', 'expected'), [
+        ('insert_after', False, '# app\ninserted\nhello world\n'),
+        ('insert_after', True, '# app\ninserted\nhello world\n'),
+        ('insert_before', False, 'inserted\n# app\nhello world\n'),
+        ('insert_before', True, 'inserted\n# app\nhello world\n'),
+    ])
+    def test_edit_file_insert_ignores_replace_all_for_unique_anchor(
+            self, proj, operation, replace_all, expected):
+        pj.cmd_project_read_files({'root': 'app', 'path': 'README.md'})
+        out = pj.cmd_project_edit_file({
+            'root': 'app',
+            'edits': [{
+                'path': 'README.md', 'operation': operation,
+                'anchor': '# app', 'content': 'inserted',
+                'replace_all': replace_all,
+            }],
+        })
+        assert out.startswith('Applied 1/1 edits')
+        assert (proj['root'] / 'README.md').read_text() == expected
+
+    def test_edit_file_replace_all_does_not_enable_ambiguous_insert(self, proj):
+        target = proj['root'] / 'README.md'
+        target.write_text('# app\n# app\n', encoding='utf-8')
+        pj.cmd_project_read_files({'root': 'app', 'path': 'README.md'})
+        out = pj.cmd_project_edit_file({
+            'root': 'app',
+            'edits': [{
+                'path': 'README.md', 'operation': 'insert_after',
+                'anchor': '# app', 'content': 'inserted',
+                'replace_all': True,
+            }],
+        })
+        assert out.startswith('Applied 0/1 edits (1 failed)')
+        assert 'matches 2 locations' in out
+        assert target.read_text(encoding='utf-8') == '# app\n# app\n'
+
     def test_edit_file_wrap_replace_rejected_pre_execution(self, proj):
         """Parity with the server-side tool_edit_file wrap gate: a replace
         whose content keeps the anchor verbatim at a boundary is a pure
@@ -251,6 +304,62 @@ class TestWriteSafetyNet:
         assert out.startswith('Applied 1/1 edits')
         assert 'appended' in (proj['root'] / 'README.md').read_text()
 
+    def test_edit_file_neighbour_echo_auto_repaired(self, proj):
+        """Desktop parity for the mswlvsfgzwiywr incident: an insert_after
+        whose content quotes the following def line is repaired locally."""
+        (proj['root'] / 'src' / 'sample.py').write_text(
+            'def test_previous():\n'
+            '    assert True\n'
+            '\n\n'
+            'def test_existing():\n'
+            "    assert 'x' in 'x'\n", encoding='utf-8')
+        pj.cmd_project_read_files({'root': 'app', 'path': 'src/sample.py'})
+        out = pj.cmd_project_edit_file({
+            'root': 'app',
+            'edits': [
+                {'path': 'src/sample.py', 'operation': 'insert_after',
+                 'anchor': '    assert True',
+                 'content': 'def test_existing():\n'
+                            'def test_new():\n'
+                            "    assert 'y' in 'y'\n"},
+            ],
+        })
+        assert out.startswith('Applied 1/1 edits')
+        assert 'auto-repaired' in out
+        text = (proj['root'] / 'src' / 'sample.py').read_text(encoding='utf-8')
+        assert text.count('def test_existing():') == 1
+        assert 'def test_new():' in text
+        import ast
+        ast.parse(text)
+
+    def test_edit_file_anchor_echo_stripped(self, proj):
+        pj.cmd_project_read_files({'root': 'app', 'path': 'README.md'})
+        out = pj.cmd_project_edit_file({
+            'root': 'app',
+            'edits': [
+                {'path': 'README.md', 'operation': 'insert_after',
+                 'anchor': '# app', 'content': '# app\ninserted'},
+            ],
+        })
+        assert out.startswith('Applied 1/1 edits')
+        assert 'auto-repaired' in out
+        assert (proj['root'] / 'README.md').read_text(encoding='utf-8') == (
+            '# app\ninserted\nhello world\n')
+
+    def test_edit_file_whole_echo_fails(self, proj):
+        pj.cmd_project_read_files({'root': 'app', 'path': 'README.md'})
+        out = pj.cmd_project_edit_file({
+            'root': 'app',
+            'edits': [
+                {'path': 'README.md', 'operation': 'insert_after',
+                 'anchor': '# app', 'content': 'hello world'},
+            ],
+        })
+        assert out.startswith('Applied 0/1 edits (1 failed)')
+        assert 'verbatim copy' in out
+        assert (proj['root'] / 'README.md').read_text(encoding='utf-8') == (
+            '# app\nhello world\n')
+
 
 # ═══════════════════════════════════════════════════════════
 #  grep / find(复用 lib/project_mod,ignore 规则含 .tofu)
@@ -276,6 +385,22 @@ class TestSearchSide:
     def test_find_files_glob(self, proj):
         out = pj.cmd_project_find_files({'root': 'app', 'pattern': '*.py'})
         assert 'main.py' in out['files']
+
+    def test_find_shell_output_preserves_hidden_and_ignore_semantics(self, proj):
+        (proj['root'] / '.hidden.py').write_text('x', encoding='utf-8')
+        (proj['root'] / 'node_modules').mkdir()
+        (proj['root'] / 'node_modules' / 'dep.py').write_text(
+            'x', encoding='utf-8')
+        out = pj.cmd_project_find_files({
+            'root': 'app',
+            'path': '.',
+            'pattern': '*.py',
+            'case_sensitive': True,
+            'shell_output': True,
+            'respect_project_ignores': False,
+        })
+        assert './.hidden.py' in out['files']
+        assert './node_modules/dep.py' in out['files']
 
     def test_grep_requires_pattern(self, proj):
         out = pj.cmd_project_grep_search({'root': 'app', 'pattern': ''})

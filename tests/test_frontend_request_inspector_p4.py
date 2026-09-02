@@ -27,12 +27,14 @@ import shutil
 import subprocess
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
+PROJECT_ROOT = os.path.dirname(HERE)
 
 
 def _node_deps_available() -> bool:
@@ -82,13 +84,7 @@ win.t = global.t = (k, args) => {
   return s;
 };
 win.activeConvId = global.activeConvId = 'conv-1';
-win.conversations = global.conversations = [{
-  id: 'conv-1',
-  messages: [
-    { _msgId: 'mp', role: 'assistant', content: 'plan', _taskId: 'task-EP',
-      _isEndpointPlanner: true, apiRounds: [{ round: 1 }] },
-  ],
-}];
+win.conversations = global.conversations = [{ id: 'conv-1', _serverTurnCount: 1 }];
 win.debugVisible = global.debugVisible = false;
 
 const CALLS = { payloads: [] };
@@ -176,11 +172,11 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   check('detail_from_turn_payload',
     document.getElementById('debugContent').innerHTML.indexOf('payload-reviewing') !== -1);
 
-  /* ── Anchor: planner bubble prefers the planning row ── */
-  openRequestInspectorForMessage('mp');
+  /* ── Stable task action reselects the endpoint task without a transcript anchor. ── */
+  await openRequestInspectorForTask('task-EP');
   await sleep(30);
-  const sel = document.querySelector('#riRoundList .ri-round.ri-sel');
-  check('anchor_prefers_planner_row', !!sel && sel.dataset.turn === 'planning');
+  const selectedTask = document.querySelector('#riTaskList .ri-task.ri-sel');
+  check('stable_task_action_selects_endpoint', !!selectedTask);
 
   /* ── Accelerator turn-keying: working R1 and planning R1 coexist ── */
   showMessagesInDebug([{ role: 'user', content: 'w1' }], 'W R1', true,
@@ -246,8 +242,6 @@ def test_coverage_ambiguous_chip_text():
                encoding='utf-8').read()
     assert "fold.coverageReason === 'endpoint-untagged'" in src
     assert "'ri.coverageAmbiguous'" in src
-    i18n = open(os.path.join(JS_DIR, 'i18n.js'), encoding='utf-8').read()
-    assert "'ri.coverageAmbiguous'" in i18n
 
 
 if __name__ == '__main__':

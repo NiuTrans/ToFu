@@ -8,7 +8,7 @@ from evaluations.tool_search.evaluation import (
     flatten_episodes,
     merge_simulated_users,
 )
-from lib.tools.gateway import search_enabled_catalog
+from lib.tools.gateway import search_executable_catalog
 from evaluations.tool_search.qwen_reference import qwen_keyword_search
 
 
@@ -38,7 +38,7 @@ def test_evaluation_has_stable_exact_ground_truth_metrics():
         'id': CASES[0]['id'], 'utterances': ['search file contents'],
     }]})
     report = evaluate_retrieval(
-        CATALOG, flatten_episodes(cases), search=search_enabled_catalog,
+        CATALOG, flatten_episodes(cases), search=search_executable_catalog,
         search_text_by_name=SEARCH_TEXT_BY_NAME)
     assert report['episodes'] == 3
     assert 0 <= report['recall_at_1'] <= report['recall_at_5'] <= 1
@@ -62,7 +62,7 @@ def test_direct_hidden_name_is_scored_without_search_round():
             'episode_id': 'direct:0', 'case_id': 'direct',
             'target': 'apply_diff', 'utterance': 'call apply_diff',
             'action': 'direct', 'direct_name': 'apply_diff', 'query': '',
-        }], search=search_enabled_catalog)
+        }], search=search_executable_catalog)
     assert report['direct_calls'] == 1
     assert report['direct_accuracy'] == 1
     assert report['recall_at_1'] == 1

@@ -27,6 +27,8 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+
 
 class PeerProtocolPlacementTest(unittest.TestCase):
     """Peer instructions live with the tools, not in ambient context."""
@@ -110,20 +112,29 @@ class PeerReplyAffordanceTest(unittest.TestCase):
         the receiver's turn will contain, DB-free."""
         import lib.conversations.project_peer as pp
         captured = {}
+
+        def _enqueue(conv_id, data, config, kind='real', *, user_id):
+            self.assertEqual(TEST_OWNER_USER_ID, user_id)
+            captured.setdefault('p', data)
+            return {'queueId': 'q1'}
+
+        def _resolve_target(target, *, user_id):
+            self.assertEqual(TEST_OWNER_USER_ID, user_id)
+            return (target or '').strip(), ''
+
         monkeypatch.setattr(
             'lib.message_queue.enqueue_message',
-            lambda conv_id, data, config, kind='real': captured.setdefault('p', data)
-            or {'queueId': 'q1'})
+            _enqueue)
         monkeypatch.setattr('lib.conversations.project_feed.emit_project_event',
                             lambda *a, **k: None)
         monkeypatch.setattr('lib.conversations.project_peer.audit_log',
                             lambda *a, **k: None)
         monkeypatch.setattr(
             'lib.conversations.project_peer._resolve_target_conv_id',
-            lambda t: ((t or '').strip(), ''))
+            _resolve_target)
         with pp._rate_lock:
             pp._peer_msg_history.clear()
-        pp.send_peer_message('/p', 'convSENDERfull', 'convTARGETfull', 'boundary?')
+        pp.send_peer_message('/p', 'convSENDERfull', 'convTARGETfull', 'boundary?', user_id=TEST_OWNER_USER_ID)
         return captured['p']['text']
 
     # ── Part A: project_message's schema teaches a bounded reply ──

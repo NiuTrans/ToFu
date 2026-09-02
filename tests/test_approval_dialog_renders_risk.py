@@ -61,6 +61,8 @@ def _resolve_renderer_source() -> tuple[str, str]:
         for f in files:
             if not f.endswith('.js') or f.startswith(('bundle-', 'feature-', 'i18n-')):
                 continue
+            if f == 'app-runtime.js':
+                continue
             p = os.path.join(root, f)
             try:
                 with open(p, encoding='utf-8') as fh:
@@ -107,7 +109,7 @@ def _write_partition_tools() -> list[str]:
     """
     import lib.tasks_pkg.handlers  # noqa: F401 — registration side-effect
     from lib.tasks_pkg.tool_dispatch._flags import _WRITE_TOOLS
-    from lib.tools import all_specs
+    from lib.tools.registry import all_specs
 
     provides: set[str] = set()
     for s in all_specs():
@@ -121,6 +123,12 @@ def _write_partition_tools() -> list[str]:
 #: ``rm -rf ~/Documents``, it cannot show anything that matters.
 CASES: dict[str, tuple[dict, str]] = {
     'run_command': ({'command': 'rm -rf /tmp/victim'}, 'rm -rf /tmp/victim'),
+    'request_skill_install': ({
+        'catalog_id': 'skill-creator',
+        'scope': 'global',
+        'overwrite': True,
+        'reason': 'Generate and install a task-specific workflow',
+    }, 'skill-creator'),
     'write_file': ({'path': 'a.py', 'content': 'PAYLOAD_X'}, 'PAYLOAD_X'),
     'edit_file': ({'description': 'replace dangerous code', 'edits': [{
         'path': 'a.py', 'operation': 'replace',
@@ -133,11 +141,19 @@ CASES: dict[str, tuple[dict, str]] = {
                         'content': 'INS_X'}, 'ANCH_X'),
     'insert_contents': ({'edits': [{'path': 'a.py', 'anchor': 'ANCH_X',
                                     'content': 'INS_X'}]}, 'ANCH_X'),
-    'create_project': ({'path': '/tmp/newroot_X', 'name': 'nr'}, '/tmp/newroot_X'),
     'browser_execute_js': ({'tab_id': '7',
                             'code': 'document.querySelector("#pay").click()'},
                            '#pay'),
+    'browser_devtools': ({'tab_id': '7', 'action': 'evaluate',
+                          'expression': 'document.querySelector("#pay").click()'},
+                         '#pay'),
     'browser_navigate': ({'url': 'https://evil.example/pay'}, 'evil.example'),
+    'browser_research_page': ({
+        'url': 'https://friday.internal.example.com/skills/skills-market',
+        'max_scrolls': 8,
+        'max_pages': 5,
+        'pagination': 'auto',
+    }, 'friday.internal.example.com'),
     'browser_fill_form': ({'fields': {'#card': '4111111111111111'}},
                           '4111111111111111'),
     'browser_click': ({'tab_id': '7', 'selector': '#confirm-purchase'},
@@ -197,13 +213,13 @@ def _live_schema_properties() -> dict[str, set[str]]:
     anyone's memory of them.
     """
     import lib.tasks_pkg.handlers  # noqa: F401 — registration side-effect
-    from lib.tools import ToolContext, assemble_tool_list
+    from lib.tools.registry import ToolContext, assemble_tool_list
 
     ctx = ToolContext(
         cfg={}, task_id='t-schema', project_path='/tmp/p', project_enabled=True,
         search_mode='multi', search_enabled=True, fetch_enabled=True,
         code_exec_enabled=False, browser_enabled=True, desktop_enabled=True,
-        swarm_enabled=True, image_gen_enabled=True,
+        image_gen_enabled=True,
         human_guidance_enabled=True, scheduler_enabled=True, messages=[],
     )
     out: dict[str, set[str]] = {}

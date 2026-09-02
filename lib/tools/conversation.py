@@ -118,7 +118,8 @@ CHARTER_READ_TOOL = {
             "project's shared intent and to avoid contradicting an already-committed "
             "decision. Read-only. DEFAULT returns the headline list (the same "
             "shape the per-turn injection shows); pass `index` for ONE entry's "
-            "full text — the evidence chain costs one entry, not the whole charter."
+            "full text — the evidence chain costs one entry, not the whole charter. "
+            "To raise a NEW key decision for human review, use project_charter_propose."
         ),
         "parameters": {
             "type": "object",
@@ -273,7 +274,10 @@ BOARD_READ_TOOL = {
             "of epics with their status: OPEN (unclaimed), CLAIMED (another "
             "conversation is actively advancing it — do NOT duplicate), and recently "
             "DONE. Use it to avoid redoing or colliding with work a sibling "
-            "conversation already owns, and to find an open epic to pick up. Read-only."
+            "conversation already owns, and to find an open epic to pick up. Read-only. "
+            "To act on the board: project_board_claim an epic before working it, "
+            "project_board_complete when done, project_board_post a new epic, "
+            "project_board_block when waiting on a human."
         ),
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
@@ -299,6 +303,16 @@ BOARD_POST_TOOL = {
                 "write_set": {
                     "type": "array", "items": {"type": "string"},
                     "description": "Optional list of file paths / globs / subsystem tags this epic intends to WRITE. Declaring it lets the dispatcher avoid handing two conversations epics that will fight over the same files (it prefers epics whose write-set is disjoint from currently-claimed ones). Optional and advisory — an omitted write-set is treated as 'unknown footprint' and never blocks dispatch."
+                },
+                "isolated": {
+                    "type": "boolean",
+                    "description": (
+                        "When true, this epic gets a DEDICATED git worktree (isolated writer "
+                        "workspace): the assignee works only inside it and its result enters "
+                        "the deterministic integration queue (human review → gated merge) "
+                        "instead of landing in the shared checkout directly. Use for risky or "
+                        "review-worthy changes; omit for ordinary shared-tree work."
+                    )
                 },
             },
             "required": ["title"],
@@ -468,7 +482,9 @@ PEER_STATUS_TOOL = {
             "(and its sub-agents): current phase, file being edited, tool round, "
             "and which board epic it is advancing. Use it to decide whether your "
             "planned work overlaps a sibling's, before you duplicate it. This is "
-            "the live complement to get_conversation (which reads past messages)."
+            "the live complement to get_conversation (which reads past messages). "
+            "To coordinate: project_message sends a note to a sibling, "
+            "project_intervene asks it to stop/change course."
         ),
         "parameters": {
             "type": "object",
@@ -495,7 +511,7 @@ PEER_FEED_TOOL = {
             "narrative complement to project_peer_status (who is live NOW) and "
             "project_board_read (the epic lanes): use it to catch up on what "
             "already happened across the team before you start or hand off "
-            "work. Read-only."
+            "work. Read-only. To reply to a peer's activity, use project_message."
         ),
         "parameters": {
             "type": "object",
@@ -532,7 +548,12 @@ PEER_MESSAGE_TOOL = {
             "you may reply exactly once with project_message(to_conv_id=<the "
             "supplied reply id>) only to confirm a boundary, hand off context, "
             "or decline. Do not acknowledge just to be polite: this is "
-            "coordination, not a chat channel, and the rate limit is the ceiling."
+            "coordination, not a chat channel, and the rate limit is the ceiling. "
+            "By default the note WAKES an idle peer: a fresh turn is started so "
+            "it answers promptly. Pass wake=false for a mailbox-only FYI — the "
+            "note then waits for the peer's next natural turn and never starts "
+            "one by itself (cheaper; use it for information the peer only needs "
+            "when it next works, not for anything time-sensitive)."
         ),
         "parameters": {
             "type": "object",
@@ -544,6 +565,10 @@ PEER_MESSAGE_TOOL = {
                 "text": {
                     "type": "string",
                     "description": "The coordination message, addressed to the peer AGENT. A concrete coordination act — a claim, a boundary question, a hand-off, or an overlap warning — NOT a status report. State what you want the peer to do or confirm."
+                },
+                "wake": {
+                    "type": "boolean",
+                    "description": "trigger_turn semantics. true (default): an idle peer is woken with a fresh turn to answer this note. false: mailbox-only — never starts a turn on an idle peer; the note is delivered on the peer's next natural turn (or into its live turn at the next round boundary)."
                 },
             },
             "required": ["to_conv_id", "text"],
@@ -598,6 +623,125 @@ PEER_TOOLS = [PEER_STATUS_TOOL, PEER_FEED_TOOL, PEER_MESSAGE_TOOL,
 PEER_TOOL_NAMES = {'project_peer_status', 'project_feed_read',
                    'project_message', 'project_intervene'}
 
+# ── Integration writer tools (isolated-epic worktree lifecycle) ──
+# An epic posted with isolated=true runs in a DEDICATED git worktree (created
+# server-side before dispatch; the kickoff names it). The writer agent uses
+# these three to snapshot progress, hand the work to the human review queue,
+# and check where it stands. An ordinary shared-tree conversation NEVER needs
+# them — calling them there returns a clear error, not damage.
+
+INTEGRATION_STATUS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "integration_status",
+        "description": (
+            "Show this project's INTEGRATION pipeline: every isolated writer "
+            "workspace with its queue state (running → checkpointed → ready "
+            "(awaiting human review) → integrated | quarantined | discarded), "
+            "its checkpoint commit, and which conversation produced it. "
+            "Read-only. Use it to check whether YOUR isolated work has been "
+            "reviewed/merged yet, or what a sibling's isolated epic is doing. "
+            "An epic only appears here when it was posted with isolated=true."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
+INTEGRATION_CHECKPOINT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "integration_checkpoint",
+        "description": (
+            "Snapshot the CURRENT state of your isolated writer workspace as a "
+            "checkpoint commit (kept under refs/tofu/checkpoints/, the shared "
+            "checkout is untouched). Use at natural milestones — after a "
+            "passing test run, before a risky refactor — so a crash never "
+            "loses finished work and the human reviewer can see progress. "
+            "This does NOT submit anything for review; keep working "
+            "afterwards. ONLY valid when your kickoff said the epic is "
+            "ISOLATED and named a workspace path — for ordinary shared-tree "
+            "work just edit files, no checkpoint exists."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The board epic id your kickoff named (pt_…). Optional when this conversation owns exactly one active integration workspace — then it is resolved automatically."
+                },
+                "note": {
+                    "type": "string",
+                    "description": "Optional one-line milestone note for the reviewer (what works at this checkpoint)."
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
+INTEGRATION_SUBMIT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "integration_submit",
+        "description": (
+            "SUBMIT your isolated writer workspace to the human review queue: "
+            "takes a final checkpoint and marks the work READY. A human then "
+            "reviews the diff in the Project panel → Integration tab and "
+            "promotes or discards it — the merge into the shared checkout is "
+            "NEVER done by you. After submitting, the workspace is IMMUTABLE: "
+            "stop editing it, mark the board epic complete, and let the human "
+            "review. If more work is needed after review feedback, it comes "
+            "back as a new kickoff. ONLY valid when your kickoff said the epic "
+            "is ISOLATED; for ordinary shared-tree work there is nothing to "
+            "submit — your edits are already live."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The board epic id your kickoff named (pt_…). Optional when this conversation owns exactly one active integration workspace — then it is resolved automatically."
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "REQUIRED. What the reviewer is looking at: what changed, why, and how you verified it (tests run). Written for a HUMAN reviewer, self-contained."
+                },
+            },
+            "required": ["summary"],
+        },
+    },
+}
+
+INTEGRATION_TOOLS = [INTEGRATION_STATUS_TOOL, INTEGRATION_CHECKPOINT_TOOL,
+                     INTEGRATION_SUBMIT_TOOL]
+INTEGRATION_TOOL_NAMES = {'integration_status', 'integration_checkpoint',
+                          'integration_submit'}
+
+# ── Project Brain surface split (read vs advisory-write) ──
+# The registry contributes the brain in two ToolSpecs with different
+# discovery policies (lib/tools/registry/_build.py):
+#   * BRAIN_READ_TOOLS — eager, resident on the project-mode wire. These four
+#     are what the per-turn prompt injections already reference by name
+#     (render_charter_injection_block / render_board_injection_block), so a
+#     deferred schema meant the prompt pointed at tools the model could not
+#     see. ~2.7k chars total — cheap ambient awareness of the whole
+#     cross-conversation mechanism.
+#   * BRAIN_WRITE_TOOLS — searchable (deferred to Tool Search). They are the
+#     larger half (~11k chars, project_board_block alone is 4.6k) and remain
+#     exactly callable by name through the task-level executable catalog; the
+#     read-side descriptions point at them.
+BRAIN_READ_TOOLS = [CHARTER_READ_TOOL, BOARD_READ_TOOL,
+                    PEER_STATUS_TOOL, PEER_FEED_TOOL,
+                    INTEGRATION_STATUS_TOOL]
+BRAIN_WRITE_TOOLS = [CHARTER_PROPOSE_TOOL, BOARD_POST_TOOL, BOARD_CLAIM_TOOL,
+                     BOARD_COMPLETE_TOOL, BOARD_BLOCK_TOOL,
+                     PEER_MESSAGE_TOOL, PEER_INTERVENE_TOOL,
+                     INTEGRATION_CHECKPOINT_TOOL, INTEGRATION_SUBMIT_TOOL]
+BRAIN_READ_TOOL_NAMES = {
+    (t.get('function') or {}).get('name') for t in BRAIN_READ_TOOLS}
+BRAIN_WRITE_TOOL_NAMES = {
+    (t.get('function') or {}).get('name') for t in BRAIN_WRITE_TOOLS}
+
 __all__ = [
     'CONV_REF_LIST_TOOL', 'CONV_REF_GET_TOOL',
     'CONV_REF_TOOLS', 'CONV_REF_TOOL_NAMES',
@@ -608,4 +752,8 @@ __all__ = [
     'BOARD_TOOLS', 'BOARD_TOOL_NAMES',
     'PEER_STATUS_TOOL', 'PEER_FEED_TOOL', 'PEER_MESSAGE_TOOL',
     'PEER_INTERVENE_TOOL', 'PEER_TOOLS', 'PEER_TOOL_NAMES',
+    'INTEGRATION_STATUS_TOOL', 'INTEGRATION_CHECKPOINT_TOOL',
+    'INTEGRATION_SUBMIT_TOOL', 'INTEGRATION_TOOLS', 'INTEGRATION_TOOL_NAMES',
+    'BRAIN_READ_TOOLS', 'BRAIN_WRITE_TOOLS',
+    'BRAIN_READ_TOOL_NAMES', 'BRAIN_WRITE_TOOL_NAMES',
 ]

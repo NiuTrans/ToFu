@@ -290,19 +290,19 @@ class TestCacheTracking:
     """Tests for lib/tasks_pkg/cache_tracking.py."""
 
     def test_md5_consistency(self):
-        from lib.tasks_pkg.cache_tracking import _md5
+        from lib.tasks_pkg.cache_tracking._hashing import _md5
         assert _md5('hello') == _md5('hello')
         assert _md5('hello') != _md5('world')
         assert len(_md5('test')) == 16
 
     def test_hash_system_prompt_string(self):
-        from lib.tasks_pkg.cache_tracking import _hash_system_prompt
+        from lib.tasks_pkg.cache_tracking._hashing import _hash_system_prompt
         messages = [{'role': 'system', 'content': 'You are helpful'}]
         h = _hash_system_prompt(messages)
         assert h and len(h) == 16
 
     def test_hash_system_prompt_list(self):
-        from lib.tasks_pkg.cache_tracking import _hash_system_prompt
+        from lib.tasks_pkg.cache_tracking._hashing import _hash_system_prompt
         messages = [{'role': 'system', 'content': [
             {'type': 'text', 'text': 'You are helpful'},
         ]}]
@@ -310,103 +310,122 @@ class TestCacheTracking:
         assert h and len(h) == 16
 
     def test_hash_system_prompt_missing(self):
-        from lib.tasks_pkg.cache_tracking import _hash_system_prompt
+        from lib.tasks_pkg.cache_tracking._hashing import _hash_system_prompt
         assert _hash_system_prompt([{'role': 'user', 'content': 'hi'}]) == ''
 
     def test_hash_tools_empty(self):
-        from lib.tasks_pkg.cache_tracking import _hash_tools
+        from lib.tasks_pkg.cache_tracking._hashing import _hash_tools
         assert _hash_tools(None) == ''
         assert _hash_tools([]) == ''
 
     def test_hash_tools_deterministic(self):
-        from lib.tasks_pkg.cache_tracking import _hash_tools
+        from lib.tasks_pkg.cache_tracking._hashing import _hash_tools
         tools = [{'function': {'name': 'read_files', 'parameters': {}}}]
         h1 = _hash_tools(tools)
         h2 = _hash_tools(tools)
         assert h1 == h2
 
     def test_detect_cache_break_first_call_no_break(self):
-        from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
+        )
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
         conv_id = 'test-cb-1'
-        _cache_states.pop(conv_id, None)
+        _cache_states.pop(_state_key(conv_id, user_id=1), None)
 
         messages = [{'role': 'system', 'content': 'sys'}]
-        result = detect_cache_break(conv_id, messages, None, 'model-a')
+        result = detect_cache_break(conv_id, messages, None, 'model-a', user_id=1)
         assert result is None  # First call never breaks
 
     def test_detect_cache_break_model_change(self):
-        from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
+        )
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
         conv_id = 'test-cb-2'
-        _cache_states.pop(conv_id, None)
+        _cache_states.pop(_state_key(conv_id, user_id=1), None)
 
         messages = [{'role': 'system', 'content': 'sys'}]
         # First call establishes baseline with cache_read tokens
         detect_cache_break(conv_id, messages, None, 'model-a',
-                           usage={'cache_read_tokens': 5000})
+                           usage={'cache_read_tokens': 5000}, user_id=1)
         # Model change + cache_read drop confirms a cache break
         result = detect_cache_break(conv_id, messages, None, 'model-b',
-                           usage={'cache_read_tokens': 100})
+                           usage={'cache_read_tokens': 100}, user_id=1)
         assert result is not None
         assert 'model' in result
 
     def test_detect_cache_break_system_prompt_change(self):
-        from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
+        )
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
         conv_id = 'test-cb-3'
-        _cache_states.pop(conv_id, None)
+        _cache_states.pop(_state_key(conv_id, user_id=1), None)
 
         messages1 = [{'role': 'system', 'content': 'prompt v1'}]
         detect_cache_break(conv_id, messages1, None, 'model-a',
-                           usage={'cache_read_tokens': 5000})
+                           usage={'cache_read_tokens': 5000}, user_id=1)
 
         messages2 = [{'role': 'system', 'content': 'prompt v2'}]
         result = detect_cache_break(conv_id, messages2, None, 'model-a',
-                           usage={'cache_read_tokens': 100})
+                           usage={'cache_read_tokens': 100}, user_id=1)
         assert result is not None
         assert 'system_prompt' in result
 
     def test_detect_cache_break_empty_conv_id(self):
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
-        result = detect_cache_break('', [{'role': 'system', 'content': 'sys'}], None, 'm')
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+        result = detect_cache_break('', [{'role': 'system', 'content': 'sys'}], None, 'm', user_id=1)
         assert result is None
 
     def test_get_cache_prefix_count_no_state(self):
-        from lib.tasks_pkg.cache_tracking import _cache_states, get_cache_prefix_count
+        from lib.tasks_pkg.cache_tracking._state import _cache_states
+        from lib.tasks_pkg.cache_tracking._prefix import get_cache_prefix_count
         _cache_states.pop('nonexistent', None)
-        assert get_cache_prefix_count('nonexistent') == 0
+        assert get_cache_prefix_count('nonexistent', user_id=1) == 0
 
     def test_prefix_protected_after_write_only_round(self):
         """★ Regression: a round that only WROTE the prefix (cache_read=0,
         large cache_write — e.g. round 1 of a fresh conversation) must still
         protect that prefix from micro-compact mutation on the next round.
         Gating on read alone left round 2 unprotected → guaranteed miss."""
-        from lib.tasks_pkg.cache_tracking import (
-            CacheState, _cache_states, get_cache_prefix_count,
+        from lib.tasks_pkg.cache_tracking._state import (
+            CacheState,
+            _cache_states,
         )
+        from lib.tasks_pkg.cache_tracking._prefix import get_cache_prefix_count
         conv_id = 'test-prefix-write-only'
-        from lib.tasks_pkg.cache_tracking import _state_key
+        from lib.tasks_pkg.cache_tracking._state import _state_key
         state = CacheState()
         state.last_cache_read_tokens = 0        # nothing read yet
         state.last_cache_write_tokens = 278500  # but a big prefix WAS written
         state.message_count = 6
         state.call_count = 1
-        _cache_states[_state_key(conv_id)] = state
+        _cache_states[_state_key(conv_id, user_id=1)] = state
         try:
-            assert get_cache_prefix_count(conv_id) == 4  # max(0, 6 - 2)
+            assert get_cache_prefix_count(conv_id, user_id=1) == 4  # max(0, 6 - 2)
         finally:
-            _cache_states.pop(_state_key(conv_id), None)
+            _cache_states.pop(_state_key(conv_id, user_id=1), None)
 
     def test_no_false_positive_on_message_growth(self):
         """Growing messages (tool rounds) should NOT trigger a cache break
         when cache_read tokens are stable or growing."""
-        from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
+        )
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
         conv_id = 'test-cb-grow'
-        _cache_states.pop(conv_id, None)
+        _cache_states.pop(_state_key(conv_id, user_id=1), None)
 
         # Round 1: system + user
         msgs = [{'role': 'system', 'content': 'sys'},
                 {'role': 'user', 'content': 'hello'}]
         detect_cache_break(conv_id, msgs, None, 'model-a',
-                           usage={'cache_read_tokens': 1000})
+                           usage={'cache_read_tokens': 1000}, user_id=1)
 
         # Round 2: add assistant + tool result (cache growing)
         msgs.append({'role': 'assistant', 'content': '', 'tool_calls': [
@@ -414,25 +433,28 @@ class TestCacheTracking:
         ]})
         msgs.append({'role': 'tool', 'content': 'file content here'})
         result = detect_cache_break(conv_id, msgs, None, 'model-a',
-                                    usage={'cache_read_tokens': 1500})
+                                    usage={'cache_read_tokens': 1500}, user_id=1)
         assert result is None  # No break — cache grew normally
 
     def test_notify_compaction_suppresses_break(self):
         """After compaction, a cache_read drop should not be flagged."""
-        from lib.tasks_pkg.cache_tracking import (
-            _cache_states, detect_cache_break, notify_compaction,
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
         )
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._roi import notify_compaction
         conv_id = 'test-cb-compact'
-        _cache_states.pop(conv_id, None)
+        _cache_states.pop(_state_key(conv_id, user_id=1), None)
 
         msgs = [{'role': 'system', 'content': 'sys'}]
         detect_cache_break(conv_id, msgs, None, 'model-a',
-                           usage={'cache_read_tokens': 10000})
+                           usage={'cache_read_tokens': 10000}, user_id=1)
         # Compaction happened — notify
-        notify_compaction(conv_id)
+        notify_compaction(conv_id, user_id=1)
         # Cache tokens drop (expected after compaction)
         result = detect_cache_break(conv_id, msgs, None, 'model-a',
-                                    usage={'cache_read_tokens': 3000})
+                                    usage={'cache_read_tokens': 3000}, user_id=1)
         # Should NOT be flagged as a confirmed break
         assert result is None or 'system_prompt' not in result
 
@@ -624,17 +646,20 @@ class TestCacheAwareMicroCompact:
 
     def test_cache_prefix_skips_messages(self):
         """When cache prefix is set, messages within it should be skipped."""
-        from lib.tasks_pkg.cache_tracking import CacheState, _cache_states
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.cache_tracking._state import (
+            CacheState,
+            _cache_states,
+        )
+        from lib.tasks_pkg.compaction.api import micro_compact
 
         conv_id = 'test-cache-mc-1'
-        from lib.tasks_pkg.cache_tracking import _state_key
+        from lib.tasks_pkg.cache_tracking._state import _state_key
         # Set up state with active cache
         state = CacheState()
         state.last_cache_read_tokens = 5000
         state.message_count = 5  # simulate 5 messages tracked; prefix = max(0, 5 - 2) = 3
         state.call_count = 5
-        _cache_states[_state_key(conv_id)] = state
+        _cache_states[_state_key(conv_id, user_id=1)] = state
 
         messages = [
             {'role': 'system', 'content': 'system prompt'},
@@ -657,4 +682,4 @@ class TestCacheAwareMicroCompact:
         assert messages[2]['reasoning_content'] == original_thinking_2
 
         # Cleanup
-        _cache_states.pop(_state_key(conv_id), None)
+        _cache_states.pop(_state_key(conv_id, user_id=1), None)

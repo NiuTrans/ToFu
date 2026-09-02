@@ -34,6 +34,10 @@ logger = get_logger(__name__)
 # A dispatch handler — same signature as lib.protocols.ToolHandler.  Typed
 # loosely here to avoid importing the protocol into this low-level module.
 ToolHandlerFn = Callable[..., tuple[str, str, bool]]
+ToolResultMetaBuilder = Callable[
+    [str, dict[str, Any], str],
+    dict[str, Any],
+]
 
 
 # ══════════════════════════════════════════════════════════
@@ -64,10 +68,12 @@ class ToolContext:
     code_exec_enabled: bool
     browser_enabled: bool
     desktop_enabled: bool
-    swarm_enabled: bool
     image_gen_enabled: bool = False
     human_guidance_enabled: bool = False
     scheduler_enabled: bool = False
+    # Authenticated owner used by owner-scoped capability discovery. Zero means
+    # no durable/browser authority (for static inventory and isolated tests).
+    owner_user_id: int = 0
     # ``lean`` is a retained backend seam (chat_mode.is_lean_mode, currently
     # always False after the air/pro tier merge). When True, the always-on
     # capability tools that attach purely on has_base_tools — memory / todo /
@@ -110,14 +116,16 @@ class ToolContext:
     tool_namespace_by_name: dict[str, str] = field(default_factory=dict)
     # The complete task-local execution surface.  Unlike the wire schema this
     # is never reduced by composer/native exposure or provider-side discovery.
-    # The historic field name remains for extension compatibility; new task
-    # plumbing exposes it as ``_executable_tool_catalog``.
-    enabled_tool_catalog: list[dict[str, Any]] = field(default_factory=list)
+    executable_tool_catalog: list[dict[str, Any]] = field(default_factory=list)
     discovery_policy_by_name: dict[str, str] = field(default_factory=dict)
     script_safe_by_name: dict[str, bool] = field(default_factory=dict)
     # Private retrieval text (ToolSpec family hints plus MCP aliases/intents).
     # It is task-local search data, never serialized into provider tool schemas.
     search_text_by_name: dict[str, str] = field(default_factory=dict)
+    # Canonical rich contracts stay server-side and are returned only after
+    # Tool Search. Existing schemas receive a read-only v2 adapter here.
+    tool_contract_documents_by_name: dict[str, dict[str, Any]] = field(
+        default_factory=dict)
 
     @property
     def tid(self) -> str:
@@ -136,6 +144,11 @@ class ToolContext:
         if self.enabled_plugins is None:
             return True
         return bool(plugin_name) and plugin_name in self.enabled_plugins
+
+    @property
+    def durable_state_available(self) -> bool:
+        """Whether storage-backed tool families may join this task surface."""
+        return not bool(self.cfg.get('_storageFreeRuntime'))
 
     @property
     def multiroot_active(self) -> bool:
@@ -161,7 +174,7 @@ class ToolContext:
         """True when this task has a project attached (``project_enabled``).
 
         Read by the project spec builder (:func:`_build_project_or_code_exec`)
-        to gate the project tool family (list_dir / grep_search / find_files /
+        to gate the project tool family (grep_search / find_files /
         write_file / apply_diff / … / run_command).
 
         This is deliberately live on every assembly: attaching a project adds
@@ -248,6 +261,10 @@ class ToolSpec:
         Subsets of :attr:`provides` that mutate state / are safe to cache.
         Consumed by ``tool_dispatch`` to keep its concurrency + dedup
         partitions in sync without a second hand-maintained list.
+    confirmation_tools:
+        Subset of :attr:`write_tools` that always requires an attended human
+        confirmation, independent of the conversation's ordinary Auto/Manual
+        write mode. Unattended execution fails closed.
     programmatic_tools:
         Subset of :attr:`provides` explicitly reviewed for execution from an
         OpenAI Programmatic Tool Calling program.  This is intentionally NOT
@@ -308,6 +325,11 @@ class ToolSpec:
         Whether calls from a local ToolScript may execute without first being
         handed back to the ordinary approval/execution lane.  This is a trust
         property and deliberately independent of discovery policy.
+    result_meta_builder:
+        Optional plugin-owned adapter for producing the frontend result
+        metadata of names in :attr:`provides`. Core execution reaches this
+        callable through :func:`build_tool_result_meta`; it never imports the
+        concrete tool family that owns the metadata shape.
     """
 
     key: str
@@ -340,6 +362,14 @@ class ToolSpec:
     # toggle. Piggy-backed gates (for example Produce riding Web Search) leave
     # this false so they remain deferred.
     pin_on_exposure: bool = False
+    # Native v2 contracts. Appended for positional compatibility; families
+    # without them are adapted from their legacy provider schemas.
+    contracts: tuple[Any, ...] = field(default_factory=tuple)
+    # Appended for positional compatibility with third-party ToolSpec users.
+    result_meta_builder: ToolResultMetaBuilder | None = None
+    # Appended for positional compatibility. These are writes whose authority
+    # can only be minted by the attended approval UI for this exact call.
+    confirmation_tools: frozenset[str] = field(default_factory=frozenset)
 
 
 # ── Module-level registry ─────────────────────────────────
@@ -358,6 +388,7 @@ def _ordinary_claims(spec: ToolSpec) -> set[str]:
         | set(spec.write_tools)
         | set(spec.idempotent_tools)
         | set(spec.programmatic_tools)
+        | set(spec.confirmation_tools)
     )
     if spec.handler is not None and not spec.handler_special:
         claims.update(spec.handler_names)
@@ -406,12 +437,18 @@ def _register_tool_spec_unlocked(spec: ToolSpec, *, replace: bool) -> None:
             spec.handler_special or spec.handler_names or spec.provides):
         raise ValueError(
             f'ToolSpec {spec.key!r} has a handler but no dispatch names')
-    for policy_name in ('idempotent_tools', 'programmatic_tools'):
+    for policy_name in (
+            'idempotent_tools', 'programmatic_tools', 'confirmation_tools'):
         undeclared = set(getattr(spec, policy_name)) - set(spec.provides)
         if undeclared:
             raise ValueError(
                 f'ToolSpec {spec.key!r} {policy_name} contains undeclared '
                 f'tool names: {sorted(undeclared)}')
+    non_writes = set(spec.confirmation_tools) - set(spec.write_tools)
+    if non_writes:
+        raise ValueError(
+            f'ToolSpec {spec.key!r} confirmation_tools must also be writes: '
+            f'{sorted(non_writes)}')
 
     claims = _ordinary_claims(spec)
     name_collisions = [
@@ -511,6 +548,38 @@ def all_specs() -> list[ToolSpec]:
     """Return the registered specs in registration order (a shallow copy)."""
     with _SPEC_LOCK:
         return list(_TOOL_SPECS)
+
+
+def build_tool_result_meta(
+    tool_name: str,
+    tool_args: dict[str, Any],
+    tool_content: str,
+) -> dict[str, Any]:
+    """Build result metadata through the owning :class:`ToolSpec` seam.
+
+    The neutral fallback preserves the historical metadata shape for tool
+    families that do not need a specialized adapter. The callable is invoked
+    outside the registry lock because plugin code must never block registry
+    registration or introspection.
+    """
+    with _SPEC_LOCK:
+        builder = next((
+            spec.result_meta_builder
+            for spec in _TOOL_SPECS
+            if tool_name in spec.provides
+            and spec.result_meta_builder is not None
+        ), None)
+    if builder is not None:
+        return builder(tool_name, tool_args, tool_content)
+    return {
+        'title': tool_name,
+        'source': 'Project',
+        'fetched': True,
+        'fetchedChars': len(tool_content),
+        'url': '',
+        'snippet': tool_content[:120].replace('\n', ' '),
+        'badge': '',
+    }
 
 
 # ── Handler sync: push spec-attached handlers into the dispatch registry ──
@@ -733,8 +802,11 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
     def _record_contribution(
             spec: ToolSpec, contributed: list[dict], exposed: bool) -> None:
         namespace = (spec.category or spec.key or 'general').strip().lower()
-        pin = exposed and (
-            spec.discovery_policy == 'eager' or spec.pin_on_exposure)
+        # Eager visibility is a discovery policy, not proof that a human chose
+        # this individual capability. Only explicit composer/plugin selection
+        # becomes a budget pin; otherwise every eager family collapses the
+        # priority tiers back into registry order.
+        pin = exposed and spec.pin_on_exposure
         # An explicit plugin allow-list is also a caller selection.  A legacy
         # single-tenant "all plugins" default (None) remains searchable.
         if (spec.source == 'plugin'
@@ -752,6 +824,11 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
                              if _schema_name(tool) not in known)
         active_mcp = set(ctx.cfg.get('_mcpActiveToolNames') or [])
         mcp_search_text = ctx.cfg.get('_mcpToolSearchTextByName') or {}
+        native_contracts = {
+            str(getattr(contract, 'name', '')): contract
+            for contract in spec.contracts
+            if str(getattr(contract, 'name', ''))
+        }
         for tool in authority:
             name = _schema_name(tool)
             if not name:
@@ -759,8 +836,8 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
             if execution_scope == 'selected_only' and not exposed:
                 continue
             if name not in {_schema_name(row)
-                            for row in ctx.enabled_tool_catalog}:
-                ctx.enabled_tool_catalog.append(tool)
+                            for row in ctx.executable_tool_catalog}:
+                ctx.executable_tool_catalog.append(tool)
             is_active_mcp = spec.key == 'mcp' and name in active_mcp
             ctx.discovery_policy_by_name[name] = (
                 'eager' if is_active_mcp else (
@@ -775,6 +852,34 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
                 search_parts.append(str(mcp_search_text.get(name) or ''))
             ctx.search_text_by_name[name] = ' '.join(
                 part for part in search_parts if part)
+            try:
+                contract = native_contracts.get(name)
+                if contract is None:
+                    from lib.tools.contracts import adapt_legacy_tool_contract
+                    contract = adapt_legacy_tool_contract(
+                        tool,
+                        namespace=namespace,
+                        search_metadata=tuple(
+                            part for part in search_parts if part),
+                        permission=(
+                            'write' if name in spec.write_tools else 'read'),
+                        idempotency=(
+                            'idempotent' if name in spec.idempotent_tools else
+                            'non_idempotent' if name in spec.write_tools else
+                            'read_only'),
+                        ptc_eligible=name in spec.programmatic_tools,
+                    )
+                document = contract.search_document()
+                ctx.tool_contract_documents_by_name[name] = document
+                ctx.search_text_by_name[name] = ' '.join(filter(None, (
+                    ctx.search_text_by_name[name],
+                    str(document.get('help') or ''),
+                    ' '.join(document.get('aliases') or ()),
+                )))
+            except Exception as exc:
+                logger.warning(
+                    '[ToolRegistry] v2 contract compile failed for %s: %s',
+                    name, exc)
             if pin or is_active_mcp:
                 ctx.frontend_selected_tool_names.add(name)
 
@@ -794,7 +899,7 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
             continue
         exposed = bool(
             spec.exposure_gate(ctx) if spec.exposure_gate else True)
-        ctx.current_count = len(ctx.enabled_tool_catalog)
+        ctx.current_count = len(ctx.executable_tool_catalog)
         try:
             contributed = spec.build(ctx) or []
         except Exception as e:
@@ -806,7 +911,7 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
         if _wire_visible(spec, exposed):
             tool_list.extend(contributed)
 
-    ctx.has_base_tools = len(ctx.enabled_tool_catalog) > 0
+    ctx.has_base_tools = len(ctx.executable_tool_catalog) > 0
 
     # ── Capability phase ──
     for spec in specs:
@@ -814,7 +919,7 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
             continue
         exposed = bool(
             spec.exposure_gate(ctx) if spec.exposure_gate else True)
-        ctx.current_count = len(ctx.enabled_tool_catalog)
+        ctx.current_count = len(ctx.executable_tool_catalog)
         try:
             contributed = spec.build(ctx) or []
         except Exception as e:

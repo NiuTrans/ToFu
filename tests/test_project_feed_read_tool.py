@@ -3,7 +3,7 @@
 Closes the audited perception hole: the cross-conversation ACTIVITY FEED was
 written everywhere (task lifecycle / board / peer notes) but an AGENT could
 never read it mid-turn — only the HTTP/UI route surfaced it, and
-``system_context.py`` injects only the board + charter blocks, never the feed.
+The Context Composer injects only the board + charter blocks, never the feed.
 A conversation could therefore see who is live NOW (``project_peer_status``)
 and the epic lanes (``project_board_read``) but not the narrative of what
 siblings had been DOING.
@@ -32,6 +32,9 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _PEER_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_peer.py')
@@ -39,6 +42,15 @@ _CONV_SRC = os.path.join(ROOT, 'lib', 'tools', 'conversation.py')
 
 
 from tests._nc_harness import patch_restore as _patch_restore  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _clean(chat_sidecar):
+    """Per-test feed isolation (sidecar equivalent of the legacy
+    DELETE FROM project_events fixture)."""
+    import tests._seed as seed
+    seed.clear_events()
+    yield
 
 
 def _events():
@@ -83,7 +95,7 @@ def test_fmt_feed_renders_rows_and_marks_self():
 def test_feed_read_refuses_outside_project():
     from lib.conversations.project_peer import execute_peer_tool
     out = execute_peer_tool('project_feed_read', {}, current_conv_id='cA',
-                            project_path='')
+                            project_path='', user_id=TEST_OWNER_USER_ID)
     assert 'only available in project mode' in out
 
 
@@ -93,16 +105,18 @@ def test_feed_read_reads_and_formats(monkeypatch):
     import lib.conversations.project_feed as pf
     captured = {}
 
-    def _fake_read(project_path, since_seq=0, limit=100):
+    def _fake_read(project_path, *, user_id, since_seq=0, limit=100):
         captured['path'] = project_path
+        captured['user_id'] = user_id
         captured['limit'] = limit
         return {'events': _events(), 'maxSeq': 3}
 
     monkeypatch.setattr(pf, 'read_project_feed', _fake_read)
     from lib.conversations.project_peer import execute_peer_tool
     out = execute_peer_tool('project_feed_read', {'limit': 5},
-                            current_conv_id='cB', project_path='/proj/x')
+                            current_conv_id='cB', project_path='/proj/x', user_id=TEST_OWNER_USER_ID)
     assert captured['path'] == '/proj/x'
+    assert captured['user_id'] == TEST_OWNER_USER_ID
     assert captured['limit'] == 5
     assert '[completed]' in out and 'Docs pass (this conversation)' in out
 
@@ -112,14 +126,17 @@ def test_feed_read_clamps_limit(monkeypatch):
     import lib.conversations.project_feed as pf
     seen = []
     monkeypatch.setattr(pf, 'read_project_feed',
-                        lambda p, since_seq=0, limit=100: seen.append(limit) or {'events': [], 'maxSeq': 0})
+                        lambda p, *, user_id, since_seq=0, limit=100:
+                        seen.append((user_id, limit)) or
+                        {'events': [], 'maxSeq': 0})
     from lib.conversations.project_peer import execute_peer_tool
     # NOTE: limit=0 is falsy → `int(0 or 25)` defaults to 25 (0 is meaningless);
     # the floor-to-1 clamp only bites on a negative limit.
     for arg in [{}, {'limit': -5}, {'limit': 999}, {'limit': 'x'}, {'limit': 10}]:
         execute_peer_tool('project_feed_read', arg, current_conv_id='c',
-                          project_path='/p')
-    assert seen == [25, 1, 60, 25, 10], seen
+                          project_path='/p', user_id=TEST_OWNER_USER_ID)
+    assert seen == [(TEST_OWNER_USER_ID, limit)
+                    for limit in (25, 1, 60, 25, 10)], seen
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -129,7 +146,7 @@ def test_feed_read_clamps_limit(monkeypatch):
 # ════════════════════════════════════════════════════════════════════
 
 def test_feed_read_in_schema_and_name_set():
-    from lib.tools import PEER_TOOLS, PEER_TOOL_NAMES
+    from lib.tools.conversation import PEER_TOOLS, PEER_TOOL_NAMES
     names = [t['function']['name'] for t in PEER_TOOLS]
     assert 'project_feed_read' in names, \
         'project_feed_read MUST be in the tool schema (else phantom-tool trap)'
@@ -141,21 +158,20 @@ def test_feed_read_in_schema_and_name_set():
     assert 'limit' in props
 
 
-def test_feed_read_registered_in_conv_ref_provides():
-    """The conv_ref ToolSpec's provides/idempotent sets must include the tool
+def test_feed_read_registered_in_project_brain_provides():
+    """The project_brain ToolSpec's provides/idempotent sets include the tool
     so the assembler advertises it and marks it read-only (idempotent)."""
     from lib.tools.registry import all_specs
-    spec = next(s for s in all_specs() if s.key == 'conv_ref')
+    spec = next(s for s in all_specs() if s.key == 'project_brain')
     assert 'project_feed_read' in spec.provides
     assert 'project_feed_read' in spec.idempotent_tools
 
 
 def test_registry_routes_feed_read_to_peer_handler():
     from lib.tasks_pkg.executor import tool_registry
-    from lib.tasks_pkg.handlers.misc import _handle_peer_tool
+    from lib.tasks_pkg.handlers.misc._brain import _handle_peer_tool
     handler = tool_registry.lookup('project_feed_read', {})
-    # Several negative-control suites deliberately reload the handler facade.
-    # A registry populated before such a reload keeps the equivalent original
+    # A registry populated before a leaf-module reload keeps the equivalent original
     # function object, so object identity is collection-order dependent even
     # though routing remains correct.  Pin the stable callable identity and
     # leave behavior to the end-to-end dispatch test below.
@@ -172,15 +188,17 @@ def test_feed_read_reachable_end_to_end_via_agent_dispatch(monkeypatch):
 
     import lib.conversations.project_feed as pf
     monkeypatch.setattr(pf, 'read_project_feed',
-                        lambda p, since_seq=0, limit=100: {'events': _events(), 'maxSeq': 3})
+                        lambda p, *, user_id, since_seq=0, limit=100:
+                        {'events': _events(), 'maxSeq': 3})
     # Keep the round finalize + event append side-effect-free.
-    monkeypatch.setattr('lib.tasks_pkg.handlers.misc.append_event',
+    monkeypatch.setattr('lib.tasks_pkg.handlers.misc._brain.append_event',
                         lambda t, ev: None)
 
     from lib.tasks_pkg.executor import _execute_tool_one
     task = {
         'id': 'tfeed01', 'convId': 'cA', 'toolRounds': [], 'messages': [],
         'events': [], 'events_lock': threading.Lock(),
+        '_userId': TEST_OWNER_USER_ID,
     }
     round_entry = {'roundNum': 1, 'query': 'project_feed_read',
                    'results': None, 'status': 'searching',
@@ -205,19 +223,17 @@ def test_feed_read_reachable_end_to_end_via_agent_dispatch(monkeypatch):
 #    test_registry_routes_feed_read_to_peer_handler). ──
 def test_NC_feed_read_schema_registration_is_load_bearing():
     def run():
-        import importlib
         # The harness has swapped the neutered lib.tools.conversation into
-        # sys.modules; DON'T reload it (that would re-read the un-neutered
-        # file). Reload ONLY the facade so PEER_TOOLS/PEER_TOOL_NAMES are
-        # recomputed from the neutered child now live in sys.modules.
-        import lib.tools as _tools
-        importlib.reload(_tools)
-        names = [t['function']['name'] for t in _tools.PEER_TOOLS]
+        # sys.modules; inspect that concrete owner directly.
+        import lib.tools.conversation as conversation_tools
+        names = [
+            t['function']['name'] for t in conversation_tools.PEER_TOOLS
+        ]
         assert 'project_feed_read' not in names, \
             'NC-SCHEMA: with PEER_FEED_TOOL removed the model-facing schema ' \
             'must NOT advertise project_feed_read (proving the registration ' \
             'is what makes the tool visible to the agent)'
-        assert 'project_feed_read' not in _tools.PEER_TOOL_NAMES
+        assert 'project_feed_read' not in conversation_tools.PEER_TOOL_NAMES
 
     _patch_restore(
         _CONV_SRC,
@@ -231,12 +247,9 @@ def test_NC_feed_read_schema_registration_is_load_bearing():
         "                   'project_message', 'project_intervene'}",
         run,
     )
-    # The harness restored the canonical lib.tools.conversation; recompute the
-    # facade off it so the tool is advertised again (positive restore proof).
-    import importlib
-    import lib.tools as _tools
-    importlib.reload(_tools)
-    assert 'project_feed_read' in _tools.PEER_TOOL_NAMES
+    # The harness restored the canonical concrete owner (positive proof).
+    import lib.tools.conversation as conversation_tools
+    assert 'project_feed_read' in conversation_tools.PEER_TOOL_NAMES
 
 
 # ── NC-DISPATCH: no-op the feed branch in execute_peer_tool → the tool no
@@ -244,12 +257,13 @@ def test_NC_feed_read_schema_registration_is_load_bearing():
 def test_NC_feed_branch_noop_breaks_read(monkeypatch):
     import lib.conversations.project_feed as pf
     monkeypatch.setattr(pf, 'read_project_feed',
-                        lambda p, since_seq=0, limit=100: {'events': _events(), 'maxSeq': 3})
+                        lambda p, *, user_id, since_seq=0, limit=100:
+                        {'events': _events(), 'maxSeq': 3})
 
     def run():
         import lib.conversations.project_peer as pp
         out = pp.execute_peer_tool('project_feed_read', {'limit': 5},
-                                   current_conv_id='cA', project_path='/p')
+                                   current_conv_id='cA', project_path='/p', user_id=TEST_OWNER_USER_ID)
         assert 'Recent project activity' not in out, \
             'NC-DISPATCH: with the feed branch disabled the tool must NOT ' \
             'return the formatted feed (proving the branch is load-bearing)'
@@ -257,8 +271,8 @@ def test_NC_feed_branch_noop_breaks_read(monkeypatch):
 
     _patch_restore(
         _PEER_SRC,
-        "        if fn_name == 'project_feed_read':",
-        "        if fn_name == '__nc_disabled_feed_read__':",
+        '        if fn_name == "project_feed_read":',
+        '        if fn_name == "__nc_disabled_feed_read__":',
         run,
     )
 
@@ -279,7 +293,7 @@ def _drive_feed_read_post_build(flask_app, monkeypatch, project_path):
     """Run project_feed_read through _execute_tool_one against the live DB and
     return the resulting feedActivity meta dict (events list included)."""
     # Keep the round finalize's SSE append side-effect-free.
-    monkeypatch.setattr('lib.tasks_pkg.handlers.misc.append_event',
+    monkeypatch.setattr('lib.tasks_pkg.handlers.misc._brain.append_event',
                         lambda t, ev: None)
     import threading
 
@@ -287,6 +301,7 @@ def _drive_feed_read_post_build(flask_app, monkeypatch, project_path):
     task = {
         'id': 'tfeedpb', 'convId': 'cCaller', 'toolRounds': [], 'messages': [],
         'events': [], 'events_lock': threading.Lock(),
+        '_userId': TEST_OWNER_USER_ID,
     }
     round_entry = {'roundNum': 1, 'query': 'project_feed_read',
                    'results': None, 'status': 'searching',
@@ -306,25 +321,18 @@ def test_post_build_backfills_title_from_db_for_titleless_event(flask_app, monke
     """A lifecycle event emitted with NO title (as manager/orchestrator do) for
     a conv that HAS a real stored title must surface that title in the card —
     never a bare `conv <id>`. Drives the real DB + _titles_by_conv."""
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    import tests._seed as seed
     from lib.conversations.project_feed import emit_project_event
 
     proj = '/proj/feed_title_backfill'
     conv_id = 'cRealTitled'
     with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_events WHERE project_path=?', (proj,))
-        db.execute('DELETE FROM conversations WHERE id=?', (conv_id,))
-        now = 1
         # Seed a real conversation row with a genuine stored title.
-        db.execute(
-            'INSERT INTO conversations (id, user_id, title, messages, settings, '
-            ' created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (conv_id, 1, 'Real Stored Title', '[]', '{}', now, now))
-        db.commit()
+        seed.seed_conversation(conv_id, title='Real Stored Title',
+                               created_at=1, updated_at=1)
         # Emit a lifecycle event with title='' — exactly how manager.py /
         # orchestrator.py fire started/completed (no title= kwarg).
-        emit_project_event(proj, conv_id, 'completed', 'finished the parser work')
+        emit_project_event(proj, conv_id, 'completed', 'finished the parser work', user_id=TEST_OWNER_USER_ID)
 
     fa = _drive_feed_read_post_build(flask_app, monkeypatch, proj)
     events = fa.get('events') or []
@@ -343,7 +351,7 @@ def test_post_build_forwards_full_summary_not_capped(flask_app, monkeypatch):
     """An event whose summary exceeds _SUMMARY_MAX_CHARS (so summary_full is
     stored) must be forwarded FULL by _post_build — not the 280-char display
     cap that truncates mid-word."""
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    import tests._seed as seed
     from lib.conversations.project_feed import (
         emit_project_event, _SUMMARY_MAX_CHARS,
     )
@@ -354,15 +362,9 @@ def test_post_build_forwards_full_summary_not_capped(flask_app, monkeypatch):
                                       'Redis pub/sub substrate ') * 12).strip()
     assert len(long_summary) > _SUMMARY_MAX_CHARS
     with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_events WHERE project_path=?', (proj,))
-        db.execute('DELETE FROM conversations WHERE id=?', (conv_id,))
-        db.execute(
-            'INSERT INTO conversations (id, user_id, title, messages, settings, '
-            ' created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (conv_id, 1, 'Summary Conv', '[]', '{}', 1, 1))
-        db.commit()
-        emit_project_event(proj, conv_id, 'completed', long_summary)
+        seed.seed_conversation(conv_id, title='Summary Conv',
+                               created_at=1, updated_at=1)
+        emit_project_event(proj, conv_id, 'completed', long_summary, user_id=TEST_OWNER_USER_ID)
 
     fa = _drive_feed_read_post_build(flask_app, monkeypatch, proj)
     ours = [e for e in (fa.get('events') or []) if e.get('convId') == conv_id]
@@ -392,7 +394,7 @@ def test_peer_abort_route_stops_target(flask_client, monkeypatch):
     # once any sibling suite has run init_db() (creating the empty conversations
     # table) — a cross-file ordering fragility, not a product bug.
     monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
-                        lambda t: ((t or '').strip(), ''))
+                        lambda t, *, user_id: ((t or '').strip(), ''))
     audits = []
     monkeypatch.setattr('lib.conversations.project_peer.audit_log',
                         lambda ev, **k: audits.append((ev, k)))
@@ -428,6 +430,6 @@ def test_peer_abort_route_requires_target(flask_client):
 
 if __name__ == '__main__':
     import sys
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db(globals())
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage(globals())
     sys.exit(pytest.main([__file__, '-v']))

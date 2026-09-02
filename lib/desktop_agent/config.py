@@ -2,7 +2,7 @@
 
 Tiny JSON store for agent-local settings that must survive restarts —
 currently the stable ``agent_id`` (RWA P0 registration frame, see
-docs/REMOTE_WORKTREE_DESIGN.md §3.2). Path: ``TOFU_DESKTOP_CONFIG`` env
+docs/modules/remote_execution.md). Path: ``TOFU_DESKTOP_CONFIG`` env
 var, else ``~/.tofu/desktop_agent.json``.
 """
 

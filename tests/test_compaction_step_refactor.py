@@ -95,9 +95,9 @@ def _fx_image_strip():
     msgs = [{'role': 'user', 'content': 'go'}]
     for i in range(6):
         msgs.append(_mk_asst(tool_calls=[{'id': f'i{i}',
-                                          'function': {'name': 'browser_read_tab',
+                                          'function': {'name': 'browser_read_page',
                                                        'arguments': '{}'}}]))
-        msgs.append(_mk_tool('browser_read_tab', img_content(), f'i{i}'))
+        msgs.append(_mk_tool('browser_read_page', img_content(), f'i{i}'))
     return msgs, {}
 
 
@@ -130,7 +130,7 @@ def test_micro_compact_output_is_stable(fx_name):
     must preserve). We assert determinism by running twice on deep copies
     and comparing — plus assert the transform actually fired where
     expected, so a no-op regression is caught too."""
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
 
     msgs, kwargs = _FIXTURES[fx_name]()
     a = copy.deepcopy(msgs)
@@ -154,7 +154,7 @@ def test_micro_compact_output_is_stable(fx_name):
 @pytest.mark.unit
 def test_compacts_fire_where_expected():
     """Concrete behavioral anchors so 'stable' can't mean 'stably broken'."""
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
 
     # tool results
     msgs, _ = _fx_tool_results_cold()
@@ -198,7 +198,7 @@ def test_compacts_fire_where_expected():
 
 @pytest.mark.unit
 def test_phase_d_off_by_default():
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
     msgs, _ = _fx_assistant_compact()  # has the data but no kwarg
     micro_compact(msgs, conv_id='')
     ac = sum(1 for m in msgs if isinstance(m.get('content'), str)

@@ -81,8 +81,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.unit
-
 _ROOT = Path(__file__).resolve().parent.parent
 
 # Repos that `export.py --push` publishes the opensource tree to, mirroring
@@ -137,6 +135,7 @@ def _network():
 
 @pytest.mark.parametrize('repo,branch', _PUBLISHED_REPOS)
 @pytest.mark.parametrize('path', _GUARDED_PATHS)
+@pytest.mark.slow
 def test_published_release_pipeline_matches_local_source(_network, repo, branch, path):
     """The deployed pipeline file must be byte-identical to the local one.
 
@@ -203,6 +202,7 @@ _requires_export_py = pytest.mark.skipif(
 
 
 @_requires_export_py
+@pytest.mark.unit
 def test_guarded_paths_survive_the_whole_export_transform_chain():
     """Byte-equality above is only valid for files the export does not rewrite.
 
@@ -278,6 +278,7 @@ def test_guarded_paths_survive_the_whole_export_transform_chain():
 
 
 @_requires_export_py
+@pytest.mark.unit
 def test_guarded_paths_are_actually_published_by_the_export():
     """A guarded file that the export never ships is a guard that can only fail.
 

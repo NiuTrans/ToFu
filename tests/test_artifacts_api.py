@@ -24,24 +24,36 @@ import pytest
 
 pytest_plugins = ('tests._artifact_sidecar',)
 
-# ci_serial: the CRUD round-trips write through the shared sqlite pool; under
-# the CI parallel lane's contention the writes exceeded the 30s busy timeout
-# ('database is locked', 276a5bb unit leg) while passing in ~2s uncontended.
-pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
+pytestmark = pytest.mark.unit
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────
 
 @pytest.fixture()
 def fake_task():
-    """Minimal task dict that satisfies append_event's invariants."""
-    return {
+    """Registered task with the explicit owner/principal event contract."""
+    from tests.support.chat_tasks import (
+        chat_task_fixture_guard as tasks_lock,
+        chat_task_registry as tasks,
+    )
+
+    task = {
         'id':           '11111111-1111-1111-1111-111111111111',
         'convId':       'conv-test-fake',
+        '_userId':      1,
+        'status':       'running',
+        'config':       {'userId': 1},
         'events':       [],
         'events_lock':  threading.Lock(),
         'phase':        None,
     }
+    with tasks_lock:
+        tasks[task['id']] = task
+    try:
+        yield task
+    finally:
+        with tasks_lock:
+            tasks.pop(task['id'], None)
 
 
 # ─── Predicates ───────────────────────────────────────────────────────
@@ -264,6 +276,28 @@ class TestSseEvent:
             result = emit_artifact_event(None, meta)
         assert result is None
         assert meta['id'], 'the no-task branch must receive valid artifact meta'
+
+    def test_emit_event_ownerless_task_fails_closed(self, flask_app):
+        from lib.artifacts import create_artifact, emit_artifact_event
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+
+        task = {
+            'id': '22222222-2222-2222-2222-222222222222',
+            'status': 'running',
+            'events': [],
+            'events_lock': threading.Lock(),
+        }
+        chat_task_runtime.discard(task['id'])
+        with flask_app.app_context():
+            meta = create_artifact(
+                conv_id='conv-ownerless', content='# withheld\n',
+                format='markdown', source='write_file', task_id=task['id'],
+            )
+            result = emit_artifact_event(task, meta)
+
+        assert result is None
+        assert task['events'] == []
+        assert chat_task_runtime.get(task['id']) is None
 
 
 # ─── Routes ───────────────────────────────────────────────────────────

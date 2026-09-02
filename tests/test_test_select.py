@@ -131,30 +131,27 @@ class TestSelectTests:
 
 
 class TestPytestCommand:
-    def test_parallel_command_explicitly_loads_xdist(self):
+    def test_parallel_command_only_selects_worker_count(self):
         cmd = ts.build_pytest_command([_p('tests', 'test_a.py')], '2')
 
-        plugin = cmd.index('xdist.plugin')
         workers = cmd.index('-n')
-        assert cmd[plugin - 1] == '-p'
-        assert plugin < workers
         assert cmd[workers + 1] == '2'
+        assert 'xdist.plugin' not in cmd
+        assert '--dist' not in cmd
 
-    def test_serial_command_does_not_load_xdist_or_pass_worker_flags(self):
+    def test_serial_command_does_not_pass_worker_flags(self):
         cmd = ts.build_pytest_command(None, '0')
 
-        assert 'xdist.plugin' not in cmd
         assert '-n' not in cmd
         assert cmd[-5:-3] == ['-m', 'unit']
 
     def test_implicit_single_file_selection_stays_serial(self):
         cmd = ts.build_pytest_command([_p('tests', 'test_a.py')], None)
 
-        assert 'xdist.plugin' not in cmd
         assert '-n' not in cmd
 
-    def test_implicit_multi_file_selection_caps_workers_at_make_default(self):
+    def test_implicit_multi_file_selection_uses_shared_auto_policy(self):
         selected = [f'tests/test_{i}.py' for i in range(10)]
         cmd = ts.build_pytest_command(selected, None)
 
-        assert cmd[cmd.index('-n') + 1] == '4'
+        assert cmd[cmd.index('-n') + 1] == 'auto'

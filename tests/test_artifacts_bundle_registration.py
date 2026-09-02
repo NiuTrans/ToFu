@@ -21,9 +21,7 @@ def _read(path: str) -> str:
 def test_artifacts_owner_precedes_stream_render_consumers():
     source = RUNTIME.read_text(encoding='utf-8')
     owner = source.index('runtimeScope.Artifacts = {')
-    pipeline = source.index('function dispatchSSEEvent(')
     renderer = source.index('function renderToolRoundsHTML(')
-    assert owner < pipeline
     assert owner < renderer
 
 
@@ -52,8 +50,8 @@ def test_main_registers_runtime_before_lazy_feature_dispatch():
 def test_sse_and_image_helpers_have_one_runtime_owner():
     source = RUNTIME.read_text(encoding='utf-8')
     for symbol in (
-        'dispatchSSEEvent', '_handleToolStart', '_handleSwarmPhase',
-        'finishStream', '_openImageFullscreen', '_downloadGenImage',
+        '_handleSwarmPhase', '_openImageFullscreen', '_downloadGenImage',
+        'renderToolRoundsHTML',
     ):
         assert source.count(f'function {symbol}(') == 1, symbol
 

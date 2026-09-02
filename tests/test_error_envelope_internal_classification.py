@@ -51,6 +51,15 @@ class TestInternalErrorClassification:
         from lib.error_envelope._classify import _classify_exception
         assert _classify_exception(exc) == 'internal'
 
+    @pytest.mark.parametrize('exc', [
+        ValueError('HTTP 429 too many requests'),
+        KeyError('upstream timed out'),
+        AssertionError('403 forbidden'),
+    ])
+    def test_programming_type_outranks_incidental_provider_text(self, exc):
+        from lib.error_envelope._classify import _classify_exception
+        assert _classify_exception(exc) == 'internal'
+
     def test_internal_envelope_hint_is_logs_not_quota(self):
         """The user-facing hint must point at server logs, NOT the
         Settings→Keys / 429 quota advice."""
@@ -77,6 +86,16 @@ class TestInternalErrorClassification:
         # A bare RuntimeError with no recognised substring is NOT a leaf
         # programming-defect builtin → stays generic (dispatch owns it).
         assert _classify_exception(RuntimeError('something opaque upstream')) == 'generic'
+
+    @pytest.mark.parametrize('message', [
+        'API HTTP 429: {"error":{"code":"insufficient_quota"}}',
+        'HTTP 429: You exceeded your current quota, check billing details',
+        'HTTP 403 credit_balance_too_low',
+        'HTTP 403: insufficient balance',
+    ])
+    def test_strong_billing_markers_outrank_http_status(self, message):
+        from lib.error_envelope._classify import _classify_exception
+        assert _classify_exception(RuntimeError(message)) == 'quota'
 
 
 

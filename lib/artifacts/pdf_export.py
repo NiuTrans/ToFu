@@ -189,6 +189,8 @@ def render_artifact_pdf(artifact_id: str) -> bytes:
     )
 
     try:
+        from lib.search_runtime import prepare_search_dependency_import
+        prepare_search_dependency_import()
         from tofu_search.fetch.playwright_pool import _pw_pool
     except Exception as e:
         raise PdfRenderError(f'Playwright pool unavailable: {e}') from e

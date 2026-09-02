@@ -19,10 +19,6 @@ def runtime_start_contract() -> dict:
         'kinds': list(RUNTIME_START_KINDS),
         'idField': 'id',
         'kindField': 'kind',
-        'legacyIdFields': {
-            'ephemeral': 'task_id',
-            'durable': 'run_id',
-        },
         'successStatuses': {
             'ephemeral': 200,
             'durable': 201,
@@ -59,17 +55,15 @@ def run_start_response_schema(kind: str) -> dict:
     contract = runtime_start_contract()
     if kind not in contract['kinds']:
         raise ValueError(f'unknown runtime start kind {kind!r}')
-    legacy_field = contract['legacyIdFields'][kind]
     return {
         'type': 'object',
         'required': [
-            'ok', legacy_field, 'start', 'definitionSource', 'inspection',
+            'ok', 'start', 'definitionSource', 'inspection',
             'warnings', 'contract',
         ],
         'properties': {
             'ok': {'type': 'boolean', 'const': True},
             'request_id': {'type': 'string'},
-            legacy_field: {'type': 'string', 'minLength': 1},
             'start': runtime_start_identity_schema(kind),
             'definitionSource': {'type': 'string'},
             'inspection': inspection_response_schema(),

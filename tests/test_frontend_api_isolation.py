@@ -2,17 +2,17 @@
 
 Goal
 ----
-The frontend has one native HTTP transport owner:
-``frontend/src/api/transport.ts``. The classic ``static/js/api.js`` endpoint
-registry delegates to it when Vite is available and retains its transport only
-for the no-Vite rollback. Every other source MUST call the owned client and
-MUST NOT issue a raw ``fetch('/api/...')`` or ``fetch(apiUrl('/api/...'))``.
+The frontend has one HTTP transport owner:
+``frontend/src/api/transport.ts``. The retained ``api.js`` runtime section is
+an endpoint registry only and delegates every request to that required typed
+owner. Every other source MUST call the owned client and MUST NOT issue a raw
+``fetch('/api/...')`` or ``fetch(apiUrl('/api/...'))``.
 
 End state reached 2026-05-28
 ----------------------------
-``BASELINE = {}`` — every JS file has been migrated. The hard rule is
-now in steady state: ``test_no_new_files_call_api_directly`` fails CI
-the moment any file outside ``api.js`` adds a raw ``fetch('/api/...')``.
+``BASELINE = {}`` — every runtime section has been migrated. The hard rule is
+now in steady state: ``test_no_new_files_call_api_directly`` fails CI the
+moment any section adds a raw ``fetch('/api/...')``.
 
 The ``BASELINE`` ratchet machinery is preserved in case a future
 endpoint family lands in legacy form before the matching ``Api.*``
@@ -24,8 +24,8 @@ Variable-URL bypass guard (added 2026-07-14)
 The inline-string ratchet above only sees ``fetch('/api/...')`` literals.
 A call whose URL is a VARIABLE or expression — ``fetch(startUrl)``,
 ``fetch(url)``, ``fetch(apiUrl(u))``, ``fetch(_logCleanApiUrl('/api/...'))``
-— slips past it entirely (``branch.js`` even documented this as a "silent
-violation"). ``test_no_variable_url_api_fetches`` closes that hole: it counts
+— slips past it entirely. ``test_no_variable_url_api_fetches`` closes that
+hole: it counts
 every ``fetch(`` whose first argument is not a plain string literal, and
 fails unless the file is a documented carve-out in
 ``_ALLOWED_VARIABLE_FETCHES`` (external OAuth token endpoint, image-blob
@@ -34,8 +34,10 @@ in a comment is not counted.
 
 Adding a new endpoint
 ---------------------
-1. Add a method to the relevant domain in ``static/js/api.js``.
-2. Call it from feature JS via ``Api.<domain>.<method>(...)``.
+1. Add a method to the retained ``api.js`` registry in
+   ``frontend/src/runtime/app-runtime.js``, or generate it from the endpoint
+   contract when the domain has a generated client.
+2. Call that owner from the feature; never call ``fetch`` directly.
 3. Run this test — it must stay green with ``BASELINE = {}``.
 """
 
@@ -53,7 +55,6 @@ pytestmark = pytest.mark.unit
 
 # ── Configuration ────────────────────────────────────────────────────
 HERE = os.path.dirname(os.path.abspath(__file__))
-JS_DIR = os.path.normpath(os.path.join(HERE, '..', 'static', 'js'))
 FRONTEND_DIR = os.path.normpath(os.path.join(HERE, '..', 'frontend', 'src'))
 NATIVE_TRANSPORT = os.path.join(FRONTEND_DIR, 'api', 'transport.ts')
 
@@ -69,8 +70,10 @@ _LEGACY_FETCH_RE = re.compile(
     re.VERBOSE,
 )
 
-# api.js is the ONE file allowed to call /api/ directly.
-ALLOWED_FILES = {'api.js'}
+# There is no runtime exception: even the retained endpoint registry delegates
+# to the typed transport. Keep this explicit so a rollback transport cannot be
+# reintroduced under the old logical ``api.js`` name.
+ALLOWED_FILES: frozenset[str] = frozenset()
 
 # Matches a fetch( whose FIRST argument is NOT a plain string literal — i.e. a
 # variable or expression URL (fetch(url) / fetch(startUrl) / fetch(apiUrl(u)) /
@@ -83,11 +86,6 @@ _VARIABLE_FETCH_RE = re.compile(r"\bfetch\(\s*(?![)'\"`])")
 _ALLOWED_VARIABLE_FETCHES = {
     # Cross-origin OAuth provider token endpoint (Anthropic/OpenAI), not /api/*.
     'settings/oauth.js': 1,
-    # Image blob hydration: fetches img.url / img.preview (a static asset or
-    # uploaded-image URL), not a JSON /api/* business endpoint. The helper was
-    # extracted conversations.js → conv_image_hydrate.js by Epic-E slice 4
-    # (2ba63a12); the carve-out follows the code.
-    'core/conv_image_hydrate.js': 1,
     # Browser-assisted desktop transport talks to the TofuAgent's
     # loopback-only broker (127.0.0.1:15180..15189), not a Tofu /api route.
     # It intentionally needs cross-origin/PNA RequestInit fields that do not
@@ -127,8 +125,7 @@ def _count_legacy_calls(path: str) -> int:
 
 def _strip_comments(src: str) -> str:
     """Remove /* */ block and // line comments so a fetch( mentioned inside a
-    comment (e.g. branch.js's documented 'silent violation' note) is not
-    counted.
+    comment is not counted.
 
     Delegates to the SINGLE shared implementation (charter #24). This is an
     UPGRADE over the local ``re.sub(r'//[^\\n]*', '', s)`` it replaced, not mere
@@ -162,15 +159,12 @@ def _scan_variable_fetches() -> dict[str, int]:
 
 
 def _scan_all() -> dict[str, int]:
-    """Walk the entire static/js tree (incl. subdirs like ui/) for legacy
-    fetch call sites. Subdirectory files use posix paths in the result
-    dict so BASELINE entries can be e.g. ``'ui/sse_pipeline.js'``.
-    """
+    """Scan every logical section of the retained runtime for API fetches."""
     out: dict[str, int] = {}
     for rel in runtime_section_names():
         if rel in ALLOWED_FILES:
             continue
-        c = len(_LEGACY_FETCH_RE.findall(runtime_section(rel)))
+        c = len(_LEGACY_FETCH_RE.findall(_strip_comments(runtime_section(rel))))
         if c > 0:
             out[rel] = c
     return out
@@ -216,8 +210,9 @@ def test_no_new_files_call_api_directly():
         details = '\n'.join(f'  {n}: {actual[n]} call(s)' for n in new_violators)
         pytest.fail(
             'New files are calling /api/* directly instead of going through '
-            'window.Api in static/js/api.js:\n' + details +
-            '\n\nFix: route those fetches through Api.<domain>.<method>().'
+            'the owned frontend transport:\n' + details +
+            '\n\nFix: route those fetches through the endpoint registry or a '
+            'generated typed client.'
         )
 
 
@@ -240,7 +235,7 @@ def test_legacy_fetch_count_only_decreases():
         )
         pytest.fail(
             'Frontend legacy fetch count increased — new direct calls to /api/* '
-            'must instead go through window.Api in static/js/api.js:\n' + msg
+            'must instead go through the owned frontend transport:\n' + msg
         )
 
 
@@ -260,9 +255,10 @@ def test_no_variable_url_api_fetches():
             for f, (c, a) in sorted(violations.items())
         )
         pytest.fail(
-            'Variable-URL fetch() calls bypass window.Api in static/js/api.js '
+            'Variable-URL fetch() calls bypass the owned frontend transport '
             '(the inline-string ratchet cannot see them):\n' + details +
-            '\n\nFix: route those fetches through Api.<domain>.<method>(), or — '
+            '\n\nFix: route those fetches through the endpoint registry or a '
+            'generated typed client, or — '
             'if it is a genuine non-/api call — add it to '
             '_ALLOWED_VARIABLE_FETCHES with a reason.'
         )

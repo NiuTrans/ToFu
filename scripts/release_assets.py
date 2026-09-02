@@ -128,7 +128,7 @@ PLATFORM_ASSETS: tuple[tuple[str, str, str, str, int], ...] = (
     ('linux',   'x86_64', 'Linux .deb installer', 'Tofu-*-linux-x86_64.deb', 130_000_000),
 )
 
-# The AGENT component's assets (docs/DESKTOP_AGENT_DIST_DESIGN.md §5.3):
+# The AGENT component's assets (docs/modules/remote_execution.md):
 # same tuple shape, disjoint globs (TofuAgent- prefix can never collide
 # with the full line). The CI agent legs (build-desktop.yml, slice A2b)
 # produce them, and REQUIRED_PLATFORM_ASSETS below derives over BOTH

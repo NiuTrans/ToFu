@@ -131,11 +131,17 @@ def test_task_metrics_expose_registry_and_event_retention(monkeypatch):
     import routes.metrics as metrics
 
     class Runtime:
-        _lock = threading.Lock()
-        _tasks = {
-            'running': {'status': 'running', 'events': [{}, {}]},
-            'done': {'status': 'done', 'events': [{}]},
-        }
+        @staticmethod
+        def stats():
+            return {
+                'kind': 'paper-report',
+                'total': 2,
+                'pending': 0,
+                'running': 1,
+                'done': 1,
+                'error': 0,
+                'aborted': 0,
+            }
 
         @staticmethod
         def retention_stats():
@@ -182,7 +188,7 @@ def test_task_events_carry_correlation_envelope():
 
     set_req_id('browser-page-7')
     runtime = TaskRuntime('test-modern', push_channel='')
-    task = runtime.create(task_id='task-modern')
+    task = runtime.create(user_id=1, task_id='task-modern')
     runtime.append_event(task['id'], {'type': 'phase'})
 
     event = task['events'][0]
@@ -206,7 +212,7 @@ def test_task_worker_reseeds_only_the_captured_request_id():
 
     runtime = TaskRuntime('worker-correlation', push_channel='')
     set_req_id('browser-page-8')
-    task = runtime.create(task_id='task-worker-correlation')
+    task = runtime.create(user_id=1, task_id='task-worker-correlation')
     # Model the route teardown happening before the background worker starts.
     set_req_id('')
     completed = threading.Event()
@@ -232,7 +238,7 @@ def test_task_worker_records_real_queue_wait(monkeypatch):
         lambda kind, seconds: observed.append((kind, seconds)),
     )
     runtime = TaskRuntime('paper-report', push_channel='')
-    task = runtime.create(task_id='queue-wait-task')
+    task = runtime.create(user_id=1, task_id='queue-wait-task')
     completed = threading.Event()
 
     def worker():
@@ -253,7 +259,7 @@ def test_task_runtime_bounds_replay_events_without_reusing_sequences():
     reset_for_tests()
     runtime = TaskRuntime(
         'bounded-replay', max_events=3, max_tasks=4, push_channel='')
-    task = runtime.create(task_id='bounded-task')
+    task = runtime.create(user_id=1, task_id='bounded-task')
     for index in range(5):
         assert runtime.append_event(
             task['id'], {'type': 'progress', 'index': index}) == index
@@ -278,10 +284,10 @@ def test_task_runtime_capacity_evicts_only_terminal_records():
 
     runtime = TaskRuntime(
         'bounded-registry', max_tasks=2, max_events=2, push_channel='')
-    first = runtime.create(task_id='finished-first')
+    first = runtime.create(user_id=1, task_id='finished-first')
     runtime.finish(first['id'])
-    active = runtime.create(task_id='active-second')
-    newest = runtime.create(task_id='newest-third')
+    active = runtime.create(user_id=1, task_id='active-second')
+    newest = runtime.create(user_id=1, task_id='newest-third')
 
     assert runtime.get(first['id']) is None
     assert runtime.get(active['id']) is active
@@ -323,8 +329,7 @@ def test_task_budget_soft_warning_hard_limit_and_remaining():
 
 
 def test_financial_budget_emits_one_soft_warning(monkeypatch):
-    from lib.tasks_pkg.orchestrator import _round_gates
-
+    import lib.tasks_pkg.orchestrator._round_gates as _round_gates
     events = []
     monkeypatch.setattr(_round_gates, 'append_event',
                         lambda _task, event: events.append(event))
@@ -349,8 +354,7 @@ def test_financial_budget_emits_one_soft_warning(monkeypatch):
 
 
 def test_financial_hard_limit_returns_standard_remaining_budget(monkeypatch):
-    from lib.tasks_pkg.orchestrator import _round_gates
-
+    import lib.tasks_pkg.orchestrator._round_gates as _round_gates
     monkeypatch.setattr(_round_gates, 'append_event', lambda *_args: None)
     monkeypatch.setattr('lib.cost_estimator.estimate_usage_cost',
                         lambda *_args, **_kwargs: 12.0)
@@ -394,6 +398,8 @@ def test_vite_manifest_tags_and_corruption_fail_closed(tmp_path, monkeypatch):
             'isEntry': True,
             'imports': ['shared.ts'],
             'css': ['assets/main-abc.css'],
+            assets.I18N_CATALOG_DIGEST_FIELD:
+                assets._source_i18n_catalog_digest(),
         },
         'shared.ts': {'file': 'assets/shared-abc.js'},
     }), encoding='utf-8')
@@ -433,7 +439,6 @@ def test_application_code_uses_native_quart_imports():
             offenders.append(relative)
     assert offenders == []
 
-
 def test_test_suite_does_not_install_flask_to_quart_shims():
     """Keep test imports from masking production framework regressions."""
     offenders = []
@@ -464,13 +469,3 @@ def test_test_suite_does_not_install_flask_to_quart_shims():
                         and key.value == 'flask'):
                     offenders.append(f'{relative}:{node.lineno}')
     assert offenders == []
-
-
-def test_vite_entry_and_manifest_resolver_are_wired_to_index():
-    package = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))
-    common = (ROOT / 'routes' / 'common.py').read_text(encoding='utf-8')
-    assert package['scripts']['build:frontend'] == 'node scripts/build_frontend.mjs'
-    wrapper = (ROOT / 'scripts' / 'build_frontend.mjs').read_text(encoding='utf-8')
-    assert "import { build } from 'vite'" in wrapper
-    assert 'get_vite_asset_tags' in common
-    assert (ROOT / 'frontend' / 'src' / 'main.ts').is_file()

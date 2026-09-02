@@ -1,5 +1,3 @@
-# Incident anchor: born in commit 825a914b — FlowExecutor consistency step 3: VU-only diminishing-returns guard
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """tests/test_flow_vu_progress_guard.py — FlowExecutor VU-only progress guard.
 
 Mirrors ``tests/test_autopilot_budget_guard.py`` for the ENGINE path. The
@@ -30,13 +28,17 @@ pytestmark = pytest.mark.unit
 
 
 def _autopilot_defn(max_iterations=8):
-    from lib.orchestration import build_autopilot_definition
+    from lib.orchestration._builtin_definitions import (
+        build_autopilot_definition,
+    )
     return build_autopilot_definition(max_iterations=max_iterations)
 
 
-def _endpoint_defn(max_iterations=8):
-    from lib.orchestration import build_endpoint_definition
-    return build_endpoint_definition(max_iterations=max_iterations)
+def _critic_loop_defn(max_iterations=8):
+    from tests.support.orchestration_definitions import (
+        build_verifier_loop_definition,
+    )
+    return build_verifier_loop_definition(max_iterations=max_iterations)
 
 
 def _run(defn, fake_runner, *, max_iter=8):
@@ -101,7 +103,7 @@ def test_critic_loop_no_progress_line_never_trips_guard():
                 'error': '',
                 'tool_log': [{'round': 1, 'tool': 'write_file', 'args_brief': 'x.py'}]}
 
-    res = _run(_endpoint_defn(5), runner, max_iter=5)
+    res = _run(_critic_loop_defn(5), runner, max_iter=5)
     assert res['ok'] is False
     # NOT no_progress — the critic path has no hard signal, so it fails open
     # and the loop exits on the plain iteration cap.

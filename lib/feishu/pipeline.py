@@ -9,13 +9,13 @@ import uuid
 
 from lib.feishu.conversation import (
     append_message,
-    append_web_message,
     get_conv_id,
     get_history,
     get_mode,
     get_model,
     get_project,
-    sync_to_db,
+    persist_exchange,
+    resolve_owner_user_id,
 )
 
 from lib.log import get_logger
@@ -42,7 +42,7 @@ def exec_project_tool(user_id: str, fn_name: str, fn_args: dict) -> str:
 
 
 def run_task_pipeline(user_id: str, text: str,
-                      send_progress_fn=None) -> str:
+                      send_progress_fn=None, *, source_message_id: str = '') -> str:
     """Run the full LLM task pipeline for a Feishu message.
 
     This mirrors the web UI's _stream_chat_once flow:
@@ -60,6 +60,16 @@ def run_task_pipeline(user_id: str, text: str,
         consumer can post intermediate progress while the task runs. Wired
         through to ``run_task_sync(progress_fn=...)``.
     """
+    owner_user_id = resolve_owner_user_id(user_id)
+    if owner_user_id is None:
+        logger.error(
+            '[FeishuBot] No application owner mapped for %s', user_id[:12]
+        )
+        return (
+            '❌ 该飞书账号尚未绑定应用用户。请配置 '
+            'FEISHU_USER_OWNER_MAP 或 FEISHU_DEFAULT_OWNER_USER_ID。'
+        )
+
     # ── Build conversation history ──
     append_message(user_id, 'user', text)
     history = get_history(user_id)
@@ -71,13 +81,11 @@ def run_task_pipeline(user_id: str, text: str,
 
     # ── Prepare web-format user message ──
     user_web_msg = {
-        'id': str(uuid.uuid4()),
+        'id': source_message_id or str(uuid.uuid4()),
         'role': 'user',
         'content': text,
         'timestamp': int(time.time() * 1000),
     }
-    append_web_message(user_id, user_web_msg)
-
     # ── Build task config ──
     config = {
         'model': model,
@@ -95,8 +103,12 @@ def run_task_pipeline(user_id: str, text: str,
         config['enable_tools'] = True
 
     # ── Execute pipeline ──
-    from lib.tasks_pkg.endpoint import run_task_sync
-    result = run_task_sync(config, progress_fn=send_progress_fn)
+    from lib.tasks_pkg.sync_run import run_task_sync
+    result = run_task_sync(
+        config,
+        user_id=owner_user_id,
+        progress_fn=send_progress_fn,
+    )
 
     if not result:
         result = '(无回复)'
@@ -115,10 +127,19 @@ def run_task_pipeline(user_id: str, text: str,
         'model': model,
         'timestamp': int(time.time() * 1000),
     }
-    append_web_message(user_id, assistant_web_msg)
-
-    # Sync to DB (fire-and-forget, errors are logged)
-    sync_to_db(user_id)
+    # Persist the same owner identity used by the task itself.
+    try:
+        persist_exchange(
+            user_id,
+            user_web_msg,
+            assistant_web_msg,
+            owner_user_id=owner_user_id,
+        )
+    except Exception:
+        logger.warning(
+            '[FeishuBot] Canonical exchange persistence failed for %s',
+            user_id[:12],
+            exc_info=True,
+        )
 
     return response_text
-

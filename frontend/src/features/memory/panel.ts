@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import type { I18nKey } from '../../i18n';
 interface MemoryItem {
   id: string;
   name: string;
@@ -18,6 +19,7 @@ interface ResponseLike {
 
 interface MemoryApi {
   list(scope: string): Promise<{ memories?: MemoryItem[] } | null>;
+  get(id: string): Promise<MemoryItem | null>;
   toggle(id: string): Promise<ResponseLike | null>;
   remove(id: string): Promise<ResponseLike | null>;
   create(item: Record<string, unknown>): Promise<ResponseLike | null>;
@@ -31,7 +33,7 @@ type MemoryWindow = Window & {
   debugLog?: (message: string, kind?: string) => void;
   showConfirm?: (message: string, options?: { danger?: boolean }) => Promise<boolean>;
   _applyMemoryUI?: (enabled: boolean) => void;
-  _saveConvToolState?: () => void;
+  captureActiveConversationSettings?: () => void;
   updateSubmenuCounts?: () => void;
   _attachMemoryDropZone?: () => void;
   toggleMemory?: () => void;
@@ -43,7 +45,7 @@ type MemoryWindow = Window & {
   switchMemoryTab?: (scope: string) => void;
   filterMemoryList?: (query: string) => void;
   refreshMemoryList?: (scope?: string, targetId?: string) => Promise<void>;
-  toggleMemoryBody?: (header: Element) => void;
+  toggleMemoryBody?: (header: Element) => Promise<void>;
   toggleMemoryEnabled?: (id: string) => Promise<void>;
   deleteMemory?: (id: string) => Promise<void>;
   createMemoryFromModal?: () => Promise<void>;
@@ -62,7 +64,7 @@ let listenerAttached = false;
 
 function globals(): MemoryWindow { return featureRegistry as unknown as MemoryWindow; }
 function isMemoryEnabled(): boolean { return globals().memoryEnabled ?? true; }
-function translate(key: string, values?: Record<string, unknown>): string {
+function translate(key: I18nKey, values?: Record<string, unknown>): string {
   return globals().t?.(key, values) || key;
 }
 function escape(value: unknown): string {
@@ -92,13 +94,13 @@ function ensureListener(): void {
 export function toggleMemory(): void {
   if (!isMemoryEnabled()) { openMemoryModal(); return; }
   globals()._applyMemoryUI?.(false);
-  globals()._saveConvToolState?.();
+  globals().captureActiveConversationSettings?.();
   globals().debugLog?.('Memory applied: OFF (AI still accumulates in background)', 'success');
 }
 
 export function toggleMemoryFromModal(): void {
   globals()._applyMemoryUI?.(!isMemoryEnabled());
-  globals()._saveConvToolState?.();
+  globals().captureActiveConversationSettings?.();
   globals().updateSubmenuCounts?.();
   globals().debugLog?.(`Memory applied: ${isMemoryEnabled() ? 'ON — existing memories injected into context' : 'OFF — AI still accumulates in background'}`, 'success');
   closeMemoryModal();
@@ -214,7 +216,7 @@ function buildCard(item: MemoryItem): HTMLElement {
       </div></div>
     ${item.description ? `<div class="memory-card-desc">${escape(item.description)}</div>` : ''}
     ${item.tags?.length ? `<div class="memory-card-tags">${item.tags.map((tag) => `<span class="memory-card-tag">${escape(tag)}</span>`).join('')}</div>` : ''}
-    <div class="memory-card-body"><div class="memory-card-body-inner" data-raw="${escape(item.body || '(empty)')}"></div></div>`;
+    <div class="memory-card-body"><div class="memory-card-body-inner"${typeof item.body === 'string' ? ` data-raw="${escape(item.body || '(empty)')}"` : ''}></div></div>`;
   return card;
 }
 
@@ -235,18 +237,40 @@ export function renderMemoryCards(memories: MemoryItem[], targetId = currentTarg
   list.replaceChildren(fragment);
 }
 
-export function toggleMemoryBody(header: Element): void {
-  const card = header.closest('.memory-card');
+export async function toggleMemoryBody(header: Element): Promise<void> {
+  const card = header.closest<HTMLElement>('.memory-card');
   const body = card?.querySelector<HTMLElement>('.memory-card-body');
-  if (!body) return;
+  if (!body || !card) return;
   const open = body.classList.toggle('open');
   header.querySelector('.memory-card-expand-icon')?.classList.toggle('expanded', open);
+  if (!open) return;
   const inner = body.querySelector<HTMLElement>('.memory-card-body-inner');
-  if (open && inner?.dataset.raw != null) {
-    const raw = inner.dataset.raw;
+  if (!inner || inner.dataset.loaded === '1') return;
+  const render = (raw: string): void => {
     try { inner.innerHTML = globals().marked?.parse(raw) || `<pre>${escape(raw)}</pre>`; }
     catch { inner.innerHTML = `<pre>${escape(raw)}</pre>`; }
+    inner.dataset.loaded = '1';
+  };
+  if (inner.dataset.raw != null) {
+    const raw = inner.dataset.raw;
     delete inner.dataset.raw;
+    render(raw);
+    return;
+  }
+  // Summary-list entries carry no body — fetch this one memory on demand
+  // (and cache it back into memoryCache so re-renders stay local).
+  const id = card.dataset.id || '';
+  const cached = memoryCache.find((entry) => entry.id === id);
+  if (typeof cached?.body === 'string') { render(cached.body || '(empty)'); return; }
+  inner.innerHTML = `<pre>${escape(translate('memory.loading'))}</pre>`;
+  try {
+    const mem = await api().get(id);
+    if (!inner.isConnected) return;
+    const raw = typeof mem?.body === 'string' ? mem.body : '';
+    if (cached) cached.body = raw;
+    render(raw || '(empty)');
+  } catch (error: unknown) {
+    if (inner.isConnected) inner.innerHTML = `<pre>${escape(errorMessage(error))}</pre>`;
   }
 }
 
@@ -335,7 +359,7 @@ function onMemoryClick(event: Event): void {
   const action = target.dataset.memoryAction;
   const card = target.closest<HTMLElement>('.memory-card');
   const id = card?.dataset.id || '';
-  if (action === 'expand') toggleMemoryBody(target);
+  if (action === 'expand') void toggleMemoryBody(target);
   else if (action === 'toggle') { event.stopPropagation(); void toggleMemoryEnabled(id); }
   else if (action === 'delete') { event.stopPropagation(); void deleteMemory(id); }
   else if (action === 'retry') void refreshMemoryList(undefined, target.dataset.targetId || 'memoryList');

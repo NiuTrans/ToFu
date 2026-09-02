@@ -11,8 +11,7 @@ from lib.log import get_logger
 from lib.api_response import api_bad_request, api_internal_error, api_ok
 from lib.request_parser import async_parse_body
 from routes.api_v1.chat import api_v1_chat_bp  # noqa: E402
-from routes.api_v1.auth import require_scope
-from routes.common import DEFAULT_USER_ID
+from routes.api_v1.auth import request_user_id, require_scope
 
 logger = get_logger(__name__)
 
@@ -31,6 +30,7 @@ async def chat_tool_state(conv_id):
     data = await async_parse_body()
     if not data:
         return api_bad_request('No settings provided')
+    owner_user_id = int(request_user_id())
 
     try:
         def _write():
@@ -40,11 +40,9 @@ async def chat_tool_state(conv_id):
             # pooled checkout→use→return cycle. Returns True when the conv row
             # exists, False when it's not persisted yet.
             from lib.conversations import set_conversation_settings
-            from lib.database import DOMAIN_CHAT, pooled_db
-            with pooled_db(DOMAIN_CHAT) as db:
-                res = set_conversation_settings(
-                    conv_id, data, user_id=DEFAULT_USER_ID, db=db)
-                return res is not None
+            res = set_conversation_settings(
+                conv_id, data, user_id=owner_user_id)
+            return res is not None
 
         existed = await asyncio.to_thread(_write)
         if not existed:

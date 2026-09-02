@@ -1,5 +1,3 @@
-# Incident anchor: born in commit 0d3f59bb — refactor(orchestrator): pt_03f4cdf1 slice 16 — extract live-tail tool...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 16 — extract the live-tail
 assistant/tool_call assembly + inter-round narration discard +
 incremental auto-translate submit cluster from _run.py's stream loop
@@ -39,6 +37,8 @@ import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUN_PY = ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_run.py'
+ROOT_LOOP_PY = (
+    ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_root_agent_loop.py')
 LEAF_PY = (
     ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' /
     '_tool_call_prelude.py')
@@ -79,7 +79,7 @@ def test_helper_signature_is_keyword_only():
 # 3. _run.py imports + delegates to the extracted helper
 # ---------------------------------------------------------------------------
 def test_run_py_imports_helper():
-    src = RUN_PY.read_text()
+    src = ROOT_LOOP_PY.read_text()
     assert (
         'from lib.tasks_pkg.orchestrator._tool_call_prelude import'
         in src), (
@@ -90,9 +90,9 @@ def test_run_py_imports_helper():
 
 
 def test_run_task_delegates_to_helper():
-    src = RUN_PY.read_text()
+    src = ROOT_LOOP_PY.read_text()
     assert 'append_assistant_tool_call_message(' in src, (
-        '_run.py must call append_assistant_tool_call_message in the '
+        'the root adapter must call append_assistant_tool_call_message in the '
         'stream loop')
 
 
@@ -284,3 +284,45 @@ def test_helper_translate_failure_is_swallowed(monkeypatch):
     mod.append_assistant_tool_call_message(
         task, messages,
         round_num=0, tid='abcd', assistant_msg=assistant_msg)
+
+
+def test_helper_consumes_lossless_partial_prefill_before_tool_call(monkeypatch):
+    import lib.tasks_pkg.orchestrator._tool_call_prelude as mod
+    from lib.tasks_pkg.assistant_messages import (
+        PARTIAL_STREAM_PREFILL_MARKER,
+    )
+
+    monkeypatch.setattr(mod, '_discard_pretool_prose', lambda *_a: None)
+    import lib.translate as translate_module
+    monkeypatch.setattr(
+        translate_module, 'submit_round_segment', lambda *_a: None)
+
+    task = _make_task()
+    messages = [
+        {'role': 'user', 'content': 'inspect'},
+        {'role': 'assistant', 'content': 'exact prefix',
+         PARTIAL_STREAM_PREFILL_MARKER: True},
+    ]
+    tool_calls = [{
+        'id': 'tc_1',
+        'type': 'function',
+        'function': {'name': 'read_files',
+                     'arguments': '{"path":"safe.py"}'},
+    }]
+
+    mod.append_assistant_tool_call_message(
+        task,
+        messages,
+        round_num=1,
+        tid='lossless',
+        assistant_msg={
+            'role': 'assistant',
+            'content': ' then inspect ',
+            'tool_calls': tool_calls,
+        },
+    )
+
+    assert len(messages) == 2
+    assert messages[-1]['content'] == 'exact prefix then inspect '
+    assert messages[-1]['tool_calls'] == tool_calls
+    assert PARTIAL_STREAM_PREFILL_MARKER not in messages[-1]

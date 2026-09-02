@@ -54,7 +54,7 @@ Fingerprint — why content, not mtime (MEASURED, do not "simplify" back):
   tests/test_write_freshness_gate.py::test_tracked_text_files_stay_under_hash_threshold
   flips red the day any tracked text file outgrows it.
 
-Restart persistence (pt_1bbd3cc82eb44ddc): the store is in-memory, so
+Restart persistence (): the store is in-memory, so
 any restart used to wipe every token and leave the gate fail-open until
 each conversation's next read — the auto-restart watcher made that window
 recur on every HEAD move. ``save_snapshot()`` (called before the re-exec
@@ -139,15 +139,30 @@ def _fingerprint(abs_path: str) -> tuple | None:
     return ('m', st.st_mtime_ns, st.st_size)
 
 
-def record(conv_key: str, abs_path: str) -> None:
-    """Record the current fingerprint of *abs_path* for *conv_key*.
+def _fingerprint_bytes(abs_path: str, data) -> tuple | None:
+    """Fingerprint of *abs_path* given the bytes just written there.
 
-    Called after every successful read/write of the file by this
-    conversation. Never raises; a stat failure simply skips recording.
+    The post-write fast path: small files are hashed directly from *data*
+    (the caller already holds the bytes — never re-read the file); large
+    files keep the stat-only ``('m', mtime_ns, size)`` fast path (one stat,
+    still no content read). Non-bytes input degrades to ``_fingerprint``.
     """
-    if not conv_key or not abs_path or not _gate_enabled():
-        return
-    fp = _fingerprint(abs_path)
+    if not isinstance(data, (bytes, bytearray)):
+        return _fingerprint(abs_path)
+    data = bytes(data)
+    size = len(data)
+    if size <= _CONTENT_HASH_MAX_BYTES:
+        return ('c', size, hashlib.blake2b(data, digest_size=16).hexdigest())
+    try:
+        st = os.stat(abs_path)
+    except OSError as _e:
+        logger.debug('fingerprint: unreadable (%s)', _e)
+        return None
+    return ('m', st.st_mtime_ns, st.st_size)
+
+
+def _store_fingerprint(conv_key: str, abs_path: str, fp: tuple | None) -> None:
+    """Shared tail of record/record_written (never raises)."""
     if fp is None:
         return
     key = (conv_key, abs_path)
@@ -158,11 +173,41 @@ def record(conv_key: str, abs_path: str) -> None:
             _tokens.popitem(last=False)
 
 
+def record(conv_key: str, abs_path: str) -> None:
+    """Record the current fingerprint of *abs_path* for *conv_key*.
+
+    Called after every successful read of the file by this conversation
+    (the read-side stamp). The content is not in hand here, so this
+    re-fingerprints the file. Never raises; a stat failure simply skips.
+    """
+    if not conv_key or not abs_path or not _gate_enabled():
+        return
+    _store_fingerprint(conv_key, abs_path, _fingerprint(abs_path))
+
+
+def record_written(conv_key: str, abs_path: str, data: bytes) -> None:
+    """Record the post-write fingerprint of *abs_path* WITHOUT re-reading.
+
+    The bytes just written are in hand, so small files are hashed directly
+    from *data*; large files keep the stat-only fast path. Never raises.
+    """
+    if not conv_key or not abs_path or not _gate_enabled():
+        return
+    _store_fingerprint(conv_key, abs_path, _fingerprint_bytes(abs_path, data))
+
+
 def is_stale(conv_key: str, abs_path: str) -> bool:
     """True iff a token exists AND the file exists AND its fingerprint moved.
 
     False (fail-open) when: gate disabled, no token recorded, or the file
     has since vanished (creation semantics — the stale token is dropped).
+
+    Pre-write cost note: a content token (``'c'``) can NOT be verified with
+    a stat-only ``(mtime_ns, size)`` short-circuit — the very reason content
+    hashing exists is the measured 1-second-mtime / same-size blind spot on
+    this FUSE mount, where ``(mtime_ns, size)`` is provably unchanged by a
+    same-tick same-size external edit. So the full re-read stays here for
+    content tokens; ``('m', …)`` tokens are already stat-only.
     """
     if not conv_key or not abs_path or not _gate_enabled():
         return False
@@ -291,6 +336,7 @@ def _reset_for_tests() -> None:
         _tokens.clear()
 
 
-__all__ = ['record', 'is_stale', 'has_token', 'drop', '_reset_for_tests', '_fingerprint',
+__all__ = ['record', 'record_written', 'is_stale', 'has_token', 'drop',
+           '_reset_for_tests', '_fingerprint', '_fingerprint_bytes',
            '_CONTENT_HASH_MAX_BYTES', 'save_snapshot', 'load_snapshot',
            '_snapshot_path']

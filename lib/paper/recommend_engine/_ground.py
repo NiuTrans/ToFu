@@ -1,23 +1,17 @@
-"""Grounding — the anti-hallucination gate for the recommend engine.
+"""Ground model-proposed candidates against authoritative arXiv records.
 
 No card is ever surfaced unless its arXiv ID resolves through the existing
 ``search_arxiv`` / ``fetch_arxiv_title`` path to a real paper. A title the model
 produced but that cannot be grounded is dropped, logged at debug, and never
 rendered.
 
-The arXiv seams (``search_arxiv`` / ``fetch_arxiv_title``) — and the
-``_ground_candidate`` helper the correction path re-enters — are resolved
-THROUGH the package facade at call time (``import lib.paper.recommend_engine as
-_pkg``) so a test patching ``re_mod.search_arxiv`` / ``re_mod.fetch_arxiv_title``
-/ ``re_mod._ground_candidate`` bites here exactly as it did in the original
-single-module layout.
 """
 
 import re
 
 from lib.log import get_logger
 
-from ..arxiv import _extract_arxiv_id
+from ..arxiv import _extract_arxiv_id, fetch_arxiv_title, search_arxiv
 
 logger = get_logger(__name__)
 
@@ -92,13 +86,7 @@ def _ground_candidate(cand):
          title-only card.
       3. Otherwise drop (logged at debug) — an ungrounded card is NEVER shown.
 
-    The arXiv seams are resolved through the package facade so tests patching
-    ``re_mod.search_arxiv`` / ``re_mod.fetch_arxiv_title`` bite here.
     """
-    import lib.paper.recommend_engine as _pkg
-    search_arxiv = _pkg.search_arxiv
-    fetch_arxiv_title = _pkg.fetch_arxiv_title
-
     title = (cand.get('title') or '').strip()
     raw_id = cand.get('arxiv_id')
     claimed_id = _extract_arxiv_id(raw_id) if raw_id else None
@@ -146,8 +134,6 @@ def _ground_correction(correction, seen_ids):
     any, must ground through the same path or it is dropped (logged) — the
     banner then shows the note without a bogus paper offer.
 
-    ``_ground_candidate`` is re-entered through the facade so a test patching
-    ``re_mod._ground_candidate`` also governs the correction paper.
     """
     if not isinstance(correction, dict):
         return None
@@ -157,8 +143,7 @@ def _ground_correction(correction, seen_ids):
     out = {'note': note, 'paper': None}
     paper = correction.get('paper')
     if isinstance(paper, dict) and (paper.get('title') or paper.get('arxiv_id')):
-        import lib.paper.recommend_engine as _pkg
-        grounded = _pkg._ground_candidate(paper)
+        grounded = _ground_candidate(paper)
         if grounded and _norm_id(grounded['arxiv_id']) not in seen_ids:
             out['paper'] = grounded
         elif not grounded:

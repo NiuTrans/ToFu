@@ -464,7 +464,7 @@ def test_the_release_publishes_under_the_version_tag():
 
 def test_agent_legs_build_all_three_platforms():
     """The agent component ships from the SAME three platform jobs (one
-    change, legs+gates atomically — docs/DESKTOP_AGENT_DIST_DESIGN.md A2b)."""
+    change, legs+gates atomically — docs/modules/remote_execution.md)."""
     wf_text = _WORKFLOW.read_text(encoding='utf-8')
     # One PyInstaller agent build per platform job (windows/macos/linux).
     assert wf_text.count('pyinstaller tofu-agent.spec') == 3, (
@@ -1691,8 +1691,8 @@ def test_install_linux_script_contract():
         'install-linux.sh uses sudo — the Linux install is supposed to be '
         'per-user like the Windows one'
     )
-    for needle in ('.local/share/applications', 'hicolor',
-                   '__INSTALL_DIR__', 'update-desktop-database'):
+    for needle in ('XDG_DATA_HOME', 'hicolor', '__INSTALL_DIR__',
+                   'update-desktop-database'):
         assert needle in text, f'install-linux.sh is missing {needle}'
     bash = subprocess.run(['bash', '-n', str(_INSTALL_LINUX)],
                           capture_output=True, text=True)
@@ -1707,7 +1707,11 @@ def test_install_linux_script_end_to_end(tmp_path):
     the test that would catch a broken sed substitution or a wrong relative
     path even though every content pin above still passes."""
     pytest.importorskip('PIL.Image', reason='Pillow required')
-    bundle = tmp_path / 'Tofu'
+    # Spaces and sed/desktop-entry metacharacters are normal in an extracted
+    # download path. The pre-hardening installer generated a broken Exec line
+    # here: spaces were unquoted, '&' expanded the sed match, and '%' was
+    # interpreted as a desktop-entry field-code prefix.
+    bundle = tmp_path / 'Tofu bundle & 100% $cash'
     (bundle / '_internal' / 'static' / 'icons').mkdir(parents=True)
     home = tmp_path / 'home'
     home.mkdir()
@@ -1728,7 +1732,8 @@ def test_install_linux_script_end_to_end(tmp_path):
     entry = home / '.local' / 'share' / 'applications' / 'tofu.desktop'
     assert entry.is_file(), 'no application-menu entry was written'
     body = entry.read_text(encoding='utf-8')
-    assert f'Exec={bundle}/Tofu' in body, (
+    desktop_exec_dir = str(bundle).replace('$', r'\$').replace('%', '%%')
+    assert f'Exec="{desktop_exec_dir}/Tofu"' in body, (
         f'__INSTALL_DIR__ was not rendered to the bundle path: {body!r}'
     )
     assert '__INSTALL_DIR__' not in body, 'unrendered placeholder survived'
@@ -1736,7 +1741,105 @@ def test_install_linux_script_end_to_end(tmp_path):
             / 'apps' / 'tofu.png')
     assert icon.is_file(), 'no themed icon was installed'
     # Nothing may escape the fake HOME (the per-user contract, enforced).
-    assert not (tmp_path / 'Tofu' / '.local').exists()
+    assert not (bundle / '.local').exists()
+
+
+def test_install_linux_honours_xdg_data_home(tmp_path):
+    """XDG_DATA_HOME is the desktop-standard authority when it is set."""
+    pytest.importorskip('PIL.Image', reason='Pillow required')
+    import shutil
+
+    bundle = tmp_path / 'Tofu'
+    (bundle / '_internal' / 'static' / 'icons').mkdir(parents=True)
+    (bundle / 'Tofu').write_text('#!/bin/sh\n', encoding='utf-8')
+    (bundle / 'Tofu').chmod(0o755)
+    shutil.copy(_ROOT / 'static' / 'icons' / 'logo.png',
+                bundle / '_internal' / 'static' / 'icons' / 'logo.png')
+    shutil.copy(_DESKTOP_ENTRY, bundle / 'tofu.desktop')
+    shutil.copy(_INSTALL_LINUX, bundle / 'install.sh')
+
+    home = tmp_path / 'home'
+    data_home = tmp_path / 'custom-data'
+    home.mkdir()
+    env = dict(os.environ, HOME=str(home), XDG_DATA_HOME=str(data_home))
+    result = subprocess.run(
+        ['bash', str(bundle / 'install.sh')],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (data_home / 'applications' / 'tofu.desktop').is_file()
+    assert (data_home / 'icons' / 'hicolor' / '512x512' / 'apps'
+            / 'tofu.png').is_file()
+    assert not (home / '.local' / 'share' / 'applications'
+                / 'tofu.desktop').exists()
+
+
+def test_install_linux_help_and_unknown_args_are_side_effect_free(tmp_path):
+    env = dict(os.environ, HOME=str(tmp_path / 'home'))
+
+    help_result = subprocess.run(
+        ['bash', str(_INSTALL_LINUX), '--help'],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert help_result.returncode == 0
+    assert 'usage: ./install.sh' in help_result.stdout
+    assert '--uninstall' in help_result.stdout
+
+    bad_result = subprocess.run(
+        ['bash', str(_INSTALL_LINUX), '--typo'],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert bad_result.returncode == 2
+    assert 'unknown arguments: --typo' in bad_result.stderr
+    assert not (tmp_path / 'home').exists()
+
+
+def test_install_linux_uninstall_removes_only_desktop_integration(tmp_path):
+    pytest.importorskip('PIL.Image', reason='Pillow required')
+    import shutil
+
+    bundle = tmp_path / 'Tofu'
+    (bundle / '_internal' / 'static' / 'icons').mkdir(parents=True)
+    (bundle / 'Tofu').write_text('#!/bin/sh\n', encoding='utf-8')
+    (bundle / 'Tofu').chmod(0o755)
+    shutil.copy(_ROOT / 'static' / 'icons' / 'logo.png',
+                bundle / '_internal' / 'static' / 'icons' / 'logo.png')
+    shutil.copy(_DESKTOP_ENTRY, bundle / 'tofu.desktop')
+    shutil.copy(_INSTALL_LINUX, bundle / 'install.sh')
+    home = tmp_path / 'home'
+    home.mkdir()
+    env = dict(os.environ, HOME=str(home))
+
+    installed = subprocess.run(
+        ['bash', str(bundle / 'install.sh')],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert installed.returncode == 0, installed.stderr
+    entry = home / '.local' / 'share' / 'applications' / 'tofu.desktop'
+    icon = (home / '.local' / 'share' / 'icons' / 'hicolor' / '512x512'
+            / 'apps' / 'tofu.png')
+    assert entry.is_file() and icon.is_file()
+
+    removed = subprocess.run(
+        ['bash', str(bundle / 'install.sh'), '--uninstall'],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert removed.returncode == 0, removed.stderr
+    assert not entry.exists()
+    assert not icon.exists()
+    assert (bundle / 'Tofu').is_file()
+    assert 'bundle' in removed.stdout and 'kept' in removed.stdout
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1815,9 +1918,33 @@ def test_build_deb_script_contract():
     for needle in ('dpkg-deb --build', '/opt/Tofu', 'postinst',
                    'usr/share/applications', '__INSTALL_DIR__'):
         assert needle in text, f'build-deb.sh is missing {needle}'
+    assert text.index('unset LD_LIBRARY_PATH') < text.index('cp -a "$BUNDLE/."'), (
+        'host packaging tools must not inherit Conda runtime libraries'
+    )
     bash = subprocess.run(['bash', '-n', str(_BUILD_DEB)],
                           capture_output=True, text=True)
     assert bash.returncode == 0, f'bash syntax check failed: {bash.stderr}'
+
+
+def test_build_deb_help_and_bad_arguments_are_side_effect_free(tmp_path):
+    help_result = subprocess.run(
+        ['bash', str(_BUILD_DEB), '--help'], cwd=tmp_path,
+        capture_output=True, text=True)
+    bad_result = subprocess.run(
+        ['bash', str(_BUILD_DEB), 'bundle-only'], cwd=tmp_path,
+        capture_output=True, text=True)
+    version_result = subprocess.run(
+        ['bash', str(_BUILD_DEB), str(tmp_path), '../bad'], cwd=tmp_path,
+        capture_output=True, text=True)
+
+    assert help_result.returncode == 0
+    assert 'BUNDLE_DIR VERSION [OUT_DIR]' in help_result.stdout
+    assert help_result.stderr == ''
+    assert bad_result.returncode == 2
+    assert 'expected BUNDLE_DIR VERSION [OUT_DIR]' in bad_result.stderr
+    assert version_result.returncode == 2
+    assert 'invalid Debian package version' in version_result.stderr
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_build_deb_end_to_end(tmp_path):

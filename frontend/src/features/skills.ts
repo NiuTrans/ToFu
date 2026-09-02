@@ -1,4 +1,5 @@
 import { featureRegistry } from '../feature-registry';
+import type { I18nKey } from '../i18n';
 import { createLifecycleScope, type LifecycleScope } from '../lifecycle';
 import { invokeFeatureEntry, type FeatureCallable } from '../runtime-bridge';
 
@@ -24,6 +25,18 @@ interface CatalogSkill {
   requires?: SkillRequirements;
   installed?: boolean;
   installed_memory_id?: string;
+  installable?: boolean;
+  unavailable_reason?: string;
+  catalog_id?: string;
+  source?: string;
+  source_revision?: string;
+  verified?: boolean;
+  signed?: boolean;
+  publisher?: string;
+  downloads?: number;
+  installed_source_revision?: string;
+  update_available?: boolean;
+  remote_rank?: number;
 }
 
 interface InstalledSkill {
@@ -38,6 +51,9 @@ interface InstalledSkill {
   is_package?: boolean;
   requires_env?: string[];
   updated?: string;
+  catalog_id?: string;
+  source_revision?: string;
+  source_registry?: string;
 }
 
 interface SkillEnvRow {
@@ -62,12 +78,26 @@ interface ResponseLike {
 
 interface SkillsApi {
   catalog(): Promise<{ catalog?: CatalogSkill[] } | null>;
+  catalogSearch(query: string, limit: number): Promise<{
+    catalog?: CatalogSkill[];
+    online?: {
+      ok?: boolean;
+      error?: string;
+      cached?: boolean;
+      verified_count?: number;
+    };
+  } | null>;
   list(scope: string): Promise<{ skills?: InstalledSkill[] } | null>;
   envStatus(id: string): Promise<{ env?: SkillEnvRow[] } | null>;
   envSet(id: string, name: string, value: string): Promise<ResponseLike | null>;
   envDelete(id: string, name: string): Promise<ResponseLike | null>;
   setScope(id: string, scope: InstallScope): Promise<ResponseLike | null>;
-  catalogInstall(id: string, scope: InstallScope): Promise<ResponseLike | null>;
+  catalogInstall(
+    id: string,
+    scope: InstallScope,
+    sourceRevision?: string,
+    overwrite?: boolean,
+  ): Promise<ResponseLike | null>;
   uninstall(id: string): Promise<ResponseLike | null>;
   toggle(id: string): Promise<ResponseLike | null>;
   files(id: string): Promise<{
@@ -104,6 +134,7 @@ type SkillsWindow = Window & {
   _skillsCatalogInstall?: (
     skillId: string,
     button?: HTMLButtonElement | null,
+    sourceRevision?: string,
   ) => Promise<void>;
   _skillsUninstall?: (skillId: string) => Promise<void>;
   _skillsToggleEnabled?: (
@@ -116,12 +147,15 @@ type SkillsWindow = Window & {
 };
 
 const PAGE_SIZE = 12;
+const ONLINE_SEARCH_LIMIT = 8;
+const ONLINE_SEARCH_DEBOUNCE_MS = 350;
 const CATEGORY_ORDER = [
   'Documents', 'Coding', 'Creative', 'Infrastructure',
   'Productivity', 'Research', 'Other',
 ] as const;
 
 let catalog: CatalogSkill[] = [];
+let onlineCatalog: CatalogSkill[] = [];
 let installed: InstalledSkill[] = [];
 let scope: SkillScope = 'catalog';
 let activeCategory = 'all';
@@ -132,6 +166,11 @@ let viewScope: LifecycleScope | null = null;
 let populateGeneration = 0;
 let filesGeneration = 0;
 let dataEpoch = 0;
+let onlineSearchTimer: number | null = null;
+let onlineSearchGeneration = 0;
+let onlineSearchPending = false;
+let onlineSearchError = '';
+let onlineSearchQuery = '';
 
 function globals(): SkillsWindow {
   return featureRegistry as unknown as SkillsWindow;
@@ -143,7 +182,7 @@ function api(): SkillsApi {
   return value;
 }
 
-function translate(key: string, values?: Record<string, unknown>): string {
+function translate(key: I18nKey, values?: Record<string, unknown>): string {
   return globals().t?.(key, values) || key;
 }
 
@@ -213,6 +252,10 @@ function ensureLifecycle(): LifecycleScope {
 export function destroySkills(): void {
   populateGeneration += 1;
   filesGeneration += 1;
+  onlineSearchGeneration += 1;
+  if (onlineSearchTimer !== null) window.clearTimeout(onlineSearchTimer);
+  onlineSearchTimer = null;
+  onlineSearchPending = false;
   viewScope?.destroy();
   viewScope = null;
   closeFiles();
@@ -246,9 +289,11 @@ export async function populateSkillsTab(): Promise<void> {
 
     catalog = nextCatalog;
     installed = nextInstalled;
+    refreshOnlineInstalledState();
     envStatus = nextEnv;
     dataEpoch += 1;
     render();
+    scheduleOnlineSearch(searchQuery);
     globals()._skillsAttachDropZone?.();
     if (envFailures) {
       debug(`[Skills] ${envFailures} credential status request(s) failed`, 'warn');
@@ -274,12 +319,83 @@ export function setScope(nextScope: SkillScope): void {
     tab.classList.toggle('active', tab.dataset.scope === nextScope);
   });
   render();
+  scheduleOnlineSearch(searchQuery);
 }
 
 export function filterSkills(query: string): void {
   searchQuery = String(query || '').toLowerCase().trim();
   page = 1;
   render();
+  scheduleOnlineSearch(searchQuery);
+}
+
+function refreshOnlineInstalledState(): void {
+  const byCatalog = new Map(
+    installed
+      .filter((item) => item.catalog_id)
+      .map((item) => [item.catalog_id as string, item]),
+  );
+  for (const entry of onlineCatalog) {
+    const item = byCatalog.get(entry.catalog_id || entry.id);
+    entry.installed = Boolean(item);
+    entry.installed_memory_id = item?.id || '';
+    entry.installed_source_revision = item?.source_revision || '';
+    entry.update_available = Boolean(
+      item?.source_revision
+      && entry.source_revision
+      && item.source_revision !== entry.source_revision,
+    );
+  }
+}
+
+function scheduleOnlineSearch(query: string): void {
+  onlineSearchGeneration += 1;
+  const generation = onlineSearchGeneration;
+  if (onlineSearchTimer !== null) window.clearTimeout(onlineSearchTimer);
+  onlineSearchTimer = null;
+  const normalized = String(query || '').trim();
+  if (scope !== 'catalog' || normalized.length < 2) {
+    onlineCatalog = [];
+    onlineSearchQuery = '';
+    onlineSearchPending = false;
+    onlineSearchError = '';
+    render();
+    return;
+  }
+  onlineSearchPending = true;
+  onlineSearchError = '';
+  render();
+  onlineSearchTimer = window.setTimeout(() => {
+    onlineSearchTimer = null;
+    void runOnlineSearch(normalized, generation);
+  }, ONLINE_SEARCH_DEBOUNCE_MS);
+}
+
+async function runOnlineSearch(query: string, generation: number): Promise<void> {
+  try {
+    const result = await api().catalogSearch(query, ONLINE_SEARCH_LIMIT);
+    if (generation !== onlineSearchGeneration || viewScope?.signal.aborted) return;
+    const remote = Array.isArray(result?.catalog) ? result.catalog : [];
+    onlineCatalog = remote.map((entry, index) => ({
+      ...entry,
+      remote_rank: index,
+    }));
+    onlineSearchQuery = query;
+    onlineSearchError = result?.online?.ok === false
+      ? result.online.error || 'online_unavailable'
+      : '';
+    refreshOnlineInstalledState();
+  } catch (error: unknown) {
+    if (generation !== onlineSearchGeneration || viewScope?.signal.aborted) return;
+    onlineCatalog = [];
+    onlineSearchQuery = query;
+    onlineSearchError = errorMessage(error);
+  } finally {
+    if (generation === onlineSearchGeneration && !viewScope?.signal.aborted) {
+      onlineSearchPending = false;
+      render();
+    }
+  }
 }
 
 export function setCategory(category: string): void {
@@ -343,7 +459,8 @@ function renderHeader(): void {
   const count = document.getElementById('skillsCatalogCount');
   if (total) total.textContent = translate('skills.countInstalled', { n: installed.length });
   if (count) {
-    count.textContent = translate('skills.countCatalog', { n: catalog.length });
+    const catalogCount = searchQuery ? filteredCatalog().length : catalog.length;
+    count.textContent = translate('skills.countCatalog', { n: catalogCount });
     count.style.display = scope === 'catalog' ? '' : 'none';
   }
 }
@@ -358,13 +475,16 @@ function renderCategoryBar(): void {
   }
   bar.style.display = '';
   const counts: Record<string, number> = {};
-  for (const entry of catalog) {
+  const categoryEntries = searchQuery && onlineSearchQuery === searchQuery
+    ? [...catalog, ...onlineCatalog]
+    : catalog;
+  for (const entry of categoryEntries) {
     const category = entry.category || 'Other';
     counts[category] = (counts[category] || 0) + 1;
   }
   let html = `<button class="mcp-cat-pill${activeCategory === 'all' ? ' active' : ''}"
     data-skills-action="category" data-category="all">${escape(translate('skills.scopeAll'))}
-    <span class="mcp-cat-count">${catalog.length}</span></button>`;
+    <span class="mcp-cat-count">${categoryEntries.length}</span></button>`;
   for (const category of orderedCategories(counts)) {
     html += `<button class="mcp-cat-pill${activeCategory === category ? ' active' : ''}"
       data-skills-action="category" data-category="${escape(category)}">${escape(category)}
@@ -374,13 +494,23 @@ function renderCategoryBar(): void {
 }
 
 function filteredCatalog(): CatalogSkill[] {
-  return catalog.filter((entry) => {
+  const localMatches = catalog.filter((entry) => {
     if (activeCategory !== 'all' && entry.category !== activeCategory) return false;
     if (!searchQuery) return true;
     const haystack = [entry.name, entry.description, ...(entry.tags || []), entry.author]
       .filter(Boolean).join(' ').toLowerCase();
     return haystack.includes(searchQuery);
   });
+  if (!searchQuery || onlineSearchQuery !== searchQuery) return localMatches;
+  const remoteMatches = onlineCatalog.filter((entry) => (
+    activeCategory === 'all' || entry.category === activeCategory
+  ));
+  const merged = new Map<string, CatalogSkill>();
+  for (const entry of [...localMatches, ...remoteMatches]) {
+    const key = entry.catalog_id || entry.id;
+    if (!merged.has(key)) merged.set(key, entry);
+  }
+  return [...merged.values()];
 }
 
 function safeHomepage(value?: string): string | null {
@@ -395,12 +525,19 @@ function safeHomepage(value?: string): string | null {
 
 function catalogCard(entry: CatalogSkill): string {
   const isInstalled = Boolean(entry.installed);
+  const isUnavailable = entry.installable === false;
   const rawIcon = entry.icon || icon('package', 26);
   const iconHtml = /^<svg[\s>]/i.test(rawIcon) ? rawIcon : escape(rawIcon);
   let badges = '';
   if (entry.featured) badges += `<span class="skill-badge-featured">${escape(translate('skills.featured'))}</span>`;
   if (entry.author && /anthropic/i.test(entry.author)) {
     badges += `<span class="skill-badge-official">${escape(translate('skills.official'))}</span>`;
+  }
+  if (entry.source === 'clawhub') {
+    badges += `<span class="skill-badge-official">ClawHub</span>`;
+  }
+  if (entry.verified) {
+    badges += `<span class="skill-badge-official">${escape(translate('skills.verified'))}</span>`;
   }
   const requirements = entry.requires || {};
   const warnings: string[] = [];
@@ -410,22 +547,37 @@ function catalogCard(entry: CatalogSkill): string {
   if (requirements.env?.length) {
     warnings.push(translate('skills.reqEnv', { env: requirements.env.join(', ') }));
   }
+  if (isUnavailable && entry.unavailable_reason) {
+    warnings.push(entry.unavailable_reason);
+  }
   const homepage = safeHomepage(entry.homepage);
   const memoryId = entry.installed_memory_id || entry.id;
+  const updateAction = entry.update_available && !isUnavailable
+    ? `<button class="btn btn-primary btn-xs" data-skills-action="install"
+         data-skill-id="${escape(entry.catalog_id || entry.id)}"
+         data-source-revision="${escape(entry.source_revision || '')}"
+         data-overwrite="true">${escape(translate('skills.updateBtn'))}</button>`
+    : '';
   const actions = isInstalled
     ? `<span class="skill-installed-tag">${escape(translate('skills.installedTag'))}</span>
+       ${updateAction}
        <button class="btn btn-secondary btn-xs" data-skills-action="files"
          data-skill-id="${escape(memoryId)}">${escape(translate('skills.viewFiles'))}</button>
        <button class="btn btn-secondary btn-xs" data-skills-action="uninstall"
          data-skill-id="${escape(memoryId)}">${escape(translate('skills.uninstallBtn'))}</button>`
-    : `<button class="btn btn-primary btn-xs" data-skills-action="install"
-         data-skill-id="${escape(entry.id)}">${escape(translate('skills.installBtn'))}</button>`;
+    : isUnavailable
+      ? `<button class="btn btn-primary btn-xs" disabled aria-disabled="true"
+           title="${escape(entry.unavailable_reason || '')}">${escape(translate('skills.installBtn'))}</button>`
+      : `<button class="btn btn-primary btn-xs" data-skills-action="install"
+           data-skill-id="${escape(entry.catalog_id || entry.id)}"
+           data-source-revision="${escape(entry.source_revision || '')}">${escape(translate('skills.installBtn'))}</button>`;
   return `<div class="mcp-app-card skill-card${isInstalled ? ' is-installed' : ''}">
     <div class="mcp-app-icon">${iconHtml}</div>
     <div class="mcp-app-name"><span class="mcp-app-name-text">${escape(entry.name)}</span>${badges}</div>
     ${entry.author ? `<div class="skill-author">${escape(translate('skills.by', { author: entry.author }))}</div>` : ''}
     <div class="mcp-app-desc">${escape(entry.description || '')}</div>
     ${entry.install_note ? `<div class="mcp-app-note">${escape(entry.install_note)}</div>` : ''}
+    ${entry.source_revision ? `<div class="mcp-app-note">${escape(translate('skills.version', { version: entry.source_revision }))}</div>` : ''}
     ${warnings.length ? `<div class="skill-badge-warn">⚠ ${escape(warnings.join(' · '))}</div>` : ''}
     <div class="skill-card-footer">
       ${homepage ? `<a class="mcp-app-repo" href="${escape(homepage)}" target="_blank" rel="noopener" title="Homepage">${repoIcon()} ${escape(translate('skills.repo'))}</a>` : '<span></span>'}
@@ -491,18 +643,37 @@ function renderCatalog(): void {
   const grid = document.getElementById('skillsCatalogGrid');
   if (!grid) return;
   const items = filteredCatalog().sort((a, b) => {
+    if (searchQuery) {
+      const aRemote = a.source === 'clawhub';
+      const bRemote = b.source === 'clawhub';
+      if (aRemote !== bRemote) return aRemote ? 1 : -1;
+      if (aRemote && bRemote) {
+        return (a.remote_rank ?? Number.MAX_SAFE_INTEGER)
+          - (b.remote_rank ?? Number.MAX_SAFE_INTEGER);
+      }
+    }
     if (a.featured !== b.featured) return a.featured ? -1 : 1;
     return (a.name || '').localeCompare(b.name || '');
   });
   if (!items.length) {
-    grid.innerHTML = `<p class="stg-empty">${escape(translate('skills.noMatch'))}</p>`;
+    const message = onlineSearchPending
+      ? translate('skills.onlineSearching')
+      : onlineSearchError
+        ? translate('skills.onlineSearchFailed')
+        : translate('skills.noMatch');
+    grid.innerHTML = `<p class="stg-empty">${escape(message)}</p>`;
     return;
   }
   const pages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
   page = Math.min(page, pages);
   const start = (page - 1) * PAGE_SIZE;
+  const onlineStatus = onlineSearchPending
+    ? `<p class="stg-empty">${escape(translate('skills.onlineSearching'))}</p>`
+    : onlineSearchError
+      ? `<p class="stg-empty">${escape(translate('skills.onlineSearchFailed'))}</p>`
+      : '';
   grid.innerHTML = items.slice(start, start + PAGE_SIZE).map(catalogCard).join('')
-    + renderPagination(items.length);
+    + onlineStatus + renderPagination(items.length);
 }
 
 function renderInstalled(): void {
@@ -590,14 +761,33 @@ export async function moveScope(
 export async function catalogInstall(
   skillId: string,
   button?: HTMLButtonElement | null,
+  sourceRevision = '',
+  overwrite = false,
 ): Promise<void> {
+  const entry = [...catalog, ...onlineCatalog].find((candidate) => (
+    (candidate.catalog_id || candidate.id) === skillId
+  ));
+  if (entry?.source === 'clawhub') {
+    const confirmed = await (globals().showConfirm?.(
+      translate(overwrite ? 'skills.remoteUpdateConfirm' : 'skills.remoteInstallConfirm', {
+        name: entry.name || skillId,
+        version: sourceRevision || entry.source_revision || '',
+      }),
+    ) ?? Promise.resolve(true));
+    if (!confirmed) return;
+  }
   if (button) {
     button.disabled = true;
-    button.textContent = translate('skills.installing');
+    button.textContent = translate(overwrite ? 'skills.updating' : 'skills.installing');
   }
   toast(translate('skills.downloadingInstalling', { id: skillId }));
   try {
-    const response = await api().catalogInstall(skillId, installScope());
+    const response = await api().catalogInstall(
+      skillId,
+      installScope(),
+      sourceRevision || entry?.source_revision || '',
+      overwrite,
+    );
     const body = await json(response);
     if (!response?.ok) {
       const detail = typeof body.error === 'string'
@@ -606,7 +796,7 @@ export async function catalogInstall(
       toast(translate('skills.installFailed', { err: detail }), 'error');
       if (button?.isConnected) {
         button.disabled = false;
-        button.textContent = translate('skills.installBtn');
+        button.textContent = translate(overwrite ? 'skills.updateBtn' : 'skills.installBtn');
       }
       return;
     }
@@ -627,7 +817,7 @@ export async function catalogInstall(
     toast(translate('skills.installError', { err: errorMessage(error) }), 'error');
     if (button?.isConnected) {
       button.disabled = false;
-      button.textContent = translate('skills.installBtn');
+      button.textContent = translate(overwrite ? 'skills.updateBtn' : 'skills.installBtn');
     }
   }
 }
@@ -769,7 +959,14 @@ function onPanelClick(event: Event): void {
   const button = target instanceof HTMLButtonElement ? target : null;
   if (action === 'category') setCategory(target.dataset.category || 'all');
   else if (action === 'page') setPage(Number(target.dataset.page || 1));
-  else if (action === 'install') void catalogInstall(skillId, button);
+  else if (action === 'install') {
+    void catalogInstall(
+      skillId,
+      button,
+      target.dataset.sourceRevision || '',
+      target.dataset.overwrite === 'true',
+    );
+  }
   else if (action === 'uninstall') void uninstallSkill(skillId);
   else if (action === 'toggle') void toggleEnabled(skillId, button);
   else if (action === 'move') {

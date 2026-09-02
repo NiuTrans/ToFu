@@ -6,7 +6,7 @@ on its blueprint and gets a uniform set of endpoints.
 
 Example usage:
 
-    from lib.task_runtime import TaskRuntime
+    from lib.agent_core.task_runtime import TaskRuntime
     from routes._task_routes import register_task_routes
 
     paper_report_runtime = TaskRuntime('paper-report', ttl=3600,
@@ -37,6 +37,7 @@ from routes.task_http import (
     task_replay_parameters,
     task_replay_response,
 )
+from routes.api_v1.auth import request_user_id
 
 logger = get_logger(__name__)
 
@@ -71,8 +72,9 @@ def register_task_routes(bp, runtime: TaskRouteRuntimePort, *, url_prefix: str,
         poll_path: Override the poll route shape (default '/poll/<task_id>').
         abort_path: Override the abort route shape (default '/abort/<task_id>').
         abort_handler: Optional application-specific response adapter. It
-            receives ``task_id`` and replaces the default bool-to-HTTP mapping
-            while retaining the shared route registration.
+            receives ``task_id`` plus the authenticated ``owner_user_id`` and
+            replaces the default bool-to-HTTP mapping while retaining the
+            shared route registration. The handler owns its atomic owner check.
         poll_responses: Optional OpenAPI response map for the poll adapter.
         abort_responses: Optional OpenAPI response map for the abort adapter.
         poll_extensions: Optional OpenAPI vendor extensions for polling.
@@ -89,6 +91,9 @@ def register_task_routes(bp, runtime: TaskRouteRuntimePort, *, url_prefix: str,
 
     if enable_poll:
         def _poll(task_id):
+            user_id = int(request_user_id())
+            if runtime.get_owned(task_id, user_id=user_id) is None:
+                return api_not_found()
             cursor = task_replay_cursor(request.args)
             resp = runtime.poll(task_id, cursor=cursor)
             # runtime.poll() returns the versioned replay page. Preserve it
@@ -113,13 +118,14 @@ def register_task_routes(bp, runtime: TaskRouteRuntimePort, *, url_prefix: str,
 
     if enable_abort:
         def _abort(task_id):
+            user_id = int(request_user_id())
             if abort_handler is not None:
-                return abort_handler(task_id)
-            ok = runtime.abort(task_id)
+                return abort_handler(task_id, user_id)
+            task = runtime.get_owned(task_id, user_id=user_id)
+            if task is None:
+                return api_not_found()
+            ok = runtime.abort_owned(task_id, user_id=user_id)
             if not ok:
-                task = runtime.get(task_id)
-                if task is None:
-                    return api_not_found()
                 return api_ok(status=task['status'], note='already finished')
             return api_ok(status='aborting')
 

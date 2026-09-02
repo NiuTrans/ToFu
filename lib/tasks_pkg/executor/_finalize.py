@@ -1,10 +1,8 @@
 # HOT_PATH
 """Shared tool-handler helpers — DRY finalization & meta.
 
-``_finalize_tool_round`` and ``_build_simple_meta`` are MONKEYPATCH TARGETS:
-they are imported+patched by ``lib/tasks_pkg/handlers/misc/_human.py`` (via the
-misc facade) and by tests. They are re-exported from the ``executor`` package
-facade so ``from lib.tasks_pkg.executor import _finalize_tool_round`` works.
+``_finalize_tool_round`` and ``_build_simple_meta`` are the shared result
+projection primitives. Handlers bind them from the executor API directly.
 """
 
 from __future__ import annotations
@@ -13,6 +11,10 @@ from typing import Any
 
 from lib.agent_core.events import EventType, build_event, now_ms
 from lib.log import get_logger
+from lib.tool_rejection import (
+    stamp_tool_rejection,
+    tool_rejection_descriptor,
+)
 from lib.tasks_pkg.manager import append_event
 
 logger = get_logger(__name__)
@@ -60,6 +62,14 @@ def _attach_terminal_qr(results: list) -> None:
                         len(imgs), meta.get('toolName'))
 
 
+#: Terminal verdicts a finalize may stamp. Anything else is normalized to
+#: 'done' — a finalize SETTLES a round, and the only honest settle states are
+#: success or one of these backend-assigned failure verdicts (the same set the
+#: client reducer treats as terminal, _TERMINAL_ROUND_STATUS).
+_FINALIZE_VERDICTS = frozenset(
+    {'done', 'error', 'rejected', 'aborted', 'unanswerable'})
+
+
 def _finalize_tool_round(
     task: dict[str, Any],
     rn: int,
@@ -68,6 +78,7 @@ def _finalize_tool_round(
     *,
     query_override: str = '',
     extra_event_fields: dict[str, Any] | None = None,
+    status: str = 'done',
 ) -> None:
     """Finalize a tool round: set results & status, emit the SSE event.
 
@@ -76,6 +87,16 @@ def _finalize_tool_round(
         round_entry['results'] = results
         round_entry['status'] = 'done'
         append_event(task, {'type': 'tool_result', ...})
+
+    ``status`` (keyword-only, default ``'done'``) is the backend's terminal
+    VERDICT on the tool — the single source of truth the client renders. It
+    is stamped on the round BEFORE the event is built and ALWAYS rides the
+    ``tool_result`` wire frame, so neither the live client nor a later
+    replay/rehydration ever has to GUESS the outcome (guessing is how a
+    crashed tool rendered as a ✓ success card). A non-done verdict already
+    on the round is never demoted by a late 'done' finalize (a pool-timeout
+    lane whose cancelled thread finishes late must not overwrite the
+    'error' the pipeline already recorded).
 
     Parameters
     ----------
@@ -96,12 +117,25 @@ def _finalize_tool_round(
     # Must run BEFORE results are frozen onto the round + copied into the SSE
     # event, so the live stream and any later replay/rehydration carry the
     # same descriptors (a post-hoc mutation would reach only one of them).
+    rejection = tool_rejection_descriptor(round_entry)
+    if rejection is not None and isinstance(results, list):
+        for result_meta in results:
+            if isinstance(result_meta, dict):
+                stamp_tool_rejection(
+                    result_meta, rejection, legacy_result_alias=True)
     if isinstance(results, list):
         _attach_terminal_qr(results)
     round_entry['results'] = results
-    round_entry['status'] = 'done'
+    _status = status if status in _FINALIZE_VERDICTS else 'done'
+    _prior = round_entry.get('status')
+    if (_status == 'done' and isinstance(_prior, str)
+            and _prior in _FINALIZE_VERDICTS and _prior != 'done'):
+        # Verdict protection: a failure verdict already recorded (e.g. the
+        # pool-timeout lane stamped 'error') outranks a late success settle.
+        _status = _prior
+    round_entry['status'] = _status
 
-    # ★ Timing contract (pt_67ffc2b7). `tEnd` is stamped HERE — the shared
+    # Timing contract (). `tEnd` is stamped HERE — the shared
     #   finalize seam every one of the ~44 handler call sites already funnels
     #   through — so per-tool duration is measured in ONE place instead of 44
     #   that would drift. `tStart` is carried forward from the round so the
@@ -120,21 +154,32 @@ def _finalize_tool_round(
         _t_start = _t_end
         round_entry['tStart'] = _t_start
 
+    _tool_name = round_entry.get('toolName')
+    if not _tool_name and isinstance(results, list) and results \
+            and isinstance(results[0], dict):
+        _tool_name = results[0].get('toolName')
     event = build_event(
         EventType.TOOL_RESULT,
         roundNum=rn,
         toolCallId=round_entry.get('toolCallId', ''),
+        toolName=_tool_name or '',
         query=query_override or round_entry['query'],
         results=results,
+        # Self-describing terminal frame: the verdict ALWAYS rides the event,
+        # so a client never settles a round by inference. The client treats
+        # this field as the ONLY truth for the success/failure badge.
+        status=_status,
         tStart=_t_start,
         tEnd=_t_end,
     )
-    # ★ Carry the harness self-repair descriptor onto the tool_result event.
+    # Carry the harness self-repair descriptor onto the tool_result event.
     #   For early-announced rounds the original tool_start went out with the
     #   pre-repair (possibly garbled) display, so the frontend relies on this
     #   to swap in the corrected line + "auto-fixed" badge.
     if round_entry.get('_repaired'):
         event['_repaired'] = round_entry['_repaired']
+    if rejection is not None:
+        stamp_tool_rejection(event, rejection)
     if extra_event_fields:
         event.update(extra_event_fields)
     append_event(task, event)

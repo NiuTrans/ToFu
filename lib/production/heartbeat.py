@@ -1,7 +1,7 @@
 """lib/production/heartbeat.py — worker-side liveness heartbeat (P-UX2).
 
 The third piece of the progress-perception contract
-(docs/PAPER_MEDIA_UX_DESIGN.md §3.1): long phases (LLM script writing,
+(docs/modules/ingest_media.md §3.1): long phases (LLM script writing,
 per-scene TTS, concat/mux ffmpeg runs) emit **zero events** today, so the
 frontend cannot tell "working" from "dead" — and the read-side stall reaper
 (:meth:`TaskRuntime.reap_if_stalled`) would false-kill them.

@@ -25,6 +25,7 @@ from benchmarks.context_efficiency.runtime import (
     build_agent_prompt,
 )
 from lib.benchmark_contract import public_price_cost_from_usage
+from lib.context_telemetry import PROMPT_PROFILE_EVIDENCE_VERSION
 
 
 pytestmark = pytest.mark.unit
@@ -47,7 +48,20 @@ def _record(task_id: str, passed: bool, *, cost: float = 1,
             prompt_tokens: int = 100,
             optimization_decisions: list[dict] | None = None,
             multi_agent_calls: int = 0,
+            prompt_profile: str = 'full',
             ) -> dict:
+    prompt_evidence = {
+        'contractVersion': PROMPT_PROFILE_EVIDENCE_VERSION,
+        'requestedProfile': prompt_profile,
+        'resolvedProfile': prompt_profile,
+        'effectiveProfile': prompt_profile,
+        'status': 'applied',
+        'reason': '',
+        'model': 'kimi-k3',
+        'charCount': 100,
+        'tokenCount': 20,
+        'sha256': 'a' * 64,
+    }
     return {
         'taskId': task_id,
         'oracle': {'passed': passed},
@@ -59,7 +73,8 @@ def _record(task_id: str, passed: bool, *, cost: float = 1,
         'latencyMs': latency,
         'contextTelemetry': {
             'rounds': [{
-                'toolSchemaTokens': schema, 'stablePrefixTokens': 20}],
+                'toolSchemaTokens': schema, 'stablePrefixTokens': 20,
+                'promptProfile': prompt_evidence}],
             'programRuns': program_runs or [],
             'optimizationDecisions': optimization_decisions or [],
             'multiAgentCalls': multi_agent_calls,
@@ -88,9 +103,12 @@ def test_arm_config_is_nested_and_candidate_can_be_loaded(tmp_path):
         'promptProfile'] == 'lean'
     assert arm_config('tofu-effort-medium')['thinkingDepth'] == 'medium'
     assert arm_config('tofu-effort-low')['thinkingDepth'] == 'low'
-    assert arm_config('tofu-multi-agent')['responses']['multiAgent'] == 'auto'
+    assert arm_config('tofu-multi-agent')[
+        'orchestration']['multiAgent'] == 'auto'
     assert arm_config('tofu-control')['responses'] == {
-        'promptProfile': 'full', 'multiAgent': 'off'}
+        'promptProfile': 'full'}
+    assert arm_config('tofu-control')['orchestration'] == {
+        'multiAgent': 'off'}
     candidate = tmp_path / 'candidate.json'
     candidate.write_text(json.dumps({'config': {
         'tools': {'nativeExposure': 'routed'}}}))
@@ -260,7 +278,8 @@ def test_candidate_can_select_lean_effort_and_exercised_multi_agent():
     baseline = {'t1': _record(
         't1', True, cost=3, latency=120, prompt_tokens=300)}
     lean = {'t1': _record(
-        't1', True, cost=2, latency=110, prompt_tokens=180)}
+        't1', True, cost=2, latency=110, prompt_tokens=180,
+        prompt_profile='lean')}
     medium = {'t1': _record(
         't1', True, cost=1.5, latency=100, prompt_tokens=220)}
     low = {'t1': _record(
@@ -277,10 +296,12 @@ def test_candidate_can_select_lean_effort_and_exercised_multi_agent():
         'tofu-multi-agent': multi,
     })
     assert candidate['config']['responses']['promptProfile'] == 'lean'
-    assert candidate['config']['responses']['multiAgent'] == 'auto'
+    assert candidate['config']['orchestration']['multiAgent'] == 'auto'
     assert candidate['config']['thinkingDepth'] == 'low'
     assert candidate['evidence']['tofu-prompt-lean'][
         'promptTokenReduction'] == pytest.approx(0.4)
+    assert candidate['evidence']['tofu-prompt-lean'][
+        'profileAdoptionClean'] is True
     assert candidate['evidence']['tofu-multi-agent'][
         'taskGateExercised'] is True
     assert candidate['evidence']['tofu-multi-agent']['summary'][
@@ -290,6 +311,28 @@ def test_candidate_can_select_lean_effort_and_exercised_multi_agent():
     unobserved['t1']['contextTelemetry']['multiAgentCalls'] = 0
     rejected = freeze_candidate({
         'tofu-control': baseline, 'tofu-multi-agent': unobserved})
-    assert rejected['config']['responses']['multiAgent'] == 'off'
+    assert rejected['config']['orchestration']['multiAgent'] == 'off'
     assert rejected['evidence']['tofu-multi-agent'][
         'taskGateExercised'] is False
+
+    missing_adoption = json.loads(json.dumps(lean))
+    del missing_adoption['t1']['contextTelemetry']['rounds'][0][
+        'promptProfile']
+    rejected_prompt = freeze_candidate({
+        'tofu-control': baseline,
+        'tofu-prompt-lean': missing_adoption,
+    })
+    assert rejected_prompt['config']['responses']['promptProfile'] == 'full'
+    assert rejected_prompt['evidence']['tofu-prompt-lean'][
+        'profileAdoptionClean'] is False
+
+    malformed_adoption = json.loads(json.dumps(lean))
+    malformed_adoption['t1']['contextTelemetry']['rounds'][0][
+        'promptProfile']['tokenCount'] = 'many'
+    malformed_prompt = freeze_candidate({
+        'tofu-control': baseline,
+        'tofu-prompt-lean': malformed_adoption,
+    })
+    assert malformed_prompt['config']['responses']['promptProfile'] == 'full'
+    assert malformed_prompt['evidence']['tofu-prompt-lean'][
+        'profileAdoptionClean'] is False

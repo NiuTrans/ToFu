@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import type { I18nKey } from '../../i18n';
 import {
   paperAttachPush,
   paperDetachPush,
@@ -48,7 +49,7 @@ function globals(): LegacyPaperWindow {
   return featureRegistry as unknown as LegacyPaperWindow;
 }
 
-function translate(key: string, vars?: JsonObject): string {
+function translate(key: I18nKey, vars?: JsonObject): string {
   const fn = globals().t;
   return typeof fn === 'function' ? fn(key, vars) : key;
 }

@@ -12,8 +12,8 @@ the model didn't pick it. Relying on the model to choose the robust path is the
 defect. The fix makes the CODE guarantee it:
 
   * ``recommend_engine._RESEARCH_VERTICAL == 'academic'`` and the interpretation
-    loop passes it to ``_execute_report_tool(..., force_vertical=...)``;
-  * ``_execute_report_tool(force_vertical='academic')`` overrides EVERY query
+    loop passes it to ``execute_paper_tool(..., force_vertical=...)``;
+  * ``execute_paper_tool(force_vertical='academic')`` overrides EVERY query
     spec's vertical unconditionally — even when the model asked for ``'auto'``
     / ``'off'`` / a wrong domain — before it reaches ``_web_search_one``;
   * the default (``force_vertical=None``) is byte-identical to today, so the
@@ -40,7 +40,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault('TRADING_ENABLED', '0')
 
-import lib.paper.recommend_engine as re_mod  # noqa: E402
+import lib.paper.recommend_engine._events as re_mod  # noqa: E402
+import lib.paper.recommend_engine._ground as ground_mod  # noqa: E402
+import lib.paper.recommend_engine._research as research_mod  # noqa: E402
 import lib.paper.tools as tools_mod  # noqa: E402
 
 
@@ -63,9 +65,9 @@ class _Patched:
     """Fake a 2-round agentic dispatch (round 0 = a web_search tool call whose
     args carry ``model_vertical``; round 1 = the final JSON) AND capture the
     ``vertical`` value that ultimately reaches ``_web_search_one`` through the
-    REAL ``_execute_report_tool``.
+    REAL ``execute_paper_tool``.
 
-    Only the LLM and the actual network search are faked — ``_execute_report_tool``
+    Only the LLM and the actual network search are faked — ``execute_paper_tool``
     runs for real, so the test exercises the whole force-vertical seam end to end.
     """
 
@@ -75,10 +77,10 @@ class _Patched:
         self.captured_verticals = []   # vertical handed to _web_search_one
 
     def __enter__(self):
-        self._orig['dispatch_stream'] = re_mod.dispatch_stream
-        self._orig['search_arxiv'] = re_mod.search_arxiv
-        self._orig['fetch_arxiv_title'] = re_mod.fetch_arxiv_title
-        self._orig['_web_search_one'] = tools_mod._web_search_one
+        self._orig['dispatch_stream'] = research_mod.dispatch_stream
+        self._orig['search_arxiv'] = ground_mod.search_arxiv
+        self._orig['fetch_arxiv_title'] = ground_mod.fetch_arxiv_title
+        self._orig['load_paper_search_backend'] = tools_mod.load_paper_search_backend
         rec = self
 
         def _fake_dispatch_stream(messages, *, on_content=None, tools=None, **kw):
@@ -103,24 +105,34 @@ class _Patched:
             rec.captured_verticals.append(vertical)
             return ([], None, None, None)
 
-        re_mod.dispatch_stream = _fake_dispatch_stream
-        re_mod.search_arxiv = lambda *a, **k: []
-        re_mod.fetch_arxiv_title = lambda _id: ''
-        tools_mod._web_search_one = _fake_web_search_one
+        research_mod.dispatch_stream = _fake_dispatch_stream
+        ground_mod.search_arxiv = lambda *a, **k: []
+        ground_mod.fetch_arxiv_title = lambda _id: ''
+        backend = tools_mod.PaperSearchBackend(
+            web_search_one=_fake_web_search_one,
+            fetch_url_one=lambda *a, **k: None,
+            format_search_response=(
+                lambda results, search_diag=None, query='': ''),
+            format_search_display=lambda results: [],
+            format_fetch_display=lambda item, short_url: {},
+            vertical_header_for_llm=lambda result: '',
+            vertical_to_sse_payload=lambda result: None,
+        )
+        tools_mod.load_paper_search_backend = lambda: backend
         return self
 
     def __exit__(self, *exc):
-        re_mod.dispatch_stream = self._orig['dispatch_stream']
-        re_mod.search_arxiv = self._orig['search_arxiv']
-        re_mod.fetch_arxiv_title = self._orig['fetch_arxiv_title']
-        tools_mod._web_search_one = self._orig['_web_search_one']
+        research_mod.dispatch_stream = self._orig['dispatch_stream']
+        ground_mod.search_arxiv = self._orig['search_arxiv']
+        ground_mod.fetch_arxiv_title = self._orig['fetch_arxiv_title']
+        tools_mod.load_paper_search_backend = self._orig['load_paper_search_backend']
         return False
 
 
 def test_constant_is_academic():
     """The research vertical constant exists and is the academic domain."""
-    assert getattr(re_mod, '_RESEARCH_VERTICAL', None) == 'academic', \
-        f'_RESEARCH_VERTICAL is not "academic": {getattr(re_mod, "_RESEARCH_VERTICAL", None)!r}'
+    assert research_mod._RESEARCH_VERTICAL == 'academic', \
+        f'_RESEARCH_VERTICAL is not "academic": {research_mod._RESEARCH_VERTICAL!r}'
     _ok('recommend_engine._RESEARCH_VERTICAL == "academic"')
 
 
@@ -146,27 +158,34 @@ def test_force_vertical_overrides_model_choice():
     _ok('force_vertical overrides the model-chosen vertical (off → academic)')
 
 
-def test_execute_report_tool_default_preserves_model_vertical():
+def testexecute_paper_tool_default_preserves_model_vertical():
     """Direct unit check of the shared seam: WITHOUT force_vertical (the report /
     QA / insight callers), the model's own vertical is preserved — the change is
     byte-identical for every other caller."""
-    orig = tools_mod._web_search_one
     seen = []
-    tools_mod._web_search_one = lambda q, uq, freshness='', vertical='auto': (
-        seen.append(vertical) or ([], None, None, None))
-    try:
-        args = json.dumps({'queries': [{'query': 'q', 'vertical': 'off'}]})
-        # No force_vertical → other callers' behaviour: model's vertical wins.
-        tools_mod._execute_report_tool('web_search', args, user_question='q')
-        assert seen == ['off'], f'default path altered the model vertical: {seen}'
-        # force_vertical set → overridden.
-        seen.clear()
-        tools_mod._execute_report_tool('web_search', args, user_question='q',
-                                       force_vertical='academic')
-        assert seen == ['academic'], f'force_vertical did not override: {seen}'
-    finally:
-        tools_mod._web_search_one = orig
-    _ok('_execute_report_tool: default preserves model vertical, force_vertical overrides it')
+    backend = tools_mod.PaperSearchBackend(
+        web_search_one=(
+            lambda q, uq, freshness='', vertical='auto':
+            seen.append(vertical) or ([], None, None, None)),
+        fetch_url_one=lambda *a, **k: None,
+        format_search_response=lambda *a, **k: '',
+        format_search_display=lambda results: [],
+        format_fetch_display=lambda item, short_url: {},
+        vertical_header_for_llm=lambda result: '',
+        vertical_to_sse_payload=lambda result: None,
+    )
+    args = json.dumps({'queries': [{'query': 'q', 'vertical': 'off'}]})
+    # No force_vertical → other callers' behaviour: model's vertical wins.
+    tools_mod.execute_paper_tool(
+        'web_search', args, user_question='q', search_backend=backend)
+    assert seen == ['off'], f'default path altered the model vertical: {seen}'
+    # force_vertical set → overridden.
+    seen.clear()
+    tools_mod.execute_paper_tool(
+        'web_search', args, user_question='q', force_vertical='academic',
+        search_backend=backend)
+    assert seen == ['academic'], f'force_vertical did not override: {seen}'
+    _ok('execute_paper_tool: default preserves model vertical, force_vertical overrides it')
 
 
 def test_prompt_instructs_unquoted_title_tokens():
@@ -180,13 +199,13 @@ def test_prompt_instructs_unquoted_title_tokens():
     tokens — higher recall, less fragile. We pin the instruction in the prompt
     (and the removal of the now-redundant 'Prefer vertical=academic' nudge,
     since the code forces it)."""
-    sys_prompt = re_mod._RECOMMEND_SYSTEM.lower()
+    sys_prompt = research_mod._RECOMMEND_SYSTEM.lower()
     # The prompt must explicitly steer away from exact-phrase quoting.
     assert 'unquoted' in sys_prompt or 'without quotes' in sys_prompt \
         or 'do not wrap' in sys_prompt or "don't wrap" in sys_prompt \
         or 'no exact-phrase' in sys_prompt or 'not quote' in sys_prompt, \
         'prompt does not instruct the model to issue unquoted title tokens: ' \
-        f'{re_mod._RECOMMEND_SYSTEM[:400]!r}'
+        f'{research_mod._RECOMMEND_SYSTEM[:400]!r}'
     # It must reference quotes / phrase so the guidance is unambiguous.
     assert 'quot' in sys_prompt or 'phrase' in sys_prompt, \
         'prompt guidance does not mention quotes/phrase'
@@ -197,8 +216,8 @@ def test_neuter_force_vertical_is_load_bearing():
     """NEUTER: blank out the forced-academic constant → the research search
     reverts to the model's own 'auto' vertical, NOT academic. Proves the
     constant is what delivers the robust path (not an incidental default)."""
-    orig_const = re_mod._RESEARCH_VERTICAL
-    re_mod._RESEARCH_VERTICAL = None
+    orig_const = research_mod._RESEARCH_VERTICAL
+    research_mod._RESEARCH_VERTICAL = None
     try:
         with _Patched(model_vertical=None) as p:
             re_mod.recommend_papers('recent dLLM', 6)
@@ -206,7 +225,7 @@ def test_neuter_force_vertical_is_load_bearing():
         assert all(v == 'auto' for v in p.captured_verticals), \
             f'NEUTER did not bite — academic still forced with the constant blanked: {p.captured_verticals}'
     finally:
-        re_mod._RESEARCH_VERTICAL = orig_const
+        research_mod._RESEARCH_VERTICAL = orig_const
     _ok('NEUTER: with _RESEARCH_VERTICAL blanked, research reverts to model vertical (load-bearing)')
 
 
@@ -218,7 +237,7 @@ def main():
         test_constant_is_academic,
         test_research_search_forces_academic_when_model_omits_it,
         test_force_vertical_overrides_model_choice,
-        test_execute_report_tool_default_preserves_model_vertical,
+        testexecute_paper_tool_default_preserves_model_vertical,
         test_prompt_instructs_unquoted_title_tokens,
         test_neuter_force_vertical_is_load_bearing,
     ]

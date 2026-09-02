@@ -36,50 +36,62 @@ from __future__ import annotations
 import pathlib
 import re
 
+import pytest
+
+from tests._runtime_sections import (
+    runtime_section_names,
+    runtime_section_path,
+    runtime_sections_dir,
+)
+
+pytestmark = pytest.mark.unit
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BUNDLER_PY = ROOT / 'lib' / 'js_bundler.py'
 INDEX_HTML = ROOT / 'index.html'
-PET_JS = ROOT / 'static' / 'js' / 'tofu-pet.js'
-SCENE_JS = ROOT / 'static' / 'js' / 'tofu-scene.js'
-FEATURE_LOADER = ROOT / 'static' / 'js' / 'feature-bridge.js'
+# lib/js_bundler.py and the static/js tree are gone with the Vite migration:
+# the pair now lives in frontend/src/runtime/scene/ as idle-scheduled lazy
+# chunks (imported from app-runtime.js after app-ready), and the retained
+# runtime sections are materialized by tests/_runtime_sections.py.
+PET_JS = pathlib.Path(runtime_section_path('tofu-pet.js'))
+SCENE_JS = pathlib.Path(runtime_section_path('tofu-scene.js'))
+FEATURE_LOADER = pathlib.Path(runtime_section_path('feature-bridge.js'))
+ACTION_REGISTRY = ROOT / 'frontend' / 'src' / 'action-registry.ts'
 
 
 def _manifest():
-    import lib.js_bundler as jb
-    return jb._extract_manifest_from_source(str(BUNDLER_PY))
+    """Return the logical sections owned by the retained Vite runtime."""
+    return runtime_section_names()
 
 
 # ---------------------------------------------------------------------------
 # 1. manifest move (the failing-first drivers)
 # ---------------------------------------------------------------------------
 def test_tofu_pet_in_deferred_files():
-    _bf, deferred_files, _entry, _crit = _manifest()
-    assert 'tofu-pet.js' in deferred_files, (
-        "'tofu-pet.js' must be in _CLASSIC_ASSET_FILES — 65KB of decorative "
-        'pet out of the render-blocking core')
+    assert 'tofu-pet.js' in _manifest(), (
+        "'tofu-pet.js' must be present in the Vite runtime — 65KB of "
+        'decorative pet shipped as an idle-scheduled lazy chunk out of the '
+        'render-blocking core')
 
 
 def test_tofu_pet_not_in_core_bundle_files():
-    bundle_files, _df, _entry, _crit = _manifest()
-    assert 'tofu-pet.js' not in bundle_files, (
-        "'tofu-pet.js' must NOT remain in _BUNDLE_FILES — listing it in "
-        'both bundles would double-boot the pet (two mascots, doubled '
+    assert _manifest().count('tofu-pet.js') == 1, (
+        "'tofu-pet.js' must occur exactly once in the Vite runtime — a "
+        'second copy would double-boot the pet (two mascots, doubled '
         'animation frames)')
 
 
 def test_tofu_scene_in_deferred_files():
-    _bf, deferred_files, _entry, _crit = _manifest()
-    assert 'tofu-scene.js' in deferred_files, (
-        "'tofu-scene.js' must be in _CLASSIC_ASSET_FILES — 96KB of decorative "
-        'canvas backdrop out of the render-blocking core')
+    assert 'tofu-scene.js' in _manifest(), (
+        "'tofu-scene.js' must be present in the Vite runtime — 96KB of "
+        'decorative canvas backdrop shipped as an idle-scheduled lazy chunk '
+        'out of the render-blocking core')
 
 
 def test_tofu_scene_not_in_core_bundle_files():
-    bundle_files, _df, _entry, _crit = _manifest()
-    assert 'tofu-scene.js' not in bundle_files, (
-        "'tofu-scene.js' must NOT remain in _BUNDLE_FILES — listing it in "
-        'both bundles would double-mount the canvas backdrop')
+    assert _manifest().count('tofu-scene.js') == 1, (
+        "'tofu-scene.js' must occur exactly once in the Vite runtime — a "
+        'second copy would double-mount the canvas backdrop')
 
 
 # ---------------------------------------------------------------------------
@@ -87,11 +99,25 @@ def test_tofu_scene_not_in_core_bundle_files():
 # ---------------------------------------------------------------------------
 def test_scene_switch_onclick_absence_safe():
     src = INDEX_HTML.read_text()
-    assert 'window.TofuPet&&window.TofuPet.cycleDecor()' in src, (
-        "index.html's sceneSwitchBtn onclick must keep the "
-        '`window.TofuPet&&…` short-circuit — with the module deferred the '
-        'handler fires before the pet arrives and must no-op, never '
-        'ReferenceError')
+    # The inline `window.TofuPet&&…` onclick became a delegated
+    # data-tofu-action with the Vite migration. Absence-safety is preserved
+    # by the mechanism, not the pin: the action-registry dispatcher resolves
+    # TofuPet through the runtime service port and CATCHES resolution
+    # failures, so a click in the pre-load window is a logged no-op, never a
+    # ReferenceError escaping the handler.
+    assert 'data-tofu-action="TofuPet.cycleDecor()"' in src, (
+        "index.html's sceneSwitchBtn must reference the pet ONLY through "
+        'the delegated data-tofu-action mechanism — with the module '
+        'deferred the handler fires before the pet arrives and must no-op')
+    assert not re.search(r'onclick="[^"]*TofuPet', src), (
+        'a raw inline onclick referencing TofuPet would ReferenceError in '
+        'the pre-load window — keep the reference on the delegated '
+        'data-tofu-action dispatcher')
+    registry = ACTION_REGISTRY.read_text()
+    assert '[actions] refused' in registry, (
+        'the action-registry dispatcher lost its try/catch refusal path — '
+        'an unresolved TofuPet action would escape as an uncaught error '
+        'instead of a logged no-op')
 
 
 def test_index_has_no_raw_decorative_scripts():
@@ -105,19 +131,17 @@ def test_index_has_no_raw_decorative_scripts():
 # 3. no-stub design pin (control; mirrors test_no_tw_stub_entries)
 # ---------------------------------------------------------------------------
 def test_no_tofu_stub_entries_in_either_list():
-    """TofuPet/TofuScene/cycleDecor must NOT be feature-loader stubs: the
-    modules self-boot on arrival and the one onclick is already
+    """TofuPet/TofuScene/cycleDecor/setDecor must NOT be feature-loader stubs: the
+    modules self-boot on arrival and the one action reference is already
     absence-safe — a stub would only trigger the feature fetch on a
-    decorative click the idle prefetch already makes instant."""
-    _bf, _df, entry_points, _crit = _manifest()
-    for name in ('TofuPet', 'TofuScene', 'cycleDecor', 'setDecor'):
-        assert name not in entry_points, (
-            f'{name} must NOT be a deferred entry point — self-booting '
-            'modules with absence-safe callers need no stub')
+    decorative click the idle prefetch already makes instant.
+
+    The bundler manifest half of this guard retired with lib/js_bundler.py;
+    the surviving stub list is feature-bridge.js's _FEATURE_ENTRY_POINTS."""
     loader = FEATURE_LOADER.read_text()
     for name in ('TofuPet', 'TofuScene', 'cycleDecor', 'setDecor'):
         assert f"'{name}'" not in loader, (
-            f'{name} must NOT be in feature-bridge.js stub list either')
+            f'{name} must NOT be in feature-bridge.js stub list')
 
 
 # ---------------------------------------------------------------------------
@@ -144,9 +168,15 @@ def test_tofu_scene_self_boot_ready_state_guard():
 # ---------------------------------------------------------------------------
 # 5. cross-references between the pair are window-guarded (control)
 # ---------------------------------------------------------------------------
+# The migrated sections read the sibling namespace through `runtimeScope`
+# (the scope prelude's `typeof window !== "undefined" ? window : globalThis`)
+# instead of a bare `window` — the guard semantics are identical.
+_WINDOWED_GUARD = r'(?:window|runtimeScope)\.'
+
+
 def test_pet_reads_scene_guarded():
     guards = re.findall(
-        r'window\.TofuScene\s*&&', PET_JS.read_text())
+        _WINDOWED_GUARD + r'TofuScene\s*&&', PET_JS.read_text())
     assert len(guards) >= 3, (
         f'tofu-pet.js must window-guard every TofuScene read (lightInfo / '
         f'critterX / spook) — the scene may still be in flight; found '
@@ -155,7 +185,7 @@ def test_pet_reads_scene_guarded():
 
 def test_scene_reads_pet_guarded():
     guards = re.findall(
-        r'window\.TofuPet\s*&&', SCENE_JS.read_text())
+        _WINDOWED_GUARD + r'TofuPet\s*&&', SCENE_JS.read_text())
     assert len(guards) >= 3, (
         f'tofu-scene.js must window-guard every TofuPet read '
         f'(getState ×3) — the pet may still be in flight; found '
@@ -169,12 +199,18 @@ def test_no_external_tofu_callers_repo_wide():
     """Re-run of the slice census: outside tofu-pet.js / tofu-scene.js
     themselves (and built artifacts), no JS source may reference
     TofuPet./TofuScene. — a new unguarded external caller would
-    ReferenceError in the pre-load window."""
+    ReferenceError in the pre-load window.
+
+    The census walks the materialized migrated-runtime view
+    (tests/_runtime_sections.py): the old ``static/js`` tree is gone, and
+    walking a deleted directory made this guard pass VACUOUSLY."""
     import os
+    js_root = pathlib.Path(runtime_sections_dir())
     call_re = re.compile(r'\bTofu(?:Pet|Scene)\s*[.(]')
     built_re = re.compile(r'^(?:bundle|feature|i18n-(?:zh|en))-[0-9a-f]{8}\.js$')
     violations = []
-    for dirpath, _dirs, files in os.walk(ROOT / 'static' / 'js'):
+    for dirpath, dirs, files in os.walk(js_root):
+        dirs[:] = [d for d in dirs if not d.startswith(('.', '__'))]
         for fn in files:
             if (not fn.endswith('.js') or built_re.match(fn)
                     or fn in ('tofu-pet.js', 'tofu-scene.js')):
@@ -187,7 +223,7 @@ def test_no_external_tofu_callers_repo_wide():
                         or stripped.startswith('//')):
                     continue
                 if call_re.search(line):
-                    violations.append(f'{path.relative_to(ROOT)}:{i}')
+                    violations.append(f'{path.relative_to(js_root)}:{i}')
     assert not violations, (
         'external TofuPet/TofuScene callers appeared (must be added '
         'absence-safe, or the deferral is no longer zero-gate):\n  '

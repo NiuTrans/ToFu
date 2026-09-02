@@ -7,7 +7,7 @@ short narrated MG video (report → scene beats → motion engine).
 Flow:
 
   1. ``has_report`` gate (same report-first UX as the podcast start route);
-  2. source text via the podcast chain's ``_load_source_text`` (report in
+  2. source text via the podcast chain's ``load_source_text`` (report in
      the requested language → other language → translation → parsed text);
   3. :func:`build_abstract_scenes` — beats carrying THREE separate fields
      (see below), each one sized to fit both its frame and its time slot;
@@ -435,10 +435,11 @@ def start_video_abstract(paper_hash: str, *, lang: str = 'zh',
                          parallel: int = 2, max_scenes: int = _DEFAULT_MAX_SCENES,
                          scene_author: bool | None = None,
                          model: str | None = None,
+                         user_id: int,
                          force: bool = False) -> dict:
     """Start a motion-engine task rendering this paper's video abstract.
 
-    Dedup (§2.1 of docs/PAPER_MEDIA_UX_DESIGN.md): a second call with the
+    Dedup (§2.1 of docs/modules/ingest_media.md): a second call with the
     same (paper_hash, lang, voice, narration, burn_in, quality) joins the
     in-flight task instead of starting a parallel render — same contract
     as the motion main route. ``force=True`` (the frontend's Regenerate
@@ -459,15 +460,15 @@ def start_video_abstract(paper_hash: str, *, lang: str = 'zh',
         _motion_task_id,
         _new_motion_task,
     )
-    from lib.paper.podcast_engine import _load_source_text, has_report
+    from lib.paper.podcast_engine.worker import load_source_text, has_report
 
-    if not has_report(paper_hash):
+    if not has_report(paper_hash, user_id=user_id):
         return {'ok': False, 'reason': 'report_required'}
 
     # The model is part of the dedup identity: joining an in-flight render
     # made with a DIFFERENT model would silently serve the wrong film — the
     # cache-key-skew family (same class as the podcast cache row).
-    dedup_key = ('paper', paper_hash, lang, voice, bool(narration),
+    dedup_key = (user_id, 'paper', paper_hash, lang, voice, bool(narration),
                  bool(burn_in), quality, scene_author, model or '')
     if not force:
         existing = _motion_index_get(dedup_key)
@@ -477,7 +478,7 @@ def start_video_abstract(paper_hash: str, *, lang: str = 'zh',
             return {'ok': True, 'task_id': existing, 'deduped': True,
                     'scenes': 0, 'source_kind': 'joined'}
 
-    text, kind = _load_source_text(paper_hash, lang)
+    text, kind = load_source_text(paper_hash, lang, user_id=user_id)
     if not text.strip():
         return {'ok': False, 'reason': 'empty_source'}
     scenes = build_abstract_scenes(text, max_scenes=max_scenes, lang=lang,
@@ -510,11 +511,12 @@ def start_video_abstract(paper_hash: str, *, lang: str = 'zh',
     if force:
         # Force explicitly supersedes a live identity. Create first so index
         # pruning can never mistake the replacement for an orphan.
-        task = _new_motion_task(task_id, **task_kwargs)
+        task = _new_motion_task(
+            task_id, user_id=user_id, **task_kwargs)
         _motion_index_register(dedup_key, task_id)
     else:
         task, joined_task_id = _motion_claim_task(
-            dedup_key, task_id, **task_kwargs)
+            dedup_key, task_id, user_id=user_id, **task_kwargs)
     if joined_task_id:
         logger.info('[Paper:Video] concurrent dedup join: %s (paper=%s)',
                     joined_task_id, paper_hash[:8])

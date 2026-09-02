@@ -12,13 +12,13 @@ Census (2026-08-01, grep-verified):
     _cacheBreakCulprits / _CP_KEY_SVG / _CP_WARN_SVG) is COLD: the
     collapsed bar's warn tooltip calls _cacheBreakReason at paint —
     it STAYS in core,
-  * new contract: renderFinishInfo stashes the build ctx in the
-    _costCtxByMsg WeakMap (keyed by the msg object) and embeds an EMPTY
+  * new contract: renderFinishInfo stashes bounded build context in
+    _costCtxByTurnId (keyed by stable Turn identity) and embeds an EMPTY
     placeholder; the deferred _toggleCostPopover (feature-loader entry
     point) builds the popover on FIRST open — legacy embedded content
     (mixed-shape bundles) still wins when present,
-  * _msgElIndex (chat_render.js, core) resolves the msg from the clicked
-    tag; getActiveConv is core.
+  * the clicked tag carries stable Turn identity; no positional message lookup
+    participates in the popover path.
 
 Behaviour harness (tests/test_frontend_finish_info_rich_modes.py)
 proves both modes against the REAL files: degraded (core alone → bar
@@ -119,15 +119,12 @@ def test_phrase_family_stays_cold():
 # ---------------------------------------------------------------------------
 def test_core_stashes_ctx_no_inline_build():
     src = _fi()
-    assert '_costCtxByMsg.set(msg,' in src, (
-        'renderFinishInfo must stash the popover ctx in _costCtxByMsg')
-    assert 'var _costCtxByMsg = new WeakMap()' in src, (
-        'the _costCtxByMsg WeakMap must be declared in core — as a VAR, '
-        'not const: the deferred rich module reads it across the bundle '
-        'boundary, and only a top-level var lands on the global object '
-        '(reachable from any script/eval scope); a const lives only in '
-        'the shared lexical env and is invisible to the deferred '
-        "bundle's eval in the modes harness (2026-08-01 sub-8 fix)")
+    assert '_rememberCostContext(turnId, {' in src, (
+        'renderFinishInfo must stash popover context by stable Turn id')
+    assert 'var _costCtxByTurnId = new Map()' in src, (
+        'the deferred rich module must share a Turn-keyed context map')
+    assert '_COST_CONTEXT_LIMIT' in src, (
+        'the Turn-keyed presentation cache must remain bounded')
     assert '${popHtml}' not in src, (
         'renderFinishInfo must no longer embed pre-built popover HTML')
     assert '_buildCostPopover({' not in src, (
@@ -136,10 +133,10 @@ def test_core_stashes_ctx_no_inline_build():
 
 def test_rich_toggle_lazy_builds():
     src = _rich()
-    assert '_costCtxByMsg.get(' in src, (
-        'the deferred toggle must read the ctx stash for the lazy build')
-    assert '_msgElIndex' in src, (
-        'the deferred toggle must resolve the msg via _msgElIndex')
+    assert '_costCtxByTurnId.get(_turnId)' in src, (
+        'the deferred toggle must read context by stable Turn identity')
+    assert '_msgElIndex' not in src, (
+        'the deferred toggle must not recover identity from DOM position')
     assert 'data.innerHTML = _buildCostPopover(' in src, (
         'the deferred toggle must build the popover into the placeholder')
 

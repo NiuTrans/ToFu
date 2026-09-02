@@ -1,7 +1,7 @@
 """tests/test_orchestration_emits_subflow.py — message-axis + nesting.
 
-Covers the two new orchestration axes that let custom flows fully subsume
-both built-in orchestrations (endpoint + autopilot):
+Covers the two orchestration axes that let custom flows express verifier and
+autopilot loop shapes:
 
   * ``emits`` — per-node MESSAGE axis (user|assistant), orthogonal to role.
   * ``subflow`` — a "big role" composed of small roles (nested flow),
@@ -13,15 +13,32 @@ both built-in orchestrations (endpoint + autopilot):
 import unittest
 from pathlib import Path
 
-from lib.orchestration import (
-    DEFAULT_ROLE_ISOLATION, DEFAULT_ROLE_TIER, MAX_SUBFLOW_DEPTH, SCHEMA_ID,
-    VALID_SCOPES, build_autopilot_definition, build_endpoint_definition,
-    expand_subflows, resolve_emits, resolve_isolation, resolve_scope,
-    resolve_tier, validate_definition, VERIFIER_ROLES,
+import pytest
+
+from lib.orchestration._builtin_definitions import (
+    build_autopilot_definition,
+)
+from lib.orchestration._definition_contract import SCHEMA_ID
+from lib.orchestration._role_axes import (
+    DEFAULT_ROLE_ISOLATION,
+    DEFAULT_ROLE_TIER,
+    VALID_SCOPES,
+    VERIFIER_ROLES,
+    resolve_emits,
+    resolve_isolation,
+    resolve_scope,
+    resolve_tier,
+)
+from lib.orchestration._subflow_contract import MAX_SUBFLOW_DEPTH
+from lib.orchestration._subflow_expansion import expand_subflows
+from lib.orchestration._validate import validate_definition
+from tests.support.orchestration_definitions import (
+    build_verifier_loop_definition,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
+pytestmark = pytest.mark.unit
 
 
 class ResolveEmitsTest(unittest.TestCase):
@@ -257,10 +274,10 @@ class ExpandSubflowsTest(unittest.TestCase):
         self.assertIn('writer', roles)
 
     def test_no_subflows_returns_equivalent(self):
-        ep = build_endpoint_definition()
-        flat = expand_subflows(ep)
+        definition = build_verifier_loop_definition()
+        flat = expand_subflows(definition)
         self.assertEqual({n['id'] for n in flat['nodes']},
-                         {n['id'] for n in ep['nodes']})
+                         {n['id'] for n in definition['nodes']})
 
     def test_ref_without_resolver_raises_at_expand(self):
         d = {
@@ -494,9 +511,10 @@ class ParallelVerdictChannelWarningTest(unittest.TestCase):
         subflow_runtime = (
             ROOT / 'lib/orchestration_subflow_runtime.py'
         ).read_text()
-        adapter = (ROOT / 'lib/orchestration_endpoint_adapter.py').read_text()
-        endpoint_projection = (
-            ROOT / 'lib/orchestration_endpoint_projection.py'
+        adapter = (
+            ROOT / 'lib/orchestration_chat_flow_adapter.py').read_text()
+        flow_projection = (
+            ROOT / 'lib/orchestration_chat_flow_projection.py'
         ).read_text()
 
         self.assertIn('def parallel_verdict_channel_warnings(', topology)
@@ -505,9 +523,9 @@ class ParallelVerdictChannelWarningTest(unittest.TestCase):
         self.assertIn('from lib.orchestration._role_axes import VERIFIER_ROLES', topology)
         self.assertIn(
             'from lib.orchestration._role_axes import VERIFIER_ROLES',
-            endpoint_projection,
+            flow_projection,
         )
-        self.assertIn('endpoint_emits_for_role,', adapter)
+        self.assertIn('flow_emits_for_role,', adapter)
         self.assertIn('from lib.orchestration._role_axes import VERIFIER_ROLES', engine)
         self.assertIn('resolve_node_runtime_param', role_runtime)
         self.assertIn("node, 'isolation'", role_runtime)
@@ -520,7 +538,7 @@ class ParallelVerdictChannelWarningTest(unittest.TestCase):
         )
         sources = '\n'.join((
             roles, topology, engine, role_runtime, agent_runner, subflow_runtime,
-            endpoint_projection, adapter,
+            flow_projection, adapter,
         ))
         self.assertEqual(
             sources.count("frozenset({'critic', 'reviewer', 'virtual_user'})"),
@@ -548,8 +566,8 @@ class ParallelVerdictChannelWarningTest(unittest.TestCase):
 
     def test_shared_context_outside_parallel_no_warning(self):
         # A shared-context worker in a plain linear loop is the CORRECT
-        # endpoint pattern — it must NOT trip the parallel warning.
-        d = build_endpoint_definition()
+        # verifier-loop pattern — it must NOT trip the parallel warning.
+        d = build_verifier_loop_definition()
         v = validate_definition(d)
         self.assertTrue(v['ok'], v['errors'])
         self.assertFalse(self._has_par_warning(v), v['warnings'])

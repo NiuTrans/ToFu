@@ -208,6 +208,18 @@ class ResponseTranslationTest(unittest.TestCase):
             {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': 'x'}]})
         self.assertEqual(o['choices'][0]['finish_reason'], 'stop')
 
+    def test_missing_or_unknown_stop_reason_is_not_laundered_to_stop(self):
+        missing = anthropic_response_to_openai({
+            'content': [{'type': 'text', 'text': 'partial'}],
+        })
+        unknown = anthropic_response_to_openai({
+            'stop_reason': 'future_limit',
+            'content': [{'type': 'text', 'text': 'partial'}],
+        })
+
+        self.assertIsNone(missing['choices'][0]['finish_reason'])
+        self.assertEqual(unknown['choices'][0]['finish_reason'], 'future_limit')
+
     def test_hosted_tool_blocks_are_kept_for_protocol_replay(self):
         blocks = [
             {'type': 'server_tool_use', 'id': 'srv_1',
@@ -283,6 +295,14 @@ class SSETranslationTest(unittest.TestCase):
         out = t.translate(json.dumps({'type': 'error',
                                       'error': {'message': 'boom'}}))
         self.assertEqual(out[0]['error']['message'], 'boom')
+
+    def test_unknown_stop_reason_remains_unknown(self):
+        _content, _args, finish, _done = self._run([{
+            'type': 'message_delta',
+            'delta': {'stop_reason': 'future_limit'},
+        }])
+
+        self.assertEqual(finish, 'future_limit')
 
     def test_server_tool_use_is_not_dispatched_and_full_blocks_are_replayable(self):
         t = AnthropicSSETranslator(model='claude-sonnet-4-5')

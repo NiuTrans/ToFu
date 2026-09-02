@@ -1,6 +1,6 @@
 """lib.billing.pricing — Relay margin + (legacy) per-model price table.
 
-★ As of the 2026-06-24 single-engine unification, the per-token RATE math
+As of the 2026-06-24 single-engine unification, the per-token RATE math
 no longer lives here. ``lib/billing/cost.compute_request_cost`` delegates to
 ``lib.cost.compute_cost`` over the rich ``lib/pricing.py`` table (100+ models,
 cache conventions, Qwen tiers, provider overrides). What this module STILL
@@ -242,7 +242,7 @@ class PricingError(ValueError):
 def save_margin(margin: float) -> Dict:
     """Persist ONLY the relay profit margin, then hot-reload.
 
-    ★ As of the 2026-06-24 single-engine unification the per-model RATE rows
+    As of the 2026-06-24 single-engine unification the per-model RATE rows
     are no longer an editable surface — they are NOT a cost source anymore
     (cost rates are authoritative in ``lib/pricing.py``), so allowing edits
     here would re-create the very drift this cleanup removed. The ONLY tunable

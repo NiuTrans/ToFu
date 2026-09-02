@@ -14,6 +14,7 @@ and do a single coalesced save at the end.
 import datetime as _dt
 import re
 
+from lib.identity import require_user_id
 from lib.log import get_logger
 
 from .storage import _load_report, _save_report
@@ -174,7 +175,7 @@ def _merge_manual_state(result, existing):
     return result
 
 
-def _get_yesterday_carryover(target_date, _prev=None):
+def _get_yesterday_carryover(target_date, *, owner_user_id, _prev=None):
     """Load yesterday's unfinished TODO items and blocked streams.
 
     Args:
@@ -184,11 +185,13 @@ def _get_yesterday_carryover(target_date, _prev=None):
 
     Returns a list of short carryover strings for LLM context.
     """
+    owner_id = require_user_id(
+        owner_user_id, context='daily report carryover')
     try:
         if _prev is None:
             dt = _dt.date.fromisoformat(target_date)
             yesterday = (dt - _dt.timedelta(days=1)).isoformat()
-            prev = _load_report(yesterday)
+            prev = _load_report(yesterday, owner_user_id=owner_id)
         else:
             prev = _prev
         if not prev:
@@ -208,7 +211,7 @@ def _get_yesterday_carryover(target_date, _prev=None):
         return []
 
 
-def _get_today_inherited_todos(target_date, _prev=None):
+def _get_today_inherited_todos(target_date, *, owner_user_id, _prev=None):
     """Load yesterday's unfinished TODO items as structured dicts for display.
 
     These are items from the previous day's ``tomorrow[]`` that haven't
@@ -221,10 +224,15 @@ def _get_today_inherited_todos(target_date, _prev=None):
 
     Returns list of dicts: [{id, text, done, _inherited, _origin_date}, ...].
     """
+    owner_id = require_user_id(
+        owner_user_id, context='daily report inherited todos')
     try:
         dt = _dt.date.fromisoformat(target_date)
         yesterday = (dt - _dt.timedelta(days=1)).isoformat()
-        prev = _prev if _prev is not None else _load_report(yesterday)
+        prev = (
+            _prev if _prev is not None
+            else _load_report(yesterday, owner_user_id=owner_id)
+        )
         if not prev:
             return []
         items = []
@@ -247,7 +255,8 @@ def _get_today_inherited_todos(target_date, _prev=None):
         return []
 
 
-def _get_yesterday_todo_accountability(target_date, _prev=None):
+def _get_yesterday_todo_accountability(
+        target_date, *, owner_user_id, _prev=None):
     """Load yesterday's TODO items with completion status for LLM context.
 
     Args:
@@ -256,11 +265,13 @@ def _get_yesterday_todo_accountability(target_date, _prev=None):
 
     Returns list of (text, done_bool) tuples for the LLM prompt.
     """
+    owner_id = require_user_id(
+        owner_user_id, context='daily report todo accountability')
     try:
         if _prev is None:
             dt = _dt.date.fromisoformat(target_date)
             yesterday = (dt - _dt.timedelta(days=1)).isoformat()
-            prev = _load_report(yesterday)
+            prev = _load_report(yesterday, owner_user_id=owner_id)
         else:
             prev = _prev
         if not prev:
@@ -276,7 +287,8 @@ def _get_yesterday_todo_accountability(target_date, _prev=None):
 
 
 def _mark_yesterday_todos_done(target_date, yesterday_done, todo_status,
-                               stream_titles=None, _prev=None, _defer_save=False):
+                               *, owner_user_id, stream_titles=None,
+                               _prev=None, _defer_save=False):
     """Write back completion status to yesterday's report.
 
     When the LLM identifies that yesterday's TODO items were addressed
@@ -303,6 +315,8 @@ def _mark_yesterday_todos_done(target_date, yesterday_done, todo_status,
         Tuple ``(prev_dict_or_None, changed_count)`` so the caller can
         perform a coalesced save covering multiple mutations.
     """
+    owner_id = require_user_id(
+        owner_user_id, context='daily report todo completion')
     all_done_texts = list(yesterday_done or [])
     # Also treat stream titles+summaries as potential done signals
     if stream_titles:
@@ -314,7 +328,10 @@ def _mark_yesterday_todos_done(target_date, yesterday_done, todo_status,
     try:
         dt = _dt.date.fromisoformat(target_date)
         yesterday = (dt - _dt.timedelta(days=1)).isoformat()
-        prev = _prev if _prev is not None else _load_report(yesterday)
+        prev = (
+            _prev if _prev is not None
+            else _load_report(yesterday, owner_user_id=owner_id)
+        )
         if not prev:
             return None, 0
 
@@ -339,7 +356,7 @@ def _mark_yesterday_todos_done(target_date, yesterday_done, todo_status,
                     break
 
         if changed and not _defer_save:
-            _save_report(yesterday, prev)
+            _save_report(yesterday, prev, owner_user_id=owner_id)
             logger.info('[DailyReport] Wrote back %d completed TODOs to %s',
                         changed, yesterday)
         return prev, changed
@@ -348,7 +365,8 @@ def _mark_yesterday_todos_done(target_date, yesterday_done, todo_status,
         return _prev, 0
 
 
-def _close_yesterday_remaining_todos(target_date, _prev=None, _defer_save=False):
+def _close_yesterday_remaining_todos(
+        target_date, *, owner_user_id, _prev=None, _defer_save=False):
     """Close ALL remaining undone TODOs in yesterday's report.
 
     Once today's report is generated, yesterday's plan is finalized:
@@ -370,10 +388,15 @@ def _close_yesterday_remaining_todos(target_date, _prev=None, _defer_save=False)
     Returns:
         Tuple ``(unfinished_list, prev_dict_or_None, changed_count)``.
     """
+    owner_id = require_user_id(
+        owner_user_id, context='daily report todo closure')
     try:
         dt = _dt.date.fromisoformat(target_date)
         yesterday = (dt - _dt.timedelta(days=1)).isoformat()
-        prev = _prev if _prev is not None else _load_report(yesterday)
+        prev = (
+            _prev if _prev is not None
+            else _load_report(yesterday, owner_user_id=owner_id)
+        )
         if not prev:
             return [], None, 0
 
@@ -400,7 +423,7 @@ def _close_yesterday_remaining_todos(target_date, _prev=None, _defer_save=False)
             unfinished.append(uf_item)
 
         if changed and not _defer_save:
-            _save_report(yesterday, prev)
+            _save_report(yesterday, prev, owner_user_id=owner_id)
             logger.info('[DailyReport] Auto-closed %d remaining TODOs from %s',
                         changed, yesterday)
 

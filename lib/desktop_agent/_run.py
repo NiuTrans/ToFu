@@ -200,9 +200,9 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
         server_url: Tofu server base URL.
         permissions: dict with allow_write / allow_exec / allow_gui flags.
         poll_interval: seconds between polls.
-        bridge_secret: optional X-Bridge-Secret value. Required when the
-            server has TOFU_BRIDGE_SECRET configured. Pass empty string to
-            disable (LAN-only deployments).
+        bridge_secret: owner-scoped ``agents:bridge`` credential. A standalone
+            agent always requires one; the packaged in-process agent receives
+            its process-memory capability from the launcher.
         stop_event: optional ``threading.Event``; when set, the loop exits
             cleanly at the next poll boundary. Lets the desktop tray toggle the
             agent off without killing the process.
@@ -313,7 +313,8 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
     logger.info('   Agent: %s (%s, %s)', agent_frame['name'],
                 agent_id[:8], agent_frame['platform'])
     logger.info('   Permissions: %s', json.dumps(permissions))
-    logger.info('   Bridge secret: %s', 'configured' if bridge_secret else 'none (LAN-only)')
+    logger.info('   Device credential: %s',
+                'configured' if bridge_secret else 'missing')
     available_cmds = ', '.join(sorted(COMMANDS.keys()))
     logger.info('   Available commands: %s', available_cmds)
     logger.info('   Poll interval: %ss', poll_interval)
@@ -374,9 +375,9 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
                 if tofu_refusal:
                     _emit('auth')
                     _route_alive()  # Tofu answered — the address is fine
-                    logger.error('Server returned 401 — bridge auth failed. '
-                                 'Set --bridge-secret (or TOFU_BRIDGE_SECRET env var) '
-                                 'to match the server.')
+                    logger.error('Server returned 401 — the device credential '
+                                 'is missing, revoked, or belongs to another '
+                                 'owner. Pair the device again.')
                 else:
                     _emit('proxy')
                     _route_dead_hit()
@@ -518,10 +519,9 @@ Examples:
                              'machine\'s network')
     parser.add_argument('--allow-all', action='store_true', help='Enable all permissions')
     parser.add_argument('--poll-interval', type=float, default=1.0, help='Polling interval in seconds')
-    parser.add_argument('--bridge-secret', default='',
-                        help='X-Bridge-Secret value matching server TOFU_BRIDGE_SECRET '
-                             '(required when the server enforces bridge auth). '
-                             'Falls back to TOFU_BRIDGE_SECRET env var.')
+    parser.add_argument(
+        '--bridge-token', required=True,
+        help='Owner-scoped agents:bridge credential returned by device pairing.')
     parser.add_argument('--root', action='append', default=[], metavar='NAME=PATH',
                         help='Declare a project share root (repeatable). Merged into '
                              'the agent config and persisted — a same-named existing '
@@ -539,9 +539,7 @@ Examples:
         allow_all=args.allow_all,
     )
 
-    bridge_secret = (args.bridge_secret
-                     or os.environ.get('TOFU_BRIDGE_SECRET')
-                     or '').strip()
+    bridge_secret = args.bridge_token.strip()
 
     if args.root:
         from lib.desktop_agent.config import merge_cli_roots

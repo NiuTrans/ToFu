@@ -32,6 +32,52 @@ from lib.tasks_pkg.segments._types import (
 logger = get_logger(__name__)
 
 
+def _round_block_suffix(round_dict: dict[str, Any], position: int) -> str:
+    """Return a stable, content-independent identity within one turn.
+
+    ``llmRound`` is the canonical batch identity.  Older/synthetic round
+    shapes may not carry it, so their durable round number is the next choice;
+    position is the final compatibility key and is stable for the immutable
+    merged history.  Never derive block identity from growing text.
+    """
+    llm_round = round_dict.get('llmRound')
+    if llm_round is not None:
+        return f'llm-{llm_round}'
+    round_number = round_dict.get('roundNum')
+    if round_number is not None:
+        return f'round-{round_number}'
+    return f'legacy-{position}'
+
+
+def _tool_block_id(round_dict: dict[str, Any], position: int) -> str:
+    tool_call_id = str(round_dict.get('toolCallId') or '').strip()
+    return f'tool:{tool_call_id}' if tool_call_id else (
+        f'tool:{_round_block_suffix(round_dict, position)}'
+    )
+
+
+def tool_use_segment_from_round(
+    round_dict: dict[str, Any], position: int,
+) -> dict[str, Any]:
+    """Build one tool block without applying finished-turn ordering.
+
+    Live projection repair uses this constructor to append an early-announced
+    tool after the already-streamed prose prefix. Keeping the block shape here
+    makes final assembly and incremental repair share one source of truth.
+    """
+    return {
+        'type': SEG_TOOL_USE,
+        'blockId': _tool_block_id(round_dict, position),
+        'id': round_dict.get('toolCallId', ''),
+        'name': round_dict.get('toolName', ''),
+        'input': round_dict.get('toolArgs', ''),
+        'llmRound': round_dict.get('llmRound'),
+        'result': {'content': round_dict.get('toolContent'),
+                   'status': round_dict.get('status')},
+        '_round': round_dict,
+    }
+
+
 def _merged_rounds(task: dict[str, Any], merged: list | None) -> list:
     """Return the ordered checkpoint+current tool rounds.
 
@@ -42,7 +88,7 @@ def _merged_rounds(task: dict[str, Any], merged: list | None) -> list:
     """
     if merged is not None:
         return merged
-    from lib.tasks_pkg.manager import _merge_tool_rounds
+    from lib.tasks_pkg.manager._persist import _merge_tool_rounds
     return _merge_tool_rounds(task)
 
 
@@ -97,10 +143,12 @@ def assemble_segments(task: dict[str, Any],
         # order (thinking before the prose it preceded).
         if batch_key not in seen_batches:
             seen_batches.add(batch_key)
+            block_suffix = _round_block_suffix(r, idx)
             think = r.get('thinking')
             if think:
                 seg: dict[str, Any] = {
                     'type': SEG_THINKING, 'text': think,
+                    'blockId': f'thinking:{block_suffix}',
                     'deliverable': False, 'llmRound': lr,
                 }
                 sig = r.get('thinkingSignature')
@@ -111,20 +159,12 @@ def assemble_segments(task: dict[str, Any],
             if ac:
                 segments.append({
                     'type': SEG_TEXT, 'text': ac,
+                    'blockId': f'text:{block_suffix}',
                     'deliverable': False, 'llmRound': lr,
                 })
         # Every round entry becomes a tool_use segment with its result nested,
         # so a tool and its output are one renderable unit.
-        segments.append({
-            'type': SEG_TOOL_USE,
-            'id': r.get('toolCallId', ''),
-            'name': r.get('toolName', ''),
-            'input': r.get('toolArgs', ''),
-            'llmRound': lr,
-            'result': {'content': r.get('toolContent'),
-                       'status': r.get('status')},
-            '_round': r,
-        })
+        segments.append(tool_use_segment_from_round(r, idx))
 
     # ── Terminal round: the deliverable prose + its thinking ──
     # task['content'] / task['thinking'] hold the LAST round's output (reset
@@ -135,12 +175,14 @@ def assemble_segments(task: dict[str, Any],
     if term_think:
         segments.append({
             'type': SEG_THINKING, 'text': term_think,
+            'blockId': 'thinking:terminal',
             'deliverable': False, 'terminal': True,
         })
     term_content = task.get('content') or ''
     if term_content:
         term_seg: dict[str, Any] = {
             'type': SEG_TEXT, 'text': term_content,
+            'blockId': 'text:terminal',
             'deliverable': True, 'terminal': True,
         }
         # A turn cut off mid-answer leaves a RESUMABLE deliverable prefix.

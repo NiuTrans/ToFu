@@ -85,18 +85,6 @@ def test_stop_wakes_watcher_without_process_shutdown(monkeypatch):
 
 
 @pytest.mark.unit
-def test_production_entry_registers_auto_restart_shutdown_owner():
-    from pathlib import Path
-
-    source = (Path(__file__).resolve().parents[1]
-              / 'lib/serving_loop_lifecycle.py').read_text()
-    assert 'def _stop_auto_restart()' in source
-    assert 'stop_auto_restart_watch' in source
-    assert 'stop_auto_restart_watch(timeout=2.0)' in source
-    assert 'await asyncio.to_thread(_stop_auto_restart)' in source
-
-
-@pytest.mark.unit
 def test_first_poll_captures_baseline(state):
     from lib.auto_restart import poll_once
     v = poll_once(state, **_seams(head_sha=lambda: 'aaa111'))

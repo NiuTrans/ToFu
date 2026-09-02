@@ -2,7 +2,7 @@
 """tests/test_motion_video_engine.py — P2b headless pipeline suite.
 
 Covers the zero-LLM / engine / runtime / api_v1 slice
-(docs/MOTION_VIDEO_DESIGN.md P2b):
+(docs/modules/ingest_media.md P2b):
 
   * build_storyboard — greedy bounds, contiguity by construction (always
     passes the storyboard gate), sentence-final preference, runt merge
@@ -31,6 +31,8 @@ import pytest
 from lib import motion_video as mv
 
 pytestmark = pytest.mark.unit
+
+TEST_OWNER_USER_ID = 1
 
 SRT = """1
 00:00:01,000 --> 00:00:03,000
@@ -123,7 +125,8 @@ def _engine_task(tmp_path, **over):
               voice='', speed=None, alignment='loose', narration=True,
               quality='draft', parallel=2, width=1080, height=1440)
     kw.update(over)
-    return _new_motion_task(_motion_task_id(), **kw)
+    return _new_motion_task(
+        _motion_task_id(), **kw, user_id=TEST_OWNER_USER_ID)
 
 
 def _fake_narration(monkeypatch, tmp_path):
@@ -352,7 +355,7 @@ def test_runtime_dedup_lifecycle():
     task = _new_motion_task(tid, srt_path='/x', workdir='/x', voice='',
                             speed=None, alignment='loose', narration=True,
                             quality='draft', parallel=1, width=1080,
-                            height=1440)
+                            height=1440, user_id=TEST_OWNER_USER_ID)
     _motion_index_register(key, tid)
     assert _motion_index_get(key) == tid
     _motion_runtime.finish(tid, result={'ok': True})

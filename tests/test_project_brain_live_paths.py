@@ -43,6 +43,8 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _FEED_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_feed.py')
@@ -50,16 +52,6 @@ _FEED_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_feed.py')
 # A distinctive project path that no other test touches; the trailing slash is
 # the whole point of the exercise.
 _PROJ = '/tmp/tofu-live-brain-proj'
-
-
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    """Create every table in the isolated test SQLite DB (mirrors
-    test_project_board.py) so the live server + seeding have real tables."""
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
 
 
 def _get_json(base, path):
@@ -85,34 +77,38 @@ def _qs(path_value):
 
 
 @pytest.fixture()
-def _seed_brain(flask_app):
+def _seed_brain(flask_app, monkeypatch):
     """Seed one board epic + a charter (north star + one decision) under the
     STRIPPED path, then clean up. The charter DECISION commit is what emits
     the feed event the /feed assertions rely on (post_task deliberately emits
     nothing — posting is not a lifecycle pulse)."""
     from lib.conversations.project_board import post_task
     from lib.conversations.project_charter import commit_charter
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    from tests._seed import clear_board, clear_events, clear_records
     # Stub the push mirror so seeding doesn't require a live WS hub.
     import lib.agent_core.push as _push
     _orig_push = _push.push_event
     _push.push_event = lambda *a, **k: None
+    monkeypatch.setattr(
+        'lib.conversations.project_status.build_status_snapshot',
+        lambda *_a, **_k: {'ok': True})
+    monkeypatch.setattr(
+        'lib.conversations.project_watch.address_open_items',
+        lambda *_a, **_k: {'ok': True})
     with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_tasks WHERE project_path=?', (_PROJ,))
-        db.execute('DELETE FROM project_events WHERE project_path=?', (_PROJ,))
-        db.execute('DELETE FROM project_charter WHERE project_path=?', (_PROJ,))
-        db.commit()
-        res_post = post_task(_PROJ, 'cLIVE', 'LIVE BRAIN EPIC')
+        clear_board(_PROJ, user_id=TEST_OWNER_USER_ID)
+        clear_events()
+        clear_records('project_charter')
+        res_post = post_task(_PROJ, 'cLIVE', 'LIVE BRAIN EPIC', user_id=TEST_OWNER_USER_ID)
         # commit_charter's two operations are MUTUALLY EXCLUSIVE by design
         # (the CAS-split: an overwrite does not commute, an append does), so
         # the north star and the decision are TWO commits. The append emits
         # the 'decided' feed event.
         res_content = commit_charter(_PROJ, content='LIVE NORTH STAR',
-                                     updated_by_conv='cLIVE')
+                                     updated_by_conv='cLIVE', user_id=TEST_OWNER_USER_ID)
         res_append = commit_charter(_PROJ, add_decision='live decision',
                                     summary='live rule',
-                                    updated_by_conv='cLIVE')
+                                    updated_by_conv='cLIVE', user_id=TEST_OWNER_USER_ID)
         # A refused seed must fail HERE, loudly — not downstream as a
         # misleading "the live route returned empty". That is exactly how this
         # test rotted: the mutual-exclusion rule landed, the seed's mixed call
@@ -127,11 +123,9 @@ def _seed_brain(flask_app):
     finally:
         _push.push_event = _orig_push
         with flask_app.app_context():
-            db = get_thread_db(DOMAIN_CHAT)
-            db.execute('DELETE FROM project_tasks WHERE project_path=?', (_PROJ,))
-            db.execute('DELETE FROM project_events WHERE project_path=?', (_PROJ,))
-            db.execute('DELETE FROM project_charter WHERE project_path=?', (_PROJ,))
-            db.commit()
+            clear_board(_PROJ, user_id=TEST_OWNER_USER_ID)
+            clear_events()
+            clear_records('project_charter')
 
 
 def test_live_board_resolves_stripped_and_trailing_slash(live_server, _seed_brain):
@@ -270,14 +264,12 @@ def test_NC_live_no_normalization_blanks_trailing_slash(live_server, flask_app):
     try:
         with neutered_source(_FEED_SRC, anchor, patched):
             import lib.conversations.project_board as pb
+            from tests._seed import clear_board
             with flask_app.app_context():
-                from lib.database import DOMAIN_CHAT, get_thread_db
-                db = get_thread_db(DOMAIN_CHAT)
-                db.execute('DELETE FROM project_tasks WHERE project_path IN (?,?)',
-                           (_PROJ, _PROJ + '/'))
-                db.commit()
+                clear_board(
+                    _PROJ, _PROJ + '/', user_id=TEST_OWNER_USER_ID)
                 # Seed under the STRIPPED path (write key = '/proj').
-                pb.post_task(_PROJ, 'cNC', 'NC EPIC')
+                pb.post_task(_PROJ, 'cNC', 'NC EPIC', user_id=TEST_OWNER_USER_ID)
             # The live route, now running the neutered normalizer, queries the
             # trailing-slash key verbatim → MISS.
             st, data = _get_json(live_server,
@@ -289,8 +281,5 @@ def test_NC_live_no_normalization_blanks_trailing_slash(live_server, flask_app):
     finally:
         _push.push_event = _orig_push
         with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            db = get_thread_db(DOMAIN_CHAT)
-            db.execute('DELETE FROM project_tasks WHERE project_path IN (?,?)',
-                       (_PROJ, _PROJ + '/'))
-            db.commit()
+            from tests._seed import clear_board
+            clear_board(_PROJ, _PROJ + '/', user_id=TEST_OWNER_USER_ID)

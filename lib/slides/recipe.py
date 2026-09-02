@@ -1,6 +1,6 @@
 """lib/slides/recipe.py — topic → finished deck, as a checkpointed stage graph.
 
-Rides ``lib.production.stages`` (docs/SLIDES_CAPABILITY_DESIGN.md §4.5):
+Rides ``lib.production.stages`` (docs/modules/ingest_media.md §4.5):
 
     research  → URL-grounded fact cards (degradable)                  [search]
     outline   → deck plan: sources + layout/asset rhythm + briefs     [LLM]
@@ -242,7 +242,7 @@ def _gate_outline(ctx: dict, artifact: dict) -> list:
 # ── Stage: design (zero-LLM) ──────────────────────────────
 
 def _run_design(ctx: dict) -> dict:
-    from lib.design_sys import fonts as _fonts
+    import lib.design_sys.fonts as _fonts
     from lib.design_sys.themes import default_theme_id, get_theme
     outline = ctx['artifacts']['outline']
     theme_id = outline.get('theme_id') or ''
@@ -631,7 +631,7 @@ def _run_layout_qa(ctx: dict) -> dict:
 def _run_visual_qa(ctx: dict) -> dict:
     """VLM checklist per page + ONE author repair round for actionable
     findings. Fully degradable: no vision model / no browser → skipped."""
-    from lib.design_sys import visual_qa as vqa
+    import lib.design_sys.visual_qa as vqa
     from lib.design_sys.themes import get_theme
     avail, reason = vqa.visual_qa_available()
     if not avail:

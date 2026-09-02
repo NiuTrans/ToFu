@@ -6,27 +6,38 @@ from pathlib import Path
 
 import pytest
 
+from evaluations.swebench import images, preflight
 from evaluations.swebench.artifacts import (
     create_run_dir,
+    harden_artifact_tree,
     output_guard_status,
     prepare_output_root,
     validate_run_id,
 )
 from evaluations.swebench.audit import audit_run
-from evaluations.swebench.constants import terminal_bench_21_task_digests
+from evaluations.swebench.constants import (
+    BENCHMARKS,
+    BenchmarkDefinition,
+    swebench_verified_task_digests,
+    terminal_bench_21_task_digests,
+)
 from evaluations.swebench.cli import build_parser
 from evaluations.swebench.harbor_runner import (
     HarborRunSpec,
     build_job_config,
     start_harbor_run,
 )
+from evaluations.swebench.images import load_definitions
 from evaluations.swebench.official import (
     group_predictions,
     load_predictions,
     normalized_predictions_sha256,
 )
 from evaluations.swebench.process import prepare_runtime_environment
-from evaluations.swebench import preflight
+from evaluations.swebench.rootless_qemu import (
+    RootlessQemuSettings,
+    load_image_store_index,
+)
 from lib.project_mod.config import IGNORE_DIRS
 
 
@@ -41,6 +52,26 @@ def test_artifact_root_is_private_and_self_ignoring(tmp_path):
     assert (root / ".ignore").read_text().startswith("*")
     assert (run_dir / ".gitignore").read_text().startswith("*")
     assert root.stat().st_mode & 0o077 == 0
+
+
+def test_artifact_hardening_preserves_user_bits_and_skips_symlinks(tmp_path):
+    root = tmp_path / "private"
+    root.mkdir(mode=0o700)
+    nested = root / "nested"
+    nested.mkdir(mode=0o755)
+    artifact = nested / "result.json"
+    artifact.write_text("{}")
+    artifact.chmod(0o644)
+    external = tmp_path / "external"
+    external.write_text("keep")
+    external.chmod(0o644)
+    (nested / "external-link").symlink_to(external)
+
+    harden_artifact_tree(root)
+
+    assert nested.stat().st_mode & 0o777 == 0o700
+    assert artifact.stat().st_mode & 0o777 == 0o600
+    assert external.stat().st_mode & 0o777 == 0o644
 
 
 def test_project_scanner_excludes_all_evaluation_artifact_directories():
@@ -192,11 +223,205 @@ def test_singularity_config_is_local_serial_and_reuses_immutable_images(tmp_path
     assert manifest["strict_cgroup_isolation"] is False
 
 
-def test_local_backend_is_default_and_apptainer_gets_singularity_alias(
+def test_rootless_qemu_config_uses_custom_vm_environment_and_host_agent(tmp_path):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    qemu = runtime / "qemu-system-x86_64"
+    qemu_img = runtime / "qemu-img"
+    for executable in (qemu, qemu_img):
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+    base = tmp_path / "base.qcow2"
+    base.write_bytes(b"trusted-base")
+    store = tmp_path / "images"
+    store.mkdir(mode=0o700)
+    definition = BENCHMARKS["swebench-verified"]
+    (store / "index.json").write_text(json.dumps({
+        "schema": 1,
+        "benchmark": definition.key,
+        "dataset": definition.dataset,
+        "dataset_source_revision": definition.dataset_source_revision,
+        "task_count": definition.task_count,
+        "images": {
+            f"image-{index}": {
+                "tasks": [
+                    "swe-bench/django__django-11099"
+                    if index == 0
+                    else f"swe-bench/fixture-{index}"
+                ]
+            }
+            for index in range(definition.task_count)
+        },
+    }))
+    settings = RootlessQemuSettings(
+        base_disk=base,
+        image_store=store,
+        qemu_path=qemu,
+        qemu_img_path=qemu_img,
+    )
+    spec = HarborRunSpec(
+        agent="rootless_vm.harbor_tofu_agent:TofuHostAgent",
+        models=("deepseek-v4-flash-meituan",),
+        backend="rootless-qemu",
+        output_root=tmp_path / "evals",
+        task_ids=("swe-bench/django__django-11099",),
+        concurrency=4,
+        agent_concurrency=2,
+        rootless_qemu=settings,
+    )
+
+    _, run_dir = start_harbor_run(spec, dry_run=True)
+    config = json.loads((run_dir / "job-config.json").read_text())
+    environment = config["environment"]
+    assert environment["import_path"] == (
+        "rootless_vm.harbor_environment:RootlessQemuEnvironment"
+    )
+    assert environment["delete"] is True
+    assert environment["kwargs"]["image_store"] == str(store.resolve())
+    assert environment["kwargs"]["base_disk_sha256"]
+    assert config["agents"][0]["n_concurrent"] == 2
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["local_execution"] is True
+    assert manifest["network_namespace_isolation"] is True
+    assert manifest["strict_cgroup_isolation"] is False
+    assert manifest["vm_isolation"] is True
+    assert manifest["host_mounts"] is False
+
+    unsafe_agent = HarborRunSpec(
+        agent="codex",
+        models=("model",),
+        backend="rootless-qemu",
+        output_root=tmp_path,
+        rootless_qemu=settings,
+    )
+    with pytest.raises(ValueError, match="credential-safe agents"):
+        unsafe_agent.validate()
+
+
+def test_rootless_definition_cache_is_pinned_and_parses_dockerfile_base(tmp_path):
+    definition = BenchmarkDefinition(
+        key="fixture",
+        dataset="org/dataset@sha256:dataset",
+        task_count=1,
+        dataset_source_revision="sha256:dataset",
+        default_attempts=1,
+        official_min_attempts=1,
+        source_url="https://example.invalid/source",
+        source_commit="commit",
+    )
+    root = tmp_path / "definitions"
+    root.mkdir(mode=0o700)
+    task = root / "org" / "task" / ("a" * 64)
+    (task / "environment").mkdir(parents=True)
+    (task / "task.toml").write_text(
+        "[task]\nname = 'org/task'\n"
+        "[environment]\nos = 'linux'\ncpus = 1\nmemory_mb = 4096\n"
+    )
+    (task / "environment" / "Dockerfile").write_text(
+        "FROM example/base:pinned\nWORKDIR /testbed\n"
+    )
+    relative = task.relative_to(root).as_posix()
+    (root / "definitions.json").write_text(json.dumps({
+        "schema": 1,
+        "benchmark": definition.key,
+        "dataset": definition.dataset,
+        "dataset_source_revision": definition.dataset_source_revision,
+        "task_count": 1,
+        "tasks": [{"name": "org/task", "ref": "sha256:" + "a" * 64, "path": relative}],
+    }))
+
+    tasks = load_definitions(definition, root)
+
+    assert len(tasks) == 1
+    assert tasks[0].base_image == "example/base:pinned"
+    assert tasks[0].dockerfile is True
+    assert tasks[0].memory_mib == 4096
+
+
+def test_official_definition_cache_rejects_same_count_task_digest_drift(
+    tmp_path, monkeypatch
+):
+    expected_ref = "sha256:" + "a" * 64
+    monkeypatch.setattr(
+        images,
+        "swebench_verified_task_digests",
+        lambda: {"swe-bench/org__repo-1": expected_ref},
+    )
+    definition = BenchmarkDefinition(
+        key="swebench-verified",
+        dataset="org/dataset@sha256:dataset",
+        task_count=1,
+        dataset_source_revision="sha256:dataset",
+        default_attempts=1,
+        official_min_attempts=1,
+        source_url="https://example.invalid/source",
+        source_commit="commit",
+    )
+    root = tmp_path / "definitions"
+    root.mkdir(mode=0o700)
+    (root / "definitions.json").write_text(json.dumps({
+        "schema": 1,
+        "benchmark": definition.key,
+        "dataset": definition.dataset,
+        "dataset_source_revision": definition.dataset_source_revision,
+        "task_count": 1,
+        "tasks": [{
+            "name": "swe-bench/org__repo-1",
+            "ref": "sha256:" + "b" * 64,
+            "path": "unused",
+        }],
+    }))
+
+    with pytest.raises(ValueError, match="task digest lock mismatch"):
+        load_definitions(definition, root)
+
+
+def test_partial_rootless_store_is_valid_only_for_explicit_prepared_tasks(tmp_path):
+    definition = BENCHMARKS["swebench-verified"]
+    store = tmp_path / "partial-store"
+    store.mkdir(mode=0o700)
+    task = "swe-bench/psf__requests-1142"
+    (store / "index.json").write_text(json.dumps({
+        "schema": 1,
+        "benchmark": definition.key,
+        "dataset": definition.dataset,
+        "dataset_source_revision": definition.dataset_source_revision,
+        "task_count": definition.task_count,
+        "images": {"example/image:latest": {"tasks": [task]}},
+    }))
+
+    _, index = load_image_store_index(store, definition, required_tasks=(task,))
+
+    assert len(index["images"]) == 1
+    with pytest.raises(ValueError, match="incomplete"):
+        load_image_store_index(store, definition)
+    with pytest.raises(ValueError, match="missing 1 requested"):
+        load_image_store_index(
+            store,
+            definition,
+            required_tasks=("swe-bench/missing",),
+        )
+
+
+def test_prepare_rootless_cli_has_bounded_phase_defaults():
+    args = build_parser().parse_args(["prepare-rootless", "--phase", "definitions"])
+
+    assert args.benchmark == "swebench-verified"
+    assert args.definition_workers == 4
+    assert args.asset_workers == 4
+    assert args.cache_workers == 2
+    assert args.crane == "auto"
+    assert args.genisoimage is None
+
+
+def test_rootless_qemu_is_default_and_apptainer_gets_singularity_alias(
     tmp_path, monkeypatch
 ):
     monkeypatch.delenv("TOFU_EVAL_BACKEND", raising=False)
-    assert build_parser().parse_args(["doctor"]).backend == "singularity"
+    assert build_parser().parse_args(["doctor"]).backend == "rootless-qemu"
+    assert build_parser().parse_args(
+        ["doctor", "--task", "swe-bench/example"]
+    ).tasks == ["swe-bench/example"]
 
     runtime_bin = tmp_path / "runtime-bin"
     runtime_bin.mkdir()
@@ -245,6 +470,14 @@ def test_singularity_preflight_requires_writable_capacity(tmp_path, monkeypatch)
     check = preflight._backend_check("singularity")
     assert check.status == "fail"
     assert "10240 MiB" in check.detail
+
+
+def test_software_benchmark_task_catalogs_are_digest_pinned():
+    swe_digests = swebench_verified_task_digests()
+    assert len(swe_digests) == 500
+    assert swe_digests["swe-bench/psf__requests-1142"] == (
+        "sha256:24359408df5948c741ac080425763ca4e1250b0ad1e7079e5f865e10db491fe4"
+    )
 
 
 def test_terminal_bench_21_config_is_digest_pinned_and_uses_five_attempts(tmp_path):
@@ -311,7 +544,10 @@ def test_harbor_audit_proves_cardinality_and_flags_errors(tmp_path):
     config_path.write_text(json.dumps({
         "environment": {"type": "modal", "delete": True},
         "n_attempts": 1,
-        "datasets": [{"name": "swebench-verified", "version": "1.0"}],
+        "datasets": [{
+            "name": "swe-bench/swe-bench-verified",
+            "ref": "sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341",
+        }],
         "agents": [
             {"name": "codex", "model_name": "a"},
             {"name": "codex", "model_name": "b"},
@@ -323,8 +559,11 @@ def test_harbor_audit_proves_cardinality_and_flags_errors(tmp_path):
         "run_id": "audit-run",
         "benchmark": "swebench-verified",
         "models": ["a", "b"],
-        "dataset": "swebench-verified@1.0",
-        "dataset_source_revision": "86723674f04e4209ac479d0fb75d9d9f44b4377e",
+        "dataset": (
+            "swe-bench/swe-bench-verified@"
+            "sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341"
+        ),
+        "dataset_source_revision": "sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341",
         "benchmark_source_commit": "ea2fee78517f2e591bad69fcf1e6731f9c23ec99",
         "harbor_source_commit": "ea2fee78517f2e591bad69fcf1e6731f9c23ec99",
         "upload_enabled": False,

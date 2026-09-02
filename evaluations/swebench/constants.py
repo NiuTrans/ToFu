@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-FRAMEWORK_VERSION = "1.1.0"
+FRAMEWORK_VERSION = "1.3.0"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Harbor 0.21 is the version whose config schema and SWE-bench adapter parity
@@ -41,32 +41,69 @@ class BenchmarkDefinition:
     source_commit: str
 
 
-HARBOR_DATASET_COMMIT = "86723674f04e4209ac479d0fb75d9d9f44b4377e"
+SWEBENCH_VERIFIED_DATASET_REF = (
+    "sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341"
+)
 OFFICIAL_DATASET = "SWE-bench/SWE-bench_Verified"
 TBENCH21_DATASET_REF = (
     "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"
 )
 TBENCH21_REPOSITORY_COMMIT = "7131e4375048a0e408a8fb404b5f499d726b695b"
+SWEBENCH_VERIFIED_TASK_DIGESTS_PATH = Path(__file__).with_name(
+    "swebench_verified_task_digests.json"
+)
 TBENCH21_TASK_DIGESTS_PATH = Path(__file__).with_name(
     "terminal_bench_21_task_digests.json"
 )
 
 
-def terminal_bench_21_task_digests() -> dict[str, str]:
-    value = json.loads(TBENCH21_TASK_DIGESTS_PATH.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or not all(
-        isinstance(name, str) and isinstance(ref, str)
-        for name, ref in value.items()
-    ):
-        raise ValueError("invalid Terminal-Bench 2.1 task digest lock")
+def _load_task_digest_lock(
+    path: Path,
+    *,
+    label: str,
+    expected_count: int,
+) -> dict[str, str]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    valid = (
+        isinstance(value, dict)
+        and len(value) == expected_count
+        and list(value) == sorted(value)
+        and all(
+            isinstance(name, str)
+            and bool(name)
+            and isinstance(ref, str)
+            and ref.startswith("sha256:")
+            and len(ref) == 71
+            and all(char in "0123456789abcdef" for char in ref[7:])
+            for name, ref in value.items()
+        )
+    )
+    if not valid:
+        raise ValueError(f"invalid {label} task digest lock")
     return value
+
+
+def swebench_verified_task_digests() -> dict[str, str]:
+    return _load_task_digest_lock(
+        SWEBENCH_VERIFIED_TASK_DIGESTS_PATH,
+        label="SWE-bench Verified",
+        expected_count=500,
+    )
+
+
+def terminal_bench_21_task_digests() -> dict[str, str]:
+    return _load_task_digest_lock(
+        TBENCH21_TASK_DIGESTS_PATH,
+        label="Terminal-Bench 2.1",
+        expected_count=89,
+    )
 
 BENCHMARKS = {
     "swebench-verified": BenchmarkDefinition(
         key="swebench-verified",
-        dataset="swebench-verified@1.0",
+        dataset=f"swe-bench/swe-bench-verified@{SWEBENCH_VERIFIED_DATASET_REF}",
         task_count=500,
-        dataset_source_revision=HARBOR_DATASET_COMMIT,
+        dataset_source_revision=SWEBENCH_VERIFIED_DATASET_REF,
         default_attempts=1,
         official_min_attempts=1,
         source_url="https://github.com/harbor-framework/harbor/tree/main/adapters/swebench",
@@ -93,6 +130,7 @@ DEFAULT_DATASET_SIZE = BENCHMARKS[DEFAULT_BENCHMARK].task_count
 # local filesystem/PID isolation but is separately constrained to serial runs
 # because it shares host networking and lacks strict per-trial cgroups.
 ISOLATED_BACKENDS = (
+    "rootless-qemu",
     "singularity",
     "modal",
     "daytona",
@@ -101,8 +139,8 @@ ISOLATED_BACKENDS = (
     "novita",
     "docker",
 )
-LOCAL_BACKENDS = ("singularity", "docker")
-DEFAULT_AGENT_BACKEND = "singularity"
+LOCAL_BACKENDS = ("rootless-qemu", "singularity", "docker")
+DEFAULT_AGENT_BACKEND = "rootless-qemu"
 
 
 def default_output_root() -> Path:

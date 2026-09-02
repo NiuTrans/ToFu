@@ -1,5 +1,3 @@
-# Incident anchor: born in commit f9aa375c — fix(chrome-store): derive the store manifest from real API usage, not...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """tests/test_chrome_store_manifest_parity.py — the store build must declare
 exactly the permissions the shipped code actually needs.
 

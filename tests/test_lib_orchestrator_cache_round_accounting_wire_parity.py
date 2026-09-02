@@ -35,9 +35,16 @@ import importlib
 import inspect
 import pathlib
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUN_PY = ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_run.py'
+ROOT_LOOP_PY = (
+    ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_root_agent_loop.py')
 LEAF_PY = (
     ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' /
     '_cache_round_accounting.py')
@@ -84,8 +91,8 @@ def test_helper_signature_is_keyword_only():
 # 3. _run.py imports and delegates to the extracted helper
 # ---------------------------------------------------------------------------
 def test_run_py_imports_helper():
-    """_run.py imports stamp_round_cache_accounting at module scope."""
-    src = RUN_PY.read_text()
+    """The root loop adapter imports the accounting helper."""
+    src = ROOT_LOOP_PY.read_text()
     assert (
         'from lib.tasks_pkg.orchestrator._cache_round_accounting import'
         in src), (
@@ -99,7 +106,7 @@ def test_run_task_delegates_to_helper():
     """The stream loop's per-round cache-accounting cluster must be a
     single call to ``stamp_round_cache_accounting(task, ...)`` — no
     inline body left behind."""
-    src = RUN_PY.read_text()
+    src = ROOT_LOOP_PY.read_text()
     assert 'stamp_round_cache_accounting(' in src, (
         '_run.py must call stamp_round_cache_accounting in the stream loop')
 
@@ -249,7 +256,7 @@ def test_helper_is_no_op_when_no_convId():
     from lib.tasks_pkg.orchestrator._cache_round_accounting import (
         stamp_round_cache_accounting)
     api_rounds = [{'round': 1}]
-    task = {'id': 'a' * 32, 'convId': ''}
+    task = {'id': 'a' * 32, 'convId': '', '_userId': 1}
     stamp_round_cache_accounting(
         task, round_num=0, tid='abcd1234', model='claude-x',
         tools=None, usage={'input_tokens': 100, 'output_tokens': 20},
@@ -264,7 +271,7 @@ def test_helper_is_no_op_when_no_usage():
     from lib.tasks_pkg.orchestrator._cache_round_accounting import (
         stamp_round_cache_accounting)
     api_rounds = [{'round': 1}]
-    task = {'id': 'a' * 32, 'convId': 'conv-x'}
+    task = {'id': 'a' * 32, 'convId': 'conv-x', '_userId': 1}
     stamp_round_cache_accounting(
         task, round_num=0, tid='abcd1234', model='claude-x',
         tools=None, usage=None,
@@ -280,7 +287,7 @@ def test_helper_stamps_toolCalls_names_from_assistant_msg():
     from lib.tasks_pkg.orchestrator._cache_round_accounting import (
         stamp_round_cache_accounting)
     api_rounds = [{'round': 1}]
-    task = {'id': 'a' * 32, 'convId': 'conv-x'}
+    task = {'id': 'a' * 32, 'convId': 'conv-x', '_userId': 1}
     assistant_msg = {
         'role': 'assistant',
         'content': '',
@@ -309,7 +316,7 @@ def test_helper_skips_stamp_when_round_number_mismatch():
     # api_rounds[-1].round == 5, but we're stamping round_num=0
     # (⇒ round_num + 1 = 1). Mismatch.
     api_rounds = [{'round': 5}]
-    task = {'id': 'a' * 32, 'convId': 'conv-x'}
+    task = {'id': 'a' * 32, 'convId': 'conv-x', '_userId': 1}
     stamp_round_cache_accounting(
         task, round_num=0, tid='abcd1234', model='claude-x',
         tools=None,

@@ -1,11 +1,12 @@
 {
-  "key": "glm",
   "brand": "glm",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "glm",
   "category": "official",
   "name": "GLM (Zhipu AI)",
   "base_url": "https://open.bigmodel.cn/api/paas/v4",
   "balance_url": "https://open.bigmodel.cn/api/paas/v4/dashboard/billing/subscription",
-  "models": [
+  "offering_recipes": [
     {
       "model_id": "glm-5.3",
       "capabilities": ["text", "thinking"],

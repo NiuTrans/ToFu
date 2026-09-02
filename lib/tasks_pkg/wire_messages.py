@@ -8,7 +8,7 @@ Historically two paths fed the panel and disagreed:
     ``build_api_messages_from_db`` (no system-context injection, no
     cache-reorder, no sanitization).
   * HOT — the live ``messages_snapshot`` SSE was captured in the orchestrator
-    AFTER ``_inject_system_contexts`` but BEFORE ``sort_tool_results`` and
+    AFTER ``compose_task_context`` but BEFORE ``sort_tool_results`` and
     BEFORE ``build_body``'s sanitization.
 
 Neither equalled the real outbound (wire) array. This module collapses both
@@ -29,9 +29,9 @@ Two public entry points
     list, and are surfaced to the user as "transport-layer transforms not
     expanded" rather than shown.
 
-``build_wire_messages(raw_messages, config, *, mode, task=None, conv_id='', provider_id='')``
+``build_wire_messages(raw_messages, config, *, user_id, mode, task=None, conv_id='', provider_id='')``
     The full COLD-path pipeline:
-        _transform_messages → _inject_system_contexts → apply_wire_sanitize
+        _transform_messages → compose_task_context → apply_wire_sanitize
     ``mode='snapshot'`` (the endpoint) runs inject with a throwaway task and
     empty conv_id so it is side-effect-free and never pollutes the live
     request path's conv-keyed caches; per-round content (memory
@@ -65,7 +65,7 @@ from lib.llm_sanitize import (
     _strip_non_api_fields,
 )
 from lib.log import get_logger
-from lib.tasks_pkg.cache_tracking import sort_tool_results
+from lib.tasks_pkg.cache_tracking._prefix import sort_tool_results
 
 logger = get_logger(__name__)
 
@@ -127,6 +127,7 @@ def apply_wire_sanitize(messages: list, *, conv_id: str = '',
 
 
 def build_wire_messages(raw_messages: list, config: dict, *,
+                        user_id: int,
                         mode: str = 'snapshot',
                         task: dict | None = None,
                         conv_id: str = '',
@@ -134,7 +135,7 @@ def build_wire_messages(raw_messages: list, config: dict, *,
                         return_manifest: bool = False):
     """Full wire-form pipeline for the debug panel (cold path).
 
-    ``_transform_messages`` (DB → API form) → ``_inject_system_contexts``
+    ``_transform_messages`` (DB → API form) → ``compose_task_context``
     (CLAUDE.md / static guidance / memory / date / swarm / preferences) →
     ``apply_wire_sanitize``.
 
@@ -159,8 +160,8 @@ def build_wire_messages(raw_messages: list, config: dict, *,
         The wire-form OpenAI message array. With ``return_manifest=True``,
         returns ``(messages, context_manifest)``.
     """
-    from lib.tasks_pkg.conv_message_builder import _transform_messages
-    from lib.tasks_pkg.system_context import _inject_system_contexts
+    from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
+    from lib.tasks_pkg.context_composer import compose_task_context
 
     msgs = _transform_messages([dict(m) for m in raw_messages], config)
 
@@ -178,16 +179,15 @@ def build_wire_messages(raw_messages: list, config: dict, *,
     project_enabled = bool(config.get('projectEnabled', bool(project_path)))
     memory_enabled = bool(config.get('memoryEnabled', False))
     search_enabled = bool(config.get('searchEnabled', True))
-    swarm_enabled = bool(config.get('swarmEnabled', False))
 
     try:
-        _inject_system_contexts(
+        compose_task_context(
             msgs,
+            user_id=user_id,
             project_path=project_path,
             project_enabled=project_enabled,
             memory_enabled=memory_enabled,
             search_enabled=search_enabled,
-            swarm_enabled=swarm_enabled,
             has_real_tools=True,
             conv_id=_inject_cid,
             task=_task,

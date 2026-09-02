@@ -24,6 +24,11 @@ from lib.scheduler._shared import evaluate_predicate, reconcile_and_decide
 
 logger = get_logger(__name__)
 
+
+def _scheduler_client(*, write: bool = False):
+    from lib.storage import get_storage_client
+    return get_storage_client(write=write)
+
 # ── Status snapshot builder ─────────────────────────────────────────────────
 
 def gather_system_status(task: dict[str, Any]) -> str:
@@ -34,7 +39,7 @@ def gather_system_status(task: dict[str, Any]) -> str:
     - Target conversation summary (last messages)
     - System time
     """
-    from lib.tasks_pkg.manager import tasks, tasks_lock
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
 
     lines = ['=== Proactive Task Status Report ===']
     lines.append(f'Task: "{task["name"]}"')
@@ -45,15 +50,16 @@ def gather_system_status(task: dict[str, Any]) -> str:
     lines.append(f'Last poll: {last_poll} (decision: {last_decision})')
 
     # Active tasks
-    with tasks_lock:
-        running = [
+    running = [
             {
                 'task_id': t['id'][:12],
                 'conv_id': t.get('convId', '?')[:12],
                 'status': t['status'],
                 'elapsed': round(time.time() - t.get('created_at', time.time())),
             }
-            for t in tasks.values()
+            for t in chat_task_runtime.snapshot_owned(
+                user_id=int(task['user_id'])
+            )
             if t.get('status') == 'running'
         ]
 
@@ -69,11 +75,9 @@ def gather_system_status(task: dict[str, Any]) -> str:
     target_conv = task.get('target_conv_id', '')
     if target_conv:
         try:
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            from lib.database.conversation_repository import load_conversation
-            db = get_thread_db(DOMAIN_CHAT)
-            row = load_conversation(
-                db, target_conv, metadata_columns=('title',))
+            from lib.conversations.repository import get_conversation
+            row = get_conversation(
+                target_conv, user_id=int(task['user_id']))
             if row is not None:
                 title = row['title'] or '(untitled)'
                 msg_count = row['msg_count'] or 0
@@ -173,7 +177,8 @@ def poll_decision(task: dict[str, Any]) -> tuple[bool, str, int]:
 def record_poll(task_id: str, decision: str, reason: str, model: str,
                 tokens_used: int, status_snapshot: str,
                 execution_task_id: str = '', tier: str = 'llm',
-                predicate_matched: int = -1, llm_agreed: int = -1) -> None:
+                predicate_matched: int = -1, llm_agreed: int = -1, *,
+                user_id: int) -> None:
     """Write a poll decision to the proactive_poll_log table.
 
     ``tier`` / ``predicate_matched`` / ``llm_agreed`` are the machine-queryable
@@ -182,41 +187,36 @@ def record_poll(task_id: str, decision: str, reason: str, model: str,
     by counting trailing ``llm_agreed=1`` rows.
     """
     try:
-        from lib.database import (
-            DOMAIN_SYSTEM,
-            db_execute_with_retry,
-            get_thread_db,
-        )
-        db = get_thread_db(DOMAIN_SYSTEM)
         now = datetime.now().isoformat()
-        db_execute_with_retry(
-            db,
-            '''INSERT INTO proactive_poll_log
-               (task_id, poll_time, decision, reason, status_snapshot, model, tokens_used,
-                execution_task_id, tier, predicate_matched, llm_agreed)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            [task_id, now, decision, reason[:500], status_snapshot[:5000], model, tokens_used,
-             execution_task_id, tier, predicate_matched, llm_agreed]
-        )
+        _scheduler_client(write=True).command(
+            'scheduler.poll.append', {
+                'task_id': task_id, 'user_id': int(user_id),
+                'poll_time': now,
+                'decision': decision, 'reason': reason,
+                'status_snapshot': status_snapshot, 'model': model,
+                'tokens_used': tokens_used, 'execution_task_id': execution_task_id,
+                'tier': tier, 'predicate_matched': predicate_matched,
+                'llm_agreed': llm_agreed,
+            }, f'scheduler.poll:{task_id}:{now}')
     except Exception as e:
         logger.warning('[Proactive] Failed to record poll for task %s: %s', task_id, e, exc_info=True)
 
 
 # ── Predicate condition (code/hybrid tiers) ─────────────────────────────────
 
-def _count_trailing_ambiguous_code_polls(task_id: str, lookback: int = 20) -> int:
+def _count_trailing_ambiguous_code_polls(
+    task_id: str, *, user_id: int, lookback: int = 20,
+) -> int:
     """Consecutive most-recent `code`-tier polls whose predicate was ambiguous
     (predicate_matched=-1), reconstructed from proactive_poll_log. This is the
     demotion counter (code→hybrid) — derived from the ledger so it survives a
     restart with no dedicated column.
     """
     try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
-        rows = db.execute(
-            'SELECT tier, predicate_matched FROM proactive_poll_log '
-            'WHERE task_id=? ORDER BY id DESC LIMIT ?', [task_id, lookback]
-        ).fetchall()
+        rows = _scheduler_client().query(
+            'scheduler.poll.log', {
+                'task_id': task_id, 'user_id': int(user_id),
+                'limit': lookback})
     except Exception as e:
         logger.warning('[Proactive:%s] Failed to reconstruct ambiguity streak: %s',
                        task_id[:8], e, exc_info=True)
@@ -248,7 +248,9 @@ def apply_reconcile_poll(task: dict[str, Any], predicate_result, llm_ready,
     task_id = task['id']
     kind = task.get('condition_kind', 'llm')
     current_streak = int(task.get('promotion_streak', 0) or 0)
-    fallback_streak = (_count_trailing_ambiguous_code_polls(task_id)
+    user_id = int(task['user_id'])
+    fallback_streak = (_count_trailing_ambiguous_code_polls(
+        task_id, user_id=user_id)
                        if kind == 'code' else 0)
 
     outcome = reconcile_and_decide(
@@ -257,53 +259,50 @@ def apply_reconcile_poll(task: dict[str, Any], predicate_result, llm_ready,
         fallback_streak=fallback_streak)
 
     try:
-        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
         now = datetime.now().isoformat()
+        fields = {
+            'task_id': task_id, 'user_id': user_id, 'updated_at': now}
         if outcome.promoted:
-            db_execute_with_retry(
-                db,
-                "UPDATE scheduled_tasks SET condition_kind='code', "
-                'promotion_streak=?, promoted_at=?, updated_at=? WHERE id=?',
-                [outcome.new_streak, now, now, task_id])
+            fields.update({'condition_kind': 'code',
+                           'promotion_streak': outcome.new_streak,
+                           'promoted_at': now})
+        elif outcome.demoted:
+            fields.update({'condition_kind': 'hybrid', 'promotion_streak': 0,
+                           'promoted_at': ''})
+        elif outcome.new_streak != current_streak or outcome.new_kind != kind:
+            fields.update({'condition_kind': outcome.new_kind,
+                           'promotion_streak': outcome.new_streak})
+        if len(fields) > 3:
+            _scheduler_client(write=True).command(
+                'scheduler.task.update', fields,
+                f'scheduler.reconcile:{task_id}:{now}')
+        if outcome.promoted:
             audit_log('proactive_predicate_promoted', task_id=task_id,
                       predicate=task.get('condition_command', '')[:200],
                       streak=outcome.new_streak)
-            logger.info('[Proactive:%s] ✅ Predicate PROMOTED to code (streak=%d) — '
-                        'LLM drops out of future polls', task_id[:8], outcome.new_streak)
+            logger.info('[Proactive:%s] Predicate promoted to code (streak=%d)',
+                        task_id[:8], outcome.new_streak)
         elif outcome.demoted:
-            db_execute_with_retry(
-                db,
-                "UPDATE scheduled_tasks SET condition_kind='hybrid', "
-                "promotion_streak=0, promoted_at='', updated_at=? WHERE id=?",
-                [now, task_id])
             audit_log('proactive_predicate_demoted', task_id=task_id,
                       predicate=task.get('condition_command', '')[:200],
                       reason=outcome.note[:200])
-            logger.warning('[Proactive:%s] ⚠️ Predicate DEMOTED to hybrid — %s',
+            logger.warning('[Proactive:%s] Predicate demoted to hybrid: %s',
                            task_id[:8], outcome.note)
-        elif outcome.new_streak != current_streak or outcome.new_kind != kind:
-            db_execute_with_retry(
-                db,
-                'UPDATE scheduled_tasks SET condition_kind=?, promotion_streak=?, '
-                'updated_at=? WHERE id=?',
-                [outcome.new_kind, outcome.new_streak, now, task_id])
     except Exception as e:
         logger.error('[Proactive:%s] Failed to persist reconcile transition: %s',
                      task_id[:8], e, exc_info=True)
     return outcome
 
 
-def get_poll_log(task_id: str, limit: int = 30) -> list[dict]:
+def get_poll_log(
+    task_id: str, *, user_id: int, limit: int = 30,
+) -> list[dict]:
     """Retrieve recent poll log entries for a task."""
     try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
-        rows = db.execute(
-            'SELECT * FROM proactive_poll_log WHERE task_id=? ORDER BY poll_time DESC LIMIT ?',
-            [task_id, limit]
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return _scheduler_client().query(
+            'scheduler.poll.log', {
+                'task_id': task_id, 'user_id': int(user_id),
+                'limit': limit})
     except Exception as e:
         logger.warning('[Proactive] Failed to get poll log for task %s: %s', task_id, e, exc_info=True)
         return []
@@ -315,8 +314,8 @@ def execute_proactive_task(task: dict[str, Any]) -> str | None:
     """Create a real agentic task in the target conversation and run it.
 
     This creates a user message (tagged as proactive) in the conversation,
-    then delegates to :func:`inject_and_run_task` for the common load →
-    inject → config → create → run sequence.  The execution is visible in
+    then delegates to the turn-native scheduler dispatch service. The
+    execution is visible in
     the frontend as a normal assistant response.
 
     Args:
@@ -325,7 +324,7 @@ def execute_proactive_task(task: dict[str, Any]) -> str | None:
     Returns:
         The task_id of the created agentic task, or None on failure.
     """
-    from lib.scheduler._shared import inject_and_run_task
+    from lib.scheduler.conversation_dispatch import dispatch_scheduled_turn
 
     task_id_short = task['id'][:8]
     target_conv = task.get('target_conv_id', '')
@@ -357,12 +356,25 @@ def execute_proactive_task(task: dict[str, Any]) -> str | None:
         '_proactiveTaskId': task['id'],
     }
 
-    return inject_and_run_task(
-        conv_id=target_conv,
-        user_message=user_message,
-        tools_config_json=task.get('tools_config', '{}'),
-        log_prefix=log_prefix,
-    )
+    try:
+        dispatch = dispatch_scheduled_turn(
+            conversation_id=target_conv,
+            user_message=user_message,
+            tools_config=task.get('tools_config', '{}'),
+            user_id=int(task['user_id']),
+            command_id=(f'proactive:{task["id"]}:'
+                        f'{int(task.get("poll_count") or 0) + 1}'),
+            log_prefix=log_prefix,
+        )
+    except Exception as exc:
+        logger.error('%s Scheduled turn dispatch failed: %s', log_prefix, exc,
+                     exc_info=True)
+        return None
+    if dispatch.disposition != 'started':
+        logger.info('%s Scheduled turn not started (%s)',
+                    log_prefix, dispatch.disposition)
+        return None
+    return dispatch.task_id
 
 
 # ── Check if task is currently executing ────────────────────────────────────
@@ -373,12 +385,12 @@ def is_task_executing(task: dict[str, Any]) -> bool:
     if not last_exec_task_id:
         return False
 
-    from lib.tasks_pkg.manager import tasks, tasks_lock
-    with tasks_lock:
-        t = tasks.get(last_exec_task_id)
-        if t and t.get('status') == 'running':
-            return True
-    return False
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    running_task = chat_task_runtime.get_owned(
+        last_exec_task_id,
+        user_id=int(task['user_id']),
+    )
+    return bool(running_task and running_task.get('status') == 'running')
 
 
 # ── Check expiration / max executions ───────────────────────────────────────

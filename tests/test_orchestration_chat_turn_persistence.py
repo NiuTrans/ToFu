@@ -1,4 +1,4 @@
-"""Persistence port for Flow-backed chat endpoint turns."""
+"""Persistence port for Flow-backed chat turns."""
 
 from pathlib import Path
 
@@ -27,10 +27,6 @@ def _port(task, calls, *, fail_store=False):
         task,
         store_turns=store,
         sync_turns=sync,
-        translate_turn=lambda owner, message, index: calls.append(
-            ('turn', owner, message, index)),
-        translate_final=lambda owner, turns: calls.append(
-            ('final', owner, len(turns))),
     )
 
 
@@ -47,12 +43,10 @@ def test_live_buffer_binding_drives_incremental_and_final_sync():
     assert persistence.finalize() is True
 
     assert [call[0] for call in calls] == [
-        'store', 'sync', 'turn',
-        'store', 'sync', 'turn',
-        'store', 'sync', 'final',
+        'store', 'sync',
+        'store', 'sync',
+        'store', 'sync',
     ]
-    assert calls[2][3] == 0
-    assert calls[5][3] == 1
     assert all(call[1] is task for call in calls)
 
 
@@ -70,7 +64,7 @@ def test_unbound_empty_and_rebinding_contracts_are_explicit():
         persistence.bind([])
 
 
-def test_final_translation_safety_net_runs_when_database_sync_fails():
+def test_final_snapshot_failure_remains_nonfatal():
     task = {'id': 'task-three'}
     calls = []
     persistence = _port(task, calls, fail_store=True)
@@ -79,11 +73,12 @@ def test_final_translation_safety_net_runs_when_database_sync_fails():
 
     assert persistence(messages[0]) is False
     assert persistence.finalize() is False
-    assert [call[0] for call in calls] == ['store', 'store', 'final']
+    assert [call[0] for call in calls] == ['store', 'store']
 
 
-def test_endpoint_runner_only_assembles_turn_persistence_ports():
-    runner = (ROOT / 'lib' / 'orchestration_endpoint_runner.py').read_text()
+def test_flow_runner_only_assembles_turn_persistence_ports():
+    runner = (
+        ROOT / 'lib' / 'orchestration_chat_flow_runner.py').read_text()
     runtime = (
         ROOT / 'lib' / 'orchestration_chat_flow_runtime.py').read_text()
     completion = (
@@ -98,4 +93,3 @@ def test_endpoint_runner_only_assembles_turn_persistence_ports():
     assert 'turn_persistence=turn_persistence' in runtime
     assert 'self._turn_persistence.finalize()' in completion
     assert '_adapter_ref' not in runner + runtime
-    assert 'def _persist_endpoint_msg' not in runner + runtime

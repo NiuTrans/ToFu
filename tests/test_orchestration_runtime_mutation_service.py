@@ -8,7 +8,10 @@ from lib.orchestration.runtime_mutation_service import (
     OrchestrationRuntimeMutationService,
     RuntimeMutationError,
 )
-from lib.orchestration_mutation import MUTATION_NOT_FOUND, MUTATION_TERMINAL
+from lib.orchestration.mutation_result import (
+    MUTATION_NOT_FOUND,
+    MUTATION_TERMINAL,
+)
 
 
 pytestmark = pytest.mark.unit
@@ -21,15 +24,15 @@ class _Runtime:
             'active': {'status': 'running'},
         }
 
-    def abort(self, task_id):
-        return task_id == 'live'
+    def abort_owned(self, task_id, *, user_id):
+        return user_id == 41 and task_id == 'live'
 
-    def get(self, task_id):
-        return self.tasks.get(task_id)
+    def get_owned(self, task_id, *, user_id):
+        return self.tasks.get(task_id) if user_id == 41 else None
 
 
 def test_runtime_abort_uses_canonical_mutation_classification():
-    service = OrchestrationRuntimeMutationService(_Runtime())
+    service = OrchestrationRuntimeMutationService(_Runtime(), 41)
 
     accepted = service.abort('live')
     terminal = service.abort('done')
@@ -41,18 +44,21 @@ def test_runtime_abort_uses_canonical_mutation_classification():
     assert {result.target_id for result in (accepted, terminal, missing)} == {
         'live', 'done', 'missing',
     }
+    assert OrchestrationRuntimeMutationService(
+        _Runtime(), 42).abort('done').reason == MUTATION_NOT_FOUND
 
 
 def test_runtime_abort_dependency_failure_uses_service_error_contract():
     class BrokenRuntime:
-        def abort(self, _task_id):
+        def abort_owned(self, _task_id, *, user_id):
+            assert user_id == 41
             raise OSError('runtime registry unavailable')
 
-        def get(self, _task_id):
+        def get_owned(self, _task_id, *, user_id):
             raise AssertionError('abort failure must remain primary')
 
     with pytest.raises(RuntimeMutationError) as caught:
-        OrchestrationRuntimeMutationService(BrokenRuntime()).abort('live')
+        OrchestrationRuntimeMutationService(BrokenRuntime(), 41).abort('live')
 
     assert isinstance(caught.value.__cause__, OSError)
     assert 'transient orchestration run' in str(caught.value)

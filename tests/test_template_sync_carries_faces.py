@@ -46,10 +46,13 @@ pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TA = runtime_section_path('settings/template_actions.js')
+_PT = runtime_section_path('settings/provider_templates.js')
 
 _HARNESS = r'''
 const fs = require('fs');
-const src = fs.readFileSync(process.argv[2], 'utf8');
+const vm = require('vm');
+const providerTemplatesSrc = fs.readFileSync(process.argv[2], 'utf8');
+const templateActionsSrc = fs.readFileSync(process.argv[3], 'utf8');
 
 // Minimal stubs — these functions are data transforms; the DOM calls are
 // no-ops for our purposes.
@@ -74,25 +77,30 @@ global._serverConfig = {};
 global._loadExternalProviderTemplates = async () => {};
 global._coldSortModels = (m) => m;
 global._insertModelSorted = (arr, m) => { arr.push(m); };
-global.Api = { providers: {} };
+global._normalizeModelsPricingTags = () => {};
+global.Api = { providers: { templates: async () => [] } };
 
-const MERGED_TEMPLATE = {
+global.MERGED_TEMPLATE = {
   key: 'yourprovider', brand: 'yourprovider', name: 'YourProvider (AIGC Gateway)',
   base_url: 'https://api.openai.com/v1',
   faces: { anthropic: { base_url: 'https://api.openai.com/v1/anthropic',
                         protocol: 'anthropic' } },
   extra_headers: { 'X-Custom-Header': 'your-header-value' },
-  models: [
+  offering_recipes: [
     { model_id: 'kimi-k3', capabilities: ['text'], rpm: 30, cost: 0.008 },
     { model_id: 'claude-opus-5', capabilities: ['text','vision','thinking'],
       rpm: 30, cost: 0.045, request_ids: ['yuju-claude-opus-5-evaDaily'] },
   ],
 };
 
-global._PROVIDER_TEMPLATES = [MERGED_TEMPLATE];
-
-// Load the REAL implementation.
-(0, eval)(src);
+// Load both REAL retained sections. The provider-template section owns the
+// recipe adapter consumed by template_actions; replace only its in-memory
+// catalogue so this harness stays focused on the merged-template fixture.
+vm.runInThisContext(providerTemplatesSrc, { filename: process.argv[2] });
+vm.runInThisContext(templateActionsSrc, { filename: process.argv[3] });
+vm.runInThisContext(
+  '_PROVIDER_TEMPLATES.splice(0, _PROVIDER_TEMPLATES.length, MERGED_TEMPLATE);'
+);
 
 const results = {};
 
@@ -145,7 +153,7 @@ def _run() -> dict:
     harness = os.path.join('/tmp', 'faces_sync_harness.js')
     with open(harness, 'w', encoding='utf-8') as f:
         f.write(_HARNESS)
-    out = subprocess.run([shutil.which('node'), harness, _TA],
+    out = subprocess.run([shutil.which('node'), harness, _PT, _TA],
                          capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr[-2000:]
     return json.loads(out.stdout.strip().splitlines()[-1])

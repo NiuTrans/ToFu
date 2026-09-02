@@ -49,7 +49,7 @@ class TerminalOutcome:
             ),
             detail=detail,
             context='orchestration:execution',
-            source='lib.orchestration_outcome',
+            source='lib.orchestration.outcome_domain',
             raw=detail,
             severity='warning' if incomplete else 'error',
             retryable=False,
@@ -63,10 +63,6 @@ class TerminalOutcome:
             ),
             extensions={'outcome': self.as_dict()},
         )
-
-    @property
-    def durable_error(self) -> dict | None:
-        return self.error_envelope
 
     def as_dict(self) -> dict:
         return {

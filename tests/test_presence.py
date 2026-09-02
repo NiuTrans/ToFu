@@ -1,365 +1,360 @@
-"""tests/test_presence.py — cross-conversation live-presence registry.
-
-Covers lib/presence (slice 1, backend-only):
-
-  • announce / heartbeat / record_files / mark_idle / depart mutate the
-    in-memory authoritative state AND write through to
-    <root>/.tofu/presence/registry.json atomically.
-  • The backend computes status (active|idle) from the heartbeat age — the
-    frontend never derives liveness from mere presence.
-  • Overlap detection is notify-only and forms the full advisory string.
-  • The sweep transitions active→idle→reaped (ghost cleanup).
-  • Startup reconciliation reaps ghost peers a crashed server left "active".
-
-The push hub is stubbed so we can assert the exact presence frames broadcast
-without a live WebSocket. The disk mirror uses a tmp project root.
-"""
+"""Owner isolation and lifecycle contracts for process-local presence."""
 
 from __future__ import annotations
 
-import importlib
-import json
 import os
+import threading
 import time
 
 import pytest
 
-import lib.presence.registry as reg
+import lib.presence.registry as registry
 
 pytestmark = pytest.mark.unit
 
+OWNER_A = 17
+OWNER_B = 23
+
 
 @pytest.fixture
-def captured_broadcasts(monkeypatch):
-    """Capture every presence frame the registry broadcasts."""
+def captured_frames(monkeypatch):
     frames: list[dict] = []
 
-    def _fake_push_event(channel, task_id, payload):
-        frames.append({'channel': channel, 'taskId': task_id, **payload})
+    def capture(channel, task_id, payload, *, user_id=None):
+        frames.append({
+            'channel': channel,
+            'taskId': task_id,
+            'userId': user_id,
+            **payload,
+        })
 
-    # The registry imports push_event lazily inside _broadcast; patch the
-    # source module so the lazy import resolves to our stub.
-    import lib.push as push_mod
-    monkeypatch.setattr(push_mod, 'push_event', _fake_push_event)
+    import lib.agent_core.push as push
+
+    monkeypatch.setattr(push, 'push_event', capture)
     return frames
 
 
 @pytest.fixture
-def fresh_state(monkeypatch):
-    """Reset the module-global registry state between tests."""
-    monkeypatch.setattr(reg, '_state', {})
-    monkeypatch.setattr(reg, '_sweeper_started', True)  # don't spawn a thread
-    return reg
+def fresh_registry(monkeypatch):
+    monkeypatch.setattr(registry, '_state', {})
+    monkeypatch.setattr(registry, '_sweeper_started', True)
+    return registry
 
 
 @pytest.fixture
-def root(tmp_path):
-    return str(tmp_path / 'proj')
+def project_root(tmp_path):
+    return str(tmp_path / 'project')
 
 
-# ── status computation (backend-owned) ──
+def _scope(root: str, owner: int = OWNER_A):
+    return owner, os.path.abspath(root)
 
-def test_announce_creates_active_peer_and_persists(fresh_state, captured_broadcasts, root):
-    reg.announce(root, 'conv-a', task_id='task-1', title='Fix the parser',
-                 objective='make it ship', phase='working')
-    snap = reg.snapshot(root)
-    assert len(snap['peers']) == 1
-    peer = snap['peers'][0]
+
+def test_announce_is_owner_scoped_and_never_writes_project_files(
+    fresh_registry, captured_frames, project_root
+):
+    registry.announce(
+        project_root,
+        'conv-a',
+        user_id=OWNER_A,
+        task_id='task-a',
+        title='Fix parser',
+        phase='working',
+    )
+
+    peer = registry.snapshot(project_root, user_id=OWNER_A)['peers'][0]
     assert peer['convId'] == 'conv-a'
-    assert peer['status'] == 'active'          # backend-computed
+    assert peer['status'] == 'active'
     assert peer['statusLabel'] == 'working'
-    assert peer['title'] == 'Fix the parser'
-
-    # Disk mirror written under .tofu/presence/.
-    path = os.path.join(os.path.abspath(root), '.tofu', 'presence', 'registry.json')
-    assert os.path.exists(path)
-    disk = json.loads(open(path).read())
-    assert disk['peers'][0]['convId'] == 'conv-a'
-
-    # Broadcast an 'update' frame to all clients.
-    update = [f for f in captured_broadcasts if f.get('kind') == 'update']
-    assert update and update[-1]['taskId'] == '*'
-    assert update[-1]['peer']['status'] == 'active'
+    assert registry.snapshot(project_root, user_id=OWNER_B)['peers'] == []
+    assert not os.path.exists(os.path.join(project_root, '.tofu', 'presence'))
+    assert captured_frames[-1]['userId'] == OWNER_A
 
 
-def test_peer_goes_idle_after_active_ttl(fresh_state, captured_broadcasts, root):
-    reg.announce(root, 'conv-a', task_id='t1')
-    # Backdate the heartbeat beyond ACTIVE_TTL.
-    reg._state[os.path.abspath(root)]['conv-a']['lastBeatTs'] = int(
-        (time.time() - reg.ACTIVE_TTL_SEC - 5) * 1000)
-    # snapshot only returns ACTIVE peers → the idle one is filtered out.
-    assert reg.snapshot(root)['peers'] == []
+def test_same_project_and_conversation_are_independent_between_owners(
+    fresh_registry, captured_frames, project_root
+):
+    registry.announce(
+        project_root, 'same-conv', user_id=OWNER_A, title='Owner A')
+    registry.announce(
+        project_root, 'same-conv', user_id=OWNER_B, title='Owner B')
+
+    registry.mark_idle(project_root, 'same-conv', user_id=OWNER_A)
+
+    assert registry.snapshot(project_root, user_id=OWNER_A)['peers'] == []
+    peers_b = registry.snapshot(project_root, user_id=OWNER_B)['peers']
+    assert [peer['title'] for peer in peers_b] == ['Owner B']
 
 
-def test_announce_idempotent_per_conv_preserves_files(fresh_state, captured_broadcasts, root):
-    reg.announce(root, 'conv-a', task_id='t1')
-    reg.record_files(root, 'conv-a', [{'path': 'a.py', 'action': 'written'}])
-    # A follow-up turn re-announces the SAME conv — must keep the file set and
-    # the original startedTs (no flicker, no new peer).
-    started = reg._state[os.path.abspath(root)]['conv-a']['startedTs']
-    reg.announce(root, 'conv-a', task_id='t2', phase='working')
-    peer = reg._state[os.path.abspath(root)]['conv-a']
+def test_reannounce_preserves_files_and_started_timestamp(
+    fresh_registry, captured_frames, project_root
+):
+    registry.announce(project_root, 'conv-a', user_id=OWNER_A, task_id='t1')
+    registry.record_files(
+        project_root,
+        'conv-a',
+        [{'path': 'a.py', 'action': 'written'}],
+        user_id=OWNER_A,
+    )
+    started = registry._state[_scope(project_root)]['conv-a']['startedTs']
+
+    registry.announce(project_root, 'conv-a', user_id=OWNER_A, task_id='t2')
+    peer = registry._state[_scope(project_root)]['conv-a']
+
     assert peer['files'] == ['a.py']
     assert peer['startedTs'] == started
     assert peer['taskId'] == 't2'
 
 
-# ── record_files + currentFile + label ──
+def test_record_files_unions_paths_and_forms_backend_label(
+    fresh_registry, captured_frames, project_root
+):
+    registry.announce(project_root, 'conv-a', user_id=OWNER_A)
+    registry.record_files(
+        project_root,
+        'conv-a',
+        [{'path': 'a.py'}, {'path': 'b.py'}],
+        user_id=OWNER_A,
+    )
+    registry.record_files(
+        project_root,
+        'conv-a',
+        [{'path': 'b.py'}, {'path': 'c.py'}],
+        user_id=OWNER_A,
+    )
 
-def test_record_files_unions_and_sets_current(fresh_state, captured_broadcasts, root):
-    reg.announce(root, 'conv-a', task_id='t1')
-    reg.record_files(root, 'conv-a', [{'path': 'a.py', 'action': 'written'},
-                                      {'path': 'b.py', 'action': 'patched'}])
-    reg.record_files(root, 'conv-a', [{'path': 'b.py', 'action': 'patched'},
-                                      {'path': 'c.py', 'action': 'created'}])
-    peer = reg.snapshot(root)['peers'][0]
-    assert peer['files'] == ['a.py', 'b.py', 'c.py']   # unioned, no dup
+    peer = registry.snapshot(project_root, user_id=OWNER_A)['peers'][0]
+    assert peer['files'] == ['a.py', 'b.py', 'c.py']
     assert peer['currentFile'] == 'c.py'
-    assert peer['statusLabel'] == 'editing c.py'       # backend-formed label
+    assert peer['statusLabel'] == 'editing c.py'
 
 
-# ── overlap detection (notify-only) ──
+def test_conflicts_are_detected_only_inside_one_owner_scope(
+    fresh_registry, captured_frames, project_root
+):
+    registry.announce(
+        project_root, 'conv-a', user_id=OWNER_A, title='Alpha')
+    registry.announce(
+        project_root, 'conv-b', user_id=OWNER_A, title='Beta')
+    registry.announce(
+        project_root, 'conv-c', user_id=OWNER_B, title='Other owner')
+    registry.record_files(
+        project_root, 'conv-a', [{'path': 'shared.py'}], user_id=OWNER_A)
+    registry.record_files(
+        project_root, 'conv-c', [{'path': 'shared.py'}], user_id=OWNER_B)
+    assert not [frame for frame in captured_frames if frame.get('kind') == 'conflict']
 
-def test_overlap_emits_conflict_advisory(fresh_state, captured_broadcasts, root):
-    reg.announce(root, 'conv-a', task_id='t1', title='Alpha')
-    reg.announce(root, 'conv-b', task_id='t2', title='Beta')
-    reg.record_files(root, 'conv-a', [{'path': 'lib/llm/stream.py', 'action': 'patched'}])
-    captured_broadcasts.clear()
-    # conv-b touches the same file → conflict advisory broadcast.
-    reg.record_files(root, 'conv-b', [{'path': 'lib/llm/stream.py', 'action': 'patched'}])
-    conflicts = [f for f in captured_broadcasts if f.get('kind') == 'conflict']
-    assert conflicts, 'expected a conflict advisory frame'
-    adv = conflicts[-1]['conflict']
-    assert adv['path'] == 'lib/llm/stream.py'
-    assert set(adv['peers']) == {'conv-a', 'conv-b'}
-    # Fully-formed message string (frontend renders verbatim).
-    assert 'lib/llm/stream.py' in adv['message']
-    assert 'Alpha' in adv['message'] and 'Beta' in adv['message']
-
-
-def test_no_conflict_for_single_peer_or_distinct_files(fresh_state, captured_broadcasts, root):
-    reg.announce(root, 'conv-a', task_id='t1')
-    reg.announce(root, 'conv-b', task_id='t2')
-    reg.record_files(root, 'conv-a', [{'path': 'a.py', 'action': 'written'}])
-    captured_broadcasts.clear()
-    reg.record_files(root, 'conv-b', [{'path': 'b.py', 'action': 'written'}])
-    assert [f for f in captured_broadcasts if f.get('kind') == 'conflict'] == []
+    registry.record_files(
+        project_root, 'conv-b', [{'path': 'shared.py'}], user_id=OWNER_A)
+    conflicts = [
+        frame for frame in captured_frames if frame.get('kind') == 'conflict'
+    ]
+    assert len(conflicts) == 1
+    assert conflicts[0]['userId'] == OWNER_A
+    assert set(conflicts[0]['conflict']['peers']) == {'conv-a', 'conv-b'}
 
 
-# ── idle vs depart ──
+def test_subagents_have_distinct_composite_identities(
+    fresh_registry, captured_frames, project_root
+):
+    for agent_id in ('agent-1', 'agent-2'):
+        registry.announce(
+            project_root,
+            'conv-a',
+            user_id=OWNER_A,
+            agent_id=agent_id,
+            title=agent_id,
+        )
+        registry.record_files(
+            project_root,
+            'conv-a',
+            [{'path': 'shared.py'}],
+            user_id=OWNER_A,
+            agent_id=agent_id,
+        )
 
-def test_mark_idle_keeps_peer_depart_removes(fresh_state, captured_broadcasts, root):
-    reg.announce(root, 'conv-a', task_id='t1')
-    reg.mark_idle(root, 'conv-a')
-    # Peer still present in memory (lingers), but computed status is idle.
-    assert 'conv-a' in reg._state[os.path.abspath(root)]
-    assert reg.snapshot(root)['peers'] == []   # idle filtered from active view
-    reg.depart(root, 'conv-a')
-    assert os.path.abspath(root) not in reg._state
-    departs = [f for f in captured_broadcasts if f.get('kind') == 'depart']
-    assert departs and departs[-1]['peer']['convId'] == 'conv-a'
-
-
-# ── sweep (active→idle→reaped) ──
-
-def test_sweep_reaps_peer_past_idle_ttl(fresh_state, captured_broadcasts, root):
-    reg.announce(root, 'conv-a', task_id='t1')
-    reg._state[os.path.abspath(root)]['conv-a']['lastBeatTs'] = int(
-        (time.time() - reg.IDLE_TTL_SEC - 10) * 1000)
-    reaped = reg.sweep()
-    assert reaped == 1
-    assert os.path.abspath(root) not in reg._state
-    assert [f for f in captured_broadcasts if f.get('kind') == 'depart']
-
-
-def test_sweep_emits_idle_transition_once(fresh_state, captured_broadcasts, root):
-    reg.announce(root, 'conv-a', task_id='t1')
-    reg._state[os.path.abspath(root)]['conv-a']['lastBeatTs'] = int(
-        (time.time() - reg.ACTIVE_TTL_SEC - 2) * 1000)
-    captured_broadcasts.clear()
-    reg.sweep()
-    reg.sweep()  # second pass must NOT re-emit the idle transition
-    idle_updates = [f for f in captured_broadcasts
-                    if f.get('kind') == 'update' and f['peer']['status'] == 'idle']
-    assert len(idle_updates) == 1
+    conflict = [
+        frame for frame in captured_frames if frame.get('kind') == 'conflict'
+    ][-1]
+    assert set(conflict['conflict']['peers']) == {
+        'conv-a#agent-1',
+        'conv-a#agent-2',
+    }
 
 
-# ── startup reconciliation (ghost cleanup) ──
+def test_mark_idle_then_depart_targets_one_owner_and_peer(
+    fresh_registry, captured_frames, project_root
+):
+    registry.announce(project_root, 'conv-a', user_id=OWNER_A)
+    registry.announce(
+        project_root, 'conv-a', user_id=OWNER_A, agent_id='agent-1')
 
-def test_reconcile_reaps_ghost_peers_on_fresh_process(fresh_state, captured_broadcasts, root):
-    """A crashed server's persisted 'active' peer is a ghost on restart.
+    registry.mark_idle(
+        project_root, 'conv-a', user_id=OWNER_A, agent_id='agent-1')
+    assert len(registry.snapshot(project_root, user_id=OWNER_A)['peers']) == 1
 
-    With no live tasks in this fresh process, every disk peer is a ghost and
-    must be reaped — otherwise the strip lies after every restart.
-    """
-    # Simulate a pre-crash registry on disk with a fresh heartbeat (the peer
-    # *looked* active when the server died), but no live task backs it now.
-    reg.announce(root, 'conv-ghost', task_id='dead-task')
-    # Wipe in-memory state to mimic a fresh process that only has the disk file.
-    reg._state.clear()
-
-    # No live tasks → reconcile should reap the ghost.
-    import lib.tasks_pkg.manager as mgr
-    saved = dict(mgr.tasks)
-    mgr.tasks.clear()
-    try:
-        reaped = reg.reconcile_on_startup([root])
-    finally:
-        mgr.tasks.update(saved)
-    assert reaped == 1
-    # Disk mirror rewritten to an empty peer list (no stale ghost).
-    path = os.path.join(os.path.abspath(root), '.tofu', 'presence', 'registry.json')
-    disk = json.loads(open(path).read())
-    assert disk['peers'] == []
-    assert reg.snapshot(root)['peers'] == []
+    registry.depart(project_root, 'conv-a', user_id=OWNER_A)
+    assert registry.snapshot(project_root, user_id=OWNER_A)['peers'] == []
 
 
-def test_reconcile_keeps_peer_backed_by_live_task(fresh_state, captured_broadcasts, root, monkeypatch):
-    """A peer whose task is genuinely live (fresh heartbeat) survives reconcile."""
-    reg.announce(root, 'conv-live', task_id='live-task')
-    reg._state.clear()  # fresh process reads only from disk
+def test_sweep_transitions_once_then_reaps_with_owner_filtered_frames(
+    fresh_registry, captured_frames, project_root
+):
+    registry.announce(project_root, 'conv-a', user_id=OWNER_A)
+    peer = registry._state[_scope(project_root)]['conv-a']
+    peer['lastBeatTs'] = int(
+        (time.time() - registry.ACTIVE_TTL_SEC - 2) * 1000)
+    captured_frames.clear()
 
-    import lib.tasks_pkg.manager as mgr
-    saved = dict(mgr.tasks)
-    mgr.tasks.clear()
-    mgr.tasks['live-task'] = {'id': 'live-task', 'status': 'running'}
-    try:
-        reaped = reg.reconcile_on_startup([root])
-    finally:
-        mgr.tasks.clear()
-        mgr.tasks.update(saved)
-    assert reaped == 0
-    assert reg.snapshot(root)['peers'] and \
-        reg.snapshot(root)['peers'][0]['convId'] == 'conv-live'
+    assert registry.sweep() == 0
+    assert registry.sweep() == 0
+    idle = [
+        frame
+        for frame in captured_frames
+        if frame.get('kind') == 'update'
+        and frame.get('peer', {}).get('status') == 'idle'
+    ]
+    assert len(idle) == 1
+    assert idle[0]['userId'] == OWNER_A
 
-
-# ── sub-agent peers (composite key convId#agentId) ──
-
-def test_subagents_are_distinct_peers_under_one_conv(fresh_state, captured_broadcasts, root):
-    """Two sub-agents of ONE conversation are two distinct peers, not one."""
-    reg.announce(root, 'conv-a', task_id='t1', title='Parent conv')
-    reg.announce(root, 'conv-a', agent_id='agent-coder-1', task_id='t1',
-                 title='coder', parent_title='Parent conv')
-    reg.announce(root, 'conv-a', agent_id='agent-coder-2', task_id='t1',
-                 title='coder', parent_title='Parent conv')
-    peers = reg.snapshot(root)['peers']
-    # 1 conversation peer + 2 distinct sub-agent peers.
-    assert len(peers) == 3
-    agent_ids = sorted(p.get('agentId', '') for p in peers)
-    assert agent_ids == ['', 'agent-coder-1', 'agent-coder-2']
-    # All carry the SAME convId (grouping key).
-    assert all(p['convId'] == 'conv-a' for p in peers)
+    peer['lastBeatTs'] = int(
+        (time.time() - registry.IDLE_TTL_SEC - 2) * 1000)
+    assert registry.sweep() == 1
+    assert _scope(project_root) not in registry._state
+    assert captured_frames[-1]['kind'] == 'depart'
+    assert captured_frames[-1]['userId'] == OWNER_A
 
 
-def test_two_subagents_same_file_conflict_within_one_conv(fresh_state, captured_broadcasts, root):
-    """The within-conversation worst case: two sub-agents clobber one file.
+def test_push_delivery_occurs_outside_registry_lock(
+    fresh_registry, monkeypatch, project_root
+):
+    observed_while_locked: list[str] = []
 
-    This is the core slice-3 acceptance criterion — sub-agent-vs-sub-agent
-    overlap inside ONE conversation must produce a conflict advisory exactly
-    like cross-conversation overlap.
-    """
-    reg.announce(root, 'conv-a', agent_id='agent-coder-1', task_id='t1',
-                 title='coder', parent_title='Refactor session')
-    reg.announce(root, 'conv-a', agent_id='agent-coder-2', task_id='t1',
-                 title='coder', parent_title='Refactor session')
-    reg.record_files(root, 'conv-a', [{'path': 'lib/llm/stream.py', 'action': 'patched'}],
-                     agent_id='agent-coder-1')
-    captured_broadcasts.clear()
-    reg.record_files(root, 'conv-a', [{'path': 'lib/llm/stream.py', 'action': 'patched'}],
-                     agent_id='agent-coder-2')
-    conflicts = [f for f in captured_broadcasts if f.get('kind') == 'conflict']
-    assert conflicts, 'two sub-agents on one file must produce a conflict advisory'
-    adv = conflicts[-1]['conflict']
-    assert adv['path'] == 'lib/llm/stream.py'
-    # Two DISTINCT sub-agent peer keys (conv#agent), not one collapsed convId.
-    assert set(adv['peers']) == {'conv-a#agent-coder-1', 'conv-a#agent-coder-2'}
-    # The advisory names BOTH sub-agents + the parent conversation, verbatim.
-    assert 'agent-coder-1' in adv['message'] and 'agent-coder-2' in adv['message']
-    assert 'Refactor session' in adv['message']
+    def probe(_channel, _task_id, payload, *, user_id=None):
+        acquired = {'value': False}
 
+        def attempt():
+            acquired['value'] = registry._lock.acquire(blocking=False)
+            if acquired['value']:
+                registry._lock.release()
 
-def test_single_subagent_touching_file_twice_is_no_conflict(fresh_state, captured_broadcasts, root):
-    """One sub-agent editing a file across rounds is NOT a conflict."""
-    reg.announce(root, 'conv-a', agent_id='agent-coder-1', task_id='t1', title='coder')
-    reg.record_files(root, 'conv-a', [{'path': 'a.py', 'action': 'written'}],
-                     agent_id='agent-coder-1')
-    captured_broadcasts.clear()
-    reg.record_files(root, 'conv-a', [{'path': 'a.py', 'action': 'patched'}],
-                     agent_id='agent-coder-1')
-    assert [f for f in captured_broadcasts if f.get('kind') == 'conflict'] == []
+        thread = threading.Thread(target=attempt)
+        thread.start()
+        thread.join()
+        if not acquired['value']:
+            observed_while_locked.append(payload.get('kind', '?'))
+
+    import lib.agent_core.push as push
+
+    monkeypatch.setattr(push, 'push_event', probe)
+    registry.announce(project_root, 'conv-a', user_id=OWNER_A)
+    registry.heartbeat(
+        project_root, 'conv-a', user_id=OWNER_A, phase='generating')
+    registry.record_files(
+        project_root, 'conv-a', [{'path': 'a.py'}], user_id=OWNER_A)
+    registry.mark_idle(project_root, 'conv-a', user_id=OWNER_A)
+    registry.depart(project_root, 'conv-a', user_id=OWNER_A)
+
+    assert observed_while_locked == []
 
 
-def test_subagent_idle_and_depart_target_the_right_peer(fresh_state, captured_broadcasts, root):
-    """mark_idle / depart of a sub-agent must not touch the conversation peer."""
-    reg.announce(root, 'conv-a', task_id='t1', title='Parent')
-    reg.announce(root, 'conv-a', agent_id='agent-r-1', task_id='t1', title='researcher')
-    reg.depart(root, 'conv-a', agent_id='agent-r-1')
-    peers = reg.snapshot(root)['peers']
-    # The conversation peer survives; only the sub-agent departed.
-    assert len(peers) == 1 and peers[0].get('agentId', '') == ''
-    departs = [f for f in captured_broadcasts if f.get('kind') == 'depart']
-    assert departs and departs[-1]['peer'].get('agentId') == 'agent-r-1'
+def test_empty_registry_owns_no_sweeper_thread(monkeypatch):
+    monkeypatch.setattr(registry, '_state', {})
+    monkeypatch.setattr(registry, '_sweeper_started', False)
+    monkeypatch.setattr(registry, '_sweeper_thread', None)
+
+    assert registry.start_sweeper() is False
+    assert registry._sweeper_thread is None
+    assert registry._sweeper_started is False
 
 
-def test_cross_conv_conflict_still_works_with_composite_keys(fresh_state, captured_broadcasts, root):
-    """Regression: the original cross-conversation overlap still fires."""
-    reg.announce(root, 'conv-a', task_id='t1', title='Alpha')
-    reg.announce(root, 'conv-b', task_id='t2', title='Beta')
-    reg.record_files(root, 'conv-a', [{'path': 'shared.py', 'action': 'patched'}])
-    captured_broadcasts.clear()
-    reg.record_files(root, 'conv-b', [{'path': 'shared.py', 'action': 'patched'}])
-    conflicts = [f for f in captured_broadcasts if f.get('kind') == 'conflict']
-    assert conflicts
-    adv = conflicts[-1]['conflict']
-    assert set(adv['peers']) == {'conv-a', 'conv-b'}
-    assert 'Alpha' in adv['message'] and 'Beta' in adv['message']
+def test_sweeper_retires_empty_batch_and_later_announce_restarts(
+        monkeypatch, project_root):
+    now = time.time()
+    stale_peer = {
+        'convId': 'stale-conv',
+        'agentId': '',
+        'lastBeatTs': int((now - registry.IDLE_TTL_SEC - 1) * 1000),
+    }
+    monkeypatch.setattr(
+        registry, '_state', {_scope(project_root): {'stale-conv': stale_peer}})
+    monkeypatch.setattr(registry, '_sweeper_started', True)
+    monkeypatch.setattr(registry, '_sweeper_stop', threading.Event())
+    monkeypatch.setattr(registry, '_broadcast', lambda *_args, **_kwargs: None)
+    current_owner = threading.current_thread()
+    monkeypatch.setattr(registry, '_sweeper_thread', current_owner)
+
+    registry._sweep_loop(0)
+
+    assert registry._state == {}
+    assert registry._sweeper_thread is None
+    assert registry._sweeper_started is False
+
+    registry.announce(project_root, 'new-conv', user_id=OWNER_A)
+    replacement = registry._sweeper_thread
+    assert replacement is not None
+    assert replacement is not current_owner
+    assert replacement.is_alive()
+    assert registry.stop_sweeper(timeout=1.0) is True
 
 
-# ── lock discipline: broadcasts must NOT hold the global presence lock ──
+def test_empty_retirement_cannot_detach_newer_owner(monkeypatch):
+    old_owner = threading.current_thread()
+    newer_owner = object()
+    monkeypatch.setattr(registry, '_state', {})
+    monkeypatch.setattr(registry, '_sweeper_started', True)
+    monkeypatch.setattr(registry, '_sweeper_thread', newer_owner)
 
-def test_mutators_broadcast_outside_lock(fresh_state, monkeypatch, root):
-    """push_event must never be called while _lock is held.
-
-    Holding the global presence RLock across push-hub I/O is a latency /
-    lock-ordering hazard under real concurrency. This asserts every mutator
-    that broadcasts has already RELEASED the lock by the time push_event runs
-    (the broadcast captures a decorated copy under the lock, then emits after).
-    """
-    seen_locked: list[str] = []
-
-    def _probe_push(channel, task_id, payload):
-        # Try to acquire the lock non-blocking; if we CAN'T, it's still held by
-        # the calling mutator → defect. RLock is re-entrant on the same thread,
-        # so we must check via a separate thread to detect a held lock.
-        import threading as _t
-        acquired = {'ok': False}
-
-        def _try():
-            acquired['ok'] = reg._lock.acquire(blocking=False)
-            if acquired['ok']:
-                reg._lock.release()
-
-        th = _t.Thread(target=_try)
-        th.start()
-        th.join()
-        if not acquired['ok']:
-            seen_locked.append(payload.get('kind', '?'))
-
-    import lib.push as push_mod
-    monkeypatch.setattr(push_mod, 'push_event', _probe_push)
-
-    reg.announce(root, 'conv-a', task_id='t1', title='A')
-    reg.announce(root, 'conv-b', task_id='t2', title='B')
-    reg.record_files(root, 'conv-a', [{'path': 'x.py', 'action': 'written'}])
-    reg.record_files(root, 'conv-b', [{'path': 'x.py', 'action': 'written'}])  # conflict
-    reg.heartbeat(root, 'conv-a', phase='generating')
-    reg.mark_idle(root, 'conv-a')
-    reg.depart(root, 'conv-b')
-
-    assert seen_locked == [], (
-        f'push_event fired while _lock was held for: {seen_locked}')
+    assert registry._retire_sweeper_if_empty(old_owner) is False
+    assert registry._sweeper_thread is newer_owner
+    assert registry._sweeper_started is True
 
 
-if __name__ == '__main__':
-    import sys
-    sys.exit(pytest.main([__file__, '-v']))
+def test_sweep_interval_is_bounded_against_busy_loops():
+    assert registry._bounded_sweep_interval(0) == 10
+    assert registry._bounded_sweep_interval(float('nan')) == 10
+    assert registry._bounded_sweep_interval(0.001) == 0.1
+    assert registry._bounded_sweep_interval(999) == registry.ACTIVE_TTL_SEC
+
+
+def test_sweeper_start_failure_releases_unstarted_owner(
+        monkeypatch, project_root):
+    class BrokenThread:
+        @staticmethod
+        def start():
+            raise RuntimeError('injected start failure')
+
+    monkeypatch.setattr(
+        registry, '_state', {_scope(project_root): {'peer': {}}})
+    monkeypatch.setattr(registry, '_sweeper_started', False)
+    monkeypatch.setattr(registry, '_sweeper_thread', None)
+    monkeypatch.setattr(
+        registry.threading, 'Thread', lambda **_kwargs: BrokenThread())
+
+    with pytest.raises(RuntimeError, match='injected start failure'):
+        registry.start_sweeper()
+
+    assert registry._sweeper_thread is None
+    assert registry._sweeper_started is False
+
+
+def test_ephemeral_announce_survives_sweeper_start_failure(
+        monkeypatch, project_root):
+    class BrokenThread:
+        @staticmethod
+        def start():
+            raise RuntimeError('injected start failure')
+
+    monkeypatch.setattr(registry, '_state', {})
+    monkeypatch.setattr(registry, '_sweeper_started', False)
+    monkeypatch.setattr(registry, '_sweeper_thread', None)
+    monkeypatch.setattr(registry, '_broadcast', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        registry.threading, 'Thread', lambda **_kwargs: BrokenThread())
+
+    registry.announce(project_root, 'conv-a', user_id=OWNER_A)
+
+    assert [peer['convId'] for peer in registry.snapshot(
+        project_root, user_id=OWNER_A)['peers']] == ['conv-a']
+    assert registry._sweeper_thread is None
+    assert registry._sweeper_started is False

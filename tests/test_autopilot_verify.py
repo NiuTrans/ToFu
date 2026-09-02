@@ -150,20 +150,22 @@ def test_extract_objective_from_db_is_clean(monkeypatch):
     (the source of truth for human input), which never carries injected
     context — so the pinned objective is the bare human ask regardless of how
     that per-turn context is wrapped in the live in-memory copy."""
-    import lib.tasks_pkg.conv_message_builder as cmb
+    import lib.tasks_pkg.conv_message_builder._load as cmb
     import lib.tasks_pkg.autopilot as ap
 
     clean = [
         {'role': 'user', 'content': 'Fix the tablet case cutout question.'},
         {'role': 'assistant', 'content': 'a full answer'},
     ]
-    monkeypatch.setattr(cmb, '_load_messages_from_db', lambda cid: clean)
-    assert ap._extract_objective_from_db('conv-x') == \
+    monkeypatch.setattr(
+        cmb, '_load_messages_from_db', lambda cid, *, user_id: clean)
+    assert ap._extract_objective_from_db('conv-x', user_id=1) == \
         'Fix the tablet case cutout question.'
     # No conv id / empty DB → '' (caller falls back to the live list).
-    assert ap._extract_objective_from_db('') == ''
-    monkeypatch.setattr(cmb, '_load_messages_from_db', lambda cid: None)
-    assert ap._extract_objective_from_db('conv-x') == ''
+    assert ap._extract_objective_from_db('', user_id=1) == ''
+    monkeypatch.setattr(
+        cmb, '_load_messages_from_db', lambda cid, *, user_id: None)
+    assert ap._extract_objective_from_db('conv-x', user_id=1) == ''
 
 
 def test_vu_role_prompt_has_subjective_done_branch():
@@ -185,7 +187,7 @@ def _patch_subturn(monkeypatch, content):
     """Stub _run_single_turn so the VU sub-task 'replies' with `content`,
     and stub the objective resolver so no DB is touched."""
     import lib.tasks_pkg.autopilot as ap
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._turn as orch
 
     def _fake_turn(sub_task):
         sub_task['toolRounds'] = []
@@ -193,13 +195,15 @@ def _patch_subturn(monkeypatch, content):
 
     monkeypatch.setattr(orch, '_run_single_turn', _fake_turn)
     monkeypatch.setattr(ap, '_get_or_persist_objective',
-                        lambda conv_id, msgs: 'Ship a working feature.')
+                        lambda conv_id, msgs, *, user_id:
+                        'Ship a working feature.')
 
 
 def _vu_task():
     return {
         'id': 'task-vu-test-0001',
         'convId': 'conv-vu-test',
+        '_userId': 1,
         'config': {'model': 'm', 'autopilot': True},
         'messages': [
             {'role': 'user', 'content': 'Ship a working feature.'},
@@ -261,7 +265,7 @@ def test_run_vu_plain_reply_keeps_going(monkeypatch):
 def test_run_vu_injects_objective_anchor(monkeypatch):
     """The VU directive turn must carry the objective anchor header."""
     import lib.tasks_pkg.autopilot as ap
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._turn as orch
 
     captured = {}
 
@@ -272,7 +276,8 @@ def test_run_vu_injects_objective_anchor(monkeypatch):
 
     monkeypatch.setattr(orch, '_run_single_turn', _fake_turn)
     monkeypatch.setattr(ap, '_get_or_persist_objective',
-                        lambda conv_id, msgs: 'Build the UTF-8 CSV exporter.')
+                        lambda conv_id, msgs, *, user_id:
+                        'Build the UTF-8 CSV exporter.')
 
     ap.run_virtual_user(_vu_task(), vu_msg_id='vu-4')
 
@@ -294,9 +299,9 @@ def _patch_subturn_with_rounds(monkeypatch, content, thinking, rounds):
     content/thinking + a merged toolRounds list on the dict — exactly the state
     `assemble_segments` reads. Mirrors what a real `_run_single_turn` leaves
     behind (it does NOT assemble segments itself because the sub-task runs with
-    `_endpoint_managed=True`, skipping the persist path)."""
+    `_flow_managed=True`, skipping the persist path)."""
     import lib.tasks_pkg.autopilot as ap
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._turn as orch
 
     def _fake_turn(sub_task):
         sub_task['content'] = content
@@ -307,14 +312,15 @@ def _patch_subturn_with_rounds(monkeypatch, content, thinking, rounds):
 
     monkeypatch.setattr(orch, '_run_single_turn', _fake_turn)
     monkeypatch.setattr(ap, '_get_or_persist_objective',
-                        lambda conv_id, msgs: 'Ship a working feature.')
+                        lambda conv_id, msgs, *, user_id:
+                        'Ship a working feature.')
 
 
 def test_run_vu_returns_segments_for_inline_timeline(monkeypatch):
     """run_virtual_user must assemble + return the thin `segments` timeline off
     the finished sub-task so the VU turn renders the IDENTICAL agent inline
     per-tool timeline (owner directive). This is the ONLY assembly point — the
-    sub-task runs `_endpoint_managed` and never assembled segments itself.
+    sub-task runs `_flow_managed` and never assembled segments itself.
 
     Asserts the returned segments carry the interleaved shape (per-batch
     thinking + narration then the tool_use, then the terminal deliverable) and

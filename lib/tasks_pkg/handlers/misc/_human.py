@@ -1,39 +1,20 @@
 # HOT_PATH
-"""Human-facing misc handlers: ``ask_human`` (blocking human guidance) and
-``todo_write`` (the structured checklist).
+"""Human-facing ``ask_human`` and structured-checklist handlers.
 
-MONKEYPATCH PARITY: ``append_event``, ``_build_simple_meta`` and
-``_finalize_tool_round`` are resolved THROUGH the package facade
-(``lib.tasks_pkg.handlers.misc``) at call time, so a test patching
-``misc.append_event`` / ``misc._build_simple_meta`` / ``misc._finalize_tool_round``
-steers these handlers exactly as it did before the package split (see
-tests/test_tool_audit_tranche1.py).
+This module owns the handler dependency bindings used by tests and runtime.
 """
 
 from __future__ import annotations
 
 from lib.log import get_logger
-from lib.tasks_pkg.executor import tool_registry
+from lib.tasks_pkg.executor import (
+    _build_simple_meta,
+    _finalize_tool_round,
+    tool_registry,
+)
+from lib.tasks_pkg.manager import append_event
 
 logger = get_logger(__name__)
-
-
-# ── Facade indirection: resolve these collaborators THROUGH the package module
-#    (lib.tasks_pkg.handlers.misc) at call time so tests patching the facade
-#    steer this handler exactly as before the package split. ──
-def _append_event(task, ev):
-    from lib.tasks_pkg.handlers import misc as _facade
-    return _facade.append_event(task, ev)
-
-
-def _build_simple_meta(*args, **kwargs):
-    from lib.tasks_pkg.handlers import misc as _facade
-    return _facade._build_simple_meta(*args, **kwargs)
-
-
-def _finalize_tool_round(*args, **kwargs):
-    from lib.tasks_pkg.handlers import misc as _facade
-    return _facade._finalize_tool_round(*args, **kwargs)
 
 
 @tool_registry.handler('ask_human', category='human_guidance',
@@ -46,7 +27,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     question = fn_args.get('question', '')
     response_type = fn_args.get('response_type', 'free_text')
     options = fn_args.get('options', [])
-    # ★ Defensive: models sometimes return options as a JSON string, a dict,
+    # Defensive: models sometimes return options as a JSON string, a dict,
     #   or omit it entirely. Normalize to a list of dicts so the frontend's
     #   options.map(…) call can never crash on a string/object.
     if isinstance(options, str):
@@ -98,7 +79,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     round_entry['guidanceQuestion'] = question
     round_entry['guidanceType'] = response_type
     round_entry['guidanceOptions'] = options
-    _append_event(task, {
+    append_event(task, {
         'type': 'human_guidance_request',
         'roundNum': rn,
         'toolCallId': tc_id,
@@ -140,7 +121,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
             # into the tool result (and into the human_guidance_response SSE
             # event), and the deliberately-kept [PROGRESS:] machine line in
             # 'text' leaked into model context via this tool-result path
-            # (pt_5355329b, sibling of pt_0ae59e94).  Strip machine tokens
+            # (, sibling of ).  Strip machine tokens
             # through the single agent_verdict predicate — unlike the budget
             # guard, NO consumer on this path needs the raw PROGRESS line.
             from lib.agent_verdict import strip_machine_tokens
@@ -150,7 +131,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
             # response, matching the live human-guidance event shape.
             from lib.tasks_pkg.human_guidance import resolve_human_guidance
             resolve_human_guidance(guidance_id, user_response)
-            _append_event(task, {
+            append_event(task, {
                 'type': 'human_guidance_response',
                 'roundNum': rn,
                 'guidanceId': guidance_id,
@@ -209,7 +190,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
                     'guidance_id=%s, response_len=%d, task=%s',
                     guidance_id, len(user_response), task.get('id', '?')[:8])
 
-    # ★ No title/snippet truncation: the user specifically flagged that
+    # No title/snippet truncation: the user specifically flagged that
     #   "incomplete displays are not allowed" — the original 80-char title
     #   and 120-char snippet caps were producing cut-off question text
     #   ending mid-word (e.g. "…exercise t"). Pass the full strings; the

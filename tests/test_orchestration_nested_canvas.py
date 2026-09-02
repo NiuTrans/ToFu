@@ -8,9 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from lib.orchestration import (
-    expand_subflows, render_role_brief, resolve_scope, validate_definition,
-)
+from lib.orchestration._execution_projection import render_role_brief
+from lib.orchestration._role_axes import resolve_scope
+from lib.orchestration._subflow_expansion import expand_subflows
+from lib.orchestration._validate import validate_definition
 
 
 pytestmark = pytest.mark.unit

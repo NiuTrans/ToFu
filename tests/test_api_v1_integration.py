@@ -12,28 +12,25 @@ LLM dispatcher; covered separately by smoke tests with mocked
 import asyncio
 import json
 import os
-import tempfile
 import unittest
 from unittest import mock
 
 import pytest
 
 pytest_plugins = ('tests._artifact_sidecar',)
+pytestmark = pytest.mark.unit
 
 
 class _AppFixture:
     """Build a Quart app with the headless API blueprints registered.
 
-    Uses a tmp api_keys.json so the production file is never touched.
+    Credentials and artifacts share the module's isolated Sidecar authority.
     """
 
     def __init__(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        # Patch the API-key store path BEFORE the auth module loads.
-        self._patch_api_keys_path()
-        # Force test mode: TUNNEL_TOKEN must be set so the auth
-        # middleware actually rejects unauthenticated /api/v1/* calls.
-        os.environ['TUNNEL_TOKEN'] = 'test-tunnel-token-not-real'
+        from lib.api_keys import create_key
+        _row, self.admin_token = create_key(owner_user_id=1, 
+            name='removed-route-probe', scopes=[], admin=True)
 
         from quart import Quart
         self.app = Quart(__name__, static_folder=None)
@@ -52,7 +49,6 @@ class _AppFixture:
         from routes.api_v1.folders import api_v1_folders_bp
         from routes.api_v1.optimizer import api_v1_optimizer_bp
         from routes.api_v1.scheduler import api_v1_scheduler_bp
-        from routes.api_v1.endpoint import api_v1_endpoint_bp
         from routes.api_v1.swarm import api_v1_swarm_bp
         from routes.api_v1.desktop import api_v1_desktop_bp
         from routes.api_v1.browser import api_v1_browser_bp
@@ -71,13 +67,11 @@ class _AppFixture:
         # Trigger the side-effect import that registers the routes on api_v1_config_bp.
         from routes import config as _legacy_config  # noqa: F401
         from routes.api_docs import api_docs_bp
-        from routes.legacy_redirects import legacy_redirects_bp
         self.app.register_blueprint(api_v1_capabilities_bp)
         self.app.register_blueprint(api_v1_keys_bp)
         self.app.register_blueprint(api_v1_folders_bp)
         self.app.register_blueprint(api_v1_optimizer_bp)
         self.app.register_blueprint(api_v1_scheduler_bp)
-        self.app.register_blueprint(api_v1_endpoint_bp)
         self.app.register_blueprint(api_v1_swarm_bp)
         self.app.register_blueprint(api_v1_desktop_bp)
         self.app.register_blueprint(api_v1_browser_bp)
@@ -94,21 +88,13 @@ class _AppFixture:
         self.app.register_blueprint(api_v1_common_bp)
         self.app.register_blueprint(api_v1_config_bp)
         self.app.register_blueprint(api_docs_bp)
-        self.app.register_blueprint(legacy_redirects_bp)
 
-    def _patch_api_keys_path(self):
-        from lib import api_keys
-        self._orig_path = api_keys._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(self._tmp.name, 'api_keys.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
+    @property
+    def auth_headers(self):
+        return {'Authorization': f'Bearer {self.admin_token}'}
 
     def cleanup(self):
-        from lib import api_keys
-        api_keys._STORE_PATH = self._orig_path
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        self._tmp.cleanup()
+        pass
 
 
 _FIXTURE = None
@@ -147,12 +133,6 @@ class IntegrationTest(unittest.TestCase):
         if _FIXTURE is not None:
             _FIXTURE.cleanup()
             _FIXTURE = None
-
-    def setUp(self):
-        # Fresh state on every test.
-        from lib import api_keys
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
 
     def _client(self):
         return self.fix.app.test_client()
@@ -208,7 +188,7 @@ class IntegrationTest(unittest.TestCase):
     def test_keys_create_with_admin_then_list(self):
         from lib.api_keys import create_key
         # Bootstrap an admin key directly (no HTTP) then use it.
-        _row, admin_token = create_key(name='bootstrap',
+        _row, admin_token = create_key(owner_user_id=1, name='bootstrap',
                                        scopes=[], admin=True)
 
         async def go():
@@ -251,12 +231,34 @@ class IntegrationTest(unittest.TestCase):
             self.assertEqual(r.status_code, 401)
         _run(go())
 
+    def test_retired_tunnel_credential_is_not_accepted(self):
+        """Private mode has one credential authority: an issued API key."""
+        retired_env_name = 'TUNNEL_' + 'TOKEN'
+        retired_header_name = 'X-' + 'Tunnel-Token'
+        previous = os.environ.get(retired_env_name)
+        os.environ[retired_env_name] = 'retired-secret'
+
+        async def go():
+            response = await self._client().get(
+                '/api/v1/keys',
+                headers={retired_header_name: 'retired-secret'},
+            )
+            self.assertEqual(response.status_code, 401)
+
+        try:
+            _run(go())
+        finally:
+            if previous is None:
+                os.environ.pop(retired_env_name, None)
+            else:
+                os.environ[retired_env_name] = previous
+
     def test_folders_crud_full_lifecycle(self):
         # Authenticate as admin so we can hit the auth-required folder routes,
         # but redirect the folders.json store at the v1 module to a tmp file
         # so we don't pollute production state.
         from lib.api_keys import create_key
-        _row, token = create_key(name='folder-tester', scopes=[], admin=True)
+        _row, token = create_key(owner_user_id=1, name='folder-tester', scopes=[], admin=True)
 
         import importlib
         import os
@@ -341,7 +343,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/folders',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -354,13 +356,16 @@ class IntegrationTest(unittest.TestCase):
     def test_optimizer_proposals_list_with_token(self):
         from lib.api_keys import create_key
         from routes.api_v1 import optimizer as optimizer_routes
-        _row, token = create_key(name='opt-reader', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='opt-reader', scopes=['chat'])
         async def go():
             with mock.patch.object(
-                    optimizer_routes._storage, 'list_proposals', return_value=[]):
+                    optimizer_routes._storage, 'list_proposals',
+                    return_value=[]) as list_proposals:
                 r = await self._client().get(
                     '/api/v1/optimizer/proposals',
                     headers={'Authorization': f'Bearer {token}'})
+            list_proposals.assert_called_once_with(
+                owner_user_id=1, status=None, limit=50)
             self.assertEqual(r.status_code, 200)
             body = await r.get_json()
             self.assertTrue(body['ok'])
@@ -369,13 +374,37 @@ class IntegrationTest(unittest.TestCase):
 
     def test_optimizer_mutation_requires_admin(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='opt-non-admin', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='opt-non-admin', scopes=['chat'])
         async def go():
             r = await self._client().post(
                 '/api/v1/optimizer/run-now',
                 headers={'Authorization': f'Bearer {token}'},
                 json={'dry_run': True})
             self.assertEqual(r.status_code, 403)
+        _run(go())
+
+    def test_optimizer_run_receives_the_authenticated_owner_principal(self):
+        from lib.api_keys import create_key
+        from routes.api_v1 import optimizer as optimizer_routes
+
+        _row, token = create_key(
+            owner_user_id=7, name='opt-admin-owner-7', scopes=[], admin=True)
+
+        async def go():
+            with mock.patch.object(
+                    optimizer_routes, '_run_once',
+                    return_value={'proposals': []}) as run_once:
+                response = await self._client().post(
+                    '/api/v1/optimizer/run-now',
+                    headers={'Authorization': f'Bearer {token}'},
+                    json={'dry_run': True, 'window_hours': 12})
+            self.assertEqual(response.status_code, 200)
+            principal = run_once.call_args.kwargs['principal']
+            self.assertEqual(principal.owner_user_id, 7)
+            self.assertTrue(principal.has_scope('admin'))
+            self.assertEqual(run_once.call_args.kwargs['dry_run'], True)
+            self.assertEqual(run_once.call_args.kwargs['window_hours'], 12)
+
         _run(go())
 
     def test_scheduler_proactive_status_requires_auth(self):
@@ -386,7 +415,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_scheduler_proactive_status_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='sched-reader', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='sched-reader', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/scheduler/proactive/status',
@@ -399,7 +428,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_scheduler_pause_requires_admin(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='sched-non-admin', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='sched-non-admin', scopes=['chat'])
         async def go():
             r = await self._client().post(
                 '/api/v1/scheduler/tasks/abc123/pause',
@@ -409,7 +438,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_timer_list_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='timer-reader', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='timer-reader', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/timer/list',
@@ -423,7 +452,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_timer_list_summary_avoids_full_rows(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='timer-summary-reader', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='timer-summary-reader', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/timer/list?summary=1',
@@ -436,39 +465,9 @@ class IntegrationTest(unittest.TestCase):
             self.assertNotIn('timers', body)
         _run(go())
 
-    def test_endpoint_start_requires_auth(self):
-        async def go():
-            r = await self._client().post(
-                '/api/v1/endpoint/start', json={'messages': []})
-            self.assertEqual(r.status_code, 401)
-        _run(go())
-
-    def test_endpoint_start_rejects_missing_user_message(self):
-        from lib.api_keys import create_key
-        _row, token = create_key(name='endpoint-tester', scopes=['chat'])
-        async def go():
-            r = await self._client().post(
-                '/api/v1/endpoint/start',
-                headers={'Authorization': f'Bearer {token}'},
-                json={'messages': [
-                    {'role': 'system', 'content': 'You are helpful'}
-                ], 'config': {}})
-            self.assertEqual(r.status_code, 400)
-        _run(go())
-
-    def test_endpoint_status_unknown_task_404(self):
-        from lib.api_keys import create_key
-        _row, token = create_key(name='endpoint-status', scopes=['chat'])
-        async def go():
-            r = await self._client().get(
-                '/api/v1/endpoint/status/no-such-task',
-                headers={'Authorization': f'Bearer {token}'})
-            self.assertEqual(r.status_code, 404)
-        _run(go())
-
     def test_swarm_status_unknown_task(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='swarm-tester', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='swarm-tester', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/swarm/status/no-such-task',
@@ -480,7 +479,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_swarm_config_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='swarm-conf', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='swarm-conf', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/swarm/config',
@@ -493,7 +492,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_swarm_abort_requires_swarm_scope(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='swarm-no-scope', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='swarm-no-scope', scopes=['chat'])
         async def go():
             r = await self._client().post(
                 '/api/v1/swarm/abort/some-task',
@@ -509,7 +508,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_desktop_status_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='desktop-tester', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='desktop-tester', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/desktop/status',
@@ -529,7 +528,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_browser_status_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='browser-tester', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='browser-tester', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/browser/status',
@@ -543,7 +542,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_browser_clients_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='browser-clients', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='browser-clients', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/browser/clients',
@@ -561,7 +560,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_memory_list_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='memory-tester', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='memory-tester', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/memory',
@@ -577,7 +576,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_memory_get_unknown_404(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='memory-404', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='memory-404', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/memory/no-such-id',
@@ -587,7 +586,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_memory_catalog_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='memory-catalog', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='memory-catalog', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/skills/catalog',
@@ -606,7 +605,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_mcp_servers_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='mcp-tester', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='mcp-tester', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/mcp/servers',
@@ -620,7 +619,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_mcp_catalog_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='mcp-catalog', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='mcp-catalog', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/mcp/catalog',
@@ -634,7 +633,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_mcp_upsert_rejects_missing_name(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='mcp-upsert', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='mcp-upsert', scopes=['chat'])
         async def go():
             r = await self._client().post(
                 '/api/v1/mcp/servers',
@@ -651,7 +650,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_daily_report_conv_count_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='daily-reader', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='daily-reader', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/daily-report/conv-count/2026-05-29',
@@ -667,7 +666,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_oauth_status_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='oauth-reader', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='oauth-reader', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/oauth/status',
@@ -677,7 +676,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_oauth_test_requires_admin(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='oauth-nonadmin', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='oauth-nonadmin', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/oauth/test',
@@ -693,7 +692,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_project_status_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='project-reader', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='project-reader', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/project/status',
@@ -703,7 +702,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_project_set_rejects_empty_path(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='project-set', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='project-set', scopes=['chat'])
         async def go():
             r = await self._client().post(
                 '/api/v1/project/set',
@@ -714,7 +713,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_project_undo_rejects_no_active_project(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='project-undo', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='project-undo', scopes=['chat'])
         async def go():
             r = await self._client().post(
                 '/api/v1/project/undo',
@@ -733,7 +732,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_translate_sync_empty_text(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='translate-tester', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='translate-tester', scopes=['chat'])
         async def go():
             r = await self._client().post(
                 '/api/v1/translate',
@@ -744,7 +743,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_translate_poll_not_found(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='translate-poll', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='translate-poll', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/translate/poll/no-such-task',
@@ -760,7 +759,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_artifacts_list_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='artifact-tester', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='artifact-tester', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/artifacts?limit=5',
@@ -773,7 +772,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_artifacts_get_unknown_404(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='artifact-404', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='artifact-404', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/artifacts/no-such-id',
@@ -783,7 +782,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_artifacts_scan_rejects_missing_conv_id(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='artifact-scan', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='artifact-scan', scopes=['chat'])
         async def go():
             r = await self._client().post(
                 '/api/v1/artifacts/scan',
@@ -800,7 +799,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_images_models_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='img-models', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='img-models', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/images/models',
@@ -815,14 +814,14 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().post(
                 '/api/images/generate',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'},
+                headers=self.fix.auth_headers,
                 json={'prompt': 'x'})
             self.assertEqual(r.status_code, 404)
         _run(go())
 
     def test_pricing_v1_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='pricing-v1', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='pricing-v1', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/pricing',
@@ -832,7 +831,7 @@ class IntegrationTest(unittest.TestCase):
 
     def test_features_v1_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='features-v1', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='features-v1', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/features',
@@ -840,9 +839,51 @@ class IntegrationTest(unittest.TestCase):
             self.assertEqual(r.status_code, 200)
         _run(go())
 
+    def test_feature_mutation_requires_admin(self):
+        from lib.api_keys import create_key
+
+        _row, token = create_key(
+            owner_user_id=1, name='features-non-admin', scopes=['chat'])
+
+        async def go():
+            response = await self._client().post(
+                '/api/v1/features',
+                headers={'Authorization': f'Bearer {token}'},
+                json={'debug_mode': True})
+            self.assertEqual(response.status_code, 403)
+
+        _run(go())
+
+    def test_feature_mutation_passes_the_admin_owner_principal(self):
+        from lib.api_keys import create_key
+        from lib import features_store
+
+        _row, token = create_key(
+            owner_user_id=7, name='features-admin-owner-7',
+            scopes=[], admin=True)
+
+        async def go():
+            with mock.patch.object(
+                    features_store, 'apply_feature_updates',
+                    return_value={
+                        'saved': {'debug_mode': True},
+                        'changed': ['debug_mode'],
+                        'needs_restart': False,
+                    }) as apply_updates:
+                response = await self._client().post(
+                    '/api/v1/features',
+                    headers={'Authorization': f'Bearer {token}'},
+                    json={'debug_mode': True})
+            self.assertEqual(response.status_code, 200)
+            principal = apply_updates.call_args.kwargs['principal']
+            self.assertEqual(principal.owner_user_id, 7)
+            self.assertTrue(principal.has_scope('admin'))
+
+        _run(go())
+
     def test_provider_templates_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='templates-v1', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='templates-v1', scopes=['chat'])
         async def go():
             r = await self._client().get(
                 '/api/v1/providers/templates',
@@ -854,7 +895,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/server-config',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -862,13 +903,13 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/provider-templates',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
-    def test_chat_active_v1_requires_auth(self):
+    def test_tasks_v1_requires_auth(self):
         async def go():
-            r = await self._client().get('/api/v1/chat/active')
+            r = await self._client().get('/api/v1/tasks')
             self.assertEqual(r.status_code, 401)
         _run(go())
 
@@ -876,7 +917,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/chat/active',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -885,7 +926,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().post(
                 '/api/chat/queue',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'},
+                headers=self.fix.auth_headers,
                 json={'convId': 'x'})
             self.assertEqual(r.status_code, 404)
         _run(go())
@@ -894,7 +935,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/pricing',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -903,7 +944,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/me',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -911,7 +952,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/conversations/search?q=test',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -920,7 +961,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/artifacts/some-id',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -928,7 +969,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().post(
                 '/api/translate/start',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'},
+                headers=self.fix.auth_headers,
                 json={'text': 'hi'})
             self.assertEqual(r.status_code, 404)
         _run(go())
@@ -937,7 +978,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/project/status',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -945,7 +986,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/oauth/status',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -953,7 +994,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/daily-report/status/2026-05-29',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -961,7 +1002,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/mcp/servers',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -969,7 +1010,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/memory',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -979,7 +1020,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/browser/status',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -989,7 +1030,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/desktop/status',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -997,15 +1038,15 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/swarm/config',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
-    def test_legacy_endpoint_is_404(self):
+    def test_removed_orchestration_loop_route_is_404(self):
         async def go():
             r = await self._client().post(
                 '/api/endpoint/start',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'},
+                headers=self.fix.auth_headers,
                 json={'messages': []})
             self.assertEqual(r.status_code, 404)
         _run(go())
@@ -1014,7 +1055,7 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/scheduler/proactive/status',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
@@ -1022,28 +1063,24 @@ class IntegrationTest(unittest.TestCase):
         async def go():
             r = await self._client().get(
                 '/api/timer/list',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
+                headers=self.fix.auth_headers)
             self.assertEqual(r.status_code, 404)
         _run(go())
 
-    def test_legacy_optimizer_redirects_to_v1(self):
-        # The legacy /api/optimizer/* surface was removed in favour of
-        # /api/v1/optimizer/*, but stale browser tabs still poll the
-        # old URL. We serve a 308 (permanent, method-preserving) so
-        # those tabs keep working AND we stop spamming the error log.
+    def test_legacy_optimizer_is_404(self):
+        # Retired JSON routes have no compatibility surface. Reloading an old
+        # browser tab upgrades its frontend; preserving a second API authority
+        # would make removal impossible to verify.
         async def go():
             r = await self._client().get(
                 '/api/optimizer/proposals?limit=60',
-                headers={'X-Tunnel-Token': 'test-tunnel-token-not-real'})
-            self.assertEqual(r.status_code, 308)
-            self.assertIn('/api/v1/optimizer/proposals',
-                          r.headers.get('Location', ''))
-            self.assertIn('limit=60', r.headers.get('Location', ''))
+                headers=self.fix.auth_headers)
+            self.assertEqual(r.status_code, 404)
         _run(go())
 
     def test_whoami_with_token(self):
         from lib.api_keys import create_key
-        _row, token = create_key(name='who', scopes=['chat'])
+        _row, token = create_key(owner_user_id=1, name='who', scopes=['chat'])
 
         async def go():
             r = await self._client().get(

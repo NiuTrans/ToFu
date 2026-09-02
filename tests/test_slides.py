@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.slides import pptd  # noqa: E402
+import lib.slides.pptd as pptd  # noqa: E402
 from lib.slides.pptd import Deck, Page, parse_deck, validate_deck  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -364,7 +364,7 @@ class TestRecipe:
         return _call
 
     def test_full_graph_and_resume(self, tmp_path, monkeypatch):
-        from lib.slides import recipe
+        import lib.slides.recipe as recipe
         outline_json = ('{"title": "T", "scenario": "tech-engineering",'
                         ' "pages": ['
                         ' {"pageType": "cover", "purpose": "p", '
@@ -425,7 +425,7 @@ class TestRecipe:
         assert out2['pptx_path'] == out['pptx_path']
 
     def test_bad_page_degrades_not_fails(self, tmp_path, monkeypatch):
-        from lib.slides import recipe
+        import lib.slides.recipe as recipe
         import lib.slides.author as author
         outline_json = ('{"title": "T", "scenario": "business-plan",'
                         ' "pages": ['
@@ -460,7 +460,7 @@ class TestRecipe:
     @pytest.mark.parametrize('improves', [True, False])
     def test_layout_qa_accepts_only_measured_improvement(
             self, tmp_path, monkeypatch, improves):
-        from lib.slides import recipe
+        import lib.slides.recipe as recipe
         manifest = _write_deck(tmp_path, [_COVER])
         deck_dir = os.path.dirname(manifest)
         page_path = os.path.join(deck_dir, 'pages', '01.page')
@@ -519,13 +519,15 @@ class TestRuntimeContract:
         from lib.slides.runtime import _slides_runtime
         assert _slides_runtime.kind == 'slides-deck'
 
-    def test_task_persists_requested_model(self, tmp_path):
+    def test_task_persists_requested_model_and_owner(self, tmp_path):
         from lib.slides.runtime import _new_slides_task, _slides_task_id
+        owner_user_id = 7
         task = _new_slides_task(
             _slides_task_id(), topic='小米澎程', workdir=str(tmp_path),
             lang='zh', style='brand film', max_pages=8, size=(1280, 720),
-            model='kimi-k3')
+            model='kimi-k3', user_id=owner_user_id)
         assert task['model'] == 'kimi-k3'
+        assert task['user_id'] == owner_user_id
 
     def test_local_input_images_are_copied_into_deck(self, tmp_path):
         from lib.slides.recipe import _materialise_input_images
@@ -555,8 +557,9 @@ class TestRuntimeContract:
 
     def test_topic_builder_normalises_relative_workdir(self, tmp_path,
                                                        monkeypatch):
-        from lib.slides import recipe
+        import lib.slides.recipe as recipe
 
+        monkeypatch.chdir(tmp_path)
         seen = {}
 
         def fake_stages(stages, ctx, **kwargs):
@@ -574,7 +577,7 @@ class TestRuntimeContract:
         monkeypatch.setattr(recipe, 'run_stages', fake_stages)
         recipe.build_deck_from_topic('x', 'relative-slide-job')
 
-        assert os.path.isabs(seen['workdir'])
+        assert seen['workdir'] == str(tmp_path / 'relative-slide-job')
 
     def test_fallback_page_validates(self, tmp_path):
         from lib.slides.author import fallback_page
@@ -628,7 +631,7 @@ class TestP4:
         """A request must never invoke pip or mutate the serving environment."""
         import builtins
 
-        from lib.design_sys import fonts as _fonts
+        import lib.design_sys.fonts as _fonts
         from lib.slides.export_pptx import _font_file_for_embedding
 
         font_path = tmp_path / 'font.ttf'
@@ -670,7 +673,7 @@ class TestP4:
         slot, and the bytes are glyf-outline TTFs (PowerPoint rejects CFF)."""
         pytest.importorskip('pptx')
         pytest.importorskip('fontTools')  # embedding degrades off without it
-        from lib.design_sys import fonts as _fonts
+        import lib.design_sys.fonts as _fonts
         if not _fonts.ensure_font('misans', 400):
             pytest.skip('misans not staged locally')
         import re
@@ -716,7 +719,7 @@ class TestP4:
         used as bold must occupy PowerPoint's bold slot, not regular."""
         pytest.importorskip('pptx')
         pytest.importorskip('fontTools')
-        from lib.design_sys import fonts as _fonts
+        import lib.design_sys.fonts as _fonts
         if not _fonts.ensure_font('smiley-sans', 400):
             pytest.skip('smiley sans not staged locally')
         page = '''pageType: content

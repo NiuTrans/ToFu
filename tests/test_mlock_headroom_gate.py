@@ -36,8 +36,8 @@ def server_module():
         import hypercorn  # noqa: F401
     except ImportError as e:
         pytest.skip(f'quart/hypercorn not installed: {e}')
-    import server
-    return server
+    import lib.server_mlock as server_module
+    return server_module
 
 
 def _force_auto_on_fuse(server, monkeypatch):

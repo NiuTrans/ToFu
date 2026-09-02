@@ -7,10 +7,8 @@ Relocated here (2026-06) from ``routes/desktop.py`` to break the
 ``is_desktop_agent_connected``. The command queue is plain in-process
 state with no Flask dependency, so it belongs in lib.
 
-Dependencies now flow ``routes → lib`` only. ``routes/desktop.py`` keeps
-the HTTP poll/tool-exec endpoints and re-exports these names (and the
-mutable ``_commands`` / ``_last_poll_time`` state) for backward
-compatibility.
+Dependencies flow ``routes → lib`` only. ``routes/desktop.py`` owns only the
+authenticated poll adapter.
 """
 
 from lib.desktop.bridge import (
@@ -23,7 +21,6 @@ from lib.desktop.bridge import (
     is_desktop_agent_connected,
     last_poll_time,
     list_agents,
-    note_v1_poll,
     online_agents,
     pending_commands_count,
     record_poll,
@@ -45,7 +42,6 @@ __all__ = [
     'is_desktop_agent_connected',
     'last_poll_time',
     'list_agents',
-    'note_v1_poll',
     'online_agents',
     'pending_commands_count',
     'record_poll',

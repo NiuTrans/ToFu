@@ -4,7 +4,7 @@
 Why this exists
 ---------------
 Compaction can itself call the LLM:
-  * Layer 2 ``smart_summary_compact`` → ``_generate_query_aware_summary``
+  * Layer 2 ``force_compact_if_needed`` → ``_generate_query_aware_summary``
   * the advanced host's ``ctx.summarize`` (OpenCode/Hermes/OpenClaw arms)
 
 Historically both did ``content, usage = dispatch_chat(...)`` and threw
@@ -64,6 +64,34 @@ def record_compaction_usage(conv_id: str, usage: dict | None,
             v = usage.get(k)
             if isinstance(v, (int, float)):
                 acc[k] = acc.get(k, 0) + v
+        dispatch = usage.get('_dispatch')
+        if isinstance(dispatch, dict):
+            timing = acc.setdefault('timing', {})
+            latency_ms = dispatch.get('latency_ms')
+            if isinstance(latency_ms, (int, float)) and latency_ms >= 0:
+                timing['modelWallMs'] = (
+                    float(timing.get('modelWallMs') or 0) + float(latency_ms))
+            queue_wait_ms = dispatch.get('queue_wait_ms')
+            if isinstance(queue_wait_ms, (int, float)) and queue_wait_ms >= 0:
+                timing['queueWaitMs'] = (
+                    float(timing.get('queueWaitMs') or 0)
+                    + float(queue_wait_ms))
+            queue_measurement = dispatch.get('queue_wait_measurement')
+            if isinstance(queue_measurement, str) and queue_measurement:
+                previous_queue_measurement = timing.get('queueMeasurement')
+                timing['queueMeasurement'] = (
+                    queue_measurement
+                    if previous_queue_measurement in (None, queue_measurement)
+                    else 'mixed'
+                )
+            first_output = dispatch.get('first_content_at_unix_ns')
+            if isinstance(first_output, int) and first_output > 0:
+                previous = int(timing.get('firstModelOutputAtUnixNs') or 0)
+                timing['firstModelOutputAtUnixNs'] = (
+                    min(previous, first_output) if previous else first_output)
+            measurement = dispatch.get('ttft_measurement')
+            if isinstance(measurement, str) and measurement:
+                timing['ttftMeasurement'] = measurement
     logger.info('[CompactUsage] conv=%s +%s call: prompt=%s completion=%s',
                 conv_id[:8] if conv_id else '?', kind,
                 usage.get('prompt_tokens') or usage.get('input_tokens'),

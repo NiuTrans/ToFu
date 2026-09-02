@@ -21,6 +21,7 @@ Each module instantiates one TaskRuntime per task kind, then uses:
 Standard task dict shape:
     {
         'id':           str,        # unique task ID
+        '_userId':      int,        # explicit owning principal
         'kind':         str,        # 'paper-report', 'translate', etc.
         'status':       str,        # 'pending'|'running'|'done'|'error'|'aborted'
         'artifact_quality': dict|None,  # PRODUCT-quality axis, orthogonal to status
@@ -35,7 +36,7 @@ Standard task dict shape:
         'meta':         dict,        # caller-supplied custom fields
     }
 
-★ TWO INDEPENDENT AXES — do not conflate them:
+TWO INDEPENDENT AXES — do not conflate them:
 
   * ``status`` is the **lifecycle** axis: pending → running → terminal. Its
     membership is closed and load-bearing (every ``status in (…)`` terminal
@@ -73,7 +74,8 @@ import time
 from typing import Any, Callable, Optional
 
 from lib.ids import short_id
-from lib.log import get_logger, req_id, set_req_id
+from lib.identity import PrincipalContext, require_user_id
+from lib.log import bind_log_context, get_logger, req_id, set_req_id
 from lib.task_replay import (
     TASK_REPLAY_EVENT_SEQUENCE_FIELD,
     TASK_REPLAY_EVENT_TYPE_FIELD,
@@ -85,8 +87,35 @@ from lib.task_replay import (
 logger = get_logger(__name__)
 
 
+_STALE_ATTEMPT_REJECTION_SUFFIX = (
+    'event rejected: attempt is stale or no longer current'
+)
+
+
+_RUNTIME_OWNED_TASK_FIELDS = frozenset({
+    'id',
+    '_userId',
+    '_principalContext',
+    '_requestId',
+    'kind',
+    'status',
+    'artifact_quality',
+    'events',
+    '_eventBaseSeq',
+    '_eventNextSeq',
+    'events_lock',
+    'abort_event',
+    'result',
+    'error',
+    'created_at',
+    'updated_at',
+    'finished_at',
+    'meta',
+})
+
+
 def _make_envelope(error, *, context: str, source: str) -> Optional[dict]:
-    """Compatibility seam around the package-owned normalizer."""
+    """Lazy boundary around the package-owned error normalizer."""
     from lib.error_envelope import normalize_envelope
     return normalize_envelope(error, context=context, source=source)
 
@@ -129,7 +158,8 @@ class TaskRuntime:
 
     Then in routes:
 
-        task = runtime.create(meta={'paper_hash': h, 'lang': 'zh'})
+        task = runtime.create(user_id=user_id,
+                              meta={'paper_hash': h, 'lang': 'zh'})
         runtime.spawn(task['id'], _run_report, task)
         return jsonify({'task_id': task['id']})
     """
@@ -153,7 +183,7 @@ class TaskRuntime:
                 are also pushed via lib.agent_core.push.push_event(channel, task_id, event).
                 If None, defaults to ``kind``.
             error_source: Module identifier for error envelopes.
-            stall_timeout: Read-side stall reaping (docs/PAPER_MEDIA_UX_DESIGN.md
+            stall_timeout: Read-side stall reaping (docs/modules/ingest_media.md
                 §3.2). When > 0, poll() declares a pending/running task whose
                 last event is older than this many seconds ``worker_lost``.
                 0 (default) disables reaping — only enable for runtimes whose
@@ -177,17 +207,48 @@ class TaskRuntime:
 
     # ── Task lifecycle ─────────────────────────────────────────
 
-    def create(self, *, task_id: str = '', meta: Optional[dict] = None) -> dict:
-        """Create and register a new task. Returns the task dict."""
+    def create(
+        self,
+        *,
+        principal: PrincipalContext | None = None,
+        user_id: int | None = None,
+        task_id: str = '',
+        meta: Optional[dict] = None,
+    ) -> dict:
+        """Create a task with one normalized, durable principal snapshot.
+
+        Existing service adapters may pass an explicit ``user_id`` while they
+        migrate to ``PrincipalContext``; it is immediately normalized here,
+        so no task can exist with only an ambient/default owner.
+        """
+        if principal is None:
+            owner_user_id = require_user_id(
+                user_id, context='TaskRuntime.create')
+            principal = PrincipalContext.user(
+                subject_id=f'user:{owner_user_id}',
+                owner_user_id=owner_user_id,
+            )
+        else:
+            if not isinstance(principal, PrincipalContext):
+                raise TypeError('TaskRuntime.create principal must be PrincipalContext')
+            owner_user_id = principal.require_owner(context='TaskRuntime.create')
+            if user_id is not None and require_user_id(
+                    user_id, context='TaskRuntime.create') != owner_user_id:
+                raise ValueError('TaskRuntime.create principal/user_id mismatch')
         if not task_id:
             task_id = short_id(n=12)
         _now = time.time()
         request_id = req_id()
         task_meta = dict(meta or {})
+        # Ownership is structural task data. Caller metadata cannot override
+        # it, and append/push never infers it from ambient request state.
+        task_meta['userId'] = owner_user_id
         if request_id:
             task_meta.setdefault('requestId', request_id)
         task = {
             'id': task_id,
+            '_userId': owner_user_id,
+            '_principalContext': principal.to_payload(),
             'kind': self.kind,
             'status': 'pending',
             # Product-quality axis (see module docstring). None = unassessed;
@@ -251,9 +312,251 @@ class TaskRuntime:
         return task
 
     def get(self, task_id: str) -> Optional[dict]:
-        """Get a task by ID. Returns None if not found."""
+        """Internal task lookup; HTTP adapters must use :meth:`get_owned`."""
         with self._lock:
             return self._tasks.get(task_id)
+
+    def snapshot(self) -> list[dict]:
+        """Return a stable registry-membership snapshot for service policies.
+
+        The returned task records remain the live records; callers that need to
+        change them must use a lifecycle method, :meth:`update_fields`, or
+        :meth:`update_matching`.  This keeps registry membership and locking
+        private while allowing cross-task scheduling and liveness decisions.
+        Request/HTTP code must use :meth:`snapshot_owned` instead.
+        """
+        with self._lock:
+            return list(self._tasks.values())
+
+    def update_matching(
+        self,
+        *,
+        predicate: Callable[[dict], bool],
+        updater: Callable[[dict], None],
+    ) -> list[dict]:
+        """Atomically update task records selected by a service policy.
+
+        This is the explicit transaction boundary for manager-level policies
+        that must inspect several records together (supersession, reaping,
+        conversation-wide configuration).  Callbacks execute while the
+        registry lock is held and therefore must not call back into this
+        runtime.  HTTP adapters must use owner-scoped lifecycle methods rather
+        than this fleet-wide service API.
+        """
+        matched: list[dict] = []
+        with self._lock:
+            for task in self._tasks.values():
+                if predicate(task):
+                    updater(task)
+                    matched.append(task)
+        return matched
+
+    @staticmethod
+    def _validate_custom_fields(fields: dict, remove_fields: tuple[str, ...]) -> None:
+        """Reject writes to lifecycle fields owned exclusively by the runtime."""
+        requested = set(fields) | set(remove_fields)
+        forbidden = sorted(requested & _RUNTIME_OWNED_TASK_FIELDS)
+        if forbidden:
+            raise ValueError(
+                'TaskRuntime custom-field mutation cannot write runtime-owned '
+                f'fields: {", ".join(forbidden)}')
+
+    def mark_running(self, task_id: str, *, fields: Optional[dict] = None) -> bool:
+        """Atomically move a pending task to running and initialize custom state.
+
+        Repeating the call for an already-running task is safe. Terminal tasks
+        are immutable and return ``False``. Lifecycle fields remain owned by
+        :class:`TaskRuntime`; capability-specific presentation state belongs in
+        ``fields`` or the task's immutable creation metadata.
+        """
+        custom_fields = dict(fields or {})
+        self._validate_custom_fields(custom_fields, ())
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or task.get('status') not in ('pending', 'running'):
+                return False
+            task['status'] = 'running'
+            task.update(custom_fields)
+            task['updated_at'] = time.time()
+        return True
+
+    def update_fields(
+        self,
+        task_id: str,
+        *,
+        fields: Optional[dict] = None,
+        remove_fields: tuple[str, ...] = (),
+        only_if_status: str | tuple[str, ...] | None = None,
+    ) -> bool:
+        """Atomically update capability-owned fields on one registered task.
+
+        ``only_if_status`` closes progress-vs-terminal races: a late callback
+        can update presentation state only while the task is still running.
+        Core identity, event-log, and lifecycle fields are deliberately
+        rejected; callers use ``mark_running`` / ``finish`` / ``abort`` for
+        those transitions.
+        """
+        custom_fields = dict(fields or {})
+        removals = tuple(str(field) for field in remove_fields)
+        self._validate_custom_fields(custom_fields, removals)
+        if only_if_status is None:
+            allowed_statuses = None
+        elif isinstance(only_if_status, str):
+            allowed_statuses = (only_if_status,)
+        else:
+            allowed_statuses = tuple(only_if_status)
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return False
+            if allowed_statuses is not None and task.get('status') not in allowed_statuses:
+                return False
+            task.update(custom_fields)
+            for field in removals:
+                task.pop(field, None)
+            task['updated_at'] = time.time()
+        return True
+
+    def get_owned(self, task_id: str, *, user_id: int) -> Optional[dict]:
+        """Return a task only when it belongs to the explicit principal."""
+        if (isinstance(user_id, bool)
+                or not isinstance(user_id, int)
+                or user_id < 1):
+            raise ValueError('TaskRuntime.get_owned requires a positive user_id')
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or int(task.get('_userId') or 0) != user_id:
+                return None
+            return task
+
+    def snapshot_owned(self, *, user_id: int) -> list[dict]:
+        """Return one stable owner-scoped registry snapshot."""
+        if (isinstance(user_id, bool)
+                or not isinstance(user_id, int)
+                or user_id < 1):
+            raise ValueError(
+                'TaskRuntime.snapshot_owned requires a positive user_id')
+        with self._lock:
+            return [
+                task for task in self._tasks.values()
+                if int(task.get('_userId') or 0) == user_id
+            ]
+
+    def task_ids(self) -> frozenset[str]:
+        """Return the registered IDs without exposing registry storage."""
+        with self._lock:
+            return frozenset(self._tasks)
+
+    def task_statuses(self) -> dict[str, str]:
+        """Return a stable ``task_id -> lifecycle status`` snapshot."""
+        with self._lock:
+            return {
+                task_id: str(task.get('status') or '')
+                for task_id, task in self._tasks.items()
+            }
+
+    def adopt(self, task: dict) -> bool:
+        """Re-register a LIVE task dict that fell out of the registry.
+
+        Root fix for the withholding-push flood (2026-08-21): a task whose
+        worker is still emitting events but whose registry row vanished
+        (false terminal-flip by a stall reaper followed by TTL/capacity
+        eviction, or any direct-dict producer) made ``append_event`` return
+        None forever; the chat manager's legacy fallback then minted
+        ``seq = len(events)`` and every frame collided with the original
+        run's durable rows ('Event sequence has a conflicting payload'), so
+        every authoritative push was withheld and the client froze until
+        refresh. Re-adopting the live dict returns it to the monotonic
+        runtime path.
+
+        Refuses (returns False, caller keeps its fallback):
+          * terminal tasks — finished work must not resurrect as a phantom
+            'running' row;
+          * tombstoned tasks (``_discarded_at``) — a dict that
+            ``discard_task`` deliberately unregistered (e.g. the autopilot
+            VU carrier's designed retirement) must stay out;
+          * foreign-kind dicts.
+
+        The caller is responsible for seeding ``_eventNextSeq`` from the
+        durable log BEFORE adopting when the task may already own durable
+        rows; ``append_event``'s retained-event reconcile only looks at the
+        in-memory list, which a partial run leaves diverged.
+
+        Idempotent: if the id is already registered (a racing re-register),
+        the registry copy wins and True is returned.
+        """
+        task_id = str((task or {}).get('id') or '')
+        if not task_id:
+            return False
+        if task.get('status') in ('done', 'error', 'aborted'):
+            return False
+        if task.get('_discarded_at'):
+            return False
+        kind = task.get('kind')
+        if kind not in (None, '', self.kind):
+            return False
+        owner_user_id = task.get('_userId')
+        if (isinstance(owner_user_id, bool)
+                or not isinstance(owner_user_id, int)
+                or owner_user_id < 1):
+            logger.error(
+                '[TaskRuntime:%s] refused ownerless live-task adoption id=%s',
+                self.kind, task_id[:8])
+            return False
+        raw_principal = task.get('_principalContext')
+        try:
+            if raw_principal is None:
+                # Migration seam for live task dicts created before the
+                # structured identity contract. Their explicit owner is
+                # sufficient to construct a non-ambient principal once.
+                principal = PrincipalContext.user(
+                    subject_id=f'user:{owner_user_id}',
+                    owner_user_id=owner_user_id,
+                )
+                task['_principalContext'] = principal.to_payload()
+            else:
+                if not isinstance(raw_principal, dict):
+                    raise ValueError('principal snapshot must be an object')
+                principal = PrincipalContext.from_payload(raw_principal)
+                if principal.require_owner(
+                        context='TaskRuntime.adopt') != owner_user_id:
+                    raise ValueError('principal owner mismatch')
+        except (PermissionError, TypeError, ValueError) as exc:
+            logger.error(
+                '[TaskRuntime:%s] refused invalid-principal adoption id=%s: %s',
+                self.kind, task_id[:8], exc)
+            return False
+        # Fill the standard fields a bare/legacy dict may lack so the
+        # runtime paths (append_event's events_lock, abort's abort_event)
+        # never KeyError on the adopted entry.
+        task.setdefault('kind', self.kind)
+        task.setdefault('events', [])
+        task.setdefault('_eventBaseSeq', 0)
+        task.setdefault('_eventNextSeq', 0)
+        if 'events_lock' not in task:
+            task['events_lock'] = threading.Lock()
+        if 'abort_event' not in task:
+            task['abort_event'] = threading.Event()
+        task.setdefault('status', 'running')
+        task.setdefault('result', None)
+        task.setdefault('error', None)
+        task.setdefault('artifact_quality', None)
+        _now = time.time()
+        task.setdefault('created_at', _now)
+        task.setdefault('updated_at', _now)
+        task.setdefault('finished_at', None)
+        task.setdefault('meta', {})
+        with self._lock:
+            if task_id in self._tasks:
+                return True
+            self._tasks[task_id] = task
+        # WARNING, not info/debug: a live task needing re-adoption means an
+        # eviction path (or a producer) dropped a running row — the flood
+        # class this closes was invisible for hours at lower levels.
+        logger.warning('[TaskRuntime:%s] re-adopted live task %s (was missing '
+                       'from the registry while still emitting events)',
+                       self.kind, task_id[:8])
+        return True
 
     def list_running(self) -> list[dict]:
         """Return all currently-running tasks (snapshot)."""
@@ -352,11 +655,16 @@ class TaskRuntime:
             with self._lock:
                 if task.get('status') == 'pending':
                     task['status'] = 'running'
-        # ★ Durable-before-visible: commit the persistent row BEFORE the push,
+        # Durable-before-visible: commit the persistent row BEFORE the push,
         #   so task_events is never behind the bytes the client holds.
         if before_push is not None:
             try:
                 before_push(seq)
+                if '_pushWithheldAt' in task:
+                    # Persistence made it through the seam again — the wedge
+                    # is over (new frames are no longer being withheld).
+                    task.pop('_pushWithheldAt', None)
+                    task.pop('_pushWithheldCount', None)
             except Exception as e:
                 terminal = event.get(TASK_REPLAY_EVENT_TYPE_FIELD) in (
                     'done', 'error', 'aborted', 'interrupted')
@@ -366,16 +674,39 @@ class TaskRuntime:
                 # withholds its late delta instead of leaking it to clients.
                 authoritative = bool(event.get('attemptId'))
                 if terminal or authoritative:
-                    logger.error('[TaskRuntime:%s] authoritative persistence failed; '
-                                 'withholding push task=%s seq=%s: %s',
-                                 self.kind, task_id[:8], seq, e)
+                    # If this is a known cooperative-abort fence (e.g. v2 stale
+                    # attempt), _events.py already logged a single WARNING and
+                    # flagged the abort. Log at DEBUG here to avoid flooding
+                    # error.log with thousands of identical ERROR rows while
+                    # the worker loop unwinds.
+                    is_stale_fence = str(e).endswith(
+                        _STALE_ATTEMPT_REJECTION_SUFFIX)
+                    log_fn = logger.debug if is_stale_fence else logger.error
+                    log_fn('[TaskRuntime:%s] authoritative persistence failed; '
+                           'withholding push task=%s seq=%s: %s',
+                           self.kind, task_id[:8], seq, e)
+                    # Delivery-wedge marker (the 2026-08-19 msy4gswgss7tjd
+                    #   case): the task keeps 'running' while EVERY
+                    #   authoritative frame is withheld, so a task-alive probe
+                    #   alone would call this an "explained silence" even
+                    #   though no output can ever arrive. chat_poll ships this
+                    #   so the frontend escalates it to an actionable verdict.
+                    #   Cleared by the next frame whose persist succeeds.
+                    task['_pushWithheldAt'] = time.time()
+                    task['_pushWithheldCount'] = int(
+                        task.get('_pushWithheldCount') or 0) + 1
                     return seq
                 logger.debug('[TaskRuntime:%s] before_push failed task=%s: %s',
                              self.kind, task_id[:8], e)
         if self.push_channel:
             try:
                 from lib.agent_core.push import push_event
-                push_event(self.push_channel, task_id, event)
+                push_event(
+                    self.push_channel,
+                    task_id,
+                    event,
+                    user_id=int(task['_userId']),
+                )
             except Exception as e:
                 logger.debug('[TaskRuntime:%s] push_event failed task=%s: %s',
                              self.kind, task_id[:8], e)
@@ -384,7 +715,8 @@ class TaskRuntime:
     def finish(self, task_id: str, *, result: Any = None,
                error: Any = None, error_context: str = '',
                degraded: Optional[bool] = None,
-               degraded_reason: str = '') -> bool:
+               degraded_reason: str = '',
+               terminal_event_fields: Optional[dict] = None) -> bool:
         """Mark a task as terminal (done | error | aborted).
 
         Always emits a final event with type='done' or type='error' so
@@ -397,6 +729,11 @@ class TaskRuntime:
         ``status`` stays 'done' so every terminal check keeps its meaning and
         the frontend reads one extra field. Leaving it None means "this kind
         does not assess quality" — which is NOT the same as "clean".
+
+        ``terminal_event_fields`` adds capability-specific correlation or
+        presentation fields to the one authoritative terminal event. Runtime
+        fields (type/status/result/error/quality) always win, so a caller
+        cannot publish a terminal frame that disagrees with task state.
         """
         task = self.get(task_id)
         if not task:
@@ -425,10 +762,16 @@ class TaskRuntime:
             # test code, chat's own shape) predate this key.
             quality = task.get('artifact_quality')
 
-        terminal_event = {
+        terminal_event = dict(terminal_event_fields or {})
+        for runtime_field in (
+                TASK_REPLAY_EVENT_TYPE_FIELD,
+                TASK_REPLAY_EVENT_SEQUENCE_FIELD,
+                'taskId', 'status', 'result', 'error', 'artifact_quality'):
+            terminal_event.pop(runtime_field, None)
+        terminal_event.update({
             TASK_REPLAY_EVENT_TYPE_FIELD: task_terminal_event_type(final_status),
             'status': final_status,
-        }
+        })
         if envelope:
             terminal_event['error'] = envelope
         if quality:
@@ -460,6 +803,54 @@ class TaskRuntime:
         logger.info('[TaskRuntime:%s] abort requested for task %s',
                     self.kind, task_id[:8])
         return True
+
+    def abort_owned(self, task_id: str, *, user_id: int) -> bool:
+        """Atomically abort only a task owned by ``user_id``."""
+        if (isinstance(user_id, bool)
+                or not isinstance(user_id, int)
+                or user_id < 1):
+            raise ValueError('TaskRuntime.abort_owned requires a positive user_id')
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or int(task.get('_userId') or 0) != user_id:
+                return False
+            if task['status'] in ('done', 'error', 'aborted'):
+                return False
+            task['abort_event'].set()
+        logger.info('[TaskRuntime:%s] owner abort requested for task %s',
+                    self.kind, task_id[:8])
+        return True
+
+    def remove_owned(self, task_id: str, *, user_id: int) -> bool:
+        """Atomically remove only a task owned by ``user_id``.
+
+        This is the administrative registry operation.  HTTP adapters must
+        not mutate ``_tasks`` directly because doing so separates the
+        ownership check from the destructive write.
+        """
+        if (isinstance(user_id, bool)
+                or not isinstance(user_id, int)
+                or user_id < 1):
+            raise ValueError('TaskRuntime.remove_owned requires a positive user_id')
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or int(task.get('_userId') or 0) != user_id:
+                return False
+            self._tasks.pop(task_id, None)
+        logger.info('[TaskRuntime:%s] owner removed task %s',
+                    self.kind, task_id[:8])
+        return True
+
+    def discard(self, task_id: str) -> Optional[dict]:
+        """Unregister one task for an internal lifecycle policy.
+
+        Unlike :meth:`remove_owned`, this is not an HTTP authorization seam;
+        it is used by the task manager after the caller has already established
+        why a carrier or test-owned record must leave the registry.  Returning
+        the removed record lets the manager tombstone it against re-adoption.
+        """
+        with self._lock:
+            return self._tasks.pop(task_id, None)
 
     # ── Stall reaping (read-side, opt-in via stall_timeout) ────
 
@@ -518,7 +909,7 @@ class TaskRuntime:
                 'finishedAt': int (when terminal), epoch MILLISECONDS
             }
 
-        ★ UNIT: the clock fields are epoch **milliseconds** under camelCase
+        UNIT: the clock fields are epoch **milliseconds** under camelCase
         names, matching this project's existing task-start contract
         (``lib/chat_dispatch.py``, ``routes/chat_poll_abort.py``). The task
         dict's own ``created_at`` / ``updated_at`` stay float SECONDS; the
@@ -646,24 +1037,20 @@ class TaskRuntime:
             if worker_request_id:
                 set_req_id(worker_request_id)
             try:
-                fn(*args, **kwargs)
+                meta = (task.get('meta') or {}) if task is not None else {}
+                with bind_log_context(
+                        task_id=task_id,
+                        conversation_id=(meta.get('conversationId')
+                                         or meta.get('convId') or ''),
+                        trace_id=worker_request_id,
+                        user_id=meta.get('userId') or ''):
+                    fn(*args, **kwargs)
             except Exception as e:
                 logger.error('[TaskRuntime:%s] worker for task %s crashed: %s',
                              self.kind, task_id[:8], e, exc_info=True)
                 self.finish(task_id, error=e,
                             error_context=f'{self.kind}:worker_crash')
             finally:
-                # Workers run on the shared asyncio.to_thread executor pool;
-                # those threads are long-lived and never die, so a thread-local
-                # DB connection acquired during the task would be pinned forever
-                # and exhaust the connection semaphore under load. Return it to
-                # the pool now that this unit of work is done.
-                try:
-                    from lib.agent_core.store import get_conversation_store
-                    get_conversation_store().release_connection()
-                except Exception as _ctd_err:
-                    logger.debug('[TaskRuntime:%s] release_connection failed task=%s: %s',
-                                 self.kind, task_id[:8], _ctd_err)
                 # Executor threads are reused. Restore the context that was
                 # present before this unit of work (normally empty in the
                 # deliberately fresh Context) so correlation never bleeds into
@@ -677,15 +1064,10 @@ class TaskRuntime:
             loop = None
 
         if loop and loop.is_running():
-            # ``asyncio.to_thread`` copies the caller's ContextVars by
-            # default. When spawn() is called by a Quart route that includes
-            # the request/app context, the worker then mistakes itself for a
-            # request and ``get_thread_db`` stores its connection on copied
-            # ``g``. Request teardown cannot see that copied context and the
-            # worker's close_thread_db() cannot see the g-bound connection:
-            # an uncommitted SQLite write can therefore hold the global writer
-            # lane forever. Run the worker inside a deliberately fresh context
-            # while retaining to_thread's tracked executor lifecycle.
+            # ``asyncio.to_thread`` copies the caller's ContextVars by default.
+            # A background task must not inherit request-scoped authentication,
+            # correlation, or framework context, so run it inside a deliberately
+            # fresh context while retaining to_thread's tracked lifecycle.
             import contextvars
             worker_context = contextvars.Context()
 
@@ -725,7 +1107,7 @@ class TaskRuntime:
             # INFO (was debug) + the evicted id prefixes: cleanup_stale is one
             # of only TWO registry-eviction paths (with discard_task), and a
             # task evaporating from the registry while alive was invisible
-            # when this logged at debug (pt_a21cd6eb ③-1).
+            # when this logged at debug ( ③-1).
             logger.info('[TaskRuntime:%s] cleaned %d stale tasks: %s',
                         self.kind, len(expired),
                         [t[:8] for t in expired[:8]])

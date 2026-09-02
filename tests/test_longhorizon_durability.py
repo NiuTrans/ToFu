@@ -24,7 +24,7 @@ conclude), so a re-scan can't snap it to a stale ancient turn.
 
 import pytest
 
-import lib.tasks_pkg.compaction._layer2 as l2
+import lib.tasks_pkg.compaction._layer2._compact as l2
 import lib.tasks_pkg.compaction._reactive as reactive
 
 
@@ -62,7 +62,14 @@ def fake_summary(monkeypatch):
     """Replace the LLM summary with a deterministic marker that PARAPHRASES —
     it never echoes the objective text verbatim, so if the anchor mechanism
     fails, the objective is provably gone from the live context."""
-    def _fake(old_messages, current_query, log_prefix='', conv_id='', task=None):
+    def _fake(
+        old_messages,
+        current_query,
+        log_prefix='',
+        conv_id='',
+        task=None,
+        usage_out=None,
+    ):
         return ('### 1. Primary Request\n[summary of earlier work — '
                 'objective paraphrased, not verbatim]\n### 6. All User Messages\n'
                 '(compressed)')
@@ -117,7 +124,7 @@ def test_anchor_index_skips_ismeta_context_carrier():
 def test_NC_anchor_ismeta_skip_is_load_bearing(monkeypatch):
     """NEUTER: if the anchor did NOT skip ``_isMeta`` it would return the
     injected carrier's index (1) instead of the human objective (2)."""
-    import lib.tasks_pkg.compaction._layer2 as _l2mod
+    import lib.tasks_pkg.compaction._layer2._anchor as _l2mod
     src = _l2mod._objective_anchor_index.__doc__  # sanity: fn exists
     assert src is not None
     msgs = [_sys(),
@@ -150,7 +157,8 @@ def test_objective_survives_three_compactions(fake_summary):
 
     for pass_i in range(3):
         # tiny budget → boundary near the end → objective is in old_messages
-        l2.execute_compact_tool(msgs, task={'convId': 'c', 'id': 't'},
+        l2.execute_compact_tool(
+                                msgs, task={'convId': 'c', 'id': 't', '_userId': 1},
                                 preserve_budget_tokens=200)
         assert _objective_present_verbatim(msgs), \
             f'objective lost after compaction pass {pass_i + 1}'
@@ -167,7 +175,8 @@ def test_objective_survives_three_compactions(fake_summary):
 def test_anchor_position_is_right_after_system(fake_summary):
     """The re-inserted anchor sits immediately after the system block."""
     msgs = _build_long_conversation(30)
-    l2.execute_compact_tool(msgs, task={'convId': 'c', 'id': 't'},
+    l2.execute_compact_tool(
+                            msgs, task={'convId': 'c', 'id': 't', '_userId': 1},
                             preserve_budget_tokens=200)
     # first non-system message must be the objective
     first_non_sys = next(m for m in msgs if m.get('role') != 'system')
@@ -181,7 +190,8 @@ def test_NC_anchor_removed_objective_is_summarized_away(monkeypatch, fake_summar
     monkeypatch.setattr(l2, '_objective_anchor_index', lambda messages: None)
     msgs = _build_long_conversation(30)
     assert _objective_present_verbatim(msgs)
-    l2.execute_compact_tool(msgs, task={'convId': 'c', 'id': 't'},
+    l2.execute_compact_tool(
+                            msgs, task={'convId': 'c', 'id': 't', '_userId': 1},
                             preserve_budget_tokens=200)
     assert not _objective_present_verbatim(msgs), \
         'with the anchor neutered the objective must be summarized away'
@@ -212,9 +222,9 @@ def test_NC_head_truncate_without_protection_drops_objective(monkeypatch):
     """NEUTER: force the anchor index to None so _drop_pos falls back to popping
     system_end (the objective) → it gets dropped. Proves the protection is
     load-bearing."""
-    # _head_truncate imports _objective_anchor_index locally from _layer2 on
-    # each call, so patch it at the SOURCE module.
-    monkeypatch.setattr(l2, '_objective_anchor_index', lambda messages: None)
+    import lib.tasks_pkg.compaction._reactive._headtrunc as headtrunc
+    monkeypatch.setattr(
+        headtrunc, '_objective_anchor_index', lambda messages: None)
     msgs = [_sys(), _user(OBJECTIVE)]
     for i in range(40):
         msgs.append(_assistant('big ' + 'z' * 4000))
@@ -263,7 +273,7 @@ def test_autopilot_summaries_retention_caps_growth(store, monkeypatch):
     store.ensure('c1')
     for i in range(12):
         ap._store_run_record('c1', f'run-{i:02d}', reason='task_done',
-                             text=f'report {i}')
+                             text=f'report {i}', user_id=1)
     summaries = store.rows['c1']['autopilotSummaries']
     assert len(summaries) == 5, f'expected cap 5, got {len(summaries)}'
     # The most-recent run must always be present.
@@ -277,7 +287,7 @@ def test_autopilot_summaries_unlimited_when_zero(store, monkeypatch):
     import lib.tasks_pkg.autopilot as ap
     store.ensure('c2')
     for i in range(12):
-        ap._store_run_record('c2', f'run-{i:02d}', reason='task_done')
+        ap._store_run_record('c2', f'run-{i:02d}', reason='task_done', user_id=1)
     assert len(store.rows['c2']['autopilotSummaries']) == 12  # unlimited
 
 
@@ -290,7 +300,7 @@ def test_NC_summaries_retention_disabled_grows_unbounded(store, monkeypatch):
     monkeypatch.setattr(_av, 'autopilot_summary_retention', lambda: 0)
     store.ensure('c3')
     for i in range(12):
-        ap._store_run_record('c3', f'run-{i:02d}', reason='task_done')
+        ap._store_run_record('c3', f'run-{i:02d}', reason='task_done', user_id=1)
     assert len(store.rows['c3']['autopilotSummaries']) == 12
 
 
@@ -300,7 +310,7 @@ def test_hole_a_objective_pin_survives_run_conclude(store):
     import lib.tasks_pkg.autopilot as ap
     store.ensure('c4', autopilotObjective=OBJECTIVE, autopilotRunId='r1',
                  autopilotTurnCount=7, autopilotVuHistory=['a', 'b'])
-    ap._clear_run_id('c4')
+    ap._clear_run_id('c4', user_id=1)
     s = store.rows['c4']
     assert s.get('autopilotObjective') == OBJECTIVE, 'objective pin must persist'
     # run-scoped counters ARE cleared

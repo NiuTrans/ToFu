@@ -1,21 +1,26 @@
-"""Per-task soft warnings and hard resource ceilings.
+"""Per-task soft warnings, deployment defaults, and hard resource ceilings.
 
-Limits are disabled when unset/zero, preserving the personal-install defaults.
-The guard is intentionally pure apart from :func:`account_tool_output`, making
-the boundary semantics easy to test without running an agent loop.
+Cost, prompt, tool-output, and elapsed limits remain opt-in. Model API rounds
+instead inherit one finite deployment profile when unset/zero; explicit task
+values may raise or lower it but never cross the process hard ceiling.
 """
 
 from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from runtime_guards import resolve_resource_budget
 
 from lib.log import get_logger
 
 
 logger = get_logger(__name__)
+MAX_TASK_API_ROUNDS = 1024
+_DEFAULT_API_ROUND_RESOURCE = 'TOFU_TASK_MAX_API_ROUNDS'
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,7 @@ class BudgetDecision:
     exceeded: BudgetReading | None
     warnings: tuple[BudgetReading, ...]
     remaining: dict[str, float]
+    readings: tuple[BudgetReading, ...]
 
 
 _LIMITS = (
@@ -43,6 +49,37 @@ _LIMITS = (
     ('toolOutputBytes', 'maxToolOutputBytes', 'bytes'),
     ('elapsedSeconds', 'maxTaskSeconds', 'seconds'),
 )
+
+
+def resolve_task_budget_config(
+    cfg: Mapping[str, Any] | None,
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Return one task config with a finite, hard-capped model-round limit."""
+    resolved = dict(cfg or {})
+    requested = resolved.get('maxApiRounds')
+    try:
+        requested_rounds = (
+            0 if isinstance(requested, bool) else int(requested or 0)
+        )
+    except (TypeError, ValueError, OverflowError):
+        requested_rounds = 0
+    if requested_rounds <= 0:
+        requested_rounds = resolve_resource_budget(
+            _DEFAULT_API_ROUND_RESOURCE,
+            environment,
+            maximum=MAX_TASK_API_ROUNDS,
+        )
+    resolved['maxApiRounds'] = max(
+        1,
+        min(MAX_TASK_API_ROUNDS, requested_rounds),
+    )
+    return resolved
+
+
+def api_round_finalization_reserve(limit: float) -> int:
+    """Reserve enough bounded rounds to implement, verify, and answer."""
+    return min(64, max(1, int(limit) // 3))
 
 
 def _positive_number(value: Any) -> float:
@@ -105,6 +142,7 @@ def evaluate_task_budget(task: dict, cfg: dict, *, usage: dict | None = None,
         exceeded=exceeded,
         warnings=warnings,
         remaining={reading.name: reading.remaining for reading in readings},
+        readings=readings,
     )
 
 
@@ -126,5 +164,13 @@ def account_tool_output(task: dict, value: Any) -> int:
     return size
 
 
-__all__ = ['BudgetDecision', 'BudgetReading', 'account_tool_output',
-           'evaluate_task_budget', 'usage_readings']
+__all__ = [
+    'BudgetDecision',
+    'BudgetReading',
+    'MAX_TASK_API_ROUNDS',
+    'account_tool_output',
+    'api_round_finalization_reserve',
+    'evaluate_task_budget',
+    'resolve_task_budget_config',
+    'usage_readings',
+]

@@ -7,7 +7,7 @@ boundary explicit while reusing the composition root's shared resolver.
 
 from __future__ import annotations
 
-from quart import Blueprint, request
+from quart import Blueprint
 
 from lib.api_response import api_ok
 from lib.log import get_logger
@@ -16,7 +16,7 @@ from lib.orchestration.application_provider_ports import (
     AuthoringServiceProvider,
     DefinitionResolver,
 )
-from lib.orchestration.definition_wire_contracts import (
+from lib.orchestration.definition_contract_schema import (
     definition_candidate_schema,
 )
 from lib.request_parser import parse_body
@@ -28,8 +28,6 @@ from .orchestration_authoring_http import (
     authoring_definition_response,
     compose_request_schema,
     prepare_compose_request,
-    role_contract_parameters,
-    role_contract_query,
 )
 from .orchestration_authoring_openapi import (
     authoring_route_response_registry,
@@ -47,7 +45,6 @@ logger = get_logger(__name__)
 _VALIDATION_SCHEMA = definition_candidate_schema()
 _COMPOSE_SCHEMA = compose_request_schema()
 _DEFINITION_SELECTION_SCHEMA = definition_selection_request_schema()
-_ROLE_CONTRACT_PARAMETERS = role_contract_parameters()
 _AUTHORING_RESPONSES = authoring_route_response_registry()
 
 
@@ -120,7 +117,7 @@ def register_orchestration_authoring_routes(
     @api_meta(
         summary='Get a built-in canonical flow definition',
         description='Returns a server-authored reference flow (e.g. the '
-                    'canonical endpoint loop) as a tofu.orchestration/v1 '
+                    'canonical Autopilot loop) as a tofu.orchestration/v1 '
                     'definition. The backend is the single source of truth '
                     'for these shapes.',
         tags=['orchestrations'],
@@ -148,26 +145,6 @@ def register_orchestration_authoring_routes(
         return orchestration_service_response(
             'api_v1.orchestrations.authoring_contract',
             lambda: authoring_service().contract(),
-            api_ok,
-        )
-
-    @orchestration_route(blueprint, 'role-schema')
-    @require_auth
-    @api_meta(
-        summary='Get one role schema (compatibility endpoint)',
-        description='Query ?role=<name> for one role. Without a role this '
-                    'legacy endpoint returns the same document as '
-                    'authoring-contract. New Studio clients should use '
-                    'authoring-contract.',
-        tags=['orchestrations'],
-        parameters=_ROLE_CONTRACT_PARAMETERS,
-        responses=_AUTHORING_RESPONSES['role-schema'],
-    )
-    def role_schema_orchestration():
-        role = role_contract_query(request.args)
-        return orchestration_service_response(
-            'api_v1.orchestrations.role_contract',
-            lambda: authoring_service().role_contract(role),
             api_ok,
         )
 

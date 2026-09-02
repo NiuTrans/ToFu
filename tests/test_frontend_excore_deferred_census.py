@@ -7,12 +7,11 @@ WHY THIS EXISTS (measured incident 2026-08-01 — "sidebar folder rail gone")
 Epic-E sub-3B deferred ``core/health_stream_timer.js`` out of the boot bundle.
 Its pre-flight census audited a HAND-PICKED symbol list
 (``twStart|twUpdate|twStop|_setStreamDegraded``) and missed
-``_checkDbHealth`` — which ``main.js``'s synchronous boot IIFE called
+``_checkStorageHealth`` — which ``main.js``'s synchronous boot IIFE called
 UNGUARDED. The served page then crashed at boot with
 ``ReferenceError: _checkDbHealth is not defined`` *before* ``initActiveTasks``,
-so neither ``loadConversationsFromServer`` nor ``loadFolders`` ever ran:
-the sidebar rendered without conversations (until cross-tab sync painted
-them in from a surviving tab) and without the folder rail — reproduced
+so neither ``loadConversationCatalog`` nor ``loadFolders`` ever ran:
+the sidebar rendered without conversations or the folder rail — reproduced
 headlessly against the live server (zero ``GET /api/v1/folders`` in the
 access log all day, zero children under ``#folderTabs``).
 
@@ -24,7 +23,7 @@ argument as ``conv_family_sources`` vs symbol pins (tests/_conv_bundle_sources.p
 WHAT THIS GUARDS
 ----------------
 For every EX-CORE deferred module (a file that used to be in the core bundle
-and still has core-bundle consumers — today: ``core/cross_tab_sync.js`` and
+and still has core-bundle consumers — today only
 ``core/health_stream_timer.js``; a future deferral of the same kind JOINS
 this list):
 
@@ -35,7 +34,7 @@ this list):
      line or within the preceding 3 lines (the established pattern).
   3. Fail with the full file:line list when any unguarded call remains.
 
-Plus the positive pin: the boot/recovery primitives ``_checkDbHealth`` and
+Plus the positive pin: the boot/recovery primitives ``_checkStorageHealth`` and
 ``_checkServerHealth`` MUST be defined in a CORE-bundle file (they are
 boot-path / circuit-breaker-path primitives — deferring them IS the
 incident). This pin fails loudly if a future slice re-defers them.
@@ -73,7 +72,7 @@ from _conv_bundle_sources import bundle_files, files_defining  # noqa: E402
 # behind. A future deferral of the same kind MUST be added here (that act is
 # exactly the moment the census is needed — it fails until every core call
 # site is typeof-guarded).
-_EX_CORE_DEFERRED = ('core/cross_tab_sync.js', 'core/health_stream_timer.js')
+_EX_CORE_DEFERRED = ('core/health_stream_timer.js',)
 
 _DEF_RE = re.compile(r'^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(', re.M)
 
@@ -106,12 +105,12 @@ def test_excore_deferred_symbols_have_no_unguarded_core_calls():
 
 
 def test_boot_recovery_primitives_live_in_core():
-    """``_checkDbHealth`` (boot IIFE) and ``_checkServerHealth`` (poll-fallback
+    """``_checkStorageHealth`` (boot IIFE) and ``_checkServerHealth`` (poll-fallback
     circuit breaker) are boot/recovery primitives — they must be defined by a
     CORE-bundle file. A re-deferral flips this RED at review time instead of
     crashing user boots in production."""
     core = set(_core_files())
-    for sym in ('_checkDbHealth', '_checkServerHealth'):
+    for sym in ('_checkStorageHealth', '_checkServerHealth'):
         homes = files_defining(sym)
         assert homes, f'{sym} is not defined by ANY shipped file'
         assert set(homes) <= core, (

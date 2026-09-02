@@ -6,16 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from lib.orchestration import (
+from lib.orchestration._control_specs import (
     CONTROL_KINDS,
     CONTROL_PARAM_SCHEMA,
     VALID_ARTIFACT_FORMATS,
     VALID_HUMAN_MODES,
-    VALID_PARAM_KINDS,
     control_param_schema,
     resolve_control_param,
-    validate_definition,
 )
+from lib.orchestration._validate import validate_definition
+from lib.orchestration.field_spec_contract import VALID_PARAM_KINDS
 
 
 pytestmark = pytest.mark.unit

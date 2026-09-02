@@ -3,7 +3,8 @@
 This module is the application boundary between the pure ``FlowExecutor``
 and transport/runtime adapters. It composes focused outcome and event-sink
 owners with lifecycle projection, terminal fences and TaskRuntime completion.
-Definition authoring and repository CRUD live in ``service.py``.
+Definition authoring and repository CRUD live in their focused application
+services; this module owns runtime execution only.
 """
 
 from __future__ import annotations
@@ -107,7 +108,7 @@ def execute_runtime_flow(
         finalization = projection.finalize(
             outcome.lifecycle_status,
             final=(outcome.result.get('final') or ''),
-            error=outcome.durable_error,
+            error=outcome.error_envelope,
         )
         if finalization.abort_won:
             outcome = _aborted_race_outcome(outcome)
@@ -117,7 +118,7 @@ def execute_runtime_flow(
                 'persistence',
                 executor=outcome.executor,
             )
-            projection.record_error(outcome.durable_error)
+            projection.record_error(outcome.error_envelope)
     finish_runtime(runtime, task_id, outcome)
     return outcome
 
@@ -126,6 +127,7 @@ def spawn_runtime_flow(
     runtime: OrchestrationTaskRuntimePort,
     definition: dict,
     *,
+    owner_user_id: int,
     task_id: str = '',
     meta: dict | None = None,
     initial_context: str = '',
@@ -143,7 +145,8 @@ def spawn_runtime_flow(
     if durable_runs is not None and not task_id:
         raise ValueError('durable orchestration flow requires a task_id')
 
-    task = runtime.create(task_id=task_id, meta=meta)
+    task = runtime.create(
+        user_id=owner_user_id, task_id=task_id, meta=meta)
     runtime_task_id = str(task.get('id') or '')
     if not runtime_task_id:
         raise RuntimeError('orchestration runtime returned an empty task id')
@@ -173,7 +176,6 @@ def spawn_runtime_flow(
 
 
 __all__ = [
-    'FlowRunOutcome', 'FlowEventSink', 'DurableProjectionError',
     'create_flow_executor', 'execute_flow', 'finish_runtime',
     'execute_runtime_flow', 'spawn_runtime_flow',
 ]

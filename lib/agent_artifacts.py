@@ -23,7 +23,7 @@ names, so adding a NEW artifact meant editing ~5 files — and forgetting one
 silently leaked the artifact (committed to git, copied into exports, counted
 as a dirty tree blocking updates).
 
-★ THE CONVENTION (this is what makes the whole thing future-proof):
+THE CONVENTION (this is what makes the whole thing future-proof):
   **Every project-local artifact the assistant writes MUST be named with the
   ``.tofu`` prefix.** Given that single rule, consumers can recognise present
   AND future artifacts mechanically — by prefix — instead of enumerating
@@ -64,16 +64,6 @@ USER_PROFILE_FILE = '.tofu_user_profile.md'
 USER_PROFILE_PENDING_FILE = '.tofu_user_profile_pending.json'
 USER_CONTEXT_FILE = '.tofu_user_context.json'
 USER_CONTEXT_CHANGES_FILE = '.tofu_user_context_changes.json'
-# Live cross-conversation presence registry ("who is working in this project
-# right now"). Lives UNDER the existing ``.tofu/`` dir (so the ``.tofu*``
-# gitignore glob + every artifact consumer already cover it without change):
-# ``<root>/.tofu/presence/registry.json``. The authoritative copy is in-memory
-# alongside the push hub (single-server contract); this file is the
-# crash-recoverable + human-inspectable write-through mirror. Regenerable
-# runtime state — safe to delete (a stale entry is reaped on the next server
-# startup reconciliation / sweep). Written by ``lib/presence/registry.py``.
-PRESENCE_SUBDIR = 'presence'          # under FILE_HISTORY_ROOT_DIR (.tofu/)
-PRESENCE_REGISTRY_FILE = 'registry.json'
 # Legacy per-conversation git worktree isolation state dir. The isolation
 # feature was REMOVED; this constant is retained only so the ``.tofu*`` gitignore
 # glob + artifact consumers still recognise any stale ``.tofu_worktrees/`` dirs
@@ -120,7 +110,6 @@ __all__ = [
     'FILE_HISTORY_ROOT_DIR', 'TRASH_DIR', 'SANDBOX_DIR', 'ENV_MARKER_FILE',
     'USER_PROFILE_FILE', 'USER_PROFILE_PENDING_FILE',
     'USER_CONTEXT_FILE', 'USER_CONTEXT_CHANGES_FILE',
-    'PRESENCE_SUBDIR', 'PRESENCE_REGISTRY_FILE',
     'WORKTREES_DIR',
     'KNOWN_ARTIFACT_NAMES', 'GITIGNORE_PATTERN',
     'is_agent_artifact',

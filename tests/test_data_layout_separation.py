@@ -12,7 +12,7 @@ Resolution policy under test (``lib/runtime_paths._source_checkout_base`` +
 the byte-for-byte twin ``lib/log._writable_base_dir``):
 
   precedence: $TOFU_DATA_DIR  >  $TOFU_DATA_LAYOUT  >  auto-detect
-    * TOFU_DATA_DIR      → honoured verbatim (both roots + DB_PATH follow).
+    * TOFU_DATA_DIR      → honoured verbatim by every writable root.
     * TOFU_DATA_LAYOUT=intree → force repo root.
     * TOFU_DATA_LAYOUT=xdg    → force per-user dir.
     * auto (default):
@@ -46,9 +46,13 @@ def _run_py(code: str, env_extra=None) -> subprocess.CompletedProcess:
     """Run child Python with a CLEAN data-layout env (no ambient overrides)."""
     env = os.environ.copy()
     env['PYTHONPATH'] = _REPO + os.pathsep + env.get('PYTHONPATH', '')
-    for k in ('TOFU_DATA_DIR', 'CHATUI_DATA_DIR', 'TOFU_DATA_LAYOUT',
-              'CHATUI_DATA_LAYOUT', 'TOFU_DB_PATH'):
-        env.pop(k, None)
+    for key in tuple(env):
+        if key in {
+            'TOFU_DATA_DIR', 'CHATUI_DATA_DIR', 'TOFU_DATA_LAYOUT',
+            'CHATUI_DATA_LAYOUT', 'TOFU_STORAGE_PROJECT_ROOT',
+            'TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE',
+        } or key.startswith(('TOFU_DB_', 'CHATUI_DB_')):
+            env.pop(key, None)
     if env_extra:
         env.update(env_extra)
     return subprocess.run([sys.executable, '-c', textwrap.dedent(code)],
@@ -106,20 +110,22 @@ def _resolve_base(tmprepo, env_extra=None, want_log=True):
 class SourceCheckoutLayoutTest(unittest.TestCase):
 
     def test_a_tofu_data_dir_honored_and_db_follows(self):
-        """Scenario (a): $TOFU_DATA_DIR set → both roots AND DB_PATH follow it."""
+        """Scenario (a): the runtime roots and Sidecar authority stay together."""
         base = os.path.realpath(tempfile.mkdtemp())
         data = os.path.join(base, 'data')
         r = _run_py("""
+            import os
             import lib.runtime_paths as rp
             print('DATA', rp.data_root())
             print('LOGS', rp.logs_root())
-            import lib.database._core as core
-            print('DB', core.DB_PATH)
+            os.environ['TOFU_STORAGE_TOKEN'] = 't' * 48
+            from lib.storage_sidecar.config import SidecarConfig
+            print('DB', SidecarConfig.from_environment().sqlite_path)
         """, env_extra={'TOFU_DATA_DIR': data})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('DATA %s' % data, r.stdout)
         self.assertIn('LOGS %s' % os.path.join(base, 'logs'), r.stdout)
-        # DB_PATH = data_root()/tofu.db — proves the DB follows the resolved base.
+        # The Sidecar derives its authority from the same runtime root.
         self.assertIn('DB %s' % os.path.join(data, 'tofu.db'), r.stdout)
 
     def test_b_fresh_clone_goes_xdg(self):
@@ -248,7 +254,7 @@ class UploadsCoLocationTest(unittest.TestCase):
             base_uploads = rp.uploads_root()
             print('AUTHORITY', base_uploads)
             # paper PDFs + figure manifests (DB-referenced)
-            import lib.paper.hashing as ph
+            import lib.paper_identity as ph
             print('PAPER', ph.PAPER_DIR)
             # translated PPTX (download-URL referenced)
             import lib.translate.pptx as pptx

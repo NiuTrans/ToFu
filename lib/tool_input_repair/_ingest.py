@@ -13,7 +13,7 @@ loop-break, phantom empty-arg dedup) stay in the caller.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Mapping
 
 from lib.log import audit_log, get_logger
 
@@ -28,6 +28,10 @@ from lib.tool_input_repair._rejection import (
 )
 from lib.tool_input_repair._repair import schema_hint, validate_then_repair
 from lib.tool_input_repair._schema import RepairLog, _schemas
+from lib.tools.contracts import (
+    ToolContractError,
+    validate_tool_arguments_from_documents,
+)
 
 logger = get_logger(__name__)
 
@@ -80,6 +84,8 @@ class IngestedToolCall:
         parse_error: A model-facing error string when the args were unparseable
             OR the call was rejected as a hallucination — the caller returns
             this to the LLM and skips execution. ``None`` on success.
+        contract_error: Stable ToolContractV2 error metadata when final
+            execution validation rejected the call, else ``None``.
         rejection: The ``classify_tool_call`` descriptor when the name is a
             hallucination (``{kind,attempted,suggestions,_repeat_count}``), else
             ``None``. Presence signals a rejected (never-executed) call.
@@ -91,11 +97,12 @@ class IngestedToolCall:
 
     __slots__ = ('raw_name', 'fn_name', 'fn_args', 'alias_kind', 'json_repaired',
                  'repair_log', 'parse_error', 'rejection', 'drop_reason',
-                 'repeat_count')
+                 'repeat_count', 'contract_error')
 
     def __init__(self, *, raw_name='', fn_name='', fn_args=None, alias_kind=None,
                  json_repaired=False, repair_log=None, parse_error=None,
-                 rejection=None, drop_reason=None, repeat_count=0):
+                 rejection=None, drop_reason=None, repeat_count=0,
+                 contract_error=None):
         self.raw_name = raw_name
         self.fn_name = fn_name
         self.fn_args = fn_args if fn_args is not None else {}
@@ -106,6 +113,7 @@ class IngestedToolCall:
         self.rejection = rejection
         self.drop_reason = drop_reason
         self.repeat_count = repeat_count
+        self.contract_error = contract_error
 
     @property
     def dropped(self) -> bool:
@@ -114,6 +122,10 @@ class IngestedToolCall:
     @property
     def rejected(self) -> bool:
         return self.rejection is not None
+
+    @property
+    def contract_rejected(self) -> bool:
+        return self.contract_error is not None
 
     @property
     def ok(self) -> bool:
@@ -140,11 +152,11 @@ def ingest_tool_call(
     conv_id: str = '',
     reject_hallucinated: bool = True,
     emit_audit: bool = True,
+    contract_documents_by_name: Mapping[str, Any] | None = None,
 ) -> IngestedToolCall:
     """Funnel one raw ``tool_call`` through the full ingestion pipe.
 
-    The stages, in order (each delegates to an existing primitive — this adds
-    no new repair logic):
+    The stages, in order, keep bounded repair separate from final authority:
 
     1. **Drop guard** — :func:`_tool_name_drop_reason`. Streaming artefacts
        (``antml:thinking``, XML-corrupted names) → ``drop_reason`` set, caller
@@ -152,6 +164,10 @@ def ingest_tool_call(
     2. **Name alias** — :func:`resolve_tool_name` against ``known_tools``.
        A confident 1:1 rewrite sets ``alias_kind`` + emits ``tool_name_aliased``.
        When the name IS real, :func:`clear_rejection` resets any prior streak.
+    3. **Decode** malformed JSON conservatively.
+    4. **Repair** only the curated syntax/shape patterns shared by every lane.
+    5. **Validate** the repaired value against the request-owned
+       ``ToolContractV2`` document; this last step never guesses semantics.
 
     Args:
         tool_call: The raw ``{'function': {'name', 'arguments'}, 'id'?}`` dict.
@@ -168,6 +184,9 @@ def ingest_tool_call(
             (e.g. a harness that wants the executor's raw error). Default True.
         emit_audit: When False, suppress the ``tool_name_aliased`` /
             ``tool_hallucinated`` audit events (e.g. a dry-run / test).
+        contract_documents_by_name: Request-owned execution contracts. ``None``
+            preserves the legacy read-compatible path; a supplied map fails
+            closed when the selected tool has no valid v2 document.
 
     Returns:
         An :class:`IngestedToolCall`. Check ``.dropped`` → skip; ``.rejection``
@@ -182,7 +201,7 @@ def ingest_tool_call(
     if drop:
         # Upstream canned probes land here (they carry an empty/artefact
         # name). Count each sighting LOUDLY — an upstream health-check blob
-        # inside a user turn is pollution, not traffic (pt_914bb730).
+        # inside a user turn is pollution, not traffic ().
         _args_blob = fn_obj.get('arguments') or ''
         if isinstance(_args_blob, str):
             _probe = next((m for m in _UPSTREAM_PROBE_MARKERS
@@ -308,7 +327,40 @@ def ingest_tool_call(
             logger.warning('[ingest] validate_then_repair failed for %s '
                            '(passing args through): %s', fn_name, e)
 
+    # ── Stage 5b: authoritative ToolContractV2 execution validation ──
+    # Curated repair may recover syntax/shape, but the request-owned contract
+    # is the final authority. This check deliberately runs after repair and
+    # before every dispatcher so a searched/dynamic schema cannot bypass the
+    # same bounds used to generate provider and discovery representations.
+    contract_error = None
+    if parse_error is None:
+        before_contract = fn_args
+        try:
+            fn_args = validate_tool_arguments_from_documents(
+                contract_documents_by_name, fn_name, fn_args)
+            if fn_args != before_contract:
+                added = sorted(set(fn_args) - set(before_contract))
+                if added:
+                    repair_log.extend(
+                        (f'$.{key}', 'schema_default') for key in added)
+                else:
+                    repair_log.append(('$', 'schema_default'))
+        except ToolContractError as exc:
+            contract_error = exc.to_dict()
+            parse_error = (
+                f'ERROR: Tool call `{fn_name}` was NOT executed. '
+                f'[{exc.code}] {exc} Path: {exc.path}. {exc.next_action}')
+            logger.warning(
+                '[ToolContract] rejected tool=%s code=%s path=%s model=%s '
+                'conv=%s', fn_name, exc.code, exc.path, model, conv_id)
+            if emit_audit:
+                audit_log(
+                    'tool_contract_rejected', tool=fn_name, code=exc.code,
+                    path=exc.path, retryable=exc.retryable, model=model,
+                    conv_id=conv_id)
+
     return IngestedToolCall(
         raw_name=raw_name, fn_name=fn_name, fn_args=fn_args,
         alias_kind=alias_kind, json_repaired=json_repaired,
-        repair_log=repair_log, parse_error=parse_error)
+        repair_log=repair_log, parse_error=parse_error,
+        contract_error=contract_error)

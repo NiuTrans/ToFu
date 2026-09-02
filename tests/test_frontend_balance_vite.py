@@ -16,7 +16,7 @@ from tests._esm_feature_harness import compile_feature_owner
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / 'frontend/src/features/settings/balance.ts'
-ESBUILD = ROOT / 'node_modules/.bin/esbuild'
+ESBUILD = ROOT / 'scripts' / 'vite_test_bundle.mjs'
 
 
 def _node() -> str:
@@ -34,7 +34,7 @@ def _has_jsdom() -> bool:
 
 
 @pytest.mark.skipif(not ESBUILD.is_file() or not _has_jsdom(),
-                    reason='jsdom + esbuild not installed')
+                    reason='jsdom + vite test bundler not installed')
 def test_native_balance_actions_stale_guard_and_owned_polling(tmp_path):
     built = tmp_path / 'balance.js'
     compiled = compile_feature_owner(ESBUILD, MODULE, built, tmp_path)

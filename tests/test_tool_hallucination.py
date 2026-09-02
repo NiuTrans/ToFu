@@ -20,6 +20,8 @@ import sys
 import threading
 import unittest
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.tool_input_repair import (
@@ -27,10 +29,15 @@ from lib.tool_input_repair import (
     build_rejection_message, classify_tool_call, clear_rejection,
     record_rejection, suggest_tool_names,
 )
-from lib.tasks_pkg.tool_dispatch import (
-    _known_tool_names, parse_tool_calls, execute_tool_pipeline,
+from lib.tasks_pkg.tool_dispatch.api import (
+    execute_tool_pipeline,
+    parse_tool_calls,
 )
+from lib.tasks_pkg.tool_dispatch._labels import _known_tool_names
 import lib.tool_input_repair as _tir
+
+
+pytestmark = pytest.mark.unit
 
 
 _KNOWN = {'web_search', 'fetch_url', 'read_files', 'grep_search', 'find_files'}
@@ -45,6 +52,7 @@ def _make_task(tool_names):
     return {
         'id': 'task_hallu_' + 'x' * 8,
         'convId': 'convhallu',
+        '_userId': 1,
         'model': 'test-model',
         'events': [],
         'events_lock': threading.Lock(),

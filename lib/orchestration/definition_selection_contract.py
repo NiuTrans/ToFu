@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from lib.orchestration.definition_wire_contracts import (
+from lib.orchestration.definition_contract_schema import (
     definition_request_schema,
 )
 from lib.orchestration.request_limit_contract import MAX_RUN_INPUT_LENGTH

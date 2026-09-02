@@ -161,7 +161,7 @@ except (ImportError, ValueError) as e:
 
 # ─── Parse-once cache key: which extractor + version produced a parsed_text ───
 # The paper_library corpus is a LONG-LIVED asset (auto-research R1 contract,
-# docs/AUTO_RESEARCH_SYSTEM_DESIGN.md): a row written by a degraded or older
+# docs/modules/ingest_media.md): a row written by a degraded or older
 # parser must NOT be served as a cache hit forever. Every writer of
 # paper_library.parsed_text stamps `parser_version` with the string below;
 # the harvest pre-download probe requires an exact match with

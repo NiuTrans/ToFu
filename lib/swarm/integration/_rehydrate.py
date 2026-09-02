@@ -42,7 +42,6 @@ def _rebuild_tool_list(config: dict) -> list:
             'desktopEnabled':    config.get('desktopEnabled', False),
             'imageGenEnabled':   config.get('imageGenEnabled', False),
             'memoryEnabled':     config.get('memoryEnabled', True),
-            'swarmEnabled':      True,
         }
         # Preserve the parent's tool-plugin allow-list so a rehydrated sub-agent
         # sees the same third-party plugins it had at spawn (else it would fall
@@ -58,7 +57,6 @@ def _rebuild_tool_list(config: dict) -> list:
             config.get('codeExecEnabled', False),
             config.get('browserEnabled', False),
             config.get('desktopEnabled', False),
-            swarm_enabled=True,
             image_gen_enabled=config.get('imageGenEnabled', False),
             scheduler_enabled=config.get('schedulerEnabled', False),
         )
@@ -85,6 +83,10 @@ def _rehydrate_one(sess: dict) -> bool:
         return False
 
     config = sess.get('config') or {}
+    if 'user_id' not in config:
+        logger.error('[Swarm:%s] persisted session has no owner — refusing '
+                     'unscoped rehydration', swarm_key)
+        return False
     conv_id = sess.get('conv_id', '') or ''
     task_id = sess.get('task_id', '') or swarm_key
     all_tools = _rebuild_tool_list(config)
@@ -96,7 +98,10 @@ def _rehydrate_one(sess: dict) -> bool:
         if push_conv_id:
             try:
                 from lib.agent_core.push import push_event
-                push_event('swarm', push_conv_id, ev)
+                push_event(
+                    'swarm', push_conv_id, ev,
+                    user_id=config['user_id'],
+                )
             except Exception as e:
                 logger.debug('[Swarm:%s] rehydrate push mirror failed: %s', swarm_key, e)
 
@@ -104,13 +109,18 @@ def _rehydrate_one(sess: dict) -> bool:
 
     # Resolve the settle hook through the facade package so a patched
     # ``_maybe_autocontinue`` still drives a rehydrated session's settle path.
-    def _on_settled(k=swarm_key):
+    def _on_settled(
+        k=swarm_key,
+        owner=config['user_id'],
+        source=task_id,
+    ):
         import lib.swarm.integration as _pkg
-        return _pkg._maybe_autocontinue(k)
+        return _pkg._maybe_autocontinue(k, owner, source_id=source)
 
     session = MasterOrchestrator(
         task_id=task_id,
         conv_id=conv_id,
+        user_id=config['user_id'],
         specs=specs,
         project_path=config.get('project_path', '') or '',
         model=config.get('model', '') or '',

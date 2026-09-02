@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "responsibility": "Ordered authoring sections for the generated application stylesheet.",
+  "output": "static/styles.css",
+  "sections": [
+    {
+      "path": "01-shell-navigation.css"
+    },
+    {
+      "path": "02-messages-composer.css"
+    },
+    {
+      "path": "03-paper-reader.css"
+    },
+    {
+      "path": "04-paper-reader-themes.css"
+    },
+    {
+      "path": "05-paper-report-media.css"
+    },
+    {
+      "path": "06-file-changes-settings-shell.css"
+    },
+    {
+      "path": "07-settings-providers-onboarding.css"
+    },
+    {
+      "path": "08-swarm-project-tools.css"
+    },
+    {
+      "path": "09-tool-terminal-details.css"
+    },
+    {
+      "path": "10-project-progress-modals.css"
+    },
+    {
+      "path": "11-tofu-theme-foundation.css"
+    },
+    {
+      "path": "12-tofu-theme-project-controls.css"
+    },
+    {
+      "path": "13-tofu-theme-composer-tools.css"
+    },
+    {
+      "path": "14-bridges-memory-branches.css"
+    },
+    {
+      "path": "15-queue-mobile-my-day.css"
+    },
+    {
+      "path": "16-my-day-context-indicators.css"
+    },
+    {
+      "path": "17-compaction-context-rail.css"
+    },
+    {
+      "path": "18-artifacts-knowledge-library.css"
+    },
+    {
+      "path": "19-project-brain.css"
+    },
+    {
+      "path": "21-local-knowledge-plan-mode.css"
+    },
+    {
+      "path": "22-shell-mobile-brand.css"
+    },
+    {
+      "path": "23-turn-reading-system.css"
+    }
+  ]
+}

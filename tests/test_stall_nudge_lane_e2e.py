@@ -40,12 +40,9 @@ from pathlib import Path
 
 import pytest
 
-from lib.tasks_pkg.manager._sync import (
-    INBOX_INJECT_SIDECAR_FIELDS,
-    _persist_inject_sidecars,
-)
 from lib.tasks_pkg.segments import is_synthetic_inbox_round
 from lib.tasks_pkg.stream_handler._intent_stall import NUDGE_TEXT
+from lib.turn_lifecycle import _task_projection
 
 pytestmark = pytest.mark.unit
 
@@ -176,7 +173,12 @@ def test_the_bound_holds_at_the_record_level_too():
 # ══════════════════════════════════════════════════════════════════
 
 def test_the_lane_is_registered_for_persistence():
-    assert '_stallNudges' in INBOX_INJECT_SIDECAR_FIELDS
+    marker = {'prompt': 'continue'}
+    projected = _task_projection({'_stallNudges': [marker]}, {})
+    assert projected['_stallNudges'] == [{
+        **marker, 'blockId': 'injection:stall-nudge:round-unknown',
+    }]
+    assert 'blockId' not in marker
 
 
 def test_the_produced_record_survives_the_real_persist_seam():
@@ -184,12 +186,14 @@ def test_the_produced_record_survives_the_real_persist_seam():
     task = _task([_blocked_round()])
     _analyse(task, _STALL_TEXT, [{'role': 'user', 'content': 'go'}])
 
-    msg = {'role': 'assistant', 'content': _STALL_TEXT, 'toolRounds': []}
-    wrote = _persist_inject_sidecars(task, msg)
+    projection = _task_projection(task, {})
 
-    assert wrote is True
-    assert msg['_stallNudges'] == task['_stallNudges']
-    assert msg['_stallNudges'][0]['tool'] == 'run_command'
+    projected_record = projection['_stallNudges'][0]
+    assert {key: value for key, value in projected_record.items()
+            if key != 'blockId'} == task['_stallNudges'][0]
+    assert projected_record['blockId'] == (
+        f"injection:stall-nudge:round-{projected_record['round']}")
+    assert projected_record['tool'] == 'run_command'
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -515,7 +519,7 @@ def test_the_grouped_panel_header_never_counts_the_chip():
     assert 'data-full-count="1"' in probe['html1']
     assert 'sw-stall-row' in probe['html1'], 'the chip must still render'
     # Chip-only (the trimmed view): no tool-count claim at all — the real
-    # count lives on the "Load tool activity" affordance (chat_render.js).
+    # count lives on the typed "Load tool activity" affordance.
     assert 'sw-stall-row' in probe['html2']
     assert '使用了' not in probe['html2'], (
         'a chip-only panel must not claim any tool count')

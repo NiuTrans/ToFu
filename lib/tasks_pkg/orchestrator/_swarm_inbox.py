@@ -1,4 +1,4 @@
-"""Per-round swarm/peer/steer inbox drain (pt_03f4cdf1 slice 11).
+"""Per-round swarm/peer/steer inbox drain ( slice 11).
 
 Extracted from ``run_task``'s per-round body (~L585 in _run.py) so the
 main loop no longer carries this ~180-line block inline. Byte-identical
@@ -77,7 +77,7 @@ def drain_and_inject_inbox(
             # ── Peer key can DIFFER from the swarm key ──
             #   A VU sub-task runs with convId='' (swarm key = sub-task
             #   id) but its peer twin lives under the PARENT conv, passed
-            #   via ``_peer_drain_key``. And when a DRIVER loop (endpoint)
+            #   via ``_peer_drain_key``. And when a Flow/VU DRIVER loop
             #   owns peer delivery at its OWN iteration boundary it sets
             #   ``_peer_driver_owned`` — run_task must then NOT drain peer
             #   here (only swarm), or the two paths would double-drain.
@@ -153,7 +153,7 @@ def drain_and_inject_inbox(
                             count=len(_swarm_items),
                             agentIds=[it.get('agent_id', '')
                                       for it in _swarm_items],
-                            # ★ Carry the actual <swarm-update> payloads
+                            # Carry the actual <swarm-update> payloads
                             #   (truncated) so the frontend can render an
                             #   in-timeline ptool-panel row showing exactly
                             #   what the model received — not just a count.

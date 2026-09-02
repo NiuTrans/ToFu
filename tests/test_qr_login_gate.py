@@ -40,7 +40,11 @@ _SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 @pytest.fixture(scope='module')
 def qr():
-    """Load the capture script as a module (it must import without Playwright)."""
+    """Load the capture script when its optional browser runtime is present."""
+    pytest.importorskip(
+        'playwright.sync_api',
+        reason='QR login capture requires the optional Playwright capability',
+    )
     spec = importlib.util.spec_from_file_location('_qr_cap', _SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

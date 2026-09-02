@@ -1,15 +1,7 @@
-"""Orchestration — the public insight entrypoints.
+"""Orchestrate generation, rubric gating, and insight persistence.
 
-Holds :func:`generate_insight` (grounded synthesis + render), the persistence
-helper :func:`_persist_insight`, and the gated report-path entry
-:func:`run_report_insight`.
-
-Every dependency a test monkeypatches — ``_build_reader_context``,
-``_self_identity``, ``score_report_rubric``, ``_persist_insight`` (and, through
-``generate_insight``, the ``dispatch_stream`` / arXiv seams inside
-``_research_and_synthesize`` / ``_ground_insight``) — is resolved THROUGH the
-package facade at call time (``import lib.paper.insight_engine as _pkg``) so a
-patch on ``ie.<name>`` bites exactly as it did in the original flat module.
+This module is the workflow owner.  Focused siblings own context assembly,
+model synthesis, grounding, rendering, anchors, and rubric scoring.
 """
 
 import time
@@ -19,13 +11,20 @@ from lib.llm_errors import AbortedError
 from lib.log import get_logger
 
 from ._config import INSIGHT_GATE_THRESHOLD, insight_gate_fires, insight_lang_key
+from ._anchors import resolve_insight_anchors
+from ._context import _build_reader_context
+from ._grounding import _ground_insight, _self_identity
+from ._render import render_insight_markdown
+from ._rubric import score_report_rubric
+from ._synthesize import _research_and_synthesize
 
 logger = get_logger(__name__)
 
 
 def generate_insight(paper_text, report_md, ui_lang='en', *, phash='',
                      model=None, project_path=None, abort=None, on_tool_event=None,
-                     self_arxiv_id=None, self_title=None, allow_personal_context=True):
+                     self_arxiv_id=None, self_title=None,
+                     allow_personal_context=True, user_id: int):
     """Produce a grounded insight section for a paper, given its report.
 
     Args:
@@ -57,8 +56,6 @@ def generate_insight(paper_text, report_md, ui_lang='en', *, phash='',
           'llmError': bool,
         }
     """
-    import lib.paper.insight_engine as _pkg
-
     out = {'insight': None, 'markdown': '', 'grounded': 0, 'dropped': 0,
            'selfref': 0, 'llmError': False, 'usage': None,
            'anchors': {'nominated': 0, 'resolved': 0}}
@@ -67,7 +64,9 @@ def generate_insight(paper_text, report_md, ui_lang='en', *, phash='',
         return out
 
     if allow_personal_context:
-        reader_context = _pkg._build_reader_context(phash, report_md, paper_text, ui_lang, project_path)
+        reader_context = _build_reader_context(
+            phash, report_md, paper_text, ui_lang,
+            user_id=user_id, project_path=project_path)
     else:
         # Headless / BYO surface: never splice the operator's library+memories
         # into an unrelated caller's analysis (personal_scope fail-closed).
@@ -76,9 +75,10 @@ def generate_insight(paper_text, report_md, ui_lang='en', *, phash='',
                     '(headless / opt-out)', phash)
 
     try:
-        insight = _pkg._research_and_synthesize(
+        insight = _research_and_synthesize(
             paper_text, report_md, reader_context, ui_lang,
-            model=model, abort=abort, on_tool_event=on_tool_event)
+            user_id=user_id, model=model, abort=abort,
+            on_tool_event=on_tool_event)
     except AbortedError:
         logger.info('[Paper:Insight] Synthesis aborted for hash=%s', phash)
         return out
@@ -97,19 +97,21 @@ def generate_insight(paper_text, report_md, ui_lang='en', *, phash='',
     synthesis_usage = insight.pop('_usage', None)
     out['usage'] = synthesis_usage
 
-    self_aid, self_ttl = _pkg._self_identity(phash, report_md, self_arxiv_id, self_title)
-    grounded, dropped, selfref = _pkg._ground_insight(insight, self_aid=self_aid, self_title=self_ttl)
+    self_aid, self_ttl = _self_identity(
+        phash, report_md, self_arxiv_id, self_title, user_id=user_id)
+    grounded, dropped, selfref = _ground_insight(
+        insight, self_aid=self_aid, self_title=self_ttl)
     # Deterministic anchor resolution (design §3.2): the model NOMINATED an
     # `anchor` heading per connection/provocation; resolve each against the
     # report's ACTUAL h2/h3 sequence. Runs AFTER grounding so dropped self-ref
     # connections never get anchored. Resolved indices persist with the row.
-    anchor_stats = _pkg.resolve_insight_anchors(insight, report_md)
+    anchor_stats = resolve_insight_anchors(insight, report_md)
     out['anchors'] = anchor_stats
     out['insight'] = insight
     out['grounded'] = grounded
     out['dropped'] = dropped
     out['selfref'] = selfref
-    out['markdown'] = _pkg.render_insight_markdown(insight, ui_lang)
+    out['markdown'] = render_insight_markdown(insight, ui_lang)
     logger.info('[Paper:Insight] hash=%s — %d grounded / %d dropped / %d self-ref dropped, '
                 'anchors %d/%d, %d chars',
                 phash, grounded, dropped, selfref,
@@ -117,8 +119,8 @@ def generate_insight(paper_text, report_md, ui_lang='en', *, phash='',
     return out
 
 
-def _persist_insight(phash, ui_lang, markdown, model, *, items=None,
-                     usage=None, baseline=None):
+def _persist_insight(phash, ui_lang, markdown, model, *, user_id: int,
+                     items=None, usage=None, baseline=None):
     """Persist an insight section under the ``insight:<ui_lang>`` key.
 
     Uses the Sidecar's versioned ``paper.report.upsert`` operation so the web
@@ -142,15 +144,21 @@ def _persist_insight(phash, ui_lang, markdown, model, *, items=None,
         if usage:
             meta['usage'] = usage
     try:
-        from lib.storage import get_storage_client
-        get_storage_client(write=True).command('paper.report.upsert', {
-            'paper_hash': phash,
-            'lang': insight_lang_key(ui_lang),
-            'report': markdown,
-            'model': model or '',
-            'meta': meta,
-            'created_at': int(time.time()),
-        }, f'paper.insight.upsert:{uuid.uuid4().hex}')
+        from lib.paper.artifact_repository import (
+            PaperArtifactRepository,
+            PaperReport,
+        )
+        PaperArtifactRepository(user_id).put_report(
+            PaperReport(
+                paper_hash=phash,
+                lang=insight_lang_key(ui_lang),
+                report=markdown,
+                model=model or '',
+                meta=meta,
+                created_at=int(time.time()),
+            ),
+            command_id=f'paper.insight.upsert:{uuid.uuid4().hex}',
+        )
         logger.info('[Paper:Insight] Persisted insight — hash=%s key=%s %d chars (v%s)',
                     phash, insight_lang_key(ui_lang), len(markdown),
                     meta.get('v', 1))
@@ -163,7 +171,7 @@ def _persist_insight(phash, ui_lang, markdown, model, *, items=None,
 def run_report_insight(paper_text, report_md, ui_lang='en', *, phash='',
                        model=None, project_path=None, abort=None, on_tool_event=None,
                        self_arxiv_id=None, self_title=None, allow_personal_context=True,
-                       persist=True):
+                       persist=True, user_id: int):
     """Gated, persisted insight pass — the report-path entry point.
 
     Pipeline (the production shape validated by the gated A/B):
@@ -186,8 +194,6 @@ def run_report_insight(paper_text, report_md, ui_lang='en', *, phash='',
           'persisted': bool, 'llmError': bool,
         }
     """
-    import lib.paper.insight_engine as _pkg
-
     out = {'fired': False, 'baseline': None, 'insight': None, 'markdown': '',
            'grounded': 0, 'dropped': 0, 'selfref': 0, 'persisted': False,
            'llmError': False, 'usage': None,
@@ -195,7 +201,7 @@ def run_report_insight(paper_text, report_md, ui_lang='en', *, phash='',
 
     baseline = None
     rubric_usage = None
-    verdict = _pkg.score_report_rubric(report_md, model=model, abort=abort)
+    verdict = score_report_rubric(report_md, model=model, abort=abort)
     if verdict:
         baseline = verdict['overall']
         rubric_usage = verdict.get('usage')
@@ -212,11 +218,11 @@ def run_report_insight(paper_text, report_md, ui_lang='en', *, phash='',
                 phash, f'{baseline:.2f}' if baseline is not None else 'None',
                 INSIGHT_GATE_THRESHOLD)
 
-    gen = _pkg.generate_insight(
+    gen = generate_insight(
         paper_text, report_md, ui_lang, phash=phash, model=model,
         project_path=project_path, abort=abort, on_tool_event=on_tool_event,
         self_arxiv_id=self_arxiv_id, self_title=self_title,
-        allow_personal_context=allow_personal_context)
+        allow_personal_context=allow_personal_context, user_id=user_id)
 
     out.update({k: gen[k] for k in ('insight', 'markdown', 'grounded', 'dropped',
                                     'selfref', 'llmError', 'usage', 'anchors')})
@@ -234,7 +240,8 @@ def run_report_insight(paper_text, report_md, ui_lang='en', *, phash='',
     out['usage'] = _sum_usage(rubric_usage, gen.get('usage'))
 
     if persist and gen.get('markdown') and gen.get('insight'):
-        out['persisted'] = _pkg._persist_insight(
+        out['persisted'] = _persist_insight(
             phash, ui_lang, gen['markdown'], model,
-            items=gen.get('insight'), usage=out['usage'], baseline=baseline)
+            user_id=user_id, items=gen.get('insight'), usage=out['usage'],
+            baseline=baseline)
     return out

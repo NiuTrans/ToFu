@@ -19,6 +19,7 @@ from .translate_runtime import (
     _TRANSLATE_CHUNK_SIZE,
     _append_translate_event,
     _cleanup_stale_translate_tasks,
+    _translate_runtime,
 )
 
 logger = get_logger(__name__)
@@ -32,7 +33,8 @@ def _run_translate_task(task, paper_text):
     split — this is one of the things the old client implementation got
     wrong.
     """
-    task['status'] = 'running'
+    task_id = task['task_id']
+    _translate_runtime.mark_running(task_id)
     lang = task['lang']
     # `lang` is normally a bare code ('zh'/'ja'/…) but a caller may pass a
     # COMPOSITE cache key (e.g. a review translation keyed 'review:neurips:zh')
@@ -64,7 +66,9 @@ def _run_translate_task(task, paper_text):
         chunks.append(buf)
 
     total = len(chunks)
-    task['progress']['total'] = total
+    progress = {'done': 0, 'total': total}
+    _translate_runtime.update_fields(
+        task_id, fields={'progress': progress}, only_if_status='running')
     _append_translate_event(task, {'type': 'status', 'status': 'running', 'total': total})
     logger.info('[Paper:Translate] Task %s — lang=%s chunks=%d hash=%s',
                 task['task_id'], lang, total, task['paper_hash'])
@@ -82,18 +86,15 @@ def _run_translate_task(task, paper_text):
             if task['abort_event'].is_set():
                 logger.info('[Paper:Translate] Task %s aborted at chunk %d/%d',
                             task['task_id'], ci, total)
-                from lib.error_envelope import make_envelope as _make_env
-                envelope = _make_env(
-                    'aborted',
-                    detail=f'Aborted at chunk {ci}/{total}',
-                    context='paper-translate',
-                    source='routes.paper:translate',
-                    raw='abort_event set',
+                _translate_runtime.abort(task_id)
+                _translate_runtime.finish(
+                    task_id,
+                    terminal_event_fields={
+                        'type': 'aborted',
+                        'partial': '\n\n'.join(translated_parts),
+                        'progress': dict(progress),
+                    },
                 )
-                task['status'] = 'error'
-                task['error'] = envelope
-                task['finished_at'] = time.time()
-                _append_translate_event(task, {'type': 'error', 'error': envelope})
                 return
 
             messages = [
@@ -102,7 +103,10 @@ def _run_translate_task(task, paper_text):
             ]
             collected = []
             try:
-                dispatch_stream(
+                from lib.llm.stream_result import (
+                    require_verified_provider_stream_result,
+                )
+                require_verified_provider_stream_result(dispatch_stream(
                     messages,
                     on_content=lambda t: collected.append(t),
                     max_tokens=8192,
@@ -110,37 +114,57 @@ def _run_translate_task(task, paper_text):
                     prefer_model=model,
                     strict_model=bool(model),
                     log_prefix='[Paper:Translate]',
-                )
+                ), context='paper translation chunk')
             except Exception as e:
                 logger.warning('[Paper:Translate] Chunk %d/%d failed: %s', ci + 1, total, e)
                 collected = [f'[Translation error for this section: {e}]']
 
             piece = ''.join(collected).strip()
             translated_parts.append(piece)
-            task['full_text'] = '\n\n'.join(translated_parts)
-            task['progress']['done'] = ci + 1
+            full_text_so_far = '\n\n'.join(translated_parts)
+            progress = {'done': ci + 1, 'total': total}
+            _translate_runtime.update_fields(
+                task_id,
+                fields={'full_text': full_text_so_far, 'progress': progress},
+                only_if_status='running',
+            )
             _append_translate_event(task, {
                 'type': 'chunk', 'index': ci, 'total': total,
                 'text': piece,
             })
 
         full_text = '\n\n'.join(translated_parts)
-        task['full_text'] = full_text
-        task['status'] = 'done'
-        task['finished_at'] = time.time()
+        _translate_runtime.update_fields(
+            task_id,
+            fields={'full_text': full_text, 'progress': progress},
+            only_if_status='running',
+        )
 
         try:
-            from lib.storage import get_storage_client
-            get_storage_client(write=True).command('paper.translation.upsert', {
-                'paper_hash': task['paper_hash'], 'lang': lang, 'text': full_text,
-                'model': model or _lib.LLM_MODEL, 'created_at': int(time.time()),
-            }, f'paper.translation.upsert:{uuid.uuid4().hex}')
+            from lib.paper.artifact_repository import (
+                PaperArtifactRepository,
+                PaperTranslation,
+            )
+            PaperArtifactRepository(int(task['_userId'])).put_translation(
+                PaperTranslation(
+                    paper_hash=task['paper_hash'],
+                    lang=lang,
+                    text=full_text,
+                    model=model or _lib.LLM_MODEL,
+                    created_at=int(time.time()),
+                ),
+                command_id=f'paper.translation.upsert:{uuid.uuid4().hex}',
+            )
             logger.info('[Paper:Translate] Task %s done — %d chars persisted',
                         task['task_id'], len(full_text))
         except Exception as e:
             logger.warning('[Paper:Translate] Persist failed: %s', e)
 
-        _append_translate_event(task, {'type': 'done', 'text': full_text})
+        _translate_runtime.finish(
+            task_id,
+            result=full_text,
+            terminal_event_fields={'type': 'done', 'text': full_text},
+        )
 
     except Exception as e:
         logger.error('[Paper:Translate] Task %s crashed: %s',
@@ -150,9 +174,10 @@ def _run_translate_task(task, paper_text):
             e, model=model or '', context='paper-translate',
             source='routes.paper:translate',
         )
-        task['status'] = 'error'
-        task['error'] = envelope
-        task['finished_at'] = time.time()
-        _append_translate_event(task, {'type': 'error', 'error': envelope})
+        _translate_runtime.finish(
+            task_id,
+            error=envelope,
+            error_context='paper-translate',
+        )
     finally:
         _cleanup_stale_translate_tasks()

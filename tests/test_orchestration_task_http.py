@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from lib.orchestration.run_status import RUN_STATUS_ORDER
-from lib.orchestration.durable_run_wire_contract import (
+from lib.orchestration.durable_run_field_registry import (
     durable_run_list_envelope_contract,
 )
 from lib.orchestration.http_endpoint_contract import (

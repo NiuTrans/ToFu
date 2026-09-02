@@ -74,11 +74,19 @@ def start_oauth_flow(provider: str, prefer_console: bool = False) -> dict:
 
     Returns:
         dict with 'auth_url', 'status', 'provider', 'callback_port' and
-        'redirect_mode' ('loopback' | 'console'). ``redirect_mode`` is what
+        'redirect_mode' ('loopback' | 'manual' | 'console'). ``manual`` means
+        the provider still redirects to its registered localhost URI, but the
+        browser and this process are not known to share a machine, so the user
+        copies that complete callback URL back into Tofu. ``redirect_mode`` is what
         lets the UI describe the flow truthfully — the manual-paste
         instructions are a LIE during a loopback flow, because the provider
         redirects to localhost instead of rendering a code.
     """
+    # A pending device flow for this provider must not outlive the new
+    # loopback flow — they share _active_flows[provider].
+    from lib.oauth.manager._device import stop_device_flow
+    stop_device_flow(provider)
+
     # ── Claude: bind BEFORE building the URL, because the bind decides it ──
     # Claude accepts either the console callback (user copies code#state back)
     # or the loopback callback the relay can capture silently. The loopback is
@@ -107,6 +115,22 @@ def start_oauth_flow(provider: str, prefer_console: bool = False) -> dict:
     elif provider == 'codex':
         from lib.oauth.codex import codex_build_auth_url
         flow = codex_build_auth_url()
+        # OpenAI's public Codex client has one fixed redirect:
+        # localhost:1455. Only advertise automatic capture when the browser
+        # is known to run beside this process, and bind synchronously before
+        # returning the URL (CLIProxyAPI starts its callback listener before
+        # opening the browser for the same reason). Remote/server deployments
+        # keep the valid PKCE flow but capture the complete callback URL via
+        # the Settings paste box instead of binding a useless server loopback.
+        if _loopback_callback_ok():
+            relay_server = _bind_relay(
+                'codex', flow['callback_port'], flow['state'])
+            if relay_server is None:
+                logger.info('[OAuth] codex loopback port busy — using manual '
+                            'callback URL capture')
+        else:
+            logger.info('[OAuth] codex browser is not known to be local — '
+                        'using manual callback URL capture')
     else:
         return {'error': f'Unknown provider: {provider}'}
 
@@ -118,6 +142,8 @@ def start_oauth_flow(provider: str, prefer_console: bool = False) -> dict:
     redirect_mode = 'loopback'
     if provider == 'claude':
         redirect_mode = 'loopback' if relay_server is not None else 'console'
+    elif provider == 'codex':
+        redirect_mode = 'loopback' if relay_server is not None else 'manual'
 
     # Store flow state
     with _flows_lock:
@@ -141,11 +167,10 @@ def start_oauth_flow(provider: str, prefer_console: bool = False) -> dict:
             'exchange': flow.get('exchange'),
         }
 
-    # Start the relay thread for providers whose callback lands on localhost:
-    # codex always, claude only when the loopback bind above succeeded.
-    # Claude on the console callback has no relay to run — the code is shown
-    # on Anthropic's page and pasted back by hand.
-    if provider != 'claude' or relay_server is not None:
+    # Start the relay thread only after a synchronous bind proved that this
+    # process owns the callback port. Console/manual modes have no relay: the
+    # authorization result is pasted back by the user.
+    if relay_server is not None:
         thread = threading.Thread(
             target=_run_relay_server,
             args=(provider, flow['callback_port'], flow['state']),
@@ -157,7 +182,7 @@ def start_oauth_flow(provider: str, prefer_console: bool = False) -> dict:
         logger.info('[OAuth] Started %s flow — relay on :%d, auth URL ready',
                      provider, flow['callback_port'])
     else:
-        logger.info('[OAuth] Started %s flow — auth URL ready (manual code paste required)',
+        logger.info('[OAuth] Started %s flow — auth URL ready (manual callback capture required)',
                      provider)
     return {
         'auth_url': flow['auth_url'],
@@ -177,10 +202,14 @@ def get_oauth_status(provider: str) -> dict:
 
     with _flows_lock:
         flow = _active_flows.get(provider, {})
-        # Auto-expire stale flows that have been waiting too long
+        # Auto-expire stale flows that have been waiting too long. Device
+        # flows carry their own (longer) expires_at — the user code stays
+        # valid for 15 minutes, well past the loopback flow's 5.
         if flow and flow.get('status') in ('started', 'waiting_callback'):
             started_at = flow.get('started_at', 0)
-            if started_at and (time.time() - started_at) > _FLOW_TIMEOUT:
+            expires_at = flow.get('expires_at') or (
+                started_at + _FLOW_TIMEOUT if started_at else 0)
+            if expires_at and time.time() > expires_at:
                 logger.info('[OAuth] Auto-expiring stale %s flow (started %.0fs ago)',
                             provider, time.time() - started_at)
                 _active_flows.pop(provider, None)
@@ -205,6 +234,13 @@ def get_oauth_status(provider: str) -> dict:
         # callback decision); without the URL it cannot re-open the popup.
         'redirect_mode': flow.get('redirect_mode'),
         'auth_url': flow.get('auth_url'),
+
+        # Device-flow projection (user_code + verification_url only — the
+        # device_auth_id never leaves the poll thread). Lets a reloaded page
+        # re-render the code card mid-flow, like redirect_mode above.
+        'device': ({'user_code': flow['device']['user_code'],
+                    'verification_url': flow['device']['verification_url']}
+                   if flow.get('device') else None),
         # Lets the reloaded page restore _oauthExchangeParams — without these,
         # the browser exchange rejects with no-exchange-params and the curl
         # helper cannot even build its command, leaving an unburned code with

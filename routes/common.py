@@ -10,11 +10,10 @@ Split from the original monolithic common.py:
 import json
 import os
 import re
-import threading
 import time
 from functools import wraps
 
-from quart import Blueprint, Response, request
+from quart import Blueprint, Response, current_app, request
 
 from lib.quart_sync import make_response, send_from_directory
 
@@ -23,7 +22,14 @@ from lib.css_bundler import (
     get_styles_link_tag as _get_styles_link_tag,
     get_settings_link_tag as _get_settings_link_tag,
 )
-from lib.settings_panels import inject_panels as _inject_settings_panels, panels_signature as _settings_panels_signature
+from lib.application_shell_fragments import (
+    fragments_signature as _application_shell_fragments_signature,
+    inject_fragments as _inject_application_shell_fragments,
+)
+from lib.settings_panels import (
+    inject_panels as _inject_settings_panels,
+    panels_signature as _settings_panels_signature,
+)
 from lib.log import get_logger
 from lib.vite_assets import (
     ViteAssetError,
@@ -34,7 +40,6 @@ from lib.api_response import (
 )
 from lib.request_parser import parse_body
 from lib.storage import StorageError, http_status_for_storage_error
-from lib.storage.errors import coerce_legacy_storage_error
 
 logger = get_logger(__name__)
 
@@ -44,7 +49,7 @@ logger = get_logger(__name__)
 # ══════════════════════════════════════════════════════
 
 def _db_safe(fn):
-    """Decorator that catches DB OperationalError and returns JSON 503.
+    """Map typed storage failures while preserving sync/async route shape.
 
     Dual-mode: emits an ``async def`` wrapper for coroutine handlers and a sync
     wrapper otherwise. A sync passthrough wrapper around an ``async def`` view
@@ -54,13 +59,7 @@ def _db_safe(fn):
     async-migration-dual-mode-decorators convention.
     """
     import asyncio
-    _db_errors = (Exception,)
-    def _handle(e):
-        original = e
-        if not isinstance(e, StorageError):
-            e = coerce_legacy_storage_error(e)
-        if e is None:
-            raise original
+    def _handle(e: StorageError):
         status = http_status_for_storage_error(e)
         if status in {409, 503}:
             logger.warning('[%s] storage error code=%s during %s %s',
@@ -78,7 +77,7 @@ def _db_safe(fn):
         async def async_wrapper(*args, **kwargs):
             try:
                 return await fn(*args, **kwargs)
-            except _db_errors as e:
+            except StorageError as e:
                 return _handle(e)
         return async_wrapper
 
@@ -86,13 +85,11 @@ def _db_safe(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except _db_errors as e:
+        except StorageError as e:
             return _handle(e)
     return wrapper
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_USER_ID = 1
-
 # ── Native mobile client (Android APK) download ──
 # The Android client's SOURCE lives in-tree at android/ (merged 2026-08-05),
 # but its CI (.github/workflows/build-android-apk.yml) publishes release APKs
@@ -119,53 +116,14 @@ common_bp = Blueprint('common', __name__)
 # v1 blueprint for the JSON routes (page-serving carve-outs above stay on common_bp).
 from routes.api_v1.common import api_v1_common_bp  # noqa: E402
 
-# ── In-memory cache for conversation metadata ──
-# The implementation moved to lib/conversations/meta_cache.py (2026-06) to
-# break the lib→routes circular import: lib-layer mutators invalidate the
-# cache directly from lib now. These aliases keep the legacy private names
-# working for route modules that still import them from here.
-from lib.conversations.meta_cache import (  # noqa: E402,F401  — re-exported for route modules (conversations.py, chat.py)
-    invalidate_meta_cache as _invalidate_meta_cache,
-    notify_conv_changed as _notify_conv_changed,
-    refresh_meta_cache_if_stale as _refresh_meta_cache_if_stale,
+from lib.conversations.change_notifications import (  # noqa: E402
+    notify_conv_changed as _notify_conv_changed,  # noqa: F401
 )
 
-
-def _request_user_id():
-    """Resolve the effective user_id for the current request thread.
-
-    Returns the authenticated ``AuthContext.user_id`` when a login-bound
-    session is present, else falls back to ``DEFAULT_USER_ID = 1``. Callable
-    from any route handler; safe outside a request context (returns the
-    default without raising).
-
-    pt_abae3a85a92440fd (2026-07-25): the standard helper for threading
-    request-thread user_id into ``notify_conv_changed`` and adjacent
-    seams. Owner-approved wire (DO IT NOW): route callers use this, and
-    background threads read ``task['_userId']`` via ``task_user_id`` (from
-    lib.tasks_pkg.manager._registry), both landing at the same
-    notify_conv_changed signature already accepting ``user_id=``.
-
-    NOTE: single-user default (empty AuthContext.user_id) is preserved
-    byte-identically — c6d1bd71 already coerces ``user_id == DEFAULT_USER_ID``
-    to unscoped for the snapshot projection.
-    """
-    try:
-        from routes.api_v1.auth import current_auth
-        ctx = current_auth()
-    except Exception as _e:  # noqa: BLE001 — outside request context / test env
-        logger.debug('request user id: failed (%s)', _e)
-        return DEFAULT_USER_ID
-    uid = getattr(ctx, 'user_id', '') if ctx is not None else ''
-    if not uid:
-        return DEFAULT_USER_ID
-    # If it looks like a numeric string, coerce so downstream str/int
-    # comparisons behave uniformly with existing DEFAULT_USER_ID=1 semantics.
-    try:
-        return int(uid) if str(uid).isdigit() else uid
-    except (TypeError, ValueError) as _e:
-        logger.debug('request user id: unexpected type/unparseable (%s)', _e)
-        return uid
+from routes.api_v1.auth import (  # noqa: E402
+    request_principal,
+    require_scope,
+)
 
 
 # ══════════════════════════════════════════════════════
@@ -438,6 +396,7 @@ _bundled_index_cache = {
     'vite': None,
     'html': None,
     'mtime': 0,
+    'application_fragments': None,
     'panels': None,
     'lang': None,
 }
@@ -478,11 +437,26 @@ _APP_ASSET_MARKER = '<!-- TOFU_APP_ASSETS -->'
 _ADMIN_ASSET_MARKER = '<!-- TOFU_ADMIN_ASSETS -->'
 
 
+def _browser_transport_profile():
+    configured = os.environ.get(
+        'TOFU_PROXY_TRANSPORT_PROFILE', '').strip().lower()
+    if configured in {'direct', 'constrained-proxy'}:
+        return configured
+    return (
+        'constrained-proxy'
+        if os.environ.get('VSCODE_PROXY_URI') else 'direct'
+    )
+
+
 def _boot_config_tag(entry):
     payload = json.dumps({
         'entry': entry,
         'uiLanguageHint': request_ui_lang(),
         'viteBase': 'static/vite/',
+        # The browser cannot infer every VS Code forwarded-port host shape.
+        # Publish only a transport profile (never the proxy URI or secrets) so
+        # the typed client can bound read bursts before they reach the gateway.
+        'transportProfile': _browser_transport_profile(),
     }, ensure_ascii=False, separators=(',', ':'))
     # Keep JSON data inert even if future boot values contain user-controlled
     # text. application/json is not executable, but an HTML parser still sees
@@ -536,11 +510,16 @@ def index_page():
     except OSError as _e_audit:
         logger.debug('[common] index_page caught %s: %s', type(_e_audit).__name__, _e_audit)
         html_mtime = 0
+    application_fragments_sig = _application_shell_fragments_signature()
     panels_sig = _settings_panels_signature()
     if (_bundled_index_cache['styles_tag'] == styles_tag
             and _bundled_index_cache['settings_tag'] == settings_tag
             and _bundled_index_cache['vite'] == vite_tag
             and _bundled_index_cache['mtime'] == html_mtime
+            and (
+                _bundled_index_cache['application_fragments']
+                == application_fragments_sig
+            )
             and _bundled_index_cache['panels'] == panels_sig
             and _bundled_index_cache['lang'] == request_ui_lang()
             and _bundled_index_cache['html']):
@@ -562,6 +541,9 @@ def index_page():
         html = html.replace(_APP_ASSET_MARKER, assets, 1)
         html = _APP_STYLES_RE.sub(styles_tag, html)
         html = _SETTINGS_STYLES_RE.sub(settings_tag, html)
+        # Application-shell structure is frontend-owned and split into named
+        # fragments. The backend only performs generic marker assembly.
+        html = _inject_application_shell_fragments(html)
         # Splice decoupled settings-panel fragments back in at their markers
         # (lib/settings_panels). Runs on the SAME rewrite pass; a missing
         # fragment leaves its marker visible + logs an error (never a silent
@@ -571,6 +553,8 @@ def index_page():
         _bundled_index_cache['styles_tag'] = styles_tag
         _bundled_index_cache['settings_tag'] = settings_tag
         _bundled_index_cache['vite'] = vite_tag
+        _bundled_index_cache['application_fragments'] = (
+            application_fragments_sig)
         _bundled_index_cache['panels'] = panels_sig
         _bundled_index_cache['lang'] = request_ui_lang()
         _bundled_index_cache['html'] = html
@@ -679,9 +663,11 @@ def features():
 
 
 @api_v1_common_bp.route('/api/v1/features', methods=['POST'])
+@require_scope('admin')
 def save_features():
     from lib.features_store import apply_feature_updates
-    result = apply_feature_updates(parse_body())
+    result = apply_feature_updates(
+        parse_body(), principal=request_principal())
     if result.get('error'):
         return api_internal_error('internal_error')
     return api_ok(result)
@@ -710,71 +696,16 @@ def client_error():
     else:
         logger.error('%s', ' | '.join(log_parts))
     return api_ok()
-# ── DB liveness probe, DECOUPLED from /api/health (pt_afbaf3d7 ②) ─────────
-# /api/health is the frontend's offline ARBITER (backend_offline_monitor: two
-# failed probes → the red "backend offline" banner). It used to run
-# ``SELECT 1`` INLINE, so a PG-on-FUSE stall (measured 4–7s Slow queries in
-# error.log) pushed the health answer past the frontend's 3–4s probe budget —
-# the banner went up while the process was perfectly alive. Liveness must
-# never wait on disk I/O: ``db_responsive`` is refreshed by a daemon thread on
-# a TTL and served from cache. The ONE bounded wait is the cold-start join, so
-# the install-time runtime probe (healthcheck.py --runtime) still gets a real
-# verdict on a healthy box without re-opening the stall window (2s ≪ 3s/4s).
-_db_probe_cache = {'at': 0.0, 'responsive': None, 'error': '', 'ever': False}
-_db_probe_lock = threading.Lock()
-_DB_PROBE_TTL_S = 10.0
-_DB_PROBE_COLD_JOIN_S = 2.0
-
-
-def _refresh_db_probe():
-    """Daemon-thread body: the ONE place a health-driven SELECT 1 runs."""
-    try:
-        from lib.database import get_thread_db
-        get_thread_db().execute('SELECT 1').fetchone()
-        _db_probe_cache['responsive'] = True
-        _db_probe_cache['error'] = ''
-    except Exception as e:
-        _db_probe_cache['responsive'] = False
-        _db_probe_cache['error'] = str(e)[:200]
-        logger.warning('[Health] background DB probe failed: %s', e)
-    finally:
-        # A fresh short-lived daemon is spawned every probe interval.  Without
-        # an explicit release, each dead thread leaves a PG semaphore slot to
-        # the 30s reaper (three overlapping generations at the 10s default).
-        try:
-            from lib.database import close_thread_db
-            close_thread_db()
-        except Exception as e:
-            logger.debug('[Health] DB probe connection release failed: %s', e)
-        _db_probe_cache['ever'] = True
-        _db_probe_cache['at'] = time.time()
-
-
-def _db_responsive_for_health():
-    """Kick a background refresh when the cache is stale; never blocks beyond
-    the one-time cold-start join."""
-    spawn = False
-    with _db_probe_lock:
-        if time.time() - _db_probe_cache['at'] >= _DB_PROBE_TTL_S:
-            # Mark refresh-in-progress BEFORE spawning so a concurrent health
-            # request doesn't spawn a second probe thread.
-            _db_probe_cache['at'] = time.time()
-            spawn = True
-    if not spawn:
-        return
-    t = threading.Thread(target=_refresh_db_probe, daemon=True,
-                         name='health-db-probe')
-    t.start()
-    if not _db_probe_cache['ever']:
-        # Cold start only: bound the wait so the very first verdict is REAL.
-        t.join(timeout=_DB_PROBE_COLD_JOIN_S)
+def _storage_authority_status():
+    """Read the Sidecar supervisor snapshot without performing an RPC."""
+    import lib.storage as storage
+    return storage.storage_status()
 
 
 @common_bp.route('/api/health')
 def health_check():
-    from lib.database import _BACKEND, db_available
     from lib.version import __version__
-    result = {'ok': True, 'ts': int(time.time() * 1000), 'db_ok': db_available, 'version': __version__}
+    result = {'ok': True, 'ts': int(time.time() * 1000), 'version': __version__}
 
     # ── Per-process boot identity (robust restart verification) ──
     # The restart button re-execs in place (os.execv keeps the same PID +
@@ -797,6 +728,18 @@ def health_check():
     except Exception as _bi_e:
         logger.debug('[Health] boot identity unavailable: %s', _bi_e)
 
+    # ── Frontend build identity (long-lived-tab handshake) ──
+    # A tab keeps running the bundle it was loaded with indefinitely; the
+    # vite:preloadError reload only fires when a lazy chunk 404s. Exposing the
+    # current entry-bundle basename lets the client's build watch notice that
+    # the disk moved on (a rebuild shipped new code) and reload when idle —
+    # the root fix for "already-fixed bugs still visible in an old tab".
+    try:
+        from lib.vite_assets import get_vite_build_id as _vite_build_id
+        result['buildId'] = _vite_build_id('main')
+    except Exception as _bid_e:
+        logger.debug('[Health] build id unavailable: %s', _bid_e)
+
     # Native mobile-client download URL, surfaced in the Settings footer.
     # Defaults to a DIRECT APK deep link (see DEFAULT_MOBILE_CLIENT_URL) so a
     # phone tap downloads the app rather than landing on a wrong-platform
@@ -805,32 +748,14 @@ def health_check():
         or DEFAULT_MOBILE_CLIENT_URL
     result['mobile_client_url'] = _mobile_url
 
-    # Report the active backend ('pg' or 'sqlite') — NOT a hardcoded value,
-    # which previously mislabeled every PostgreSQL deployment as sqlite.
-    result['db_engine'] = 'postgresql' if _BACKEND == 'pg' else 'sqlite'
-
     # Sidecar status is an in-memory snapshot: it must stay non-blocking just
     # like process liveness.  A runtime crash is visible here without turning
     # ``ok`` false and falsely telling every browser the whole server is down.
     try:
-        from lib.storage import storage_status
-        result['storage'] = storage_status()
-        result['storage_ready'] = bool(result['storage'].get('ready'))
+        result['storage'] = _storage_authority_status()
     except Exception as e:
         logger.debug('[Health] storage status unavailable: %s', e)
         result['storage'] = {'ready': False, 'state': 'unknown'}
-        result['storage_ready'] = False
-
-    # DB connectivity — served from the background-probe cache (see above).
-    # Deliberately does NOT flip result['ok']: `ok` reports PROCESS liveness
-    # (what the offline arbiter consumes); a stalled DB degrades
-    # db_responsive, never the liveness verdict.
-    if db_available:
-        _db_responsive_for_health()
-        if _db_probe_cache['responsive'] is not None:
-            result['db_responsive'] = _db_probe_cache['responsive']
-            if _db_probe_cache['error']:
-                result['db_error'] = _db_probe_cache['error']
 
     try:
         from lib.cross_dc import get_status
@@ -840,6 +765,89 @@ def health_check():
     except Exception as e:
         logger.debug('[Health] cross_dc status unavailable: %s', e)
     return api_ok(result)
+
+
+@common_bp.route('/health/live')
+def liveness_check():
+    """Low-sensitivity event-loop liveness for orchestrators."""
+    return api_ok({'status': 'live'})
+
+
+@common_bp.route('/api/ready')
+def readiness_check():
+    """Report traffic readiness from process memory only.
+
+    Readiness is withheld while production startup/recovery is incomplete,
+    during shutdown, and throughout a Sidecar restart.  Unlike liveness this
+    endpoint intentionally returns 503 so load balancers stop sending work.
+    """
+    lifecycle = current_app.extensions.get('tofu_production_lifecycle') or {}
+    storage = _storage_authority_status()
+    lifecycle_ready = lifecycle.get('status') == 'ready'
+    ready = bool(lifecycle_ready and storage.get('ready'))
+    payload = {
+        'ready': ready,
+        'state': lifecycle.get('status') or 'not_registered',
+        'storage': storage,
+    }
+    if ready:
+        return api_ok(payload)
+    return api_error(
+        'database_unavailable',
+        status=503,
+        message='Application storage is not ready',
+        retryAfter=1,
+        **payload,
+    )
+
+
+def _orchestrator_probe_snapshot() -> dict:
+    """Return low-sensitivity lifecycle state shared by fixed probes."""
+    lifecycle = current_app.extensions.get('tofu_production_lifecycle') or {}
+    try:
+        storage_ready = bool(_storage_authority_status().get('ready'))
+    except Exception as exc:
+        logger.debug('[Health] probe storage snapshot unavailable: %s', exc)
+        storage_ready = False
+    return {
+        'state': lifecycle.get('status') or 'not_registered',
+        'processRole': lifecycle.get('process_role') or 'unknown',
+        'dependencies': {'storage': storage_ready},
+    }
+
+
+@common_bp.route('/health/ready')
+def orchestrator_readiness_check():
+    """Traffic readiness without dependency addresses or error details."""
+    payload = _orchestrator_probe_snapshot()
+    ready = bool(
+        payload['state'] == 'ready'
+        and payload['dependencies']['storage']
+    )
+    payload['ready'] = ready
+    if ready:
+        return api_ok(payload)
+    return api_error(
+        'not_ready', status=503, message='Application is not ready',
+        retryAfter=1, **payload,
+    )
+
+
+@common_bp.route('/health/startup')
+def startup_check():
+    """Startup completion probe; failure remains visible until restart."""
+    payload = _orchestrator_probe_snapshot()
+    started = bool(
+        payload['state'] == 'ready'
+        and payload['dependencies']['storage']
+    )
+    payload['started'] = started
+    if started:
+        return api_ok(payload)
+    return api_error(
+        'not_started', status=503, message='Application startup is incomplete',
+        retryAfter=1, **payload,
+    )
 
 @common_bp.route('/favicon.ico')
 @common_bp.route('/favicon.svg')

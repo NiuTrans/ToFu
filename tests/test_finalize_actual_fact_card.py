@@ -14,8 +14,7 @@ contract MUST ship these three server-authoritative fields on every done:
     wins over the initial pick, same semantics as ``fallbackModel``).
   * actualDepth  — the thinking depth actually applied.
   * actualModes  — the run-mode list ({label, tone:'mode'}) live server-
-    side; built from ``cfg['activeFlow'] / cfg['endpointMode'] /
-    cfg['autopilot'] / cfg['swarmEnabled']``.
+    side; built from ``cfg['activeFlow'] / cfg['autopilot']``.
 
 This test asserts the SOURCE contract at
 ``lib/tasks_pkg/orchestrator/_finalize.py::_finalize_and_emit_done``:
@@ -23,7 +22,7 @@ This test asserts the SOURCE contract at
   1. All three names appear on ``done_evt`` in the file.
   2. ``actualModel = task.get('_fallback_model') or model`` — fallback
      wins, matching the existing ``fallbackModel`` semantics.
-  3. All four mode sources are read.
+  3. All three mode sources are read.
 
 NEUTER: on a mutated string COPY (shipped file untouched), stripping the
 ``done_evt['actualModel'] = …`` line makes assertion (1) fail — proving
@@ -80,25 +79,20 @@ def test_actual_model_prefers_fallback_over_initial():
     )
 
 
-def test_actual_modes_reads_all_four_sources():
-    """The mode list is built from the same four cfg keys the frontend
-    ``_collectModes`` reads: activeFlow (supersedes the mode toggles),
-    endpointMode, autopilot, swarmEnabled. Missing any source ⇒ a mode
-    the user can trigger from the composer never round-trips."""
+def test_actual_modes_reads_current_sources_only():
+    """The fact card reads the selected Flow or current Autopilot mode."""
     src = _read_source()
     # Slice the file to the actualModes construction so we don't false-match
     # references elsewhere in the file.
     start = src.index("_actual_modes: list[dict[str, str]] = []")
     end = src.index("done_evt['actualModes']", start)
     block = src[start:end]
-    for key in ("activeFlow", "endpointMode", "autopilot", "swarmEnabled"):
+    for key in ("activeFlow", "autopilot"):
         assert f"cfg.get('{key}')" in block, (
             f'{FINALIZE_PATH}: the actualModes construction block must '
             f'read cfg.get({key!r}) — every composer mode toggle must '
             f'round-trip through the fact card. Missing: {key}.'
         )
-
-
 def test_neuter_removing_actual_model_breaks_contract():
     """NEUTER: strip the ``done_evt['actualModel'] = …`` line from a
     string copy of the source (the shipped file stays untouched) and

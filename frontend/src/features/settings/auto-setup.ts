@@ -1,5 +1,6 @@
 import { featureRegistry } from '../../feature-registry';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
+import type { I18nKey } from '../../i18n';
 
 interface ProbeModel {
   catalog_managed?: boolean;
@@ -70,7 +71,7 @@ function globals(): AutoSetupWindow {
   return featureRegistry as unknown as AutoSetupWindow;
 }
 
-function translate(key: string, values?: Record<string, unknown>): string {
+function translate(key: I18nKey, values?: Record<string, unknown>): string {
   return globals().t?.(key, values) || key;
 }
 
@@ -173,7 +174,7 @@ function pushSummary(
   parts: string[],
   summary: ProbeSummary,
   field: keyof ProbeSummary,
-  key: string,
+  key: I18nKey,
 ): void {
   const count = summary[field];
   if (count) parts.push(translate(key, { n: count }));

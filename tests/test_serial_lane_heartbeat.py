@@ -76,6 +76,7 @@ def _mk_task(**over):
     t = {
         'id': 'serial-hb-1',
         'convId': 'cv-serial-hb',
+        '_userId': 1,
         'status': 'running',
         'aborted': False,
         'model': 'test-model',
@@ -128,9 +129,10 @@ class _Recorder:
 @pytest.fixture()
 def rec(monkeypatch):
     r = _Recorder()
-    from lib.tasks_pkg import tool_dispatch as facade
+    import lib.tasks_pkg.tool_dispatch._heartbeat as facade
     from lib.tasks_pkg.executor import _finalize as exec_finalize
-    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     monkeypatch.setattr(_pipeline, 'append_event', r, raising=False)
     monkeypatch.setattr(facade, 'append_event', r, raising=False)
     monkeypatch.setattr(_heartbeat, 'append_event', r, raising=False)
@@ -169,7 +171,8 @@ def slow_tools(monkeypatch):
               'source': 'Test', 'fetched': True, 'fetchedChars': 2}])
         return tc_id, 'ok', False
 
-    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     monkeypatch.setattr(_heartbeat, '_execute_tool_one', _fake, raising=False)
     monkeypatch.setattr(_pipeline, '_execute_tool_one', _fake, raising=False)
     return script, observed
@@ -182,7 +185,7 @@ def _fast_heartbeat(monkeypatch):
 
 
 def _run(task, tcs, cfg=None):
-    from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline
+    from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
     messages: list = []
     execute_tool_pipeline(
         task, tcs, cfg=cfg or {'autoApply': True}, project_path=None,
@@ -404,7 +407,7 @@ def test_no_bare_execute_tool_one_call_survives_in_the_pipeline():
     stops a heartbeat — so a THIRD lane added later cannot quietly reintroduce
     the defect.
     """
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
 
     src = textwrap.dedent(inspect.getsource(_pipeline.execute_tool_pipeline))
     tree = ast.parse(src)
@@ -458,7 +461,8 @@ def test_reaper_envelope_is_worker_lost_and_retryable(monkeypatch):
     (KINDS / _RETRYABLE_KINDS / _WARNING_KINDS / _TITLES + frontend chip +
     both i18n keys) and its hint names the one correct recovery.
     """
-    from lib.tasks_pkg.manager import _maintenance
+    import lib.tasks_pkg.manager._maintenance as _maintenance
+    from tests.support.chat_tasks import chat_task_registry
 
     now = time.time()
     stale = now - 4000
@@ -474,8 +478,7 @@ def test_reaper_envelope_is_worker_lost_and_retryable(monkeypatch):
     finalized = []
     monkeypatch.setattr(_maintenance, '_finalize_reaped_stuck_task',
                         lambda t: finalized.append(t))
-    monkeypatch.setattr(_maintenance, 'tasks', {task['id']: task})
-    monkeypatch.setattr(_maintenance, 'tasks_lock', threading.Lock())
+    monkeypatch.setitem(chat_task_registry, task['id'], task)
 
     n = _maintenance.reap_stuck_running_tasks()
     assert n == 1, 'the synthetic wedged task should have been reaped'

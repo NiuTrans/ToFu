@@ -45,6 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from lib.mcp.registry import is_opensource_build
+from lib.provider_template_recipes import offering_recipes
 
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
@@ -112,7 +113,8 @@ def _template_violations(models: list[dict]) -> list[str]:
                            'not shipped in opensource builds')
 def test_template_carries_the_six_marketplace_models():
     tpl = _load_meituan_template()
-    violations = _template_violations(tpl.get('models') or [])
+    violations = _template_violations(
+        offering_recipes(tpl, allow_legacy=False))
     assert not violations, 'meituan.json template violations:\n' + '\n'.join(
         '  ' + v for v in violations)
 

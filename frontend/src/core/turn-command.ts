@@ -1,5 +1,4 @@
 export interface TurnCommandConfig {
-  endpointMode?: boolean;
   flowDefinition?: unknown;
   flowBuiltin?: unknown;
   flowId?: unknown;
@@ -12,6 +11,13 @@ export interface TurnSubmissionInput {
   settings?: unknown;
   config?: TurnCommandConfig | null;
   signal: AbortSignal;
+  /**
+   * Per-send delivery decision from the post-send dialog when a turn is
+   * already running on the lane: 'steer' injects into the running reply at
+   * the next tool-call boundary, 'queue' (default) holds the message for
+   * dispatch as a fresh turn once the lane settles. A no-op when idle.
+   */
+  injectMode?: 'steer' | 'queue';
 }
 
 export interface TurnSubmissionExtra {
@@ -19,8 +25,9 @@ export interface TurnSubmissionExtra {
   settings: unknown;
   laneId: 'main';
   actor: 'planner' | 'assistant';
-  kind: 'endpoint_planner' | 'flow_node' | 'reply';
+  kind: 'flow_node' | 'reply';
   runId: string;
+  injectMode?: 'steer' | 'queue';
   requestOptions: {
     signal: AbortSignal;
     headers?: { 'Idempotency-Key': string };
@@ -86,7 +93,6 @@ export function buildTurnSubmissionExtra(
 ): TurnSubmissionExtra {
   const config = input.config || {};
   const commandId = String(input.commandId || '');
-  const endpoint = Boolean(config.endpointMode);
   const flow = Boolean(
     config.flowDefinition || config.flowBuiltin || config.flowId,
   );
@@ -100,9 +106,10 @@ export function buildTurnSubmissionExtra(
     commandId,
     settings: input.settings,
     laneId: 'main',
-    actor: endpoint ? 'planner' : 'assistant',
-    kind: endpoint ? 'endpoint_planner' : flow ? 'flow_node' : 'reply',
+    actor: 'assistant',
+    kind: flow ? 'flow_node' : 'reply',
     runId: String(config.autopilotRunId || config.flowRunId || ''),
+    injectMode: input.injectMode === 'steer' ? 'steer' : 'queue',
     requestOptions,
   };
 }

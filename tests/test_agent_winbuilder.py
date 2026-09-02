@@ -2,7 +2,7 @@
 
 WHAT THIS GUARDS
 ----------------
-docs/DESKTOP_AGENT_DIST_DESIGN.md slice A1: winbuilder builds a SECOND
+docs/modules/remote_execution.md: winbuilder builds a SECOND
 payload (target='agent') carrying only the desktop-agent closure. The
 contract:
 

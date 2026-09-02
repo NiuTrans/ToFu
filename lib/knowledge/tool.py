@@ -42,7 +42,8 @@ SEARCH_KNOWLEDGE_TOOL = {
 
 def build_tool(ctx) -> list[dict]:
     from .store import tool_available
-    return [SEARCH_KNOWLEDGE_TOOL] if tool_available() else []
+    return ([SEARCH_KNOWLEDGE_TOOL]
+            if tool_available(user_id=int(ctx.owner_user_id)) else [])
 
 
 def _format_results(results: list[dict]) -> str:
@@ -66,7 +67,7 @@ def _format_results(results: list[dict]) -> str:
     return '\n\n'.join(parts)
 
 
-def _multimodal_results(results: list[dict]):
+def _multimodal_results(results: list[dict], *, user_id: int):
     """Return the normal screenshot protocol when visual evidence is present."""
     text = _format_results(results)
     if not results:
@@ -80,7 +81,7 @@ def _multimodal_results(results: list[dict]):
             asset_id = str(asset.get('id') or '')
             if not asset_id or asset_id in seen or len(images) >= 3:
                 continue
-            loaded = read_asset(asset_id)
+            loaded = read_asset(asset_id, user_id=user_id)
             if loaded is None:
                 continue
             row, raw = loaded
@@ -124,7 +125,8 @@ def handle_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
     from lib.tasks_pkg.executor import _finalize_tool_round
 
     query = str((fn_args or {}).get('query') or '').strip()
-    results = search(query)
+    owner_user_id = int(task['_userId'])
+    results = search(query, user_id=owner_user_id)
     display = []
     for result in results:
         display.append({
@@ -149,7 +151,8 @@ def handle_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
     _finalize_tool_round(
         task, rn, round_entry, display,
         query_override=round_entry.get('query') or f'📚 {query[:80]}')
-    return tc_id, _multimodal_results(results), False
+    return tc_id, _multimodal_results(
+        results, user_id=owner_user_id), False
 
 
 __all__ = [

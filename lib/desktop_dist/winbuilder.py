@@ -1,6 +1,6 @@
 """lib/desktop_dist/winbuilder.py — build the WINDOWS payload on this Linux server.
 
-Half A of the two-half build (docs/DESKTOP_CLIENT_BUILD_DESIGN.md §4.2):
+Half A of the two-half build (docs/modules/remote_execution.md):
 the client-INDEPENDENT frozen payload, cached per (git_sha, deps stamp) so
 the per-client wrapper (iscc, S3) is cheap. PyInstaller cannot
 cross-compile, so the payload is built by a real Windows Python inside the
@@ -89,7 +89,7 @@ _WINPY_Z = 'Z:\\opt\\winpy\\tools\\python.exe'
 _BUILD_EXTRAS = ('pyinstaller', 'pystray', 'pillow', 'psycopg2-binary',
                  'pyautogui', 'pyperclip', 'psutil')
 
-# The AGENT target's pip recipe (docs/DESKTOP_AGENT_DIST_DESIGN.md §4.4):
+# The AGENT target's pip recipe (docs/modules/remote_execution.md):
 # the desktop-agent closure only — NO requirements.txt. That file IS the
 # server stack, the 152 MB this target exists to leave behind. curl_cffi
 # rides along for the egress TLS-fingerprint path (small, manylinux/win
@@ -317,10 +317,13 @@ def _pipeline(workdir: str, version: str, sha: str, log_fh,
     # Boot smoke — the launcher's own marker IS the sentinel.
     smoke_extra = {tgt['smoke_env']: '1'}
     if target == 'full':
-        # TOFU_DB_PATH + stripped PG_* keep the smoke child off the
-        # production PostgreSQL (builder.py's measured lesson, verbatim).
-        smoke_extra['TOFU_DB_PATH'] = _z(os.path.join(workdir,
-                                                      'smoke.db'))
+        smoke_extra.update({
+            'TOFU_DEPLOYMENT_MODE': 'personal',
+            'TOFU_PROCESS_ROLE': 'all',
+            'TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE': '1',
+            'TOFU_STORAGE_PROJECT_ROOT': _z(
+                os.path.join(workdir, 'smoke-authority')),
+        })
     env = _wine_env(smoke_extra)
     out = _wstep('smoke',
                  f'{_z(os.path.join(dist, tgt["app_dir"], tgt["exe"]))}',

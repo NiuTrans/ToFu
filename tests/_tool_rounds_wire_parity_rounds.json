@@ -459,6 +459,29 @@
   "roundNum": 29
  },
  {
+  "_name": "hg-awaiting-card",
+  "status": "awaiting_human",
+  "toolName": "ask_human",
+  "toolCallId": "call_hg_1",
+  "guidanceId": "hg_test123",
+  "guidanceQuestion": "Which scope should the redesign cover?",
+  "guidanceType": "choice",
+  "guidanceOptions": [
+   {
+    "label": "Frontend only",
+    "description": "Visual + interaction, no contract change"
+   },
+   {
+    "label": "Frontend + defaults",
+    "description": "Also schema-level defaults"
+   }
+  ],
+  "results": [
+   {}
+  ],
+  "roundNum": 30
+ },
+ {
   "_name": "badge-tokens",
   "status": "done",
   "toolName": "fetch_url",
@@ -637,6 +660,41 @@
   "toolArgs": {}
  },
  {
+  "_name": "conv-meta-get-conversation",
+  "roundNum": 49,
+  "toolName": "get_conversation",
+  "status": "done",
+  "query": "Open conversation msebjymx",
+  "toolContent": "# Earlier redesign discussion\n\n12 messages",
+  "results": [
+   {
+    "source": "Conversations",
+    "convDigest": {
+     "convId": "msebjymx",
+     "title": "Earlier redesign discussion",
+     "msgCount": 12,
+     "messages": [
+      {
+       "role": "user",
+       "text": "how should the panel collapse?"
+      },
+      {
+       "role": "assistant",
+       "text": "Collapse tool results by default.",
+       "tools": [
+        {
+         "name": "edit_file",
+         "arg": "tool_rounds.js"
+        }
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "toolArgs": {}
+ },
+ {
   "_name": "timer-watcher-triggered",
   "roundNum": 43,
   "toolName": "timer_create",
@@ -719,5 +777,29 @@
   "toolContent": "Tool execution timed out: get_conversation",
   "results": [],
   "roundNum": 48
+ },
+ {
+  "_name": "hg-awaiting-expired",
+  "status": "awaiting_human",
+  "toolName": "ask_human",
+  "toolCallId": "call_hg_2",
+  "_turnSettled": true,
+  "guidanceId": "hg_expired9",
+  "guidanceQuestion": "Which scope should the redesign cover?",
+  "guidanceType": "choice",
+  "guidanceOptions": [
+   {
+    "label": "Frontend only",
+    "description": "Visual + interaction, no contract change"
+   },
+   {
+    "label": "Frontend + defaults",
+    "description": "Also schema-level defaults"
+   }
+  ],
+  "results": [
+   {}
+  ],
+  "roundNum": 50
  }
 ]

@@ -29,18 +29,30 @@ import os
 import sys
 import threading
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.tasks_pkg.stream_handler import (  # noqa: E402
-    _CANNED_GREETING_RETRY_MAX,
-    analyse_stream_result,
-)
+from lib.tasks_pkg.stream_handler.api import analyse_stream_result  # noqa: E402
+from lib.tasks_pkg.stream_handler._budget import _CANNED_GREETING_RETRY_MAX  # noqa: E402
 from lib.tasks_pkg.stream_handler._canned_greeting import (  # noqa: E402
     is_canned_greeting_reply,
     last_user_is_smalltalk,
 )
 
 INCIDENT_TEXT = 'Hi! How can I help you today?'
+
+
+@pytest.fixture(autouse=True)
+def clean_synthetic_tasks():
+    """Register classifier tasks with the event authority and clean them up."""
+    yield
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+    with tasks_lock:
+        for task_id in [
+            task_id for task_id in tasks if task_id.startswith('canned-test')
+        ]:
+            tasks.pop(task_id, None)
 _WORK_TAIL = [
     {'role': 'user', 'content': '查一下明天去曼谷的机票，给出最便宜的三班。'},
     {'role': 'assistant', 'content': None,
@@ -156,9 +168,10 @@ def test_no_user_turn_at_all_is_canned():
 # ─────────────────────────────────────────────────────────────────────
 
 def _fresh_task(phase_counter: int = 0) -> dict:
-    return {
+    task = {
         'id': 'canned-test',
         'convId': 'conv-canned',
+        '_userId': 1,
         'aborted': False,
         'content': '',
         'thinking': '',
@@ -168,6 +181,10 @@ def _fresh_task(phase_counter: int = 0) -> dict:
         'content_lock': threading.Lock(),
         '_premature_retry_count_phase': phase_counter,
     }
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+    with tasks_lock:
+        tasks[task['id']] = task
+    return task
 
 
 def _usage():
@@ -289,7 +306,7 @@ def test_short_non_greeting_stop_not_retried():
 
 # ─────────────────────────────────────────────────────────────────────
 # 2b) The 2026-08-02 deepseek-v4-flash shape: the per-turn tail injection
-#     (_refresh_tail_block — date / digest / charter / board) appends
+#     (managed Context Composer blocks — date / digest / charter / board) append
 #     <system-reminder> blocks onto the LAST user message before the round,
 #     so the production wire form of "你好" is a blocks list carrying a
 #     reminder. The small-talk complement must judge the USER'S OWN WORDS,
@@ -372,7 +389,7 @@ def _patch_subturn(monkeypatch, content):
     """Stub _run_single_turn so the VU sub-task 'replies' with `content`
     (mirrors tests/test_autopilot_verify.py's harness)."""
     import lib.tasks_pkg.autopilot as ap
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._turn as orch
 
     def _fake_turn(sub_task):
         sub_task['toolRounds'] = []
@@ -380,13 +397,14 @@ def _patch_subturn(monkeypatch, content):
 
     monkeypatch.setattr(orch, '_run_single_turn', _fake_turn)
     monkeypatch.setattr(ap, '_get_or_persist_objective',
-                        lambda conv_id, msgs: 'Ship a working feature.')
+                        lambda conv_id, msgs, *, user_id: 'Ship a working feature.')
 
 
 def _vu_task():
     return {
         'id': 'task-vu-canned-0001',
         'convId': 'conv-vu-canned',
+        '_userId': 1,
         'config': {'model': 'claude-opus-5', 'autopilot': True},
         'messages': [
             {'role': 'user', 'content': 'Ship a working feature.'},

@@ -96,12 +96,15 @@ def test_schema_bootstrap_runs_in_bounded_disposable_child(
     def fake_run(argv, *, cwd, env, capture_output, text, timeout):
         assert argv[0] == migrator.sys.executable
         assert argv[1] == '-c'
+        assert argv[3] == str(target)
         assert cwd == str(migrator._PROJECT_ROOT)
         assert capture_output is True and text is True and timeout == 600
-        assert env['TOFU_DB_BACKEND'] == 'sqlite'
-        assert env['TOFU_DB_PATH'] == str(target)
-        assert env['TOFU_SERVER_PROCESS'] == '0'
-        assert env['TOFU_SQLITE_OWNER_GUARD'] == '0'
+        assert env['TOFU_DEPLOYMENT_MODE'] == 'personal'
+        assert env['TOFU_PROCESS_ROLE'] == 'all'
+        assert 'TOFU_DB_BACKEND' not in env
+        assert 'TOFU_REQUIRE_PG' not in env
+        assert 'TOFU_POSTGRES_DSN_FILE' not in env
+        assert not any(name.startswith('TOFU_PG_') for name in env)
         for name in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
                      'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS',
                      'ORT_NUM_THREADS', 'TOFU_ONNX_THREADS'):
@@ -115,6 +118,32 @@ def test_schema_bootstrap_runs_in_bounded_disposable_child(
     monkeypatch.setattr(migrator.subprocess, 'run', fake_run)
     migrator._initialize_target(target)
     assert target.is_file()
+
+
+def test_postgres_authority_requires_bounded_tls_secret_file(
+        migrator, tmp_path):
+    relative = Path('postgres.dsn')
+    with pytest.raises(RuntimeError, match='absolute path'):
+        migrator._read_dsn_secret(relative)
+
+    insecure = tmp_path / 'insecure.dsn'
+    insecure.write_text(
+        'postgresql://db.example/tofu?sslmode=require', encoding='utf-8')
+    with pytest.raises(RuntimeError, match='sslmode=verify-full'):
+        migrator._read_dsn_secret(insecure)
+
+    secure = tmp_path / 'secure.dsn'
+    secure.write_text(
+        'postgresql://db.example/tofu?sslmode=verify-full', encoding='utf-8')
+    assert migrator._read_dsn_secret(secure).endswith('sslmode=verify-full')
+
+
+def test_cli_does_not_accept_retired_or_plaintext_postgres_configuration(
+        migrator):
+    help_text = migrator._parser().format_help()
+    assert '--postgres-dsn-file' in help_text
+    assert '--source-dsn' not in help_text
+    assert 'TOFU_PG_' not in help_text
 
 
 def test_cli_authority_artifacts_cannot_escape_project_data(migrator):

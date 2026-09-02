@@ -10,7 +10,7 @@ two interlocking holes:
 1.  ``onProjectCleared()`` (and ``onProjectAttached()``) repainted the dial
     but never persisted it, so ``conv.chatMode`` kept the stale ``'studio'``
     with an empty ``projectPath`` after the project was cleared.
-2.  ``_restoreConvToolState()`` trusted that stored tier verbatim —
+2.  ``restoreConversationSettingsToComposer()`` trusted that stored tier verbatim —
     ``conv.chatMode || _deriveChatModeFromFlags(conv)`` — so the poisoned
     ``'studio'`` + no-``projectPath`` combination restored as Studio on the
     next reload / conv switch. Clicking Studio then only opens the panel
@@ -31,10 +31,10 @@ Chat detaches the project), so the restore clamp now heals BOTH ways:
 ``studio ⟺ projectPath`` — demote studio-without-project, PROMOTE
 non-studio-with-project. Both heals stay paint-only.
 
-These tests drive the REAL shipped functions under node
-(``_restoreConvToolState`` sliced from static/js/main.js,
+These tests drive the retained source owners under node
+(``restoreConversationSettingsToComposer`` from ``runtime/sections/main.js``;
 ``_deriveChatModeFromFlags`` / ``onProjectAttached`` / ``onProjectCleared``
-from static/js/main/main_toolbar_ui.js). Two neuters prove the assertions are
+from ``runtime/sections/main/main_toolbar_ui.js``). Two neuters prove the assertions are
 load-bearing: without the restore clamp the poisoned conv restores as Studio;
 without the persist hook the clear path reopens the poison.
 """
@@ -44,18 +44,21 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._runtime_sections import runtime_section
 
 pytestmark = pytest.mark.unit
 
-ROOT = Path(__file__).resolve().parent.parent
-MAIN_JS = ROOT / "static" / "js" / "main.js"
-TOOLBAR_JS = ROOT / "static" / "js" / "main" / "main_toolbar_ui.js"
-PROJECT_JS = ROOT / "static" / "js" / "project.js"
+ROOT = Path(__file__).resolve().parents[1]
+MAIN_SOURCE = runtime_section("main.js", scope_prelude=False)
+TOOLBAR_SOURCE = runtime_section(
+    "main/main_toolbar_ui.js", scope_prelude=False,
+)
+PROJECT_SOURCE = runtime_section("project.js", scope_prelude=False)
 
 RESTORE_CLAMP = ("(_storedMode === 'studio' && !conv.projectPath) ? 'chat'\n"
                  "      : (_storedMode !== 'studio' && conv.projectPath) ? 'studio'\n"
                  "      : _storedMode")
-PERSIST_HOOK = "if (typeof _saveConvToolState === 'function') _saveConvToolState();"
+PERSIST_HOOK = "if (typeof captureActiveConversationSettings === 'function') captureActiveConversationSettings();"
 
 
 def _node() -> str:
@@ -81,18 +84,17 @@ def _slice_fn(src: str, signature: str) -> str:
 
 
 def _restore_fn() -> str:
-    return _slice_fn(MAIN_JS.read_text(encoding="utf-8"),
-                     "function _restoreConvToolState(conv) {")
+    return _slice_fn(
+        MAIN_SOURCE, "function restoreConversationSettingsToComposer(conv) {",
+    )
 
 
 def _derive_fn() -> str:
-    return _slice_fn(TOOLBAR_JS.read_text(encoding="utf-8"),
-                     "function _deriveChatModeFromFlags(conv) {")
+    return _slice_fn(TOOLBAR_SOURCE, "function _deriveChatModeFromFlags(conv) {")
 
 
 def _toolbar_fn(name: str) -> str:
-    return _slice_fn(TOOLBAR_JS.read_text(encoding="utf-8"),
-                     f"function {name}() {{")
+    return _slice_fn(TOOLBAR_SOURCE, f"function {name}() {{")
 
 
 def _run(script: str) -> dict:
@@ -103,26 +105,30 @@ def _run(script: str) -> dict:
 
 
 # ── Harness A: restore path ─────────────────────────────────────────────
-# Stubs for every bare call inside the real _restoreConvToolState. The
+# Stubs for every bare call inside the real restoreConversationSettingsToComposer. The
 # typeof-guarded hooks (updateSubmenuCounts / updateContextBar /
 # presenceRefresh / projectBrainRefresh / convInfluenceRefresh) are left
 # undefined on purpose so the guard branches are exercised too.
 RESTORE_HARNESS = """
+const runtimeScope = globalThis;
 const appliedLog = [];
 const stub = () => {};
 const config = {};
 const serverModel = 'stub-model';
 const _applyModelUI = stub, _applySearchModeUI = stub, _applyFetchEnabledUI = stub,
       _applyCodeExecUI = stub, _applyBrowserUI = stub, _applyDesktopUI = stub,
-      _applyMemoryUI = stub, _applySchedulerUI = stub, _applySwarmUI = stub,
-      _applyEndpointUI = stub, _applyAutopilotUI = stub, _applyFlowUI = stub,
+      _applyMemoryUI = stub, _applyAgentModeUI = stub, _applyFlowUI = stub,
       _applyImageGenToolUI = stub, _applyImageGenUI = stub,
       _applyHumanGuidanceUI = stub, _applyAutoTranslateUI = stub,
-      _scheduleReflow = stub, convAutoTranslate = () => false;
+      _updateAutoApplyUI = stub, _scheduleReflow = stub,
+      convAutoTranslate = () => false;
+const normalizeConversationInteractionModes = () => ({
+  agentMode: 'standard', activeFlow: '',
+});
 const _applyChatModeUI = (m) => { appliedLog.push(m); };
 __DERIVE_FN__
 __RESTORE_FN__
-_restoreConvToolState(__CONV__);
+restoreConversationSettingsToComposer(__CONV__);
 console.log(JSON.stringify({
   applied: appliedLog.length ? appliedLog[appliedLog.length - 1] : null,
   calls: appliedLog.length,
@@ -144,7 +150,7 @@ let applied = null;
 let saved = 0;
 let chatMode = __CHAT_MODE__;
 const _applyChatModeUI = (m) => { applied = m; };
-const _saveConvToolState = () => { saved++; };
+const captureActiveConversationSettings = () => { saved++; };
 __FN__
 __CALL__();
 console.log(JSON.stringify({ applied, saved }));
@@ -349,7 +355,7 @@ let saved = 0;
 let chatMode = __CHAT_MODE__;
 const stub = () => {};
 const _applyChatModeUI = (m) => { appliedLog.push(m); chatMode = m; };
-const _saveConvToolState = () => { saved++; };
+const captureActiveConversationSettings = () => { saved++; };
 const _saveConvProjectPath = (p, extras) => { savePathCalls.push({ p: p || '' }); };
 const _applyProjectData = stub, _updateProjectUI = stub, closeProjectModal = stub,
       saveRecentProject = stub, debugLog = stub, renderConversationList = stub,
@@ -391,8 +397,7 @@ WITH_PREV_PROJECT = {"active": True, "path": "/old", "extraRoots": []}
 def _run_mp_apply(prev_state: dict, chat_mode: str,
                   set_paths: str = FAIL_SET_PATHS,
                   mp_src: str | None = None) -> dict:
-    src = mp_src or _slice_fn(PROJECT_JS.read_text(encoding="utf-8"),
-                              "async function mpApplyFolders() {")
+    src = mp_src or _slice_fn(PROJECT_SOURCE, "async function mpApplyFolders() {")
     script = (MP_APPLY_HARNESS
               .replace("__CHAT_MODE__", json.dumps(chat_mode))
               .replace("__SET_PATHS__", set_paths)
@@ -451,8 +456,7 @@ def test_NC_rollback_without_demotion_strands_studio():
     """Neuter: strip the rollback demotion from the REAL mpApplyFolders and
     the first-attach failure strands the dial at Studio with no project —
     the exact poisoned shape the owner caught."""
-    src = _slice_fn(PROJECT_JS.read_text(encoding="utf-8"),
-                    "async function mpApplyFolders() {")
+    src = _slice_fn(PROJECT_SOURCE, "async function mpApplyFolders() {")
     assert DEMOTION_LINE in src, "harness stale: demotion line not found"
     neutered = src.replace(DEMOTION_LINE, "")
     assert neutered != src
@@ -466,10 +470,9 @@ def test_NC_rollback_without_demotion_strands_studio():
 
 
 def test_rollback_demotion_present_in_project_js():
-    src = _slice_fn(PROJECT_JS.read_text(encoding="utf-8"),
-                    "async function mpApplyFolders() {")
+    src = _slice_fn(PROJECT_SOURCE, "async function mpApplyFolders() {")
     assert DEMOTION_LINE in src, (
-        "static/js/project.js mpApplyFolders catch branch lost the rollback "
+        "runtime/sections/project.js mpApplyFolders catch branch lost the rollback "
         "demotion — a failed first-attach would strand Studio with no project"
     )
 
@@ -480,6 +483,6 @@ def test_rollback_demotion_present_in_project_js():
 
 def test_restore_clamp_present_in_main_js():
     assert RESTORE_CLAMP in _restore_fn(), (
-        "static/js/main.js _restoreConvToolState lost the studio⟺project "
+        "runtime/sections/main.js restoreConversationSettingsToComposer lost the studio⟺project "
         "clamp — a stored 'studio' with no projectPath would restore as Studio"
     )

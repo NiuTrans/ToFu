@@ -33,7 +33,11 @@ ROOT = Path(__file__).resolve().parents[1]
     (HumanGateServiceError('gate registry offline'), {}),
     (RuntimeMutationError('runtime registry offline'), {}),
     (RuntimeStartError('worker offline', run_id='run-1'), {
-        'run_id': 'run-1',
+        'start': {
+            'format': 'tofu.orchestration.runtime-start/v1',
+            'kind': 'durable',
+            'id': 'run-1',
+        },
     }),
 ])
 def test_expected_service_errors_share_one_http_projection(
@@ -162,7 +166,7 @@ def test_http_adapters_depend_on_error_contract_not_service_implementations():
 
     route_calls = {
         'orchestration_definition_routes.py': 2,
-        'orchestration_authoring_routes.py': 6,
+        'orchestration_authoring_routes.py': 5,
         'orchestration_runtime_routes.py': 1,
         'orchestration_runtime_start_http.py': 1,
         'orchestration_task_routes.py': 3,

@@ -1,6 +1,6 @@
 """tests/test_write_breakdown.py — tests for the per-round `write` decomposition.
 
-`lib.tasks_pkg.orchestrator._compute_write_breakdown` splits a round's
+`lib.tasks_pkg.write_breakdown._compute_write_breakdown` splits a round's
 prompt-cache ``write`` into {toolResults, prevOutput, recacheBody, envelope}
 from real recorded usage. The CORE INVARIANT — the reason this lives on the
 backend — is that the sub-items sum to EXACTLY ``write`` in every case,
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import unittest
 
-from lib.tasks_pkg.orchestrator import _compute_write_breakdown
+from lib.tasks_pkg.write_breakdown import _compute_write_breakdown
 
 
 def _sum(wb: dict) -> int:
@@ -180,7 +180,7 @@ class WriteBreakdownTest(unittest.TestCase):
         # be reported as `contextWrite` (first-time caching), NOT `envelope`
         # (which is physically bounded framing). envelope keeps only the
         # ceiling allowance; the excess goes to contextWrite; recacheBody=0.
-        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        from lib.tasks_pkg.write_breakdown import _ENVELOPE_MAX_TOKENS
         wb = _compute_write_breakdown(
             {'toolRounds': []},
             [{'round': 1, 'usage': {'cache_write_tokens': 64100}}],
@@ -198,7 +198,7 @@ class WriteBreakdownTest(unittest.TestCase):
         # Same large residual, but WITH a cacheBreak → the excess is waste
         # (recacheBody), and contextWrite must be 0. Mirror image of the test
         # above — the break flag is what distinguishes warm-up from waste.
-        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        from lib.tasks_pkg.write_breakdown import _ENVELOPE_MAX_TOKENS
         wb = _compute_write_breakdown(
             {'toolRounds': []},
             [{'round': 1, 'usage': {'cache_write_tokens': 64100},
@@ -230,7 +230,7 @@ class WriteBreakdownTest(unittest.TestCase):
         # bulk to recacheBody, NOT envelope. write=37700, tools=893, prev=337
         # → residual=36470; envelope capped at _ENVELOPE_MAX_TOKENS (800),
         # recacheBody=35670. The 36k must NOT show up as "structural overhead".
-        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        from lib.tasks_pkg.write_breakdown import _ENVELOPE_MAX_TOKENS
         wb = _compute_write_breakdown(
             {'toolRounds': [{'llmRound': 0, 'toolTokens': 893}]},
             [
@@ -251,7 +251,7 @@ class WriteBreakdownTest(unittest.TestCase):
         # Same numbers but NO cacheBreak. The large residual is NOT framing —
         # it is fresh context cached for the first time, so it must land in
         # `contextWrite`, with envelope capped and recacheBody=0.
-        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        from lib.tasks_pkg.write_breakdown import _ENVELOPE_MAX_TOKENS
         wb = _compute_write_breakdown(
             {'toolRounds': [{'llmRound': 0, 'toolTokens': 893}]},
             [
@@ -288,7 +288,7 @@ class WriteBreakdownTest(unittest.TestCase):
         # 134.9k → 130.0k (a 4.9k drop, only ~3.6% so detect_cache_break stayed
         # silent → no cacheBreak flag). The excess must be labeled recacheBody
         # (re-billed body / waste), NOT contextWrite ("first-time, not waste").
-        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        from lib.tasks_pkg.write_breakdown import _ENVELOPE_MAX_TOKENS
         wb = _compute_write_breakdown(
             {'toolRounds': [{'llmRound': 0, 'toolTokens': 68}]},
             [
@@ -315,7 +315,7 @@ class WriteBreakdownTest(unittest.TestCase):
     def test_read_held_keeps_context_write(self):
         # Same shape but cache_read HELD (no drop) → the excess is genuine
         # first-time context, recacheBody must stay 0 and readDrop 0.
-        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        from lib.tasks_pkg.write_breakdown import _ENVELOPE_MAX_TOKENS
         wb = _compute_write_breakdown(
             {'toolRounds': [{'llmRound': 0, 'toolTokens': 68}]},
             [
@@ -335,7 +335,7 @@ class WriteBreakdownTest(unittest.TestCase):
     def test_partial_read_drop_splits_excess(self):
         # Read drop SMALLER than the excess: only the drop is re-billed body,
         # the remainder is genuine new context. Both terms present, sum exact.
-        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        from lib.tasks_pkg.write_breakdown import _ENVELOPE_MAX_TOKENS
         wb = _compute_write_breakdown(
             {'toolRounds': []},
             [
@@ -355,7 +355,7 @@ class WriteBreakdownTest(unittest.TestCase):
 
     def test_small_read_drop_below_threshold_stays_context(self):
         # A drop below _READ_DROP_WASTE_TOKENS is noise, not waste → contextWrite.
-        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        from lib.tasks_pkg.write_breakdown import _ENVELOPE_MAX_TOKENS
         wb = _compute_write_breakdown(
             {'toolRounds': []},
             [
@@ -385,7 +385,7 @@ class WriteBreakdownTest(unittest.TestCase):
         # prefix was evicted and re-billed inside this write. The excess must be
         # recacheBody, NOT the benign "first-cache context" (the exact round-1
         # mislabel the user caught).
-        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        from lib.tasks_pkg.write_breakdown import _ENVELOPE_MAX_TOKENS
         wb = _compute_write_breakdown(
             {'toolRounds': []},
             [{'round': 1, 'usage': {'cache_write_tokens': 40100,
@@ -410,7 +410,7 @@ class WriteBreakdownTest(unittest.TestCase):
         # round's read (cache grew across the turn boundary — the prefix was
         # fully read back plus more). No drop → the write is genuine first-time
         # context, recacheBody must stay 0.
-        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        from lib.tasks_pkg.write_breakdown import _ENVELOPE_MAX_TOKENS
         wb = _compute_write_breakdown(
             {'toolRounds': []},
             [{'round': 1, 'usage': {'cache_write_tokens': 40100,
@@ -429,7 +429,7 @@ class WriteBreakdownTest(unittest.TestCase):
         # prev_turn_cache_read defaults to 0 → read_drop 0 → the large write is
         # legitimate first-time context, exactly as before the fix. This is the
         # honest "first-cache warm-up" case the label was MEANT for.
-        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        from lib.tasks_pkg.write_breakdown import _ENVELOPE_MAX_TOKENS
         wb = _compute_write_breakdown(
             {'toolRounds': []},
             [{'round': 1, 'usage': {'cache_write_tokens': 40100,
@@ -483,7 +483,7 @@ class WriteBreakdownTest(unittest.TestCase):
         # the baseline — the cross-turn arg is ignored (it only rescues round-1).
         # round 2: prev within-turn read 130000, this read 130000 → no drop,
         # despite a cross-turn arg that would (wrongly) imply a huge drop.
-        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        from lib.tasks_pkg.write_breakdown import _ENVELOPE_MAX_TOKENS
         wb = _compute_write_breakdown(
             {'toolRounds': []},
             [
@@ -528,7 +528,7 @@ class WriteBreakdownTest(unittest.TestCase):
 class PrevTurnCacheReadTest(unittest.TestCase):
     """get_prev_turn_cache_read — the cross-turn baseline source.
 
-    It scans the per-(conv,thread) cache-state singleton for the same conv,
+    It scans the per-(owner,conv,thread) cache-state singleton for the same conv,
     EXCLUDING the caller's own thread (whose entry detect_cache_break already
     advanced to THIS round's read), and returns the most-recently-updated
     sibling's last_cache_read_tokens. That sibling is the previous user turn.
@@ -536,7 +536,11 @@ class PrevTurnCacheReadTest(unittest.TestCase):
 
     def setUp(self):
         import threading
-        from lib.tasks_pkg.cache_tracking import _cache_states, _cache_lock, CacheState
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _cache_lock,
+            CacheState,
+        )
         self._threading = threading
         self._states = _cache_states
         self._lock = _cache_lock
@@ -544,12 +548,14 @@ class PrevTurnCacheReadTest(unittest.TestCase):
         self._conv = 'cw_test_conv_' + str(id(self))
         # Clean any stray entries for this conv id.
         with _cache_lock:
-            for k in [k for k in _cache_states if k[0] == self._conv]:
+            for k in [k for k in _cache_states
+                      if k[0] == 1 and k[1] == self._conv]:
                 _cache_states.pop(k, None)
 
     def tearDown(self):
         with self._lock:
-            for k in [k for k in self._states if k[0] == self._conv]:
+            for k in [k for k in self._states
+                      if k[0] == 1 and k[1] == self._conv]:
                 self._states.pop(k, None)
 
     def _put(self, thread_id, *, cache_read, update_time, call_count=1):
@@ -558,43 +564,43 @@ class PrevTurnCacheReadTest(unittest.TestCase):
         st.last_update_time = update_time
         st.call_count = call_count
         with self._lock:
-            self._states[(self._conv, thread_id)] = st
+            self._states[(1, self._conv, thread_id)] = st
 
     def test_returns_zero_when_no_state(self):
-        from lib.tasks_pkg.cache_tracking import get_prev_turn_cache_read
-        self.assertEqual(get_prev_turn_cache_read(self._conv), 0)
-        self.assertEqual(get_prev_turn_cache_read(''), 0)
+        from lib.tasks_pkg.cache_tracking._state import get_prev_turn_cache_read
+        self.assertEqual(get_prev_turn_cache_read(self._conv, user_id=1), 0)
+        self.assertEqual(get_prev_turn_cache_read('', user_id=1), 0)
 
     def test_excludes_callers_own_thread(self):
         # The caller's own thread entry (this round's already-advanced read)
         # must NOT be returned — else read_drop collapses to 0 and the fix is a
         # no-op. Only a DIFFERENT-thread (prior-turn) sibling counts.
-        from lib.tasks_pkg.cache_tracking import get_prev_turn_cache_read
+        from lib.tasks_pkg.cache_tracking._state import get_prev_turn_cache_read
         self_tid = self._threading.get_ident()
         # Self thread: this round's read (would be the no-op trap).
         self._put(self_tid, cache_read=79200, update_time=200.0)
         # No sibling yet → excluding self leaves nothing.
-        self.assertEqual(get_prev_turn_cache_read(self._conv), 0)
+        self.assertEqual(get_prev_turn_cache_read(self._conv, user_id=1), 0)
         # Add a prior-turn sibling on a different thread.
         self._put(self_tid + 1, cache_read=118000, update_time=100.0)
-        self.assertEqual(get_prev_turn_cache_read(self._conv), 118000)
+        self.assertEqual(get_prev_turn_cache_read(self._conv, user_id=1), 118000)
 
     def test_picks_most_recent_sibling(self):
-        from lib.tasks_pkg.cache_tracking import get_prev_turn_cache_read
+        from lib.tasks_pkg.cache_tracking._state import get_prev_turn_cache_read
         self_tid = self._threading.get_ident()
         self._put(self_tid + 1, cache_read=50000, update_time=100.0)   # older
         self._put(self_tid + 2, cache_read=118000, update_time=300.0)  # newest
         self._put(self_tid + 3, cache_read=90000, update_time=200.0)
-        self.assertEqual(get_prev_turn_cache_read(self._conv), 118000)
+        self.assertEqual(get_prev_turn_cache_read(self._conv, user_id=1), 118000)
 
     def test_ignores_cold_call_count_zero_siblings(self):
         # A sibling entry that never completed a round (call_count==0) carries
         # no real baseline — skip it even if it's the most recent.
-        from lib.tasks_pkg.cache_tracking import get_prev_turn_cache_read
+        from lib.tasks_pkg.cache_tracking._state import get_prev_turn_cache_read
         self_tid = self._threading.get_ident()
         self._put(self_tid + 1, cache_read=118000, update_time=100.0, call_count=1)
         self._put(self_tid + 2, cache_read=5, update_time=999.0, call_count=0)
-        self.assertEqual(get_prev_turn_cache_read(self._conv), 118000)
+        self.assertEqual(get_prev_turn_cache_read(self._conv, user_id=1), 118000)
 
 
 if __name__ == '__main__':

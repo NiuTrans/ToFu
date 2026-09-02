@@ -1,15 +1,14 @@
-"""Public entrypoints + DB load for the conversation message builder.
+"""Public entrypoints + authority load for the conversation message builder.
 
   * ``build_api_messages_from_db`` — load a conversation and build API
     messages.
   * ``build_branch_api_messages`` — build API messages for a branch
     conversation.
-  * ``_load_messages_from_db`` — raw PostgreSQL load helper.
+  * ``_load_messages_from_db`` — owner-scoped transcript projection helper.
 """
 
 from __future__ import annotations
 
-from lib.database import DOMAIN_CHAT, get_thread_db
 from lib.log import get_logger
 
 from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
@@ -17,23 +16,13 @@ from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
 logger = get_logger(__name__)
 
 
-def _load_via_facade(conv_id: str) -> list[dict] | None:
-    """Resolve ``_load_messages_from_db`` through the package facade.
-
-    The public entrypoints look the loader up on the package module at call
-    time (rather than binding the local reference) so tests that patch
-    ``lib.tasks_pkg.conv_message_builder._load_messages_from_db`` — as they
-    did against the pre-split monolithic module — keep working.
-    """
-    import lib.tasks_pkg.conv_message_builder as _facade
-    return _facade._load_messages_from_db(conv_id)
-
-
 def build_branch_api_messages(
     conv_id: str,
     msg_idx: int,
     branch_idx: int,
     config: dict,
+    *,
+    user_id: int,
 ) -> list[dict] | None:
     """Build API-ready messages for a branch conversation.
 
@@ -59,7 +48,7 @@ def build_branch_api_messages(
     list[dict] | None
         API-ready message list, or None if conversation/branch not found.
     """
-    raw_messages = _load_via_facade(conv_id)
+    raw_messages = _load_messages_from_db(conv_id, user_id=user_id)
     if raw_messages is None:
         return None
 
@@ -133,6 +122,8 @@ def build_api_messages_from_db(
     config: dict,
     *,
     exclude_last: bool = False,
+    preloaded_messages: list[dict] | None = None,
+    user_id: int,
 ) -> list[dict] | None:
     """Load conversation messages from DB and build API-ready messages.
 
@@ -145,17 +136,27 @@ def build_api_messages_from_db(
     exclude_last : bool
         If True, exclude the last message (used by continueAssistant where
         the last assistant message is the one being regenerated).
+    preloaded_messages : list[dict] | None
+        Optional RAW transcript already loaded by the caller. When provided,
+        the DB read is skipped and this list is transformed directly.
 
     Returns
     -------
     list[dict] | None
         API-ready message list, or None if conversation not found.
     """
-    raw_messages = _load_via_facade(conv_id)
-    if raw_messages is None:
-        return None
+    # ``preloaded_messages`` lets a request that already loaded the RAW
+    # conversation snapshot (e.g. chat_send / chat_start's single-load path)
+    # reuse it instead of issuing a second DB read. Other callers keep the
+    # live-load fallback.
+    if preloaded_messages is not None:
+        raw_messages = preloaded_messages
+    else:
+        raw_messages = _load_messages_from_db(conv_id, user_id=user_id)
+        if raw_messages is None:
+            return None
 
-    # Lifecycle no-refire note (pt_40d00fd526e5479a): a regenerate re-asks the
+    # Lifecycle no-refire note (): a regenerate re-asks the
     # model for the turn the crash interrupted. When the interrupted tail had
     # ALREADY emitted a restart/shutdown-class tool call, a fresh generation
     # must not blindly re-fire it — the command may have succeeded (its result
@@ -232,14 +233,17 @@ def _prepend_note_to_last_user(built: list[dict], note: str) -> bool:
     return False
 
 
-def _load_messages_from_db(conv_id: str) -> list[dict] | None:
+def _load_messages_from_db(
+    conv_id: str,
+    *,
+    user_id: int,
+) -> list[dict] | None:
     """Load canonical messages through the conversation repository."""
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        from lib.database.conversation_repository import load_conversation
-        snapshot = load_conversation(db, conv_id)
+        from lib.conversations.repository import get_conversation
+        snapshot = get_conversation(conv_id, user_id=int(user_id))
         if snapshot is None:
-            logger.warning('[MsgBuilder] conv=%s not found in DB', conv_id[:8])
+            logger.warning('[MsgBuilder] conv=%s not found', conv_id[:8])
             return None
         messages = snapshot.messages
         if not isinstance(messages, list):

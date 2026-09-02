@@ -12,10 +12,16 @@ import time
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
 
-from lib.http_client import http_get
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+
+def http_get(*args, **kwargs):
+    """Request-loaded HTTP seam retained for title-resolution tests."""
+    from lib.http_client import http_get as _http_get
+
+    return _http_get(*args, **kwargs)
 
 _ARXIV_API_URL = 'http://export.arxiv.org/api/query'
 _ATOM_NS = {'atom': 'http://www.w3.org/2005/Atom'}
@@ -31,7 +37,7 @@ _ARXIV_TITLE_RETRY_SLEEP = 1.5
 _ARXIV_SEARCH_RETRIES = 3
 _ARXIV_SEARCH_RETRY_SLEEP = 3.0
 
-# ★ `search_arxiv` takes FREE TEXT ONLY. These markers mean the caller already
+# `search_arxiv` takes FREE TEXT ONLY. These markers mean the caller already
 # built arXiv query syntax, and feeding that here is a SILENT corruption: the
 # free-text path sanitizes its input (correct for terms, destructive for built
 # syntax), so `(ti:predictive OR ti:delta) AND all:"KV cache compression"`
@@ -253,7 +259,7 @@ def _rerank_by_title(query, results):
 def search_arxiv_explained(query, max_results=10):
     """Search arXiv by free-text query, returning ``(results, error)``.
 
-    ★ The arXiv HTTP client and Atom parsing live in
+    The arXiv HTTP client and Atom parsing live in
     ``tofu_search.search.vertical.arxiv`` — this function does NOT own a second
     copy of them. It contributes only the two things that are genuinely local
     policy: retry/backoff for arXiv's aggressive 429s, and the title re-rank.
@@ -264,7 +270,7 @@ def search_arxiv_explained(query, max_results=10):
     with backoff). A bare empty list cannot express that difference, and
     retrying a legitimate zero would just burn the rate limit.
 
-    ★ ``error`` is the distinction a UI caller MUST keep: it is ``''`` when
+    ``error`` is the distinction a UI caller MUST keep: it is ``''`` when
     the query ran clean — whether it matched papers or legitimately matched
     none — and carries a short human-readable reason when the request itself
     failed (after all retries) or never ran. Collapsing "failed" and "matched
@@ -290,6 +296,8 @@ def search_arxiv_explained(query, max_results=10):
     Raises:
         ArxivQuerySyntaxError: the query contains built arXiv field syntax.
     """
+    from lib.search_runtime import ensure_search_runtime
+    ensure_search_runtime()
     from tofu_search.search.vertical import arxiv as ts_arxiv
 
     query = (query or '').strip()

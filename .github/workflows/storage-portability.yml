@@ -1,0 +1,72 @@
+name: Storage portability
+
+on:
+  pull_request:
+    paths:
+      - "lib/storage/**"
+      - "lib/storage_sidecar/**"
+      - "lib/storage_boundary.py"
+      - "lib/production_lifecycle.py"
+      - "scripts/storagectl.py"
+      - "tests/test_storage_*.py"
+      - ".github/workflows/storage-portability.yml"
+  push:
+    branches: [main, master]
+    paths:
+      - "lib/storage/**"
+      - "lib/storage_sidecar/**"
+      - "lib/storage_boundary.py"
+      - "lib/production_lifecycle.py"
+      - "scripts/storagectl.py"
+      - "tests/test_storage_*.py"
+      - ".github/workflows/storage-portability.yml"
+  workflow_dispatch:
+
+jobs:
+  storage-contract:
+    name: ${{ matrix.os }} / ${{ matrix.backend }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            backend: sqlite
+            postgres_contract: "0"
+          - os: macos-15
+            backend: sqlite
+            postgres_contract: "0"
+          - os: windows-latest
+            backend: sqlite
+            postgres_contract: "0"
+          - os: ubuntu-latest
+            backend: postgres
+            postgres_contract: "1"
+    env:
+      TOFU_STORAGE_TEST_POSTGRES: ${{ matrix.postgres_contract }}
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - name: Install PostgreSQL binaries
+        if: matrix.backend == 'postgres'
+        run: sudo apt-get update && sudo apt-get install -y postgresql
+      - name: Install package and test dependencies
+        run: uv lock --check && uv sync --frozen --extra test
+      - name: Run portable storage contracts
+        run: >-
+          uv run --frozen --extra test python -m pytest -q -p no:cacheprovider
+          tests/test_storage_sidecar_contract.py
+          tests/test_storage_event_batcher.py
+          tests/test_storage_maintenance_cli.py
+          tests/test_storage_process_boundary.py
+          tests/test_health_liveness_decoupled.py
+          tests/test_http_request_lifecycle.py
+          --tb=short

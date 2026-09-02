@@ -28,11 +28,37 @@ set -u
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+_usage() {
+    cat <<'EOF'
+usage: bash stop.sh [-y]
+
+Compatibility wrapper for `serverctl.py stop`. A live server requires a human
+confirmation in an interactive terminal, or a one-time shutdown approval from
+the Tofu UI for non-interactive use.
+
+  -y, --yes  skip the interactive prompt (UI approval is still required when
+             stdin is non-interactive)
+  -h, --help show this help without changing lifecycle state
+EOF
+}
+
+STOP_ARGS=()
+case "$#:${1:-}" in
+    0:) ;;
+    1:-h|1:--help) _usage; exit 0 ;;
+    1:-y|1:--yes) STOP_ARGS=("$1") ;;
+    *)
+        echo "stop.sh: unsupported arguments: $*" >&2
+        _usage >&2
+        exit 2
+        ;;
+esac
+
 # Unified lifecycle owner. Tests and old exported copies that contain only
 # this script fall through to the proven legacy implementation below.
 if [[ -f "$BASE_DIR/serverctl.py" ]]; then
     exec "${TOFU_SUPERVISOR_PYTHON:-python3}" "$BASE_DIR/serverctl.py" stop \
-        --source legacy-stop.sh
+        "${STOP_ARGS[@]}" --source legacy-stop.sh
 fi
 
 LOCK="$BASE_DIR/data/.server.lock"

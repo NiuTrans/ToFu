@@ -1,0 +1,902 @@
+/* ═══════════════════════════════════════════════════════════
+   PORTRAIT-TABLET READING MODE  (769px–1024px, coarse pointer)
+   ───────────────────────────────────────────────────────────
+   The single-pane block above (`≤768 ∪ (≤1024 ∧ coarse)`) correctly collapses
+   the side-by-side split into one full-screen pane + bottom switcher on a
+   portrait tablet — but it applies the SAME 360px-phone compaction it uses for
+   a true handset: 14px reader padding, shrunk 12px tab buttons, tiny
+   arxiv-search rows. A ~900px-wide tablet has plenty of room; that cramped
+   treatment wastes it and yields finger-hostile targets. This block runs AFTER
+   the shared one (source order) so it re-inflates the reading surface for the
+   tablet form factor only, WITHOUT touching the ≤768 phone. Keep the width
+   bounds in sync with the chat tablet-drawer block + core.js TOFU_BP.tablet. */
+@media(min-width:769px) and (max-width:1024px) and (pointer:coarse){
+  /* Roomier reading gutters — closer to the desktop 20px than the phone 14px,
+   * so long-form prose isn't jammed against the pane edges on a tablet. */
+  .paper-report-content,.paper-report-body{padding:24px 28px}
+  [data-theme="tofu"] .paper-pdf-container{padding:20px}
+
+  /* Bottom switcher is a touch bar — give the two targets a comfortable height
+   * and label size (the base 54px min from --paper-switch-h stays). */
+  .paper-mobile-switch-btn{font-size:14px}
+
+  /* Reader tabs (Q&A / Report / Babel) — restore roomy, tappable pills instead
+   * of the phone's cramped 10px/6px. */
+  .paper-tab-btn{padding:12px 16px;font-size:13px;gap:6px}
+  .paper-tab-btn svg{width:15px;height:15px}
+  [data-theme="tofu"] .paper-tab-btn{padding:12px 16px;font-size:13px}
+
+  /* Reader comfort controls + PDF toolbar buttons → 36px touch targets. */
+  .paper-reader-set-btn{height:36px;min-width:40px}
+  .paper-toolbar-btn{width:36px;height:34px}
+
+  /* The arxiv landing keeps its comfortable desktop row on a tablet (the phone
+   * block stacks it into a full-width column + hides the search icon — overkill
+   * for ~900px). Undo that stacking. */
+  .paper-arxiv-input{flex-direction:row}
+  .paper-arxiv-input .paper-arxiv-search-icon{display:inline-flex}
+  .paper-arxiv-btn{width:auto}
+  .paper-landing{padding:36px 32px}
+
+  /* Library rows in the drawer get a touch-comfortable size (mirrors the phone
+   * treatment — a tablet drawer is still finger-driven). */
+  .paper-lib-item{padding:14px;min-height:48px}
+}
+
+/* ═══════════════════════════════════════════════════
+   ★ Paper Reading Mode — Per-Theme Flair
+   Each theme transforms Reading Mode into a distinct
+   reading environment. Dark = Midnight Scholar's Desk
+   with aurora glow + glass panels. Light = Modern
+   Reading Room with cream paper. Tofu = Cozy Study
+   Nook with dashed stitches + claymorphic cards.
+   ═══════════════════════════════════════════════════ */
+
+/* ─────────────────────────────────────────
+   DARK — Midnight Scholar's Desk
+   Aurora gradient backdrop + glass-morphism
+   panels + neon-underline active tab.
+   ───────────────────────────────────────── */
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-mode-container,
+[data-theme="dark"] .paper-mode-container{
+  background:
+    radial-gradient(1100px 700px at 8% -10%,rgba(99,102,241,0.16),transparent 60%),
+    radial-gradient(900px 600px at 95% 110%,rgba(56,189,248,0.10),transparent 55%),
+    radial-gradient(700px 500px at 60% 40%,rgba(168,85,247,0.07),transparent 65%),
+    var(--bg-primary);
+  position:relative;
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-mode-container::before,
+[data-theme="dark"] .paper-mode-container::before{
+  content:'';position:absolute;inset:0;pointer-events:none;z-index:0;
+  background-image:
+    radial-gradient(circle at 22% 18%,rgba(255,255,255,0.06) 0.6px,transparent 1.2px),
+    radial-gradient(circle at 73% 62%,rgba(255,255,255,0.05) 0.5px,transparent 1px),
+    radial-gradient(circle at 41% 83%,rgba(255,255,255,0.05) 0.6px,transparent 1.2px);
+  background-size:240px 240px,320px 320px,180px 180px;
+  opacity:0.7;
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-body,
+[data-theme="dark"] .paper-body{position:relative;z-index:1}
+
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-left,
+[data-theme="dark"] .paper-left{border-right:1px solid rgba(255,255,255,0.06)}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-right,
+[data-theme="dark"] .paper-right{
+  background:linear-gradient(180deg,rgba(255,255,255,0.025),rgba(255,255,255,0.01));
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  border-left:1px solid rgba(255,255,255,0.04)
+}
+
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-pdf-toolbar,
+[data-theme="dark"] .paper-pdf-toolbar{
+  background:linear-gradient(180deg,rgba(24,28,44,0.75),rgba(18,22,34,0.55));
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  border-bottom:1px solid rgba(255,255,255,0.06)
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-pdf-container,
+[data-theme="dark"] .paper-pdf-container{background:transparent}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-page-wrapper,
+[data-theme="dark"] .paper-page-wrapper{
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.04) inset,
+    0 4px 16px rgba(0,0,0,0.45),
+    0 24px 48px -24px rgba(99,102,241,0.28),
+    0 0 0 1px rgba(255,255,255,0.04);
+  border-radius:8px;
+  transition:transform .25s cubic-bezier(.2,.9,.3,1.1),box-shadow .25s
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-page-wrapper:hover,
+[data-theme="dark"] .paper-page-wrapper:hover{
+  transform:translateY(-2px);
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.06) inset,
+    0 8px 28px rgba(0,0,0,0.5),
+    0 28px 56px -20px rgba(99,102,241,0.4),
+    0 0 0 1px rgba(99,102,241,0.2)
+}
+
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-tabs,
+[data-theme="dark"] .paper-tabs{
+  background:linear-gradient(180deg,rgba(24,28,44,0.7),rgba(18,22,34,0.4));
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  border-bottom:1px solid rgba(255,255,255,0.06)
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-tab-btn,
+[data-theme="dark"] .paper-tab-btn{
+  border-bottom:2px solid transparent;
+  position:relative;
+  transition:color .2s,background .2s
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-tab-btn.active,
+[data-theme="dark"] .paper-tab-btn.active{
+  color:#c7c9ff;
+  background:linear-gradient(180deg,transparent,rgba(99,102,241,0.09));
+  border-bottom-color:transparent
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-tab-btn.active::after,
+[data-theme="dark"] .paper-tab-btn.active::after{
+  content:'';position:absolute;bottom:0;left:14%;right:14%;height:2px;border-radius:2px;
+  background:linear-gradient(90deg,#6366f1,#8b5cf6,#38bdf8);
+  box-shadow:0 0 10px rgba(139,92,246,0.55),0 0 18px rgba(56,189,248,0.3)
+}
+
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-user,
+[data-theme="dark"] .paper-qa-user{
+  background:linear-gradient(135deg,rgba(99,102,241,0.22),rgba(139,92,246,0.18));
+  border:1px solid rgba(139,92,246,0.28);
+  box-shadow:0 4px 14px -6px rgba(99,102,241,0.4)
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-assistant,
+[data-theme="dark"] .paper-qa-assistant{
+  background:linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02));
+  border:1px solid rgba(255,255,255,0.07);
+  box-shadow:0 2px 8px rgba(0,0,0,0.3)
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-input-area,
+[data-theme="dark"] .paper-qa-input-area{
+  background:linear-gradient(180deg,rgba(18,22,34,0.55),rgba(24,28,44,0.75));
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  border-top:1px solid rgba(255,255,255,0.06)
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) #paperQAInput,
+[data-theme="dark"] #paperQAInput{
+  background:rgba(255,255,255,0.04);
+  border:1px solid rgba(255,255,255,0.08);
+  transition:border-color .2s,box-shadow .2s
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) #paperQAInput:focus,
+[data-theme="dark"] #paperQAInput:focus{
+  border-color:rgba(139,92,246,0.5);
+  box-shadow:0 0 0 3px rgba(139,92,246,0.15),0 0 18px rgba(99,102,241,0.2)
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn,
+[data-theme="dark"] .paper-qa-send-btn{
+  background:linear-gradient(135deg,#6366f1,#8b5cf6);
+  box-shadow:0 4px 14px -4px rgba(139,92,246,0.55),0 0 0 1px rgba(255,255,255,0.08) inset
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:hover,
+[data-theme="dark"] .paper-qa-send-btn:hover{
+  background:linear-gradient(135deg,#7c7ff5,#a78bfa);
+  box-shadow:0 6px 18px -4px rgba(139,92,246,0.7)
+}
+
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-landing,
+[data-theme="dark"] .paper-landing{position:relative}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-landing::before,
+[data-theme="dark"] .paper-landing::before{
+  content:'';position:absolute;width:420px;height:420px;top:50%;left:50%;
+  transform:translate(-50%,-50%);pointer-events:none;z-index:0;
+  background:radial-gradient(closest-side,rgba(139,92,246,0.18),transparent 70%);
+  filter:blur(40px);animation:paperLandingPulse 6s ease-in-out infinite
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-landing > *,
+[data-theme="dark"] .paper-landing > *{position:relative;z-index:1}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-landing-icon,
+[data-theme="dark"] .paper-landing-icon{
+  font-size:64px;filter:drop-shadow(0 6px 18px rgba(99,102,241,0.4));
+  animation:paperLandingFloat 4s ease-in-out infinite
+}
+
+/* arXiv search results — Midnight Scholar glass cards */
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-result-card,
+[data-theme="dark"] .paper-result-card{
+  background:linear-gradient(180deg,rgba(30,34,52,0.72),rgba(20,24,38,0.5));
+  backdrop-filter:blur(10px);border-color:rgba(139,92,246,0.16)
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-result-card:hover,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-result-card:focus-visible,
+[data-theme="dark"] .paper-result-card:hover,
+[data-theme="dark"] .paper-result-card:focus-visible{
+  border-color:rgba(139,92,246,0.55);
+  box-shadow:0 14px 34px -18px rgba(139,92,246,0.7),0 0 0 1px rgba(139,92,246,0.12) inset
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-result-num,
+[data-theme="dark"] .paper-result-num{
+  background:linear-gradient(135deg,rgba(99,102,241,0.25),rgba(139,92,246,0.25));color:#c4b5fd
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-result-meta .paper-card-cat,
+[data-theme="dark"] .paper-result-meta .paper-card-cat{
+  background:rgba(139,92,246,0.18);color:#c4b5fd
+}
+
+/* arXiv search results — Cozy Study Nook claymorphic cards (tofu) */
+[data-theme="tofu"] .paper-result-card{
+  background:#FBF8EF;border:2.5px solid #C4B89E;
+  border-top-color:#DDD6C4;border-left-color:#DDD6C4;
+  border-right-color:#A89878;border-bottom-color:#A89878;border-radius:12px;
+  box-shadow:0 3px 0 #C8BDA6,0 4px 0 #B8AD96,0 6px 10px rgba(120,107,82,0.18)
+}
+[data-theme="tofu"] .paper-result-card:hover,
+[data-theme="tofu"] .paper-result-card:focus-visible{
+  transform:translateY(-1px);
+  box-shadow:0 4px 0 #C8BDA6,0 5px 0 #B8AD96,0 8px 14px rgba(120,107,82,0.24)
+}
+[data-theme="tofu"] .paper-result-num{background:#E9E0C8;color:#6B5B3E}
+[data-theme="tofu"] .paper-result-title{color:#4A4030}
+[data-theme="tofu"] .paper-search-head-title{color:#4A4030}
+[data-theme="tofu"] .paper-search-back{border:1.5px dashed var(--stitch,#C2BCA4);background:#FBF8EF}
+[data-theme="tofu"] .paper-result-meta .paper-card-cat{background:#E9E0C8;color:#6B5B3E}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-landing h3,
+[data-theme="dark"] .paper-landing h3{
+  font-size:22px;letter-spacing:-0.02em;
+  background:linear-gradient(90deg,#c7c9ff,#e0e7ff 60%,#fef9c3);
+  -webkit-background-clip:text;background-clip:text;color:transparent
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-upload-btn,
+[data-theme="dark"] .paper-upload-btn{
+  border:1.5px dashed rgba(139,92,246,0.35);
+  background:rgba(255,255,255,0.03);
+  backdrop-filter:blur(8px)
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-upload-btn:hover,
+[data-theme="dark"] .paper-upload-btn:hover{
+  border-color:rgba(139,92,246,0.6);
+  background:rgba(139,92,246,0.08);
+  box-shadow:0 0 24px rgba(139,92,246,0.2)
+}
+
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-sidebar-current,
+[data-theme="dark"] .paper-sidebar-current{
+  background:linear-gradient(135deg,rgba(99,102,241,0.06),rgba(139,92,246,0.03));
+  border-bottom:1px solid rgba(255,255,255,0.06)
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-lib-item.active,
+[data-theme="dark"] .paper-lib-item.active{
+  background:linear-gradient(90deg,rgba(99,102,241,0.18),rgba(139,92,246,0.08));
+  box-shadow:inset 3px 0 0 #8b5cf6
+}
+
+@keyframes paperLandingPulse{
+  0%,100%{opacity:0.7;transform:translate(-50%,-50%) scale(1)}
+  50%{opacity:1;transform:translate(-50%,-50%) scale(1.1)}
+}
+@keyframes paperLandingFloat{
+  0%,100%{transform:translateY(0)}
+  50%{transform:translateY(-8px)}
+}
+
+/* Dark — scrollbar tints + tactile press feedback */
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-messages::-webkit-scrollbar-thumb,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-report-content::-webkit-scrollbar-thumb,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-report-body::-webkit-scrollbar-thumb,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-pdf-container::-webkit-scrollbar-thumb,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-library-list::-webkit-scrollbar-thumb,
+[data-theme="dark"] .paper-qa-messages::-webkit-scrollbar-thumb,
+[data-theme="dark"] .paper-report-content::-webkit-scrollbar-thumb,
+[data-theme="dark"] .paper-report-body::-webkit-scrollbar-thumb,
+[data-theme="dark"] .paper-pdf-container::-webkit-scrollbar-thumb,
+[data-theme="dark"] .paper-library-list::-webkit-scrollbar-thumb{
+  background:rgba(139,92,246,0.28);background-clip:content-box
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-messages::-webkit-scrollbar-thumb:hover,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-report-content::-webkit-scrollbar-thumb:hover,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-report-body::-webkit-scrollbar-thumb:hover,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-pdf-container::-webkit-scrollbar-thumb:hover,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-library-list::-webkit-scrollbar-thumb:hover,
+[data-theme="dark"] .paper-qa-messages::-webkit-scrollbar-thumb:hover,
+[data-theme="dark"] .paper-report-content::-webkit-scrollbar-thumb:hover,
+[data-theme="dark"] .paper-report-body::-webkit-scrollbar-thumb:hover,
+[data-theme="dark"] .paper-pdf-container::-webkit-scrollbar-thumb:hover,
+[data-theme="dark"] .paper-library-list::-webkit-scrollbar-thumb:hover{
+  background:rgba(139,92,246,0.55);background-clip:content-box
+}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-toolbar-btn:active,
+[data-theme="dark"] .paper-toolbar-btn:active{transform:translateY(1px);box-shadow:0 0 0 1px rgba(139,92,246,0.25) inset}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-report-btn:active,
+[data-theme="dark"] .paper-report-btn:active{transform:translateY(1px)}
+html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:active,
+[data-theme="dark"] .paper-qa-send-btn:active{transform:translateY(0) scale(.96);box-shadow:0 2px 8px -4px rgba(139,92,246,0.6)}
+
+/* ─────────────────────────────────────────
+   LIGHT — Modern Reading Room
+   Warm paper gradient + crisp Linear-style
+   cards + animated pill tab indicator.
+   ───────────────────────────────────────── */
+[data-theme="light"] .paper-mode-container{
+  background:
+    linear-gradient(180deg,#faf8f2 0%,var(--bg-primary) 100%);
+  position:relative
+}
+[data-theme="light"] .paper-mode-container::before{
+  content:'';position:absolute;inset:0;pointer-events:none;z-index:0;
+  background:
+    radial-gradient(1000px 600px at 10% -10%,rgba(99,102,241,0.05),transparent 55%),
+    radial-gradient(800px 500px at 100% 100%,rgba(236,72,153,0.035),transparent 50%);
+}
+[data-theme="light"] .paper-body{position:relative;z-index:1}
+
+[data-theme="light"] .paper-left{border-right:1px solid rgba(0,0,0,0.06)}
+[data-theme="light"] .paper-right{
+  background:rgba(255,255,255,0.55);
+  backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)
+}
+[data-theme="light"] .paper-pdf-toolbar{
+  background:rgba(255,255,255,0.7);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border-bottom:1px solid rgba(0,0,0,0.06)
+}
+[data-theme="light"] .paper-pdf-container{background:transparent;padding:20px}
+[data-theme="light"] .paper-page-wrapper{
+  border-radius:6px;
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.6) inset,
+    0 1px 3px rgba(40,30,20,0.08),
+    0 10px 30px -12px rgba(40,30,20,0.18);
+  transition:transform .25s cubic-bezier(.2,.9,.3,1.1),box-shadow .25s
+}
+[data-theme="light"] .paper-page-wrapper:hover{
+  transform:translateY(-2px);
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.6) inset,
+    0 4px 10px rgba(40,30,20,0.1),
+    0 18px 42px -14px rgba(40,30,20,0.24)
+}
+
+[data-theme="light"] .paper-tabs{
+  background:rgba(255,255,255,0.7);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border-bottom:1px solid rgba(0,0,0,0.06);
+  padding:6px 8px 0;gap:2px
+}
+[data-theme="light"] .paper-tab-btn{
+  border-radius:10px 10px 0 0;
+  padding:10px 14px;
+  border-bottom:none;
+  position:relative
+}
+[data-theme="light"] .paper-tab-btn:hover{background:rgba(99,102,241,0.05)}
+[data-theme="light"] .paper-tab-btn.active{
+  color:#4f46e5;
+  background:var(--bg-primary);
+  border-bottom:none;
+  box-shadow:
+    0 -1px 0 rgba(0,0,0,0.05) inset
+}
+[data-theme="light"] .paper-tab-btn.active::after{
+  content:'';position:absolute;top:6px;left:10px;right:10px;height:3px;border-radius:3px;
+  background:linear-gradient(90deg,#6366f1,#8b5cf6);
+  animation:paperTabSlideIn .28s cubic-bezier(.2,.9,.3,1.1)
+}
+@keyframes paperTabSlideIn{
+  from{opacity:0;transform:scaleX(0.4)}
+  to{opacity:1;transform:scaleX(1)}
+}
+
+[data-theme="light"] .paper-qa-messages{padding:20px}
+[data-theme="light"] .paper-qa-user{
+  background:linear-gradient(135deg,#6366f1,#7c7ff5);
+  color:#ffffff;
+  border:none;
+  box-shadow:0 6px 16px -6px rgba(99,102,241,0.45)
+}
+[data-theme="light"] .paper-qa-user .paper-qa-msg-content{color:#ffffff}
+[data-theme="light"] .paper-qa-user .paper-qa-msg-content code{background:rgba(255,255,255,0.18);color:#fff}
+[data-theme="light"] .paper-qa-assistant{
+  background:#ffffff;
+  border:1px solid rgba(0,0,0,0.06);
+  box-shadow:0 2px 8px rgba(40,30,20,0.06)
+}
+[data-theme="light"] .paper-qa-input-area{
+  background:rgba(255,255,255,0.8);
+  backdrop-filter:blur(8px);
+  border-top:1px solid rgba(0,0,0,0.06);
+  padding:14px
+}
+[data-theme="light"] #paperQAInput{
+  background:#ffffff;
+  border:1px solid rgba(0,0,0,0.1);
+  box-shadow:0 1px 3px rgba(40,30,20,0.04)
+}
+[data-theme="light"] #paperQAInput:focus{
+  border-color:#6366f1;
+  box-shadow:0 0 0 3px rgba(99,102,241,0.12)
+}
+[data-theme="light"] .paper-qa-send-btn{
+  background:linear-gradient(135deg,#6366f1,#4f46e5);
+  box-shadow:0 4px 12px -4px rgba(99,102,241,0.5)
+}
+[data-theme="light"] .paper-qa-send-btn:hover{
+  box-shadow:0 6px 16px -4px rgba(99,102,241,0.65);
+  transform:translateY(-1px) scale(1.04)
+}
+
+[data-theme="light"] .paper-report-content,
+[data-theme="light"] .paper-report-body{
+  font-family:'Source Serif Pro','Charter','Iowan Old Style','Georgia','Noto Serif SC','Songti SC',serif;
+  font-size:calc(15px * var(--reader-font-scale,1));line-height:1.8;color:#2d2a22;
+  padding:28px 32px
+}
+[data-theme="light"] .paper-report-content h2,
+[data-theme="light"] .paper-report-body h2{
+  font-family:'Plus Jakarta Sans','Inter',sans-serif;
+  font-weight:700;letter-spacing:-0.01em;color:#1f1c14;
+  border-bottom:1px solid rgba(0,0,0,0.08);padding-bottom:8px
+}
+[data-theme="light"] .paper-landing{padding:64px 20px}
+[data-theme="light"] .paper-landing-icon{
+  font-size:56px;animation:paperLandingFloat 4s ease-in-out infinite;
+  filter:drop-shadow(0 6px 20px rgba(99,102,241,0.25))
+}
+[data-theme="light"] .paper-landing h3{
+  font-size:24px;letter-spacing:-0.02em;font-weight:700;color:#1f1c14
+}
+[data-theme="light"] .paper-upload-btn{
+  border:1.5px dashed rgba(99,102,241,0.4);
+  background:rgba(99,102,241,0.04)
+}
+[data-theme="light"] .paper-upload-btn:hover{
+  border-color:#6366f1;background:rgba(99,102,241,0.08);
+  transform:translateY(-1px);box-shadow:0 8px 20px -10px rgba(99,102,241,0.35)
+}
+[data-theme="light"] .paper-arxiv-btn{
+  background:linear-gradient(135deg,#6366f1,#4f46e5);
+  box-shadow:0 4px 12px -4px rgba(99,102,241,0.5)
+}
+[data-theme="light"] .paper-arxiv-btn:hover{
+  box-shadow:0 6px 16px -4px rgba(99,102,241,0.65)
+}
+
+[data-theme="light"] .paper-sidebar-current{
+  background:linear-gradient(135deg,rgba(99,102,241,0.06),transparent);
+  border-bottom:1px solid rgba(0,0,0,0.06)
+}
+[data-theme="light"] .paper-lib-item.active{
+  background:linear-gradient(90deg,rgba(99,102,241,0.1),transparent);
+  box-shadow:inset 3px 0 0 #6366f1
+}
+
+/* Light — scrollbar tints + tactile press feedback */
+[data-theme="light"] .paper-qa-messages::-webkit-scrollbar-thumb,
+[data-theme="light"] .paper-report-content::-webkit-scrollbar-thumb,
+[data-theme="light"] .paper-report-body::-webkit-scrollbar-thumb,
+[data-theme="light"] .paper-pdf-container::-webkit-scrollbar-thumb,
+[data-theme="light"] .paper-library-list::-webkit-scrollbar-thumb{
+  background:rgba(99,102,241,0.22);background-clip:content-box
+}
+[data-theme="light"] .paper-qa-messages::-webkit-scrollbar-thumb:hover,
+[data-theme="light"] .paper-report-content::-webkit-scrollbar-thumb:hover,
+[data-theme="light"] .paper-report-body::-webkit-scrollbar-thumb:hover,
+[data-theme="light"] .paper-pdf-container::-webkit-scrollbar-thumb:hover,
+[data-theme="light"] .paper-library-list::-webkit-scrollbar-thumb:hover{
+  background:rgba(99,102,241,0.42);background-clip:content-box
+}
+[data-theme="light"] .paper-toolbar-btn:active{transform:translateY(1px);box-shadow:0 0 0 1px rgba(99,102,241,0.2) inset}
+[data-theme="light"] .paper-report-btn:active{transform:translateY(1px)}
+[data-theme="light"] .paper-qa-send-btn:active{transform:translateY(0) scale(.96);box-shadow:0 2px 8px -4px rgba(99,102,241,0.5)}
+
+/* ─────────────────────────────────────────
+   TOFU — Cozy Study Nook
+   Warm ivory paper + dashed stitch borders +
+   claymorphic puffy PDF cards + JetBrains
+   Mono tab labels. Matches RPG dialogue
+   aesthetic from .message blocks.
+   ───────────────────────────────────────── */
+[data-theme="tofu"] .paper-mode-container{
+  background:
+    radial-gradient(1200px 800px at 12% -10%,rgba(187,149,114,0.09),transparent 60%),
+    radial-gradient(900px 600px at 95% 110%,rgba(108,168,152,0.08),transparent 55%),
+    var(--bg-primary);
+  position:relative;
+  font-family:var(--sans-body)
+}
+[data-theme="tofu"] .paper-mode-container::before{
+  content:'';position:absolute;inset:0;pointer-events:none;z-index:0;
+  background-image:
+    radial-gradient(circle at 30% 20%,rgba(138,122,86,0.05) 0.6px,transparent 1.4px),
+    radial-gradient(circle at 70% 65%,rgba(138,122,86,0.04) 0.5px,transparent 1px);
+  background-size:200px 200px,280px 280px;
+  opacity:0.6
+}
+[data-theme="tofu"] .paper-body{position:relative;z-index:1}
+
+[data-theme="tofu"] .paper-left{border-right:var(--stitch)}
+[data-theme="tofu"] .paper-right{
+  background:linear-gradient(180deg,#F9F7F0,#F3F1E8);
+  border-left:var(--stitch)
+}
+[data-theme="tofu"] .paper-divider{background:transparent}
+[data-theme="tofu"] .paper-divider::after{
+  background:#C4B89E;
+  box-shadow:0 0 0 1px rgba(138,122,86,0.15)
+}
+
+[data-theme="tofu"] .paper-pdf-toolbar{
+  background:linear-gradient(180deg,#F8F6F0,#EEEBDF);
+  border-bottom:var(--stitch);
+  padding:6px 14px;gap:8px
+}
+[data-theme="tofu"] .paper-toolbar-btn{
+  border:2px solid #C4B89E;
+  border-top-color:#DDD6C4;border-left-color:#DDD6C4;
+  border-right-color:#A89878;border-bottom-color:#A89878;
+  border-radius:8px;
+  background:#FDFBF5;
+  color:#5C4A33;
+  font-family:var(--sans-body);
+  box-shadow:0 2px 0 #C8BDA6,0 3px 0 #B8AD96;
+  transition:transform .12s cubic-bezier(.34,1.56,.64,1),box-shadow .12s
+}
+[data-theme="tofu"] .paper-toolbar-btn:hover{
+  background:#F5F1E4;color:#4A3820;
+  transform:translateY(-1px);
+  box-shadow:0 3px 0 #C8BDA6,0 4px 0 #B8AD96
+}
+[data-theme="tofu"] .paper-toolbar-btn:active{
+  transform:translateY(2px);box-shadow:none
+}
+[data-theme="tofu"] .paper-toolbar-zoom-input{
+  background:#FDFBF5;border:2px solid #C4B89E;border-radius:6px;
+  font-family:var(--sans-body);color:#5C4A33
+}
+[data-theme="tofu"] .paper-pdf-container{background:transparent;padding:24px;gap:18px}
+
+/* ── Claymorphic PDF page cards ── */
+[data-theme="tofu"] .paper-page-wrapper{
+  border-radius:10px;
+  background:#FFFEF9;
+  border:2.5px solid #C4B89E;
+  border-top-color:#DDD6C4;border-left-color:#DDD6C4;
+  border-right-color:#A89878;border-bottom-color:#A89878;
+  box-shadow:
+    0 3px 0 #C8BDA6,
+    0 4px 0 #B8AD96,
+    0 6px 14px rgba(120,100,70,0.12);
+  transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .18s
+}
+[data-theme="tofu"] .paper-page-wrapper:hover{
+  transform:translateY(-3px);
+  box-shadow:
+    0 5px 0 #C8BDA6,
+    0 6px 0 #B8AD96,
+    0 10px 24px rgba(120,100,70,0.18)
+}
+[data-theme="tofu"] .paper-page-label{
+  font-family:var(--sans-body);font-weight:700;
+  background:#F0E9D4;color:#7A6B52;
+  border:1.5px solid #C4B89E;border-radius:6px;
+  box-shadow:var(--clay-sm)}
+
+/* ── Tabs — JetBrains Mono pixel buttons ── */
+[data-theme="tofu"] .paper-tabs{
+  background:linear-gradient(180deg,#F0EDE0,#E8E4D4);
+  border-bottom:var(--stitch);
+  padding:6px 8px 0;gap:4px
+}
+[data-theme="tofu"] .paper-tab-btn{
+  font-family:var(--sans-body);
+  font-size:12px;font-weight:700;letter-spacing:0.04em;
+  color:#7A6B52;
+  border:2px solid transparent;
+  border-radius:10px 10px 0 0;
+  border-bottom:none;
+  padding:10px 14px;
+  transition:all .15s cubic-bezier(.34,1.56,.64,1);
+  position:relative
+}
+[data-theme="tofu"] .paper-tab-btn:hover{
+  color:#4A3820;background:rgba(187,149,114,0.08);
+  transform:translateY(-1px)
+}
+[data-theme="tofu"] .paper-tab-btn.active{
+  color:#4A3820;
+  background:#F9F7F0;
+  border:2px solid #C4B89E;border-bottom:none;
+  border-top-color:#DDD6C4;border-left-color:#DDD6C4;border-right-color:#A89878;
+  box-shadow:0 -2px 0 rgba(138,122,86,0.06)
+}
+[data-theme="tofu"] .paper-tab-btn.active::after{
+  content:'';position:absolute;bottom:-2px;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,#BB9572,#D4A875,#BB9572);
+  border-radius:0
+}
+
+/* ── QA bubbles — RPG dialogue style ── */
+[data-theme="tofu"] .paper-qa-messages{padding:20px;gap:16px}
+[data-theme="tofu"] .paper-qa-msg{
+  padding:12px 16px;
+  border-radius:14px;
+  transition:transform .12s
+}
+[data-theme="tofu"] .paper-qa-user{
+  background:linear-gradient(135deg,#E5D4B8,#D4BE96);
+  color:#4A3820;
+  border:2px solid #BB9572;
+  border-top-color:#D4B98F;border-left-color:#D4B98F;
+  border-right-color:#9E7F5E;border-bottom-color:#9E7F5E;
+  box-shadow:
+    0 3px 0 #B0896A,
+    0 4px 0 #9A7658,
+    0 6px 10px rgba(120,100,70,0.1);
+  border-bottom-right-radius:6px
+}
+[data-theme="tofu"] .paper-qa-assistant{
+  background:#F8F6F0;
+  color:#4A4233;
+  border:2px solid #C4B89E;
+  border-top-color:#DDD6C4;border-left-color:#DDD6C4;
+  border-right-color:#A89878;border-bottom-color:#A89878;
+  box-shadow:
+    0 3px 0 #C8BDA6,
+    0 4px 0 #B8AD96,
+    0 6px 12px rgba(120,100,70,0.08);
+  border-bottom-left-radius:6px;
+  position:relative
+}
+[data-theme="tofu"] .paper-qa-assistant::before{
+  content:'';position:absolute;inset:3px;border:var(--stitch);border-radius:10px;pointer-events:none;opacity:0.4
+}
+[data-theme="tofu"] .paper-qa-msg-content{
+  font-size:13.5px;line-height:1.7;font-weight:450
+}
+[data-theme="tofu"] .paper-qa-msg-content code{
+  background:rgba(138,122,86,0.1);
+  border:1px solid rgba(138,122,86,0.18);
+  font-family:'JetBrains Mono',monospace;color:#5C4A33
+}
+[data-theme="tofu"] .paper-qa-msg-content blockquote{
+  border-left:3px solid #BB9572;
+  background:rgba(187,149,114,0.06)
+}
+
+[data-theme="tofu"] .paper-qa-input-area{
+  background:linear-gradient(180deg,#F0EDE0,#E8E4D4);
+  border-top:var(--stitch);
+  padding:14px
+}
+[data-theme="tofu"] #paperQAInput{
+  background:#FDFBF5;
+  border:2px solid #C4B89E;
+  border-top-color:#A89878;border-left-color:#A89878;
+  border-right-color:#DDD6C4;border-bottom-color:#DDD6C4;
+  border-radius:10px;
+  color:#4A4233;
+  box-shadow:inset 0 2px 4px rgba(138,122,86,0.08);
+  font-family:'Plus Jakarta Sans','Inter',sans-serif
+}
+[data-theme="tofu"] #paperQAInput:focus{
+  border-color:#BB9572;
+  box-shadow:
+    inset 0 2px 4px rgba(138,122,86,0.08),
+    0 0 0 3px rgba(187,149,114,0.2)
+}
+[data-theme="tofu"] .paper-qa-send-btn{
+  background:linear-gradient(180deg,#D4A875,#BB9572);
+  border:2px solid #9E7F5E;
+  border-top-color:#E8C192;border-left-color:#E8C192;
+  border-radius:12px;
+  color:#FFFEF9;
+  box-shadow:
+    0 3px 0 #8F7050,
+    0 4px 0 #7A5E40,
+    0 5px 10px rgba(120,100,70,0.15);
+  transition:transform .12s cubic-bezier(.34,1.56,.64,1),box-shadow .12s
+}
+[data-theme="tofu"] .paper-qa-send-btn:hover{
+  transform:translateY(-2px);
+  box-shadow:
+    0 5px 0 #8F7050,
+    0 6px 0 #7A5E40,
+    0 7px 14px rgba(120,100,70,0.2);
+  background:linear-gradient(180deg,#DFB386,#C4A080)
+}
+[data-theme="tofu"] .paper-qa-send-btn:active{
+  transform:translateY(2px);box-shadow:none
+}
+
+/* ── Report panel — parchment paper ── */
+[data-theme="tofu"] .paper-report-toolbar{
+  background:linear-gradient(180deg,#F0EDE0,#E8E4D4);
+  border-bottom:var(--stitch)
+}
+[data-theme="tofu"] .paper-report-btn,
+[data-theme="tofu"] .paper-report-model-btn{
+  border:2px solid #C4B89E;
+  border-top-color:#DDD6C4;border-left-color:#DDD6C4;
+  border-right-color:#A89878;border-bottom-color:#A89878;
+  background:#FDFBF5;
+  color:#5C4A33;
+  font-family:var(--sans-body);
+  font-size:10.5px;font-weight:700;letter-spacing:0.03em;
+  border-radius:8px;
+  box-shadow:0 2px 0 #C8BDA6;
+  transition:transform .12s,box-shadow .12s
+}
+[data-theme="tofu"] .paper-report-btn:hover,
+[data-theme="tofu"] .paper-report-model-btn:hover{
+  background:#F5F1E4;color:#4A3820;
+  transform:translateY(-1px);
+  box-shadow:0 3px 0 #C8BDA6
+}
+[data-theme="tofu"] .paper-report-content,
+[data-theme="tofu"] .paper-report-body{
+  background:
+    linear-gradient(180deg,#FFFEF9,#F9F6EB);
+  color:#4A4233;
+  font-size:calc(14.5px * var(--reader-font-scale,1));line-height:1.75;
+  padding:28px 34px
+}
+[data-theme="tofu"] .paper-report-content h2,
+[data-theme="tofu"] .paper-report-body h2{
+  font-weight:700;color:#3A2F20;letter-spacing:-0.01em;
+  border-bottom:2px dashed #C4B89E;padding-bottom:6px
+}
+[data-theme="tofu"] .paper-report-content blockquote,
+[data-theme="tofu"] .paper-report-body blockquote{
+  border-left:3px solid #BB9572;
+  background:rgba(187,149,114,0.06);
+  padding:8px 12px;border-radius:0 6px 6px 0
+}
+
+/* ── Landing — welcoming tofu study ── */
+[data-theme="tofu"] .paper-landing{padding:56px 20px;position:relative}
+[data-theme="tofu"] .paper-landing::before{
+  content:'';position:absolute;width:360px;height:360px;top:50%;left:50%;
+  transform:translate(-50%,-50%);pointer-events:none;z-index:0;
+  background:radial-gradient(closest-side,rgba(187,149,114,0.15),transparent 70%);
+  filter:blur(30px)
+}
+[data-theme="tofu"] .paper-landing > *{position:relative;z-index:1}
+[data-theme="tofu"] .paper-landing-icon{
+  font-size:64px;
+  animation:tofuFloat 3.5s ease-in-out infinite;
+  filter:drop-shadow(0 6px 14px rgba(187,149,114,0.3))
+}
+[data-theme="tofu"] .paper-landing h3{
+  font-family:var(--sans-body);
+  font-size:20px;font-weight:700;letter-spacing:0.02em;
+  color:#3A2F20
+}
+[data-theme="tofu"] .paper-landing p{color:#7A6B52}
+[data-theme="tofu"] .paper-upload-btn{
+  border:2px dashed #BB9572;
+  background:#FDFBF5;
+  color:#5C4A33;
+  font-family:var(--sans-body);
+  font-weight:700;letter-spacing:0.02em;
+  box-shadow:0 2px 0 rgba(138,122,86,0.1);
+  transition:transform .15s cubic-bezier(.34,1.56,.64,1),box-shadow .15s
+}
+[data-theme="tofu"] .paper-upload-btn:hover{
+  border-color:#AD8758;background:#F5F1E4;color:#3A2F20;
+  transform:translateY(-2px);
+  box-shadow:0 4px 0 rgba(138,122,86,0.15),0 6px 14px rgba(187,149,114,0.2)
+}
+[data-theme="tofu"] .paper-arxiv-input input{
+  background:#FDFBF5;border:2px solid #C4B89E;
+  border-top-color:#A89878;border-left-color:#A89878;
+  border-right-color:#DDD6C4;border-bottom-color:#DDD6C4;
+  border-radius:10px;color:#4A4233;
+  font-family:var(--sans-body);font-size:12px
+}
+[data-theme="tofu"] .paper-arxiv-input input:focus{
+  border-color:#BB9572;
+  box-shadow:0 0 0 3px rgba(187,149,114,0.18)
+}
+[data-theme="tofu"] .paper-arxiv-btn{
+  background:linear-gradient(180deg,#D4A875,#BB9572);
+  border:2px solid #9E7F5E;
+  border-top-color:#E8C192;border-left-color:#E8C192;
+  border-radius:10px;
+  font-family:var(--sans-body);font-weight:700;letter-spacing:0.04em;
+  box-shadow:0 3px 0 #8F7050,0 4px 0 #7A5E40
+}
+[data-theme="tofu"] .paper-arxiv-btn:hover{
+  transform:translateY(-2px);
+  box-shadow:0 5px 0 #8F7050,0 6px 0 #7A5E40,0 7px 14px rgba(120,100,70,0.18)
+}
+
+/* ── Sidebar library — book spines feel ── */
+[data-theme="tofu"] .paper-sidebar-current{
+  background:linear-gradient(135deg,#F0E9D4,#E8DEC5);
+  border-bottom:var(--stitch)
+}
+[data-theme="tofu"] .paper-sidebar-title{color:#3A2F20;font-weight:700}
+[data-theme="tofu"] .paper-sidebar-pages{
+  font-family:var(--sans-body);color:#9B8C6E
+}
+[data-theme="tofu"] .paper-sidebar-lib-header{
+  font-family:var(--sans-body);color:#9B8C6E
+}
+[data-theme="tofu"] .paper-lib-item{
+  border:1.5px solid transparent;
+  transition:all .12s
+}
+[data-theme="tofu"] .paper-lib-item:hover{
+  background:rgba(187,149,114,0.08);
+  border-color:rgba(187,149,114,0.2)
+}
+[data-theme="tofu"] .paper-lib-item.active{
+  background:linear-gradient(90deg,rgba(187,149,114,0.18),transparent);
+  border-color:rgba(187,149,114,0.3);
+  box-shadow:inset 4px 0 0 #BB9572
+}
+[data-theme="tofu"] .paper-lib-item-title{color:#4A4233}
+[data-theme="tofu"] .paper-lib-item.active .paper-lib-item-title{color:#3A2F20}
+[data-theme="tofu"] .paper-lib-item-meta{
+  font-family:var(--sans-body);font-size:10px;color:#9B8C6E
+}
+
+/* ── Selection toolbar — rounded pixel pill ── */
+[data-theme="tofu"] .paper-selection-bar{
+  background:#3A2F20;
+  border:2px solid #1A1410;
+  border-radius:12px;
+  box-shadow:0 4px 0 #1A1410,0 6px 14px rgba(60,45,20,0.4)
+}
+[data-theme="tofu"] .paper-sel-btn{
+  font-family:var(--sans-body);font-weight:700;
+  color:#F0E9D4;font-size:11px
+}
+[data-theme="tofu"] .paper-sel-btn:hover{background:#BB9572}
+
+/* ── Babel PDF — lantern-style lang pills ── */
+[data-theme="tofu"] .babel-pdf-brand{
+  background:linear-gradient(180deg,#F0EDE0,#E8E4D4);
+  border-bottom:var(--stitch)
+}
+[data-theme="tofu"] .babel-pdf-title{
+  font-family:var(--sans-body);color:#3A2F20
+}
+[data-theme="tofu"] .babel-pdf-lang{
+  background:#FDFBF5;border:2px solid #C4B89E;
+  border-radius:14px;
+  font-family:var(--sans-body);font-weight:700;
+  color:#7A6B52;
+  box-shadow:0 2px 0 rgba(138,122,86,0.1);
+  transition:transform .12s
+}
+[data-theme="tofu"] .babel-pdf-lang:hover{
+  background:#F5F1E4;color:#4A3820;transform:translateY(-1px)
+}
+[data-theme="tofu"] .babel-pdf-lang.active{
+  background:linear-gradient(180deg,#D4A875,#BB9572);
+  color:#FFFEF9;border-color:#9E7F5E;
+  box-shadow:0 3px 0 #8F7050
+}
+
+/* Tofu — warm kinako scrollbar tint */
+[data-theme="tofu"] .paper-qa-messages::-webkit-scrollbar-thumb,
+[data-theme="tofu"] .paper-report-content::-webkit-scrollbar-thumb,
+[data-theme="tofu"] .paper-report-body::-webkit-scrollbar-thumb,
+[data-theme="tofu"] .paper-pdf-container::-webkit-scrollbar-thumb,
+[data-theme="tofu"] .paper-library-list::-webkit-scrollbar-thumb{
+  background:rgba(187,149,114,0.45);background-clip:content-box
+}
+[data-theme="tofu"] .paper-qa-messages::-webkit-scrollbar-thumb:hover,
+[data-theme="tofu"] .paper-report-content::-webkit-scrollbar-thumb:hover,
+[data-theme="tofu"] .paper-report-body::-webkit-scrollbar-thumb:hover,
+[data-theme="tofu"] .paper-pdf-container::-webkit-scrollbar-thumb:hover,
+[data-theme="tofu"] .paper-library-list::-webkit-scrollbar-thumb:hover{
+  background:rgba(187,149,114,0.7);background-clip:content-box
+}
+
+/* ── Mobile tweaks for tofu paper mode ── */
+@media(max-width:768px){
+  [data-theme="tofu"] .paper-pdf-container{padding:14px}
+  [data-theme="tofu"] .paper-page-wrapper{box-shadow:0 2px 0 #C8BDA6,0 3px 0 #B8AD96,0 4px 10px rgba(120,100,70,0.1)}
+  [data-theme="tofu"] .paper-tab-btn{font-size:11px;padding:8px 10px}
+}
+
+.ig-slot-retry-btn:hover{background:var(--bg-tertiary);border-color:var(--border-light);color:var(--text-primary)}
+

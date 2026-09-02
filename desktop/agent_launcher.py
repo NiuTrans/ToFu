@@ -5,11 +5,12 @@ The agent-only packaged app: NO Quart server, NO browser auto-open, NO
 database, NO component manager, NO GitHub update check. The machine's only
 role is to be controlled by a Tofu server — the agent loop IS this process.
 
-Four acts (docs/DESKTOP_AGENT_DIST_DESIGN.md §4.1):
+Four acts (docs/modules/remote_execution.md):
 
   1. import the installer's internal attachment (routes + credential);
   2. if no attachment exists, try zero-input discovery and otherwise stay
-     idle until a fresh personalized installer is run;
+     idle until the Local Control tab pushes the attach over the loopback
+     broker (macOS/Linux) or a fresh personalized installer runs (Windows);
   3. rebuild the permission floor — persisted tiers over deny-all;
   4. run the agent in a thread + a minimal tray on the main thread.
 
@@ -65,9 +66,21 @@ def _log(msg: str) -> None:
     global _log_fh
     if _log_fh is None:
         try:
+            from lib.log_retention import register_external_log
+            register_external_log(_LOG_PATH, 'desktop_agent_console')
             _log_fh = open(_LOG_PATH, 'a', encoding='utf-8', buffering=1)
         except OSError:
             _log_fh = False
+        except Exception:
+            try:
+                _log_fh = open(_LOG_PATH, 'a', encoding='utf-8', buffering=1)
+            except OSError:
+                _log_fh = False
+    try:
+        from lib.log_redaction import redact_text
+        line = redact_text(line, max_chars=4096)
+    except Exception:
+        pass
     try:
         if _log_fh:
             _log_fh.write(line)
@@ -663,11 +676,12 @@ def main():
         else:
             # Owner decree 2026-08-05: NO first-run dialog (the pairing
             # code is dead; typing anything is the burden we removed).
-            # Start idle — the role window and tray tell the user to rerun a
-            # fresh personalized installer. There is deliberately no manual
-            # address/credential repair surface.
+            # Start idle — the signed-in Local Control tab pushes the
+            # attach over the loopback broker (/v1/attach), and a Windows
+            # personalized installer also still works. There is
+            # deliberately no manual address/credential repair surface.
             _log('No attach bundle and no server discovered — starting '
-                 'unattached; rerun a personalized installer to attach')
+                 'unattached; the browser push channel stays open')
 
     # ── 3. Permission floor: persisted tiers over deny-all ──
     from lib.desktop_agent._permissions import safe_default
@@ -702,7 +716,36 @@ def main():
                 _log('Browser-relay candidate read failed: %s' % e)
             return urls
 
-        relay = BrowserRelay(_relay_urls, log=_log)
+        # ── Browser-pushed zero-config attach (macOS/Linux parity) ──
+        # The personalized installer is a Windows-only artifact, so a
+        # generic DMG/tarball carries no credential.  While UNATTACHED the
+        # broker opens /v1/attach: the signed-in Local Control tab the user
+        # just downloaded from pushes the routes + a fresh bridge token,
+        # _push_attach validates and persists them, and the poll loop
+        # (re)starts on the fresh route — the same user-visible outcome as
+        # the Windows .exe (download → run → attached; nothing typed).
+        def _attach_state():
+            return bool(state.get('url'))
+
+        def _on_pushed_attach(payload, origin):
+            from lib.desktop_agent._push_attach import handle_pushed_attach
+            ok, reason, url, transport = handle_pushed_attach(
+                payload, origin, log=_log)
+            if ok:
+                try:
+                    from lib.desktop_agent.config import remote_server
+                    saved_url, saved_secret = remote_server()
+                    state['url'] = saved_url or url
+                    state['secret'] = saved_secret
+                except Exception as e:
+                    _log('Post-attach config readback failed: %s' % e)
+                    state['url'] = url
+                _restart_agent(state, perms)
+            return ok, reason, url, transport
+
+        relay = BrowserRelay(_relay_urls, log=_log,
+                             attach_handler=_on_pushed_attach,
+                             attach_state=_attach_state)
         if relay.start():
             state['browser_relay'] = relay
     except Exception as e:

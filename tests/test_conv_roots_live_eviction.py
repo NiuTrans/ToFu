@@ -53,6 +53,7 @@ Double-neuter (on-disk, restored byte-identical):
 """
 
 import os
+from tests.support.chat_tasks import chat_task_registry
 import shutil
 import sys
 import tempfile
@@ -280,7 +281,7 @@ def main():
 #    neutered to `return False`, the pin is gone and A misroutes. ──
 def _nc1_live_conv_misroutes_when_pin_disabled():
     from lib.project_mod import config as cfg
-    from lib.tasks_pkg import manager as _mgr
+    import lib.tasks_pkg.manager.runtime as _mgr
     tmp, ws_a, ws_b = _fresh_workspace()
     task_id = 'tk-evict-nc1'
     try:
@@ -288,7 +289,11 @@ def _nc1_live_conv_misroutes_when_pin_disabled():
         cfg.MAX_CONV_ROOTS = 3
         # Real runtime liveness for convA (shipped probe reads this).
         _mgr._record_latest_task('convA', task_id)
-        _mgr._chat_runtime._tasks[task_id] = {'status': 'running', 'convId': 'convA'}
+        chat_task_registry[task_id] = {
+            'id': task_id,
+            'status': 'running',
+            'convId': 'convA',
+        }
         cfg._roots['src'] = cfg._make_root_state(ws_b)  # colliding decoy
         cfg.set_conv_roots('convA', ws_a)
         for i in range(6):
@@ -306,7 +311,7 @@ def _nc1_live_conv_misroutes_when_pin_disabled():
             assert base == ws_a, (
                 f'live conv evicted AND misrouted to {base!r} (expected {ws_a!r})')
     finally:
-        _mgr._chat_runtime._tasks.pop(task_id, None)
+        chat_task_registry.pop(task_id, None)
         with _mgr._conv_latest_task_lock:
             _mgr._conv_latest_task.pop('convA', None)
         try:

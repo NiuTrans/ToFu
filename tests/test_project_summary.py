@@ -10,10 +10,10 @@ The cheap-model call is monkeypatched so tests are deterministic + offline.
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
+import uuid
 
 import pytest
 
@@ -21,17 +21,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import lib.conversations.project_summary as ps
 
+pytest_plugins = ('tests._chat_sidecar',)
+
 
 @pytest.mark.api
 class TestProjectSummaryEngine:
     @pytest.fixture(autouse=True)
-    def seed(self, flask_client, monkeypatch):
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        from lib.database._core_schema import CONVERSATIONS, upsert
-
-        self.db = get_thread_db(DOMAIN_CHAT)
+    def seed(self, flask_client, chat_sidecar, monkeypatch):
+        from tests._seed import seed_conversation
         now = int(time.time() * 1000)
-        tag = f'{now}'
+        tag = uuid.uuid4().hex[:10]
         self.proj = f'/tmp/projsum_{tag}'
         self.ids = []
 
@@ -46,14 +45,9 @@ class TestProjectSummaryEngine:
                     'text': summary, 'generated_at': ts,
                     'msg_count_at_gen': n_msgs,
                 }
-            upsert(self.db, CONVERSATIONS, {
-                'id': cid, 'user_id': 1, 'title': title,
-                'messages': json.dumps(msgs), 'created_at': ts, 'updated_at': ts,
-                'settings': json.dumps(settings), 'msg_count': n_msgs,
-                'search_text': title,
-            }, insert_cols=['id', 'user_id', 'title', 'messages', 'created_at',
-                            'updated_at', 'settings', 'msg_count', 'search_text'],
-               retry=True)
+            seed_conversation(
+                cid, title=title, messages=msgs, created_at=ts,
+                updated_at=ts, settings=settings)
             self.ids.append(cid)
             return cid
 
@@ -73,25 +67,25 @@ class TestProjectSummaryEngine:
 
         monkeypatch.setattr('lib.llm_dispatch.dispatch_chat', _fake_dispatch)
         yield
-        for cid in self.ids:
-            self.db.execute('DELETE FROM conversations WHERE id=?', (cid,))
-        self.db.commit()
 
     def _settings(self, cid):
-        row = self.db.execute(
-            'SELECT settings, messages, updated_at FROM conversations WHERE id=?',
-            (cid,)).fetchone()
-        s = row['settings']
-        return json.loads(s) if isinstance(s, str) else s, row
+        from tests._seed import conv_document
+        document = conv_document(cid)
+        metadata = document['metadata']
+        row = {
+            'messages': document['messages'],
+            'updated_at': metadata['updated_at'],
+        }
+        return metadata['settings'], row
 
     def test_fresh_summary_not_regenerated(self):
         # Cached summary, msg_count unchanged → no LLM call, returns cached.
-        out = ps.ensure_summary(self.c_fresh, blocking=True)
+        out = ps.ensure_summary(self.c_fresh, user_id=1, blocking=True)
         assert out == 'Existing cached summary.'
         assert len(self.calls) == 0
 
     def test_missing_summary_is_generated_and_persisted(self):
-        out = ps.ensure_summary(self.c_grown, blocking=True)
+        out = ps.ensure_summary(self.c_grown, user_id=1, blocking=True)
         assert out == 'GENERATED SUMMARY OK'
         assert len(self.calls) == 1
         settings, _ = self._settings(self.c_grown)
@@ -99,13 +93,13 @@ class TestProjectSummaryEngine:
         assert settings['projectSummary']['msg_count_at_gen'] == 20
 
     def test_below_min_messages_skipped(self):
-        out = ps.ensure_summary(self.c_tiny, blocking=True)
+        out = ps.ensure_summary(self.c_tiny, user_id=1, blocking=True)
         assert out is None
         assert len(self.calls) == 0
 
     def test_persist_touches_only_settings(self):
         _, before = self._settings(self.c_grown)
-        ps.ensure_summary(self.c_grown, blocking=True)
+        ps.ensure_summary(self.c_grown, user_id=1, blocking=True)
         _, after = self._settings(self.c_grown)
         # messages + updated_at must be unchanged by a summary write.
         assert before['messages'] == after['messages']
@@ -119,12 +113,14 @@ class TestProjectSummaryEngine:
         assert ps._is_stale(None, 50) is True              # never summarized
 
     def test_force_regenerates_even_when_fresh(self):
-        out = ps.ensure_summary(self.c_fresh, blocking=True, force=True)
+        out = ps.ensure_summary(
+            self.c_fresh, user_id=1, blocking=True, force=True)
         assert out == 'GENERATED SUMMARY OK'
         assert len(self.calls) == 1
 
     def test_digest_bounded_and_scoped(self):
-        d = ps.build_project_digest(self.proj, current_conv_id=self.c_fresh, limit=10)
+        d = ps.build_project_digest(
+            self.proj, user_id=1, current_conv_id=self.c_fresh, limit=10)
         # Self excluded; other-project conv excluded; siblings present.
         assert self.c_fresh not in d
         assert self.c_other not in d
@@ -135,7 +131,7 @@ class TestProjectSummaryEngine:
 
     def test_digest_uses_summary_text_when_present(self):
         # Add a sibling WITH a summary and confirm it shows in the digest body.
-        d = ps.build_project_digest('/tmp/other_proj', limit=10)
+        d = ps.build_project_digest('/tmp/other_proj', user_id=1, limit=10)
         assert self.c_other in d  # only sibling in that project
 
     def test_digest_entries_structured_and_consistent_with_text(self):
@@ -143,7 +139,7 @@ class TestProjectSummaryEngine:
         # same self/other-project exclusion, summary text carried through, and
         # consistent with what build_project_digest renders into the prompt.
         entries = ps.project_digest_entries(
-            self.proj, current_conv_id=self.c_fresh, limit=10)
+            self.proj, user_id=1, current_conv_id=self.c_fresh, limit=10)
         ids = {e['id'] for e in entries}
         assert self.c_fresh not in ids          # self excluded
         assert self.c_other not in ids          # other project excluded
@@ -153,39 +149,109 @@ class TestProjectSummaryEngine:
             assert set(e.keys()) == {'id', 'title', 'summary'}
         # Consistency: every structured id appears in the rendered text digest.
         text = ps.build_project_digest(
-            self.proj, current_conv_id=self.c_fresh, limit=10)
+            self.proj, user_id=1, current_conv_id=self.c_fresh, limit=10)
         for e in entries:
             assert e['id'] in text
 
+    def test_digest_projection_reads_and_copies_one_snapshot(self, monkeypatch):
+        source = [{
+            'id': 'sibling-1',
+            'title': 'Stable sibling',
+            'summary': 'One cached summary.',
+        }]
+        calls = []
+
+        def _entries(*args, **kwargs):
+            calls.append((args, kwargs))
+            return source
+
+        monkeypatch.setattr(ps, 'project_digest_entries', _entries)
+        projection = ps.build_project_digest_projection(
+            self.proj,
+            user_id=1,
+            current_conv_id=self.c_fresh,
+            conv_tools_available=False,
+            query='stable',
+        )
+
+        assert len(calls) == 1
+        assert projection.entries == ({
+            'id': 'sibling-1',
+            'title': 'Stable sibling',
+            'summary': 'One cached summary.',
+        },)
+        assert 'sibling-1' in projection.text
+        assert 'One cached summary.' in projection.text
+        source[0]['title'] = 'changed after projection'
+        assert projection.entries[0]['title'] == 'Stable sibling'
+
+    def test_digest_pushes_scope_limit_and_projection_to_repository(
+        self, monkeypatch
+    ):
+        calls = []
+
+        def _list_conversations(**kwargs):
+            calls.append(kwargs)
+            return [{
+                'id': 'scoped-sibling',
+                'title': 'Scoped sibling',
+                'settings': {
+                    'projectPath': self.proj,
+                    'projectSummary': {'text': 'A bounded cached summary.'},
+                },
+            }]
+
+        monkeypatch.setattr(
+            'lib.conversations.repository.list_conversations',
+            _list_conversations,
+        )
+        entries = ps.project_digest_entries(self.proj, user_id=1)
+
+        assert entries == [{
+            'id': 'scoped-sibling',
+            'title': 'Scoped sibling',
+            'summary': 'A bounded cached summary.',
+        }]
+        assert calls == [{
+            'user_id': 1,
+            'project_path': self.proj,
+            'order_by': 'updated_at_desc',
+            'limit': ps._DIGEST_SCAN_LIMIT,
+            'include_messages': False,
+            'settings_keys': ['projectPath', 'projectSummary'],
+        }]
+
     def test_digest_entries_empty_without_project(self):
-        assert ps.project_digest_entries('', limit=10) == []
-        assert ps.project_digest_entries('/tmp/nonexistent_proj_zzz', limit=10) == []
+        assert ps.project_digest_entries('', user_id=1, limit=10) == []
+        assert ps.project_digest_entries(
+            '/tmp/nonexistent_proj_zzz', user_id=1, limit=10) == []
 
     def test_digest_empty_without_project(self):
-        assert ps.build_project_digest('', limit=10) == ''
-        assert ps.build_project_digest('/tmp/nonexistent_proj_zzz', limit=10) == ''
+        assert ps.build_project_digest('', user_id=1, limit=10) == ''
+        assert ps.build_project_digest(
+            '/tmp/nonexistent_proj_zzz', user_id=1, limit=10) == ''
 
     def test_digest_relevance_gating_and_recency_floor(self):
         # Seed topically-distinct siblings in a dedicated project so BM25 can
         # discriminate. A query mentioning one topic must surface THAT sibling
         # first; an off-topic query must still return the recency floor.
         now = int(time.time() * 1000)
-        tag = f'relgate-{now}'
+        tag = f'relgate-{uuid.uuid4().hex[:10]}'
         proj = f'/tmp/projsum_{tag}'
 
         def _mk(cid, title, summary, ts):
             settings = {'projectPath': proj,
                         'projectSummary': {'text': summary, 'generated_at': ts,
                                            'msg_count_at_gen': 8}}
-            from lib.database._core_schema import CONVERSATIONS, upsert
-            upsert(self.db, CONVERSATIONS, {
-                'id': cid, 'user_id': 1, 'title': title,
-                'messages': json.dumps([]), 'created_at': ts, 'updated_at': ts,
-                'settings': json.dumps(settings), 'msg_count': 8,
-                'search_text': title,
-            }, insert_cols=['id', 'user_id', 'title', 'messages', 'created_at',
-                            'updated_at', 'settings', 'msg_count', 'search_text'],
-               retry=True)
+            from tests._seed import seed_conversation
+            messages = [
+                {'role': 'user' if i % 2 == 0 else 'assistant',
+                 'content': f'message {i}'}
+                for i in range(8)
+            ]
+            seed_conversation(
+                cid, title=title, messages=messages, created_at=ts,
+                updated_at=ts, settings=settings)
             self.ids.append(cid)
             return cid
 
@@ -199,7 +265,8 @@ class TestProjectSummaryEngine:
 
         # Relevant query → the matching sibling appears.
         entries = ps.project_digest_entries(
-            proj, query='fix a bug in the postgresql database migration')
+            proj, user_id=1,
+            query='fix a bug in the postgresql database migration')
         ids = [e['id'] for e in entries]
         assert c_db in ids, 'relevant sibling must be surfaced'
         assert ids[0] == c_db, 'most-relevant sibling must rank first'
@@ -207,13 +274,14 @@ class TestProjectSummaryEngine:
         # Off-topic query (nothing matches) → recency floor still returns
         # something, led by the most-recent sibling.
         off = ps.project_digest_entries(
-            proj, query='quantum chromodynamics lattice gauge theory')
+            proj, user_id=1,
+            query='quantum chromodynamics lattice gauge theory')
         off_ids = [e['id'] for e in off]
         assert off_ids, 'off-topic turn must NOT be empty (recency floor)'
         assert c_recent in off_ids, 'recency floor keeps the most-recent sibling'
 
         # No query → pure recency (back-compat), most-recent first.
-        recency = ps.project_digest_entries(proj)
+        recency = ps.project_digest_entries(proj, user_id=1)
         assert [e['id'] for e in recency][:3] == [c_recent, c_css, c_db]
 
     def test_digest_header_advertises_tools_only_when_available(self):
@@ -221,10 +289,10 @@ class TestProjectSummaryEngine:
         # model to call them. When they are NOT, the header must name no tool
         # the model can't call (mirrors the using-tools-section guardrail).
         with_tools = ps.build_project_digest(
-            self.proj, current_conv_id=self.c_fresh, limit=10,
+            self.proj, user_id=1, current_conv_id=self.c_fresh, limit=10,
             conv_tools_available=True)
         without_tools = ps.build_project_digest(
-            self.proj, current_conv_id=self.c_fresh, limit=10,
+            self.proj, user_id=1, current_conv_id=self.c_fresh, limit=10,
             conv_tools_available=False)
         assert 'list_conversations' in with_tools
         assert 'get_conversation' in with_tools

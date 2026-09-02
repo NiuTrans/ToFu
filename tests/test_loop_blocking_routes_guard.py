@@ -66,12 +66,8 @@ _GUARDED_HELPERS = frozenset({
 # OUTSIDE daily_report.py so deleting one (back to an on-loop parse)
 # turns this suite red.
 _OFFLOAD_TOKENS = {
-    'routes/api_v1/conversations.py': [
-        ('snapshot = await asyncio.to_thread(_load)', 1),
-        ('mutation = await asyncio.to_thread(_persist_branch)', 1),
-    ],
     'routes/conversations_compaction.py': [
-        ("await asyncio.to_thread(json.loads, r['messages_json'])", 1),
+        ('get_conversation_store().get_compaction_archive,', 1),
     ],
 }
 

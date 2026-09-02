@@ -49,7 +49,7 @@ def _count_compacted_tools(msgs) -> int:
 
 @pytest.mark.unit
 def test_pipeline_absent_config_matches_default():
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
 
     base = _mk_conv()
     direct = copy.deepcopy(base)
@@ -66,7 +66,7 @@ def test_pipeline_absent_config_matches_default():
 
 @pytest.mark.unit
 def test_explicit_steps_ablation():
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
 
     msgs = _mk_conv()
     # Run ONLY strip_thinking — no tool compaction should happen.
@@ -84,16 +84,18 @@ def test_explicit_steps_ablation():
 
 @pytest.mark.unit
 def test_ignore_cache_prefix(monkeypatch):
-    from lib.tasks_pkg.compaction import _layer1, micro_compact
+    import lib.tasks_pkg.compaction._layer1 as _layer1
+    from lib.tasks_pkg.compaction.api import micro_compact
 
     # Force a large cache prefix so the default (skip) arm protects most
     # cold tool results and compacts few; the aggressive arm compacts more.
-    import lib.tasks_pkg.cache_tracking as ct
+    import lib.tasks_pkg.cache_tracking._prefix as ct
     # Stub mirrors the real signature: get_cache_prefix_count now takes an
     # optional current_msg_count (the history-shrink clamp). Return a fixed
     # large prefix regardless so the skip-arm protects most cold results.
     monkeypatch.setattr(ct, 'get_cache_prefix_count',
-                        lambda _cid, current_msg_count=None: 100)
+                        lambda _cid, user_id=None,
+                        current_msg_count=None: 100)
 
     skip_msgs = _mk_conv()
     aggr_msgs = _mk_conv()
@@ -112,8 +114,8 @@ def test_ignore_cache_prefix(monkeypatch):
 
 @pytest.mark.unit
 def test_constant_overrides_no_global_leak():
-    import lib.tasks_pkg.compaction as comp
-    from lib.tasks_pkg.compaction import micro_compact
+    import lib.tasks_pkg.compaction._constants as comp
+    from lib.tasks_pkg.compaction.api import micro_compact
 
     orig_hot_tail = comp.MICRO_HOT_TAIL
 
@@ -138,10 +140,10 @@ def test_constant_overrides_no_global_leak():
 
 @pytest.mark.unit
 def test_pipeline_reads_compaction_config():
-    from lib.tasks_pkg.compaction import run_compaction_pipeline
+    from lib.tasks_pkg.compaction.api import run_compaction_pipeline
 
     msgs = _mk_conv()
-    task = {'convId': '', 'config': {'model': 'gpt-4',
+    task = {'convId': '', '_userId': 1, 'config': {'model': 'gpt-4',
                                      'compaction': {'steps': ['strip_thinking']}}}
     run_compaction_pipeline(msgs, current_round=5, task=task)
     # strip_thinking only → no tool compaction via the config-selected arm.
@@ -173,18 +175,19 @@ def test_strip_thinking_skips_deepseek():
     """DeepSeek V4 thinking mode rejects an assistant turn whose
     reasoning_content was emptied (HTTP 400). strip_thinking must skip it,
     while still stripping for OpenAI-compatible models."""
-    import lib.tasks_pkg.compaction as comp
-    from lib.tasks_pkg.compaction import micro_compact
+    import lib.tasks_pkg.compaction._constants as comp
+    from lib.tasks_pkg.compaction.api import micro_compact
 
     n = comp._THINKING_HOT_TAIL + 5  # ensure some cold thinking exists
 
     ds = _mk_thinking_conv(n)
-    micro_compact(ds, conv_id='', task={'model': 'deepseek-v4-flash'})
+    micro_compact(ds, conv_id='',
+                  task={'model': 'deepseek-v4-flash', '_userId': 1})
     assert _count_blanked_reasoning(ds) == 0, (
         'DeepSeek reasoning_content must be preserved for thinking replay')
 
     gpt = _mk_thinking_conv(n)
-    micro_compact(gpt, conv_id='', task={'model': 'gpt-4'})
+    micro_compact(gpt, conv_id='', task={'model': 'gpt-4', '_userId': 1})
     assert _count_blanked_reasoning(gpt) > 0, (
         'non-DeepSeek models should still strip cold reasoning_content')
 
@@ -193,18 +196,18 @@ def test_strip_thinking_skips_deepseek():
 def test_disable_default_l1_and_force_compact_flags():
     """REPLACEMENT-mode arms: disableDefaultL1 skips the built-in L1 pass,
     disableForceCompact skips chatui L2 — so an external method runs alone."""
-    from lib.tasks_pkg.compaction import run_compaction_pipeline
+    from lib.tasks_pkg.compaction.api import run_compaction_pipeline
 
     # disableDefaultL1 with NO steps → no tool compaction happens at all.
     msgs = _mk_conv()
-    task = {'convId': '', 'config': {'model': 'gpt-4',
+    task = {'convId': '', '_userId': 1, 'config': {'model': 'gpt-4',
             'compaction': {'disableDefaultL1': True, 'disableForceCompact': True}}}
     run_compaction_pipeline(msgs, current_round=5, task=task)
     assert _count_compacted_tools(msgs) == 0, 'disableDefaultL1 must skip L1'
 
     # disableDefaultL1 but WITH explicit steps → the arm's own steps still run.
     msgs2 = _mk_conv()
-    task2 = {'convId': '', 'config': {'model': 'gpt-4',
+    task2 = {'convId': '', '_userId': 1, 'config': {'model': 'gpt-4',
              'compaction': {'disableDefaultL1': True, 'disableForceCompact': True,
                             'steps': ['compact_tool_results']}}}
     run_compaction_pipeline(msgs2, current_round=5, task=task2)
@@ -213,9 +216,8 @@ def test_disable_default_l1_and_force_compact_flags():
 
 @pytest.mark.unit
 def test_make_constants_identity_when_empty():
-    """make_constants returns the base unchanged (preserving hot-reload
-    identity) when there are no overrides."""
-    import lib.tasks_pkg.compaction as comp
+    """make_constants preserves the constants owner when no overlay exists."""
+    import lib.tasks_pkg.compaction._constants as comp
     from lib.tasks_pkg.compaction._steps import make_constants
 
     assert make_constants(comp, None) is comp
@@ -223,5 +225,5 @@ def test_make_constants_identity_when_empty():
     view = make_constants(comp, {'MICRO_HOT_TAIL': 5})
     assert view is not comp
     assert view.MICRO_HOT_TAIL == 5
-    # Non-overridden attrs fall through to the package.
+    # Non-overridden attrs fall through to the constants owner.
     assert view.MICRO_COMPACT_THRESHOLD == comp.MICRO_COMPACT_THRESHOLD

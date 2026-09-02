@@ -295,15 +295,7 @@ const defaults: Record<string, Record<string, unknown>> = {
         "name": "reconcile_required",
         "type": "boolean"
       }
-    },
-    "legacyTargetFields": [
-      "run_id",
-      "requestId"
-    ],
-    "legacyStatusFields": [
-      "run_status",
-      "status"
-    ]
+    }
   },
   "replayContract": {
     "format": "tofu.task-replay/v1",
@@ -454,10 +446,6 @@ const defaults: Record<string, Record<string, unknown>> = {
     ],
     "idField": "id",
     "kindField": "kind",
-    "legacyIdFields": {
-      "ephemeral": "task_id",
-      "durable": "run_id"
-    },
     "successStatuses": {
       "ephemeral": 200,
       "durable": 201
@@ -543,14 +531,13 @@ const defaults: Record<string, Record<string, unknown>> = {
       },
       "expectedUpdatedAt": {
         "name": "expectedUpdatedAt",
-        "type": "nullable_non_negative_integer"
+        "type": "non_negative_integer"
       },
       "currentUpdatedAt": {
         "name": "currentUpdatedAt",
-        "type": "nullable_non_negative_integer"
+        "type": "non_negative_integer"
       }
-    },
-    "legacyUnguarded": true
+    }
   }
 };
 

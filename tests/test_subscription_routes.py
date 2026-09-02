@@ -203,6 +203,71 @@ def test_reset_discards_late_probe_result():
         manager.close()
 
 
+def test_probe_executor_retires_after_each_batch_and_rebuilds_lazily():
+    entered = [threading.Event(), threading.Event()]
+    release = [threading.Event(), threading.Event()]
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def probe(_url, _route):
+        nonlocal calls
+        with calls_lock:
+            batch = calls // 2
+            calls += 1
+            if calls % 2 == 0:
+                entered[batch].set()
+        release[batch].wait(1)
+        return ProbeResult('network_fail')
+
+    manager = RouteManager(
+        probe=probe, jitter=lambda value: value, max_workers=2)
+    url = 'https://chatgpt.com/backend-api/codex/responses'
+    routes = [_route('direct'), _route('proxy')]
+
+    def run_batch():
+        manager.candidates(
+            url, routes, wait_timeout=1, force_probe=True)
+
+    try:
+        first_call = threading.Thread(target=run_batch)
+        first_call.start()
+        assert entered[0].wait(1)
+        with manager._lock:
+            first_executor = manager._executor
+            first_threads = tuple(first_executor._threads)
+        assert len(first_threads) == 2
+        assert all(thread.is_alive() for thread in first_threads)
+        release[0].set()
+        first_call.join(2)
+
+        deadline = time.monotonic() + 1
+        while (manager._executor is not None
+               or any(thread.is_alive() for thread in first_threads)):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        second_call = threading.Thread(target=run_batch)
+        second_call.start()
+        assert entered[1].wait(1)
+        with manager._lock:
+            second_executor = manager._executor
+            second_threads = tuple(second_executor._threads)
+        assert second_executor is not first_executor
+        assert len(second_threads) == 2
+        release[1].set()
+        second_call.join(2)
+
+        deadline = time.monotonic() + 1
+        while (manager._executor is not None
+               or any(thread.is_alive() for thread in second_threads)):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+    finally:
+        release[0].set()
+        release[1].set()
+        manager.close()
+
+
 def test_route_repr_never_exposes_proxy_credentials():
     route = Route('pool:hk', 'proxy hk', 'proxy',
                   proxy_url='http://secret:password@gw.invalid:8080')
@@ -320,7 +385,10 @@ def test_async_stream_connect_failover_uses_same_route_plan(monkeypatch):
             assert route is second
 
     asyncio.run(run())
-    assert [call.args[2] for call in report.call_args_list] == [False, True]
+    # Connect failure is immediate. Header receipt is not success anymore: the
+    # transport reports the selected route only after the full stream settles.
+    assert [call.args[2] for call in report.call_args_list] == [False]
+    assert response.extensions['tofu_network_route']['routeId'] == 'p2'
 
 
 def test_async_desktop_handoff_closes_abandoned_raw_dumper(monkeypatch):

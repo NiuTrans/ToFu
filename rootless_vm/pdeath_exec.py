@@ -16,6 +16,12 @@ def main(argv: list[str] | None = None) -> int:
     if not command or not os.path.isabs(command[0]):
         raise ValueError("parent-death wrapper requires an absolute executable")
     parent = os.getppid()
+    # Fail closed if the launcher vanished before this Python process got its
+    # first instruction. PID 0 is valid for the first process in the private
+    # PID namespace used by SandboxSession; PID 1 here means a host-namespace
+    # orphan that has already been adopted by init.
+    if parent == 1:
+        return 143
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
         error = ctypes.get_errno()

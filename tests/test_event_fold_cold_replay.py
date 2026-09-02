@@ -31,7 +31,8 @@ import uuid
 
 import pytest
 
-pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._chat_sidecar',)
+pytestmark = [pytest.mark.unit, pytest.mark.usefixtures('chat_sidecar')]
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -55,7 +56,7 @@ def _persist_deltas(task_id, chunks, *, resets=()):
         if i in dict(resets):
             append_persistent_event(task_id, eid, {'type': dict(resets)[i]}); eid += 1
         append_persistent_event(task_id, eid, {'type': 'delta', 'content': chunk}); eid += 1
-    flush_pending(task_id)  # write-behind lane: drain before reading back
+    flush_pending(task_id)
     return eid
 
 
@@ -179,8 +180,8 @@ def main():
     print()
     print(_color('\u2550\u2550\u2550 event-log fold cold-replay \u2014 neuter \u2550\u2550\u2550', '36'))
     print()
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_event_fold_cold_replay')
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_event_fold_cold_replay')
 
     print(_color('Baseline (shipped code):', '36'))
     if not all(_run(fn) for fn in _POSITIVE):

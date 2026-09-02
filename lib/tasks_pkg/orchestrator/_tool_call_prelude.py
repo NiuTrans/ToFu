@@ -3,7 +3,7 @@
 discard + incremental auto-translate submit — the "we've decided to
 call tools this round" bracket.
 
-Extracted 2026-07-31 (pt_03f4cdf1 slice 16) from
+Extracted 2026-07-31 ( slice 16) from
 ``lib/tasks_pkg/orchestrator/_run.py``'s stream loop.
 
 **What it does**
@@ -42,7 +42,10 @@ from __future__ import annotations
 from typing import Any
 
 from lib.log import get_logger
-from lib.tasks_pkg.conv_message_builder import (
+from lib.tasks_pkg.assistant_messages import (
+    append_assistant_message_with_partial_prefill,
+)
+from lib.tasks_pkg.conv_message_builder._toolcalls import (
     build_assistant_tool_call_message,
 )
 from lib.tasks_pkg.orchestrator._finalize import _discard_pretool_prose
@@ -74,7 +77,7 @@ def append_assistant_tool_call_message(
             this round (has ``tool_calls`` + ``content`` +
             ``reasoning_content`` + ``thinking_signature`` fields).
     """
-    # ★ SINGLE SOURCE: assemble the live-tail assistant/tool_call
+    # SINGLE SOURCE: assemble the live-tail assistant/tool_call
     #   message through build_assistant_tool_call_message — the SAME
     #   function the replay path (_reconstruct_tool_call_messages) uses.
     #   This makes the live tail and every replay path emit byte-
@@ -97,26 +100,36 @@ def append_assistant_tool_call_message(
         _builder_kwargs['anthropic_content_blocks'] = (
             assistant_msg['_anthropic_content_blocks'])
     clean_msg = build_assistant_tool_call_message(**_builder_kwargs)
-    messages.append(clean_msg)
+    append_assistant_message_with_partial_prefill(
+        messages,
+        clean_msg,
+        continuation_content=assistant_msg.get('content') or '',
+    )
 
-    # ★ Discard the inter-round narration this round streamed before
+    # Discard the inter-round narration this round streamed before
     #   its tool calls (backend reset + client DELTA_RESET). See
     #   _discard_pretool_prose for the full rationale.
     _discard_pretool_prose(task, round_num)
 
-    # ★ Incremental auto-translate: this round's prose segment is now
+    # Incremental auto-translate: this round's prose segment is now
     #   self-contained (the model finished its commentary and is about
     #   to call tools). Translate it in the background so it's ready by
     #   task end instead of one big translation stall. Gated + isolated
     #   inside the helper; a no-op when autoTranslate is off.
+    # The round's reasoning closed at the same moment — submit it too,
+    #   keyed by its segment blockId so the pin lands on the thinking
+    #   segment (immutable history the reader watches live).
     try:
-        from lib.translate import submit_round_segment
+        from lib.translate import submit_round_segment, submit_thinking_segment
         submit_round_segment(
             task, round_num, assistant_msg.get('content') or '')
+        submit_thinking_segment(
+            task, f'thinking:llm-{round_num}',
+            assistant_msg.get('reasoning_content') or '')
     except Exception as _ite:
         logger.debug(
             '[%s] incremental translate submit failed (non-fatal): %s',
             tid, _ite)
 
-    # ★ Expose live messages to context_compact tool handler
+    # Expose live messages to context_compact tool handler
     task['_compact_messages'] = messages

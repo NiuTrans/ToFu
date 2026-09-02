@@ -83,6 +83,16 @@ from lib.billing.wallet import (
     settle,
 )
 from lib.billing.wallet_janitor import sweep_stale_reserves
+from lib.billing.redeem_codes import (
+    RedeemCode,
+    RedeemCodeAlreadyUsed,
+    RedeemCodeExpired,
+    RedeemCodeNotFound,
+    Redemption,
+    list_codes as list_redeem_codes,
+    mint_codes as mint_redeem_codes,
+    redeem_code,
+)
 
 __all__ = [
     # pricing
@@ -98,6 +108,10 @@ __all__ = [
     'debit', 'deposit', 'get_balance', 'get_wallet',
     'reserve', 'reserve_release', 'settle',
     'sweep_stale_reserves',
+    # redemption codes
+    'RedeemCode', 'RedeemCodeAlreadyUsed', 'RedeemCodeExpired',
+    'RedeemCodeNotFound', 'Redemption', 'list_redeem_codes',
+    'mint_redeem_codes', 'redeem_code',
     # users
     'create_user', 'find_user', 'get_user', 'list_users',
     'set_user_status', 'update_user_role',

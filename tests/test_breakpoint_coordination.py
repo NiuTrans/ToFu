@@ -245,7 +245,7 @@ def test_tablet_drawer_predicate_false_for_fine_pointer_desktop():
 
 # Files allowed to mention 768 near a viewport check:
 #   core.js         — DEFINES the constant + helpers (and documents the old sites)
-_ALLOWED_FILES = {'app-runtime.js'}
+_ALLOWED_FILES = {'app-runtime.js', 'core.js'}
 _GENERATED_RE = re.compile(r'^(?:bundle|feature|styles)-[0-9a-f]{8}\.js$')
 
 # A bare mobile-width comparison against the literal 768.

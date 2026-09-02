@@ -26,7 +26,8 @@ import pytest
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
+ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 
 
@@ -127,7 +128,6 @@ def test_safe_html_is_not_a_raw_index_script():
 # sinks of dynamic content here must go through safeHtml instead.
 _GUARDED_FILES = [
     'ui/streaming_render.js',
-    'ui/chat_render.js',
 ]
 
 # A raw-template sink: insertAdjacentHTML(pos, `...${...}...`) or

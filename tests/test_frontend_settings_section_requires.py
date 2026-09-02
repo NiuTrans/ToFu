@@ -34,7 +34,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parent.parent
 MODULE = ROOT / "static" / "js" / "settings" / "section_requires.js"
 MODULE_TS = ROOT / "frontend" / "src" / "features" / "settings" / "section-requires.ts"
-ESBUILD = ROOT / "node_modules" / ".bin" / "esbuild"
+ESBUILD = ROOT / 'scripts' / 'vite_test_bundle.mjs'
 PANEL = ROOT / "static" / "settings_panels" / "general.html"
 STYLES = ROOT / "static" / "styles.css"
 

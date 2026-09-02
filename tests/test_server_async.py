@@ -7,7 +7,7 @@ Validates:
 3. Sync route handlers work (run in thread pool)
 4. SSE streaming endpoints deliver events correctly
 5. Static file serving with correct MIME types
-6. Tunnel auth works
+6. Open-mode local access works
 7. Compression works for JSON responses
 
 Run:
@@ -26,6 +26,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -96,11 +99,11 @@ class TestQuartSyncBridge:
 
     def test_quart_blueprint_registration(self, async_app):
         """All native Quart blueprints register successfully."""
-        # Check that core blueprints are registered. After the /api/v1
-        # migration, config/conversations moved under the api_v1_* namespace
-        # while chat/common kept their legacy bare names.
+        # Check that core blueprints are registered. JSON chat controls live
+        # on the canonical v1 blueprint; only transport carve-outs remain on
+        # unversioned blueprints.
         bp_names = set(async_app.blueprints.keys())
-        assert 'chat' in bp_names
+        assert 'api_v1_chat' in bp_names
         assert 'common' in bp_names
         assert 'api_v1_config' in bp_names
         assert 'api_v1_conversations' in bp_names
@@ -116,17 +119,13 @@ class TestBasicRoutes:
     """Test that sync Flask routes work under Quart."""
 
     def test_health_endpoint(self, client):
-        """A basic GET to /api/v1/chat/active should work."""
+        """The canonical task-list route should work."""
         async def go():
-            resp = await client.get('/api/v1/chat/active')
+            resp = await client.get('/api/v1/tasks')
             assert resp.status_code == 200
             data = await resp.get_json()
-            # Charter #0 (docs/API_CONTRACT.md): array payloads ride the
-            # {ok, items} envelope — a bare top-level array is the OLD
-            # contract this assertion used to pin (direction-alignment,
-            # same drift family as test_restart_smoke).
             assert data['ok'] is True
-            assert isinstance(data.get('items'), list)
+            assert isinstance(data.get('tasks'), list)
         _run_async(go())
 
     def test_404_json(self, client):
@@ -159,18 +158,12 @@ class TestBasicRoutes:
 
 
 @pytest.mark.auth_mode("open")
-class TestTunnelAuth:
-    """Test tunnel token auth when enabled."""
+class TestOpenModeAuth:
+    """Open mode grants the local browser a synthetic admin principal."""
 
-    def test_no_auth_when_no_token(self, client, async_app):
-        """When TUNNEL_TOKEN is empty, all requests pass through."""
-        # server.py reads TUNNEL_TOKEN at module level — if not set,
-        # auth is disabled and requests pass through unchanged.
-        import server
-        if server.TUNNEL_TOKEN:
-            pytest.skip('TUNNEL_TOKEN is set in env')
+    def test_local_request_needs_no_credential(self, client):
         async def go():
-            resp = await client.get('/api/v1/chat/active')
+            resp = await client.get('/api/v1/tasks')
             assert resp.status_code == 200
         _run_async(go())
 
@@ -183,7 +176,7 @@ class TestCompression:
         """JSON responses are gzip compressed when Accept-Encoding: gzip."""
         async def go():
             resp = await client.get(
-                '/api/v1/chat/active',
+                '/api/v1/tasks',
                 headers={'Accept-Encoding': 'gzip'}
             )
             assert resp.status_code == 200
@@ -205,7 +198,7 @@ class TestCompression:
         """
         async def go():
             resp = await client.get(
-                '/static/vendor/highlight.min.js',
+                '/static/styles.css',
                 headers={'Range': 'bytes=0-1023',
                          'Accept-Encoding': 'gzip'},
             )
@@ -226,7 +219,8 @@ class TestSSEStreaming:
     def test_stream_nonexistent_task(self, client):
         """Streaming a nonexistent task returns 404."""
         async def go():
-            resp = await client.get('/api/chat/stream/nonexistent-task-id')
+            resp = await client.get(
+                '/api/v1/tasks/nonexistent-task-id/stream')
             # Should be 404 (task not found) or SSE with error
             assert resp.status_code in (200, 404)
         _run_async(go())
@@ -277,9 +271,9 @@ if __name__ == '__main__':
     # ⚠️ DATA-LOSS GUARD: standalone mode skips conftest (no force-sqlite, no
     # pytest_configure gate), so guard the real-app boot against a non-test DB.
     try:
-        from tests.conftest import _assert_test_database as _adb
+        from tests.conftest import _assert_isolated_storage as _adb
     except Exception:
-        from conftest import _assert_test_database as _adb  # run from tests/ cwd
+        from conftest import _assert_isolated_storage as _adb  # run from tests/ cwd
     _adb('test_server_async.__main__')
 
     # 1. Check dependencies
@@ -336,12 +330,11 @@ if __name__ == '__main__':
     async def _run_checks():
         async with app.test_client() as client:
             # Basic route
-            resp = await client.get('/api/v1/chat/active')
+            resp = await client.get('/api/v1/tasks')
             assert resp.status_code == 200, f'Expected 200, got {resp.status_code}'
             data = await resp.get_json()
-            # Charter #0 envelope: {ok, items} (see the pytest body above).
-            assert data['ok'] is True and isinstance(data.get('items'), list)
-            print('  ✓ GET /api/v1/chat/active → 200 (sync route in thread pool)')
+            assert data['ok'] is True and isinstance(data.get('tasks'), list)
+            print('  ✓ GET /api/v1/tasks → 200 (sync route in thread pool)')
 
             # 404
             resp = await client.get('/api/nonexistent')

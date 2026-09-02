@@ -138,7 +138,7 @@ def _usage_with_wire(msgs, *, cache_read, cache_write):
 
 
 def test_detector_byte_divergence_not_laundered_into_eviction():
-    from lib.tasks_pkg.cache_tracking import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.cache_tracking._state import _cache_states
 
     conv = 'byte-gate-1'
@@ -148,7 +148,7 @@ def test_detector_byte_divergence_not_laundered_into_eviction():
           _asst_with_reasoning([{'type': 'reasoning', 'id': 'r1'}])]
     detect_cache_break(conv, r1, None, 'claude-opus-4',
                        usage=_usage_with_wire(r1, cache_read=90000,
-                                              cache_write=0))
+                                              cache_write=0), user_id=1)
     # Round 2: SAME prefix but reasoning_details rebuilt on the assistant turn
     # (canonical identical, true bytes differ) + a big read DROP → a break.
     r2 = [{'role': 'system', 'content': 'S' * 200},
@@ -157,7 +157,7 @@ def test_detector_byte_divergence_not_laundered_into_eviction():
           {'role': 'user', 'content': 'u2'}]
     out = detect_cache_break(conv, r2, None, 'claude-opus-4',
                              usage=_usage_with_wire(r2, cache_read=40000,
-                                                    cache_write=0))
+                                                    cache_write=0), user_id=1)
     _cache_states.clear()
     assert out is not None
     blob = str(out)
@@ -180,7 +180,7 @@ def test_tail_only_byte_change_with_high_read_not_flagged_whole_prefix_break():
     NEW tail assistant turn carries a reasoning_details rebuild; cache_read
     stays high (no collapse). The detector must not raise a prefix_mutation
     whole-prefix break for it."""
-    from lib.tasks_pkg.cache_tracking import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.cache_tracking._state import _cache_states
 
     conv = 'pos-gate-tail'
@@ -189,7 +189,7 @@ def test_tail_only_byte_change_with_high_read_not_flagged_whole_prefix_break():
           {'role': 'assistant', 'content': 'a1'}]
     detect_cache_break(conv, r1, None, 'claude-opus-4',
                        usage=_usage_with_wire(r1, cache_read=200000,
-                                              cache_write=5000))
+                                              cache_write=5000), user_id=1)
     # Round 2: prior prefix (idx 0-2) UNCHANGED byte-for-byte; append a NEW
     # assistant tail whose reasoning_details differ (byte-only, canonical
     # blind). cache_read stays HIGH (prefix read back) with a modest tail write.
@@ -200,7 +200,7 @@ def test_tail_only_byte_change_with_high_read_not_flagged_whole_prefix_break():
           _asst_with_reasoning([{'type': 'reasoning', 'id': 'tail-REBUILT'}])]
     out = detect_cache_break(conv, r2, None, 'claude-opus-4',
                              usage=_usage_with_wire(r2, cache_read=198000,
-                                                    cache_write=20000))
+                                                    cache_write=20000), user_id=1)
     _cache_states.clear()
     # The prior prefix read back (~99%); a tail-confined byte change is NOT a
     # whole-prefix mutation break.
@@ -214,7 +214,7 @@ def test_in_prefix_byte_change_still_flagged_whole_prefix_break():
     the prior cached prefix — an already-cached message rewritten in place —
     IS a whole-prefix break even if cache_read happens to read partially back.
     """
-    from lib.tasks_pkg.cache_tracking import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.cache_tracking._state import _cache_states
 
     conv = 'pos-gate-inprefix'
@@ -225,7 +225,7 @@ def test_in_prefix_byte_change_still_flagged_whole_prefix_break():
           {'role': 'assistant', 'content': 'a2'}]
     detect_cache_break(conv, r1, None, 'claude-opus-4',
                        usage=_usage_with_wire(r1, cache_read=200000,
-                                              cache_write=5000))
+                                              cache_write=5000), user_id=1)
     # Round 2: rewrite the reasoning_details of the EARLY assistant (idx 2,
     # well inside the prior prefix boundary) + big write → in-prefix rewrite.
     r2 = [{'role': 'system', 'content': 'S' * 200},
@@ -236,7 +236,7 @@ def test_in_prefix_byte_change_still_flagged_whole_prefix_break():
           {'role': 'user', 'content': 'u3'}]
     out = detect_cache_break(conv, r2, None, 'claude-opus-4',
                              usage=_usage_with_wire(r2, cache_read=120000,
-                                                    cache_write=60000))
+                                                    cache_write=60000), user_id=1)
     _cache_states.clear()
     assert out is not None and 'prefix_mutation' in out, (
         'an in-prefix already-cached-message rewrite MUST still be flagged as '
@@ -248,7 +248,7 @@ def test_detector_NEUTER_without_byte_gate_launders_to_eviction():
     reasoning_details-rebuild round IS laundered into the eviction verdict,
     because canonical alone is blind to it. Proves the byte gate is
     load-bearing."""
-    from lib.tasks_pkg.cache_tracking import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.cache_tracking._state import _cache_states
 
     conv = 'byte-gate-neuter'
@@ -262,13 +262,13 @@ def test_detector_NEUTER_without_byte_gate_launders_to_eviction():
           {'role': 'user', 'content': 'u1'},
           _asst_with_reasoning([{'type': 'reasoning', 'id': 'r1'}])]
     detect_cache_break(conv, r1, None, 'claude-opus-4',
-                       usage=_usage_no_bytes(r1, cache_read=90000))
+                       usage=_usage_no_bytes(r1, cache_read=90000), user_id=1)
     r2 = [{'role': 'system', 'content': 'S' * 200},
           {'role': 'user', 'content': 'u1'},
           _asst_with_reasoning([{'type': 'reasoning', 'id': 'r2-REBUILT'}]),
           {'role': 'user', 'content': 'u2'}]
     out = detect_cache_break(conv, r2, None, 'claude-opus-4',
-                             usage=_usage_no_bytes(r2, cache_read=40000))
+                             usage=_usage_no_bytes(r2, cache_read=40000), user_id=1)
     _cache_states.clear()
     assert out is not None
     # Without the byte gate the lossy canonical says "identical" → the miss is
@@ -343,7 +343,7 @@ def test_detector_system_byte_flip_not_laundered_into_eviction():
     """End-to-end: a system-prefix wrapping flip (system_fingerprint blind,
     canonical/messages identical) must NOT be called an eviction — the verdict
     names the hoisted-region byte change."""
-    from lib.tasks_pkg.cache_tracking import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.cache_tracking._state import _cache_states
 
     conv = 'region-gate-1'
@@ -353,7 +353,7 @@ def test_detector_system_byte_flip_not_laundered_into_eviction():
     # Round 1: warm prefix, system as a bare string.
     detect_cache_break(conv, msgs, None, 'claude-opus-4',
                        usage=_usage_with_region(msgs, sys_str, [],
-                                                cache_read=90000))
+                                                cache_read=90000), user_id=1)
     # Round 2: SAME everything but system flipped to a single text block +
     # a big read drop. Messages canonical identical, system_fingerprint
     # identical — only the raw hoisted bytes differ.
@@ -361,7 +361,7 @@ def test_detector_system_byte_flip_not_laundered_into_eviction():
              {'role': 'assistant', 'content': 'a1'}]
     out = detect_cache_break(conv, msgs2, None, 'claude-opus-4',
                              usage=_usage_with_region(msgs2, sys_block, [],
-                                                      cache_read=40000))
+                                                      cache_read=40000), user_id=1)
     _cache_states.clear()
     assert out is not None
     blob = str(out)
@@ -375,7 +375,7 @@ def test_detector_NEUTER_without_region_gate_launders_system_flip():
     """NEUTER: drop the _wire_region signal and the SAME system wrapping flip
     IS laundered into eviction (system_fingerprint is blind to it). Proves the
     region byte gate is load-bearing."""
-    from lib.tasks_pkg.cache_tracking import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.cache_tracking._state import _cache_states
 
     conv = 'region-gate-neuter'
@@ -389,12 +389,12 @@ def test_detector_NEUTER_without_region_gate_launders_system_flip():
 
     detect_cache_break(conv, msgs, None, 'claude-opus-4',
                        usage=_no_region(_usage_with_region(
-                           msgs, sys_str, [], cache_read=90000)))
+                           msgs, sys_str, [], cache_read=90000)), user_id=1)
     msgs2 = [{'role': 'user', 'content': 'u1'},
              {'role': 'assistant', 'content': 'a1'}]
     out = detect_cache_break(conv, msgs2, None, 'claude-opus-4',
                              usage=_no_region(_usage_with_region(
-                                 msgs2, sys_block, [], cache_read=40000)))
+                                 msgs2, sys_block, [], cache_read=40000)), user_id=1)
     _cache_states.clear()
     assert out is not None
     assert 'upstream cache miss' in str(out), (

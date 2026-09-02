@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 from lib.log import get_logger
+from runtime_guards import resolve_deployment_mode
 
 from . import block_search_domain as _block_search_domain
 
@@ -55,6 +56,14 @@ _SUGGEST_ONLY: dict[str, str] = {
         'Free-form improvement idea that does not fit any other category.',
 }
 
+
+def action_available_in_this_deployment(entry: dict[str, Any]) -> bool:
+    """Fail closed when an action only has a personal persistent-state owner."""
+    allowed_modes = entry.get('deployment_modes')
+    if not isinstance(allowed_modes, (set, frozenset, tuple, list)):
+        return False
+    return resolve_deployment_mode() in allowed_modes
+
 ACTION_REGISTRY: dict[str, dict[str, Any]] = {
     _block_search_domain.ACTION['name']: _block_search_domain.ACTION,
 }
@@ -65,6 +74,7 @@ for _name, _desc in _SUGGEST_ONLY.items():
         'description': _desc + ' (pending_review — human must approve)',
         'apply': None,
         'revert': None,
+        'deployment_modes': frozenset({'personal', 'distributed'}),
     }
 
 
@@ -72,4 +82,8 @@ def get_action(name: str) -> dict | None:
     return ACTION_REGISTRY.get(name)
 
 
-__all__ = ['ACTION_REGISTRY', 'get_action']
+__all__ = [
+    'ACTION_REGISTRY',
+    'action_available_in_this_deployment',
+    'get_action',
+]

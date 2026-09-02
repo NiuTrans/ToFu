@@ -4,7 +4,7 @@ Before this, ``FlowExecutor.run()`` returned ``ok = (status=='completed')`` and
 ``_run_loop`` left a cap-hit / stuck / replan-exhausted loop through a bare
 ``else: logger.info('hit cap')`` with NO reason propagated — so a loop that
 burned its whole ``max_iterations`` budget WITHOUT a verifier STOP still came
-back ``ok=True`` and the endpoint runner logged ``reason=completed``. That made
+back ``ok=True`` and the Flow runner logged ``reason=completed``. That made
 every one of the 200+ live engine runs look like a clean success even when they
 never converged — the exact dishonesty the standalone autopilot loop avoids
 (it emits ``budget_exhausted`` / ``stuck`` / ``no_progress``).
@@ -19,8 +19,8 @@ This suite pins the labeling-parity fix:
   * NEGATIVE CONTROL: forcing the ledger empty makes a cap-hit report
     ``completed`` again — proving the ledger is load-bearing.
 
-Uses the canonical endpoint graph (planner → loop[worker → critic] → stop) with
-the SubAgent runner stubbed, so no live LLM is touched.
+Uses a synthetic planner → loop[worker → critic] → stop graph with the
+SubAgent runner stubbed, so no live LLM is touched.
 
 @pytest.mark.unit — pure in-process, deterministic stub runner.
 """
@@ -30,9 +30,11 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-def _endpoint_defn(max_iterations=3):
-    from lib.orchestration import build_endpoint_definition
-    return build_endpoint_definition(max_iterations=max_iterations)
+def _verifier_loop(max_iterations=3):
+    from tests.support.orchestration_definitions import (
+        build_verifier_loop_definition,
+    )
+    return build_verifier_loop_definition(max_iterations=max_iterations)
 
 
 def _run_with_runner(defn, fake_runner, *, max_iter=3):
@@ -69,7 +71,7 @@ def test_caphit_reports_max_iterations_not_completed():
         return {'output': f'work {iteration}', 'status': 'completed', 'error': '',
                 'tool_log': [{'round': 1, 'tool': 'write_file', 'args_brief': ''}]}
 
-    res = _run_with_runner(_endpoint_defn(3), never_stop, max_iter=3)
+    res = _run_with_runner(_verifier_loop(3), never_stop, max_iter=3)
     assert res['status'] == 'completed'      # walk finished (no crash)
     assert res['ok'] is False, 'a burned-budget loop must not be ok'
     assert res['stop_reason'] == 'max_iterations', res.get('stop_reason')
@@ -92,7 +94,7 @@ def test_stuck_reports_stuck():
         return {'output': f'work {iteration}', 'status': 'completed', 'error': '',
                 'tool_log': [{'round': 1, 'tool': 'write_file', 'args_brief': ''}]}
 
-    res = _run_with_runner(_endpoint_defn(6), repeating, max_iter=6)
+    res = _run_with_runner(_verifier_loop(6), repeating, max_iter=6)
     assert res['ok'] is False
     assert res['stop_reason'] == 'stuck', res.get('stop_reason')
     exits = res.get('loop_exits') or []
@@ -109,7 +111,7 @@ def test_clean_stop_stays_completed():
         return {'output': f'work {iteration}', 'status': 'completed', 'error': '',
                 'tool_log': [{'round': 1, 'tool': 'write_file', 'args_brief': ''}]}
 
-    res = _run_with_runner(_endpoint_defn(3), approve, max_iter=3)
+    res = _run_with_runner(_verifier_loop(3), approve, max_iter=3)
     assert res['ok'] is True
     assert res['stop_reason'] == 'completed', res.get('stop_reason')
     exits = res.get('loop_exits') or []
@@ -153,7 +155,7 @@ def test_NC_empty_ledger_regresses_to_completed():
     eng.FlowExecutor._default_runner = never_stop
     eng.FlowExecutor._run_loop = _loop_no_ledger
     try:
-        ex = eng.FlowExecutor(_endpoint_defn(3), agent_runner=None, max_iterations=3)
+        ex = eng.FlowExecutor(_verifier_loop(3), agent_runner=None, max_iterations=3)
         res = ex.run(initial_context='x')
         # With the ledger neutered, the burned-budget run falsely looks clean.
         assert res['ok'] is True

@@ -25,7 +25,7 @@ def stamp_chat_task_terminal(
     *,
     status: str,
     finish_reason: str,
-    endpoint_reason: str = '',
+    flow_reason: str = '',
 ) -> bool:
     """Atomically stamp terminal facts without allowing terminal rewrites.
 
@@ -53,9 +53,9 @@ def stamp_chat_task_terminal(
     task['_chat_terminal_stamped'] = True
     if not task.get('finished_at'):
         task['finished_at'] = time.time()
-    if endpoint_reason or task.get('endpoint_mode') or '_endpoint_phase' in task:
-        task['_endpoint_phase'] = 'done'
-        task['_endpoint_stop_reason'] = endpoint_reason or finish_reason
+    if flow_reason or task.get('flow_mode') or '_flow_phase' in task:
+        task['_flow_phase'] = 'done'
+        task['_flow_stop_reason'] = flow_reason or finish_reason
     return first
 
 
@@ -63,7 +63,7 @@ def finalize_chat_task_error(
     task: dict,
     error: Any,
     *,
-    endpoint_reason: str = 'error',
+    flow_reason: str = 'error',
     append_event_fn: Callable[[dict, dict], Any] | None = None,
     persist_task_result_fn: Callable[[dict], Any] | None = None,
     notify_terminal_fn: Callable[[dict], Any] | None = None,
@@ -80,14 +80,14 @@ def finalize_chat_task_error(
         from lib.tasks_pkg.manager._persist import persist_task_result
         persist_task_result_fn = persist_task_result
     if notify_terminal_fn is None:
-        from lib.tasks_pkg.manager._registry import notify_terminal_busy_state
-        notify_terminal_fn = notify_terminal_busy_state
+        from lib.tasks_pkg.manager._registry import notify_terminal_conversation_change
+        notify_terminal_fn = notify_terminal_conversation_change
 
     first = stamp_chat_task_terminal(
         task,
         status='error',
         finish_reason='error',
-        endpoint_reason=endpoint_reason,
+        flow_reason=flow_reason,
     )
     if not first:
         return None

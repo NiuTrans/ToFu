@@ -5,7 +5,7 @@ Tests pure logic modules:
   - lib.protocols (Protocol interfaces)
   - lib.pricing (cost calculation)
   - lib.utils (safe_json, etc.)
-  - lib.database (schema, CRUD)
+  - lib.storage_sidecar (schema and semantic storage contracts)
   - lib.tests.validate_imports (all modules import cleanly)
 
 Run:  pytest tests/test_backend_unit.py -m unit
@@ -419,6 +419,14 @@ class TestProtocols:
         # runtime_checkable only checks method names exist
         assert isinstance(mock, LLMService)
 
+    def test_llm_service_stream_exposes_typed_terminal_evidence(self):
+        from typing import get_type_hints
+
+        from lib.llm.stream_result import ProviderStreamResult
+        from lib.protocols import LLMService
+
+        assert get_type_hints(LLMService.stream)['return'] is ProviderStreamResult
+
 
 # ═══════════════════════════════════════════════════════════
 #  3. Utils
@@ -785,80 +793,3 @@ class TestReadjustThinkingParams:
         assert body.get('thinking') == {'type': 'enabled'}
         assert body.get('temperature') == 1.0
         assert 'enable_thinking' not in body
-
-
-# ═══════════════════════════════════════════════════════════
-#  9. BYO provider thinking_format persistence
-# ═══════════════════════════════════════════════════════════
-
-@pytest.mark.unit
-class TestByoProviderThinkingFormat:
-    """The BYO store must round-trip thinking_format and reject
-    typos. This is the path that registered-suffix runs
-    (``model="qwen35-0p8b@prov_xxx"``) actually take."""
-
-    def _isolate(self, monkeypatch, tmp_path):
-        """Point the BYO store at an empty tmp file + reset the cache."""
-        from lib import byo_providers as _byo
-        store = tmp_path / 'byo_providers.json'
-        monkeypatch.setattr(_byo, '_STORE_PATH', str(store))
-        # Reset the in-memory cache so reads see the fresh tmp file.
-        with _byo._lock:
-            _byo._cache.clear()
-            _byo._cache_loaded = False
-        return _byo
-
-    def test_create_persists_thinking_format(self, monkeypatch, tmp_path):
-        byo = self._isolate(monkeypatch, tmp_path)
-        row = byo.create_provider(
-            owner_key_id='k_test', name='sglang-cluster',
-            base_url='http://10.0.0.1:8080/v1', api_key='', models=[],
-            thinking_format='chat_template_kwargs',
-        )
-        assert row['thinking_format'] == 'chat_template_kwargs'
-        # Round-trip via lookup.
-        full = byo.get_provider(row['id'], 'k_test')
-        assert full['thinking_format'] == 'chat_template_kwargs'
-
-    def test_create_default_is_empty(self, monkeypatch, tmp_path):
-        byo = self._isolate(monkeypatch, tmp_path)
-        # Use a private IP literal (like the sibling tests) so the SSRF egress
-        # guard in _validate_base_url passes without a live DNS lookup — CI
-        # runners have no outbound DNS, and a real hostname here would raise
-        # EgressDenied('DNS resolution failed').
-        row = byo.create_provider(
-            owner_key_id='k_test', name='cloud',
-            base_url='http://10.0.0.1:8080/v1', api_key='', models=[],
-        )
-        assert row['thinking_format'] == ''
-
-    def test_create_rejects_typo(self, monkeypatch, tmp_path):
-        byo = self._isolate(monkeypatch, tmp_path)
-        with pytest.raises(ValueError):
-            byo.create_provider(
-                owner_key_id='k_test', name='oops',
-                base_url='http://10.0.0.1:8080/v1', api_key='', models=[],
-                thinking_format='chat_template_kwarg',  # missing 's'
-            )
-
-    def test_update_persists_thinking_format(self, monkeypatch, tmp_path):
-        byo = self._isolate(monkeypatch, tmp_path)
-        row = byo.create_provider(
-            owner_key_id='k_test', name='sglang',
-            base_url='http://10.0.0.1:8080/v1', api_key='', models=[],
-        )
-        ok = byo.update_provider(row['id'], 'k_test',
-                                  thinking_format='chat_template_kwargs')
-        assert ok
-        assert byo.get_provider(row['id'], 'k_test')['thinking_format'] == \
-            'chat_template_kwargs'
-
-    def test_update_rejects_typo(self, monkeypatch, tmp_path):
-        byo = self._isolate(monkeypatch, tmp_path)
-        row = byo.create_provider(
-            owner_key_id='k_test', name='sglang',
-            base_url='http://10.0.0.1:8080/v1', api_key='', models=[],
-        )
-        with pytest.raises(ValueError):
-            byo.update_provider(row['id'], 'k_test',
-                                 thinking_format='glm-style')

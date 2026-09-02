@@ -20,7 +20,7 @@ are unused. **Submit the trimmed manifest.**
 ## host permission: `<all_urls>`
 
 ```
-The extension is a browser-automation bridge for the user's own self-hosted Tofu assistant. The user gives the assistant tasks that can involve any website (read this page, fill this form, screenshot this dashboard), so the extension must be able to inject content scripts and read page content on whatever URL the task targets. The set of sites cannot be known in advance, so a fixed host list is not possible.
+The extension is a browser-automation bridge for the user's own self-hosted Tofu assistant. The user gives the assistant tasks that can involve any website (read this page, fetch a user-requested file into their Tofu server, fill this form, screenshot this dashboard), so the extension must be able to inject content scripts and read page content or a response stream on whatever URL the task targets. The set of sites cannot be known in advance, so a fixed host list is not possible.
 ```
 
 ## `scripting`
@@ -38,13 +38,19 @@ Used to list the user's open tabs (titles and URLs) so they can choose which tab
 ## `downloads`
 
 ```
-The assistant can be asked to save a file the user is looking at (for example "download this report"). That task is carried out with chrome.downloads.download, using the URL the task names and an optional filename. This is the only use; the extension does not read, search, or modify the user's existing download history.
+The assistant can be asked explicitly to save a file in the Downloads folder of the device running Chrome. That device-local task is carried out with chrome.downloads.download, using the URL the task names and an optional filename. It returns a receipt whose location is `device_downloads`. Authenticated files requested for Tofu's server use a separate bounded response-stream transport and never call this API. The extension does not read, search, or modify the user's existing download history.
 ```
 
 ## `webRequest`
 
 ```
-Used only while an active Tofu browser task explicitly requests network-response capture for its target tab. The extension records bounded response metadata (URL, method, status, resource type and timing), never response bodies, cookies, or authorization headers; the listener is removed when the task stops or its lease is released.
+Used as the metadata-only fallback while an active Tofu browser task captures network responses for its target tab. It records URL, method, status, resource type and timing when Chrome DevTools response-body capture is unavailable. The listener is removed when the capture stops; it never reads headers, cookies, authorization values, or request bodies.
+```
+
+## `webNavigation`
+
+```
+Used to invalidate transient captured API data when the target tab navigates, changes SPA history state, or changes fragment outside an active Tofu capture. This prevents data from a prior document being returned with a later page. The extension does not record a navigation history through this API.
 ```
 
 ## `storage`
@@ -74,7 +80,7 @@ Provides an optional "read my bookmarks" capability so the assistant can open or
 ## `debugger`
 
 ```
-Used ONLY to capture true full-page screenshots via the Chrome DevTools Protocol (Page.captureScreenshot with captureBeyondViewport). The standard captureVisibleTab API can only capture the visible viewport; full-page capture requires attaching the debugger to the single target tab for the duration of one screenshot, then detaching. It is not used to inspect, modify, or intercept network traffic.
+Used for bounded, task-visible operations on one target tab: full-page screenshots; textual API/WebSocket response capture for dynamic-page research; trusted click/keyboard input; and a temporary DevTools Bridge that reads console errors, inspects JavaScript objects, and supports breakpoints/pause/step when the user's task explicitly asks for debugging. One shared per-tab attachment is reference-counted. At most two debug tabs are active, sessions expire within 120 seconds, paused pages auto-resume within 30 seconds, cross-origin child targets are detached, all console/object/source buffers have hard size limits, and the last holder detaches. It never reads request/response headers, authorization values, or request bodies.
 ```
 
 ## `notifications`
@@ -109,7 +115,6 @@ them, so they are unjustifiable and would trigger rejection:
 
 | Removed | Why it's safe to drop |
 |---|---|
-| `webNavigation` | No `chrome.webNavigation.*` call exists. Tab-load waiting uses `chrome.tabs.onUpdated`, which needs only `tabs`. |
 | `clipboardRead` | No clipboard read anywhere (no `navigator.clipboard.readText`, no `execCommand('paste')`). |
 | `clipboardWrite` | No clipboard write anywhere. |
 | `declarativeNetRequest` | No DNR ruleset and no `chrome.declarativeNetRequest.*` call. |

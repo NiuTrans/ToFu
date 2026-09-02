@@ -1,6 +1,6 @@
 """tests/test_remote_stream_ui.py — RWA P4b-2b:远程 run_command 流帧 UI.
 
-设计要点(docs/REMOTE_WORKTREE_DESIGN.md §5 P4b-2b):**前端零改动** ——
+设计要点(docs/modules/remote_execution.md):**前端零改动** ——
 服务器 run_command 的实时输出通道(``_make_run_command_progress_cb`` →
 ``tool_progress`` SSE → tool_rounds 终端块)已存在,远程路径只做:
   * ``send_desktop_command`` 接受预置 ``cmd_id``;
@@ -27,10 +27,8 @@ from lib.desktop import bridge as db
 
 @pytest.fixture(autouse=True)
 def _clean_bridge(monkeypatch):
-    monkeypatch.setenv('TOFU_DESKTOP_ADDRESSING', '1')
     monkeypatch.setenv('TOFU_REMOTE_WORKTREE', '1')
     monkeypatch.setattr(db, '_last_poll', [0.0])
-    monkeypatch.setattr(db, '_v1_last_poll', 0.0)
     with db.command_queue_lock:
         db.command_queue.clear()
         db._agents.clear()
@@ -65,10 +63,10 @@ def test_send_accepts_preset_cmd_id():
 
     def agent():
         cmds = _run_async(db.take_pending_commands_async(
-            timeout=1, agent_id='agent-A', v1=False))
+            timeout=1, agent_id='agent-A', user_id='owner'))
         captured['cmds'] = cmds
 
-    db.register_agent('agent-A', {'name': 'mac'})
+    db.register_agent('agent-A', {'name': 'mac'}, user_id='owner')
     t = threading.Thread(target=agent)
     t.start()
     time.sleep(0.1)
@@ -76,13 +74,16 @@ def test_send_accepts_preset_cmd_id():
     def producer():
         db.send_desktop_command('desktop_list_files', {}, timeout=2,
                                 target_agent_id='agent-A',
+                                user_id='owner',
                                 cmd_id='cmd-preset-1')
 
     p = threading.Thread(target=producer)
     p.start()
     t.join(timeout=3)
     assert captured['cmds'][0]['id'] == 'cmd-preset-1'
-    db.resolve_results([{'id': 'cmd-preset-1', 'result': {}, 'error': None}])
+    db.resolve_results(
+        [{'id': 'cmd-preset-1', 'result': {}, 'error': None}],
+        agent_id='agent-A', user_id='owner')
     p.join(timeout=3)
 
 
@@ -107,7 +108,8 @@ def test_remote_run_streams_via_tool_progress(tmp_path, monkeypatch):
 
     db.register_agent('agent-A', {
         'name': 'mac',
-        'share_roots': [{'name': 'myapp', 'path': str(root)}]})
+        'share_roots': [{'name': 'myapp', 'path': str(root)}]},
+        user_id='owner')
 
     events = []
     monkeypatch.setattr(hp, '_finalize_tool_round', lambda *a: None)
@@ -116,7 +118,7 @@ def test_remote_run_streams_via_tool_progress(tmp_path, monkeypatch):
     monkeypatch.setattr(ce, 'append_event',
                         lambda task, ev: events.append(ev) or None)
 
-    task = {'id': 'task-e2e', 'convId': 'conv-e2e', '_userId': ''}
+    task = {'id': 'task-e2e', 'convId': 'conv-e2e', '_userId': 'owner'}
     round_entry = {'toolCallId': 'tc-1', 'toolName': 'run_command'}
     outcome = {}
 
@@ -129,7 +131,7 @@ def test_remote_run_streams_via_tool_progress(tmp_path, monkeypatch):
     def fake_agent():
         # 真 poll:等到命令到达 → 真流式执行 → 真流帧/结果回桥
         cmds = _run_async(db.take_pending_commands_async(
-            timeout=5, agent_id='agent-A', v1=False))
+            timeout=5, agent_id='agent-A', user_id='owner'))
         assert cmds and cmds[0]['type'] == 'project_run_command'
         cmd = cmds[0]
         seq = [0]
@@ -142,16 +144,19 @@ def test_remote_run_streams_via_tool_progress(tmp_path, monkeypatch):
             frames.append(frame)
             # 仿真真 agent 的 outbox:帧随下一次 poll 即时上行,
             # 不是等命令退出才批量回传(否则桥内 mid-flight 无数据)。
-            db.resolve_streams([frame])
+            db.resolve_streams(
+                [frame], agent_id='agent-A', user_id='owner')
 
         def on_exit(res):
             seq[0] += 1
             frames.append({'cmd_id': cmd['id'], 'seq': seq[0],
                            'stream': 'meta', 'data': '', 'done': True})
             # agent 的下一次 poll 会把 frames + result 一起带上
-            db.resolve_streams(frames)
-            db.resolve_results([{'id': cmd['id'], 'result': res,
-                                 'error': None}])
+            db.resolve_streams(
+                frames, agent_id='agent-A', user_id='owner')
+            db.resolve_results(
+                [{'id': cmd['id'], 'result': res, 'error': None}],
+                agent_id='agent-A', user_id='owner')
 
         err = pj.start_project_run(cmd['id'], cmd['params'],
                                    on_chunk, on_exit)
@@ -217,12 +222,24 @@ def test_remote_run_meta_terminal_shape(tmp_path, monkeypatch):
 
 @pytest.mark.api
 def test_streams_endpoint_returns_assembled(flask_client):
-    db.resolve_streams([
-        {'cmd_id': 'c9', 'seq': 1, 'stream': 'stdout', 'data': 'A', 'done': False},
-        {'cmd_id': 'c9', 'seq': 2, 'stream': 'stdout', 'data': 'B', 'done': True},
-    ])
+    with db.command_queue_lock:
+        db.command_queue['c9'] = {
+            'id': 'c9', 'type': 'project_run_command', 'params': {},
+            'created_at': time.time(), 'event': threading.Event(),
+            'result': None, 'error': None, 'user_id': '1',
+            'target_agent_id': 'agent-A', 'claimed_agent_id': 'agent-A',
+        }
+    db.resolve_streams(
+        [
+            {'cmd_id': 'c9', 'seq': 1, 'stream': 'stdout',
+             'data': 'A', 'done': False},
+            {'cmd_id': 'c9', 'seq': 2, 'stream': 'stdout',
+             'data': 'B', 'done': True},
+        ],
+        agent_id='agent-A', user_id='1',
+    )
     from lib.api_keys import create_key
-    _row, token = create_key(name='stream-reader', scopes=['chat'])
+    _row, token = create_key(owner_user_id=1, name='stream-reader', scopes=['chat'])
     r = flask_client.get('/api/v1/desktop/streams/c9',
                          headers={'Authorization': f'Bearer {token}'})
     assert r.status_code == 200
@@ -231,34 +248,31 @@ def test_streams_endpoint_returns_assembled(flask_client):
 
 
 @pytest.mark.unit
-def test_kill_switch_drill_full_legacy(monkeypatch):
-    """P5 演练:两个总闸全关(TOFU_REMOTE_WORKTREE × TOFU_DESKTOP_ADDRESSING)
-    → 伪路径不翻译、桥投递回到 drain-all,全链与 RWA 之前逐字节一致."""
+def test_remote_feature_switch_does_not_disable_bridge_authority(monkeypatch):
+    """Disabling remote worktrees never disables device routing isolation."""
     monkeypatch.delenv('TOFU_REMOTE_WORKTREE', raising=False)
-    monkeypatch.setenv('TOFU_DESKTOP_ADDRESSING', '0')
-    # ① resolver 不翻译
     from lib.conv_config import resolve_conv_config
     out = resolve_conv_config(
         conv_settings={'projectPath': 'remote:a:r'}, is_active=False)
     assert out['projectPath'] == 'remote:a:r'
     assert out.get('project_remote') is None
-    # ② 桥 drain-all:任一 poll 者拿全部命令(legacy 语义,明知故犯才关)
-    db.register_agent('agent-A', {'name': 'mac'})
-    db.register_agent('agent-B', {'name': 'win'})
+    db.register_agent('agent-A', {'name': 'mac'}, user_id='owner')
+    db.register_agent('agent-B', {'name': 'win'}, user_id='owner')
     cmd = {'id': 'drill-1', 'type': 'desktop_list_files', 'params': {},
            'created_at': time.time(), 'event': threading.Event(),
-           'result': None, 'error': None, 'target_agent_id': 'agent-A'}
+           'result': None, 'error': None, 'target_agent_id': 'agent-A',
+           'user_id': 'owner'}
     with db.command_queue_lock:
         db.command_queue['drill-1'] = cmd
     cmds = _run_async(db.take_pending_commands_async(
-        timeout=0.3, agent_id='agent-B', v1=False))
-    assert [c['id'] for c in cmds] == ['drill-1']
+        timeout=0.3, agent_id='agent-B', user_id='owner'))
+    assert cmds == []
 
 
 @pytest.mark.api
 def test_streams_endpoint_unknown_404(flask_client):
     from lib.api_keys import create_key
-    _row, token = create_key(name='stream-reader-2', scopes=['chat'])
+    _row, token = create_key(owner_user_id=1, name='stream-reader-2', scopes=['chat'])
     r = flask_client.get('/api/v1/desktop/streams/nobody',
                          headers={'Authorization': f'Bearer {token}'})
     assert r.status_code == 404

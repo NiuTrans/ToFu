@@ -50,7 +50,13 @@ import pytest
 pytestmark = pytest.mark.unit
 
 REPO = Path(__file__).resolve().parents[1]
-PET_JS = REPO / "static" / "js" / "tofu-pet.js"
+import sys as _sys
+_sys.path.insert(0, str(REPO))
+from tests._runtime_sections import runtime_section_path
+import sys as _sys
+if str(REPO) not in _sys.path:
+    _sys.path.insert(0, str(REPO))
+PET_JS = Path(runtime_section_path('tofu-pet.js'))
 CSS = REPO / "static" / "styles.css"
 _NODE = __import__("shutil").which("node")
 

@@ -23,9 +23,9 @@ What this pins:
   3. Verbatim preservation: nothing is lost — the full cause stays in title.
   4. Pass-through: a PLAIN reason (rate limit / timeout — the common case) is
      never reworded, and a lone '<' is not mistaken for markup.
-  5. Single formatter: finish_info.js and streaming_ui.js both consume
-     core/error_envelope.js's fallbackCauseParts; NEITHER may carry a private
-     copy of the stripping logic (charter #2 — one normalization throat).
+  5. Single formatter: the typed Surface footer delegates to finish_info.js,
+     which consumes core/error_envelope.js's fallbackCauseParts; no surface
+     may carry a private copy of the stripping logic.
   6. Graceful degradation: finish_info.js evaled WITHOUT error_envelope.js
      (the dev / isolated-harness context test_frontend_finish_tag_fallback.py
      already protects) must not throw.
@@ -53,7 +53,7 @@ import sys
 
 import pytest
 
-from tests._runtime_sections import runtime_sections_dir
+from tests._runtime_sections import native_module_path, runtime_sections_dir
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 pytestmark = pytest.mark.unit
@@ -63,6 +63,8 @@ ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS = runtime_sections_dir()
 FINISH_INFO = os.path.join(JS, 'ui', 'finish_info.js')
 ERROR_ENVELOPE = os.path.join(JS, 'core', 'error_envelope.js')
+TYPED_ERRORS = native_module_path(
+    '.native/api-errors.js', os.path.join(ROOT, 'frontend/src/api/errors.ts'))
 
 # The owner's verbatim payload — a bare openresty 502 whose whole HTML body
 # arrives as the fallback reason.
@@ -83,9 +85,10 @@ _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[2];
-const ERROR_ENVELOPE = process.argv[3];   // real or NEUTERED copy
-const FINISH_INFO = process.argv[4];      // real or NEUTERED copy
-const REASON_502 = process.argv[5];
+const TYPED_ERRORS = process.argv[3];
+const ERROR_ENVELOPE = process.argv[4];   // real or NEUTERED copy
+const FINISH_INFO = process.argv[5];      // real or NEUTERED copy
+const REASON_502 = process.argv[6];
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 
 const dom = new JSDOM('<!DOCTYPE html><body><div id="h"></div></body>',
@@ -119,17 +122,21 @@ global._i18n = win._i18n = {
 };
 global._i18nLang = win._i18nLang = 'en';
 
+eval(fs.readFileSync(TYPED_ERRORS, 'utf8'));     // api/errors.ts owner
+global.normalizeTypedErrorEnvelope = global.normalizeErrorEnvelope;
+global.isTypedErrorEnvelope = global.isErrorEnvelope;
 eval(fs.readFileSync(ERROR_ENVELOPE, 'utf8'));   // core/error_envelope.js
 eval(fs.readFileSync(FINISH_INFO, 'utf8'));      // ui/finish_info.js
 
 const h = document.getElementById('h');
 function render(msg) {
-  h.innerHTML = renderFinishInfo(msg, false);
+  h.innerHTML = renderFinishInfo(msg);
   return h;
 }
 // A settled fallback turn: finishReason present ⇒ the finish bar renders.
 const settled = (reason, kind) => ({
-  role: 'assistant', content: 'answer', finishReason: 'stop', toolRounds: [],
+  role: 'assistant', content: 'answer', _turnStatus: 'completed',
+  finishReason: 'stop', toolRounds: [],
   fallbackModel: 'kimi-k3', fallbackFrom: 'claude-opus-5',
   fallbackReason: reason, fallbackKind: kind,
 });
@@ -186,12 +193,13 @@ check('unknown_kind_label_is_raw_kind',
   h.querySelector('.fb-cause-kind').textContent === 'weird_kind');
 // ── 5. No fallback → no cause tag at all ──
 h.innerHTML = renderFinishInfo(
-  { role: 'assistant', content: 'x', finishReason: 'stop', toolRounds: [] }, false);
+  { role: 'assistant', content: 'x', _turnStatus: 'completed',
+    finishReason: 'stop', toolRounds: [] });
 check('no_cause_tag_without_fallback', h.querySelector('.fb-cause') === null);
 // A fallback with NO reason at all must not emit an empty cause chip.
 h.innerHTML = renderFinishInfo({ role: 'assistant', content: 'x',
-  finishReason: 'stop', toolRounds: [], fallbackModel: 'kimi-k3',
-  fallbackFrom: 'claude-opus-5' }, false);
+  _turnStatus: 'completed', finishReason: 'stop', toolRounds: [],
+  fallbackModel: 'kimi-k3', fallbackFrom: 'claude-opus-5' });
 check('no_empty_cause_tag_without_reason', h.querySelector('.fb-cause') === null);
 
 console.log(out.join('\n'));
@@ -205,7 +213,8 @@ def _run(error_envelope: str = ERROR_ENVELOPE,
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, ROOT, error_envelope, finish_info, REASON_502],
+            ['node', harness, ROOT, TYPED_ERRORS, error_envelope,
+             finish_info, REASON_502],
             capture_output=True, text=True, timeout=90)
     finally:
         try:
@@ -282,23 +291,6 @@ def test_single_cause_formatter_no_duplicate_stripping():
         'finish_info.js contains a private tag-stripping regex — cause '
         'formatting belongs in core/error_envelope.js only')
 
-    # The live streaming banner is the OTHER consumer. It is a separate,
-    # independently-landing surface, so assert its contract only when it is
-    # actually present — this file must stay green on a tree that carries the
-    # settled tag alone.
-    sui = open(os.path.join(JS, 'ui', 'streaming_ui.js')).read()
-    if 'renderModelFallbackBannerHtml' in sui:
-        assert 'fallbackCauseParts(msg)' in sui, (
-            'streaming_ui.js has a fallback banner but does not consume the '
-            'shared formatter — the two surfaces will drift')
-        for stale in ('_fbDistillDetail', '_fbReasonParts', '_fbKindLabel'):
-            assert stale not in sui, (
-                f'streaming_ui.js still carries a private {stale} — the two '
-                f'surfaces will drift')
-        assert '<[^>]*>' not in sui, (
-            'streaming_ui.js contains a private tag-stripping regex — cause '
-            'formatting belongs in core/error_envelope.js only')
-
     css = open(os.path.join(ROOT, 'static', 'styles.css')).read()
     for sel in ('.fb-cause', '.fb-cause-kind', '.fb-cause-detail'):
         assert sel in css, f'styles.css must style {sel}'
@@ -325,9 +317,10 @@ global.formatCny = (n) => '' + n;
 global.calcCostCny = () => 0; global.calcCost = () => 0;
 eval(fs.readFileSync(process.argv[2], 'utf8'));   // finish_info.js ALONE
 const html = renderFinishInfo({ role: 'assistant', content: 'x',
-  finishReason: 'stop', toolRounds: [], fallbackModel: 'kimi-k3',
+  _turnStatus: 'completed', finishReason: 'stop', toolRounds: [],
+  fallbackModel: 'kimi-k3',
   fallbackFrom: 'claude-opus-5', fallbackReason: 'upstream_error: boom',
-  fallbackKind: 'upstream_error' }, false);
+  fallbackKind: 'upstream_error' });
 console.log(html.indexOf('kimi-k3') !== -1 ? 'PASS solo_render_ok'
                                            : 'FAIL solo_render_ok');
 """)

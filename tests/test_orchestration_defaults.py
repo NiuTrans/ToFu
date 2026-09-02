@@ -4,24 +4,29 @@ from __future__ import annotations
 
 import pytest
 
-from lib.orchestration import (
+from lib.orchestration._builtin_definitions import (
+    build_adversarial_definition,
+    build_autopilot_definition,
+    build_blank_definition,
+    build_fanout_definition,
+)
+from lib.orchestration._control_specs import (
     CONTROL_KINDS,
     CONTROL_PARAM_SCHEMA,
     DEFAULT_HUMAN_APPROVAL_TIMEOUT,
     MAX_ARTIFACT_PATH_LEN,
-    MAX_OBJECTIVE_LEN,
+)
+from lib.orchestration._defaults import (
     all_control_node_params,
-    build_adversarial_definition,
-    build_autopilot_definition,
-    build_blank_definition,
-    build_endpoint_definition,
-    build_fanout_definition,
     control_node_params,
     node_authoring_params,
-    node_runtime_defaults,
-    resolve_node_runtime_param,
     role_node_params,
     subflow_node_params,
+)
+from lib.orchestration._role_specs import MAX_OBJECTIVE_LEN
+from lib.orchestration._runtime_params import (
+    node_runtime_defaults,
+    resolve_node_runtime_param,
 )
 
 
@@ -156,13 +161,9 @@ def test_runtime_param_resolver_is_total_for_malformed_legacy_params(
     assert resolve_node_runtime_param(node, key) == expected
 
 
-def test_builtin_loops_reuse_defaults_with_intentional_overrides():
-    endpoint = _node(build_endpoint_definition(max_iterations=7), 'loop')
+def test_autopilot_builtin_reuses_defaults_with_intentional_overrides():
     autopilot = _node(build_autopilot_definition(max_iterations=13), 'loop')
 
-    assert endpoint['params'] == control_node_params(
-        'loop', max_iterations=7, verifier='critic',
-    )
     assert autopilot['params'] == control_node_params(
         'loop', max_iterations=13, verifier='virtual_user',
     )
@@ -170,11 +171,11 @@ def test_builtin_loops_reuse_defaults_with_intentional_overrides():
 
 @pytest.mark.parametrize(
     'builder',
-    [build_endpoint_definition, build_autopilot_definition,
-     build_fanout_definition, build_adversarial_definition],
+    [build_autopilot_definition, build_fanout_definition,
+     build_adversarial_definition],
 )
 def test_runnable_builtin_definitions_are_valid_laid_out_and_detached(builder):
-    from lib.orchestration import validate_definition
+    from lib.orchestration._validate import validate_definition
 
     definition = builder()
     assert validate_definition(definition)['ok'] is True

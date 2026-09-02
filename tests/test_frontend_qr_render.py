@@ -24,12 +24,13 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 pytestmark = pytest.mark.unit
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(_legacy_test_root())
 TOOL_ROUNDS = ROOT / 'static' / 'js' / 'ui' / 'tool_rounds.js'
 I18N = ROOT / 'static' / 'js' / 'i18n.js'
 

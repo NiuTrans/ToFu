@@ -1,12 +1,10 @@
-# Incident anchor: born in commit 374a13e3 — feat(toolbar): three-tier capability dial (Air/Pro/Studio) replacing ...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """tests/test_chat_mode_parity.py — FE↔BE chat-mode table parity.
 
 The three-tier dial has TWO derivation tables that MUST stay byte-equal:
 
   * Backend: ``lib/tasks_pkg/chat_mode.chat_mode_defaults`` (authoritative).
   * Frontend: ``_CHAT_MODE_DEFAULTS`` in
-    ``static/js/main/main_toolbar_ui.js`` (mirror the user sees).
+    retained ``runtime/sections/main/main_toolbar_ui.js`` (mirror the user sees).
 
 If they drift, the UI dial and the resolved tool set silently disagree — the
 exact class of FE/BE desync the owner asked to prevent. This test parses the

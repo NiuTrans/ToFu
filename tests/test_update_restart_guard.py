@@ -29,7 +29,10 @@ to capture the intent instead of re-execing the test process. The approval
 store lives in temp files (module-level paths monkeypatched).
 """
 
+
 from __future__ import annotations
+
+pytest_plugins = ('tests._credential_sidecar',)
 
 import asyncio
 import os
@@ -64,11 +67,6 @@ class UpdateRestartGuardTest(unittest.TestCase):
         _install_shim()
         cls._tmp = tempfile.TemporaryDirectory()
         from lib import api_keys
-        cls._orig_path = api_keys._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(cls._tmp.name, 'api_keys.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        os.environ['TUNNEL_TOKEN'] = 'tt'
 
         # Lifecycle approval store → temp files (never touch the real ones).
         cls._orig_approvals = la._APPROVALS_FILE
@@ -88,14 +86,11 @@ class UpdateRestartGuardTest(unittest.TestCase):
         cls.app.register_blueprint(api_v1_update_bp)
 
         from lib.api_keys import create_key
-        _r, cls.admin_token = create_key(name='admin-test', scopes=['admin'])
+        _r, cls.admin_token = create_key(owner_user_id=1, name='admin-test', scopes=['admin'])
 
     @classmethod
     def tearDownClass(cls):
         from lib import api_keys
-        api_keys._STORE_PATH = cls._orig_path
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
         la._APPROVALS_FILE = cls._orig_approvals
         la._STATE_FILE = cls._orig_state
         cls._tmp.cleanup()

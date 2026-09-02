@@ -42,6 +42,8 @@ from lib.video_analysis._store import (  # noqa: E402,F401
     create_record,
     fail_record,
     get_record,
+    register_video_asset,
+    resolve_owned_video_asset,
     set_phase,
     update_record,
 )
@@ -64,7 +66,8 @@ __all__ = [
     'VIDEO_EXTS',
     'frame_target_for_duration', 'scene_score_threshold', 'scratch_root',
     'video_analysis_enabled', 'video_max_bytes', 'video_max_duration_s',
-    'create_record', 'get_record', 'update_record', 'set_phase',
+    'create_record', 'get_record', 'register_video_asset',
+    'resolve_owned_video_asset', 'update_record', 'set_phase',
     'complete_record', 'fail_record',
     'extract_frames', 'persist_frames', 'transcribe_track',
     'storyboard_enabled', 'storyboard_for_frames',

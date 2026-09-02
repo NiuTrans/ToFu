@@ -239,6 +239,9 @@ def test_the_analyser_re_drives_the_loop_and_appends_the_nudge():
 
     assert decision['action'] == 'continue', (
         'the intent stall must re-drive the loop, not settle as a normal stop')
+    assert [item['role'] for item in messages] == [
+        'user', 'assistant', 'user']
+    assert messages[-2]['content'] == _STALL_TEXT
     assert messages[-1]['role'] == 'user'
     assert messages[-1]['content'] == NUDGE_TEXT
     assert task['_intent_stall_nudge_count'] == 1

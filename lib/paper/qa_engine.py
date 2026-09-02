@@ -1,7 +1,7 @@
 """Background worker for agentic paper Q&A.
 
 Runs the SAME tool-calling loop the report engine proves (web_search /
-fetch_url via ``_execute_report_tool``), but for a single user question. The
+fetch_url via ``execute_paper_tool``), but for a single user question. The
 message context is built by ``qa_context.build_qa_messages`` — full generated
 report + question-relevant paper sections — so the model can answer both
 "what did you mean in the Limitations section?" (from the report) and "find
@@ -18,15 +18,17 @@ import lib as _lib
 from lib.agent_loop import AbortSignal, run_agent_loop
 from lib.llm_dispatch.api import dispatch_stream
 from lib.log import get_logger
+from lib.tasks_pkg.tool_display import tool_round_label as _display_query_for
+from lib.tool_input_repair import parse_and_repair_tool_args
 
-from .qa_runtime import _append_qa_event, _cleanup_stale_qa_tasks
+from .qa_runtime import _append_qa_event, _cleanup_stale_qa_tasks, _qa_runtime
 from .tools import (
-    _execute_report_tool,
-    cap_tool_result,
-    display_query_for as _display_query_for,
+    PaperToolResultBudgetV2,
+    execute_paper_tool,
+    apply_paper_tool_epoch_guidance,
+    build_paper_full_tool_epoch,
     make_paper_exec_shim,
     paper_effective_tool_name,
-    parse_and_repair_tool_args,
 )
 
 logger = get_logger(__name__)
@@ -39,7 +41,8 @@ def _run_qa_task(task, messages):
         task: the Q&A task dict (from ``_new_qa_task``).
         messages: the assembled message list (from ``build_qa_messages``).
     """
-    task['status'] = 'running'
+    task_id = task['task_id']
+    _qa_runtime.mark_running(task_id)
     _append_qa_event(task, {'type': 'status', 'status': 'running'})
 
     model = task['model']
@@ -57,8 +60,24 @@ def _run_qa_task(task, messages):
     abort_signal = AbortSignal.from_event(abort_event)
     # Shim for the SHARED dispatch (full tool set) — one per run; see the
     # report engine for the policy + state-survival rationale.
+    paper_epoch = build_paper_full_tool_epoch(
+        owner_user_id=task.get('_userId'), model=model_name,
+        cfg=task.get('config'))
+    task['toolEpochV2'] = paper_epoch.telemetry()
+    paper_tools = list(paper_epoch.wire_schemas)
+    apply_paper_tool_epoch_guidance(
+        messages, paper_epoch, lang=task.get('lang') or 'en')
     _exec_shim = make_paper_exec_shim(task_id=task['task_id'],
-                                      abort=abort_signal.is_set)
+                                      abort=abort_signal.is_set,
+                                      owner_user_id=task.get('_userId'),
+                                      cfg=task.get('config'),
+                                      tool_epoch=paper_epoch,
+                                      model=model_name)
+    _result_budget = PaperToolResultBudgetV2(
+        owner_user_id=task.get('_userId'), model=model_name,
+        result_envelope=paper_epoch.result_envelope,
+        conv_id=task['task_id'])
+    task['toolResultPolicyV1'] = _result_budget.telemetry()
     # Per-round content buffer (reset each dispatch), shared with the
     # draft-discard hook via a mutable holder — same interim-draft fix as the
     # report engine.
@@ -76,7 +95,8 @@ def _run_qa_task(task, messages):
 
         logger.info('[Paper:QA] Task %s round %d — model=%s msgs=%d',
                     task['task_id'], rnd + 1, model_name, len(messages))
-        return dispatch_stream(
+        from lib.llm.stream_result import ensure_provider_stream_result
+        return ensure_provider_stream_result(dispatch_stream(
             messages,
             on_content=_on_content,
             abort_check=_abort_check,
@@ -87,7 +107,7 @@ def _run_qa_task(task, messages):
             temperature=0,
             thinking_enabled=False,
             log_prefix='[Paper:QA]',
-        )
+        ))
 
     def _begin_tool_round(rnd, msg):
         # Discard any interim draft prose this round emitted (it will be
@@ -118,7 +138,8 @@ def _run_qa_task(task, messages):
         effective_name = paper_effective_tool_name(fn_name)
 
         round_entry = {
-            'roundNum': rn, 'toolName': effective_name, 'query': display_query,
+            'roundNum': rn, 'llmRound': rnd,
+            'toolName': effective_name, 'query': display_query,
             'toolCallId': tc_id,
             'toolArgs': (fn_args_raw if isinstance(fn_args_raw, str)
                          else json.dumps(fn_args, ensure_ascii=False)),
@@ -132,7 +153,7 @@ def _run_qa_task(task, messages):
         })
 
         tool_t0 = time.time()
-        result, display_results, search_diag, engine_breakdown, verticals = _execute_report_tool(
+        result, display_results, search_diag, engine_breakdown, verticals = execute_paper_tool(
             fn_name, fn_args_raw, user_question=user_question,
             abort=abort_signal.is_set,
             exec_shim=_exec_shim, round_entry=round_entry)
@@ -140,7 +161,9 @@ def _run_qa_task(task, messages):
         logger.info('[Paper:QA:Tool] %s → %d chars in %.1fs',
                     fn_name, len(result), tool_elapsed)
 
-        round_entry['status'] = 'done'
+        tool_status = ('rejected' if round_entry.get('status') == 'rejected'
+                       else 'done')
+        round_entry['status'] = tool_status
         round_entry['_elapsed'] = f'{tool_elapsed:.1f}s'
         round_entry['results'] = display_results
         if engine_breakdown:
@@ -153,7 +176,10 @@ def _run_qa_task(task, messages):
             'type': 'tool_done', 'roundNum': rn, 'toolName': effective_name,
             'toolCallId': tc_id, 'elapsed': round(tool_elapsed, 1),
             'toolContent': result[:4000], 'results': display_results,
+            'status': tool_status,
         }
+        if round_entry.get('contractError'):
+            done_ev['contractError'] = round_entry['contractError']
         if search_diag:
             done_ev['searchDiag'] = search_diag
         if engine_breakdown:
@@ -162,34 +188,47 @@ def _run_qa_task(task, messages):
             done_ev['verticals'] = verticals
         _append_qa_event(task, done_ev)
 
-        messages.append({
-            'role': 'tool', 'tool_call_id': tc_id,
-            'content': cap_tool_result(result, fn_name, tc_id,
-                                       conv_id=f"paper-qa-{task['paper_hash']}",
-                                       can_read=True),
-        })
+        _result_budget.append(
+            messages, round_index=rnd, tool_name=fn_name,
+            tool_call_id=tc_id, content=result, round_entry=round_entry,
+            world_version=str(task.get('_worldVersion') or ''),
+            tool_arguments=fn_args)
 
     try:
         _outcome = run_agent_loop(
             abort=abort_signal,
-            round_tools=_QA_TOOLS,
+            round_tools=paper_tools,
             dispatch=_dispatch,
             execute_tool=_execute_tool,
             on_tool_round=_begin_tool_round,
+            on_round_end=_result_budget.finish_round,
         )
         if _outcome.completed:
             logger.info('[Paper:QA] Task %s — answer complete (%d chars, %.1fs)',
                         task['task_id'], len(full_content), time.time() - t0)
-        elif _outcome.aborted:
+        if _outcome.aborted:
             logger.info('[Paper:QA] Task %s aborted', task['task_id'])
+            _qa_runtime.abort(task_id)
+            _qa_runtime.finish(
+                task_id,
+                terminal_event_fields={
+                    'type': 'aborted', 'partial': full_content,
+                    'paperHash': task['paper_hash'],
+                },
+            )
+            return
 
         elapsed = time.time() - t0
         logger.info('[Paper:QA] Task %s complete — %d chars, %.1fs',
                     task['task_id'], len(full_content), elapsed)
-        task['status'] = 'done'
-        task['finished_at'] = time.time()
-        _append_qa_event(task, {'type': 'done', 'answer': full_content,
-                                'paperHash': task['paper_hash']})
+        _qa_runtime.finish(
+            task_id,
+            result=full_content,
+            terminal_event_fields={
+                'type': 'done', 'answer': full_content,
+                'paperHash': task['paper_hash'],
+            },
+        )
 
     except Exception as e:
         logger.error('[Paper:QA] Task %s failed after %.1fs: %s',
@@ -197,16 +236,14 @@ def _run_qa_task(task, messages):
         from lib.error_envelope import from_exception as _err_from_exc
         envelope = _err_from_exc(
             e, model='', context='paper-qa', source='routes.paper:qa')
-        task['status'] = 'error'
-        task['error'] = envelope
-        task['finished_at'] = time.time()
-        _append_qa_event(task, {'type': 'error', 'error': envelope})
+        _qa_runtime.finish(
+            task_id,
+            error=envelope,
+            error_context='paper-qa',
+        )
     finally:
         _cleanup_stale_qa_tasks()
 
 
-# Tool list — the FULL chat-tier set (report engine parity): search/fetch
-# plus read_files / code_exec / memory / todo / scheduler / …, assembled via
-# the shared registry. The research-only engines (insight/recommend/ideate)
-# deliberately keep the narrow ``_REPORT_TOOLS``.
-from .prompts import _FULL_REPORT_TOOLS as _QA_TOOLS  # noqa: E402
+# Q&A uses the same full executable catalog plus bounded Tool Search projection
+# as the report engine. Research-only engines keep the narrow search/fetch set.

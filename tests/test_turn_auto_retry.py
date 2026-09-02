@@ -33,6 +33,7 @@ from lib.tasks_pkg.turn_retry import (  # noqa: E402
     auto_turn_retry_max,
     should_auto_retry_turn,
 )
+from tests._registered_chat_task import registered_chat_task  # noqa: E402
 
 # ── The persistent kinds we must NEVER auto-retry (a re-run just re-fails). ──
 _NON_RETRY_KINDS = [
@@ -141,7 +142,8 @@ def _fresh_task(err_kind='ratelimit', pristine=None):
 def test_seam_retries_and_reinvokes(monkeypatch):
     """A retryable error → _maybe_auto_retry_turn returns True, emits
     retry_reset + phase, and re-invokes run_task exactly once."""
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._finalize as orch
+    import lib.tasks_pkg.orchestrator._ports as orchestrator_ports
     import lib.tasks_pkg.turn_retry as tr
 
     calls = {'n': 0}
@@ -149,12 +151,13 @@ def test_seam_retries_and_reinvokes(monkeypatch):
     def _spy_run_task(task):
         calls['n'] += 1
 
-    monkeypatch.setattr(orch, 'run_task', _spy_run_task)
+    monkeypatch.setattr(orchestrator_ports, 'rerun_task', _spy_run_task)
     # Zero backoff so the test is instant.
     monkeypatch.setattr(tr, 'auto_turn_backoff_seconds', lambda attempt: 0.0)
 
     task = _fresh_task('ratelimit')
-    retried = orch._maybe_auto_retry_turn(task, cfg={})
+    with registered_chat_task(task):
+        retried = orch._maybe_auto_retry_turn(task, cfg={})
     assert retried is True
     assert calls['n'] == 1, 'run_task must be re-invoked once'
 
@@ -176,7 +179,8 @@ def test_seam_restores_pristine_input_on_retry(monkeypatch):
     """The re-run must start from the PRISTINE input, not the failed attempt's
     system-context-injected / partial-round write-back. (NC: dropping the
     restore line leaves the injected 3-message list.)"""
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._finalize as orch
+    import lib.tasks_pkg.orchestrator._ports as orchestrator_ports
     import lib.tasks_pkg.turn_retry as tr
 
     seen = {}
@@ -184,7 +188,7 @@ def test_seam_restores_pristine_input_on_retry(monkeypatch):
     def _spy_run_task(task):
         seen['messages'] = list(task['messages'])
 
-    monkeypatch.setattr(orch, 'run_task', _spy_run_task)
+    monkeypatch.setattr(orchestrator_ports, 'rerun_task', _spy_run_task)
     monkeypatch.setattr(tr, 'auto_turn_backoff_seconds', lambda attempt: 0.0)
 
     pristine = [{'role': 'user', 'content': 'the original question'}]
@@ -197,10 +201,12 @@ def test_seam_restores_pristine_input_on_retry(monkeypatch):
 def test_seam_non_retryable_finalizes(monkeypatch):
     """A persistent error → returns False, does NOT re-invoke run_task, so the
     caller finalizes and surfaces the error for manual retry."""
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._finalize as orch
+    import lib.tasks_pkg.orchestrator._ports as orchestrator_ports
 
     calls = {'n': 0}
-    monkeypatch.setattr(orch, 'run_task', lambda task: calls.__setitem__('n', calls['n'] + 1))
+    monkeypatch.setattr(orchestrator_ports, 'rerun_task',
+                        lambda task: calls.__setitem__('n', calls['n'] + 1))
 
     task = _fresh_task('content_filter')
     retried = orch._maybe_auto_retry_turn(task, cfg={})
@@ -212,11 +218,13 @@ def test_seam_non_retryable_finalizes(monkeypatch):
 
 def test_seam_abort_during_backoff_finalizes(monkeypatch):
     """If the user aborts during the backoff sleep, do NOT re-run."""
-    import lib.tasks_pkg.orchestrator as orch
-    import lib.tasks_pkg.stream_handler as sh
+    import lib.tasks_pkg.orchestrator._finalize as orch
+    import lib.tasks_pkg.orchestrator._ports as orchestrator_ports
+    import lib.tasks_pkg.stream_handler._budget as sh
 
     calls = {'n': 0}
-    monkeypatch.setattr(orch, 'run_task', lambda task: calls.__setitem__('n', calls['n'] + 1))
+    monkeypatch.setattr(orchestrator_ports, 'rerun_task',
+                        lambda task: calls.__setitem__('n', calls['n'] + 1))
 
     task = _fresh_task('network')
 
@@ -231,16 +239,42 @@ def test_seam_abort_during_backoff_finalizes(monkeypatch):
 
 def test_seam_budget_exhausted_finalizes(monkeypatch):
     """When _auto_turn_retry_count already at cap, no retry."""
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._finalize as orch
+    import lib.tasks_pkg.orchestrator._ports as orchestrator_ports
 
     calls = {'n': 0}
-    monkeypatch.setattr(orch, 'run_task', lambda task: calls.__setitem__('n', calls['n'] + 1))
+    monkeypatch.setattr(orchestrator_ports, 'rerun_task',
+                        lambda task: calls.__setitem__('n', calls['n'] + 1))
 
     task = _fresh_task('ratelimit')
     task['_auto_turn_retry_count'] = _AUTO_TURN_RETRY_MAX
     retried = orch._maybe_auto_retry_turn(task, cfg={})
     assert retried is False
     assert calls['n'] == 0
+
+
+def test_partial_stream_exhaustion_never_wipes_prefix(monkeypatch):
+    """The generic retry seam must not clear a preserved partial response or
+    replay already completed work after lossless continuations are exhausted."""
+    import lib.tasks_pkg.orchestrator._finalize as orch
+    import lib.tasks_pkg.orchestrator._ports as orchestrator_ports
+
+    calls = {'n': 0}
+    monkeypatch.setattr(orchestrator_ports, 'rerun_task',
+                        lambda task: calls.__setitem__('n', calls['n'] + 1))
+
+    task = _fresh_task('premature_close')
+    task['_suppress_whole_turn_retry_to_preserve_partial'] = True
+    original_content = task['content']
+    original_messages = list(task['messages'])
+    retried = orch._maybe_auto_retry_turn(task, cfg={})
+
+    assert retried is False
+    assert calls['n'] == 0
+    assert task['content'] == original_content
+    assert task['messages'] == original_messages
+    assert task['error']['kind'] == 'premature_close'
+    assert task['events'] == []
 
 
 if __name__ == '__main__':

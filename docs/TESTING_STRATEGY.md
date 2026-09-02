@@ -1,94 +1,148 @@
-# TESTING_STRATEGY.md — Tofu 测试体系分层战略
+# Testing strategy
 
-> 2026-08-14 Vite/ESM 更新版。本文是测试工作的 north star：新增测试前先对层入座。
+Tests protect product behavior and architecture ownership. They are not an
+archive of incidents, implementation line numbers, or past migrations.
 
----
+## Test layers
 
-## 1. 家底盘点（2026-08-04 实测）
-
-| 层 | 数量 | 机制 |
+| Layer | Purpose | Typical command |
 |---|---|---|
-| 后端单元 | ~950 套件 | pytest + conftest 自动打标（无标记者兜底 unit） |
-| 集成/API | ~40 套件 | Flask test client + mock LLM |
-| 守护棘轮 | ~113 套件 | drift/parity/contract/invariant，只降不升 |
-| 前端 ESM 契约 | 24 个现行文件 / 102 用例 | owner 隔离、类型检查、Vite manifest、缓存/MIME、无 Node 发布 |
-| 前后端契约缝 | Vite + API transport | `api/transport.ts` 路径 ⇄ live url_map；manifest ⇄ 静态服务 |
-| 真浏览器 E2E | 11 条主流程 | Playwright；真 app + 真浏览器 + stub LLM，CI 覆盖 Chromium/Firefox/WebKit |
-| classic harness | 退休，不进现行门禁 | 依赖已删除 `static/js` 文件顺序的历史测试不代表发布图 |
+| Unit | Pure policy, reducer, parser, repository and lifecycle behavior | `make test-unit` |
+| API | Authenticated HTTP plus application/storage integration | `make test-api` |
+| Frontend owner | TypeScript owner, generated artifact and serving contracts | `make test-frontend` |
+| Browser journey | A small set of user-critical flows through the real app | `make test-e2e` |
+| Visual | Layout and interaction behavior requiring a browser | `make test-visual` |
+| Supply chain | CycloneDX plus source/image vulnerability, secret and deployment scans | CI `supply-chain` + `container` jobs |
+| Release | All current layers | `make test-all` |
 
-## 2. 业界对照（一手源）
+Unit and API suites are the main diagnostic layers. Browser journeys cover
+cross-boundary user outcomes that cannot be proven cheaply below the browser;
+they are deliberately few and high value.
 
-| 做法 | 我们的对齐状态 |
-|---|---|
-| 金字塔 70/20/10（[Google](https://testing.googleblog.com/2015/04/just-say-no-to-more-end-to-end-tests.html)） | 比例大致符合；E2E 偏薄但在正确的一侧 |
-| 奖杯「mostly integration」（[Dodds](https://kentcdodds.com/blog/write-tests)） | ESM owner harness + 浏览器旅程覆盖模块组合 |
-| S/M/L hermetic 分级（[Google Test Sizes](https://testing.googleblog.com/2010/12/test-sizes.html)） | markers(unit/api/visual/slow/live_llm) 已是同构物 |
-| 契约测试：monolith 用静态契约而非 Pact（[Fowler](https://martinfowler.com/articles/consumerDrivenContracts.html)） | **已在做**（路径⇄路由表），P1 升级到字段形状 |
-| flake 隔离+SLA+删除（[Google Flaky](https://testing.googleblog.com/2016/05/flaky-tests-at-google-and-how-we.html)） | 有「预存红」三板斧文化，未制度化 SLA → P2 |
-| 覆盖率只作信号（[Fowler](https://martinfowler.com/bliki/TestCoverage.html)） | 遵守，不设全仓门槛 |
-| 测试选择（[Google Taming](https://doi.org/10.1109/ICSE-SEIP.2017.16)、[Meta](https://arxiv.org/abs/1810.05286)、微软 Herzig ICSE'15） | **先量墙钟时间**，>15min 才做路径映射选择；不上 ML |
+## Iteration ladder
 
-## 3. 三个真缺口（按 ROI 排序）
+1. Reproduce and run the smallest test at the owning boundary.
+2. Run neighboring contract tests when data crosses a module/process boundary.
+3. Regenerate and check artifacts when a source contract changes.
+4. Run the domain gate after focused tests pass.
+5. Run broad gates once the worktree is stable.
 
-1. **旧 harness 漂移**：依赖 classic 文件路径、拼接顺序或 window owner 的测试
-   已退出现行门禁；`make test-frontend` 只运行能描述发布 ESM 图的显式清单。
-2. **断言地板是虚的**：`run_harness` 默认 `min_pass=1`，且用
-   `output.count('PASS')` 子串计数（非行锚定）；102 个文件中只有 60 个显式
-   声明 min_pass —— 约 42 个文件的地板是「至少 1 行像 PASS 的输出」。
-3. **真浏览器主干道巡检薄**：e2e hermetic 车道只有 1 条旅程；业界惯例
-   10–50 条关键旅程守 release 闸。
+`make test-affected` is a transparent selection hint for the inner loop. It
+does not replace domain or release gates. Do not rerun an unchanged suite.
 
-## 4. 分层方案（owner 拍板）
+## What a durable test asserts
 
-### P0（本批）
-- **P0-1 前端门禁必须响亮**：`make test-frontend` 与 CI frontend job 运行
-  显式 ESM 契约清单；Node/jsdom/esbuild 缺失时硬失败。
-- **P0-2 结构化断言地板**：`_jsdom_harness.js` 的 `report()` 追加结构化
-  尾行 `__JSDOM_RESULT__ {"pass":N,"fail":M}`；`run_harness` 优先解析尾行
-  （缺失走行锚定计数，不再子串计数）；新增 `expect_pass=` 精确申报；新棘轮
-  扫描调用点，未申报 expect_pass 的数量只降不升——新套件必须申报。
-- **P0-3 浏览器主干道**：以 `test_e2e_smoke.py` 为母版扩到 10–20 条关键旅程
-  （发消息→流式→工具卡→中止 / 会话恢复 / 设置保存 / 上传），接 release 闸。
-  先实测 `make test-unit` 墙钟时间，再定是否做按路径的选择运行。
+- user-visible outcome or stable domain invariant;
+- owner identity and authorization;
+- typed failure and actionable recovery;
+- transaction rollback and atomic event capture;
+- command idempotency and lost-ack behavior;
+- cancellation and resource disposal;
+- bounded payload or work where growth is a risk.
 
-### P1 ✅(2026-08-04 落地 tests/test_api_field_contract.py)
-- 契约守卫从「路径存在」升级到「字段形状」：只钉 top-N 核心端点的响应字段
-  （轻量 schema pin，**不上 Pact**）。消费者驱动——只钉前端真读的字段,
-  响应多出新字段不破钉(防快照剧场);checker 自带 NEUTER 咬合自证。
+Prefer public functions, repository protocols, generated DTOs, and real module
+graphs. Avoid private source positions, exact comment text, copied
+implementations, magic output counts, and compatibility behavior already
+removed.
 
-### P2 ✅(2026-08-04 落地,防负优化制度化)
-- **①棘轮殡葬审计**(`scripts/ratchet_audit.py` → `docs/RATCHET_AUDIT.md`):
-  152 个守护套件机械分类——锚定 92(NEUTER 咬合证明/事故引用 pt_/commit/
-  JOURNAL/事故/家族锚×21)、殡葬候选 60。候选**不自动删**(删保护要人判),
-  逐个:补事故链接/补 NEUTER/降级/删除。增量由
-  `tests/test_ratchet_incident_link.py` 守:**新守护套件必须带锚,无锚禁入**
-  (存量祖父化于 tests/_ratchet_guard_baseline.json);FAMILY_ANCHORS 工件
-  必须在库(防洗白)。
-- **②flake/预存红三步(制度化):** 隔离—— flake 或预存红先挂板票
-  (三态分诊:本批引入/预存/兄弟 churn,票据须带纯净 HEAD 复现证据);
-  SLA—— 自挂票起 7 天内根修或方向对齐;删除—— SLA 过期未处置,默认
-  删除该测试(一个能被无视的测试比没有更糟,Google flake 政策同义)。
-  季度重跑 `ratchet_audit.py --write-docs` 刷新候选清单。
-- **③按路径选择运行**(`scripts/test_select.py` + `make test-affected`):
-  静态反向索引(测试文件→AST import+字面路径引用,mtime 缓存 ~4s 冷/
-  <1s 热),改动∩引用=入选 + 爆炸半径表(conftest→全量,jsdom 助手/
-  api.js→前端族)+ 守卫核心常跑;选择超 40% 直接跑全量。**不上 ML**——
-  透明映射可审计,15k 规模用不上预测模型。全量层(unit 19m58s 实测)
-  仍是 CI/预推闸门;选择器只做迭代内环。
+When a source-level architecture ratchet is necessary, assert a durable
+boundary (for example, “routes contain no SQL” or “generated output is
+current”), not a historical incident ID. A ratchet without a behavioral or
+ownership explanation should be deleted.
 
-## 5. 明确不做（防负优化清单）
+## Frontend policy
 
-- 不追全仓覆盖率数字（Goodhart）；覆盖率只看新代码 diff。
-- 不上 Pact（单体+单消费者，静态契约已够）。
-- 不上 ML 测试选择（15k 规模全量跑得起；先实测再议）。
-- 不把 E2E 扩成主防线（E2E 只守主干道，比例不逾 10%）。
-- 新测试默认 failing-first；写不红的测试不进库（NEUTER 纪律延续）。
+Frontend tests exercise the Vite/ESM sources and generated delivery graph.
+They may use a real browser or an isolated module harness. Tests that rebuild
+deleted classic file graphs, concatenate independently bundled registries, or
+publish private owners onto `window` do not describe the shipped application.
 
-## 6. 操作细则
+Run these before the frontend test lane:
 
-- 跑测试统一 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` 或 Makefile 的 `-p no:napari` 基底。
-- 每批改动后必跑 `--collect-only` 闸。
-- 期望前端套件执行的环境先运行 `npm run check:frontend`，再运行
-  `make test-frontend`；CI 将同一份 `static/vite` 工件交给三浏览器 E2E。
-- 新 ESM owner 隔离测试使用 `tests/_esm_feature_harness.py` 注入私有 service
-  port；禁止为测试把 owner 重新发布到 `window`。
+```bash
+npm run check:runtime
+npm run check:styles
+npm run check:conversation-sync
+npm run typecheck:modules
+```
+
+## Hermeticity and markers
+
+- `unit`: no external service and no real model.
+- `api`: local test client plus controlled storage/LLM seams.
+- `visual`: real browser; external services remain stubbed unless explicitly
+  marked otherwise.
+- `slow`: expensive but deterministic local work.
+- `live_llm`: opt-in only and never a release prerequisite.
+
+Tests own temporary storage and processes and clean them up. Network, clock,
+randomness, provider, and browser dependencies are injected or bounded.
+
+## Parallel execution policy
+
+`pyproject.toml` is the single owner of pytest's `worksteal` distribution
+mode. A bare `python -m pytest` stays serial; the Make, CI, and affected-test
+entry points opt into xdist with `-n`. Tests must therefore be correct when
+collected in the same order but executed in any order on any worker.
+
+`-n auto` is resource-aware rather than raw host-CPU fan-out. The xdist hook in
+`tests/conftest.py` reuses the runtime affinity/cgroup CPU and live-memory probe,
+caps the zero-configuration result at four workers, and avoids launching more
+workers than explicitly selected test files. This preserves headroom for the
+OS, browser, and a running personal Tofu instance. `JOBS=N` is the explicit
+dedicated-host override; `JOBS=0` is the debugging/serial override.
+
+Every worker owns separate data, storage, log, and temporary roots. Tests may
+not mutate shipped source or use a fixed host-global port as an implicit lock.
+`loadscope`, `loadfile`, and `loadgroup` are optimization tools, not correctness
+barriers: grouping one file does not prevent another worker from touching the
+same external resource.
+
+The `serial` marker is a narrow unit-test exception for a host-global resource,
+an intentional saturation test, or a timing contract that cannot safely
+overlap the parallel unit lane. Each new use carries an inline resource reason.
+`test-unit` runs those cases in a separate no-xdist phase; isolation work
+should remove the marker rather than broaden the exception.
+
+## Flakes and pre-existing failures
+
+A failing test has one of three states: introduced by the change, reproducible
+before the change, or caused by concurrent worktree changes. Record the exact
+command and evidence. Fix or remove a flaky test promptly; retries and ignored
+failures are not correctness.
+
+Broad results in a concurrently edited worktree are a moving target. Report the
+tested revision/state and never claim an unrelated failure was fixed.
+
+## Supply-chain release gate
+
+CI generates a CycloneDX document for the checked-out dependency graph and for
+each API/worker release candidate. It then fails on HIGH or CRITICAL Python, npm,
+or operating-system vulnerabilities, checked-in secrets, and deployment
+misconfiguration. The scanner action is commit-pinned and its binary version is
+fixed in `.github/workflows/ci.yml`; changing either is a reviewed dependency
+update. Local data, logs, generated Vite assets, dependency directories, and
+the nested `codex/` checkout are excluded because they are not release inputs.
+
+The developer-runtime tag workflow repeats the source/secret gates, builds and
+scans the public rootless `agent` target, and publishes both repository and
+agent CycloneDX documents with the release. Package and image publish jobs all
+depend on that tag-local gate; a green branch run is not treated as release
+evidence.
+
+An exception is never implemented with `continue-on-error` or a blanket scan
+disable. Record an exact advisory/rule waiver with an expiry and removal owner,
+then keep SBOM upload enabled so the accepted release remains auditable.
+
+## Adding or changing tests
+
+1. Put the test beside the owning domain and choose the narrowest marker.
+2. Demonstrate that it fails when the intended invariant is removed.
+3. Assert outcome and error semantics, not implementation narration.
+4. Reuse shared fixtures for auth, storage, browser, and model behavior.
+5. Give spawned processes and waits explicit timeouts and cleanup.
+6. Delete tests whose protected surface is deleted.
+
+Test-suite health is checked mechanically by `scripts/audit_tests.py` and
+`tests/test_suite_health_ratchet.py`; the ratchet covers executable quality
+signals, not incident metadata.

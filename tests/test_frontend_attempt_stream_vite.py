@@ -1,17 +1,162 @@
-"""Real-browser contracts for the typed V2 attempt event transport."""
+"""Real-browser contracts for typed turn state and conversation sync."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+
+from tests._runtime_sections import native_module_path
 
 
 pytestmark = pytest.mark.visual
+ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_attempt_stream_owns_cursor_recovery_and_terminal_close(
+@pytest.fixture(autouse=True)
+def install_native_test_owners(page):
+    """Exercise typed owners directly; the public bridge no longer exports internals."""
+    sources = (
+        ('conversation-sync-browser.js', 'frontend/src/core/conversation-sync.ts'),
+        ('send-startup-browser.js', 'frontend/src/core/send-startup.ts'),
+        ('turn-projection-browser.js', 'frontend/src/core/turn-projection.ts'),
+        ('turn-runtime-browser.js', 'frontend/src/core/turn-runtime.ts'),
+        ('turn-state-browser.js', 'frontend/src/core/turn-state.ts'),
+        ('turn-presentation-browser.js', 'frontend/src/core/turn-presentation.ts'),
+        ('lifecycle-browser.js', 'frontend/src/lifecycle.ts'),
+    )
+    for name, source in sources:
+        page.add_script_tag(path=native_module_path(name, source))
+
+
+def test_runtime_store_is_published_before_reentrant_initial_health(
         page, assert_no_js_errors):
     page.wait_for_function(
-        "typeof window.TofuModules?.createAttemptEventStream === 'function'",
+        "typeof window.createConversationTurnRuntime === 'function'",
+        timeout=30_000,
+    )
+
+    result = page.evaluate(r"""
+    async () => {
+      let runtime;
+      let idleHealthCount = 0;
+      let storeReadFromHealth = null;
+      let hydrateFromHealth = null;
+      let snapshotCount = 0;
+      runtime = window.createConversationTurnRuntime({
+        api: {
+          async snapshot(conversationId) {
+            snapshotCount += 1;
+            return {
+              ok: true,
+              contract: 'tofu.conversation-sync.snapshot/v1',
+              conversationId,
+              conversationRevision: 1,
+              syncSeq: 1,
+              cursor: 'cursor-1',
+              serverBootId: 'boot-test',
+              heartbeatIntervalMs: 15000,
+              settings: {},
+              turns: [],
+              attempts: [],
+            };
+          },
+          eventsUrl() { return '/unused'; },
+        },
+        onHealth(conversationId, health) {
+          if (health.state !== 'idle' || idleHealthCount > 0) return;
+          idleHealthCount += 1;
+          storeReadFromHealth = runtime.ensureRuntimeStore(conversationId);
+          hydrateFromHealth = runtime.hydrateConversation({
+            id: conversationId,
+            createdAt: 1,
+          });
+        },
+      });
+      const store = runtime.ensureRuntimeStore('conv-reentrant-health');
+      await hydrateFromHealth;
+      return {
+        idleHealthCount,
+        reusedPublishedStore: storeReadFromHealth === store,
+        snapshotCount,
+      };
+    }
+    """)
+
+    assert result == {
+        'idleHealthCount': 1,
+        'reusedPublishedStore': True,
+        'snapshotCount': 1,
+    }
+
+
+def test_snapshot_flight_is_claimed_before_reentrant_health_callback(
+        page, assert_no_js_errors):
+    page.wait_for_function(
+        "typeof window.ConversationSyncCoordinator === 'function'",
+        timeout=30_000,
+    )
+
+    result = page.evaluate(r"""
+    async () => {
+      let releaseSnapshot;
+      const snapshotGate = new Promise(resolve => { releaseSnapshot = resolve; });
+      let snapshotCount = 0;
+      let projectionCount = 0;
+      let didReenter = false;
+      let reentrantHydrate = null;
+      let coordinator;
+      coordinator = new window.ConversationSyncCoordinator({
+        conversationId: 'conv-reentrant-snapshot',
+        api: {
+          async snapshot(conversationId) {
+            snapshotCount += 1;
+            await snapshotGate;
+            return {
+              ok: true,
+              contract: 'tofu.conversation-sync.snapshot/v1',
+              conversationId,
+              conversationRevision: 1,
+              syncSeq: 1,
+              cursor: 'cursor-1',
+              serverBootId: 'boot-test',
+              heartbeatIntervalMs: 15000,
+              settings: {},
+              turns: [],
+              attempts: [],
+            };
+          },
+          eventsUrl() { return '/unused'; },
+        },
+        onSnapshot() { projectionCount += 1; },
+        onAttemptEvent() { return true; },
+        onTurnDelta() { return true; },
+        onHealth(_conversationId, health) {
+          if (health.state !== 'connecting' || didReenter) return;
+          didReenter = true;
+          reentrantHydrate = coordinator.hydrate(false);
+        },
+      });
+
+      const initialHydrate = coordinator.hydrate(false);
+      releaseSnapshot();
+      await Promise.all([initialHydrate, reentrantHydrate]);
+      coordinator.close();
+      return { didReenter, snapshotCount, projectionCount };
+    }
+    """)
+
+    assert result == {
+        'didReenter': True,
+        'snapshotCount': 1,
+        'projectionCount': 1,
+    }
+
+
+def test_conversation_sync_owns_cursor_ordering_and_snapshot_recovery(
+        page, assert_no_js_errors):
+    page.wait_for_function(
+        "typeof window.ConversationSyncCoordinator === 'function'",
         timeout=30_000,
     )
 
@@ -27,113 +172,138 @@ def test_attempt_stream_owns_cursor_recovery_and_terminal_close(
           this.onerror = null;
         }
         close() { this.closed = true; }
-        emit(name, body) {
+        emit(name, body, lastEventId = '') {
           this.dispatchEvent(new MessageEvent(name, {
             data: JSON.stringify(body),
+            lastEventId,
           }));
         }
       }
 
-      const statuses = [];
+      const healthStates = [];
       const events = [];
+      const deltas = [];
       const snapshots = [];
-      const terminals = [];
-      const continuations = [];
       const protocolErrors = [];
-      let source;
-      let fetchCount = 0;
-      let releaseSnapshot;
-
-      const connection = window.TofuModules.createAttemptEventStream({
-        attemptId: 'attempt-a',
-        url: '/attempts/attempt-a/events?after=2',
-        after: 2,
+      const sources = [];
+      let snapshotCount = 0;
+      const api = {
+        async snapshot(conversationId) {
+          snapshotCount += 1;
+          const syncSeq = snapshotCount === 1 ? 2 : 10;
+          return {
+            ok: true,
+            contract: 'tofu.conversation-sync.snapshot/v1',
+            conversationId,
+            conversationRevision: syncSeq,
+            syncSeq,
+            cursor: `cursor-${syncSeq}`,
+            serverBootId: 'boot-test',
+            heartbeatIntervalMs: 15000,
+            settings: {},
+            turns: [], attempts: [],
+          };
+        },
+        eventsUrl(conversationId, after) {
+          return `/conversations/${conversationId}/events?after=${after}`;
+        },
+      };
+      const coordinator = new window.ConversationSyncCoordinator({
+        conversationId: 'conv-a',
+        api,
         eventSourceFactory(url) {
-          source = new FakeEventSource(url);
+          const source = new FakeEventSource(url);
+          sources.push(source);
           return source;
         },
-        onTransport(status) { statuses.push(status); },
-        onEvent(event) { events.push(event); },
-        fetchSnapshot() {
-          fetchCount += 1;
-          return new Promise(resolve => { releaseSnapshot = resolve; });
-        },
         onSnapshot(snapshot) { snapshots.push(snapshot); },
-        onTerminal(event) { terminals.push(event); },
-        onContinuation(value) { continuations.push(value); },
+        onAttemptEvent(event) { events.push(event); return true; },
+        onTurnDelta(delta) { deltas.push(delta); return true; },
+        onHealth(_conversationId, health) { healthStates.push(health.state); },
         onProtocolError(error) { protocolErrors.push(error.message); },
       });
 
-      source.onopen();
-      source.emit('projection_updated', {
-        type: 'projection_updated', seq: 5, attemptId: 'attempt-a',
-        requestId: 'req-1', payload: { projection: { content: 'hello' } },
-      });
-      source.emit('status_changed', {
-        type: 'status_changed', seq: 3, attemptId: 'attempt-a',
-        payload: { status: 'running' },
-      });
-      source.emit('projection_updated', {
-        type: 'projection_updated', seq: 99, attemptId: 'attempt-other',
-        payload: { projection: { content: 'wrong stream' } },
-      });
-      source.onmessage(new MessageEvent('message', { data: '{bad json' }));
-
-      source.onerror();
-      source.onerror();
-      await Promise.resolve();
-      const fetchCountBeforeRelease = fetchCount;
-      releaseSnapshot({ conversationRevision: 9, turns: [] });
+      await coordinator.hydrate(true);
+      const first = sources[0];
+      first.onopen();
+      first.emit('attempt.event', {
+        contract: 'tofu.conversation-sync.event/v1',
+        type: 'attempt.event', conversationId: 'conv-a', syncSeq: 3,
+        occurredAt: 3, turnId: 'turn-a', attemptId: 'attempt-a',
+        payload: { event: {
+          conversationId: 'conv-a', turnId: 'turn-a', attemptId: 'attempt-a',
+          seq: 1, projectionRevision: 1, type: 'projection_updated',
+          payload: { projection: { content: 'hello' } },
+        } },
+      }, 'cursor-3');
+      first.emit('turn.patch', {
+        contract: 'tofu.conversation-sync.event/v1',
+        type: 'turn.patch', conversationId: 'conv-a', syncSeq: 4,
+        occurredAt: 4, turnId: 'turn-a', payload: {
+          conversationRevision: 4,
+          turnPatches: [{
+            turnId: 'turn-a', baseProjectionRevision: 1,
+            targetProjectionRevision: 2, updatedAt: 4,
+            projectionPatch: {
+              version: 1, baseRevision: 1, targetRevision: 2,
+              operations: [{ op: 'append_text', path: ['content'], value: '!' }],
+            },
+          }],
+        },
+      }, 'cursor-4');
+      // Sequence 6 skips 5. The coordinator must close the stale pipe,
+      // recover one authoritative snapshot, and resume from its opaque cursor.
+      first.emit('turn.upsert', {
+        contract: 'tofu.conversation-sync.event/v1',
+        type: 'turn.upsert', conversationId: 'conv-a', syncSeq: 6,
+        occurredAt: 6, payload: { turns: [] },
+      }, 'cursor-6');
       await new Promise(resolve => setTimeout(resolve, 0));
-
-      source.emit('terminal_settlement', {
-        type: 'terminal_settlement', seq: 6, attemptId: 'attempt-a',
-        payload: { settlement: { continuation: { attemptId: 'attempt-b' } } },
-      });
-      connection.close();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const second = sources[1];
+      coordinator.close();
 
       return {
-        url: source.url,
-        statuses,
+        firstUrl: first.url,
+        secondUrl: second.url,
         eventTypes: events.map(event => event.type),
-        cursor: connection.cursor,
-        fetchCountBeforeRelease,
+        deltaPatchTargets: deltas.flatMap(delta => delta.turnPatches || [])
+          .map(change => change.targetProjectionRevision),
+        cursor: coordinator.cursor,
         snapshotCount: snapshots.length,
-        terminalCount: terminals.length,
-        continuationIds: continuations.map(value => value.attemptId),
         protocolErrorCount: protocolErrors.length,
-        closed: source.closed,
+        firstClosed: first.closed,
+        secondClosed: second.closed,
+        finalHealth: healthStates[healthStates.length - 1],
       };
     }
     """)
 
     assert result == {
-        'url': '/attempts/attempt-a/events?after=2',
-        'statuses': ['connecting', 'connected', 'reconnecting', 'reconnecting'],
-        'eventTypes': [
-            'projection_updated', 'status_changed', 'terminal_settlement',
-        ],
-        'cursor': 6,
-        'fetchCountBeforeRelease': 1,
-        'snapshotCount': 1,
-        'terminalCount': 1,
-        'continuationIds': ['attempt-b'],
-        'protocolErrorCount': 2,
-        'closed': True,
+        'firstUrl': '/conversations/conv-a/events?after=cursor-2',
+        'secondUrl': '/conversations/conv-a/events?after=cursor-10',
+        'eventTypes': ['projection_updated'],
+        'deltaPatchTargets': [2],
+        'cursor': 'cursor-10',
+        'snapshotCount': 2,
+        'protocolErrorCount': 0,
+        'firstClosed': True,
+        'secondClosed': True,
+        'finalHealth': 'closed',
     }
 
 
 def test_send_startup_lease_owns_timeout_stop_and_race_cleanup(
         page, assert_no_js_errors):
     page.wait_for_function(
-        "typeof window.TofuModules?.createSendStartupLease === 'function'",
+        "typeof window.createSendStartupLease === 'function'",
         timeout=30_000,
     )
 
     result = page.evaluate(r"""
     async () => {
       const timeoutOwner = {};
-      const timeoutLease = window.TofuModules.createSendStartupLease(
+      const timeoutLease = window.createSendStartupLease(
         timeoutOwner, { timeoutMs: 5 });
       const timeoutWasOwned = timeoutOwner._genStartCtrl === timeoutLease.controller;
       await new Promise(resolve => setTimeout(resolve, 20));
@@ -141,7 +311,7 @@ def test_send_startup_lease_owns_timeout_stop_and_race_cleanup(
       timeoutLease.finish();
 
       const stopOwner = {};
-      const stopLease = window.TofuModules.createSendStartupLease(
+      const stopLease = window.createSendStartupLease(
         stopOwner, { timeoutMs: 0 });
       stopOwner._genStartStop = stopLease.controller;
       stopOwner._genStartCtrl = null;
@@ -151,9 +321,9 @@ def test_send_startup_lease_owns_timeout_stop_and_race_cleanup(
       stopLease.finish();
 
       const raceOwner = {};
-      const older = window.TofuModules.createSendStartupLease(
+      const older = window.createSendStartupLease(
         raceOwner, { timeoutMs: 0 });
-      const newer = window.TofuModules.createSendStartupLease(
+      const newer = window.createSendStartupLease(
         raceOwner, { timeoutMs: 0 });
       older.finish();
       const newerSurvived = raceOwner._genStartCtrl === newer.controller;
@@ -189,93 +359,73 @@ def test_send_startup_lease_owns_timeout_stop_and_race_cleanup(
     }
 
 
-def test_turn_projection_is_pure_ordered_and_branch_aware(
+def test_browser_turn_reads_are_ordered_and_attempt_aware(
         page, assert_no_js_errors):
     page.wait_for_function(
-        "typeof window.TofuModules?.projectTurnState === 'function'",
+        "typeof window.ConversationTurnRead?.ordered === 'function'",
         timeout=30_000,
     )
 
     result = page.evaluate(r"""
     () => {
-      const previousMessages = [{
-        _turnId: 'human-1',
-        branches: [{ _laneId:'lane-b', title:'Preserved title',
-          icon:'B', messages:[{content:'stale'}] }],
-      }];
-      const state = {
-        conversationRevision: 7,
-        transport: 'connected',
-        commandPending: { 'assistant-1': 'regenerate' },
-        laneOrder: {
-          main: ['human-1', 'assistant-1'],
-          'lane-b': ['branch-1'],
-        },
-        turnsById: {
-          'human-1': {
-            turnId:'human-1', actor:'human', laneId:'main', status:'completed',
+      const conversationId = 'browser-read-contract';
+      const store = window.ConversationTurnStore.ensureRuntimeStore(conversationId);
+      store._snapshotLoaded = true;
+      store.dispatch({type:'snapshot', snapshot:{conversationRevision:7, turns:[
+          {
+            turnId:'human-1', conversationId, actor:'human', kind:'input',
+            laneId:'main', ordinal:1, status:'completed',
             projectionRevision:1, createdAt:10,
-            projection:{ role:'assistant', content:'question', _branchLanes:[{
+            projection:{ content:'question', _branchLanes:[{
               laneId:'lane-b', kind:'branch', anchorText:'selection',
-            }] },
+            }] }, settlement:{outcome:'completed'},
           },
-          'assistant-1': {
-            turnId:'assistant-1', actor:'assistant', laneId:'main',
+          {
+            turnId:'assistant-1', conversationId, actor:'assistant', kind:'reply',
+            laneId:'main', ordinal:2,
             status:'running', currentAttemptId:'attempt-main',
             projectionRevision:2, createdAt:20,
             projection:{ content:'answer' },
           },
-          'branch-1': {
-            turnId:'branch-1', actor:'critic', laneId:'lane-b',
+          {
+            turnId:'branch-1', conversationId, actor:'critic', kind:'reply',
+            laneId:'lane-b', ordinal:1,
             parentTurnId:'human-1', status:'pending',
             currentAttemptId:'attempt-branch', projectionRevision:3,
             projection:{ content:'branch answer' },
           },
-        },
+        ], attempts:[], queueItems:[]}});
+      const main = window.ConversationTurnRead.ordered(conversationId);
+      const branch = window.ConversationTurnRead.ordered(conversationId, 'lane-b');
+      const output = {
+        legacyProjectionGlobal:typeof window.projectTurnState,
+        orderedIds:main.map(turn => turn.turnId),
+        actors:main.map(turn => turn.actor),
+        branchIds:branch.map(turn => turn.turnId),
+        activeAttemptIds:[...window.ConversationTurnRead.activeAttemptIds(
+          conversationId)].sort(),
+        activeMainAttemptId:window.ConversationTurnRead.activeMainAttemptId(
+          conversationId),
       };
-      const before = JSON.stringify({ previousMessages, state });
-      const projected = window.TofuModules.projectTurnState({
-        state, previousMessages, now: () => 99,
-      });
-      const after = JSON.stringify({ previousMessages, state });
-      const main = projected.messages;
-      const branch = main[0].branches[0];
-      return {
-        sourceUnchanged: before === after,
-        roles: main.map(item => item.role),
-        orderedIds: main.map(item => item._turnId),
-        maliciousRoleRemoved: main[0].role === 'user',
-        commandPending: main[1]._commandPending,
-        activeAttemptId: projected.activeAttemptId,
-        activeBranchAttemptIds: projected.activeBranchAttemptIds,
-        branchTitle: branch.title,
-        branchRole: branch.messages[0].role,
-        branchContent: branch.messages[0].content,
-        fingerprintHasRevision: projected.fingerprint.includes(
-          'main:assistant-1:2:running:attempt-main:regenerate'),
-      };
+      window.ConversationTurnStore.disposeConversation(conversationId);
+      return output;
     }
     """)
 
     assert result == {
-        'sourceUnchanged': True,
-        'roles': ['user', 'assistant'],
+        'legacyProjectionGlobal': 'undefined',
         'orderedIds': ['human-1', 'assistant-1'],
-        'maliciousRoleRemoved': True,
-        'commandPending': 'regenerate',
-        'activeAttemptId': 'attempt-main',
-        'activeBranchAttemptIds': ['attempt-branch'],
-        'branchTitle': 'Preserved title',
-        'branchRole': 'user',
-        'branchContent': 'branch answer',
-        'fingerprintHasRevision': True,
+        'actors': ['human', 'assistant'],
+        'branchIds': ['branch-1'],
+        'activeAttemptIds': ['attempt-branch', 'attempt-main'],
+        'activeMainAttemptId': 'attempt-main',
     }
 
 
 def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
         page, assert_no_js_errors):
     page.wait_for_function(
-        "typeof window.TofuModules?.createConversationTurnRuntime === 'function'",
+        "typeof window.createConversationTurnRuntime === 'function'",
         timeout=30_000,
     )
 
@@ -291,9 +441,10 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
           this.onerror = null;
         }
         close() { this.closed = true; }
-        emit(name, body) {
+        emit(name, body, lastEventId = '') {
           this.dispatchEvent(new MessageEvent(name, {
             data: JSON.stringify(body),
+            lastEventId,
           }));
         }
       }
@@ -301,12 +452,22 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
       const sources = [];
       const submitted = [];
       const persisted = [];
+      const renderedStates = [];
+      const settledTurns = [];
+      let legacyRepaints = 0;
       const api = {
-        async list(conversationId) {
+        async snapshot(conversationId) {
           return {
-            cutoverActive: true,
+            ok: true,
+            contract: 'tofu.conversation-sync.snapshot/v1',
+            conversationId,
             conversationRevision: 1,
-            authoritativeFull: true,
+            syncSeq: 1,
+            cursor: 'cursor-1',
+            serverBootId: 'boot-test',
+            heartbeatIntervalMs: 15000,
+            settings: {projectPath:'/workspace/current'},
+            attempts: [],
             turns: [{
               conversationId, turnId:'human-1', laneId:'main', ordinal:0,
               actor:'human', kind:'input', status:'completed',
@@ -314,9 +475,11 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
             }],
           };
         },
-        async submit(conversationId, payload, requestOptions) {
+        async createTurn(conversationId, payload, requestOptions) {
           submitted.push({conversationId, payload, requestOptions});
           return {
+            ok: true,
+            conversationId,
             conversationRevision: 2,
             turn: {
               conversationId, turnId:'assistant-1', laneId:'main', ordinal:1,
@@ -327,30 +490,44 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
             attempt: {
               attemptId:'attempt-1', turnId:'assistant-1', status:'running',
             },
-            streamCursor: 4,
           };
         },
-        async attempt() { throw Error('not used'); },
-        streamUrl(attemptId, after) {
-          return `/attempts/${attemptId}?after=${after}`;
+        async createAttempt() { throw Error('not used'); },
+        eventsUrl(conversationId, after) {
+          return `/conversations/${conversationId}/events?after=${after}`;
         },
-        async update() { throw Error('not used'); },
+        async updateTurn() { throw Error('not used'); },
         async createLane() { throw Error('not used'); },
         async deleteLane() { throw Error('not used'); },
         async deleteTurns() { throw Error('not used'); },
-        async abort(attemptId) { return {attemptId}; },
+        async abortAttempt(attemptId) { return {attemptId}; },
       };
-      const runtime = window.TofuModules.createConversationTurnRuntime({
+      const runtime = window.createConversationTurnRuntime({
         api,
         eventSourceFactory(url) {
           const source = new FakeEventSource(url);
           sources.push(source);
           return source;
         },
-        persist(conv) { persisted.push(conv.messages.map(item => item.content)); },
+        persist(conv) {
+          persisted.push({
+            revision: conv._serverRev,
+            turnCount: conv._serverTurnCount,
+          });
+        },
+        applySettings(conv, settings) { Object.assign(conv, settings); },
+        isActive() { return true; },
+        renderState(_conv, state) {
+          renderedStates.push(Object.values(state.turnsById).map(turn => turn?.status));
+          return true;
+        },
+        onTurnSettled(_conv, turn) {
+          settledTurns.push(`${turn.turnId}:${turn.status}`);
+        },
+        replaceAll() { legacyRepaints += 1; },
       });
       const signal = new AbortController().signal;
-      const conv = {id:'conv-1', title:'Typed', createdAt:10, messages:[]};
+      const conv = {id:'conv-1', title:'Typed', createdAt:10};
 
       await runtime.hydrateConversation(conv);
       await runtime.submitConversation(conv, 'question', {model:'test'}, {
@@ -358,72 +535,124 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
         requestOptions:{signal, headers:{'Idempotency-Key':'cmd-1'}},
       });
       const source = sources[0];
-      source.emit('projection_updated', {
-        type:'projection_updated', seq:5, turnId:'assistant-1',
-        attemptId:'attempt-1', projectionRevision:2,
-        payload:{projection:{content:'typed stream'}},
-      });
-      source.emit('terminal_settlement', {
-        type:'terminal_settlement', seq:6, turnId:'assistant-1',
-        attemptId:'attempt-1', projectionRevision:3,
-        payload:{status:'completed', settlement:{cause:'stop'},
-          projection:{content:'typed done'}},
-      });
+      source.emit('attempt.event', {
+        contract:'tofu.conversation-sync.event/v1',
+        type:'attempt.event', conversationId:'conv-1', syncSeq:2,
+        occurredAt:2, turnId:'assistant-1', attemptId:'attempt-1',
+        payload:{event:{
+          conversationId:'conv-1', turnId:'assistant-1',
+          attemptId:'attempt-1', seq:1, projectionRevision:2,
+          type:'projection_updated',
+          payload:{projection:{content:'typed stream'}},
+        }},
+      }, 'cursor-2');
+      source.emit('attempt.event', {
+        contract:'tofu.conversation-sync.event/v1',
+        type:'attempt.event', conversationId:'conv-1', syncSeq:3,
+        occurredAt:3, turnId:'assistant-1', attemptId:'attempt-1',
+        payload:{event:{
+          conversationId:'conv-1', turnId:'assistant-1',
+          attemptId:'attempt-1', seq:2, projectionRevision:3,
+          type:'terminal_settlement',
+          payload:{status:'completed', settlement:{cause:'stop'},
+            projection:{content:'typed done'}},
+        }},
+      }, 'cursor-3');
+
+      const renderStateSawTerminal = renderedStates.some(statuses =>
+        statuses.includes('completed') && statuses.length > 1);
+      const finalState = runtime.ensureRuntimeStore('conv-1').getState();
+      const finalTurns = finalState.laneOrder.main.map(
+        turnId => finalState.turnsById[turnId],
+      );
+      runtime.disposeConversation('conv-1');
 
       return {
-        nativeMarker: runtime.emptyState === window.TofuModules.createTurnState
-          && typeof window.TurnStoreV2?.hydrateConversation === 'function',
-        cutover: runtime.isCutoverActive(),
+        runtimeOwner: runtime.emptyState('native-owner').conversationId === 'native-owner'
+          && typeof window.ConversationTurnStore?.hydrateConversation === 'function',
+        markerFree: !Object.prototype.hasOwnProperty.call(conv, '_turnNative'),
+        transcriptFree: !Object.prototype.hasOwnProperty.call(conv, 'messages'),
+        projectPath: conv.projectPath,
         payloadCommandId: submitted[0].payload.commandId,
         payloadMessage: submitted[0].payload.message,
+        payloadKeys: Object.keys(submitted[0].payload).sort(),
+        payloadHasTopLevelSettings: Object.hasOwn(submitted[0].payload, 'settings'),
+        payloadHasRequestOptions: Object.hasOwn(submitted[0].payload, 'requestOptions'),
+        nestedSettings: submitted[0].payload.conversation.settings,
+        nestedTitle: submitted[0].payload.conversation.title,
         requestSignalPreserved: submitted[0].requestOptions.signal === signal,
         sourceUrl: source.url,
         sourceClosed: source.closed,
-        messageIds: conv.messages.map(item => item._turnId),
-        messageContents: conv.messages.map(item => item.content),
-        status: conv.messages[1]._turnStatus,
-        activeAttemptId: conv._activeAttemptId,
+        turnIds: finalTurns.map(turn => turn.turnId),
+        turnContents: finalTurns.map(turn => turn.projection.content),
+        status: finalTurns[1].status,
+        activeAttemptIds: finalTurns
+          .filter(turn => turn.status === 'pending' || turn.status === 'running')
+          .map(turn => turn.currentAttemptId),
         persistedCount: persisted.length,
+        renderStateSawTerminal,
+        settledTurns,
+        legacyRepaints,
       };
     }
     """)
 
     assert result == {
-        'nativeMarker': True,
-        'cutover': True,
+        'runtimeOwner': True,
+        'markerFree': True,
+        'transcriptFree': True,
+        'projectPath': '/workspace/current',
         'payloadCommandId': 'cmd-1',
         'payloadMessage': 'question',
+        'payloadKeys': [
+            'commandId', 'config', 'conversation', 'inputTurn', 'message',
+        ],
+        'payloadHasTopLevelSettings': False,
+        'payloadHasRequestOptions': False,
+        'nestedSettings': {'search': True},
+        'nestedTitle': 'Typed',
         'requestSignalPreserved': True,
-        'sourceUrl': '/attempts/attempt-1?after=4',
+        'sourceUrl': '/conversations/conv-1/events?after=cursor-1',
+        # This harness has no active-view callback; once its only turn settles,
+        # the runtime pauses the conversation stream until the view resumes it.
         'sourceClosed': True,
-        'messageIds': ['human-1', 'assistant-1'],
-        'messageContents': ['hello', 'typed done'],
+        'turnIds': ['human-1', 'assistant-1'],
+        'turnContents': ['hello', 'typed done'],
         'status': 'completed',
-        'activeAttemptId': None,
-        # Persist durable projections only: hydrate, submit, projection and
-        # settlement. The transient connecting transport updates chrome but
-        # deliberately does not rewrite conversation storage.
+        'activeAttemptIds': [],
+        # Persist shell invalidation metadata only: hydrate, submit, projection
+        # and settlement. Turn content remains normalized in TurnStore.
         'persistedCount': 4,
+        'renderStateSawTerminal': True,
+        'settledTurns': ['assistant-1:completed'],
+        'legacyRepaints': 0,
     }
 
 
 def test_native_turn_runtime_does_not_probe_an_unsaved_conversation(
         page, assert_no_js_errors):
     page.wait_for_function(
-        "typeof window.TofuModules?.createConversationTurnRuntime === 'function'",
+        "typeof window.createConversationTurnRuntime === 'function'",
         timeout=30_000,
     )
 
     result = page.evaluate(r"""
     async () => {
-      let listCalls = 0;
+      let snapshotCalls = 0;
       let submitCalls = 0;
-      const runtime = window.TofuModules.createConversationTurnRuntime({
+      let submittedTitle = null;
+      const runtime = window.createConversationTurnRuntime({
         api: {
-          async list() { listCalls += 1; throw Error('must not probe'); },
-          async submit(conversationId) {
+          async snapshot() {
+            snapshotCalls += 1;
+            throw Error('must not probe');
+          },
+          async createTurn(conversationId, payload) {
             submitCalls += 1;
+            submittedTitle = payload.conversation.title;
             return {
+              ok: true,
+              conversationId,
               conversationRevision: 1,
               turn: {
                 conversationId, turnId:'assistant-local', laneId:'main', ordinal:1,
@@ -431,40 +660,47 @@ def test_native_turn_runtime_does_not_probe_an_unsaved_conversation(
                 projectionRevision:1, projection:{content:'done'},
               },
               attempt: {attemptId:'', turnId:'assistant-local', status:'completed'},
-              streamCursor: 0,
             };
           },
-          async attempt() { throw Error('not used'); },
-          streamUrl() { throw Error('not used'); },
-          async update() { throw Error('not used'); },
+          async createAttempt() { throw Error('not used'); },
+          eventsUrl() { throw Error('not used'); },
+          async updateTurn() { throw Error('not used'); },
           async createLane() { throw Error('not used'); },
           async deleteLane() { throw Error('not used'); },
           async deleteTurns() { throw Error('not used'); },
-          async abort() { throw Error('not used'); },
+          async abortAttempt() { throw Error('not used'); },
         },
       });
       const conversation = {
         id:'local-only-conversation', title:'New Chat', createdAt:10,
-        messages:[], _localOnly:true,
+        _localOnly:true,
       };
       await runtime.submitConversation(conversation, 'question', {}, {});
-      return {listCalls, submitCalls, localOnly:conversation._localOnly};
+      return {
+        snapshotCalls, submitCalls, submittedTitle,
+        localOnly:conversation._localOnly,
+      };
     }
     """)
 
-    assert result == {'listCalls': 0, 'submitCalls': 1, 'localOnly': False}
+    assert result == {
+        'snapshotCalls': 0,
+        'submitCalls': 1,
+        'submittedTitle': '',
+        'localOnly': False,
+    }
 
 
 def test_typed_turn_reducer_rejects_stale_ingress_and_replays_unknown_turn(
         page, assert_no_js_errors):
     page.wait_for_function(
-        "typeof window.TofuModules?.reduceTurnState === 'function'",
+        "typeof window.reduceTurnState === 'function'",
         timeout=30_000,
     )
 
     result = page.evaluate(r"""
     () => {
-      const modules = window.TofuModules;
+      const modules = window;
       let unknownTurn = null;
       let state = modules.createTurnState('conv-r');
       state = modules.reduceTurnState(state, {
@@ -547,7 +783,7 @@ def test_typed_turn_reducer_rejects_stale_ingress_and_replays_unknown_turn(
 def test_typed_turn_store_singleflights_snapshot_recovery_and_unsubscribes(
         page, assert_no_js_errors):
     page.wait_for_function(
-        "typeof window.TofuModules?.createTurnStore === 'function'",
+        "typeof window.createTurnStore === 'function'",
         timeout=30_000,
     )
 
@@ -557,7 +793,7 @@ def test_typed_turn_store_singleflights_snapshot_recovery_and_unsubscribes(
       let releaseSnapshot;
       let notifications = 0;
       const errors = [];
-      const store = window.TofuModules.createTurnStore('conv-store', {
+      const store = window.createTurnStore('conv-store', {
         fetchSnapshot() {
           fetchCount += 1;
           return new Promise(resolve => { releaseSnapshot = resolve; });
@@ -591,7 +827,7 @@ def test_typed_turn_store_singleflights_snapshot_recovery_and_unsubscribes(
 
       let retryFetches = 0;
       let retryErrors = 0;
-      const retryStore = window.TofuModules.createTurnStore('conv-retry', {
+      const retryStore = window.createTurnStore('conv-retry', {
         fetchSnapshot() {
           retryFetches += 1;
           if (retryFetches === 1) return Promise.reject(new Error('temporary'));
@@ -634,13 +870,13 @@ def test_typed_turn_store_singleflights_snapshot_recovery_and_unsubscribes(
 def test_typed_turn_finish_presentation_normalizes_terminal_states(
         page, assert_no_js_errors):
     page.wait_for_function(
-        "typeof window.TofuModules?.presentTurnFinish === 'function'",
+        "typeof window.presentTurnFinish === 'function'",
         timeout=30_000,
     )
 
     result = page.evaluate(r"""
     () => {
-      const present = window.TofuModules.presentTurnFinish;
+      const present = window.presentTurnFinish;
       const running = present({turnId:'running', status:'running'});
       const completed = present({turnId:'done', status:'completed'});
       const interrupted = present({
@@ -677,7 +913,10 @@ def test_typed_turn_finish_presentation_normalizes_terminal_states(
             'resumeOptions': [],
         },
         'failed': {
-            'tone': 'error', 'label': 'Failed', 'detail': 'provider_down',
+            # Legacy string errors normalize to a warning-severity envelope
+            # (kind=generic, non-retryable) — severity drives the tone.
+            'tone': 'warning', 'label': 'Failed', 'detail': 'provider_down',
+            'errorKind': 'generic', 'retryable': False,
             'resumeOptions': [],
         },
     }
@@ -686,13 +925,13 @@ def test_typed_turn_finish_presentation_normalizes_terminal_states(
 def test_lifecycle_scope_releases_listeners_timers_and_cleanups(
         page, assert_no_js_errors):
     page.wait_for_function(
-        "typeof window.TofuModules?.createLifecycleScope === 'function'",
+        "typeof window.createLifecycleScope === 'function'",
         timeout=30_000,
     )
 
     result = page.evaluate(r"""
     async () => {
-      const scope = window.TofuModules.createLifecycleScope();
+      const scope = window.createLifecycleScope();
       const target = new EventTarget();
       const calls = [];
       scope.listen(target, 'tick', () => calls.push('event'));
@@ -721,14 +960,14 @@ def test_lifecycle_scope_releases_listeners_timers_and_cleanups(
 def test_turn_renderer_skips_unchanged_long_conversation_dom_work(
         page, assert_no_js_errors):
     page.wait_for_function(
-        "typeof window.TurnStoreV2?.renderInto === 'function' && "
-        "typeof window.TofuModules?.reduceTurnState === 'function'",
+        "typeof window.ConversationTurnStore?.renderInto === 'function' && "
+        "typeof window.reduceTurnState === 'function'",
         timeout=30_000,
     )
 
     result = page.evaluate(r"""
     () => {
-      const modules = window.TofuModules;
+      const modules = window;
       let state = modules.createTurnState('conv-render');
       const turn = (turnId, ordinal, revision, content) => ({
         turnId, laneId:'main', ordinal, actor:'assistant', status:'running',
@@ -755,17 +994,17 @@ def test_turn_renderer_skips_unchanged_long_conversation_dom_work(
         node.textContent = value.projection.content;
       };
 
-      window.TurnStoreV2.renderInto(container, state, renderer);
+      window.ConversationTurnStore.renderInto(container, state, renderer);
       const initialAppends = appendCalls;
       appendCalls = 0;
-      window.TurnStoreV2.renderInto(container, state, renderer);
+      window.ConversationTurnStore.renderInto(container, state, renderer);
       const steadyAppends = appendCalls;
       const steadyRenders = {...renderCounts};
 
       state = modules.reduceTurnState(state, {
         type:'command_response', response:{turn:turn('t2', 2, 2, 'two-new')},
       });
-      window.TurnStoreV2.renderInto(container, state, renderer);
+      window.ConversationTurnStore.renderInto(container, state, renderer);
       const updateAppends = appendCalls;
       const updateRenders = {...renderCounts};
 
@@ -773,7 +1012,7 @@ def test_turn_renderer_skips_unchanged_long_conversation_dom_work(
       state = modules.reduceTurnState(state, {
         type:'command_response', response:{turn:turn('t2', 0, 2, 'two-new')},
       });
-      window.TurnStoreV2.renderInto(container, state, renderer);
+      window.ConversationTurnStore.renderInto(container, state, renderer);
       return {
         initialAppends,
         steadyAppends,

@@ -8,9 +8,11 @@ import fnmatch
 import os
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from lib.log import get_logger
 from lib.project_mod.config import (
@@ -33,6 +35,7 @@ from lib.project_mod.scanner import (
     _should_ignore,
 )
 from lib.project_mod.grep_engine import SearchRequest, run_search
+from lib.project_mod import tree_index
 
 logger = get_logger(__name__)
 
@@ -140,8 +143,78 @@ def _maybe_signal_svg(target, rel_path):
 #  list_dir
 # ═══════════════════════════════════════════════════════
 
-def tool_list_dir(base, rel_path='.'):
-    ignore = IGNORE_DIRS
+_LIST_DIR_SCAN_LIMIT = 10_000
+_LIST_DIR_ENTRY_LIMIT = 1_000
+_LIST_DIR_OUTPUT_CHAR_LIMIT = 64_000
+_FIND_SCAN_LIMIT = 250_000
+
+
+def _scan_directory_entries(target, *, show_hidden=False,
+                            include_directory_stat=False,
+                            respect_project_ignores=True,
+                            include_non_regular=False):
+    """Return a bounded, sorted directory snapshot.
+
+    The limits bound both hostile/FUSE directories and response growth. The
+    scan still reports truncation instead of presenting a partial list as
+    complete. Symlinks and special files are skipped because this backend is a
+    project navigator, not an authority-expanding replacement for arbitrary
+    GNU ``ls`` shapes. ``run_command`` can disable project-ignore filtering
+    and retain non-regular entries for its shell-compatible listing view.
+    """
+    rows = []
+    scanned = 0
+    truncated = False
+    with os.scandir(target) as iterator:
+        for entry in iterator:
+            if scanned >= _LIST_DIR_SCAN_LIMIT:
+                truncated = True
+                break
+            scanned += 1
+            name = entry.name
+            if not show_hidden and name.startswith('.'):
+                continue
+            try:
+                is_symlink = entry.is_symlink()
+                is_dir = entry.is_dir(follow_symlinks=False)
+                is_file = entry.is_file(follow_symlinks=False)
+            except OSError:
+                logger.debug('[Tools] list_dir type check failed for %s', name)
+                continue
+            if respect_project_ignores and is_dir and name in IGNORE_DIRS:
+                continue
+            if not is_dir and not is_file and not include_non_regular:
+                continue
+            size = None
+            modified = None
+            if is_file or include_directory_stat or include_non_regular:
+                try:
+                    stat_result = entry.stat(follow_symlinks=False)
+                    size = None if is_dir else stat_result.st_size
+                    modified = stat_result.st_mtime
+                except OSError:
+                    logger.debug('[Tools] list_dir stat failed for %s', name)
+                    if is_file:
+                        continue
+            rows.append({
+                'name': name,
+                'path': entry.path,
+                'is_dir': is_dir,
+                'is_file': is_file,
+                'is_symlink': is_symlink,
+                'size': size,
+                'modified': modified,
+            })
+    rows.sort(key=lambda row: (not row['is_dir'], row['name'].lower(),
+                               row['name']))
+    if len(rows) > _LIST_DIR_ENTRY_LIMIT:
+        rows = rows[:_LIST_DIR_ENTRY_LIMIT]
+        truncated = True
+    return rows, truncated, scanned
+
+
+def tool_list_dir(base, rel_path='.', *, show_hidden=False,
+                  shell_compatible=False):
     try:
         target = _safe_path(base, rel_path)
     except ValueError as e:
@@ -150,42 +223,48 @@ def tool_list_dir(base, rel_path='.'):
     if not os.path.isdir(target):
         return f'Not a directory: {rel_path}'
     try:
-        entries = sorted(os.scandir(target), key=lambda e: e.name)
-    except PermissionError:
-        logger.debug('[Tools] list_dir permission denied for %s', rel_path, exc_info=True)
-        return f'Permission denied: {rel_path}'
+        entries, truncated, scanned = _scan_directory_entries(
+            target,
+            show_hidden=show_hidden,
+            respect_project_ignores=not shell_compatible,
+            include_non_regular=shell_compatible,
+        )
+    except (PermissionError, OSError):
+        logger.debug('[Tools] list_dir unable to scan %s', rel_path,
+                     exc_info=True)
+        return f'Unable to list directory: {rel_path}'
     dirs_out, files_out = [], []
+    output_chars = 0
     for entry in entries:
-        name = entry.name
-        try:
-            is_d = entry.is_dir(follow_symlinks=False)
-        except OSError:
-            logger.debug('[Tools] is_dir check failed for entry %s', name)
-            continue
-        if is_d:
-            if name not in ignore and not name.startswith('.'):
-                try:
-                    cc = sum(1 for e in os.scandir(entry.path)
-                             if not e.name.startswith('.') and e.name not in ignore)
-                except Exception as e:
-                    logger.debug('[Tools] child count scan failed for dir %s: %s', name, e, exc_info=True)
-                    cc = '?'
-                dirs_out.append(f'  {name}/ ({cc} items)')
-        else:
-            try:
-                if not entry.is_file(follow_symlinks=False):
-                    continue
-                st = entry.stat(follow_symlinks=False)
-                sz = st.st_size
-            except OSError:
-                logger.debug('[Tools] stat failed for file entry %s', name)
-                continue
+        name = entry['name']
+        if entry['is_dir']:
+            # NOTE: the per-subdir child count was dropped — it cost one
+            # nested os.scandir per subdir per call (O(subdirs) FUSE
+            # readdirs). The tree_index indexes files only, so listing into a
+            # subdir remains the bounded way to inspect it.
+            rendered = f'  {name}/'
+            dirs_out.append(rendered)
+        elif entry['is_file']:
+            sz = int(entry['size'] or 0)
             ext = os.path.splitext(name)[1].lower()
             if ext not in BINARY_EXTENSIONS and sz > 0:
                 lc = _estimate_lines(sz, ext)
-                files_out.append(f'  {name} ({lc}L, {_fmt_size(sz)})')
+                rendered = f'  {name} ({lc}L, {_fmt_size(sz)})'
             else:
-                files_out.append(f'  {name} ({_fmt_size(sz)})')
+                rendered = f'  {name} ({_fmt_size(sz)})'
+            files_out.append(rendered)
+        else:
+            kind = 'symlink' if entry['is_symlink'] else 'special'
+            rendered = f'  {name} [{kind}]'
+            files_out.append(rendered)
+        output_chars += len(rendered) + 1
+        if output_chars >= _LIST_DIR_OUTPUT_CHAR_LIMIT:
+            if entry['is_dir']:
+                dirs_out.pop()
+            else:
+                files_out.pop()
+            truncated = True
+            break
     result = f'Directory: {rel_path or "."}\n\n'
     if dirs_out:
         result += 'Directories:\n' + '\n'.join(dirs_out) + '\n\n'
@@ -193,8 +272,12 @@ def tool_list_dir(base, rel_path='.'):
         result += 'Files:\n' + '\n'.join(files_out)
     if not dirs_out and not files_out:
         result += '(empty or all files ignored)'
+    if truncated:
+        result += (f'\n\n… [listing truncated: scanned at most {scanned} '
+                   f'entries; returned {len(dirs_out) + len(files_out)}. '
+                   'Use a narrower relative path.]')
     # ── Project Summary when listing root ──
-    if rel_path in ('.', '', None) and target == base:
+    if not shell_compatible and rel_path in ('.', '', None) and target == base:
         try:
             fc = _project_state.get('fileCount', 0)
             dc = _project_state.get('dirCount', 0)
@@ -304,7 +387,7 @@ def _read_absolute_file(path: str, start_line=None, end_line=None):
     return result
 
 
-def _read_project_file(base, rel_path, start_line=None, end_line=None):
+def _read_project_file(base, rel_path, start_line=None, end_line=None, _pre_stat=None):
     """Read a single project-relative file.  Internal helper for tool_read_files.
 
     Handles safe-path validation, data-file detection, symbol TOC extraction,
@@ -316,8 +399,16 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None):
     except ValueError as e:
         logger.debug('[Tools] read_file safe_path rejected %s: %s', rel_path, e, exc_info=True)
         return str(e)
-    if not os.path.isfile(target):
+    # ONE stat for existence/type + size, reused across this read instead of
+    # os.path.isfile + os.path.getsize (which each re-stat the file on FUSE).
+    try:
+        st = _pre_stat if _pre_stat is not None else os.stat(target)
+    except OSError as e:
+        logger.debug('[Tools] read_file stat failed for %s: %s', rel_path, e)
         return f'File not found: {rel_path}'
+    if not stat.S_ISREG(st.st_mode):
+        return f'File not found: {rel_path}'
+    sz = st.st_size
 
     # ── Binary / image classification (mirror _read_absolute_file) ──
     # Done AFTER path resolution so it applies to project-RELATIVE paths
@@ -341,7 +432,6 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None):
         from lib.file_reader import read_local_file
         return read_local_file(target)
 
-    sz = os.path.getsize(target)
     if sz > MAX_FILE_SIZE and not (start_line or end_line):
         return (f'File too large ({_fmt_size(sz)}). Use grep_search to find specific content, '
                 f'or read_files with start_line/end_line for a specific range.')
@@ -441,13 +531,15 @@ def _normalize_line_range(start_line, end_line):
 def _merge_same_file_ranges(reads):
     """Merge overlapping/adjacent ranges for the same file.
 
-    Preserves ``_base`` (per-spec base override for multi-root) through
-    the merge — the first occurrence's ``_base`` wins for each path group.
+    Preserves ``_base`` (per-spec base override for multi-root) and the
+    caller-visible ``_display_path`` through the merge — the first occurrence
+    wins for each path group.
     """
     GAP_THRESHOLD = 40
     from collections import OrderedDict
     grouped = OrderedDict()  # path → list[(sl, el)]
     base_map = {}            # path → _base (first seen)
+    display_path_map = {}    # path → original caller-visible path
     for spec in reads:
         if not isinstance(spec, dict) or 'path' not in spec:
             grouped.setdefault(None, []).append(spec)
@@ -458,6 +550,8 @@ def _merge_same_file_ranges(reads):
         grouped.setdefault(p, []).append((sl, el))
         if p not in base_map and '_base' in spec:
             base_map[p] = spec['_base']
+        if p not in display_path_map and '_display_path' in spec:
+            display_path_map[p] = spec['_display_path']
 
     merged = []
     for p, ranges in grouped.items():
@@ -470,6 +564,8 @@ def _merge_same_file_ranges(reads):
             entry = {'path': p}
             if p in base_map:
                 entry['_base'] = base_map[p]
+            if p in display_path_map:
+                entry['_display_path'] = display_path_map[p]
             merged.append(entry)
             continue
         sorted_ranges = sorted(ranges, key=lambda r: (r[0] or 1, r[1] or float('inf')))
@@ -487,6 +583,8 @@ def _merge_same_file_ranges(reads):
             entry = {'path': p}
             if p in base_map:
                 entry['_base'] = base_map[p]
+            if p in display_path_map:
+                entry['_display_path'] = display_path_map[p]
             if s is not None:
                 entry['start_line'] = s
             if e is not None:
@@ -496,12 +594,16 @@ def _merge_same_file_ranges(reads):
 
 
 
-def tool_read_files(base, reads):
+def tool_read_files(base, reads, *, result_items=None):
     """Batch-read multiple files (or file ranges) in one call.
 
     Each spec in *reads* is ``{path, start_line?, end_line?}``.
     Multi-root callers may attach ``_base`` per-spec to override the
     default *base* for that particular file.
+
+    ``result_items`` is an optional request-owned sink for bounded structured
+    per-file previews.  It does not change the legacy text return; the task
+    result-envelope boundary consumes and discards the sidecar items.
 
     Absolute paths (starting with ``/`` or ``~``) are routed to
     ``_read_absolute_file`` and bypass the project sandbox.
@@ -515,7 +617,7 @@ def tool_read_files(base, reads):
     if len(reads) > MAX_BATCH:
         reads = reads[:MAX_BATCH]
 
-    # ★ Coerce LLM-emitted string line numbers to int. The model
+    # Coerce LLM-emitted string line numbers to int. The model
     # occasionally returns ``start_line: "70"`` instead of ``70`` and
     # downstream arithmetic (``sl <= prev_e + GAP_THRESHOLD``) crashes
     # with ``TypeError: can only concatenate str (not "int") to str``.
@@ -533,7 +635,7 @@ def tool_read_files(base, reads):
                 logger.debug('[Tools] read_files: dropping non-numeric %s=%r (%s)', k, v, e)
                 spec[k] = None
 
-    # ★ Repair reversed ranges (start > end) BEFORE merging. Order matters:
+    # Repair reversed ranges (start > end) BEFORE merging. Order matters:
     #   _merge_same_file_ranges sorts by (start, end) and coalesces within
     #   GAP_THRESHOLD, so a reversed spec batched with another range for the
     #   same file is absorbed by it and vanishes — the model then receives a
@@ -556,11 +658,36 @@ def tool_read_files(base, reads):
     parts = []
     image_results = {}  # index → dict for __screenshot__ results
     total_chars = 0
-    BATCH_CHAR_BUDGET = 50 * 1024 * 1024  # ★ lifted; per-file size bounds are the real limit
+    BATCH_CHAR_BUDGET = 50 * 1024 * 1024  # lifted; per-file size bounds are the real limit
     WHOLE_FILE_THRESHOLD = 40_000
+
+    def _record_result(index, spec, result, *, status=None):
+        if not isinstance(result_items, list):
+            return
+        from lib.tools.result_projection import file_read_result_projection_item
+        result_items.append(file_read_result_projection_item(
+            index=index + 1,
+            path=spec.get('_display_path', spec.get('path', '?'))
+            if isinstance(spec, dict) else '?',
+            result=result,
+            start_line=spec.get('start_line') if isinstance(spec, dict) else None,
+            end_line=spec.get('end_line') if isinstance(spec, dict) else None,
+            status=status,
+        ))
+
+    def _record_batch_skips(start_index):
+        for skipped_index in range(start_index, len(reads)):
+            skipped_spec = reads[skipped_index]
+            _record_result(
+                skipped_index, skipped_spec,
+                'Read skipped because the batch output budget was exhausted.',
+                status='skipped')
+
     for i, spec in enumerate(reads):
         if not isinstance(spec, dict) or 'path' not in spec:
-            parts.append(f'[{i+1}] Error: each entry must have a "path" field')
+            error = f'[{i+1}] Error: each entry must have a "path" field'
+            parts.append(error)
+            _record_result(i, spec, error, status='error')
             continue
         rel_path = spec['path']
         sl = spec.get('start_line')
@@ -580,6 +707,7 @@ def tool_read_files(base, reads):
                 image_results[i] = result
                 parts.append(text_fallback)
                 total_chars += len(text_fallback)
+                _record_result(i, spec, result)
                 continue
             # Text/PDF/Office result — budget as normal string
             if isinstance(result, str):
@@ -588,26 +716,34 @@ def tool_read_files(base, reads):
                     if remaining > 200:
                         result = result[:remaining] + '\n… [truncated — batch budget exceeded]'
                     else:
-                        parts.append(f'[{i+1}] … [{len(reads) - i} more files skipped — batch budget exceeded]')
+                        notice = f'[{i+1}] … [{len(reads) - i} more files skipped — batch budget exceeded]'
+                        parts.append(notice)
+                        _record_batch_skips(i)
                         break
                 total_chars += len(result)
                 parts.append(result)
+                _record_result(i, spec, result)
                 continue
-            parts.append(str(result))
+            rendered = str(result)
+            parts.append(rendered)
+            _record_result(i, spec, rendered)
             continue
 
-        # Project-relative path — auto-expand small files to whole-file
+        # Project-relative path — auto-expand small files to whole-file.
+        # Compute ONE stat here and hand it to _read_project_file so the
+        # read path doesn't re-stat the target.
+        _pre_stat = None
         if sl is not None or el is not None:
             try:
                 target = _safe_path(spec_base, rel_path)
-                if os.path.isfile(target):
-                    file_sz = os.path.getsize(target)
-                    if file_sz <= WHOLE_FILE_THRESHOLD:
-                        sl, el = None, None
+                st = os.stat(target)
+                if stat.S_ISREG(st.st_mode) and st.st_size <= WHOLE_FILE_THRESHOLD:
+                    sl, el = None, None
+                _pre_stat = st
             except (ValueError, OSError) as e:
                 logger.debug('[Tools] read_files range check failed for %s: %s', rel_path, e, exc_info=True)
 
-        result = _read_project_file(spec_base, rel_path, sl, el)
+        result = _read_project_file(spec_base, rel_path, sl, el, _pre_stat=_pre_stat)
         # Relative-path images/PDFs/Office now return a __screenshot__ dict
         # (parity with the absolute branch) — track separately so base64
         # never reaches the text accumulator below.
@@ -617,6 +753,7 @@ def tool_read_files(base, reads):
             image_results[i] = result
             parts.append(text_fallback)
             total_chars += len(text_fallback)
+            _record_result(i, spec, result)
             continue
         # SVG reads as text (model sees the markup); ALSO signal its source
         # so the frontend can render it inline like an image.
@@ -631,10 +768,13 @@ def tool_read_files(base, reads):
             if remaining > 200:
                 result = result[:remaining] + '\n… [truncated — batch budget exceeded]'
             else:
-                parts.append(f'[{i+1}] … [{len(reads) - i} more files skipped — batch budget exceeded]')
+                notice = f'[{i+1}] … [{len(reads) - i} more files skipped — batch budget exceeded]'
+                parts.append(notice)
+                _record_batch_skips(i)
                 break
         total_chars += len(result)
         parts.append(result)
+        _record_result(i, spec, result)
 
     text_result = '\n\n'.join(parts)
 
@@ -720,6 +860,14 @@ def tool_grep(base, pattern, rel_path=None, include=None, context_lines=None,
     ctx_n = max(0, min(10, int(context_lines))) if context_lines else 0
     cap = max(1, min(int(max_results), 500)) if max_results else MAX_GREP_RESULTS
 
+    # ── Fast path: persistent tree index (zero directory traversal) ──
+    io_timeout = _get_io_timeout(base)
+    indexed = _grep_via_index(base, target, pattern, include, ctx_n, cap,
+                              count_only, io_timeout)
+    if indexed is not None:
+        return indexed
+    tree_index.warm(base)  # no index yet — build it behind the live walk
+
     if _HAS_RG:
         result = _run_rg(base, target, pattern, include, ctx_n, cap, count_only)
         if result is not None:
@@ -748,7 +896,7 @@ def _build_rg_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, c
     # node_modules & co. leaked back into grep results ~nondeterministically.)
     for d in sorted(IGNORE_DIRS):
         cmd.extend(['-g', f'!{d}/'])
-    # ★ rg auto-respects .gitignore only inside a git repo (.git/ present).
+    # rg auto-respects .gitignore only inside a git repo (.git/ present).
     #   When there's no .git/ (e.g. exported projects, workdir copies),
     #   explicitly point rg at the .gitignore file so it still honors it.
     #   This is critical — without it, rg crawls into huge ignored dirs
@@ -779,7 +927,7 @@ def _build_grep_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS,
     # See _build_rg_cmd: complete, deterministic exclusions (no [:30] cap).
     for d in sorted(IGNORE_DIRS):
         cmd.extend(['--exclude-dir', d])
-    # ★ GNU grep doesn't have --ignore-file, so parse .gitignore manually
+    # GNU grep doesn't have --ignore-file, so parse .gitignore manually
     #   and add --exclude-dir for directory patterns found there.
     if base:
         gitignore = os.path.join(base, '.gitignore')
@@ -868,6 +1016,9 @@ def _format_grep_output(base, raw_output, pattern, include, ctx_n,
 
 # Max filesize that rg should bother searching (skip huge data/binary files)
 _RG_MAX_FILESIZE = '2M'
+# Numeric twin of _RG_MAX_FILESIZE for the index candidate filter (rg size
+# suffixes are 1024-based).
+_RG_MAX_BYTES = 2 * 1024 * 1024
 
 # Max depth for rg/fd to search (safety cap)
 _TOOL_MAX_DEPTH = 30
@@ -1046,6 +1197,237 @@ def _format_grep_timeout(base, target, pattern, include, ctx_n, cap, count_only,
             f'Try a more specific subdirectory path or narrower file glob (include parameter).' + footer)
 
 
+# ── Index-backed grep (zero directory traversal) ─────────────────────
+# rg costs ~130ms fixed per PROCESS plus per-file opens whose latency is
+# mount-dependent (≈0.005ms warm local, ≥0.5ms FUSE/cross-DC).  No static
+# chunk/jobs profile wins on both: big argv-bound chunks minimize process
+# overhead (fast disks), many small chunks maximize latency-hiding process
+# parallelism (slow mounts).  So the runner PROBES with one 600-file chunk,
+# measures ms/file, and picks the profile for the rest of the candidates
+# from that measurement — self-calibrating per mount, per query.
+_GREP_INDEX_PROBE_FILES = 600
+# Probe wall-time below which the mount is "fast" (few big argv-bound chunks
+# win).  The probe inherently pays one ~130ms process setup, so the
+# comparison is on TOTAL probe seconds — fast mounts finish 600 files plus
+# setup well under this bound; latency-bound mounts blow past it on opens
+# alone (per-file arithmetic would wrongly blame setup on small chunks).
+_GREP_INDEX_PROBE_FAST_S = float(os.environ.get('TOFU_GREP_INDEX_PROBE_FAST_S', '0.25') or 0.25)
+# Candidate volume above which a (non-latency-bound) search parallelizes
+# content reads across 8 processes.
+_GREP_INDEX_CONTENT_BYTES = int(os.environ.get('TOFU_GREP_INDEX_CONTENT_BYTES',
+                                               str(20 * 1024 * 1024)) or 20 * 1024 * 1024)
+
+_GREP_INDEX_ARGV_BUDGET = max(64 * 1024, min(1024 * 1024,
+                              int(os.environ.get('TOFU_GREP_INDEX_ARGV_BUDGET',
+                                                 str(512 * 1024)) or 512 * 1024)))
+
+
+def _index_chunk_env_override():
+    """Explicit operator profile ``(jobs, chunk_cap)`` or None (auto-probe)."""
+    if 'TOFU_GREP_INDEX_JOBS' not in os.environ and 'TOFU_GREP_INDEX_CHUNK' not in os.environ:
+        return None
+    jobs = max(1, min(8, int(os.environ.get('TOFU_GREP_INDEX_JOBS', '4') or 4)))
+    cap = max(1, min(100_000, int(os.environ.get('TOFU_GREP_INDEX_CHUNK', '1500') or 1500)))
+    return jobs, cap
+
+
+def _chunk_paths(paths, byte_budget, count_budget):
+    """Split *paths* into argv-safe chunks (byte AND count bounded)."""
+    chunks, cur, cur_bytes = [], [], 0
+    for p in paths:
+        need = len(p) + 1
+        if cur and (cur_bytes + need > byte_budget or len(cur) >= count_budget):
+            chunks.append(cur)
+            cur, cur_bytes = [], 0
+        cur.append(p)
+        cur_bytes += need
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def _run_index_chunks(base, pattern, ctx_n, cap, count_only, cands, deadline,
+                      total_bytes=0):
+    """Run rg over the candidate list, preserving candidate order.
+
+    Self-calibrating on TWO axes (explicit-arg rg parallelizes weakly inside
+    one process, so process count is the real lever):
+      * probe wall time (first 600 candidates) → metadata latency;
+      * total candidate bytes from the index snapshot → content volume.
+    Fast+small trees get few big argv-bound chunks (process overhead
+    dominates); content-heavy searches get 8 processes × 1500-file chunks
+    (parallel content reads); latency-bound mounts get 8 × 600 (maximum
+    open-latency overlap).  ``TOFU_GREP_INDEX_JOBS`` / ``TOFU_GREP_INDEX_CHUNK``
+    pin the profile explicitly and skip the probe.
+
+    Returns ``(stdout_bytes, timed_out, unavailable)``.  ``unavailable`` means
+    the rg binary vanished (caller should fall through to the GNU path).
+    """
+
+    def _is_match_line(line):
+        try:
+            return bool(_RG_MATCH_LINE.match(line.decode('utf-8', errors='replace')))
+        except Exception as exc:
+            logger.debug('[Tools] index grep match-line classification failed: %s', exc)
+            return False
+
+    def _mk_cmd(chunk):
+        flags = ['-ci'] if count_only else ['-ni']
+        # --no-messages: a candidate deleted between index snapshot and search
+        # must not leak "No such file" errors into results (NB: GNU grep's
+        # -s means no-messages, but rg's -s means --case-sensitive — do NOT
+        # shorten this flag).
+        # -H: candidates always come from a DIRECTORY target here (explicit
+        # single-file operands short-circuit to the live path earlier), and a
+        # directory walk always prefixes paths — even when the candidate set
+        # ends up holding exactly one file.
+        cmd = ['rg'] + flags + ['--color=never', '--no-heading', '--no-messages', '-H']
+        if ctx_n > 0 and not count_only:
+            cmd.extend(['-C', str(ctx_n)])
+        cmd.extend(['--', pattern])
+        cmd.extend(chunk)
+        return cmd
+
+    def _run_one(i, chunk):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.05:
+            return i, b'', True, False, 0.0
+        t0 = time.perf_counter()
+        req = SearchRequest(cwd=base, rg_argv=tuple(_mk_cmd(chunk)), preferred_backend='rg',
+                            max_results=None if count_only else cap,
+                            timeout=remaining, match_line=_is_match_line)
+        res = run_search(req)
+        dt = time.perf_counter() - t0
+        if res.unavailable:
+            return i, b'', False, True, dt
+        return i, res.stdout, res.timed_out, False, dt
+
+    # ── Probe: first chunk always runs alone, timed for the profile pick ──
+    probe_size = _GREP_INDEX_PROBE_FILES
+    override = _index_chunk_env_override()
+    if override is not None or len(cands) <= probe_size:
+        jobs, chunk_cap = override or (4, 1500)
+        chunks = _chunk_paths(cands, _GREP_INDEX_ARGV_BUDGET, chunk_cap)
+    else:
+        i0, probe_out, probe_to, probe_un, probe_dt = _run_one(
+            0, cands[:probe_size])
+        content_heavy = total_bytes > _GREP_INDEX_CONTENT_BYTES
+        if probe_dt >= _GREP_INDEX_PROBE_FAST_S:
+            jobs, chunk_cap = 8, 600       # latency-bound mount
+        elif content_heavy:
+            jobs, chunk_cap = 8, 1500      # cheap opens, heavy content reads
+        else:
+            jobs, chunk_cap = 2, 100_000   # fast mount, little content
+        logger.debug('[Tools] index grep probe: %.0fms for %d files, %.1fMB candidates '
+                     '→ profile jobs=%d chunk=%d',
+                     probe_dt * 1000, probe_size, total_bytes / 1048576, jobs, chunk_cap)
+        chunks = [cands[:probe_size]] + _chunk_paths(
+            cands[probe_size:], _GREP_INDEX_ARGV_BUDGET, chunk_cap)
+        # Pre-seed the probe result so the pool only schedules the rest.
+        results = [None] * len(chunks)
+        results[0] = probe_out
+        if probe_un:
+            return b'', False, True
+        if probe_to:
+            return probe_out, True, False
+        if not count_only and probe_out:
+            got0 = sum(1 for ln in probe_out.split(b'\n')
+                       if ln and _RG_MATCH_LINE.match(ln.decode('utf-8', errors='replace')))
+            if got0 >= cap:
+                return probe_out, False, False
+        pool_chunks = chunks[1:]
+        results, timed_out, unavailable = _run_pool(
+            _run_one, pool_chunks, jobs, results, offset=1,
+            count_only=count_only, cap=cap, match_re=_RG_MATCH_LINE)
+        raw = b''.join(b for b in results if b)
+        return raw, timed_out, unavailable
+
+    results, timed_out, unavailable = _run_pool(
+        _run_one, chunks, jobs, [None] * len(chunks), offset=0,
+        count_only=count_only, cap=cap, match_re=_RG_MATCH_LINE)
+    raw = b''.join(b for b in results if b)
+    return raw, timed_out, unavailable
+
+
+def _run_pool(_run_one, chunks, jobs, results, offset, count_only, cap, match_re):
+    """Schedule ``_run_one(i+offset, chunk)`` over *chunks* with early exits.
+
+    Writes into *results* (probe pre-seed honoured via *offset*); returns
+    ``(results, timed_out, unavailable)``.  Stops consuming when a chunk
+    times out (partial honesty) or the global match cap is already satisfied.
+    """
+    timed_out = False
+    unavailable = False
+    pool = ThreadPoolExecutor(max_workers=max(1, min(jobs, len(chunks))))
+    try:
+        futs = [pool.submit(_run_one, offset + i, chunk) for i, chunk in enumerate(chunks)]
+        got = 0
+        for i, fut in enumerate(futs):
+            try:
+                _i, data, to, un, _dt = fut.result()
+            except Exception as e:
+                logger.debug('[Tools] index grep chunk %d failed: %s', offset + i, e)
+                data, to, un = b'', False, False
+            if un:
+                unavailable = True
+            results[offset + i] = data
+            if to:
+                timed_out = True
+                break  # later chunks unreliable — report partial
+            if not count_only and data:
+                got += sum(1 for ln in data.split(b'\n')
+                           if ln and match_re.match(ln.decode('utf-8', errors='replace')))
+                if got >= cap:
+                    break  # already have a full page of matches — skip the tail
+    finally:
+        # Do NOT wait for abandoned chunks: pending ones are cancelled and
+        # in-flight ones are bounded by their own run_search timeout.
+        pool.shutdown(wait=False, cancel_futures=True)
+    return results, timed_out, unavailable
+
+
+def _grep_via_index(base, target, pattern, include, ctx_n, cap, count_only,
+                    io_timeout):
+    """Index-backed grep.  Returns a formatted result string, or None when the
+    index cannot serve this query (caller falls back to the live rg walk).
+
+    The persistent tree index yields the exact candidate file list (ignore
+    rules + include glob applied in memory); rg then runs on EXPLICIT paths,
+    performing zero directory traversal — the operation that blows the 60s
+    timeout on FUSE/cross-DC trees.
+    """
+    try:
+        if os.path.isfile(target):
+            return None  # explicit single-file operand: rg searches even
+                         # ignored/hidden files — keep the live semantics
+        base_abs = os.path.abspath(base)
+        target_abs = os.path.abspath(target)
+        if target_abs != base_abs and not target_abs.startswith(base_abs + os.sep):
+            return None  # absolute target outside this root — not indexed
+        entry = tree_index.acquire(base_abs)
+        if entry is None:
+            return None
+        rel_target = os.path.relpath(target_abs, base_abs)
+        cands, total_bytes = tree_index.grep_candidates(
+            entry, '' if rel_target == '.' else rel_target, include, _RG_MAX_BYTES)
+        if not cands:
+            return _format_grep_output(base, '', pattern, include, ctx_n, cap, count_only)
+        raw, timed_out, unavailable = _run_index_chunks(
+            base, pattern, ctx_n, cap, count_only, cands,
+            time.monotonic() + io_timeout, total_bytes)
+        if unavailable and not raw:
+            return None  # rg vanished mid-flight — GNU path still available
+        text = raw.decode('utf-8', errors='replace')
+        if timed_out:
+            return _format_grep_timeout(base, target, pattern, include, ctx_n, cap,
+                                        count_only, io_timeout, text, 'rg_index_timeout')
+        return _format_grep_output(base, text, pattern, include, ctx_n, cap, count_only)
+    except Exception as e:
+        logger.warning('[Tools] index grep failed for %s: %s — falling back to live walk',
+                       pattern[:40], e, exc_info=True)
+        return None
+
+
 def _run_rg(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
     """Run ripgrep. Returns formatted string on success, None on binary-not-found."""
     cmd = _build_rg_cmd(base, target, pattern, include, ctx_n, cap, count_only)
@@ -1176,22 +1558,56 @@ def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS, coun
             + '\n'.join(truncated))
 
 
-def _fd_find(target, base, pattern, cap):
+def _find_via_index(base, target, pattern, cap, *, case_sensitive=False):
+    """Index-backed find_files. Returns ``(relative_path, size)`` rows, or None when
+    the index cannot serve this query (caller falls back to fd / os.walk).
+
+    Pure in-memory glob over the persistent tree index — no readdir, no stat,
+    no subprocess.  Sizes come from the index snapshot (display-grade
+    freshness; the alternative is one FUSE stat per returned file).
+    """
+    try:
+        base_abs = os.path.abspath(base)
+        target_abs = os.path.abspath(target)
+        if target_abs != base_abs and not target_abs.startswith(base_abs + os.sep):
+            return None  # absolute target outside this root — not indexed
+        entry = tree_index.acquire(base_abs)
+        if entry is None:
+            return None
+        rel_target = os.path.relpath(target_abs, base_abs)
+        rows = tree_index.find_matching(
+            entry, '' if rel_target == '.' else rel_target, pattern, cap,
+            case_sensitive=case_sensitive)
+        return rows
+    except Exception as e:
+        logger.warning('[Tools] index find failed for %s: %s — falling back to live walk',
+                       pattern[:40], e, exc_info=True)
+        return None
+
+
+def _fd_find(target, base, pattern, cap, *, case_sensitive=False,
+             respect_project_ignores=True):
     """Find files using fd-find (3-4x faster than os.walk on large dirs).
 
-    Returns list of formatted match strings, or None if fd fails.
+    Returns ``(relative_path, size)`` rows, or ``None`` if fd fails.
     """
     io_timeout = _get_io_timeout(target, default=30)
     cmd = [_FD_BIN, '-g', pattern, target,
            '--type', 'f',
-           '--max-results', str(cap),
-           '--max-depth', str(_TOOL_MAX_DEPTH)]
-    # Exclude ignored dirs + hidden dirs
-    for d in IGNORE_DIRS:
-        cmd.extend(['--exclude', d])
-    # ★ fd auto-respects .gitignore only inside a git repo (.git/ present).
-    #   Explicitly point fd at .gitignore when there's no .git/ dir.
-    if base:
+           '--max-results', str(cap)]
+    cmd.append('--case-sensitive' if case_sensitive else '--ignore-case')
+    if respect_project_ignores:
+        cmd.extend(['--max-depth', str(_TOOL_MAX_DEPTH)])
+        # Exclude ignored dirs + hidden dirs.
+        for d in sorted(IGNORE_DIRS):
+            cmd.extend(['--exclude', d])
+    else:
+        # A translated shell ``find`` must not silently omit hidden or ignored
+        # files merely because the project navigation index does.
+        cmd.extend(['--hidden', '--no-ignore'])
+    # fd auto-respects .gitignore only inside a git repo (.git/ present).
+    # Explicitly point fd at .gitignore when there is no .git/ dir.
+    if respect_project_ignores and base:
         gitignore = os.path.join(base, '.gitignore')
         if os.path.isfile(gitignore) and not os.path.isdir(os.path.join(base, '.git')):
             cmd.extend(['--ignore-file', gitignore])
@@ -1212,60 +1628,124 @@ def _fd_find(target, base, pattern, cap):
             except Exception as e:
                 logger.debug('[Tools] getsize failed for %s: %s', rel, e, exc_info=True)
                 sz = 0
-            matches.append(f'  {rel} ({_fmt_size(sz)})')
+            matches.append((rel, sz))
         return matches
     except subprocess.TimeoutExpired:
         logger.warning('[Tools] fd timed out after %ds for pattern=%s in %s',
                        io_timeout, pattern, os.path.relpath(target, base))
-        return None
+        return [(
+            None,
+            f'[search timed out after {io_timeout}s - '
+            'try a more specific path]',
+        )]
     except Exception as e:
         logger.warning('[Tools] fd failed: %s', e)
         return None
 
 
-def _python_find(target, base, pattern, cap):
-    """Find files using Python os.walk + fnmatch (fallback).
+def _python_find(target, base, pattern, cap, *, case_sensitive=False,
+                 respect_project_ignores=True):
+    """Find files using a bounded ``scandir`` DFS + fnmatch fallback.
 
-    Enhanced with .gitignore awareness, heavy directory detection,
-    depth limiting, and extra directory pruning.
+    Unlike ``os.walk``, this does not first materialize every name in a huge
+    directory. Work, depth, notices, and matches all have explicit bounds.
     """
-    gi_patterns = _load_gitignore_patterns(base)
+    gi_patterns = (
+        _load_gitignore_patterns(base) if respect_project_ignores else [])
     matches = []
+    scanned = 0
     timeout_val = _get_io_timeout(base, default=30)
     deadline = time.time() + timeout_val
-    for root, dirs, files in os.walk(target):
-        # Prune directories
-        pruned = []
-        for d in sorted(dirs):
-            if d in IGNORE_DIRS or d.startswith('.'):
-                continue
-            if gi_patterns:
-                d_rel = os.path.relpath(os.path.join(root, d), base)
-                if _gitignore_match(d_rel, True, gi_patterns):
-                    continue
-            pruned.append(d)
-        dirs[:] = pruned
-        for fname in sorted(files):
-            if fnmatch.fnmatch(fname.lower(), pattern.lower()):
-                fp = os.path.join(root, fname)
-                rel = os.path.relpath(fp, base)
-                # .gitignore check
-                if gi_patterns and _gitignore_match(rel, False, gi_patterns):
-                    continue
-                try:
-                    sz = os.path.getsize(fp)
-                except Exception as e:
-                    logger.debug('[Tools] getsize failed for %s: %s', fname, e, exc_info=True)
-                    sz = 0
-                matches.append(f'  {rel} ({_fmt_size(sz)})')
-                if len(matches) >= cap:
-                    return matches
-        if len(matches) >= cap:
-            return matches
+    comparable_pattern = pattern if case_sensitive else pattern.lower()
+    stack = [(target, 0)]
+    error_notices = 0
+    depth_truncated = False
+    while stack:
+        root, depth = stack.pop()
+        child_directories = []
+        try:
+            with os.scandir(root) as iterator:
+                for entry in iterator:
+                    scanned += 1
+                    if scanned > _FIND_SCAN_LIMIT:
+                        matches.append((
+                            None,
+                            f'[search stopped after scanning '
+                            f'{_FIND_SCAN_LIMIT} entries - try a more '
+                            'specific path]',
+                        ))
+                        return matches
+                    if scanned % 256 == 0 and time.time() > deadline:
+                        matches.append((
+                            None,
+                            f'[search timed out after {timeout_val}s - '
+                            'try a more specific path]',
+                        ))
+                        return matches
+                    name = entry.name
+                    try:
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                        is_file = entry.is_file(follow_symlinks=False)
+                    except OSError as exc:
+                        logger.debug('[Tools] find type check failed for %s: %s',
+                                     entry.path, exc)
+                        continue
+                    if is_dir:
+                        if depth >= _TOOL_MAX_DEPTH:
+                            depth_truncated = True
+                            continue
+                        if respect_project_ignores and (
+                                name in IGNORE_DIRS or name.startswith('.')):
+                            continue
+                        rel = os.path.relpath(entry.path, base)
+                        if gi_patterns and _gitignore_match(
+                                rel, True, gi_patterns):
+                            continue
+                        child_directories.append((entry.path, depth + 1))
+                        continue
+                    if not is_file or (
+                            respect_project_ignores and name.startswith('.')):
+                        continue
+                    comparable = name if case_sensitive else name.lower()
+                    if not fnmatch.fnmatchcase(
+                            comparable, comparable_pattern):
+                        continue
+                    rel = os.path.relpath(entry.path, base)
+                    if gi_patterns and _gitignore_match(
+                            rel, False, gi_patterns):
+                        continue
+                    try:
+                        stat_result = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        logger.debug('[Tools] find stat failed for %s: %s',
+                                     entry.path, exc)
+                        continue
+                    matches.append((rel, stat_result.st_size))
+                    if len(matches) >= cap:
+                        return matches
+        except OSError as exc:
+            logger.debug('[Tools] find scan failed for %s: %s', root, exc)
+            if error_notices < 8:
+                error_notices += 1
+                matches.append((
+                    None,
+                    f'[unable to scan {os.path.relpath(root, base)}: {exc}]',
+                ))
+        # Reverse restores the directory encounter order under LIFO traversal.
+        stack.extend(reversed(child_directories))
         if time.time() > deadline:
-            matches.append(f'  [search timed out after {timeout_val}s - '
-                           f'try a more specific path]')
+            matches.append((
+                None,
+                f'[search timed out after {timeout_val}s - '
+                'try a more specific path]',
+            ))
             return matches
+    if depth_truncated:
+        matches.append((
+            None,
+            f'[search depth capped at {_TOOL_MAX_DEPTH} - '
+            'try a more specific path]',
+        ))
     return matches
 
 
@@ -1357,7 +1837,9 @@ def tool_find_files_batch(base, searches):
     return '\n\n'.join(parts)
 
 
-def tool_find_files(base, pattern, rel_path=None, max_results=None):
+def tool_find_files(base, pattern, rel_path=None, max_results=None, *,
+                    case_sensitive=False, shell_output=False,
+                    respect_project_ignores=True):
     """Find files by name glob pattern.
 
     Uses fd-find when available (3-4x faster on large dirs), falls back to
@@ -1374,29 +1856,72 @@ def tool_find_files(base, pattern, rel_path=None, max_results=None):
     except ValueError as e:
         logger.debug('[Tools] find_files safe_path rejected %s: %s', rel_path, e, exc_info=True)
         return str(e)
+    if not os.path.isdir(target):
+        if shell_output:
+            return f"find: '{rel_path or '.'}': No such directory"
+        return f'Not a directory: {rel_path or "."}'
     cap = max(1, min(int(max_results), 500)) if max_results else 100
+    query_cap = cap + 1
 
+    # ── Fast path: persistent tree index (pure in-memory glob, µs–ms) ──
     matches = None
-    if _FD_BIN:
-        t0 = time.perf_counter()
-        matches = _fd_find(target, base, pattern, cap)
-        if matches is not None:
-            elapsed = (time.perf_counter() - t0) * 1000
-            logger.debug('[Tools] fd found %d files in %.1fms', len(matches), elapsed)
+    if respect_project_ignores:
+        matches = _find_via_index(
+            base, target, pattern, query_cap,
+            case_sensitive=case_sensitive)
+
+    if matches is None:
+        if respect_project_ignores:
+            # No index yet — build it behind the live walk. A shell-compatible
+            # search deliberately skips the filtered index instead.
+            tree_index.warm(base)
+        if _FD_BIN:
+            t0 = time.perf_counter()
+            matches = _fd_find(
+                target, base, pattern, query_cap,
+                case_sensitive=case_sensitive,
+                respect_project_ignores=respect_project_ignores)
+            if matches is not None:
+                elapsed = (time.perf_counter() - t0) * 1000
+                logger.debug('[Tools] fd found %d files in %.1fms', len(matches), elapsed)
 
     if matches is None:
         t0 = time.perf_counter()
-        matches = _python_find(target, base, pattern, cap)
+        matches = _python_find(
+            target, base, pattern, query_cap,
+            case_sensitive=case_sensitive,
+            respect_project_ignores=respect_project_ignores)
         elapsed = (time.perf_counter() - t0) * 1000
         logger.debug('[Tools] os.walk found %d files in %.1fms', len(matches), elapsed)
 
     if not matches:
-        return f'No files matching: {pattern}'
+        return '' if shell_output else f'No files matching: {pattern}'
+    real_matches = [row for row in matches if row[0] is not None]
+    notices = [row[1] for row in matches if row[0] is None]
+    was_capped = len(real_matches) > cap
+    real_matches = real_matches[:cap]
+    capped_notice = (
+        f'[results capped at {cap}; narrow the pattern or path]'
+        if was_capped else '')
+    if shell_output:
+        requested_path = str(rel_path or '.')
+        dot_prefixed = requested_path == '.' or requested_path.startswith('./')
+        lines = [
+            (f'./{rel}' if dot_prefixed and not str(rel).startswith('./')
+             else str(rel))
+            for rel, _size in real_matches
+        ]
+        lines.extend(f'find: {notice}' for notice in notices)
+        if capped_notice:
+            lines.append(f'find: {capped_notice}')
+        return '\n'.join(lines)
     hdr = f'Files matching "{pattern}"'
     if rel_path:
         hdr += f' in {rel_path}'
-    # The timeout sentinel ("[search timed out ...]") is appended to `matches`
-    # for display but is not a real file - exclude it from the count so the
-    # header is honest.
-    n_real = sum(1 for m in matches if '[search timed out' not in m)
-    return hdr + f' ({n_real} found):\n\n' + '\n'.join(matches)
+    rendered = [f'  {rel} ({_fmt_size(size)})'
+                for rel, size in real_matches]
+    rendered.extend(f'  {notice}' for notice in notices)
+    if capped_notice:
+        rendered.append(f'  {capped_notice}')
+    return (hdr + f' ({len(real_matches)} found):\n\n'
+            + '\n'.join(rendered))

@@ -346,7 +346,8 @@ def test_guard_or_dispose_invariant(relay_file, monkeypatch):
             g.auth_ctx = AuthContext(key_id='k', name='t',
                                      scopes=frozenset({'agents:run'}),
                                      rate_limit_rpm=0, rate_limit_tpd=0,
-                                     user_id='usr_1')
+                                     owner_user_id=2,
+                                     account_user_id='usr_1')
             # Pool request (no handle) → rejected, nothing to dispose.
             assert guard_model_relay_or_dispose(None) is not None
             # BYO request (handle present) → allowed, slot survives.

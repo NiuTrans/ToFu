@@ -123,12 +123,11 @@ def test_run_virtual_user_keeps_progress_for_the_budget_guard():
 def vu_env(monkeypatch):
     captured = {}
     monkeypatch.setattr(ap, 'is_autopilot_enabled', lambda task: True)
-    monkeypatch.setattr(ap, '_has_pending_real_message', lambda conv_id: False)
+    monkeypatch.setattr(ap, '_has_pending_real_message', lambda conv_id, *, user_id: False)
     monkeypatch.setattr(ap, '_successor_already_running',
                         lambda task, conv_id: False)
     monkeypatch.setattr(ap, '_get_or_persist_run_id',
-                        lambda conv_id: 'ar-test000001')
-    monkeypatch.setattr(ap, '_presync_parent_reply', lambda task: None)
+                        lambda conv_id, *, user_id: 'ar-test000001')
 
     vu_text = '第三条还没修，继续。\n' + PROGRESS_SAMPLE
     monkeypatch.setattr(
@@ -136,17 +135,14 @@ def vu_env(monkeypatch):
         lambda task, vu_msg_id=None: {'text': vu_text, 'rounds': [],
                                       'segments': []})
 
-    def fake_append(conv_id, vu_msg_id, text, rounds=None, run_id='',
+    def fake_append(task, conv_id, vu_msg_id, text, rounds=None, run_id='',
                     segments=None):
         captured['persist_text'] = text
         return {'_msgId': vu_msg_id, 'content': text, 'role': 'user'}
-    monkeypatch.setattr(ap, '_append_vu_message_to_conv', fake_append)
     monkeypatch.setattr(
-        ap, '_maybe_auto_translate_vu',
-        lambda conv_id, vu_msg_id, content:
-            captured.__setitem__('translate_text', content))
+        ap, '_append_conversation_autopilot_turns', fake_append)
 
-    def fake_budget(conv_id, vu_text, targets=None):
+    def fake_budget(conv_id, vu_text, *, user_id, targets=None):
         captured['budget_text'] = vu_text
         return {'stop': False, 'reason': '', 'turn': 1}
     monkeypatch.setattr(ap, '_record_vu_turn_and_check_budget', fake_budget)
@@ -159,7 +155,8 @@ def vu_env(monkeypatch):
 
 
 def test_persist_strips_machine_tokens_but_budget_guard_reads_raw(vu_env):
-    task = {'id': 'task00000001', 'convId': 'conv00000001', 'config': {},
+    task = {'id': 'task00000001', 'convId': 'conv00000001', '_userId': 1,
+            'config': {},
             'modifiedFileList': []}
     out = ap.maybe_run_autopilot(task)
     assert out is not None
@@ -170,5 +167,3 @@ def test_persist_strips_machine_tokens_but_budget_guard_reads_raw(vu_env):
     assert '第三条还没修，继续。' in vu_env['persist_text']
     # The guard still gets the original PROGRESS line to parse.
     assert PROGRESS_SAMPLE in vu_env['budget_text']
-    # The translate safety net translates the SAME clean copy that persisted.
-    assert vu_env['translate_text'] == vu_env['persist_text']

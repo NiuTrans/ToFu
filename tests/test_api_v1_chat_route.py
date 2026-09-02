@@ -5,11 +5,14 @@ a synthetic completion onto the task dict before returning, then verify
 the route assembles a correct response.
 """
 
+pytest_plugins = ('tests._credential_sidecar',)
+
 import asyncio
 import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 
 
@@ -27,11 +30,6 @@ class ChatRouteTest(unittest.TestCase):
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory()
         from lib import api_keys
-        cls._orig = api_keys._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(cls._tmp.name, 'api_keys.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        os.environ['TUNNEL_TOKEN'] = 'test-tunnel-no-real'
 
         from quart import Quart
         cls.app = Quart(__name__, static_folder=None)
@@ -47,14 +45,11 @@ class ChatRouteTest(unittest.TestCase):
 
         # Mint a chat-scoped key.
         from lib.api_keys import create_key
-        _row, cls.token = create_key(name='chat-bot', scopes=['chat'])
+        _row, cls.token = create_key(owner_user_id=1, name='chat-bot', scopes=['chat'])
 
     @classmethod
     def tearDownClass(cls):
         from lib import api_keys
-        api_keys._STORE_PATH = cls._orig
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
         cls._tmp.cleanup()
 
     def setUp(self):
@@ -63,7 +58,7 @@ class ChatRouteTest(unittest.TestCase):
         _cache.clear()
         # Stub spawn_task so it immediately marks the task done with
         # synthetic content / usage.
-        import lib.tasks_pkg as pkg
+        import lib.tasks_pkg.spawn as pkg
 
         def _fake_spawn(task):
             task['content'] = 'Hello from stub'
@@ -82,7 +77,7 @@ class ChatRouteTest(unittest.TestCase):
         pkg.spawn_task = _fake_spawn
 
     def tearDown(self):
-        import lib.tasks_pkg as pkg
+        import lib.tasks_pkg.spawn as pkg
         pkg.spawn_task = self._orig_spawn
 
     def test_sync_completion(self):
@@ -109,6 +104,76 @@ class ChatRouteTest(unittest.TestCase):
             self.assertEqual(body['usage']['total_tokens'], 15)
             self.assertIn('task_id', body)
         _new_loop_run(go())
+
+    def test_sync_stream_failure_is_http_error_not_fake_completion(self):
+        import lib.tasks_pkg.spawn as pkg
+
+        current_spawn = pkg.spawn_task
+
+        def _failed_spawn(task):
+            task['content'] = 'safe prefix'
+            task['status'] = 'done'
+            task['finishReason'] = 'premature_close'
+            task['streamState'] = 'malformed_stream'
+            from lib.tasks_pkg.manager import append_event
+            append_event(task, {
+                'type': 'done',
+                'finishReason': 'premature_close',
+                'streamState': 'malformed_stream',
+            })
+
+        pkg.spawn_task = _failed_spawn
+        try:
+            async def go():
+                response = await self.app.test_client().post(
+                    '/api/v1/chat/completions',
+                    headers={'Authorization': f'Bearer {self.token}'},
+                    json={
+                        'model': 'test-model',
+                        'messages': [{'role': 'user', 'content': 'Hi'}],
+                        'timeout_s': 5,
+                    },
+                )
+                self.assertEqual(response.status_code, 500)
+                body = await response.get_json()
+                self.assertFalse(body['ok'])
+                self.assertNotIn('choices', body)
+
+            _new_loop_run(go())
+        finally:
+            pkg.spawn_task = current_spawn
+
+    def test_native_stream_failure_uses_error_event(self):
+        from routes.api_v1.chat import _stream_generator
+
+        task = {
+            'id': 'native-cut',
+            'status': 'done',
+            'content': 'safe prefix',
+            'finishReason': 'premature_close',
+            'streamState': 'malformed_stream',
+            'events': [{
+                'type': 'done',
+                'finishReason': 'premature_close',
+                'streamState': 'malformed_stream',
+                'seq': 0,
+            }],
+            'events_lock': threading.Lock(),
+        }
+
+        async def go():
+            return [frame async for frame in _stream_generator(
+                task, 'test-model', 'chatcmpl-cut')]
+
+        frames = _new_loop_run(go())
+        payloads = [
+            json.loads(frame[len('data: '):].strip())
+            for frame in frames
+            if frame.startswith('data: ') and '[DONE]' not in frame
+        ]
+        self.assertEqual(payloads[0]['error']['code'],
+                         'provider_stream_error')
+        self.assertFalse(any('choices' in payload for payload in payloads))
 
     def test_rejected_without_auth(self):
         # Credential gate only fires in private/multi-user mode; open mode
@@ -179,6 +244,6 @@ class ChatRouteTest(unittest.TestCase):
 if __name__ == '__main__':
     import pathlib
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_api_v1_chat_route.py')
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_api_v1_chat_route.py')
     unittest.main()

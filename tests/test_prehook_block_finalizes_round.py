@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests._registered_chat_task import registered_chat_task
+
 # "rm" assembled at runtime so THIS test file's source / any shell that scans
 # it never itself trips a dangerous-command guard.
 _RM = chr(114) + chr(109)
@@ -113,7 +115,7 @@ class TestPreHookBlockFinalizesRound:
     def _run_pipeline_with_blocking_hook(self, recovery=''):
         """Drive execute_tool_pipeline for a single run_command whose pre-hook
         blocks it, and return (task, round_entry, messages)."""
-        from lib.tasks_pkg.tool_dispatch import _pipeline as pipe
+        import lib.tasks_pkg.tool_dispatch._pipeline as pipe
         from lib.tasks_pkg import tool_hooks
 
         # A blocking hook registered just for this test (cleaned up after).
@@ -151,11 +153,13 @@ class TestPreHookBlockFinalizesRound:
                 'model': 'test-model',
             }
             messages = []
-            pipe.execute_tool_pipeline(
-                task, parsed_tcs, cfg={}, project_path=None,
-                project_enabled=False, tool_list=None, messages=messages,
-                all_search_results_text=[], round_num=17, model='test-model',
-            )
+            with registered_chat_task(task):
+                pipe.execute_tool_pipeline(
+                    task, parsed_tcs, cfg={}, project_path=None,
+                    project_enabled=False, tool_list=None, messages=messages,
+                    all_search_results_text=[], round_num=17,
+                    model='test-model',
+                )
             return task, round_entry, messages
         finally:
             tool_hooks._pre_hooks.pop()

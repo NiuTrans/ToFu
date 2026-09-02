@@ -18,7 +18,6 @@ cohesive sub-modules:
 Public surface:
   * ``execute_compact_tool``       — generates the summary, mutates messages
   * ``force_compact_if_needed``    — gates on threshold + injects synthetic pair
-  * ``smart_summary_compact``      — legacy alias
   * Boundary helpers:
       - ``_objective_anchor_index``
       - ``_extract_current_query``
@@ -46,6 +45,7 @@ from lib.tasks_pkg.compaction._layer2._prompt import (  # noqa: F401
 from lib.tasks_pkg.compaction._layer2._anchor import (  # noqa: F401
     _apiform_tool_rounds,
     _coerce_spec_list,
+    _collect_user_verbatim,
     _extract_current_query,
     _extract_recently_accessed_files,
     _find_turn_boundary,
@@ -59,7 +59,6 @@ from lib.tasks_pkg.compaction._layer2._summary import (  # noqa: F401
 from lib.tasks_pkg.compaction._layer2._compact import (  # noqa: F401
     execute_compact_tool,
     force_compact_if_needed,
-    smart_summary_compact,
 )
 
 logger = get_logger(__name__)
@@ -70,6 +69,7 @@ __all__ = [
     '_summary_input_char_budget',
     '_coerce_spec_list',
     '_extract_current_query',
+    '_collect_user_verbatim',
     '_extract_recently_accessed_files',
     '_find_turn_boundary',
     '_objective_anchor_index',
@@ -81,5 +81,4 @@ __all__ = [
     '_COMPACT_TOOL_NAME',
     'execute_compact_tool',
     'force_compact_if_needed',
-    'smart_summary_compact',
 ]

@@ -34,7 +34,7 @@ import pytest
 def clean_index():
     """Isolate the conv→latest-task index + store mirror around each test."""
     from lib.runtime_state_store import reset_for_test
-    from lib.tasks_pkg import manager as m
+    import lib.tasks_pkg.manager.runtime as m
     with m._conv_latest_task_lock:
         m._conv_latest_task.clear()
     reset_for_test()
@@ -47,7 +47,7 @@ def clean_index():
 @pytest.fixture()
 def put_task():
     """Insert a synthetic task into the live registry; auto-cleanup."""
-    from lib.tasks_pkg import tasks, tasks_lock
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
     added = []
 
     def _put(task_id, conv_id, status='running'):
@@ -100,7 +100,7 @@ def test_gate_true_for_live_newer_task(clean_index, put_task):
     for live_status in ('pending', 'running'):
         put_task(f'live-{live_status}', conv, status=live_status)
         m._record_latest_task(conv, f'live-{live_status}')
-        parent = {'id': 'parent-3', 'convId': conv}
+        parent = {'id': 'parent-3', 'convId': conv, '_userId': 1}
         assert _successor_already_running(parent, conv) is True, live_status
 
 
@@ -121,13 +121,14 @@ def test_discard_task_invalidates_store_mirror(clean_index, put_task):
     Before the fix the mirror (TTL 1h) kept naming the discarded carrier, so
     every store-backed _latest_task_for_conv read returned the corpse."""
     from lib.runtime_state_store import get_store
+    from lib.tasks_pkg.manager import discard_task
     m = clean_index
     conv = 'conv-gate-5'
     put_task('carrier-5', conv, status='running')
     m._record_latest_task(conv, 'carrier-5')
     # Mirror written by _record_latest_task — visible via the store-backed read.
     assert get_store().get_value(m._LATEST_KIND, conv) == 'carrier-5'
-    m.discard_task('carrier-5', conv_id=conv)
+    discard_task('carrier-5', conv_id=conv)
     assert get_store().get_value(m._LATEST_KIND, conv) is None
     assert m._latest_task_for_conv(conv) is None
 

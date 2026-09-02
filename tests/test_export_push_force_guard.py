@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Incident anchor: born in commit 4795d5ff — fix(export): force-push only on non-fast-forward rejection, not any e...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Guard: export.py force-pushes ONLY on a non-fast-forward REJECTION.
 
 Background — the data-loss class:

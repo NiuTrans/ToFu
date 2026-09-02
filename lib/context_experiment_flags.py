@@ -1,7 +1,7 @@
-"""Validated, request-local switches for context-efficiency experiments.
+"""Validated, request-local switches for context-efficiency policy.
 
 These switches are intentionally separate from the conversation-sticky cost
-experiment.  Each optimization can be enabled independently for a benchmark
+experiment. Each optimization can be selected independently for a benchmark
 arm, and an absent/invalid value always falls back to the shipped behavior.
 No process-global state is mutated, so concurrent arms cannot contaminate one
 another.
@@ -16,7 +16,10 @@ DEFAULT_CONTEXT_EXPERIMENT_FLAGS = {
     'cache': {'gpt56BreakpointMode': 'explicit'},
     'tools': {
         'nativeExposure': 'routed',
-        'programmaticCalling': 'auto',
+        # ``on`` (shipped default) exposes the tier-shaped programmatic
+        # surface on every round that has a reviewed read-only tool;
+        # ``auto`` keeps the legacy bounded-reduction text/fan-out gate.
+        'programmaticCalling': 'on',
         # Public GPT-5.6 Responses requests automatically defer only the
         # non-pinned portion of a large tool catalog.  Frontend/caller-selected
         # tools are carried separately as an immutable direct-exposure set.
@@ -26,6 +29,11 @@ DEFAULT_CONTEXT_EXPERIMENT_FLAGS = {
         # name even when a composer toggle keeps its schema off the wire.
         # ``selected_only`` preserves the former opt-in authority semantics.
         'executionScope': 'available',
+        'schemaBudgetTokens': 0,
+        # Bounded by default: every tool, including read_files, uses an
+        # owner-scoped artifact recovery handle above the 8k/24k limits.
+        # ``legacy`` remains an explicit rollback and experiment-control arm.
+        'resultEnvelope': 'v2',
     },
     'responses': {
         'transport': 'sse',
@@ -33,23 +41,36 @@ DEFAULT_CONTEXT_EXPERIMENT_FLAGS = {
         'verbosity': 'medium',
         'imageDetail': 'auto',
         'promptProfile': 'auto',
-        'multiAgent': 'auto',
-        'maxConcurrentSubagents': 3,
     },
-    'compaction': {'evidenceLedger': False},
+    # Provider-neutral orchestration policy.  Legacy callers may still send
+    # responses.multiAgent / responses.maxConcurrentSubagents; normalization
+    # accepts those aliases but this block is the sole returned owner.
+    'orchestration': {
+        'multiAgent': 'auto',
+        'maxConcurrentAgents': 3,
+        'policy': 'v1',
+    },
+    'context': {'globalBudgetTokens': 0},
+    'compaction': {'evidenceLedger': False, 'strategy': 'fixed'},
 }
 
 _VALID_BREAKPOINT_MODES = frozenset({'implicit', 'explicit'})
 _VALID_NATIVE_EXPOSURE = frozenset({'full', 'routed'})
-_VALID_PROGRAMMATIC_CALLING = frozenset({'off', 'auto'})
+_VALID_PROGRAMMATIC_CALLING = frozenset({'off', 'auto', 'on'})
 _VALID_TOOL_SEARCH = frozenset({'off', 'auto', 'native', 'local'})
 _VALID_TOOL_EXECUTION_SCOPE = frozenset({'available', 'selected_only'})
 _VALID_RESPONSES_TRANSPORT = frozenset({'sse', 'websocket'})
 _VALID_REASONING_MODE = frozenset({'standard', 'pro'})
 _VALID_VERBOSITY = frozenset({'low', 'medium', 'high'})
 _VALID_IMAGE_DETAIL = frozenset({'auto', 'original'})
-_VALID_PROMPT_PROFILE = frozenset({'auto', 'full', 'lean'})
+_VALID_PROMPT_PROFILE = frozenset({
+    'auto', 'full', 'lean', 'lean_no_url', 'lean_no_safety',
+    'lean_no_tools', 'lean_no_output', 'lean_no_autonomy',
+})
 _VALID_MULTI_AGENT = frozenset({'off', 'auto', 'read_only'})
+_VALID_RESULT_ENVELOPE = frozenset({'legacy', 'v2'})
+_VALID_ORCHESTRATION_POLICY = frozenset({'v1', 'v2'})
+_VALID_COMPACTION_STRATEGY = frozenset({'fixed', 'adaptive'})
 
 
 def _mapping(value: Any) -> dict:
@@ -61,7 +82,7 @@ def normalize_context_experiment_flags(
     """Return the complete experiment switch set for one request.
 
     ``request_config`` is the normal task config.  The function reads only the
-    four documented nested blocks and ignores unrelated keys.  With
+    five documented nested blocks and ignores unrelated keys.  With
     ``strict=True`` invalid values raise ``ValueError``; the hot request path
     uses the fail-safe defaults instead.
     """
@@ -69,6 +90,8 @@ def normalize_context_experiment_flags(
     cache = _mapping(cfg.get('cache'))
     tools = _mapping(cfg.get('tools'))
     responses = _mapping(cfg.get('responses'))
+    orchestration = _mapping(cfg.get('orchestration'))
+    context = _mapping(cfg.get('context'))
     compaction = _mapping(cfg.get('compaction'))
 
     breakpoint_mode = cache.get(
@@ -77,11 +100,15 @@ def normalize_context_experiment_flags(
     native_exposure = tools.get(
         'nativeExposure', cfg.get('tools.nativeExposure', 'routed'))
     programmatic = tools.get(
-        'programmaticCalling', cfg.get('tools.programmaticCalling', 'auto'))
+        'programmaticCalling', cfg.get('tools.programmaticCalling', 'on'))
     tool_search = tools.get(
         'toolSearch', cfg.get('tools.toolSearch', 'auto'))
     execution_scope = tools.get(
         'executionScope', cfg.get('tools.executionScope', 'available'))
+    schema_budget = tools.get(
+        'schemaBudgetTokens', cfg.get('tools.schemaBudgetTokens', 0))
+    result_envelope = tools.get(
+        'resultEnvelope', cfg.get('tools.resultEnvelope', 'v2'))
     transport = responses.get(
         'transport', cfg.get('responses.transport', 'sse'))
     reasoning_mode = responses.get(
@@ -92,13 +119,23 @@ def normalize_context_experiment_flags(
         'imageDetail', cfg.get('responses.imageDetail', 'auto'))
     prompt_profile = responses.get(
         'promptProfile', cfg.get('responses.promptProfile', 'auto'))
-    multi_agent = responses.get(
-        'multiAgent', cfg.get('responses.multiAgent', 'auto'))
-    max_subagents = responses.get(
-        'maxConcurrentSubagents',
-        cfg.get('responses.maxConcurrentSubagents', 3))
+    multi_agent = orchestration.get(
+        'multiAgent', cfg.get(
+            'orchestration.multiAgent', responses.get(
+                'multiAgent', cfg.get('responses.multiAgent', 'auto'))))
+    max_subagents = orchestration.get(
+        'maxConcurrentAgents', cfg.get(
+            'orchestration.maxConcurrentAgents', responses.get(
+                'maxConcurrentSubagents',
+                cfg.get('responses.maxConcurrentSubagents', 3))))
+    orchestration_policy = orchestration.get(
+        'policy', cfg.get('orchestration.policy', 'v1'))
+    global_budget = context.get(
+        'globalBudgetTokens', cfg.get('context.globalBudgetTokens', 0))
     evidence = compaction.get(
         'evidenceLedger', cfg.get('compaction.evidenceLedger', False))
+    compaction_strategy = compaction.get(
+        'strategy', cfg.get('compaction.strategy', 'fixed'))
 
     checks = (
         ('cache.gpt56BreakpointMode', breakpoint_mode,
@@ -106,7 +143,7 @@ def normalize_context_experiment_flags(
         ('tools.nativeExposure', native_exposure,
          _VALID_NATIVE_EXPOSURE, 'routed'),
         ('tools.programmaticCalling', programmatic,
-         _VALID_PROGRAMMATIC_CALLING, 'auto'),
+         _VALID_PROGRAMMATIC_CALLING, 'on'),
         ('tools.toolSearch', tool_search, _VALID_TOOL_SEARCH, 'auto'),
         ('tools.executionScope', execution_scope,
          _VALID_TOOL_EXECUTION_SCOPE, 'available'),
@@ -119,7 +156,13 @@ def normalize_context_experiment_flags(
          _VALID_IMAGE_DETAIL, 'auto'),
         ('responses.promptProfile', prompt_profile,
          _VALID_PROMPT_PROFILE, 'auto'),
-        ('responses.multiAgent', multi_agent, _VALID_MULTI_AGENT, 'auto'),
+        ('orchestration.multiAgent', multi_agent, _VALID_MULTI_AGENT, 'auto'),
+        ('tools.resultEnvelope', result_envelope,
+         _VALID_RESULT_ENVELOPE, 'v2'),
+        ('orchestration.policy', orchestration_policy,
+         _VALID_ORCHESTRATION_POLICY, 'v1'),
+        ('compaction.strategy', compaction_strategy,
+         _VALID_COMPACTION_STRATEGY, 'fixed'),
     )
     normalized: dict[str, str] = {}
     for field, raw, allowed, default in checks:
@@ -136,17 +179,35 @@ def normalize_context_experiment_flags(
             raise ValueError('compaction.evidenceLedger must be a boolean')
         evidence = False
 
+    def _bounded_tokens(raw: Any, field: str, maximum: int) -> int:
+        try:
+            value = int(raw or 0)
+        except (TypeError, ValueError):
+            if strict:
+                raise ValueError(f'{field} must be an integer')
+            return 0
+        if not 0 <= value <= maximum:
+            if strict:
+                raise ValueError(f'{field} must be between 0 and {maximum}')
+            return 0
+        return value
+
+    schema_budget = _bounded_tokens(
+        schema_budget, 'tools.schemaBudgetTokens', 128_000)
+    global_budget = _bounded_tokens(
+        global_budget, 'context.globalBudgetTokens', 1_000_000)
+
     try:
         max_subagents = int(max_subagents)
     except (TypeError, ValueError):
         if strict:
             raise ValueError(
-                'responses.maxConcurrentSubagents must be an integer')
+                'orchestration.maxConcurrentAgents must be an integer')
         max_subagents = 3
     if not 1 <= max_subagents <= 8:
         if strict:
             raise ValueError(
-                'responses.maxConcurrentSubagents must be between 1 and 8')
+                'orchestration.maxConcurrentAgents must be between 1 and 8')
         max_subagents = 3
 
     return {
@@ -160,6 +221,8 @@ def normalize_context_experiment_flags(
                 'tools.programmaticCalling'],
             'toolSearch': normalized['tools.toolSearch'],
             'executionScope': normalized['tools.executionScope'],
+            'schemaBudgetTokens': schema_budget,
+            'resultEnvelope': normalized['tools.resultEnvelope'],
         },
         'responses': {
             'transport': normalized['responses.transport'],
@@ -167,10 +230,17 @@ def normalize_context_experiment_flags(
             'verbosity': normalized['responses.verbosity'],
             'imageDetail': normalized['responses.imageDetail'],
             'promptProfile': normalized['responses.promptProfile'],
-            'multiAgent': normalized['responses.multiAgent'],
-            'maxConcurrentSubagents': max_subagents,
         },
-        'compaction': {'evidenceLedger': evidence},
+        'orchestration': {
+            'multiAgent': normalized['orchestration.multiAgent'],
+            'maxConcurrentAgents': max_subagents,
+            'policy': normalized['orchestration.policy'],
+        },
+        'context': {'globalBudgetTokens': global_budget},
+        'compaction': {
+            'evidenceLedger': evidence,
+            'strategy': normalized['compaction.strategy'],
+        },
     }
 
 
@@ -184,14 +254,19 @@ def context_experiment_arm(request_config: Any) -> dict:
         'programmaticCalling': flags['tools']['programmaticCalling'],
         'toolSearch': flags['tools']['toolSearch'],
         'executionScope': flags['tools']['executionScope'],
+        'schemaBudgetTokens': flags['tools']['schemaBudgetTokens'],
+        'resultEnvelope': flags['tools']['resultEnvelope'],
         'responsesTransport': flags['responses']['transport'],
         'reasoningMode': flags['responses']['reasoningMode'],
         'verbosity': flags['responses']['verbosity'],
         'imageDetail': flags['responses']['imageDetail'],
         'promptProfile': flags['responses']['promptProfile'],
-        'multiAgent': flags['responses']['multiAgent'],
-        'maxConcurrentSubagents': flags['responses'][
-            'maxConcurrentSubagents'],
+        'multiAgent': flags['orchestration']['multiAgent'],
+        'maxConcurrentAgents': flags['orchestration'][
+            'maxConcurrentAgents'],
+        'orchestrationPolicy': flags['orchestration']['policy'],
+        'contextGlobalBudgetTokens': flags['context']['globalBudgetTokens'],
+        'compactionStrategy': flags['compaction']['strategy'],
     }
 
 

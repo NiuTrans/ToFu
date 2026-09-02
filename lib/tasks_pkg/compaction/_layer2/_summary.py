@@ -68,6 +68,35 @@ def _codex_subscription_provider(task: dict | None) -> str:
             logger.debug('[Summary] sticky Codex-provider lookup failed: %s',
                          exc)
 
+    # Crash recovery can rebuild a task before it has dispatched once in this
+    # process: no task.provider_id and no in-memory sticky key exist yet.  The
+    # configured model is still useful evidence when the live dispatcher says
+    # every matching slot belongs to ONE Codex provider.  Refuse to infer when
+    # the model is shared across providers; that preserves the no-name-guessing
+    # rule while closing the recovered-task hole.
+    model_hint = str(
+        task.get('model') or cfg.get('model') or cfg.get('preset') or '')
+    if not pinned and model_hint:
+        try:
+            from lib.llm_dispatch import get_dispatcher
+            dispatcher = get_dispatcher()
+            dispatcher.initialize()
+            matching = [
+                slot for slot in dispatcher.slots
+                if model_hint in {
+                    str(slot.model or ''), str(slot.logical_model or '')
+                }
+            ]
+            providers = {
+                str(slot.provider_id or '') for slot in matching
+                if slot.oauth == 'codex' and slot.provider_id
+            }
+            if (matching and len(providers) == 1
+                    and all(slot.oauth == 'codex' for slot in matching)):
+                candidates.extend(providers)
+        except Exception as exc:
+            logger.debug('[Summary] model-slot Codex lookup failed: %s', exc)
+
     def _is_codex_provider(provider_id: str) -> bool:
         if not provider_id:
             return False
@@ -146,8 +175,8 @@ def _generate_query_aware_summary(messages: list, current_query: str,
             logger.warning('%s evidence ledger generation failed: %s', tag, exc)
 
     # MESSAGE-AWARE elision: pass the budget INTO the formatter so it trims by
-    # dropping middle ASSISTANT content while keeping EVERY user message (summary
-    # prompt §6 is MANDATORY). The old code sliced the joined string blindly,
+    # dropping middle ASSISTANT/context content while keeping EVERY real user
+    # message. The old code sliced the joined string blindly,
     # which could cut a user turn in half or drop it entirely — losing user
     # instructions. See _format_messages_for_summary / _elide_to_budget.
     history_budget = max(
@@ -186,8 +215,9 @@ def _generate_query_aware_summary(messages: list, current_query: str,
 
         With ``on_delta`` set we STREAM and forward each delta live; otherwise
         we use the non-streaming ``dispatch_chat`` (byte-identical to before).
-        ``dispatch_stream`` returns ``(content, finish_reason, usage)`` — we
-        drop the finish_reason so both branches yield the same 2-tuple."""
+        The streaming branch adopts content only after the typed provider
+        result proves completion; a half-stream can never become the durable
+        compaction summary. Both branches then yield ``(content, usage)``."""
         # Codex subscription slots are streaming-only.  A non-streaming
         # dispatch excludes them and may silently buy the summary from another
         # API provider.  Stream internally even when no UI delta callback was
@@ -220,11 +250,18 @@ def _generate_query_aware_summary(messages: list, current_query: str,
             pin = nullcontext()
 
         with pin:
-            msg, _finish, usage = dispatch_stream(
+            from lib.llm.stream_result import (
+                require_verified_provider_stream_result,
+            )
+            stream_result = require_verified_provider_stream_result(
+                dispatch_stream(
                 _summary_messages,
                 on_content=_on_content if on_delta is not None else None,
                 max_tokens=_SUMMARY_MAX_TOKENS, temperature=0,
-                capability=capability, log_prefix=tag)
+                capability=capability, log_prefix=tag),
+                context='L2 compaction summary')
+            msg = stream_result.message
+            usage = stream_result.usage
         # dispatch_stream returns the assistant message as a dict
         # ({'role': 'assistant', 'content': '...'}), NOT a bare string like
         # dispatch_chat — unwrap it so the shared post-processing (re.sub /

@@ -1,0 +1,2084 @@
+/* ═══════════════════════════════════════════
+   ★ run_command inline terminal block
+   ═══════════════════════════════════════════ */
+.ptool-cmd-block {
+  /* Flat content inside the .ptool-turn card — the old 12px/8px side margins
+   * date from the retired nested-card model and pushed the header icon ~12px
+   * right of the .ptool-line icon column above it. */
+  margin: 0;
+  border-radius: 0;
+  border: none;
+  background: none;
+  overflow: visible;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+}
+.ptool-cmd-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  /* Same horizontal inset as .ptool-line so the icon column aligns with
+   * plain tool rows in the same card. */
+  padding: 2px 12px 4px 16px;
+  border-bottom: none;
+  background: none;
+}
+.ptool-cmd-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  color: var(--accent);
+}
+.ptool-cmd-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+.ptool-cmd-status {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 4px;
+}
+/* ── Two-axis verdict chips: "finished" (completion) sits beside the exit-
+ * code verdict chip instead of one fused "✓ done" label. The group takes
+ * over the right-push; the finish chip is neutral gray in every theme — it
+ * states completion, not success. */
+.ptool-cmd-chips {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ptool-cmd-chips .ptool-cmd-status {
+  margin-left: 0;
+}
+.ptool-cmd-finish {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: rgba(148,163,184,0.14);
+}
+.ptool-grep-intercept {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: #93c5fd;
+  background: rgba(59,130,246,0.1);
+  border: 1px solid rgba(96,165,250,0.24);
+}
+.ptool-cmd-ok .ptool-cmd-status {
+  color: #4ade80;
+  background: rgba(74,222,128,0.1);
+}
+.ptool-cmd-err .ptool-cmd-status {
+  color: #f87171;
+  background: rgba(248,113,113,0.1);
+}
+.ptool-cmd-timeout .ptool-cmd-status {
+  color: #fbbf24;
+  background: rgba(251,191,36,0.1);
+}
+/* ── "not run": command refused/blocked before it executed ──
+ * Distinct from error (red, exit≠0): this is amber/neutral — the command
+ * never ran, and the reason is shown inline rather than as a cryptic code. */
+.ptool-cmd-notrun .ptool-cmd-status {
+  color: #fbbf24;
+  background: rgba(251,191,36,0.1);
+}
+.ptool-cmd-reason {
+  padding: 8px 16px 10px 16px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #d9b873;
+  background: rgba(251,191,36,0.06);
+  border-top: 1px solid rgba(251,191,36,0.12);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ptool-cmd-running .ptool-cmd-header {
+  color: var(--accent);
+}
+.ptool-cmd-running .ptool-cmd-icon { color: var(--accent); }
+.ptool-cmd-running .ptool-cmd-label { color: var(--accent-hover); }
+
+/* ── Per-command interrupt button (pt_232244fb) ──
+ * Sits in the running header next to the timer chip. Amber outline (a
+ * deliberate, reversible stop), never the red of an error frame. */
+.ptool-cmd-interrupt {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(251,191,36,0.45);
+  background: rgba(251,191,36,0.08);
+  color: #fbbf24;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.ptool-cmd-interrupt:hover:not(:disabled) {
+  background: rgba(251,191,36,0.18);
+  border-color: rgba(251,191,36,0.7);
+}
+.ptool-cmd-interrupt:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+/* Terminal frame of an interrupted command: amber neutral stop (like
+ * not-run), never the red of an error — the task CONTINUED. */
+.ptool-cmd-interrupted .ptool-cmd-status {
+  color: #fbbf24;
+  background: rgba(251,191,36,0.1);
+}
+
+/* ── Interactive stdin: waiting for user input ── */
+.ptool-cmd-stdin .ptool-cmd-header {
+  color: #38bdf8;
+}
+.ptool-cmd-stdin .ptool-cmd-icon { color: #38bdf8; }
+.ptool-cmd-stdin .ptool-cmd-label { color: #38bdf8; }
+.stdin-pulse {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #38bdf8;
+  margin-left: 6px;
+  animation: stdinPulse 1.2s ease-in-out infinite;
+}
+@keyframes stdinPulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(56,189,248,0.5); }
+  50% { opacity: 0.5; box-shadow: 0 0 6px 3px rgba(56,189,248,0.3); }
+}
+.stdin-prompt-output {
+  margin: 0;
+  padding: 6px 12px;
+  background: rgba(0,0,0,0.15);
+  border: none;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #94a3b8;
+  font-size: 12px;
+  max-height: 100px;
+  overflow-y: auto;
+  border-top: 1px solid rgba(255,255,255,0.04);
+}
+.stdin-prompt-output code {
+  color: #94a3b8;
+  font-family: var(--font-mono, 'Fira Code', monospace);
+  font-size: 12px;
+}
+.stdin-input-area {
+  padding: 8px 12px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  background: rgba(0,0,0,0.1);
+  border-radius: 0 0 8px 8px;
+}
+.stdin-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.stdin-caret {
+  color: #38bdf8;
+  font-weight: 700;
+  font-size: 16px;
+  font-family: var(--font-mono, 'Fira Code', monospace);
+  user-select: none;
+  flex-shrink: 0;
+}
+.stdin-input {
+  flex: 1;
+  background: rgba(0,0,0,0.25);
+  border: 1px solid rgba(56,189,248,0.25);
+  border-radius: 5px;
+  padding: 6px 10px;
+  color: #e2e8f0;
+  font-family: var(--font-mono, 'Fira Code', monospace);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.stdin-input:focus {
+  border-color: rgba(56,189,248,0.6);
+  box-shadow: 0 0 0 2px rgba(56,189,248,0.15);
+}
+.stdin-input::placeholder {
+  color: rgba(148,163,184,0.5);
+}
+.stdin-submit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px; height: 32px;
+  border: none;
+  border-radius: 5px;
+  background: rgba(56,189,248,0.15);
+  color: #38bdf8;
+  cursor: pointer;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.stdin-submit-btn:hover {
+  background: rgba(56,189,248,0.3);
+}
+.stdin-eof-btn {
+  padding: 4px 10px;
+  border: 1px solid rgba(148,163,184,0.25);
+  border-radius: 5px;
+  background: rgba(148,163,184,0.08);
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+  font-family: var(--font-mono, 'Fira Code', monospace);
+}
+.stdin-eof-btn:hover {
+  background: rgba(248,113,113,0.15);
+  border-color: rgba(248,113,113,0.35);
+  color: #f87171;
+}
+.ptool-cmd-desc {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 7px 12px 5px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+.ptool-cmd-desc::before {
+  content: "";
+  flex-shrink: 0;
+  align-self: stretch;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  opacity: 0.55;
+}
+/* ── Inline command description: woven onto the header title line (next
+ *   to the root pill), replacing the old detached band below the header.
+ *   Grows to fill the row and truncates with an ellipsis so it never
+ *   pushes the status badge / spinner off the right edge. */
+.ptool-cmd-desc-inline {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* ── Live run_command timer chip (countdown when the call declared a
+ *   `timeout`, elapsed count-up otherwise). Tabular numerals so the width
+ *   does not jitter as the digits change once per second, and flex-shrink:0
+ *   so the description (which owns flex:1) truncates before the timer does —
+ *   the timer is the one thing on this row that must stay readable. */
+.ptool-cmd-timer {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--text-secondary);
+  opacity: 0.75;
+  white-space: nowrap;
+}
+/* Under 10s left — the command is about to be killed, so stop being quiet. */
+.ptool-cmd-timer-soon {
+  color: #d97706;
+  opacity: 1;
+}
+/* Past the deadline: the backend is SIGKILLing the process tree. */
+.ptool-cmd-timer-over {
+  color: #dc2626;
+  opacity: 1;
+}
+.ptool-cmd-code {
+  margin: 0;
+  padding: 3px 0 5px;
+  background: none;
+  border: none;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.ptool-cmd-code code {
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 11.5px;
+}
+.ptool-cmd-output-wrap {
+  border-top: none;
+}
+.ptool-cmd-toggle {
+  padding: 4px 0;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  user-select: none;
+  transition: color .15s;
+}
+.ptool-cmd-toggle:hover {
+  color: var(--accent-hover);
+}
+.ptool-cmd-output {
+  display: none;
+  margin: 0;
+  padding: 4px 0 4px 10px;
+  background: none;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 260px;
+  overflow-y: auto;
+  border-left: 2px solid var(--border);
+}
+.ptool-cmd-output code {
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 11px;
+}
+/* ★ Scannable QR recovered from terminal output (lib/qr.py → meta.qrImages).
+ * Deliberately OUTSIDE .ptool-cmd-output: that pane is `pre-wrap` +
+ * `break-all` (which is exactly what destroys block-art QR rows) and starts
+ * collapsed. A code the user must point a phone at has to be visible without
+ * expanding anything, and rendered as an image so no text wrapping applies.
+ * White plate + padding is not decoration — it supplies the quiet zone
+ * scanners require, and keeps the code readable under a dark theme where a
+ * transparent PNG would invert to unscannable. */
+.ptool-qr-strip {
+  margin: 6px 0 2px;
+}
+.ptool-qr-label {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  margin-bottom: 4px;
+}
+.ptool-qr-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.ptool-qr-tile {
+  margin: 0;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  line-height: 0;
+}
+.ptool-qr-tile img {
+  width: 148px;
+  height: 148px;
+  display: block;
+  cursor: zoom-in;
+  /* Never smooth a QR: interpolated module edges are what make a scaled
+   * code undecodable. */
+  image-rendering: pixelated;
+}
+/* Live (streaming) output while a run_command is in-flight.
+ * Always visible (no collapse), capped height with auto-scroll so the
+ * newest lines stay in view. */
+.ptool-cmd-output-live {
+  display: block !important;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px 0 4px 10px;
+  background: none;
+  border-left: 2px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.ptool-cmd-output-live code {
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* Live current line (PTY replace-current-line, e.g. a redrawing progress bar):
+ * rendered as the evolving tail after the committed output. Slightly brighter
+ * so it reads as "happening now" vs the settled lines above. */
+
+.ptool-cmd-output-wrap.expanded .ptool-cmd-output {
+  display: block;
+}
+/* Folded output (owner call 2026-08-27): a done command keeps only its
+ * title row — the header itself is the disclosure and a small chevron in
+ * the chips cluster marks the folded pane. The standalone "Show output"
+ * button row is retired for run_command/code_exec (browser_execute_js
+ * keeps its own toggle above). Expansion state is keyed by toolCallId in
+ * _cmdOutputExpanded so re-renders keep the reader's choice. */
+.ptool-cmd-block.ptool-cmd-hasoutput > .ptool-cmd-header {
+  cursor: pointer;
+  user-select: none;
+}
+.ptool-cmd-outchev {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-tertiary);
+  transition: transform .16s ease;
+}
+.ptool-cmd-outchev svg {
+  display: block;
+  width: 11px;
+  height: 11px;
+}
+.ptool-cmd-block.output-open .ptool-cmd-outchev {
+  transform: rotate(90deg);
+}
+.ptool-cmd-block.output-open .ptool-cmd-output {
+  display: block;
+}
+
+/* ── Collapsible command body (done + running states) ──
+ * When a description conveys intent AND the command is long enough to be
+ * noise (multi-line or > 100 chars — see _cmdCollapsible in tool_rounds.js),
+ * the `$ command` <pre> starts COLLAPSED and the header description itself
+ * is the toggle (click to expand in place — no chevron glyph, owner call
+ * 2026-08-02). The user cares about what the command DID, not the exact
+ * shell string. Short one-liners and description-less commands never get
+ * the class and stay visible. */
+.ptool-cmd-block .ptool-cmd-collapsible {
+  display: none;
+}
+.ptool-cmd-block.cmd-open .ptool-cmd-collapsible {
+  display: block;
+}
+.ptool-cmd-desc-toggle {
+  cursor: pointer;
+}
+.ptool-cmd-desc-toggle:hover {
+  color: var(--accent-hover);
+}
+
+/* ── Running: elapsed / timeout-budget readout in the header ── */
+/* When both the elapsed readout and the spinner are present, the elapsed
+ * takes the auto margin (pushes right); the spinner sits just after it. */
+
+/* ── Running: tqdm progress bar parsed from live output ── */
+
+/* Light theme */
+
+/* Tofu theme — warm palette matching the running-block accent */
+
+/* ═══════════════════════════════════════════
+   ★ Pending Approval (manual project tool)
+   ═══════════════════════════════════════════ */
+.ptool-pending-wrap {
+  margin: 2px 0;
+  border: 1px solid rgba(234,179,8,0.3);
+  border-radius: var(--radius-sm);
+  background: rgba(234,179,8,0.04);
+  overflow: hidden;
+  animation: ptoolPendingPulse 2.5s ease-in-out infinite;
+}
+@keyframes ptoolPendingPulse {
+  0%, 100% { border-color: rgba(234,179,8,0.3); box-shadow: 0 0 0 0 rgba(234,179,8,0); }
+  50%      { border-color: rgba(234,179,8,0.55); box-shadow: 0 0 8px -2px rgba(234,179,8,0.12); }
+}
+.ptool-pending-wrap .ptool-line.ptool-pending {
+  color: #fbbf24;
+  background: rgba(234,179,8,0.06);
+  border-bottom: 1px solid rgba(234,179,8,0.12);
+}
+.ptool-badge-warn {
+  color: #f59e0b;
+  background: rgba(245,158,11,0.15);
+  border: 1px solid rgba(245,158,11,0.25);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 8px;
+  white-space: nowrap;
+  animation: ptoolBadgeBlink 1.8s ease-in-out infinite;
+}
+
+/* ── Write-gate refusal (stale / read-first interception) ──
+ * Static amber — a terminal intercepted state, NOT a transient warning, so
+ * the header badge opts out of the warn blink via .ptool-badge-gate. The
+ * notice card explains WHY the write was intercepted and that the assistant
+ * re-reads + re-issues on its own (no user action). */
+.ptool-badge-gate { animation: none; }
+.ptool-gate-note {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 2px 8px 8px 24px;
+  padding: 8px 12px;
+  border: 1px solid rgba(245,158,11,0.28);
+  border-radius: var(--radius-sm);
+  background: rgba(245,158,11,0.07);
+}
+.ptool-gate-note-icon { color: #f59e0b; flex: none; margin-top: 1px; }
+.ptool-gate-note-icon > svg { display: block; }
+.ptool-gate-note-body { min-width: 0; }
+.ptool-gate-note-title { font-size: 12px; font-weight: 600; color: #f59e0b; margin-bottom: 3px; }
+.ptool-gate-note-text { font-size: 12px; line-height: 1.55; color: var(--text-secondary); }
+.ptool-gate-note-path { font-size: 11px; padding: 0 5px; border-radius: 4px; background: rgba(245,158,11,0.13); color: var(--text-primary); }
+
+/* ── Rejected hallucinated tool call (not a real tool, never executed) ── */
+.ptool-line.ptool-rejected {
+  opacity: 0.92;
+}
+.ptool-line.ptool-rejected .ptool-icon { opacity: 0.5; }
+.ptool-reject-name {
+  text-decoration: line-through;
+  text-decoration-color: rgba(239,68,68,0.6);
+  color: var(--text-muted, #9ca3af);
+}
+.ptool-badge-reject {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #ef4444;
+  background: rgba(239,68,68,0.12);
+  border: 1px solid rgba(239,68,68,0.3);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+.ptool-reject-hint {
+  font-size: 11px;
+  color: var(--text-muted, #9ca3af);
+  margin-left: 2px;
+}
+.ptool-reject-sugg {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 10.5px;
+  color: var(--accent, #6ea8fe);
+  background: rgba(110,168,254,0.1);
+  border: 1px solid rgba(110,168,254,0.2);
+  border-radius: 5px;
+  padding: 0 5px;
+}
+@keyframes ptoolBadgeBlink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.6; }
+}
+
+/* Diff preview */
+.ptool-diff-preview {
+  padding: 6px 0;
+  max-height: 340px;
+  overflow-y: auto;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.ptool-diff-line {
+  display: flex;
+  padding: 1px 12px 1px 10px;
+  min-height: 20px;
+}
+.ptool-diff-sign {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+  font-weight: 700;
+  user-select: none;
+}
+.ptool-diff-code {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.ptool-diff-del {
+  background: rgba(239,68,68,0.1);
+  color: #fca5a5;
+}
+.ptool-diff-del .ptool-diff-sign {
+  color: #f87171;
+}
+.ptool-diff-add {
+  background: rgba(34,197,94,0.1);
+  color: #86efac;
+}
+.ptool-diff-add .ptool-diff-sign {
+  color: #4ade80;
+}
+.ptool-diff-ellipsis {
+  opacity: 0.55;
+  font-style: italic;
+}
+.ptool-diff-separator {
+  height: 1px;
+  margin: 4px 12px;
+  background: rgba(255,255,255,0.08);
+}
+
+/* Batch apply_diff */
+.ptool-batch-preview {
+  padding: 4px 0;
+}
+.ptool-batch-header {
+  padding: 6px 12px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.ptool-batch-edit {
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.ptool-batch-edit[open] {
+  background: rgba(0,0,0,0.08);
+}
+.ptool-batch-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 11.5px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  user-select: none;
+  transition: background .15s;
+}
+.ptool-batch-summary:hover {
+  background: rgba(255,255,255,0.04);
+}
+.ptool-batch-idx {
+  color: var(--accent);
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  min-width: 22px;
+}
+.ptool-batch-path {
+  color: #93c5fd;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+}
+.ptool-batch-desc {
+  flex: 1;
+  color: var(--text-tertiary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ptool-batch-stats {
+  color: var(--text-tertiary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  opacity: 0.7;
+}
+.ptool-batch-edit .ptool-diff-preview {
+  max-height: 200px;
+  border-top: 1px solid rgba(255,255,255,0.04);
+}
+.ptool-batch-more {
+  padding: 5px 12px;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+/* ── Batch tool done state — collapsible per-edit list ── */
+.ptool-batch-done-block {
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ptool-batch-done-block > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.ptool-batch-done-block > summary::-webkit-details-marker { display: none; }
+.ptool-batch-done-block > summary::marker { display: none; content: ""; }
+.ptool-batch-done-block > summary .ptool-text::after {
+  content: " ▸";
+  font-size: 10px;
+  opacity: 0.5;
+}
+.ptool-batch-done-block[open] > summary .ptool-text::after {
+  content: " ▾";
+}
+.ptool-batch-done-list {
+  padding: 6px 8px 8px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* Each edit is a nested <details> with summary + optional diff preview */
+.ptool-batch-done-edit {
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.06);
+  overflow: hidden;
+}
+.ptool-batch-done-edit[open] {
+  border-color: rgba(255,255,255,0.1);
+}
+.ptool-batch-done-single {
+  border-radius: 6px;
+  overflow: hidden;
+}
+/* Memory body rendered as Markdown inside the expand block — give it
+   breathing room and a subtle surface so it reads like a content card,
+   not a raw diff row. */
+.ptool-batch-done-single.md-content {
+  padding: 8px 12px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  font-size: 13px;
+}
+.ptool-batch-done-single.md-content > :first-child { margin-top: 0; }
+.ptool-batch-done-single.md-content > :last-child { margin-bottom: 0; }
+
+/* ── Memory preview — create / update / merge_memories ──
+   A collapsible card with a left accent stripe. The summary row reuses the
+   standard .ptool-line layout; expanding reveals the memory name, metadata
+   chips, description lead-in, and the Markdown body. Themes via --accent. */
+.ptool-memory-block {
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ptool-memory-block > summary {
+  list-style: none;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.12s ease;
+}
+.ptool-memory-block > summary::-webkit-details-marker { display: none; }
+.ptool-memory-block > summary::marker { display: none; content: ""; }
+.ptool-memory-block > summary:hover {
+  background: var(--accent-subtle);
+}
+.ptool-memory-block > summary .ptool-text::after {
+  content: " ▸";
+  font-size: 10px;
+  opacity: 0.5;
+}
+.ptool-memory-block[open] > summary .ptool-text::after {
+  content: " ▾";
+}
+.ptool-memory-body {
+  margin: 4px 0 6px 11px;
+  padding: 12px 14px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--accent-subtle);
+  border-radius: 0 8px 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.ptool-memory-name {
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--text-primary);
+  line-height: 1.35;
+  word-break: break-word;
+}
+.ptool-memory-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ptool-memory-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+}
+.ptool-memory-chip-scope {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  text-transform: capitalize;
+}
+.ptool-memory-chip-id {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 500;
+}
+.ptool-memory-chip-tag {
+  color: var(--accent);
+}
+.ptool-memory-desc {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  font-style: italic;
+  word-break: break-word;
+}
+.ptool-memory-content {
+  font-size: 13px;
+  padding-top: 9px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.ptool-memory-content > :first-child { margin-top: 0; }
+.ptool-memory-content > :last-child { margin-bottom: 0; }
+.ptool-memory-empty {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+/* ── Generic tool-result viewer (catch-all expander) ──
+   Every settled tool round whose result has no dedicated renderer (read_files
+   text, grep_search, find_files, list_dir, browser reads, MCP tools, …) gets
+   this collapsible card. The summary reuses the standard .ptool-line row;
+   expanding reveals the verbatim result in a monospace, scrollable pane with
+   a stats + copy header (the same .code-header/.copy-btn chrome markdown code
+   blocks use). Theme-variable driven only — no per-theme overrides needed. */
+.ptool-result-block {
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ptool-result-block > summary {
+  list-style: none;
+  cursor: pointer;
+  border-radius: 8px;
+}
+.ptool-result-block > summary::-webkit-details-marker { display: none; }
+.ptool-result-block > summary::marker { display: none; content: ""; }
+.ptool-result-block > summary .ptool-text::after {
+  content: " ▸";
+  font-size: 10px;
+  opacity: 0.5;
+}
+.ptool-result-block[open] > summary .ptool-text::after {
+  content: " ▾";
+}
+.ptool-result-body {
+  margin: 2px 0 6px 11px;
+  padding: 2px 8px 2px 10px;
+  border-left: 2px solid var(--border);
+}
+.ptool-result-pre {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+.ptool-result-pre > code {
+  display: block;
+  padding: 10px 12px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.ptool-result-trunc {
+  padding: 4px 2px 0;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+/* ── Checklist block (todo_write) — collapsed-by-default row that reads like
+   every other tool line (monospace `.ptool-text`, same icon slot). The header
+   shows progress WITHOUT expanding via an inline mini-bar + a done/total chip +
+   the current step's text. Expanded body is a vertical-timeline stepper: a
+   connector line threads the state glyphs. Green success accent; per the
+   tool-row NO-opacity-for-state rule, item STATE is conveyed by solid glyph
+   color + strike-through, never by fading the row. */
+.ptool-todo-block {
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ptool-todo-block > summary {
+  list-style: none;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.12s ease;
+  gap: 8px;
+}
+.ptool-todo-block > summary::-webkit-details-marker { display: none; }
+.ptool-todo-block > summary::marker { display: none; content: ""; }
+.ptool-todo-block > summary:hover {
+  background: color-mix(in srgb, var(--s-done, #10b981) 9%, transparent);
+}
+/* The "Checklist" label stays the plain monospace tool label. */
+.ptool-todo-header .ptool-text {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+/* Header mini progress bar — fixed width, tabular, sits before the chip. */
+.ptool-todo-minibar {
+  flex-shrink: 0;
+  width: 54px;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-secondary) 18%, transparent);
+  overflow: hidden;
+  align-self: center;
+}
+.ptool-todo-minibar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--s-done, #10b981);
+  transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.ptool-todo-minibar-fill.ptool-todo-minibar-done { background: var(--s-done, #10b981); }
+.ptool-todo-count {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 7px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.ptool-todo-count-done {
+  color: var(--s-done, #10b981);
+  background: color-mix(in srgb, var(--s-done, #10b981) 14%, transparent);
+  border-color: color-mix(in srgb, var(--s-done, #10b981) 30%, transparent);
+}
+.ptool-todo-revisions {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  font: 10px/1.2 'JetBrains Mono', ui-monospace, monospace;
+  white-space: nowrap;
+}
+.ptool-todo-body {
+  margin: 2px 0 6px 22px;
+  padding: 4px 0 2px;
+}
+.ptool-todo-breadcrumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 6px;
+  color: var(--text-tertiary);
+  font: 10.5px/1.35 'JetBrains Mono', ui-monospace, monospace;
+}
+.ptool-todo-breadcrumbs i { font-style: normal; }
+.ptool-todo-breadcrumbs .is-active { color: var(--text-secondary); font-weight: 700; }
+.ptool-todo-notice {
+  margin: 0 8px 6px 0;
+  padding: 5px 7px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  font-size: 11px;
+}
+.ptool-todo-notice.is-rejected { color: var(--s-error, #ef4444); }
+.ptool-todo-notice.is-restored { color: var(--s-done, #10b981); }
+.ptool-todo-history {
+  margin: 7px 8px 0 28px;
+  color: var(--text-tertiary);
+  font: 10.5px/1.45 'JetBrains Mono', ui-monospace, monospace;
+}
+.ptool-todo-history > summary { cursor: pointer; }
+.ptool-todo-history > div { display: flex; flex-direction: column; gap: 2px; padding-top: 4px; }
+.ptool-todo-history code { color: var(--text-secondary); }
+/* Vertical-timeline stepper. The connector line is drawn on the list via a
+   ::before running through the glyph centers. */
+.ptool-todo-list {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ptool-todo-list::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 12px;
+  bottom: 12px;
+  width: 2px;
+  background: color-mix(in srgb, var(--text-secondary) 20%, transparent);
+  z-index: 0;
+}
+.ptool-todo-item {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 4px 8px 4px 0;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+.ptool-todo-mark {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  /* Solid disc behind the glyph so the connector line reads as passing
+     BEHIND each node, not through the text. */
+  background: var(--bg-primary, var(--bg-secondary));
+  box-shadow: 0 0 0 3px var(--bg-primary, var(--bg-secondary));
+}
+.ptool-todo-mark svg { width: 15px; height: 15px; }
+.ptool-todo-text {
+  flex: 1 1 auto;
+  padding-top: 1px;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+/* Completed — solid green tick + struck-through (state by color, not opacity). */
+.ptool-todo-completed .ptool-todo-mark { color: var(--s-done, #10b981); }
+.ptool-todo-completed .ptool-todo-text {
+  color: var(--text-tertiary);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--text-tertiary) 55%, transparent);
+}
+/* In progress — accent node + tinted pill + bold text; this is happening NOW. */
+.ptool-todo-in_progress .ptool-todo-mark { color: var(--s-done, #10b981); }
+.ptool-todo-in_progress .ptool-todo-text {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+.ptool-todo-blocked .ptool-todo-mark { color: var(--s-warning, #f59e0b); }
+.ptool-todo-blocked .ptool-todo-text { color: var(--s-warning, #f59e0b); font-weight: 700; }
+/* Pending — solid (not faded) neutral ring + secondary text. */
+.ptool-todo-pending .ptool-todo-mark { color: var(--text-tertiary); }
+.ptool-todo-pending .ptool-todo-text { color: var(--text-secondary); }
+.ptool-todo-empty {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  padding-left: 4px;
+}
+
+/* ── Project-brain / conversation-meta block (board / charter / conv digest /
+   peer) — collapsible card rendering the tool's full prose output. Mirrors
+   the memory block's collapse affordance with its own accent + a source chip. */
+.ptool-convmeta-block {
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ptool-convmeta-block > summary {
+  list-style: none;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.12s ease;
+  gap: 7px;
+}
+.ptool-convmeta-block > summary::-webkit-details-marker { display: none; }
+.ptool-convmeta-block > summary::marker { display: none; content: ""; }
+.ptool-convmeta-block > summary:hover {
+  background: var(--accent-subtle);
+}
+.ptool-convmeta-block > summary .ptool-text::after {
+  content: " ▸";
+  font-size: 10px;
+  opacity: 0.5;
+}
+.ptool-convmeta-block[open] > summary .ptool-text::after {
+  content: " ▾";
+}
+.ptool-convmeta-src {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 8px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  line-height: 1;
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  white-space: nowrap;
+}
+/* At-a-glance count chip on a COLLAPSED routine-read summary ("3 active" /
+   "5 open") — a neutral pill so the user gets the signal without expanding. */
+.ptool-convmeta-count {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 8px;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.ptool-convmeta-body {
+  margin: 4px 0 6px 11px;
+  padding: 12px 14px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--accent-subtle);
+  border-radius: 0 8px 8px 0;
+}
+/* Plain-language "why this ran / what it means" caption above the card body —
+   turns an opaque list of conv ids + statuses into something a user (and the
+   agent) can actually interpret. Muted so it reads as an explanatory lead-in. */
+.ptool-convmeta-why {
+  margin: 0 0 9px;
+  padding-bottom: 8px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  border-bottom: 1px dashed color-mix(in srgb, var(--accent) 24%, transparent);
+  overflow-wrap: anywhere;
+}
+.ptool-convmeta-content {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.ptool-convmeta-content > :first-child { margin-top: 0; }
+.ptool-convmeta-content > :last-child { margin-bottom: 0; }
+.ptool-convmeta-empty {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+/* ── Structured Project-Brain tool renderers (Phase 3) ── */
+.ptool-convmeta-structured { font-size: 12.5px; }
+/* Board mini-kanban */
+.ptool-board-mini { display: flex; flex-direction: column; gap: 10px; }
+.ptool-board-mini-lane { display: flex; flex-direction: column; gap: 5px; }
+.ptool-board-mini-head { display: flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-tertiary); }
+.ptool-board-mini-count { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 5px; font-size: 10px; font-weight: 700; color: var(--text-secondary); background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px; }
+.ptool-board-mini-card { display: flex; align-items: center; gap: 6px; padding: 5px 9px; background: var(--bg-secondary); border: 1px solid var(--border); border-left: 2px solid var(--border); border-radius: 5px; }
+.ptool-board-mini-open { border-left-color: var(--pb-amber, #eab308); }
+.ptool-board-mini-claimed { border-left-color: var(--accent); }
+.ptool-board-mini-deferred { border-left-color: var(--text-tertiary); opacity: 0.85; border-left-style: dashed; }
+
+/* ── Motion-video / produce tool cards ──
+   The body reuses .ptool-convmeta-block / summary / src-chip styles; these
+   are the motion-specific internals (detail rows, dep list, scene table). */
+.ptool-motion-block > summary .ptool-convmeta-src {
+  color: #f472b6;
+  background: color-mix(in srgb, #f472b6 15%, transparent);
+}
+.ptool-motion-body {
+  margin: 4px 0 6px 11px;
+  padding: 12px 14px;
+  border-left: 2px solid color-mix(in srgb, #f472b6 55%, transparent);
+  background: var(--accent-subtle);
+  border-radius: 0 8px 8px 0;
+  font-size: 12.5px;
+}
+.ptool-motion-row { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
+.ptool-motion-k {
+  flex: none; min-width: 96px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-tertiary);
+}
+.ptool-motion-v { color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-motion-mono { font-family: var(--font-mono, monospace); font-size: 11.5px; }
+.ptool-motion-section { margin-top: 9px; }
+.ptool-motion-section-title {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-tertiary); margin-bottom: 4px;
+}
+.ptool-motion-li { padding: 1.5px 0; color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-motion-err { color: var(--danger, #f87171); }
+.ptool-motion-warn { color: var(--warning, #fbbf24); }
+.ptool-motion-hint { color: var(--text-secondary); }
+.ptool-motion-more { color: var(--text-tertiary); font-style: italic; }
+.ptool-motion-dep {
+  display: flex; align-items: center; gap: 8px; padding: 2px 0;
+}
+.ptool-motion-dep-name { flex: none; min-width: 96px; font-family: var(--font-mono, monospace); font-size: 11.5px; }
+.ptool-motion-dep-ok .ptool-motion-dep-val { color: var(--text-secondary); overflow-wrap: anywhere; }
+.ptool-motion-dep-miss .ptool-motion-dep-val { color: var(--danger, #f87171); }
+.ptool-motion-scene {
+  display: flex; align-items: baseline; gap: 8px; padding: 2.5px 0;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 60%, transparent);
+}
+.ptool-motion-scene:last-child { border-bottom: none; }
+.ptool-motion-scene-id { flex: none; min-width: 96px; font-family: var(--font-mono, monospace); font-size: 11.5px; color: var(--text-secondary); }
+.ptool-motion-scene-dur { color: var(--text-primary); }
+.ptool-motion-scene-grew .ptool-motion-scene-dur { color: var(--warning, #fbbf24); }
+.ptool-motion-scene-overflow { color: var(--danger, #f87171); font-size: 11px; }
+.ptool-board-mini-done { border-left-color: var(--pb-green, #22c55e); opacity: 0.75; }
+.ptool-board-mini-title { flex: 1; overflow-wrap: anywhere; }
+.ptool-board-mini-owner { font-size: 10px; color: var(--accent); font-family: var(--mono, monospace); }
+.ptool-board-mini-auto { display: inline-flex; color: var(--accent); }
+.ptool-board-mini-empty { font-size: 11px; color: var(--text-tertiary); padding: 2px 4px; }
+/* Board transition card — verb+status head row, then the epic title row (the
+   epic title is the whole point of the card; the id is a small mono chip). */
+.ptool-board-transition { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.ptool-board-tr-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.ptool-board-tr-titlerow { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 6px 9px; background: var(--bg-secondary); border: 1px solid var(--border); border-left: 2px solid var(--accent); border-radius: 5px; }
+.ptool-board-tr-verb { font-weight: 700; color: var(--accent); }
+.ptool-board-tr-title { flex: 1; overflow-wrap: anywhere; color: var(--text-primary); }
+.ptool-board-tr-untitled { color: var(--text-tertiary); font-style: italic; }
+.ptool-board-tr-id { font-size: 10px; color: var(--text-tertiary); font-family: var(--mono, monospace); white-space: nowrap; }
+.ptool-board-tr-arrow { display: inline-flex; color: var(--text-tertiary); transform: rotate(-90deg); }
+.ptool-board-tr-status { font-size: 10.5px; font-weight: 700; padding: 1px 8px; border-radius: 8px; border: 1px solid var(--border); }
+.ptool-board-tr-failed { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; padding: 1px 8px; border-radius: 8px; color: var(--pb-red, #ef4444); border: 1px solid color-mix(in srgb, var(--pb-red, #ef4444) 45%, transparent); }
+.ptool-board-transition-failed .ptool-board-tr-titlerow { border-left-color: var(--pb-red, #ef4444); }
+.ptool-board-tr-error { font-size: 11.5px; line-height: 1.5; color: var(--pb-red, #ef4444); overflow-wrap: anywhere; padding: 5px 9px; background: color-mix(in srgb, var(--pb-red, #ef4444) 8%, transparent); border: 1px solid color-mix(in srgb, var(--pb-red, #ef4444) 30%, transparent); border-radius: 5px; }
+/* Peer status cards */
+.ptool-peer-list { display: flex; flex-direction: column; gap: 7px; }
+.ptool-peer-card { padding: 7px 10px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; }
+.ptool-peer-who { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--text-primary); }
+.ptool-peer-agent { font-size: 10.5px; font-weight: 400; color: var(--text-tertiary); }
+.ptool-peer-detail { margin-top: 3px; font-size: 11.5px; color: var(--text-secondary); }
+.ptool-peer-epic { margin-top: 4px; display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--accent); }
+.ptool-peer-empty { font-size: 12px; color: var(--text-tertiary); font-style: italic; }
+/* Charter proposal card */
+.ptool-charter-proposal { padding: 9px 11px; background: var(--accent-subtle); border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent); border-radius: 6px; }
+.ptool-charter-prop-title { font-weight: 700; color: var(--text-primary); margin-bottom: 4px; }
+.ptool-charter-prop-text { font-size: 12.5px; line-height: 1.55; color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-charter-prop-pending { margin-top: 7px; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-secondary); }
+/* Activity feed (project_feed_read) — chronological rows: kind chip + who + summary + time */
+.ptool-feed-list { display: flex; flex-direction: column; gap: 6px; }
+.ptool-feed-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 9px; background: var(--bg-secondary); border: 1px solid var(--border); border-left: 2px solid var(--border); border-radius: 5px; }
+.ptool-feed-started { border-left-color: var(--accent); }
+.ptool-feed-completed { border-left-color: var(--pb-green, #22c55e); }
+.ptool-feed-aborted, .ptool-feed-blocked { border-left-color: var(--pb-red, #ef4444); }
+.ptool-feed-claimed { border-left-color: var(--pb-amber, #eab308); }
+.ptool-feed-decided, .ptool-feed-proposed_decision { border-left-color: #a78bfa; }
+.ptool-feed-kind { flex-shrink: 0; display: inline-flex; align-items: center; height: 16px; padding: 0 6px; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-secondary); background: var(--bg-tertiary); border-radius: 7px; white-space: nowrap; }
+.ptool-feed-body { flex: 1; min-width: 0; }
+.ptool-feed-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.ptool-feed-who { font-size: 11.5px; font-weight: 600; color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-feed-mine { font-size: 10px; font-weight: 600; color: var(--accent); }
+.ptool-feed-when { font-size: 10.5px; color: var(--text-tertiary); margin-left: auto; white-space: nowrap; }
+.ptool-feed-summary { margin-top: 2px; font-size: 11.5px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
+.ptool-feed-empty { font-size: 12px; color: var(--text-tertiary); font-style: italic; }
+/* Peer message / intervention delivery card */
+.ptool-peermsg { padding: 8px 11px; background: var(--bg-secondary); border: 1px solid var(--border); border-left: 2px solid var(--accent); border-radius: 6px; }
+.ptool-peermsg-denied, .ptool-peermsg-failed { border-left-color: var(--pb-red, #ef4444); }
+.ptool-peermsg-rate_limited { border-left-color: var(--pb-amber, #eab308); }
+.ptool-peermsg-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ptool-peermsg-verb { font-weight: 700; color: var(--accent); font-size: 12.5px; }
+.ptool-peermsg-arrow { display: inline-flex; color: var(--text-tertiary); transform: rotate(-90deg); }
+.ptool-peermsg-target { font-family: var(--mono, monospace); font-size: 11.5px; color: var(--text-primary); }
+.ptool-peermsg-outcome { margin-left: auto; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; padding: 1px 8px; border-radius: 8px; border: 1px solid var(--border); color: var(--text-secondary); }
+.ptool-peermsg-outcome-delivered { color: var(--pb-green, #22c55e); border-color: color-mix(in srgb, var(--pb-green, #22c55e) 45%, transparent); }
+.ptool-peermsg-outcome-denied, .ptool-peermsg-outcome-failed { color: var(--pb-red, #ef4444); border-color: color-mix(in srgb, var(--pb-red, #ef4444) 45%, transparent); }
+.ptool-peermsg-outcome-rate_limited { color: var(--pb-amber, #eab308); border-color: color-mix(in srgb, var(--pb-amber, #eab308) 45%, transparent); }
+.ptool-peermsg-text { margin-top: 6px; font-size: 12.5px; line-height: 1.55; color: var(--text-primary); overflow-wrap: anywhere; white-space: pre-wrap; }
+/* Commit result card (project_commit) — outcome chip + clean/held file groups */
+.ptool-commit { display: flex; flex-direction: column; gap: 9px; }
+.ptool-commit-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ptool-commit-outcome { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; padding: 2px 9px; border-radius: 8px; border: 1px solid var(--border); color: var(--text-secondary); }
+.ptool-commit-outcome-committed { color: var(--pb-green, #22c55e); border-color: color-mix(in srgb, var(--pb-green, #22c55e) 45%, transparent); }
+.ptool-commit-outcome-planned { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.ptool-commit-outcome-warn { color: var(--pb-amber, #eab308); border-color: color-mix(in srgb, var(--pb-amber, #eab308) 45%, transparent); }
+.ptool-commit-outcome-failed { color: var(--pb-red, #ef4444); border-color: color-mix(in srgb, var(--pb-red, #ef4444) 45%, transparent); }
+.ptool-commit-sha { font-family: var(--mono, monospace); font-size: 11.5px; color: var(--text-secondary); background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 5px; padding: 1px 7px; }
+.ptool-commit-err { font-size: 12px; line-height: 1.5; color: var(--pb-red, #ef4444); overflow-wrap: anywhere; }
+.ptool-commit-group { display: flex; flex-direction: column; gap: 4px; }
+.ptool-commit-grouphead { display: flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.ptool-commit-grouphead-clean { color: var(--pb-green, #22c55e); }
+.ptool-commit-grouphead-held { color: var(--pb-amber, #eab308); }
+.ptool-commit-files { display: flex; flex-direction: column; gap: 3px; }
+.ptool-commit-file { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; padding: 4px 9px; font-size: 12px; background: var(--bg-secondary); border: 1px solid var(--border); border-left: 2px solid var(--pb-green, #22c55e); border-radius: 5px; font-family: var(--mono, monospace); color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-commit-file-held { border-left-color: var(--pb-amber, #eab308); }
+.ptool-commit-fpath { flex-shrink: 0; }
+.ptool-commit-numstat { font-size: 10.5px; color: var(--text-tertiary); }
+.ptool-commit-reason { font-family: var(--font-sans, sans-serif); font-size: 11px; color: var(--text-secondary); flex: 1; min-width: 0; }
+.ptool-commit-empty { font-size: 12px; color: var(--text-tertiary); font-style: italic; }
+/* Conversation digest card (get_conversation) — clean human view of a
+   referenced transcript: a meta row (preset + message count) then one row per
+   message with a role chip, text preview, and tool/attachment hints. Replaces
+   the raw ═══ / ── User Message # ASCII dump. */
+.ptool-convdigest { display: flex; flex-direction: column; gap: 9px; }
+.ptool-convdigest-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 7px; border-bottom: 1px solid var(--border); }
+.ptool-convdigest-title { min-width: 0; max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; color: var(--text-primary); }
+.ptool-convdigest-preset { display: inline-flex; align-items: center; height: 17px; padding: 0 8px; font-size: 10px; font-weight: 650; letter-spacing: 0.02em; line-height: 1; border-radius: 999px; color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); white-space: nowrap; }
+.ptool-convdigest-msgcount { font-size: 11px; color: var(--text-tertiary); }
+.ptool-convdigest-time { font-size: 11px; color: var(--text-tertiary); margin-left: auto; white-space: nowrap; }
+.ptool-convdigest-msgs { display: flex; flex-direction: column; gap: 6px; }
+.ptool-convdigest-msg { display: flex; align-items: flex-start; gap: 9px; padding: 7px 10px; background: var(--bg-secondary); border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: 6px; }
+.ptool-convdigest-user { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, var(--bg-secondary)); }
+.ptool-convdigest-assistant { border-left-color: var(--pb-green, #22c55e); }
+.ptool-convdigest-system { border-left-color: #a78bfa; }
+.ptool-convdigest-gutter { flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 62px; }
+.ptool-convdigest-role { display: inline-flex; align-items: center; height: 16px; padding: 0 7px; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-secondary); background: var(--bg-tertiary); border-radius: 7px; white-space: nowrap; }
+.ptool-convdigest-idx { font-size: 9.5px; color: var(--text-tertiary); font-family: var(--mono, monospace); padding-left: 2px; }
+.ptool-convdigest-msgbody { flex: 1; min-width: 0; }
+.ptool-convdigest-text { font-size: 12.5px; line-height: 1.55; color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-convdigest-notext { color: var(--text-tertiary); font-style: italic; }
+.ptool-convdigest-summary { color: var(--text-secondary); }
+.ptool-convdigest-summary-tag { display: inline-flex; align-items: center; height: 14px; margin-right: 6px; padding: 0 6px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-tertiary); background: var(--bg-tertiary); border-radius: 6px; vertical-align: 1px; }
+.ptool-convdigest-expand > summary { cursor: pointer; list-style: none; }
+.ptool-convdigest-expand > summary::-webkit-details-marker { display: none; }
+.ptool-convdigest-expand-hint { margin-left: 6px; font-size: 10px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.8; }
+.ptool-convdigest-expand[open] > summary .ptool-convdigest-expand-hint { display: none; }
+.ptool-convdigest-full { margin-top: 6px; padding: 7px 9px; font-size: 12px; line-height: 1.55; color: var(--text-primary); background: var(--bg-tertiary); border-radius: 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ptool-convdigest-hints { margin-top: 5px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.ptool-convdigest-tools { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; color: var(--text-tertiary); }
+.ptool-convdigest-tool { display: inline-flex; align-items: center; gap: 5px; max-width: 320px; padding: 1px 7px; font-size: 10.5px; font-family: var(--mono, monospace); background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 6px; }
+.ptool-convdigest-tool-name { font-weight: 650; color: var(--text-secondary); white-space: nowrap; }
+.ptool-convdigest-tool-arg { color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ptool-convdigest-tool-failed { border-color: color-mix(in srgb, var(--danger, #ef4444) 45%, var(--border)); }
+.ptool-convdigest-tool-failed .ptool-convdigest-tool-name { color: var(--danger, #ef4444); }
+.ptool-convdigest-tool-more { font-size: 10px; color: var(--text-tertiary); font-family: var(--mono, monospace); }
+.ptool-convdigest-msgtime { font-size: 10px; color: var(--text-tertiary); white-space: nowrap; }
+.ptool-convdigest-att { display: inline-flex; align-items: center; height: 15px; padding: 0 6px; font-size: 10px; font-weight: 600; color: var(--text-secondary); background: var(--bg-tertiary); border-radius: 7px; white-space: nowrap; }
+.ptool-convdigest-empty { font-size: 12px; color: var(--text-tertiary); font-style: italic; }
+.ptool-convdigest-more { font-size: 11px; color: var(--text-tertiary); font-style: italic; }
+.ptool-convdigest-omitted { padding: 4px 0; text-align: center; font-size: 10.5px; color: var(--text-tertiary); font-style: italic; letter-spacing: 0.02em; position: relative; }
+.ptool-convdigest-omitted::before, .ptool-convdigest-omitted::after { content: ""; position: absolute; top: 50%; width: 22%; height: 1px; background: var(--border); }
+.ptool-convdigest-omitted::before { left: 6%; }
+.ptool-convdigest-omitted::after { right: 6%; }
+/* RAW/debug read markers — only rendered for get_conversation(raw=true). */
+.ptool-convdigest-rawbadge { gap: 4px; height: 17px; padding: 0 8px; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; line-height: 1; border-radius: 999px; color: var(--pb-amber, #f59e0b); background: color-mix(in srgb, var(--pb-amber, #f59e0b) 15%, transparent); border: 1px solid color-mix(in srgb, var(--pb-amber, #f59e0b) 40%, transparent); }
+.ptool-convdigest-metachip { display: inline-flex; align-items: center; height: 15px; padding: 0 6px; font-size: 10px; font-weight: 600; font-family: var(--mono, monospace); color: var(--text-tertiary); background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 6px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.ptool-convdigest-meta-model { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.ptool-convdigest-meta-fr { color: var(--text-secondary); }
+.ptool-batch-done-summary {
+  display: flex;
+  /* Top-align so a multi-line description keeps the status glyph / index
+     pinned to the first line instead of floating to the vertical centre. */
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 11px;
+  font-size: 12px;
+  line-height: 1.3;
+  cursor: pointer;
+  list-style: none;
+}
+.ptool-batch-done-summary::-webkit-details-marker { display: none; }
+.ptool-batch-done-summary::marker { display: none; content: ""; }
+.ptool-batch-done-summary:hover {
+  background: rgba(255,255,255,0.03);
+}
+.ptool-batch-done-summary .ptool-batch-status {
+  flex-shrink: 0;
+  font-size: 12px;
+  width: 15px;
+  height: 1.3em;
+  text-align: center;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.ptool-batch-done-edit.ptool-batch-ok .ptool-batch-status { color: #34d399; }
+.ptool-batch-done-edit.ptool-batch-fail .ptool-batch-status { color: var(--accent-red, #f87171); }
+/* Monospace ordinal so a stack of edits reads as a numbered list. */
+.ptool-batch-done-summary .ptool-batch-idx {
+  flex-shrink: 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  opacity: 0.65;
+  min-width: 14px;
+  height: 1.3em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+/* Per-edit operation pill — a glanceable rewrite/insert indicator on each
+   batch-edit row. Amber = replace (rewrote existing text), green = insert
+   (pure addition, anchor untouched). The label is the raw API enum value so
+   it matches the header summary "(N edits: replace, …)". */
+.ptool-op {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 15px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1;
+}
+.ptool-op svg { flex-shrink: 0; }
+.ptool-op--replace {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.10);
+  border-color: rgba(251, 191, 36, 0.28);
+}
+.ptool-op--insert {
+  color: #34d399;
+  background: rgba(52, 211, 153, 0.10);
+  border-color: rgba(52, 211, 153, 0.28);
+}
+.ptool-batch-done-summary .ptool-batch-desc {
+  color: var(--text-primary, #e2e8f0);
+  /* Take all remaining width and wrap freely. min-width:0 lets it shrink
+     inside the flex row instead of overflowing. */
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+/* Only shown when a batch spans MULTIPLE files — and then it's just the
+   basename (full path on hover), pinned to the right and never wrapping,
+   so it can't starve the description column. */
+.ptool-batch-done-summary .ptool-batch-path {
+  flex-shrink: 0;
+  max-width: 45%;
+  font-size: 10.5px;
+  font-family: 'JetBrains Mono', monospace;
+  color: #93c5fd;
+  opacity: 0.75;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-left: auto;
+  height: 1.3em;
+  display: inline-flex;
+  align-items: center;
+}
+/* Git-style diff block inside each batch edit */
+.bdiff-block {
+  border-top: 1px solid rgba(255,255,255,0.08);
+  padding: 6px 0;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Menlo', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  background: #0f1014;
+}
+.bdiff-line {
+  display: flex;
+  padding: 0 12px;
+  min-height: 18px;
+}
+.bdiff-sign {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  user-select: none;
+  font-weight: 600;
+  opacity: 0.7;
+}
+.bdiff-line code {
+  white-space: pre;
+  font-family: inherit;
+  font-size: inherit;
+  flex: 1;
+  min-width: 0;
+}
+/* GitHub-dark inspired: solid but quiet backgrounds, high-contrast text */
+.bdiff-del {
+  background: #2d1418;
+  color: #f0c5c5;
+}
+.bdiff-del .bdiff-sign { color: #f87171; opacity: 1; }
+.bdiff-add {
+  background: #14281a;
+  color: #c5e8c5;
+}
+.bdiff-add .bdiff-sign { color: #4ade80; opacity: 1; }
+.bdiff-ctx {
+  background: transparent;
+  color: #c8c8d0;
+}
+.bdiff-ctx .bdiff-sign { color: #6a6a7a; }
+.bdiff-sep {
+  height: 1px;
+  margin: 3px 16px;
+  background: rgba(255,255,255,0.06);
+}
+
+/* Write file meta */
+.ptool-write-meta {
+  padding: 5px 12px;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  border-top: 1px solid rgba(255,255,255,0.05);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Approval buttons */
+.ptool-approval-btns {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid rgba(234,179,8,0.12);
+  background: rgba(0,0,0,0.1);
+}
+.ptool-approve-btn, .ptool-reject-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color .18s ease, background-color .18s ease;
+  font-family: inherit;
+}
+.ptool-approve-btn {
+  background: rgba(34,197,94,0.15);
+  color: #4ade80;
+  border-color: rgba(34,197,94,0.3);
+}
+.ptool-approve-btn:hover {
+  background: rgba(34,197,94,0.28);
+  border-color: rgba(34,197,94,0.5);
+  color: #86efac;
+  box-shadow: 0 0 10px -3px rgba(34,197,94,0.25);
+}
+.ptool-reject-btn {
+  background: rgba(239,68,68,0.12);
+  color: #f87171;
+  border-color: rgba(239,68,68,0.25);
+}
+.ptool-reject-btn:hover {
+  background: rgba(239,68,68,0.24);
+  border-color: rgba(239,68,68,0.45);
+  color: #fca5a5;
+  box-shadow: 0 0 10px -3px rgba(239,68,68,0.25);
+}
+
+/* ═══════════════════════════════════════════
+   ★ Human Guidance — interactive Q&A card
+   ═══════════════════════════════════════════ */
+.hg-card {
+  margin: 8px 0;
+  border-radius: 12px;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.06) 0%, rgba(139, 92, 246, 0.04) 100%);
+  overflow: hidden;
+  transition: opacity 0.3s ease, filter 0.3s ease;
+}
+.hg-card.hg-submitting {
+  opacity: 0.55;
+  pointer-events: none;
+  filter: grayscale(0.3);
+}
+/* Expired (turn settled before an answer arrived) — muted, non-interactive. */
+.hg-card.hg-expired {
+  opacity: 0.65;
+  filter: grayscale(0.45);
+}
+.hg-option-card.hg-option-static {
+  cursor: default;
+  pointer-events: none;
+  text-align: left;
+}
+.hg-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(99, 102, 241, 0.12);
+  background: rgba(99, 102, 241, 0.05);
+}
+.hg-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #a5b4fc;
+  flex: 1;
+}
+.hg-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.12);
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  animation: hgPulse 2s ease-in-out infinite;
+}
+@keyframes hgPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+/* ★ The question is rendered via renderMarkdown() — same pipeline as
+   assistant messages.  Styles here scope Markdown HTML (headings, lists,
+   code blocks, tables, math) inside the guidance card. */
+.hg-question {
+  padding: 12px 14px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: #e2e8f0;
+  word-break: break-word;
+}
+/* ── Markdown prose inside the question ── */
+.hg-question p { margin: 0 0 8px; }
+.hg-question p:last-child { margin-bottom: 0; }
+.hg-question ul, .hg-question ol { margin: 4px 0 8px 18px; padding: 0; }
+.hg-question li { margin-bottom: 3px; }
+.hg-question code {
+  background: rgba(99, 102, 241, 0.13);
+  color: #c7d2fe;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12.5px;
+}
+.hg-question pre {
+  margin: 8px 0;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.hg-question pre code {
+  background: transparent;
+  padding: 0;
+}
+.hg-question blockquote {
+  border-left: 3px solid rgba(99, 102, 241, 0.4);
+  margin: 6px 0;
+  padding: 4px 12px;
+  color: #94a3b8;
+}
+.hg-question table { margin: 8px 0; }
+.hg-question strong { color: #f1f5f9; }
+.hg-question h1, .hg-question h2, .hg-question h3,
+.hg-question h4, .hg-question h5, .hg-question h6 {
+  margin: 8px 0 4px;
+  color: #e2e8f0;
+  font-size: 14px;
+  font-weight: 700;
+}
+/* ── Markdown in option card descriptions ── */
+.hg-opt-desc p { margin: 0; }
+.hg-opt-desc code {
+  background: rgba(99, 102, 241, 0.13);
+  color: #c7d2fe;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+/* ── Free-text input area ── */
+.hg-freetext-wrap {
+  padding: 0 14px 14px;
+}
+.hg-textarea {
+  width: 100%;
+  min-height: 68px;
+  max-height: 200px;
+  padding: 10px 12px;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.6);
+  color: #e2e8f0;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  box-sizing: border-box;
+}
+.hg-textarea:focus {
+  border-color: rgba(99, 102, 241, 0.5);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+.hg-textarea::placeholder {
+  color: rgba(148, 163, 184, 0.5);
+}
+.hg-freetext-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+/* ── Auto-translate indicator (shown while EN→CN translation is in-flight) ── */
+.hg-translating-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  margin: 0 14px 4px;
+  font-size: 12px;
+  color: #a5b4fc;
+  border-radius: 6px;
+  background: rgba(99, 102, 241, 0.08);
+  animation: translatePulse 1.5s ease-in-out infinite;
+}
+.hg-submit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  font-family: inherit;
+}
+.hg-submit-btn {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.3);
+}
+.hg-submit-btn:hover {
+  background: rgba(34, 197, 94, 0.28);
+  border-color: rgba(34, 197, 94, 0.5);
+  color: #86efac;
+  box-shadow: 0 0 12px -3px rgba(34, 197, 94, 0.25);
+}
+
+/* ── Multiple-choice options grid ── */
+.hg-options-grid {
+  display: grid;
+  /* auto-fit (not auto-fill): empty tracks collapse so the actual
+     option cards stretch to fill the full row width — no dead space
+     on the right when there are fewer options than columns. */
+  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+  gap: 10px;
+  padding: 4px 14px 14px;
+}
+.hg-option-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  /* Grid/flex items default to min-width:auto, which lets long
+     unbroken tokens (file paths, URLs) force the card wider than its
+     track; min-width:0 + overflow-wrap keeps text inside the card. */
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  background: rgba(99, 102, 241, 0.06);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-family: inherit;
+  text-align: left;
+  color: #e2e8f0;
+}
+.hg-option-card:hover {
+  border-color: rgba(99, 102, 241, 0.5);
+  background: rgba(99, 102, 241, 0.14);
+  box-shadow: 0 2px 12px -3px rgba(99, 102, 241, 0.2);
+  transform: translateY(-1px);
+}
+.hg-option-card:active {
+  transform: translateY(0);
+}
+.hg-option-card.hg-selected {
+  border-color: rgba(34, 197, 94, 0.6);
+  background: rgba(34, 197, 94, 0.15);
+  box-shadow: 0 0 16px -4px rgba(34, 197, 94, 0.3);
+}
+.hg-option-card.hg-selected .hg-opt-label::before {
+  content: '✓ ';
+  color: #4ade80;
+}
+.hg-option-card:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+.hg-opt-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #c7d2fe;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.hg-opt-desc {
+  font-size: 11.5px;
+  color: #94a3b8;
+  line-height: 1.5;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+/* Long inline code spans (paths, schema filenames) must wrap too. */
+.hg-opt-desc code {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+/* ── Submitted HG round — compact collapsed line with spinner ── */
+.hg-submitted-line {
+  background: rgba(34, 197, 94, 0.04);
+  border-color: rgba(34, 197, 94, 0.15);
+}
+.hg-submitted-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid rgba(74, 222, 128, 0.25);
+  border-top-color: #4ade80;
+  border-radius: 50%;
+  animation: hgSpin 0.8s linear infinite;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* ── Shake animation for empty submit ── */
+@keyframes hgShake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-4px); }
+  40%, 80% { transform: translateX(4px); }
+}
+.hg-shake {
+  animation: hgShake 0.4s ease;
+  border-color: rgba(239, 68, 68, 0.5) !important;
+}
+
+/* ── Spinner for translate button ── */
+.hg-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(165, 180, 252, 0.3);
+  border-top-color: #a5b4fc;
+  border-radius: 50%;
+  animation: hgSpin 0.6s linear infinite;
+}
+@keyframes hgSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Skipped HG round — user never answered before task ended ── */
+.hg-skipped-line {
+  background: rgba(148, 163, 184, 0.04);
+  border-color: rgba(148, 163, 184, 0.12);
+  opacity: 0.7;
+}
+.ptool-badge-skip {
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+/* ── Interrupted tool round — task aborted (Stop) while this round was
+      in-flight; the backend dangling-round sweep marks status='aborted'. ── */
+.ptool-interrupted {
+  background: rgba(148, 163, 184, 0.04);
+  border-color: rgba(148, 163, 184, 0.12);
+  opacity: 0.75;
+}
+.ptool-badge-interrupted {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.22);
+}
+
+/* ── Failed tool round — the tool RAN but never produced a result (raised,
+      or cancelled by the parallel-pool timeout ceiling); backend stamps
+      status='error'. Warm red tint (vs. the amber 'interrupted') so a failure
+      reads differently from a user Stop at a glance. ── */
+.ptool-error {
+  background: rgba(220, 38, 38, 0.05);
+  border-color: rgba(220, 38, 38, 0.18);
+}
+.ptool-error-reason {
+  color: var(--error-text, #f87171);
+  font-size: 11px;
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* ── Inline Turn activity events ─────────────────────────────────────────
+   Durable "what actually happened" diagnostics anchored where they
+   happened: a tool-linked row sits right under its tool block, everything
+   else rides its model round.  Routine stream phase text never lands here
+   — the live-status surface owns it — so rows stay scannable: a severity
+   dot, one summary line, and small duration/repeat chips.  The full
+   timestamp rides the row tooltip instead of a per-row line. */
+.conversation-block--activity-event {
+  margin: 2px 0;
+}
+.activity-event {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  min-width: 0;
+  padding: 3px 6px 3px 2px;
+  border-radius: 7px;
+}
+.activity-event--nested {
+  margin-left: 12px;
+}
+.activity-event--warning {
+  background: rgba(245, 158, 11, 0.06);
+}
+.activity-event--error,
+.activity-event--failed {
+  background: rgba(220, 38, 38, 0.06);
+}
+.activity-event__marker {
+  width: 7px;
+  height: 7px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.6);
+}
+.activity-event--warning .activity-event__marker {
+  background: #f59e0b;
+}
+.activity-event--error .activity-event__marker,
+.activity-event--failed .activity-event__marker {
+  background: var(--error-text, #f87171);
+}
+.activity-event--succeeded .activity-event__marker {
+  background: var(--s-done, #10b981);
+}
+.activity-event--switched .activity-event__marker,
+.activity-event--skipped .activity-event__marker,
+.activity-event--aborted .activity-event__marker {
+  background: #f59e0b;
+}
+.activity-event__body {
+  min-width: 0;
+}
+.activity-event__line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.activity-event__summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.activity-event--failed .activity-event__summary,
+.activity-event--error .activity-event__summary {
+  color: var(--error-text, #f87171);
+}
+.activity-event--warning .activity-event__summary {
+  color: #d97706;
+}
+.activity-event__chips {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font: 500 10px/1.2 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.activity-event__repeated {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text-tertiary);
+  font: 600 9.5px/1 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.activity-event__detail,
+.activity-event__facts {
+  margin-top: 1px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.activity-event--failed .activity-event__detail,
+.activity-event--error .activity-event__detail {
+  color: var(--error-text, #f87171);
+  opacity: 0.85;
+}
+.activity-event__facts {
+  font-size: 10.5px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.activity-event.activity-event--terminal-error {
+  display: block;
+  padding: 0;
+}
+.activity-event__terminal-summary {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  min-width: 0;
+  padding: 3px 6px 3px 2px;
+  border-radius: 7px;
+  cursor: pointer;
+  list-style: none;
+}
+.activity-event__terminal-summary::-webkit-details-marker {
+  display: none;
+}
+.activity-event__terminal-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.activity-event__chevron {
+  width: 14px;
+  height: 14px;
+  transition: transform .16s ease;
+  transform: rotate(-90deg);
+}
+.activity-event--terminal-error[open] .activity-event__chevron {
+  transform: rotate(0deg);
+}
+.activity-event__terminal-content {
+  min-width: 0;
+  margin: 1px 6px 6px 14px;
+}
+.activity-event__terminal-envelope {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  color: inherit;
+  font: 11px/1.5 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  overflow-x: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
+}
+.activity-event__terminal-content .activity-event__facts {
+  margin-top: 4px;
+}
+@media (max-width: 600px) {
+  .activity-event {
+    padding-right: 4px;
+  }
+  .activity-event--nested {
+    margin-left: 8px;
+  }
+}

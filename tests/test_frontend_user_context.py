@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
-from tests._jsdom import JS_DIR, run_harness
-from tests._runtime_sections import native_module_path, runtime_section
+from tests._jsdom import run_harness
+from tests._runtime_sections import (
+    native_module_path,
+    runtime_section,
+    runtime_section_path,
+)
 
 pytestmark = pytest.mark.unit
 _AUDIT_SYNTHETIC_REPO_PATHS = {'static/js/preferences.js'}
@@ -63,7 +70,6 @@ def test_context_and_clear_api_wiring_is_complete():
 
 def test_context_layout_has_mobile_contract_and_undo_affordance():
     css = _read('static/settings.css')
-    events = _read('static/js/ui/sse_handlers_misc.js')
     timeline = _read('static/js/ui/tool_rounds.js')
     assert '.ctx-group-work_rule' in css
     assert '@media(max-width:760px)' in css
@@ -71,8 +77,45 @@ def test_context_layout_has_mobile_contract_and_undo_affordance():
     # (not viewport) single-column floor for the masonry.
     assert '.settings-panel:has(#settingsTab_preferences.active)' in css
     assert '@container' in css
-    assert 'Api.userContext.undo(changeId)' in events
     assert 'pl-seg-undo' in timeline
+
+
+_UNDO_HARNESS = r'''
+const fs = require('fs');
+global.window = globalThis;
+const calls = [];
+global.Api = { userContext: {
+  undo: async (changeId) => { calls.push(changeId); },
+} };
+global.t = (key) => ({
+  'context.undoing': 'undoing',
+  'context.undone': 'undone',
+})[key] || key;
+(0, eval)(fs.readFileSync(process.argv[1], 'utf8'));
+const classes = [];
+const button = {
+  textContent: 'undo', disabled: false,
+  classList: { add: (name) => classes.push(name) },
+};
+(async () => {
+  await undoContextChange(button, 'change-42');
+  console.log(JSON.stringify({ calls, button, classes }));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+'''
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is not installed')
+def test_context_change_undo_uses_public_api_and_settles_button():
+    owner = runtime_section_path('ui/preference_actions.js')
+    proc = subprocess.run(
+        ['node', '-e', _UNDO_HARNESS, owner], capture_output=True, text=True,
+        timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert got['calls'] == ['change-42']
+    assert got['button']['disabled'] is True
+    assert got['button']['textContent'] == 'undone'
+    assert got['classes'] == ['is-undone']
 
 
 _JSDOM_BODY = r'''

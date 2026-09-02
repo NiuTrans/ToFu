@@ -25,6 +25,7 @@ Run:  python -B -m pytest -p no:napari tests/test_compaction_intra_turn_auto.py
 """
 from __future__ import annotations
 
+import logging
 import os
 import random
 import string
@@ -34,7 +35,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import lib.tasks_pkg.compaction._layer2 as l2
+import lib.tasks_pkg.compaction._layer2._compact as l2
 
 
 # ── api-form builders ──────────────────────────────────────────────────────
@@ -99,11 +100,52 @@ def _api_pairs_ok(msgs):
 @pytest.fixture
 def stub_summary(monkeypatch):
     """Deterministic, hermetic summary + no archive side effects."""
-    def _fake(old_messages, current_query, log_prefix='', conv_id='', task=None):
+    def _fake(
+        old_messages,
+        current_query,
+        log_prefix='',
+        conv_id='',
+        task=None,
+        usage_out=None,
+    ):
         return '### 1. Primary Request\n[folded earlier tool rounds summarized]'
     monkeypatch.setattr(l2, '_generate_query_aware_summary', _fake)
     monkeypatch.setattr(l2, '_archive_transcript', lambda *a, **k: None)
     return _fake
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ('thresholds', 'expected_trigger'),
+    [
+        ((90_000, 90_000, 0), 'window'),
+        ((64_000, 90_000, 64_000), 'working_set'),
+    ],
+)
+def test_automatic_archive_trigger_names_the_active_threshold(
+    monkeypatch, thresholds, expected_trigger,
+):
+    """A disabled working-set ceiling must not be mislabeled as its trigger."""
+    captured = {}
+
+    def _fake_execute(messages, task=None, **kwargs):
+        captured['trigger'] = kwargs['_compaction_trigger']
+        kwargs['_result_meta'].update({
+            'compacted': True,
+            'tokens_before': 100,
+            'msgs_before': len(messages),
+            'archive_id': None,
+        })
+        return 'bounded receipt'
+
+    monkeypatch.setattr(l2, '_should_force_compact', lambda *_a, **_k: True)
+    monkeypatch.setattr(l2, '_compaction_trigger_threshold',
+                        lambda *_a, **_k: thresholds)
+    monkeypatch.setattr(l2, 'execute_compact_tool', _fake_execute)
+
+    messages = [_user('continue')]
+    assert l2.force_compact_if_needed(messages, task=None) is True
+    assert captured['trigger'] == expected_trigger
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -115,8 +157,8 @@ def test_auto_execute_compact_folds_single_giant_turn(stub_summary):
     """★ The load-bearing fix: execute_compact_tool must fold the cold rounds
     out of a giant CURRENT turn preserved whole by the boundary — tokens drop
     hard, the summary pair is injected, and NO tool result is orphaned."""
-    from lib.tasks_pkg.compaction import (
-        _estimate_total_tokens, execute_compact_tool)
+    from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
+    from lib.tasks_pkg.compaction.api import execute_compact_tool
     from lib.tasks_pkg.compaction._constants import _INTRA_TURN_HOT_ROUNDS
 
     msgs = _giant_turn_api(n_rounds=40)
@@ -156,13 +198,14 @@ def test_NC_auto_without_fold_leaves_giant_turn_whole(stub_summary, monkeypatch)
     """NEUTER #1: disable the intra-turn fold (make it a no-op) → the boundary
     still preserves the giant turn WHOLE, so tokens barely move and all 40
     rounds survive. Proves the fold is what does the shrinking on this shape."""
-    from lib.tasks_pkg.compaction import (
-        _estimate_total_tokens, execute_compact_tool)
+    from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
+    from lib.tasks_pkg.compaction.api import execute_compact_tool
     import lib.tasks_pkg.compaction._layer2._compact as compact_mod
 
     # Neuter: fold returns the region unchanged, no cold rounds extracted.
     monkeypatch.setattr(compact_mod, '_fold_recent_intra_turn',
-                        lambda recent, hot_rounds=8: (list(recent), []))
+                        lambda recent, hot_rounds=8, hot_budget_tokens=None:
+                        (list(recent), []))
 
     msgs = _giant_turn_api(n_rounds=40)
     before = _estimate_total_tokens(msgs)
@@ -185,7 +228,7 @@ def test_NC_auto_without_fold_leaves_giant_turn_whole(stub_summary, monkeypatch)
 def test_auto_fold_noop_on_small_turn(stub_summary):
     """A preserved turn WITHIN the hot-round tail is not folded — execute_compact
     declines gracefully (no empty summary), messages untouched."""
-    from lib.tasks_pkg.compaction import execute_compact_tool
+    from lib.tasks_pkg.compaction.api import execute_compact_tool
 
     msgs = _giant_turn_api(n_rounds=3)  # <= hot tail (8) → nothing to fold
     original = [dict(m) for m in msgs]
@@ -199,25 +242,26 @@ def test_auto_fold_noop_on_small_turn(stub_summary):
 
 
 @pytest.mark.unit
-def test_auto_low_yield_second_compaction_declines_before_summary(monkeypatch):
-    """A threshold crossing is not sufficient when almost all tokens are in
-    the protected hot region.  Automatic L2 must decline before paying for a
-    summary or rewriting the cache prefix when the best-case fold is <5%."""
-    import lib.tasks_pkg.compaction._layer2 as layer2
-    from lib.tasks_pkg.compaction import (
-        _estimate_total_tokens, force_compact_if_needed)
+def test_auto_oversized_eight_round_tail_is_folded_to_budget(monkeypatch):
+    """The eight-round count cap is not an unlimited token entitlement.
+
+    A short but enormous current-turn tail must become foldable and compact,
+    instead of repeatedly declining because all useful savings were protected.
+    """
+    import lib.tasks_pkg.compaction._layer2._compact as layer2
+    from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
+    from lib.tasks_pkg.compaction.api import force_compact_if_needed
     from lib.tasks_pkg.compaction._constants import _summary_cooldowns
 
     # Shape of the reported second trigger: a previous compact summary is an
-    # older turn, while the current turn's hot tool results own nearly all of
-    # the prompt.  Folding the older turn can save only ~3%.
+    # older turn, while eight current-turn tool results own nearly all tokens.
     msgs = [
         _sys(),
         _user('original objective'),
         {'role': 'assistant', 'content': 'prior compact summary ' + 's' * 12_000},
         _user('continue the same task'),
     ]
-    for i in range(8):  # protected hot tail: not eligible for intra-turn fold
+    for i in range(8):
         msgs += _round(i, chars=48_000, dense=True)
 
     before = _estimate_total_tokens(msgs)
@@ -225,7 +269,7 @@ def test_auto_low_yield_second_compaction_declines_before_summary(monkeypatch):
     archive_calls = []
     monkeypatch.setattr(
         layer2, '_generate_query_aware_summary',
-        lambda *a, **k: summary_calls.append((a, k)) or 'SHOULD NOT RUN')
+        lambda *a, **k: summary_calls.append((a, k)) or 'bounded summary')
     monkeypatch.setattr(
         layer2, '_archive_transcript',
         lambda *a, **k: archive_calls.append((a, k)) or 1)
@@ -236,6 +280,7 @@ def test_auto_low_yield_second_compaction_declines_before_summary(monkeypatch):
     task = {
         'convId': conv_id,
         'id': 't',
+        '_userId': 1,
         'config': {'model': 'kimi-k3'},
     }
     import lib.tasks_pkg.compaction._layer2._compact as compact_mod
@@ -243,12 +288,19 @@ def test_auto_low_yield_second_compaction_declines_before_summary(monkeypatch):
     result = force_compact_if_needed(msgs, task=task)
 
     assert before > 128_000  # economic trigger can genuinely be crossed
-    assert result is False
-    assert msgs == original
-    assert summary_calls == [], 'declined rewrite must not spend summary tokens'
-    assert archive_calls == [], 'declined rewrite must not emit a fake snapshot'
-    assert conv_id not in _summary_cooldowns
-    assert task['_autoCompactRetryAfterTokens'] > before
+    assert result is True
+    assert msgs != original
+    assert len(summary_calls) == 1
+    assert len(archive_calls) == 1
+    assert conv_id in _summary_cooldowns
+    remaining_rounds = sum(
+        1 for message in msgs
+        if message.get('role') == 'assistant' and message.get('tool_calls')
+        and message['tool_calls'][0].get('id', '').startswith('tc_')
+    )
+    assert 1 <= remaining_rounds < 8
+    assert _estimate_total_tokens(msgs) < before * 0.5
+    assert _api_pairs_ok(msgs)[0]
 
 
 @pytest.mark.unit
@@ -281,16 +333,459 @@ def test_auto_economic_decline_hysteresis_waits_for_prompt_growth(monkeypatch):
 
 
 @pytest.mark.unit
+def test_hysteresis_reuses_authoritative_preflight_measurement(monkeypatch):
+    """Retry hysteresis must not rescan an unchanged long transcript."""
+    import lib.tasks_pkg.compaction._tokens as tokens
+
+    messages = [_sys(), _user('unchanged hot tail')]
+    task = {
+        'convId': 'hysteresis-measured',
+        'config': {'model': 'kimi-k3'},
+        '_autoCompactRetryAfterTokens': 50_000,
+    }
+
+    def count(_messages, _task, *, measurement_out=None):
+        measurement_out.update({
+            'message_tokens': 40_000,
+            'message_count': len(_messages),
+            'gate_tokens': 130_000,
+            'method': 'test',
+        })
+        return 130_000, 'test'
+
+    monkeypatch.setattr(tokens, '_count_tokens_authoritative', count)
+    monkeypatch.setattr(
+        tokens, '_estimate_total_tokens',
+        lambda _messages: pytest.fail('retry gate rescanned the transcript'))
+
+    measurement = {}
+    assert tokens._should_force_compact(
+        messages, task, measurement_out=measurement) is False
+    assert measurement['message_tokens'] == 40_000
+
+
+@pytest.mark.unit
+def test_cache_negative_retry_floor_uses_optimistic_break_even_bound():
+    """Do not rebuild a candidate before even all-droppable growth can pay."""
+    import lib.tasks_pkg.compaction._layer2._compact as layer2
+
+    task = {}
+    floor = layer2._defer_proactive_retry(
+        task,
+        130_000,
+        reason='cache_negative',
+        economics={
+            'cache_read_tokens': 120_000,
+            'dropped_tokens': 100_000,
+            'cache_read_mul': 1.0,
+            'rewrite_cost_tokens': 190_000,
+            'summary_cost_tokens': 30_000,
+        },
+    )
+
+    # One-round break-even needs 220K droppable tokens. Only 100K are
+    # currently droppable, so even the optimistic lower bound needs +120K.
+    assert floor == 250_000
+    assert task['_autoCompactRetryWitness'] == {
+        'reason': 'cache_negative',
+        'cacheReadTokens': 120_000,
+        'paybackLimitRounds': 1.0,
+    }
+
+
+@pytest.mark.unit
+def test_low_yield_retry_floor_uses_optimistic_reduction_bound():
+    """All-droppable growth must be enough to meet the reduction policy."""
+    import lib.tasks_pkg.compaction._layer2._compact as layer2
+
+    task = {}
+    floor = layer2._defer_proactive_retry(
+        task,
+        1_000_000,
+        reason='low_yield',
+        economics={'dropped_tokens': 0},
+    )
+
+    # At a 5% minimum reduction, x / (1M + x) >= 5%, so x must be at
+    # least ceil(50K / 0.95) = 52,632 even if every new token is foldable.
+    assert floor == 1_052_632
+    assert '_autoCompactRetryWitness' not in task
+
+
+@pytest.mark.unit
+def test_cache_negative_retry_floor_yields_when_cache_witness_cools(
+    monkeypatch,
+):
+    """A broken/cold prefix invalidates the prior warm-cache proof at once."""
+    import lib.tasks_pkg.cache_tracking._state as cache_state
+    import lib.tasks_pkg.compaction._tokens as tokens
+
+    messages = [_sys(), _user('unchanged hot tail')]
+    task = {
+        'convId': 'cache-cooled',
+        '_userId': 1,
+        'config': {'model': 'kimi-k3'},
+        '_autoCompactRetryAfterTokens': 250_000,
+        '_autoCompactRetryWitness': {
+            'reason': 'cache_negative',
+            'cacheReadTokens': 120_000,
+        },
+    }
+
+    def count(_messages, _task, *, measurement_out=None):
+        measurement_out.update({
+            'message_tokens': 130_000,
+            'message_count': len(_messages),
+            'gate_tokens': 130_000,
+            'method': 'test',
+        })
+        return 130_000, 'test'
+
+    monkeypatch.setattr(tokens, '_count_tokens_authoritative', count)
+    monkeypatch.setattr(cache_state, 'get_warm_cache_read',
+                        lambda *args, **kwargs: 0)
+
+    measurement = {}
+    assert tokens._should_force_compact(
+        messages, task, measurement_out=measurement) is True
+    assert '_autoCompactRetryAfterTokens' not in task
+    assert '_autoCompactRetryWitness' not in task
+
+
+@pytest.mark.unit
+def test_cache_negative_retry_floor_holds_while_cache_witness_is_warm(
+    monkeypatch,
+):
+    """Unchanged warm-cache evidence keeps the proven retry floor active."""
+    import lib.tasks_pkg.cache_tracking._state as cache_state
+    import lib.tasks_pkg.compaction._tokens as tokens
+
+    messages = [_sys(), _user('unchanged hot tail')]
+    task = {
+        'convId': 'cache-still-warm',
+        '_userId': 1,
+        'config': {'model': 'kimi-k3'},
+        '_autoCompactRetryAfterTokens': 250_000,
+        '_autoCompactRetryWitness': {
+            'reason': 'cache_negative',
+            'cacheReadTokens': 120_000,
+        },
+    }
+
+    def count(_messages, _task, *, measurement_out=None):
+        measurement_out.update({
+            'message_tokens': 130_000,
+            'message_count': len(_messages),
+            'gate_tokens': 130_000,
+            'method': 'test',
+        })
+        return 130_000, 'test'
+
+    monkeypatch.setattr(tokens, '_count_tokens_authoritative', count)
+    monkeypatch.setattr(cache_state, 'get_warm_cache_read',
+                        lambda *args, **kwargs: 120_000)
+
+    measurement = {}
+    assert tokens._should_force_compact(
+        messages, task, measurement_out=measurement) is False
+    assert task['_autoCompactRetryAfterTokens'] == 250_000
+    assert task['_autoCompactRetryWitness']['cacheReadTokens'] == 120_000
+
+
+@pytest.mark.unit
+def test_retry_floor_never_masks_hard_window_safety(monkeypatch):
+    """The real context-window trigger outranks every economic veto."""
+    import lib.tasks_pkg.compaction._tokens as tokens
+
+    messages = [_sys(), _user('oversized')]
+    task = {
+        'convId': 'hard-window',
+        'config': {'model': 'kimi-k3'},
+        '_autoCompactRetryAfterTokens': 9_000_000,
+    }
+    _, window_threshold, _ = tokens._compaction_trigger_threshold(task)
+
+    def count(_messages, _task, *, measurement_out=None):
+        measurement_out.update({
+            'message_tokens': 130_000,
+            'message_count': len(_messages),
+            'gate_tokens': window_threshold + 1,
+            'method': 'test',
+        })
+        return window_threshold + 1, 'test'
+
+    monkeypatch.setattr(tokens, '_count_tokens_authoritative', count)
+    measurement = {}
+    assert tokens._should_force_compact(
+        messages, task, measurement_out=measurement) is True
+
+
+@pytest.mark.unit
+def test_expected_decline_reuses_measurement_without_warning(
+    monkeypatch, caplog,
+):
+    """A cache-economic no-op is normal policy, not a summary failure."""
+    import lib.tasks_pkg.compaction._layer2._compact as layer2
+
+    captured = {}
+
+    def should_compact(
+        _messages,
+        _task,
+        *,
+        measurement_out=None,
+        current_round=None,
+        remaining_api_rounds=None,
+    ):
+        assert current_round is None
+        assert remaining_api_rounds is None
+        measurement_out.update({
+            'message_tokens': 12_345,
+            'message_count': len(_messages),
+            'gate_tokens': 130_000,
+            'method': 'test',
+        })
+        return True
+
+    def execute(_messages, task=None, **kwargs):
+        captured['premeasured'] = kwargs['_message_tokens_before']
+        kwargs['_result_meta'].update({
+            'compacted': False,
+            'reason': 'cache_negative',
+        })
+        return 'declined'
+
+    monkeypatch.setattr(layer2, '_should_force_compact', should_compact)
+    monkeypatch.setattr(layer2, 'execute_compact_tool', execute)
+    caplog.set_level(logging.WARNING)
+
+    measurement = {}
+    result = layer2.force_compact_if_needed(
+        [_user('continue')],
+        task={'id': 't', 'convId': 'economic-noop',
+              'config': {'model': 'kimi-k3'}},
+        _measurement_out=measurement,
+        _allow_head_truncate_fallback=True,
+    )
+
+    assert result is False
+    assert captured['premeasured'] == 12_345
+    assert measurement['message_tokens'] == 12_345
+    assert not any(
+        record.levelno >= logging.WARNING
+        and 'Compaction did not mutate messages' in record.getMessage()
+        for record in caplog.records)
+
+
+@pytest.mark.unit
+def test_unexpected_summary_failure_keeps_warning(monkeypatch, caplog):
+    """Only policy declines are quiet; failed summary work stays visible."""
+    import lib.tasks_pkg.compaction._layer2._compact as layer2
+
+    monkeypatch.setattr(
+        layer2, '_should_force_compact', lambda *a, **k: True)
+
+    def execute(_messages, task=None, **kwargs):
+        kwargs['_result_meta'].update({
+            'compacted': False,
+            'summaryFailureReason': 'summary_failed',
+        })
+        return 'failed'
+
+    monkeypatch.setattr(layer2, 'execute_compact_tool', execute)
+    caplog.set_level(logging.WARNING)
+
+    assert layer2.force_compact_if_needed(
+        [_user('continue')],
+        task={'id': 't', 'convId': 'summary-failed',
+              'config': {'model': 'kimi-k3'}},
+    ) is False
+    assert any(
+        record.levelno >= logging.WARNING
+        and 'Compaction did not mutate messages' in record.getMessage()
+        for record in caplog.records)
+
+
+@pytest.mark.unit
+def test_auto_summary_cost_declines_before_model_dispatch(monkeypatch):
+    """Expected summary cost belongs in preflight, before it becomes sunk."""
+    import lib.tasks_pkg.compaction._layer2._compact as layer2
+
+    summary_calls = []
+    monkeypatch.setattr(
+        layer2, '_generate_query_aware_summary',
+        lambda *args, **kwargs: summary_calls.append((args, kwargs)) or 'receipt')
+    monkeypatch.setattr(
+        layer2, '_projected_summary_usage_tokens',
+        lambda *args, **kwargs: 12_000)
+
+    def economics(_task, *, tokens_before, candidate_tokens,
+                  summary_usage_tokens=0):
+        dropped = max(1, tokens_before - candidate_tokens)
+        return {
+            'cache_read_tokens': 100_000,
+            'cache_rewrite_tokens': candidate_tokens,
+            'dropped_tokens': dropped,
+            'cache_write_mul': 1.0,
+            'cache_read_mul': 1.0,
+            'rewrite_cost_tokens': candidate_tokens,
+            'summary_cost_tokens': summary_usage_tokens,
+            'payback_rounds': 2.0 if summary_usage_tokens else 0.5,
+            'pricing_source': 'test',
+        }
+
+    monkeypatch.setattr(layer2, '_proactive_cache_economics', economics)
+    messages = [
+        _sys(), _user('objective'),
+        {'role': 'assistant', 'content': 'old state ' + ('x' * 20_000)},
+        _user('continue'), {'role': 'assistant', 'content': 'current state'},
+    ]
+    meta = {}
+    layer2.execute_compact_tool(
+        messages, task={'convId': 'preflight', 'id': 't',
+                        'config': {'model': 'gpt-4'}},
+        preserve_budget_tokens=1, _proactive_economic=True,
+        _compaction_skip_archive=True, _result_meta=meta)
+
+    assert summary_calls == []
+    assert meta['compacted'] is False
+    assert meta['reason'] == 'cache_negative'
+    assert meta['projected_summary_cost_tokens'] == 12_000
+
+
+@pytest.mark.unit
+def test_adaptive_expected_horizon_survives_fixed_one_round_gate(monkeypatch):
+    """The adaptive PEV decision must reach both exact L2 ROI checks.
+
+    A three-round candidate is intentionally uneconomic for the shipped fixed
+    policy, but profitable inside this adaptive request's six-round horizon.
+    The old wiring admitted it in ``_should_force_compact`` and then silently
+    rejected it here against the fixed one-round constant.
+    """
+    import lib.tasks_pkg.compaction._layer2._compact as layer2
+
+    summary_calls = []
+    monkeypatch.setattr(
+        layer2, '_projected_summary_usage_tokens',
+        lambda *args, **kwargs: 10_000)
+
+    def summary(*args, **kwargs):
+        summary_calls.append((args, kwargs))
+        kwargs['usage_out'].update({
+            'prompt_tokens': 8_000,
+            'completion_tokens': 500,
+        })
+        return 'Objective preserved; continue the current implementation.'
+
+    monkeypatch.setattr(layer2, '_generate_query_aware_summary', summary)
+
+    def economics(_task, *, tokens_before, candidate_tokens,
+                  summary_usage_tokens=0):
+        dropped = max(1, tokens_before - candidate_tokens)
+        return {
+            'cache_read_tokens': 100_000,
+            'cache_rewrite_tokens': candidate_tokens,
+            'dropped_tokens': dropped,
+            'cache_write_mul': 1.0,
+            'cache_read_mul': 0.1,
+            'rewrite_cost_tokens': candidate_tokens,
+            'summary_cost_tokens': summary_usage_tokens,
+            'payback_rounds': 3.0,
+            'pricing_source': 'test',
+        }
+
+    monkeypatch.setattr(layer2, '_proactive_cache_economics', economics)
+    messages = [
+        _sys(), _user('Objective: finish the implementation.'),
+        {'role': 'assistant', 'content': 'old state ' + ('x' * 20_000)},
+        _user('continue'), {'role': 'assistant', 'content': 'current state'},
+    ]
+    task = {
+        'convId': 'adaptive-horizon',
+        'id': 't',
+        'config': {
+            'model': 'kimi-k3',
+            'compaction': {'strategy': 'adaptive'},
+        },
+        '_adaptiveCompactionDecision': {
+            'shouldTrigger': True,
+            'remainingRoundsMedian': 6.0,
+        },
+    }
+    meta = {}
+
+    layer2.execute_compact_tool(
+        messages, task=task, preserve_budget_tokens=1,
+        _proactive_economic=True, _compaction_skip_archive=True,
+        _result_meta=meta)
+
+    assert len(summary_calls) == 1
+    assert meta['compacted'] is True
+    assert meta['economics']['payback_rounds'] == 3.0
+    assert meta['economics']['payback_limit_rounds'] == 6.0
+    assert meta['economics']['payback_policy'] == 'adaptive_expected_horizon'
+
+
+@pytest.mark.unit
+def test_auto_does_not_reject_paid_summary_on_sunk_summary_cost(monkeypatch):
+    """After generation, adoption compares only future rewrite economics."""
+    import lib.tasks_pkg.compaction._layer2._compact as layer2
+
+    monkeypatch.setattr(
+        layer2, '_projected_summary_usage_tokens',
+        lambda *args, **kwargs: 0)
+
+    def summary(*args, **kwargs):
+        kwargs['usage_out'].update({'prompt_tokens': 8_000,
+                                    'completion_tokens': 4_000})
+        return 'small faithful receipt'
+
+    monkeypatch.setattr(layer2, '_generate_query_aware_summary', summary)
+
+    def economics(_task, *, tokens_before, candidate_tokens,
+                  summary_usage_tokens=0):
+        dropped = max(1, tokens_before - candidate_tokens)
+        return {
+            'cache_read_tokens': 100_000,
+            'cache_rewrite_tokens': candidate_tokens,
+            'dropped_tokens': dropped,
+            'cache_write_mul': 1.0,
+            'cache_read_mul': 1.0,
+            'rewrite_cost_tokens': candidate_tokens,
+            'summary_cost_tokens': summary_usage_tokens,
+            'payback_rounds': 2.0 if summary_usage_tokens else 0.5,
+            'pricing_source': 'test',
+        }
+
+    monkeypatch.setattr(layer2, '_proactive_cache_economics', economics)
+    messages = [
+        _sys(), _user('objective'),
+        {'role': 'assistant', 'content': 'old state ' + ('x' * 20_000)},
+        _user('continue'), {'role': 'assistant', 'content': 'current state'},
+    ]
+    meta = {}
+    layer2.execute_compact_tool(
+        messages, task={'convId': 'sunk-cost', 'id': 't',
+                        'config': {'model': 'gpt-4'}},
+        preserve_budget_tokens=1, _proactive_economic=True,
+        _compaction_skip_archive=True, _result_meta=meta)
+
+    assert meta['compacted'] is True
+    assert meta['summary_usage_tokens'] == 12_000
+    assert meta['tokens_after_estimated'] > 0
+
+
+@pytest.mark.unit
 def test_auto_realized_low_yield_candidate_is_not_committed(monkeypatch):
     """Best-case eligibility is only a prefilter.  If the generated summary
     plus its synthetic pair leaves <5% realized savings, proactive L2 must
     preserve the live prefix and report no completed compaction side effects."""
     import lib.context_telemetry as telemetry
-    import lib.tasks_pkg.cache_tracking as cache_tracking
-    import lib.tasks_pkg.compaction._layer2 as layer2
+    import lib.tasks_pkg.cache_tracking._roi as cache_tracking
+    import lib.tasks_pkg.compaction._layer2._compact as layer2
     import lib.tasks_pkg.compaction._layer2._compact as compact_mod
     import lib.token_counter as token_counter
-    from lib.tasks_pkg.compaction import force_compact_if_needed
+    from lib.tasks_pkg.compaction.api import force_compact_if_needed
     from lib.tasks_pkg.compaction._constants import _summary_cooldowns
 
     msgs = [
@@ -350,8 +845,8 @@ def test_auto_realized_low_yield_candidate_is_not_committed(monkeypatch):
 def test_forced_compaction_bypasses_realized_yield_gate(monkeypatch):
     """Manual/reactive force=True is correctness-first: even a summary that
     realizes <5% savings still commits and injects the synthetic pair."""
-    import lib.tasks_pkg.compaction._layer2 as layer2
-    from lib.tasks_pkg.compaction import force_compact_if_needed
+    import lib.tasks_pkg.compaction._layer2._compact as layer2
+    from lib.tasks_pkg.compaction.api import force_compact_if_needed
 
     msgs = [
         _sys(),
@@ -369,6 +864,7 @@ def test_forced_compaction_bypasses_realized_yield_gate(monkeypatch):
     task = {
         'convId': 'forced-low-yield',
         'id': 't',
+        '_userId': 1,
         'config': {'model': 'kimi-k3'},
         '_contextEvidenceLedger': {'entries': [{'id': 'temporary'}]},
     }
@@ -398,13 +894,14 @@ def _ceiling_for(task):
 
 
 @pytest.mark.unit
-def test_auto_compact_converges_when_hot_tail_still_overflows(stub_summary):
-    """★ Fold + summary succeed, but the 8 preserved HOT rounds are each so
-    large that the projected request still exceeds the trigger ceiling. The
-    success-path convergence check must head-truncate (pairing-safe) so the
-    result fits the window THIS round — no orphan, objective preserved."""
-    from lib.tasks_pkg.compaction import (
-        _estimate_total_tokens, execute_compact_tool)
+def test_auto_compact_token_budget_converges_without_oversized_hot_tail(stub_summary):
+    """★ The token-aware hot suffix fits before the emergency convergence net.
+
+    Whole-round folding must keep the result under the ceiling, paired, and
+    objective-preserving even when the newest eight rounds would not fit.
+    """
+    from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
+    from lib.tasks_pkg.compaction.api import execute_compact_tool
 
     # gpt-4 → 128k window; each hot round ~45k DENSE chars so 8 hot rounds
     # alone blow past the ~80.6k-token ceiling even after the cold body is
@@ -432,15 +929,24 @@ def test_auto_compact_converges_when_hot_tail_still_overflows(stub_summary):
 
 
 @pytest.mark.unit
-def test_NC_no_convergence_leaves_projected_over_ceiling(stub_summary, monkeypatch):
-    """NEUTER #1b: neuter the convergence head-truncate (make it a no-op) → the
-    oversized hot tail survives whole and the preserved region stays OVER the
-    ceiling. Proves the success-path convergence check is what bounds it (revert
-    → the over-window request reappears)."""
-    from lib.tasks_pkg.compaction import (
-        _estimate_total_tokens, execute_compact_tool)
+def test_NC_count_only_hot_tail_leaves_projected_over_ceiling(stub_summary, monkeypatch):
+    """NEUTER #1b: restore count-only retention and disable head truncation.
+
+    Eight huge rounds then survive over the ceiling, proving token-budgeted
+    whole-round selection—not the round-count cap—is the load-bearing fix.
+    """
+    from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
+    from lib.tasks_pkg.compaction.api import execute_compact_tool
+    import lib.tasks_pkg.compaction._layer2._compact as compact_mod
+    from lib.tasks_pkg.compaction._layer2._anchor import (
+        _fold_recent_intra_turn as real_fold,
+    )
     import lib.tasks_pkg.compaction._reactive as reactive_mod
 
+    monkeypatch.setattr(
+        compact_mod, '_fold_recent_intra_turn',
+        lambda recent, hot_rounds=8, hot_budget_tokens=None:
+        real_fold(recent, hot_rounds=hot_rounds, hot_budget_tokens=None))
     # Neuter: the convergence check calls this and drops nothing.
     monkeypatch.setattr(reactive_mod, '_head_truncate',
                         lambda *a, **k: 0)
@@ -469,7 +975,7 @@ def test_head_truncate_never_orphans_a_tool_pair():
     """★ The emergency net must drop whole tool-call rounds — after an
     aggressive token-target truncation, every surviving ``tool`` result still
     has its ``assistant.tool_calls`` parent (no HTTP-400 orphan)."""
-    from lib.tasks_pkg.compaction import _head_truncate
+    from lib.tasks_pkg.compaction._reactive._headtrunc import _head_truncate
 
     # system + objective(user) + 40 heavy tool-call rounds (single turn).
     msgs = _giant_turn_api(n_rounds=40, chars=4000)
@@ -488,7 +994,7 @@ def test_head_truncate_never_orphans_a_tool_pair():
 @pytest.mark.unit
 def test_head_truncate_byte_target_never_orphans():
     """Same guarantee on the BYTE-target branch (the 413 wire-size path)."""
-    from lib.tasks_pkg.compaction import _head_truncate
+    from lib.tasks_pkg.compaction._reactive._headtrunc import _head_truncate
 
     msgs = _giant_turn_api(n_rounds=30, chars=8000)
     task = {'convId': 'c', 'id': 't', 'config': {'model': 'gpt-4'}}

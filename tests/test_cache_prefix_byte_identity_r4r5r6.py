@@ -255,7 +255,10 @@ def test_ttl_marker_stable_only_when_task_id_preserved():
     same round when ``_task_id`` is preserved (the latch pins it), and DOES flip
     when a rebuild drops ``_task_id`` and the live global differs — documenting
     the client-side cache-key flip that produced R4/R5's full miss."""
-    from lib.tasks_pkg.cache_tracking import latch_extended_ttl, release_ttl_latch
+    from lib.tasks_pkg.cache_tracking._ttl import (
+        latch_extended_ttl,
+        release_ttl_latch,
+    )
 
     snap = list(_sequence(n_rounds=20, empty_round=12))[15][1]
 

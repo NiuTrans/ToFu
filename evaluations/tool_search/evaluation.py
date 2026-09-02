@@ -173,3 +173,25 @@ def apply_tool_selections(report: dict[str, Any], payload: Any
         sum(not row['selected_tool'] for row in rows) / total, 4
     ) if total else 0.0
     return report
+
+
+def v2_release_gate(report: dict[str, Any], *, unauthorized_executions: int,
+                    end_to_end_accuracy: float | None = None) -> dict[str, Any]:
+    """Apply the pre-registered Tool Search v2 release thresholds."""
+    recall = float(report.get('recall_at_5') or 0)
+    selection = (float(end_to_end_accuracy)
+                 if end_to_end_accuracy is not None else
+                 float(report.get('end_to_end_accuracy') or 0))
+    gates = {
+        'recallAt5AtLeast99Percent': recall >= 0.99,
+        'endToEndSelectionAtLeast97Percent': selection >= 0.97,
+        'zeroUnauthorizedExecutions': int(unauthorized_executions) == 0,
+    }
+    return {'gates': gates, 'releaseEligible': all(gates.values())}
+
+
+__all__ = [
+    'apply_agent_decisions', 'apply_model_queries', 'apply_tool_selections',
+    'evaluate_retrieval', 'flatten_episodes', 'merge_simulated_users',
+    'v2_release_gate',
+]

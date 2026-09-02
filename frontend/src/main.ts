@@ -1,3 +1,8 @@
+// Self-hosted @font-face declarations (Newsreader, Plus Jakarta Sans,
+// JetBrains Mono, …) ride the main chunk's extracted CSS. Vite content-hashes
+// the font binaries; the Python shell preloads the critical UI weights from
+// the manifest. Replaces the legacy static/vendor/google-fonts-local.css link.
+import './styles/fonts.css';
 import {
   getRuntimeService,
   loadFeatureFlags,
@@ -7,74 +12,27 @@ import {
 } from './runtime/app-runtime.js';
 import { ready as i18nReady, setLanguage, t } from './i18n';
 import { installActionRegistry, resolveRegisteredAction } from './action-registry';
-import { createLifecycleScope, type LifecycleScope } from './lifecycle';
 import { type FeatureCallable } from './runtime-bridge';
 import { connectFeatureRuntime, getFeatureBinding } from './feature-registry';
-import { normalizeErrorEnvelope } from './api/errors';
 import {
-  apiTransport,
   installLegacyApiBindings,
-  type ApiTransport,
 } from './api/transport';
-import { formatFileSize } from './core/format-size';
-import {
-  createAttemptEventStream,
-  type AttemptStreamOptions,
-  type AttemptStreamConnection,
-} from './core/attempt-stream';
-import {
-  createSendStartupLease,
-  type SendStartupLease,
-  type SendStartupLeaseOptions,
-  type SendStartupOwner,
-} from './core/send-startup';
-import {
-  buildTurnSubmissionExtra,
-  buildTurnOperationRequest,
-  buildTurnSubmitRequest,
-  createTurnCommandId,
-  type TurnSubmissionExtra,
-  type TurnSubmissionInput,
-} from './core/turn-command';
-import {
-  applyTurnStateProjection,
-  projectTurnState,
-  turnToLegacyMessage,
-  type ApplyTurnProjectionInput,
-  type TurnProjectionInput,
-  type TurnProjectionResult,
-} from './core/turn-projection';
-import {
-  createTurnStore,
-  createTurnState,
-  reduceTurnState,
-  type ReduceTurnStateOptions,
-  type TurnAction,
-  type TurnState,
-  type TurnStore,
-  type TurnStoreOptions,
-} from './core/turn-state';
-import {
-  presentTurnFinish,
-  resumeTurnOptions,
-  type TurnFinishPresentation,
-} from './core/turn-presentation';
-import {
-  renderTurnStateInto,
-  type TurnRenderer,
-} from './core/turn-render';
-import {
-  createConversationTurnRuntime,
-  type TurnRuntimeOptions,
-} from './core/turn-runtime';
 
 type DomainModule = {
   prepare?(name: string): Promise<void>;
   invoke(name: string, args: readonly unknown[], stub: FeatureCallable): Promise<unknown>;
 };
 
+interface TofuSceneRuntimeBridge {
+  readonly BASE_PATH: string;
+  readonly t: typeof t;
+  TofuPet: unknown;
+  TofuScene: unknown;
+}
+
 const settingsEntries = new Set([
   'openSettings', 'closeSettings', 'saveSettings', 'switchSettingsTab',
+  'populateToolsInventory', 'searchToolsInventory',
 ]);
 const memoryEntries = new Set([
   'toggleMemory', 'openMemoryModal', 'closeMemoryModal', 'toggleMemoryAddForm',
@@ -98,7 +56,6 @@ const miscEntries = new Set([
   'redoConvModifications', 'openApplyModal', 'closeApplyModal', 'confirmApplyCode',
   '_toggleCostPopover', 'openUpdateDialog', 'closeUpdateModal',
   '_renderSettingsUpdatePill', 'toggleTimerPanel', 'toggleOptimizerPanel',
-  '_populateToolsTab', '_toolsInvSearch',
 ]);
 
 const routedFeatureEntries = new Set([
@@ -125,67 +82,15 @@ function domainLoader(name: string): () => Promise<DomainModule> {
 
 export interface TofuModuleBridge {
   version: 3;
-  createLifecycleScope(): LifecycleScope;
   loadDiagnostics(): Promise<typeof import('./features/diagnostics')>;
   collectDiagnostics(): Promise<string>;
-  attachCookieCaptureConsent(): Promise<
-    import('./features/cookie-capture').CookieCaptureConsentController
-  >;
   loadDebug(): Promise<typeof import('./features/debug')>;
-  apiTransport: ApiTransport;
-  loadTurnStoreV2(): Promise<typeof import('./core/turn-store')>;
-  normalizeErrorEnvelope: typeof normalizeErrorEnvelope;
-  formatFileSize: typeof formatFileSize;
-  createAttemptEventStream<TSnapshot = unknown>(
-    options: AttemptStreamOptions<TSnapshot>,
-  ): AttemptStreamConnection;
-  createSendStartupLease(
-    owner: SendStartupOwner,
-    options?: SendStartupLeaseOptions,
-  ): SendStartupLease;
-  buildTurnSubmissionExtra(input: TurnSubmissionInput): TurnSubmissionExtra;
-  buildTurnSubmitRequest(
-    inputTurn: unknown,
-    config: unknown,
-    extra?: Record<string, unknown> | null,
-  ): Record<string, unknown>;
-  buildTurnOperationRequest(
-    turn: Parameters<typeof buildTurnOperationRequest>[0],
-    operation: string,
-    config?: unknown,
-    options?: Parameters<typeof buildTurnOperationRequest>[3],
-  ): Record<string, unknown>;
-  createTurnCommandId(): string;
-  createConversationTurnRuntime(options: TurnRuntimeOptions): ReturnType<
-    typeof createConversationTurnRuntime
-  >;
-  applyTurnStateProjection(input: ApplyTurnProjectionInput): boolean;
-  projectTurnState(input: TurnProjectionInput): TurnProjectionResult;
-  turnToLegacyMessage: typeof turnToLegacyMessage;
-  presentTurnFinish(
-    turn: Parameters<typeof presentTurnFinish>[0],
-  ): TurnFinishPresentation | null;
-  resumeTurnOptions: typeof resumeTurnOptions;
-  renderTurnStateInto(
-    container: Element,
-    state: TurnState,
-    renderTurn?: TurnRenderer,
-  ): void;
-  createTurnState(conversationId: string): TurnState;
-  createTurnStore(
-    conversationId: string,
-    options?: TurnStoreOptions,
-  ): TurnStore;
-  reduceTurnState(
-    state: TurnState,
-    action: TurnAction | null | undefined,
-    options?: ReduceTurnStateOptions,
-  ): TurnState;
   preloadBackground(): Promise<void>;
   canInvokeFeature(name: string): boolean;
   prepareFeature(name: string): Promise<void>;
   invokeFeature(name: string, args: readonly unknown[], stub: FeatureCallable): Promise<unknown>;
   resolveAction(name: string): FeatureCallable | undefined;
+  sceneRuntime: TofuSceneRuntimeBridge;
   t: typeof t;
   setLanguage: typeof setLanguage;
 }
@@ -206,38 +111,39 @@ const resolveAction = (name: string): FeatureCallable | undefined => {
   return typeof binding === 'function' ? binding as FeatureCallable : undefined;
 };
 
+// Decorative scene chunks have a deliberately narrow mutable port. They can
+// coordinate with one another without receiving the retained runtime object or
+// publishing another browser global.
+const sceneRuntime: TofuSceneRuntimeBridge = Object.seal({
+  get BASE_PATH(): string {
+    const value = getRuntimeService('BASE_PATH');
+    return typeof value === 'string' ? value : '';
+  },
+  get t(): typeof t {
+    return t;
+  },
+  get TofuPet(): unknown {
+    return getRuntimeService('TofuPet');
+  },
+  set TofuPet(value: unknown) {
+    setRuntimeService('TofuPet', value);
+  },
+  get TofuScene(): unknown {
+    return getRuntimeService('TofuScene');
+  },
+  set TofuScene(value: unknown) {
+    setRuntimeService('TofuScene', value);
+  },
+});
+
 // The command port is the sole bridge from retained inline/global UI seams to
 // their registered domain owners. Missing owners fail closed. Diagnostics is
 // a dynamic chunk and does not tax the first screen.
 window.TofuModules = Object.freeze({
   version: 3 as const,
-  createLifecycleScope,
   loadDiagnostics: () => import('./features/diagnostics'),
   collectDiagnostics: async () => (await import('./features/diagnostics')).collectDiagnostics(),
-  attachCookieCaptureConsent: async () => (
-    await import('./features/cookie-capture')
-  ).attachCookieCaptureConsent(),
   loadDebug: () => import('./features/debug'),
-  apiTransport,
-  loadTurnStoreV2: () => import('./core/turn-store'),
-  normalizeErrorEnvelope,
-  formatFileSize,
-  createAttemptEventStream,
-  createSendStartupLease,
-  buildTurnSubmissionExtra,
-  buildTurnSubmitRequest,
-  buildTurnOperationRequest,
-  createTurnCommandId,
-  createConversationTurnRuntime,
-  applyTurnStateProjection,
-  projectTurnState,
-  turnToLegacyMessage,
-  presentTurnFinish,
-  resumeTurnOptions,
-  renderTurnStateInto,
-  createTurnState,
-  createTurnStore,
-  reduceTurnState,
   preloadBackground: async () => (await import('./features/background')).preload(),
   canInvokeFeature: (name: string) => routedFeatureEntries.has(name),
   prepareFeature: async (name: string) => {
@@ -252,6 +158,7 @@ window.TofuModules = Object.freeze({
     return domain.invoke(name, args, stub);
   },
   resolveAction,
+  sceneRuntime,
   t,
   setLanguage,
 });
@@ -284,10 +191,35 @@ if (idleCallback) {
   globalThis.setTimeout(preloadBackground, 2000);
 }
 
+const loadAmbientScene = async (): Promise<void> => {
+  // The pet owns the selected decor, so establish it before the canvas reads
+  // that state. Each ornament fails soft independently after application boot.
+  try {
+    await import('./runtime/scene/tofu-pet.js');
+  } catch (error) {
+    console.warn('[modules] ambient pet preload failed', error);
+  }
+  try {
+    await import('./runtime/scene/tofu-scene.js');
+  } catch (error) {
+    console.warn('[modules] ambient scene preload failed', error);
+  }
+};
+
+const scheduleAmbientScene = (): void => {
+  const load = (): void => { void loadAmbientScene(); };
+  if (idleCallback) {
+    idleCallback(load, { timeout: 4000 });
+  } else {
+    globalThis.setTimeout(load, 1200);
+  }
+};
+
 Promise.all([i18nReady(), runtimeReady]).then(() => {
   window.dispatchEvent(new CustomEvent('tofu:app-ready', {
     detail: { version: window.TofuModules?.version },
   }));
+  scheduleAmbientScene();
 }).catch((error: unknown) => {
   console.error('[boot] application initialization failed', error);
   window.dispatchEvent(new CustomEvent('tofu:app-failed', { detail: { error } }));

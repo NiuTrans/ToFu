@@ -1,11 +1,12 @@
-# Incident anchor: born in commit 51fe025b — refactor(orchestrator): pt_03f4cdf1 slice 19 — extract abort-before-t...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 19 wire-parity: _abort_before_tools.py extraction from _run.py."""
 
 import inspect
 from types import SimpleNamespace
 
-from lib.tasks_pkg.orchestrator import _abort_before_tools
+import pytest
+
+import lib.tasks_pkg.orchestrator._abort_before_tools as _abort_before_tools
+pytestmark = pytest.mark.unit
 
 
 class TestAbortBeforeToolsWireParity:
@@ -50,18 +51,14 @@ class TestAbortBeforeToolsWireParity:
         assert "before_tool_exec_round_" in src
         assert "aborted_before_tools_round_" in src
 
-    def test_docstring_mentions_extraction(self):
-        assert "pt_03f4cdf1" in (_abort_before_tools.__doc__ or "")
-
-
 class TestRunTaskDelegation:
     def test_run_task_delegates_to_helper(self):
-        from lib.tasks_pkg.orchestrator import _run
-        src = inspect.getsource(_run.run_task)
+        import lib.tasks_pkg.orchestrator._root_agent_loop as _root_agent_loop
+        src = inspect.getsource(_root_agent_loop)
         assert "handle_abort_before_tools(" in src
 
     def test_run_task_no_longer_carries_block_inline(self):
-        from lib.tasks_pkg.orchestrator import _run
+        import lib.tasks_pkg.orchestrator._run as _run
         src = inspect.getsource(_run.run_task)
         assert "aborted_before_tools_round_" not in src
         assert "Removed trailing tool_calls message" not in src

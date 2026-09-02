@@ -104,6 +104,65 @@ def test_stop_sh_disables_watchdog_e2e(tmp_path):
             dummy.wait(timeout=5)
 
 
+def test_stop_sh_help_and_bad_args_never_reach_lifecycle_owner(tmp_path):
+    proj = tmp_path / 'project with spaces'
+    proj.mkdir()
+    shutil.copy(STOP_SH, proj / 'stop.sh')
+    calls = proj / 'calls.txt'
+    (proj / 'serverctl.py').write_text(
+        'from pathlib import Path\n'
+        f'Path({str(calls)!r}).write_text("called")\n',
+        encoding='utf-8',
+    )
+    env = dict(os.environ, TOFU_SUPERVISOR_PYTHON=sys.executable)
+
+    help_result = subprocess.run(
+        ['bash', str(proj / 'stop.sh'), '--help'],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    bad_result = subprocess.run(
+        ['bash', str(proj / 'stop.sh'), '--typo'],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert help_result.returncode == 0
+    assert 'Compatibility wrapper' in help_result.stdout
+    assert bad_result.returncode == 2
+    assert 'unsupported arguments: --typo' in bad_result.stderr
+    assert not calls.exists()
+
+
+@pytest.mark.parametrize('flag', ['-y', '--yes'])
+def test_stop_sh_forwards_only_supported_confirmation_flag(
+        tmp_path, flag):
+    proj = tmp_path / 'project'
+    proj.mkdir()
+    shutil.copy(STOP_SH, proj / 'stop.sh')
+    args_file = proj / 'args.txt'
+    (proj / 'serverctl.py').write_text(
+        'import sys\n'
+        'from pathlib import Path\n'
+        f'Path({str(args_file)!r}).write_text("\\n".join(sys.argv[1:]))\n',
+        encoding='utf-8',
+    )
+
+    result = subprocess.run(
+        ['bash', str(proj / 'stop.sh'), flag],
+        capture_output=True,
+        text=True,
+        env=dict(os.environ, TOFU_SUPERVISOR_PYTHON=sys.executable),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert args_file.read_text(encoding='utf-8').splitlines() == [
+        'stop', flag, '--source', 'legacy-stop.sh',
+    ]
+
+
 def test_stop_sh_interlock_is_sourced_before_the_kill():
     """The flag must be touched BEFORE the SIGTERM — touching it after a
     successful kill would still lose the race if the script dies mid-way."""

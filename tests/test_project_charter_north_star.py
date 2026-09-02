@@ -40,6 +40,9 @@ from tests._nc_harness import patch_restore as _patch_restore
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _CHARTER_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_charter.py')
@@ -51,22 +54,15 @@ _GOAL = ('tofu项目需要具有长期扩展性。在低成本、高性能、高
 _PROJ = '/tmp/tofu-north-star-guard'
 
 
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
-
-
 @pytest.fixture(autouse=True)
-def _clean(flask_app):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_charter')
-        db.execute('DELETE FROM project_events')
-        db.commit()
+def _clean(chat_sidecar):
+    # Sidecar-mode isolation: the charter record namespace + feed events are
+    # cleared per test (the legacy DELETE FROM fixture's sidecar equivalent).
+    # ``chat_sidecar`` is an explicit dependency so the mode flip is active
+    # before any seed/assert runs.
+    import tests._seed as seed
+    seed.clear_records('project_charter')
+    seed.clear_events()
     yield
 
 
@@ -78,7 +74,7 @@ def _stub_push(monkeypatch):
 def _commit_goal(flask_app, goal=_GOAL):
     from lib.conversations.project_charter import commit_charter
     with flask_app.app_context():
-        res = commit_charter(_PROJ, content=goal, updated_by_conv='owner')
+        res = commit_charter(_PROJ, content=goal, updated_by_conv='owner', user_id=TEST_OWNER_USER_ID)
     assert res.get('ok'), res
     return res
 
@@ -88,7 +84,7 @@ def _commit_decisions(flask_app, n, prefix='filler decision'):
     with flask_app.app_context():
         for i in range(n):
             res = commit_charter(_PROJ, add_decision=f'{prefix} #{i}',
-                                 updated_by_conv='agent')
+                                 updated_by_conv='agent', user_id=TEST_OWNER_USER_ID)
             assert res.get('ok'), res
 
 
@@ -100,7 +96,7 @@ def _render(flask_app):
     from lib.conversations.project_charter import (
         render_charter_injection_block)
     with flask_app.app_context():
-        return render_charter_injection_block(_PROJ)
+        return render_charter_injection_block(_PROJ, user_id=TEST_OWNER_USER_ID)
 
 
 def test_the_north_star_reaches_the_model_even_behind_many_decisions(flask_app):
@@ -144,7 +140,7 @@ def test_eviction_never_deletes_the_north_star(flask_app):
 
     from lib.conversations.project_charter import read_charter
     with flask_app.app_context():
-        rec = read_charter(_PROJ)
+        rec = read_charter(_PROJ, user_id=TEST_OWNER_USER_ID)
     assert _GOAL in (rec.get('content') or ''), (
         'The north star was EVICTED by decision churn. It must not live in a '
         'FIFO-truncated collection.')
@@ -162,7 +158,7 @@ def test_a_missing_north_star_is_visible_not_silent(flask_app):
     from lib.conversations.project_charter import commit_charter
     with flask_app.app_context():
         commit_charter(_PROJ, add_decision='some decision',
-                       updated_by_conv='agent')
+                       updated_by_conv='agent', user_id=TEST_OWNER_USER_ID)
 
     block = _render(flask_app)
     assert block, 'a charter with decisions must still render'
@@ -221,7 +217,7 @@ def test_NC2_dropping_the_missing_goal_signal_breaks_observability(flask_app):
     from lib.conversations.project_charter import commit_charter
     with flask_app.app_context():
         commit_charter(_PROJ, add_decision='some decision',
-                       updated_by_conv='agent')
+                       updated_by_conv='agent', user_id=TEST_OWNER_USER_ID)
 
     def run(_mod=None):
         block = _render(flask_app)

@@ -10,7 +10,7 @@ pairs are the *designed* synthetic-context seams that deliberately place a user
 message adjacent to another user message:
 
   * the CLAUDE.md ``_isMeta`` carrier at index 1
-    (``system_context._insert_user_context_message`` — A/B-measured cache win,
+    (Context Composer head placement — A/B-measured cache win,
     see build_user_context_reminder);
   * the preference-profile blocks riding that carrier;
   * the per-turn "Recently Modified Files" attachment

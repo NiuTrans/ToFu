@@ -33,8 +33,9 @@ WHAT IS GATED (and why these are the failure modes that matter)
     F   a reference to a repo path that no longer exists — how a scanning guard
         degrades into scanning nothing while staying green
 
-Category G (implementation-face) is measured but NOT gated: the charter
-explicitly permits reading shipped source in RATCHET guards.
+    G   a read of shipped source text. Narrow architecture and
+        generated-artifact ratchets may remain, but every existing test/source
+        identity is grandfathered explicitly and the set may only shrink
 
 HOW TO RESPOND TO A FAILURE HERE
     Fix the finding. Do NOT raise the baseline to make it green — that is the
@@ -47,6 +48,7 @@ HOW TO RESPOND TO A FAILURE HERE
 
 from __future__ import annotations
 
+import hashlib
 import json
 import importlib.util
 import os
@@ -141,6 +143,32 @@ def test_tracked_scan_excludes_worktree_deletions(tmp_path, monkeypatch):
 
     assert audit._tracked('tests/test_*.py') == [
         _fixture_test_path('test_live.py')]
+
+
+def test_assertion_closure_follows_explicit_neighbor_test_helper(
+        tmp_path, monkeypatch):
+    """An imported behavioral driver can own the consumer's assertions."""
+    audit = _load_audit_module()
+    tests_dir = tmp_path / 'tests'
+    tests_dir.mkdir()
+    (tests_dir / 'test_driver.py').write_text(
+        'def _run_subject():\n'
+        '    observed = 2 + 2\n'
+        '    assert observed == 4\n',
+        encoding='utf-8',
+    )
+    (tests_dir / 'test_consumer.py').write_text(
+        'from tests.test_driver import _run_subject\n'
+        'def test_delegates_to_driver():\n'
+        '    _run_subject()\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+
+    report = audit.analyze_file(
+        _fixture_test_path('test_consumer.py'))
+
+    assert not [item for item in report.findings if item[0] == 'A']
 
 
 def test_dead_path_scan_ignores_prose_and_negative_absence_guards(
@@ -238,12 +266,101 @@ def test_dead_path_scan_accepts_only_live_native_adapter_identities(
         ('F', 0, 'references missing path static/js/task-mode-missing.js')]
 
 
+def test_shipped_source_read_is_reported_per_source_identity(
+        tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    owner = tmp_path / 'lib' / 'live_owner.py'
+    owner.parent.mkdir()
+    owner.write_text('def public_contract():\n    return 1\n', encoding='utf-8')
+    test_path = tmp_path / _fixture_test_path('test_source_pin.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'from pathlib import Path\n'
+        'def test_source_pin():\n'
+        '    source = (Path(__file__).parents[1] / "lib" / '
+        '"live_owner.py").read_text()\n'
+        '    assert "def public_contract(" in source\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+
+    report = audit.analyze_file(_fixture_test_path('test_source_pin.py'))
+
+    assert [item for item in report.findings if item[0] == 'G'] == [
+        ('G', 0, 'source-text read of lib/live_owner.py')]
+    assert 'G' in audit.BLOCKING
+
+
+def test_path_shaped_business_data_is_not_a_source_read(
+        tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    owner = tmp_path / 'lib' / 'live_owner.py'
+    owner.parent.mkdir()
+    owner.write_text('def public_contract():\n    return 1\n', encoding='utf-8')
+    test_path = tmp_path / _fixture_test_path('test_path_data.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'def test_path_label():\n'
+        '    expected_path = "lib/live_owner.py"\n'
+        '    rendered_label = "Changed lib/live_owner.py"\n'
+        '    assert expected_path in rendered_label\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+
+    report = audit.analyze_file(_fixture_test_path('test_path_data.py'))
+
+    assert not [item for item in report.findings if item[0] == 'G']
+
+
+def test_source_provenance_stays_scoped_to_each_test_function(
+        tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    owner_dir = tmp_path / 'lib'
+    owner_dir.mkdir()
+    (owner_dir / 'alpha.py').write_text('ALPHA_CONTRACT = 1\n')
+    (owner_dir / 'beta.py').write_text('BETA_CONTRACT = 2\n')
+    test_path = tmp_path / _fixture_test_path('test_scoped_sources.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'from pathlib import Path\n'
+        'def test_alpha():\n'
+        '    source = Path("lib/alpha.py").read_text()\n'
+        '    assert "ALPHA_CONTRACT =" in source\n'
+        'def test_beta():\n'
+        '    source = Path("lib/beta.py").read_text()\n'
+        '    assert "BETA_CONTRACT =" in source\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+
+    report = audit.analyze_file(_fixture_test_path('test_scoped_sources.py'))
+
+    assert not [item for item in report.findings if item[0] == 'E']
+    assert [item for item in report.findings if item[0] == 'G'] == [
+        ('G', 0, 'source-text read of lib/alpha.py'),
+        ('G', 0, 'source-text read of lib/beta.py'),
+    ]
+
+
+def _finding_digest(census: dict, category: str) -> str:
+    finding_keys = sorted({
+        f'{relative_path}:{detail}'
+        for relative_path, _line, detail
+        in census.get('findings', {}).get(category, ())
+    })
+    return hashlib.sha256(
+        '\n'.join(finding_keys).encode('utf-8')).hexdigest()
+
+
 @pytest.mark.skipif(_OPENSOURCE, reason='audit baseline is source-tree-specific; the export deliberately strips referenced files')
 def test_no_category_regressed():
     """One-way ratchet over every gated failure mode."""
     with open(BASELINE_PATH, encoding='utf-8') as f:
-        baseline = json.load(f)['counts']
-    counts = _census()['counts']
+        baseline_document = json.load(f)
+    baseline = baseline_document['counts']
+    census = _census()
+    counts = census['counts']
 
     grew = []
     for cat, base in sorted(baseline.items()):
@@ -251,10 +368,19 @@ def test_no_category_regressed():
         if now > base:
             grew.append((cat, base, now))
 
-    if grew:
+    baseline_g_digest = baseline_document.get(
+        'finding_digests', {}).get('G')
+    actual_g_digest = _finding_digest(census, 'G')
+    g_identity_changed = baseline_g_digest != actual_g_digest
+
+    if grew or g_identity_changed:
         detail = []
         for cat, base, now in grew:
             detail.append(f'  [{cat}] {base} → {now}  (+{now - base})')
+        if g_identity_changed:
+            detail.append(
+                '  [G] source-text read identity set changed; inspect '
+                '`python3 scripts/audit_tests.py --category G`')
         raise AssertionError(
             'Test-suite health regressed — new findings in these categories:\n'
             + '\n'.join(detail)
@@ -278,8 +404,10 @@ def test_baseline_is_not_loose():
     ``skip``ped instead of failing, so a loose baseline was unobservable).
     """
     with open(BASELINE_PATH, encoding='utf-8') as f:
-        baseline = json.load(f)['counts']
-    counts = _census()['counts']
+        baseline_document = json.load(f)
+    baseline = baseline_document['counts']
+    census = _census()
+    counts = census['counts']
     loose = [(c, b, counts.get(c, 0)) for c, b in sorted(baseline.items())
              if counts.get(c, 0) < b]
     assert not loose, (
@@ -288,6 +416,11 @@ def test_baseline_is_not_loose():
         'the stale bound:\n'
         + '\n'.join(f'  [{c}] baseline={b}, actual={n}' for c, b, n in loose)
         + '\n\nRegenerate: python3 scripts/audit_tests.py --write-baseline')
+
+    assert baseline_document.get('finding_digests', {}).get('G') == \
+        _finding_digest(census, 'G'), (
+            'G source-text read identities changed; inspect category G '
+            'and regenerate the baseline only after the debt shrank')
 
 
 def test_event_contract_scan_targets_resolve():

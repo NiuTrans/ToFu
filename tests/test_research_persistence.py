@@ -39,19 +39,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
 @pytest.fixture()
 def fresh_db(tmp_path, monkeypatch):
-    """Real Sidecar SQLite plus the legacy DB needed by neighboring recipe code."""
-    from lib.database import reset_sqlite_for_tests, restore_db_state
-    from lib.research import persistence
+    """Real isolated Sidecar authority."""
+    import lib.research.persistence as persistence
     from lib.storage import StorageSupervisor
 
-    snapshot = reset_sqlite_for_tests(str(tmp_path / 'research.db'))
     supervisor = StorageSupervisor(
-        project_root=tmp_path / 'sidecar', backend='sqlite', startup_timeout=20)
+        project_root=tmp_path / 'sidecar', backend='sqlite', startup_timeout=60)
     supervisor.start()
     monkeypatch.setattr(
         persistence, '_storage', lambda **_kwargs: supervisor.client)
@@ -59,7 +59,6 @@ def fresh_db(tmp_path, monkeypatch):
         yield supervisor
     finally:
         supervisor.stop()
-        restore_db_state(snapshot)
 
 
 _DIRECTION = 'long-context KV-cache compression'
@@ -143,7 +142,7 @@ class TestDirectionIdentity:
         """A direction is NOT a paper. Its identity must be namespaced so a
         direction whose text happens to equal a paper's text can never land on
         that paper's ``paper_reports`` rows."""
-        from lib.paper.hashing import _paper_hash
+        from lib.paper_identity import _paper_hash
         from lib.research.persistence import research_direction_hash
         text = 'some text'
         assert research_direction_hash(text) != _paper_hash(text)
@@ -167,10 +166,12 @@ class TestArtifactsOutliveTheProcess:
         from lib.research.persistence import (load_research_artifacts,
                                               persist_survey)
         assert persist_survey(_DIRECTION, 'en', '# Survey\n\nBody.',
-                              _OPEN_GAPS, model='m1') is True
+                              _OPEN_GAPS, model='m1',
+                              user_id=TEST_OWNER_USER_ID) is True
         self._wipe_runtime()
 
-        got = load_research_artifacts(_DIRECTION, 'en')
+        got = load_research_artifacts(
+            _DIRECTION, 'en', user_id=TEST_OWNER_USER_ID)
         assert got['survey_md'] == '# Survey\n\nBody.', (
             'the survey markdown did not survive — it is still process-local')
         assert got['open_gaps']['open_gaps'][0]['id'] == 'gap_1', (
@@ -183,10 +184,11 @@ class TestArtifactsOutliveTheProcess:
         from lib.research.persistence import (load_research_artifacts,
                                               persist_ideate)
         assert persist_ideate(_DIRECTION, 'en', _IDEATE_ARTIFACT,
-                              model='m1') is True
+                              model='m1', user_id=TEST_OWNER_USER_ID) is True
         self._wipe_runtime()
 
-        got = load_research_artifacts(_DIRECTION, 'en')
+        got = load_research_artifacts(
+            _DIRECTION, 'en', user_id=TEST_OWNER_USER_ID)
         acc = got['accepted']
         assert len(acc) == 1 and acc[0]['title'].startswith('Per-layer'), \
             'accepted ideas did not survive'
@@ -207,15 +209,20 @@ class TestArtifactsOutliveTheProcess:
         """A direction never researched is an honest empty, not an exception —
         the re-attach path calls this on every open."""
         from lib.research.persistence import load_research_artifacts
-        got = load_research_artifacts('never researched anything', 'en')
+        got = load_research_artifacts(
+            'never researched anything', 'en',
+            user_id=TEST_OWNER_USER_ID)
         assert got['found'] is False
         assert got['accepted'] == [] and got['survey_md'] == ''
 
     def test_found_flag_is_true_once_anything_persisted(self, fresh_db):
         from lib.research.persistence import (load_research_artifacts,
                                               persist_survey)
-        persist_survey(_DIRECTION, 'en', '# S', _OPEN_GAPS, model='')
-        assert load_research_artifacts(_DIRECTION, 'en')['found'] is True
+        persist_survey(
+            _DIRECTION, 'en', '# S', _OPEN_GAPS, model='',
+            user_id=TEST_OWNER_USER_ID)
+        assert load_research_artifacts(
+            _DIRECTION, 'en', user_id=TEST_OWNER_USER_ID)['found'] is True
 
 
 # ── 3. Key discipline: never collide with a paper's own rows ──────────────
@@ -225,9 +232,14 @@ class TestCompositeKeyDiscipline:
         from lib.research.persistence import (
             persist_ideate, persist_survey, research_direction_hash,
         )
-        persist_survey(_DIRECTION, 'en', '# S', _OPEN_GAPS, model='')
-        persist_ideate(_DIRECTION, 'en', _IDEATE_ARTIFACT, model='')
+        persist_survey(
+            _DIRECTION, 'en', '# S', _OPEN_GAPS, model='',
+            user_id=TEST_OWNER_USER_ID)
+        persist_ideate(
+            _DIRECTION, 'en', _IDEATE_ARTIFACT, model='',
+            user_id=TEST_OWNER_USER_ID)
         rows = fresh_db.client.query('research.artifacts.get', {
+            'user_id': TEST_OWNER_USER_ID,
             'paper_hash': research_direction_hash(_DIRECTION),
             'lang': 'en',
         })
@@ -238,32 +250,48 @@ class TestCompositeKeyDiscipline:
     def test_languages_do_not_overwrite_each_other(self, fresh_db):
         from lib.research.persistence import (load_research_artifacts,
                                               persist_survey)
-        persist_survey(_DIRECTION, 'en', '# English', _OPEN_GAPS, model='')
-        persist_survey(_DIRECTION, 'zh', '# 中文', _OPEN_GAPS, model='')
-        assert load_research_artifacts(_DIRECTION, 'en')['survey_md'] == '# English'
-        assert load_research_artifacts(_DIRECTION, 'zh')['survey_md'] == '# 中文'
+        persist_survey(
+            _DIRECTION, 'en', '# English', _OPEN_GAPS, model='',
+            user_id=TEST_OWNER_USER_ID)
+        persist_survey(
+            _DIRECTION, 'zh', '# 中文', _OPEN_GAPS, model='',
+            user_id=TEST_OWNER_USER_ID)
+        assert load_research_artifacts(
+            _DIRECTION, 'en', user_id=TEST_OWNER_USER_ID)['survey_md'] == '# English'
+        assert load_research_artifacts(
+            _DIRECTION, 'zh', user_id=TEST_OWNER_USER_ID)['survey_md'] == '# 中文'
 
     def test_rerun_upserts_rather_than_duplicating(self, fresh_db):
         from lib.research.persistence import (load_research_artifacts,
                                               persist_survey)
-        persist_survey(_DIRECTION, 'en', '# First', _OPEN_GAPS, model='')
-        persist_survey(_DIRECTION, 'en', '# Second', _OPEN_GAPS, model='')
-        got = load_research_artifacts(_DIRECTION, 'en')
+        persist_survey(
+            _DIRECTION, 'en', '# First', _OPEN_GAPS, model='',
+            user_id=TEST_OWNER_USER_ID)
+        persist_survey(
+            _DIRECTION, 'en', '# Second', _OPEN_GAPS, model='',
+            user_id=TEST_OWNER_USER_ID)
+        got = load_research_artifacts(
+            _DIRECTION, 'en', user_id=TEST_OWNER_USER_ID)
         n = 1 if got['survey_md'] else 0
         assert n == 1, f'a re-run duplicated the row instead of upserting ({n})'
-        assert load_research_artifacts(_DIRECTION, 'en')['survey_md'] == '# Second'
+        assert load_research_artifacts(
+            _DIRECTION, 'en', user_id=TEST_OWNER_USER_ID)['survey_md'] == '# Second'
 
     def test_research_rows_never_land_on_a_real_papers_report(self, fresh_db):
         """A paper's plain ``(phash,'en')`` report must be untouched by a
         research run — the composite key is what keeps them apart."""
         from lib.research.persistence import persist_survey
         fresh_db.client.command('paper.report.upsert', {
+            'user_id': TEST_OWNER_USER_ID,
             'paper_hash': 'deadbeef' * 4, 'lang': 'en',
             'report': 'THE PAPER REPORT', 'model': '', 'meta': {},
             'created_at': 1,
         }, 'research-test-paper-decoy')
-        persist_survey(_DIRECTION, 'en', '# S', _OPEN_GAPS, model='')
+        persist_survey(
+            _DIRECTION, 'en', '# S', _OPEN_GAPS, model='',
+            user_id=TEST_OWNER_USER_ID)
         row = fresh_db.client.query('paper.report.get', {
+            'user_id': TEST_OWNER_USER_ID,
             'paper_hash': 'deadbeef' * 4, 'lang': 'en',
         })
         assert row['report'] == 'THE PAPER REPORT', \
@@ -285,13 +313,16 @@ class TestPersistenceFailurePosture:
 
         monkeypatch.setattr(rp, '_upsert_row', _boom)
         assert rp.persist_ideate(_DIRECTION, 'en', _IDEATE_ARTIFACT,
-                                 model='') is False
+                                 model='', user_id=TEST_OWNER_USER_ID) is False
 
     def test_empty_direction_is_refused_not_written(self, fresh_db):
         from lib.research.persistence import persist_survey
-        assert persist_survey('', 'en', '# S', _OPEN_GAPS, model='') is False
+        assert persist_survey(
+            '', 'en', '# S', _OPEN_GAPS, model='',
+            user_id=TEST_OWNER_USER_ID) is False
         n = len(fresh_db.client.query(
-            'research.directions.list', {'limit': 50}))
+            'research.directions.list', {
+                'user_id': TEST_OWNER_USER_ID, 'limit': 50}))
         assert n == 0, 'an empty direction wrote a row under a blank identity'
 
 
@@ -313,7 +344,8 @@ class TestRecipeIsWired:
             'artifacts': {'harvest': {'arxiv_ids': ['2305.11111'],
                                       'folder_id': 'research_x'}}})
         assert art['survey_md'] == '# Wired'
-        got = load_research_artifacts(_DIRECTION, 'en')
+        got = load_research_artifacts(
+            _DIRECTION, 'en', user_id=TEST_OWNER_USER_ID)
         assert got['survey_md'] == '# Wired', (
             'the survey stage did not persist — survey_lang_key has no caller '
             'again, which is exactly the defect this epic closed')
@@ -326,9 +358,11 @@ class TestRecipeIsWired:
             'ok': True, **_IDEATE_ARTIFACT})
         art = rc._run_ideate({
             'direction': _DIRECTION, 'lang': 'en', 'n_ideas': 6,
+            'user_id': TEST_OWNER_USER_ID,
             'artifacts': {'survey': {'open_gaps': _OPEN_GAPS}}})
         assert len(art['accepted']) == 1
-        got = load_research_artifacts(_DIRECTION, 'en')
+        got = load_research_artifacts(
+            _DIRECTION, 'en', user_id=TEST_OWNER_USER_ID)
         assert len(got['accepted']) == 1, 'the ideate stage did not persist'
         assert got['rejected'][0]['scores']['novelty'] == 2, \
             'the rejection audit did not reach the DB'
@@ -344,6 +378,7 @@ class TestRecipeIsWired:
                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError('x')))
         art = rc._run_ideate({
             'direction': _DIRECTION, 'lang': 'en', 'n_ideas': 6,
+            'user_id': TEST_OWNER_USER_ID,
             'artifacts': {'survey': {'open_gaps': _OPEN_GAPS}}})
         assert len(art['accepted']) == 1, (
             'a DB failure destroyed an expensive ideate artifact')

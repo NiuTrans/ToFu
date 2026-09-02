@@ -1,215 +1,249 @@
-"""Bridge auth + CORS tests for routes/browser.py and routes/desktop.py.
+"""Device bridges accept only owner-scoped credentials or process capability."""
 
-Covers:
-  * Bridge endpoints require a CREDENTIAL, always — even with
-    TOFU_BRIDGE_SECRET unset, and regardless of how the peer address looks
-    (B0, docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md §3.4). A loopback-shaped peer
-    is NOT a credential: under a same-host reverse proxy every public
-    request presents as 127.0.0.1.
-  * With the secret set, those endpoints return 401 without the matching
-    header, 200 with it. Comparison is timing-safe (both wrong and right
-    values are exercised).
-  * OPTIONS preflight is never gated (CORS strips credentials by spec).
-  * Operator-facing endpoints (/api/v1/browser/status, /api/v1/browser/clients,
-    /api/v1/browser/test, /api/browser/download, /api/v1/desktop/status) never
-    see the bridge gate — they're called from the same-origin frontend.
-  * /api/browser/* responses no longer carry CORS wildcard headers.
-
-⚠️ Bridge tests MUST pass ``scope_base={'client': (ip, port)}`` explicitly.
-The Quart in-process client otherwise reports the peer as ``'<local>'``,
-which counts as loopback and grants the open-mode exemption — any
-"no credential → 200" assertion without scope_base is a FALSE GREEN.
-
-Run:  pytest tests/test_bridge_auth.py -m api -v
-"""
 from __future__ import annotations
 
 import pytest
 
+pytest_plugins = ('tests._credential_sidecar',)
+pytestmark = [pytest.mark.api, pytest.mark.auth_mode('open')]
 
-SECRET = 'unit-test-bridge-secret-1234567890'
-WRONG = 'unit-test-wrong-secret-0000000000'
-
-
-# ═══════════════════════════════════════════════════════════
-#  Helpers
-# ═══════════════════════════════════════════════════════════
-
-def _set_secret(monkeypatch, value: str | None):
-    """Set or clear TOFU_BRIDGE_SECRET (and the legacy alias) for one test."""
-    if value is None:
-        monkeypatch.delenv('TOFU_BRIDGE_SECRET', raising=False)
-    else:
-        monkeypatch.setenv('TOFU_BRIDGE_SECRET', value)
+PUBLIC_PEER = {'client': ('203.0.113.7', 5555)}
 
 
-# ═══════════════════════════════════════════════════════════
-#  Default behaviour: NO credential → rejected, at ANY address
-# ═══════════════════════════════════════════════════════════
-
-@pytest.mark.api
-class TestBridgeRequiresCredentialByDefault:
-    """Bridge endpoints require a credential even when TOFU_BRIDGE_SECRET
-    is unset — B0 (docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md §3.4).
-
-    This class REPLACES the former ``TestBridgeAuthDisabledByDefault``,
-    which asserted the opposite ("unset secret → 200"). That contract was
-    retired deliberately, for two measured reasons:
-
-      1. A bridge command can read the entire cookie jar, attach the
-         DevTools debugger, write files and run shell commands. Serving one
-         to an unauthenticated caller is a session-takeover primitive, so
-         "open by default" was never a safe default.
-      2. Those tests only passed because they omitted ``scope_base``: the
-         Quart in-process client reports the peer as ``'<local>'``, which
-         ``_remote_is_loopback()`` treats as loopback, handing the request
-         the open-mode synthetic-admin exemption. They therefore never
-         exercised a remote caller at all — a false green.
-
-    ⚠️ Every test here passes ``scope_base`` EXPLICITLY. Omitting it silently
-    re-enters the exemption path and makes these assertions meaningless.
-    """
-
-    LOOPBACK = {'client': ('127.0.0.1', 5555)}
-    PUBLIC = {'client': ('203.0.113.7', 5555)}
-
-    def test_browser_poll_rejected_without_credential(self, flask_client, monkeypatch):
-        _set_secret(monkeypatch, None)
-        resp = flask_client.post('/api/browser/poll', json={},
-                                 scope_base=self.PUBLIC)
-        assert resp.status_code == 401
-
-    def test_browser_poll_rejected_even_from_loopback_shaped_peer(
-            self, flask_client, monkeypatch):
-        """A loopback-LOOKING peer earns nothing without a credential.
-
-        Under a same-host reverse proxy (nginx/ngrok/cloudflared → 127.0.0.1,
-        the standard tunnel shape) this is exactly what a public attacker's
-        request looks like, and ProxyFix is not installed so the server
-        cannot tell them apart (pt_30d400a167df4440).
-        """
-        _set_secret(monkeypatch, None)
-        resp = flask_client.post('/api/browser/poll', json={},
-                                 scope_base=self.LOOPBACK)
-        assert resp.status_code == 401
-
-    def test_browser_commands_rejected_without_credential(self, flask_client, monkeypatch):
-        _set_secret(monkeypatch, None)
-        resp = flask_client.get('/api/browser/commands', scope_base=self.PUBLIC)
-        assert resp.status_code == 401
-
-    def test_browser_result_rejected_without_credential(self, flask_client, monkeypatch):
-        _set_secret(monkeypatch, None)
-        resp = flask_client.post('/api/browser/result', json={},
-                                 scope_base=self.PUBLIC)
-        assert resp.status_code == 401
-
-    def test_desktop_poll_rejected_without_credential(self, flask_client, monkeypatch):
-        _set_secret(monkeypatch, None)
-        resp = flask_client.post('/api/desktop/poll', json={},
-                                 scope_base=self.PUBLIC)
-        assert resp.status_code == 401
+def _poll_frame(path: str) -> dict:
+    if path == '/api/browser/poll':
+        return {
+            'clientId': 'bridge-auth-browser',
+            'protocolVersion': 2,
+            'capabilities': [],
+            'results': [],
+        }
+    return {
+        'agent': {'agent_id': 'bridge-auth-desktop'},
+        'results': [],
+        'streams': [],
+    }
 
 
-# ═══════════════════════════════════════════════════════════
-#  Enforcement: set env → reject without header
-# ═══════════════════════════════════════════════════════════
+def _token(*, owner_user_id=41, scopes=('agents:bridge',)) -> str:
+    from lib.api_keys import create_key
 
-@pytest.mark.api
-class TestBridgeAuthEnforced:
-    """When TOFU_BRIDGE_SECRET is set, bridge endpoints require the header."""
-
-    @pytest.mark.parametrize('path,method', [
-        ('/api/browser/poll', 'POST'),
-        ('/api/browser/commands', 'GET'),
-        ('/api/browser/result', 'POST'),
-        ('/api/desktop/poll', 'POST'),
-    ])
-    def test_missing_header_rejected(self, flask_client, monkeypatch, path, method):
-        _set_secret(monkeypatch, SECRET)
-        resp = flask_client.open(path, method=method, json={})
-        assert resp.status_code == 401
-        body = resp.get_json()
-        assert body['error'] == 'bridge_auth_required'
-
-    @pytest.mark.parametrize('path,method', [
-        ('/api/browser/poll', 'POST'),
-        ('/api/browser/commands', 'GET'),
-        ('/api/browser/result', 'POST'),
-        ('/api/desktop/poll', 'POST'),
-    ])
-    def test_wrong_header_rejected(self, flask_client, monkeypatch, path, method):
-        _set_secret(monkeypatch, SECRET)
-        resp = flask_client.open(path, method=method, json={},
-                                 headers={'X-Bridge-Secret': WRONG})
-        assert resp.status_code == 401
-
-    def test_correct_header_passes_browser_poll(self, flask_client, monkeypatch):
-        _set_secret(monkeypatch, SECRET)
-        resp = flask_client.post('/api/browser/poll', json={},
-                                 headers={'X-Bridge-Secret': SECRET})
-        assert resp.status_code == 200
-
-    def test_correct_header_passes_desktop_poll(self, flask_client, monkeypatch):
-        _set_secret(monkeypatch, SECRET)
-        resp = flask_client.post('/api/desktop/poll', json={},
-                                 headers={'X-Bridge-Secret': SECRET})
-        assert resp.status_code == 200
-
-    def test_options_preflight_skips_auth(self, flask_client, monkeypatch):
-        """OPTIONS preflight must not be auth-gated."""
-        _set_secret(monkeypatch, SECRET)
-        resp = flask_client.open('/api/browser/poll', method='OPTIONS')
-        assert resp.status_code == 204
+    _row, token = create_key(
+        owner_user_id=owner_user_id,
+        name=f'bridge-owner-{owner_user_id}',
+        scopes=list(scopes),
+    )
+    return token
 
 
-# ═══════════════════════════════════════════════════════════
-#  Operator endpoints stay unauthenticated (same-origin UI)
-# ═══════════════════════════════════════════════════════════
-
-@pytest.mark.api
-class TestOperatorEndpointsNotGated:
-    """UI status endpoints must NOT require X-Bridge-Secret — the
-    same-origin frontend at static/js/main.js calls /api/v1/browser/status
-    and /api/browser/download without one."""
-
-    @pytest.mark.parametrize('path', [
-        '/api/v1/browser/status',
-        '/api/v1/browser/clients',
-        '/api/v1/desktop/status',
-    ])
-    def test_no_bridge_secret_required(self, flask_client, monkeypatch, path):
-        # Bridge secret is set, but these are operator-facing UI status
-        # endpoints — they MUST NOT respond with the bridge_auth_required
-        # JSON envelope. (They may still 401 under the global auth gate
-        # in private/multi-user modes; the v1 routes are auth-gated. The
-        # check we care about here is that the bridge-secret middleware
-        # is not in the chain.)
-        _set_secret(monkeypatch, SECRET)
-        resp = flask_client.get(path)
-        body = resp.get_json(silent=True) or {}
-        assert body.get('error') != 'bridge_auth_required'
+@pytest.mark.parametrize('path,method', [
+    ('/api/browser/poll', 'POST'),
+    ('/api/browser/file-transfers/deadbeef/start', 'POST'),
+    ('/api/browser/commands', 'GET'),
+    ('/api/browser/result', 'POST'),
+    ('/api/desktop/poll', 'POST'),
+])
+def test_missing_and_unknown_credentials_fail_closed(
+    flask_client, path, method,
+):
+    missing = flask_client.open(
+        path, method=method, json={}, scope_base=PUBLIC_PEER)
+    unknown = flask_client.open(
+        path,
+        method=method,
+        json={},
+        headers={'X-Bridge-Secret': 'not-a-credential'},
+        scope_base=PUBLIC_PEER,
+    )
+    assert missing.status_code == 401
+    assert unknown.status_code == 401
 
 
-# ═══════════════════════════════════════════════════════════
-#  CORS: wildcard removed
-# ═══════════════════════════════════════════════════════════
+@pytest.mark.parametrize('path', ['/api/browser/poll', '/api/desktop/poll'])
+def test_owner_scoped_bridge_credential_is_address_independent(
+    flask_client, path, monkeypatch,
+):
+    async def no_browser_commands(**_kwargs):
+        return []
 
-@pytest.mark.api
-class TestBrowserCorsWildcardRemoved:
-    """B3: dropped the unconditional Access-Control-Allow-Origin: * on
-    /api/browser/*. Chrome extensions use host_permissions, not CORS, so
-    this header was never required and is a defense-in-depth hazard."""
+    async def no_desktop_commands(**_kwargs):
+        return []
 
-    @pytest.mark.parametrize('path', [
-        '/api/v1/browser/status',
-        '/api/v1/browser/clients',
-    ])
-    def test_no_allow_origin_header(self, flask_client, monkeypatch, path):
-        _set_secret(monkeypatch, None)
-        resp = flask_client.get(path, headers={'Origin': 'https://evil.example.com'})
-        # No CORS header → cross-origin reads blocked by browser. Same-origin
-        # (the Tofu frontend itself) is unaffected because CORS isn't engaged.
-        assert 'Access-Control-Allow-Origin' not in resp.headers
-        assert 'Access-Control-Allow-Methods' not in resp.headers
-        assert 'Access-Control-Allow-Headers' not in resp.headers
+    import lib.browser.queue as browser_queue
+    import lib.desktop
+    monkeypatch.setattr(
+        browser_queue, 'wait_for_commands_async', no_browser_commands)
+    monkeypatch.setattr(
+        lib.desktop, 'take_pending_commands_async', no_desktop_commands)
+    response = flask_client.post(
+        path,
+        json=_poll_frame(path),
+        headers={'X-Bridge-Secret': _token()},
+        scope_base=PUBLIC_PEER,
+    )
+    assert response.status_code == 200
+
+
+def test_non_bridge_credential_is_rejected(flask_client):
+    response = flask_client.post(
+        '/api/desktop/poll',
+        json={},
+        headers={'X-Bridge-Secret': _token(scopes=('chat',))},
+    )
+    assert response.status_code == 401
+
+
+def test_process_capability_is_desktop_only(flask_client, monkeypatch):
+    from lib.bridge_auth import process_agent_token
+
+    async def no_desktop_commands(**_kwargs):
+        return []
+
+    import lib.desktop
+    monkeypatch.setattr(
+        lib.desktop, 'take_pending_commands_async', no_desktop_commands)
+
+    headers = {'X-Bridge-Secret': process_agent_token()}
+    desktop = flask_client.post(
+        '/api/desktop/poll', json=_poll_frame('/api/desktop/poll'),
+        headers=headers,
+    )
+    browser = flask_client.post('/api/browser/poll', json={}, headers=headers)
+    assert desktop.status_code == 200
+    assert browser.status_code == 401
+
+
+def test_preflight_never_authenticates_or_mutates(flask_client):
+    response = flask_client.open('/api/browser/poll', method='OPTIONS')
+    assert response.status_code == 204
+    transfer = flask_client.open(
+        '/api/browser/file-transfers/deadbeef/start', method='OPTIONS')
+    assert transfer.status_code == 204
+
+
+def test_browser_file_transfer_http_boundary_is_owner_device_scoped(
+        flask_client):
+    """Exercise metadata, raw chunk and completion through real bridge auth."""
+    import hashlib
+    import os
+
+    from lib.browser.file_transfer import file_transfer_store
+
+    file_transfer_store.clear_for_tests()
+    created = file_transfer_store.create(
+        owner_user_id='41', client_id='browser-a', profile='Work',
+        source_url='https://x.test/download?version=latest', max_bytes=1024,
+    )
+    transfer_id = created['transferId']
+    base = f'/api/browser/file-transfers/{transfer_id}'
+    transfer_headers = {
+        'X-Bridge-Secret': _token(owner_user_id=41),
+        'X-Browser-Client-Id': 'browser-a',
+        'X-Transfer-Token': created['transferToken'],
+    }
+    wrong_owner_headers = dict(
+        transfer_headers,
+        **{'X-Bridge-Secret': _token(owner_user_id=42)},
+    )
+    metadata = {
+        'finalUrl': 'https://cdn.x.test/file.zip',
+        'responseStatus': 200,
+        'contentType': 'application/zip',
+        'contentDisposition': 'attachment; filename="file.zip"',
+        'contentLength': 8,
+        'suggestedFilename': 'file.zip',
+    }
+    wrong_owner = flask_client.post(
+        f'{base}/start', json=metadata, headers=wrong_owner_headers)
+    assert wrong_owner.status_code == 403
+    assert wrong_owner.get_json()['code'] == 'browser_file_transfer_forbidden'
+
+    started = flask_client.post(
+        f'{base}/start', json=metadata, headers=transfer_headers)
+    assert started.status_code == 200
+    payload = b'PK\x03\x04test'
+    chunk_headers = dict(
+        transfer_headers,
+        **{
+            'Content-Type': 'application/octet-stream',
+            'X-Chunk-SHA256': hashlib.sha256(payload).hexdigest(),
+        },
+    )
+    chunk = flask_client.open(
+        f'{base}/chunks/0', method='PUT', data=payload,
+        headers=chunk_headers,
+    )
+    assert chunk.status_code == 200
+    assert chunk.get_json()['receivedBytes'] == len(payload)
+    completed = flask_client.post(
+        f'{base}/complete',
+        json={'totalBytes': len(payload), 'chunkCount': 1},
+        headers=transfer_headers,
+    )
+    assert completed.status_code == 200
+    public = completed.get_json()
+    assert public['location'] == 'server_staging'
+    assert 'path' not in public
+
+    receipt = file_transfer_store.consume_completed(
+        transfer_id, owner_user_id='41', client_id='browser-a')
+    try:
+        with open(receipt['path'], 'rb') as stream:
+            assert stream.read() == payload
+    finally:
+        try:
+            os.unlink(receipt['path'])
+        except FileNotFoundError:
+            pass
+
+
+def test_browser_file_transfer_control_envelopes_have_a_route_local_cap(
+        flask_client):
+    from lib.browser.file_transfer import file_transfer_store
+
+    file_transfer_store.clear_for_tests()
+    created = file_transfer_store.create(
+        owner_user_id='41', client_id='browser-a', profile='Work',
+        source_url='https://x.test/file.bin', max_bytes=1024,
+    )
+    headers = {
+        'X-Bridge-Secret': _token(owner_user_id=41),
+        'X-Browser-Client-Id': 'browser-a',
+        'X-Transfer-Token': created['transferToken'],
+        'Content-Type': 'application/json',
+    }
+    response = flask_client.post(
+        f'/api/browser/file-transfers/{created["transferId"]}/start',
+        data=b'{"padding":"' + (b'x' * (17 * 1024)) + b'"}',
+        headers=headers,
+    )
+    assert response.status_code == 413
+    assert response.get_json()['code'] == \
+        'browser_file_transfer_control_too_large'
+    assert file_transfer_store.abort(
+        created['transferId'], owner_user_id='41', client_id='browser-a',
+        internal=True,
+    ) is True
+
+
+@pytest.mark.parametrize('path', [
+    '/api/v1/browser/status',
+    '/api/v1/browser/clients',
+    '/api/v1/desktop/status',
+])
+def test_operator_routes_do_not_use_the_device_gate(flask_client, path):
+    response = flask_client.get(path)
+    body = response.get_json(silent=True) or {}
+    assert body.get('error') != 'bridge_auth_required'
+
+
+@pytest.mark.parametrize('path', [
+    '/api/v1/browser/status',
+    '/api/v1/browser/clients',
+])
+def test_browser_status_never_enables_cross_origin_reads(flask_client, path):
+    response = flask_client.get(
+        path, headers={'Origin': 'https://evil.example.com'})
+    assert 'Access-Control-Allow-Origin' not in response.headers
+    assert 'Access-Control-Allow-Methods' not in response.headers
+    assert 'Access-Control-Allow-Headers' not in response.headers

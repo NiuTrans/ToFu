@@ -47,9 +47,11 @@ def _load_server_config():
     ``<project>/data/config/``; see ``lib.config_dir``.
     """
     try:
-        if os.path.isfile(_SERVER_CONFIG_PATH):
-            with open(_SERVER_CONFIG_PATH) as f:
-                return _json.load(f)
+        with open(_SERVER_CONFIG_PATH, encoding='utf-8') as config_file:
+            loaded = _json.load(config_file)
+            return loaded if isinstance(loaded, dict) else {}
+    except FileNotFoundError:
+        return {}
     except Exception as _e:
         import logging as _logging
         _logging.getLogger(__name__).debug('Could not load server config: %s', _e)
@@ -57,13 +59,16 @@ def _load_server_config():
 
 _SAVED_CONFIG = _load_server_config()
 
-def _cfg(env_key, saved_key, default):
+def _cfg(env_key, saved_key, default, *, empty_env_is_unset=False):
     """Resolve a config value: env var > server_config.json > default.
 
-    Only env vars that are EXPLICITLY SET override saved config.
+    Only env vars that are EXPLICITLY SET override saved config. Callers whose
+    values cannot be meaningfully empty may opt out of an empty environment
+    override. This matters for launchers such as Compose that represent an
+    omitted optional interpolation as an empty string.
     """
     env_val = os.environ.get(env_key)
-    if env_val is not None:
+    if env_val is not None and (env_val or not empty_env_is_unset):
         return env_val
     # Check saved config — look in 'presets' mapping and 'models' dict
     saved_presets = _SAVED_CONFIG.get('presets', {})
@@ -109,7 +114,10 @@ LLM_API_KEY  = LLM_API_KEYS[0] if LLM_API_KEYS else ''  # backward compat alias
 def _resolve_base_url():
     """Resolve LLM_BASE_URL: env var > first saved provider > default."""
     env_val = os.environ.get('LLM_BASE_URL')
-    if env_val is not None:
+    # An empty URL is never usable. Compose renders an absent optional
+    # interpolation as '', so treating it as authority would hide a provider
+    # saved through Settings and produce requests to `/chat/completions`.
+    if env_val:
         return env_val
     for p in _SAVED_CONFIG.get('providers', []):
         if p.get('enabled', True) and p.get('base_url'):
@@ -117,7 +125,8 @@ def _resolve_base_url():
     return 'https://api.openai.com/v1'
 
 LLM_BASE_URL    = _resolve_base_url()
-LLM_MODEL       = _cfg('LLM_MODEL', 'opus', 'gpt-4o')
+LLM_MODEL       = _cfg(
+    'LLM_MODEL', 'opus', 'gpt-4o', empty_env_is_unset=True)
 
 # ── Fallback model — used when the primary model fails ──
 # Configurable via Settings UI > 显示 > 模型默认. Empty string = disabled.
@@ -167,7 +176,29 @@ MT_PROVIDER_CONFIG = _resolve_mt_provider_config()
 
 
 # ── Feature flag resolver (DRY helper) ──
-# All boolean flags follow: env-var > data/config/features.json > default
+# All boolean flags follow: env-var > data/config/features.json > default.
+# The file is one launch snapshot: reading it once avoids one FUSE stat/open
+# pair per flag while preserving explicit reload_config() hot application.
+_FEATURES_CONFIG_PATH = _config_path('features.json')
+
+
+def _load_features_config():
+    try:
+        with open(_FEATURES_CONFIG_PATH, encoding='utf-8') as features_file:
+            loaded = _json.load(features_file)
+            return loaded if isinstance(loaded, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as _e:
+        import logging as _logging
+        _logging.getLogger(__name__).debug(
+            'Could not read features.json: %s', _e)
+        return {}
+
+
+_SAVED_FEATURES = _load_features_config()
+
+
 def _resolve_feature_flag(env_key, json_key, default):
     """Resolve a boolean feature flag.
 
@@ -177,16 +208,8 @@ def _resolve_feature_flag(env_key, json_key, default):
     env_val = os.environ.get(env_key)
     if env_val is not None:
         return env_val == '1'
-    _features_path = _config_path('features.json')
-    try:
-        if os.path.isfile(_features_path):
-            with open(_features_path) as f:
-                feats = _json.load(f)
-            if isinstance(feats, dict) and json_key in feats:
-                return bool(feats[json_key])
-    except Exception as _e:
-        import logging as _logging
-        _logging.getLogger(__name__).debug('Could not read features.json for %s: %s', json_key, _e)
+    if json_key in _SAVED_FEATURES:
+        return bool(_SAVED_FEATURES[json_key])
     return default
 
 PPTX_TRANSLATE_ENABLED = _resolve_feature_flag('PPTX_TRANSLATE_ENABLED', 'pptx_translate_enabled', False)
@@ -272,24 +295,36 @@ if isinstance(_search_cfg.get('skip_domains'), list):
 
 # Resolved LLM-content-filter toggle (env > saved config > default ON).
 # tofu-search's pipeline reads this via lib/search_bridge.sync_search_config();
-# the bridge is installed at server startup, after this module is imported.
+# the optional bridge is installed at the first real search/fetch use.
 LLM_CONTENT_FILTER_ENABLED = (
     os.environ.get('FETCH_LLM_FILTER', '1') == '1'
     if os.environ.get('FETCH_LLM_FILTER') is not None
     else bool(_search_cfg.get('llm_content_filter', True))
 )
 
-# ── Model pricing tables — now live in lib/pricing.py ──
-# Imported here for backward compatibility (all consumers use `from lib import MODEL_PRICING`)
-from lib.pricing import (  # noqa: E402
-    DEFAULT_USD_CNY_RATE,
-    MODEL_PRICING,
-    PROVIDER_PRICING,
-    QWEN_PRICING_CNY,
-    clear_provider_pricing,
-    lookup_pricing,
-    set_provider_pricing,
-)
+# ── Model pricing compatibility ──
+# Keep the historical ``from lib import MODEL_PRICING`` surface without making
+# every unrelated ``lib.*`` import load HTTP clients and the online refresh
+# implementation.  Pricing is materialized on first actual pricing access.
+_LAZY_PRICING_EXPORTS = frozenset({
+    'DEFAULT_USD_CNY_RATE',
+    'MODEL_PRICING',
+    'PROVIDER_PRICING',
+    'QWEN_PRICING_CNY',
+    'clear_provider_pricing',
+    'lookup_pricing',
+    'set_provider_pricing',
+})
+
+
+def __getattr__(name):
+    if name not in _LAZY_PRICING_EXPORTS:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    from importlib import import_module
+    pricing = import_module('lib.pricing')
+    value = getattr(pricing, name)
+    globals()[name] = value
+    return value
 
 
 
@@ -316,14 +351,16 @@ def reload_config():
     import sys
     _mod = sys.modules[__name__]
 
-    global _SAVED_CONFIG
+    global _SAVED_CONFIG, _SAVED_FEATURES
     _SAVED_CONFIG = _load_server_config()
+    _SAVED_FEATURES = _load_features_config()
 
     # ── Re-resolve all config values ──
     _mod.LLM_API_KEYS = _parse_api_keys()
     _mod.LLM_API_KEY = _mod.LLM_API_KEYS[0] if _mod.LLM_API_KEYS else ''
     _mod.LLM_BASE_URL = _resolve_base_url()
-    _mod.LLM_MODEL = _cfg('LLM_MODEL', 'opus', 'gpt-4o')
+    _mod.LLM_MODEL = _cfg(
+        'LLM_MODEL', 'opus', 'gpt-4o', empty_env_is_unset=True)
     _mod.FALLBACK_MODEL = _cfg('FALLBACK_MODEL', 'fallback_model', '')
     _mod.QWEN_MODEL = _cfg('QWEN_MODEL', 'qwen', '')
     _mod.GEMINI_MODEL = _cfg('GEMINI_MODEL', 'gemini', '')
@@ -371,10 +408,12 @@ def reload_config():
         if os.environ.get('FETCH_LLM_FILTER') is not None
         else bool(_search.get('llm_content_filter', True))
     )
-    # Push the refreshed fetch/search settings into tofu-search's global config.
+    # Push refreshed settings only when tofu-search is already resident. A
+    # model/provider-only update must not cold-import the optional search graph;
+    # first later activation reads these newest module values.
     try:
-        from lib.search_bridge import sync_search_config
-        sync_search_config()
+        from lib.search_runtime import sync_search_config_if_loaded
+        sync_search_config_if_loaded()
     except Exception as _be:
         import logging as _logging
         _logging.getLogger(__name__).debug('tofu-search config re-sync skipped: %s', _be)

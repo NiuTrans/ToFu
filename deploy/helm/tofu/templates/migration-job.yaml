@@ -1,0 +1,45 @@
+{{- if .Values.migration.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "tofu.fullname" . }}-migration
+  labels:
+{{ include "tofu.labels" . | indent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  ttlSecondsAfterFinished: {{ .Values.migration.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+{{ include "tofu.selectorLabels" (dict "root" . "role" "migration") | indent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "tofu.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+{{ include "tofu.podSecurityContext" . | indent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "tofu.apiImage" . }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: ["python", "-m", "lib.storage_sidecar.migrate"]
+          env:
+{{ include "tofu.commonEnv" (dict "root" . "role" "scheduler") | indent 12 }}
+          securityContext:
+{{ include "tofu.containerSecurityContext" . | indent 12 }}
+          volumeMounts:
+            - {name: external-services, mountPath: /run/secrets/tofu, readOnly: true}
+            - {name: runtime-data, mountPath: /app/data}
+            - {name: runtime-logs, mountPath: /app/logs}
+            - {name: runtime-tmp, mountPath: /tmp}
+      volumes:
+{{ include "tofu.secretVolume" . | indent 8 }}
+        - {name: runtime-data, emptyDir: {}}
+        - {name: runtime-logs, emptyDir: {}}
+        - {name: runtime-tmp, emptyDir: {}}
+{{- end }}

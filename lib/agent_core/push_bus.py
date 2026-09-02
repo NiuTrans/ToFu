@@ -1,7 +1,7 @@
 """lib/agent_core/push_bus.py — Cross-replica fan-out transport for PushHub.
 
-Epic B (board `pt_823ff5a3bf004c40`). See the ratified design in
-``docs/EPIC_B_PUSH_FANOUT_DESIGN.md`` §3 (relay), §4 (Redis substrate) and
+Epic B (). See the ratified design in
+``docs/ENTERPRISE_READINESS_AUDIT.md`` §3 (relay), §4 (Redis substrate) and
 §3.1 (uniform bus-only delivery).
 
 **The bug this fixes.** ``PushHub`` fan-out is process-local: a frame
@@ -31,11 +31,11 @@ only built under the flag; the ``inproc`` default never imports it.
 from __future__ import annotations
 
 import json
+import os
 import random
 import threading
 import time
 
-from lib.env_compat import getenv_compat
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -92,7 +92,7 @@ class RedisPushBus:
         if self._client_factory is not None:
             return self._client_factory()
         import redis  # optional dependency — guarded by the caller
-        url = getenv_compat('TOFU_REDIS_URL') or 'redis://127.0.0.1:6379/0'
+        url = os.environ.get('TOFU_REDIS_URL') or 'redis://127.0.0.1:6379/0'
         return redis.Redis.from_url(
             url, socket_connect_timeout=1.0, socket_timeout=2.0,
             health_check_interval=15, decode_responses=True)
@@ -315,7 +315,7 @@ def make_push_bus(deliver_fn, *, client=None, topic=_TOPIC):
     ``inproc`` (default) → :class:`InProcPushBus`; ``redis`` →
     :class:`RedisPushBus`. ``client`` injects a redis client (tests).
     """
-    backend = (getenv_compat('TOFU_RUNTIME_STATE_BACKEND') or 'inproc').strip().lower()
+    backend = (os.environ.get('TOFU_RUNTIME_STATE_BACKEND') or 'inproc').strip().lower()
     if backend == 'redis':
         return RedisPushBus(deliver_fn, client=client, topic=topic)
     return InProcPushBus(deliver_fn, topic=topic)

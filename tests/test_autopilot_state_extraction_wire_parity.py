@@ -3,7 +3,7 @@
 (board epic ``pt_00459503f23b4c0e``).
 
 **Context**: ``lib/tasks_pkg/autopilot.py`` (2196L) is being decomposed per
-``docs/AUTOPILOT_DECOMPOSITION_AUDIT.md`` in strangler-fig order that respects
+``docs/modules/task_engine.md`` in strangler-fig order that respects
 the ``pt_8dc03017`` (owner-parked VU-as-independent-stream) sequencing gate.
 
 Slice 1 target: extract the objective + run-id + budget + resolver helpers to
@@ -26,8 +26,8 @@ siblings into an ``autopilot/`` package. Symbols moved:
   * ``_record_vu_turn_and_check_budget`` — budget-guard RMW.
   * ``_clear_run_id`` — run-end cleanup of the pinned run bookkeeping.
   * ``_resolve_recent_run_id`` — DB reader for the most-recent run id.
-  * ``_resolve_run_anchor_msgid`` — DB reader for the run's boundary
-    ``_msgId``.
+  * ``_resolve_run_anchor_turn_id`` — DB reader for the run's boundary
+    ``_turnId``.
   * ``_VU_HISTORY_CAP`` / ``_PROGRESS_LEDGER_CAP`` — module constants used
     inside ``_record_vu_turn_and_check_budget``.
 
@@ -84,7 +84,7 @@ _STATE_SYMBOLS = (
     '_record_vu_turn_and_check_budget',
     '_clear_run_id',
     '_resolve_recent_run_id',
-    '_resolve_run_anchor_msgid',
+    '_resolve_run_anchor_turn_id',
     '_VU_HISTORY_CAP',
     '_PROGRESS_LEDGER_CAP',
 )

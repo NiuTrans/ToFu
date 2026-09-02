@@ -10,9 +10,9 @@ Covers improvements layered on top of the original BYO surface:
 * sanitise_extra_headers() drops too-long values and non-scalars.
 """
 
+pytest_plugins = ('tests._credential_sidecar',)
+
 import asyncio
-import os
-import tempfile
 import unittest
 
 
@@ -83,21 +83,11 @@ class HeaderAllowlistTest(unittest.TestCase):
 
 class ModelsBYOSurfaceTest(unittest.TestCase):
 
+    ALICE_OWNER = 12_021
+    BOB_OWNER = 12_022
+
     @classmethod
     def setUpClass(cls):
-        cls._tmp = tempfile.TemporaryDirectory()
-
-        from lib import api_keys, byo_providers
-        cls._orig_keys = api_keys._STORE_PATH
-        cls._orig_byo = byo_providers._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(cls._tmp.name, 'api_keys.json')
-        byo_providers._STORE_PATH = os.path.join(cls._tmp.name, 'byo.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        byo_providers._cache.clear()
-        byo_providers._cache_loaded = False
-        os.environ['TUNNEL_TOKEN'] = 'test-no-real'
-
         from quart import Quart
         cls.app = Quart(__name__, static_folder=None)
         cls.app.config.setdefault('PROVIDE_AUTOMATIC_OPTIONS', True)
@@ -115,30 +105,16 @@ class ModelsBYOSurfaceTest(unittest.TestCase):
 
         from lib.api_keys import create_key
         # alice and bob — separate principals
-        _row, cls.alice = create_key(
+        _row, cls.alice = create_key(owner_user_id=cls.ALICE_OWNER,
             name='alice', scopes=['providers', 'chat'])
-        _row, cls.bob = create_key(
+        _row, cls.bob = create_key(owner_user_id=cls.BOB_OWNER,
             name='bob', scopes=['providers', 'chat'])
 
-    @classmethod
-    def tearDownClass(cls):
-        from lib import api_keys, byo_providers
-        api_keys._STORE_PATH = cls._orig_keys
-        byo_providers._STORE_PATH = cls._orig_byo
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        byo_providers._cache.clear()
-        byo_providers._cache_loaded = False
-        cls._tmp.cleanup()
-
     def setUp(self):
-        from lib import byo_providers
-        byo_providers._cache.clear()
-        byo_providers._cache_loaded = False
-        try:
-            os.remove(byo_providers._STORE_PATH)
-        except FileNotFoundError:
-            pass
+        from lib.byo_providers import delete_provider, list_providers
+        for owner_user_id in (self.ALICE_OWNER, self.BOB_OWNER):
+            for provider in list_providers(owner_user_id):
+                delete_provider(provider['id'], owner_user_id)
 
     def test_v1_models_includes_callers_byo(self):
         async def go():

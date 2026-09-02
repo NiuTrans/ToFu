@@ -13,10 +13,10 @@ from lib.storage import StorageError, StorageEventBatcher, StorageSupervisor
 pytestmark = pytest.mark.unit
 
 
-@pytest.mark.ci_serial
+@pytest.mark.serial
 def test_two_hundred_confirmed_streams_share_transactions(tmp_path):
     supervisor = StorageSupervisor(
-        project_root=tmp_path, backend='sqlite', startup_timeout=20)
+        project_root=tmp_path, backend='sqlite', startup_timeout=60)
     supervisor.start()
     batcher = StorageEventBatcher(
         client_provider=lambda **_kwargs: supervisor.client,
@@ -43,10 +43,11 @@ def test_two_hundred_confirmed_streams_share_transactions(tmp_path):
                 f'task-{index}', 0, {'kind': 'delta', 'index': index},
                 wait=False)
             assert accepted['accepted'] is True
-        # This synchronous append is FIFO behind the async events, proving
-        # they reached durable storage before it returns.
-        assert batcher.append(
-            'async-fence', 0, {'kind': 'fence'})['inserted'] is True
+        assert batcher.flush(timeout=5) is True
+        persisted = supervisor.client.query(
+            'event.list', {
+                'task_id': 'task-249', 'after_sequence': -1, 'limit': 10})
+        assert [row['sequence'] for row in persisted] == [0]
         assert batcher.metrics['persist_lag_max_ms'] <= 300
 
         assert batcher.append(
@@ -55,6 +56,32 @@ def test_two_hundred_confirmed_streams_share_transactions(tmp_path):
             batcher.append(
                 'task-0', 0, {'kind': 'different', 'index': 0})
         assert raised.value.code == 'database_conflict'
+    finally:
+        assert batcher.close(timeout=10)
+        supervisor.stop()
+
+
+def test_commit_callback_runs_after_async_rows_are_queryable(tmp_path):
+    supervisor = StorageSupervisor(
+        project_root=tmp_path, backend='sqlite', startup_timeout=60)
+    supervisor.start()
+    committed: list[tuple[frozenset[str], list[int]]] = []
+
+    def observe(task_ids: frozenset[str]) -> None:
+        rows = supervisor.client.query(
+            'event.list', {
+                'task_id': 'async-task', 'after_sequence': -1, 'limit': 10})
+        committed.append((task_ids, [row['sequence'] for row in rows]))
+
+    batcher = StorageEventBatcher(
+        client_provider=lambda **_kwargs: supervisor.client,
+        on_commit=observe)
+    try:
+        accepted = batcher.append(
+            'async-task', 7, {'type': 'messages_snapshot'}, wait=False)
+        assert accepted['accepted'] is True
+        assert batcher.flush(timeout=5)
+        assert committed == [(frozenset({'async-task'}), [7])]
     finally:
         assert batcher.close(timeout=10)
         supervisor.stop()

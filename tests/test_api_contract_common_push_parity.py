@@ -104,9 +104,9 @@ def _sites():
         ('features', {'paper': True, 'trading_enabled': False}, 200,
          lambda: api_ok({'paper': True, 'trading_enabled': False}), False),
         ('health', {'status': 'ok', 'version': '0.16.0',
-                    'db_responsive': True}, 200,
+                    'storage': {'ready': True}}, 200,
          lambda: api_ok({'status': 'ok', 'version': '0.16.0',
-                         'db_responsive': True}), False),
+                         'storage': {'ready': True}}), False),
         ('queue-clear', {'cleared': 3}, 200,
          lambda: api_ok({'cleared': 3}), False),
     ]

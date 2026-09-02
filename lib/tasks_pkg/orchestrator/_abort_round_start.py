@@ -1,6 +1,6 @@
 """Abort-at-round-start gate: break the stream loop on a pre-round abort.
 
-Extracted 2026-07-31 (pt_03f4cdf1 slice 23) from
+Extracted 2026-07-31 ( slice 23) from
 ``lib/tasks_pkg/orchestrator/_run.py`` run_task stream loop.
 
 Runs at the very TOP of every round, before ROUND_START is emitted.
@@ -68,7 +68,7 @@ def handle_abort_at_round_start(
     logger.debug('[%s] Task aborted at START of round %d model=%s '
                  '(abort signal arrived %s, content so far: %dchars)',
                  tid, round_num, rs.model, _delay, len(task.get('content') or ''))
-    # ★ RENDER_CONTRACT Phase 3: explicit round-end boundary even on
+    # RENDER_CONTRACT Phase 3: explicit round-end boundary even on
     #   the abort-at-start path (the round never opened, so no
     #   round_start was emitted for it — close nothing here; the
     #   PREVIOUS round's end was already emitted at its own exit).

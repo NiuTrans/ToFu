@@ -339,7 +339,7 @@ def _kill_group(pid):
 
 
 @_needs_bash_setsid
-@pytest.mark.ci_serial
+@pytest.mark.serial
 def test_daemon_launches_detached_session_leader_with_pidfile(tmp_path):
     proj = _make_sh_project(tmp_path)
     sh = str(proj / 'supervisor.sh')
@@ -378,7 +378,7 @@ def test_daemon_launches_detached_session_leader_with_pidfile(tmp_path):
 
 
 @_needs_bash_setsid
-@pytest.mark.ci_serial
+@pytest.mark.serial
 def test_setsid_is_load_bearing_neuter(tmp_path):
     """NEUTER: strip setsid → the watchdog is NOT its own session leader.
 

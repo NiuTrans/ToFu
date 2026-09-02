@@ -14,6 +14,12 @@ logger = get_logger(__name__)
 
 _NOTRANSLATE_RE = re.compile(r'<notranslate>(.*?)</notranslate>', re.DOTALL | re.IGNORECASE)
 _NOTRANSLATE_ALIAS_RE = re.compile(r'<nt>(.*?)</nt>', re.DOTALL | re.IGNORECASE)
+# Execution authority still comes from the original Turn sidecar, but keeping
+# these structural delimiters byte-for-byte in display translations lets the
+# browser project the translated plan body without guessing from prose.
+_TRANSLATION_PROTOCOL_TAG_RE = re.compile(
+    r'</?proposed_plan>', re.IGNORECASE,
+)
 
 # In-place placeholder for notranslate blocks. Full-width brackets +
 # underscore + digits make this an unusual token that cheap LLMs tend to
@@ -36,8 +42,8 @@ def _extract_notranslate_blocks(text):
     """Replace <notranslate>/<nt> blocks with ⟦NT_N⟧ placeholders.
 
     Returns (text_with_placeholders, blocks) where ``blocks`` is a list of
-    dicts ``{'placeholder': '⟦NT_0⟧', 'content': '...'}`` ordered by
-    appearance in the source.  The placeholder is initially emitted at the
+    dicts carrying ``placeholder``, ``content``, and an explicit ``kind``,
+    ordered by appearance in the source. The placeholder is initially emitted at the
     block's source-text position so the LLM has positional context, but
     the prompt explicitly allows the LLM to *reposition* the marker within
     the translated text for target-language fluency (e.g. SVO→SOV word
@@ -46,9 +52,13 @@ def _extract_notranslate_blocks(text):
     enforced, since the ⟦NT_N⟧ → content mapping is held in Python.
     """
     all_matches = []
-    for pattern in [_NOTRANSLATE_RE, _NOTRANSLATE_ALIAS_RE]:
+    for pattern, content_group in [
+        (_NOTRANSLATE_RE, 1),
+        (_NOTRANSLATE_ALIAS_RE, 1),
+        (_TRANSLATION_PROTOCOL_TAG_RE, 0),
+    ]:
         for m in pattern.finditer(text):
-            all_matches.append((m.start(), m.end(), m.group(1)))
+            all_matches.append((m.start(), m.end(), m.group(content_group)))
     if not all_matches:
         return text, []
 
@@ -67,7 +77,13 @@ def _extract_notranslate_blocks(text):
             continue
         out_parts.append(text[cursor:start])
         ph = _NT_PLACEHOLDER_FMT.format(len(blocks))
-        blocks.append({'placeholder': ph, 'content': content})
+        blocks.append({
+            'placeholder': ph,
+            'content': content,
+            'kind': ('protocol_tag'
+                     if _TRANSLATION_PROTOCOL_TAG_RE.fullmatch(content)
+                     else 'notranslate'),
+        })
         out_parts.append(ph)
         cursor = end
     out_parts.append(text[cursor:])
@@ -75,25 +91,55 @@ def _extract_notranslate_blocks(text):
     return cleaned, blocks
 
 
+def _reattach_notranslate_blocks_partial(translated, blocks):
+    """Restore placeholders already present in an in-flight translation.
+
+    Unlike terminal re-attachment this never appends blocks the model has not
+    emitted yet, so a streamed preview cannot jump protocol tags or code from
+    the unseen tail to its current end.
+    """
+    if not blocks:
+        return translated
+    out = str(translated or '')
+    for block in blocks:
+        placeholder = block['placeholder']
+        if placeholder in out:
+            out = out.replace(placeholder, block['content'], 1)
+    return out
+
+
 def _reattach_notranslate_blocks(translated, blocks):
     """Substitute ⟦NT_N⟧ placeholders back with their original content.
 
-    If the translation LLM dropped a placeholder (cheap models occasionally
-    do this despite the prompt rule), the orphaned content is appended at
-    the end with a warning log so it is never silently lost — which is
-    strictly no worse than the prior all-suffix behavior.
+    If the translation LLM dropped an ordinary protected block, append its
+    content so it is never silently lost. Missing structural protocol tags
+    instead invalidate and remove the translated envelope; inventing their
+    position would misrepresent where the authoritative plan begins or ends.
     """
     if not blocks:
         return translated
     out = translated
     missing = []
+    missing_protocol_tag = False
     for b in blocks:
         ph = b['placeholder']
         content = b['content']
         if ph in out:
             out = out.replace(ph, content, 1)
+        elif b.get('kind') == 'protocol_tag':
+            missing_protocol_tag = True
         else:
             missing.append(content)
+    if missing_protocol_tag:
+        # A lone or suffix-appended protocol tag invents structure the model
+        # did not preserve and can duplicate plan text in presentation. Drop
+        # every surviving delimiter instead; the browser then safely falls
+        # back to the authoritative original plan.
+        logger.warning(
+            '[Translate] proposed-plan delimiter dropped by LLM; '
+            'discarding the incomplete translated envelope',
+        )
+        out = _TRANSLATION_PROTOCOL_TAG_RE.sub('', out)
     # Defensive: strip any *partially-mangled* placeholders the LLM may have
     # left behind (e.g. spaces inserted, brackets swapped).
     if _NT_PLACEHOLDER_RE.search(out) or _NT_PLACEHOLDER_LOOSE_RE.search(out):

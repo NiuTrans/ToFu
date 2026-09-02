@@ -99,26 +99,19 @@ def big_conv(monkeypatch):
     msgs = _big_conversation()
     row = _Row({
         'id': 'big1', 'user_id': 1, 'title': 'Big One',
-        'messages': json.dumps(msgs), 'created_at': 1, 'updated_at': 2,
-        'settings': '{}', 'msg_count': len(msgs), 'rev': 7,
+        'messages': msgs, 'created_at': 1, 'updated_at': 2,
+        'settings': {}, 'msg_count': len(msgs), 'rev': 7,
     })
-
-    class _Cur:
-        def fetchone(self):
-            return row
-
-    class _DB:
-        def execute(self, sql, params=()):
-            return _Cur()
-
-    monkeypatch.setattr(_detail, '_get_db', lambda: _DB())
+    monkeypatch.setattr(
+        _detail, '_read_conversation_snapshot',
+        lambda conversation_id, *, user_id: row)
     return msgs
 
 
 def _run(**kw):
     from lib.conv_ref import execute_conv_ref_tool
     kw.setdefault('conversation_id', 'big1')
-    return execute_conv_ref_tool('get_conversation', kw)
+    return execute_conv_ref_tool('get_conversation', kw, user_id=1)
 
 
 def _record(out):
@@ -223,21 +216,14 @@ class TestTheHeaderStatesWhatWasDelivered:
         from lib.conv_ref import _detail
         row = _Row({
             'id': 'big1', 'user_id': 1, 'title': 'Huge',
-            'messages': json.dumps(
-                [{'role': 'user', 'content': 'q' * 400000, '_msgId': 'u1'}]),
-            'created_at': 1, 'updated_at': 2, 'settings': '{}',
+            'messages': [
+                {'role': 'user', 'content': 'q' * 400000, '_msgId': 'u1'}],
+            'created_at': 1, 'updated_at': 2, 'settings': {},
             'msg_count': 1, 'rev': 1,
         })
-
-        class _Cur:
-            def fetchone(self):
-                return row
-
-        class _DB:
-            def execute(self, sql, params=()):
-                return _Cur()
-
-        monkeypatch.setattr(_detail, '_get_db', lambda: _DB())
+        monkeypatch.setattr(
+            _detail, '_read_conversation_snapshot',
+            lambda conversation_id, *, user_id: row)
         out = _run()
         rec = _record(out)
         head = out.split('```json', 1)[0]
@@ -347,7 +333,7 @@ class TestDescriptionMatchesTheSchema:
     """
 
     def _fn(self):
-        from lib.tools import CONV_REF_GET_TOOL
+        from lib.tools.conversation import CONV_REF_GET_TOOL
         return CONV_REF_GET_TOOL['function']
 
     def test_every_parameter_named_in_the_description_exists(self):

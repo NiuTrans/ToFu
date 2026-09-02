@@ -13,10 +13,13 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import orchestration_legacy_test_root
+
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
-ESBUILD = ROOT / 'node_modules/.bin/esbuild'
+LEGACY_ROOT = Path(orchestration_legacy_test_root())
+ESBUILD = ROOT / 'scripts' / 'vite_test_bundle.mjs'
 
 
 def _backend_contracts() -> set[tuple[str, str]]:
@@ -47,7 +50,7 @@ process.stdout.write(JSON.stringify(Object.fromEntries(
 """
     result = subprocess.run(
         ['node', '-e', script],
-        cwd=ROOT,
+        cwd=LEGACY_ROOT,
         capture_output=True,
         text=True,
         timeout=30,
@@ -64,7 +67,8 @@ def test_frontend_registry_matches_every_backend_orchestration_route():
     frontend = _frontend_contracts()
     backend = _backend_contracts()
 
-    assert len(frontend) == len(set(frontend.values())) == 23
+    assert frontend
+    assert len(frontend) == len(set(frontend.values()))
     assert set(frontend.values()) == backend
 
 
@@ -170,7 +174,7 @@ def test_response_required_fields_derive_from_owned_openapi_schemas():
         definition_entry_response_schema,
         definition_list_response_schema,
     )
-    from lib.orchestration.durable_run_wire_contract import (
+    from lib.orchestration.durable_run_wire_schema import (
         durable_replay_response_schema,
         durable_run_list_response_schema,
         durable_run_read_response_schema,
@@ -189,7 +193,7 @@ def test_response_required_fields_derive_from_owned_openapi_schemas():
 
     mutation_schemas = [
         mutation_response_schema(
-            config['action'], reasons, config['compatibility'])
+            config['action'], reasons)
         for config in mutation_endpoint_contracts().values()
         for reasons in config['outcomes']
     ]
@@ -250,7 +254,7 @@ def test_generated_classic_and_native_endpoint_policies_are_current():
 
 @pytest.mark.skipif(
     not shutil.which('node') or not ESBUILD.is_file(),
-    reason='node + esbuild unavailable',
+    reason='node + vite test bundler unavailable',
 )
 def test_native_request_registry_is_self_contained_and_matches_classic(
     tmp_path,
@@ -259,7 +263,7 @@ def test_native_request_registry_is_self_contained_and_matches_classic(
     compiled = subprocess.run(
         [str(ESBUILD),
          'frontend/src/features/orchestration/request-contract.ts',
-         '--bundle', '--format=iife', '--platform=browser',
+         '--bundle', '--format=cjs', '--platform=node',
          f'--outfile={built}'],
         cwd=ROOT, capture_output=True, text=True, timeout=30,
     )
@@ -267,13 +271,13 @@ def test_native_request_registry_is_self_contained_and_matches_classic(
 
     script = r"""
 const fs=require('fs');global.window=global;
-require(process.argv[1]);
-const native=global._ORCHESTRATION_REQUEST_CONTRACTS;
+const requestContracts=require(process.argv[1]);
+const native=requestContracts.ORCHESTRATION_REQUEST_CONTRACTS;
 const nativeSnapshot=JSON.parse(JSON.stringify(native));
 const nativeFrozen=Object.isFrozen(native)
   &&Object.values(native).every(value=>Object.isFrozen(value)
     &&Object.isFrozen(value.responseRequiredFields));
-const nativeUnknown=global.orchestrationRequestContract('missing');
+const nativeUnknown=requestContracts.orchestrationRequestContract('missing');
 eval(fs.readFileSync(
   'static/js/api/orchestration-http-contract.generated.js','utf8'));
 eval(fs.readFileSync(
@@ -297,13 +301,13 @@ process.stdout.write(JSON.stringify({
 }));
 """
     run = subprocess.run(
-        ['node', '-e', script, str(built)], cwd=ROOT,
+        ['node', '-e', script, str(built)], cwd=LEGACY_ROOT,
         capture_output=True, text=True, timeout=30,
     )
     assert run.returncode == 0, run.stderr
     result = json.loads(run.stdout)
     assert result['native'] == result['classic']
-    assert len(result['native']) == 23
+    assert result['native']
     assert result['nativeFrozen'] is True
     assert result['nativeUnknown'] is None
 

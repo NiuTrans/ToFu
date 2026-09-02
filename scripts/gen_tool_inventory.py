@@ -132,7 +132,7 @@ def _load_registry():
     install_onnx_thread_guard()
     import lib.tasks_pkg.handlers  # noqa: F401 — registration side-effect
     from lib.tasks_pkg.executor import tool_registry
-    from lib.tools import all_specs
+    from lib.tools.registry import all_specs
     return tool_registry, all_specs()
 
 
@@ -211,13 +211,13 @@ def _tool_schemas() -> dict:
     """
     out: dict = {}
     try:
-        from lib.tools import ToolContext, assemble_tool_list
+        from lib.tools.registry import ToolContext, assemble_tool_list
         ctx = ToolContext(
             cfg={}, task_id='inv', project_path='/tmp/inv', project_enabled=True,
             search_mode='multi', search_enabled=True, fetch_enabled=True,
             code_exec_enabled=False, browser_enabled=True, desktop_enabled=True,
-            swarm_enabled=True, image_gen_enabled=True,
-            human_guidance_enabled=True, scheduler_enabled=True, messages=[])
+            image_gen_enabled=True, human_guidance_enabled=True,
+            scheduler_enabled=True, messages=[])
         tool_list, _ = assemble_tool_list(ctx)
         for t in tool_list or []:
             fn = (t or {}).get('function') or {}

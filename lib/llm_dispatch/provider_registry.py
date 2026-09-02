@@ -1,6 +1,6 @@
 """lib/llm_dispatch/provider_registry.py — Pluggable LLM body-shape dialects.
 
-This is the **provider-side mirror** of ``lib/tools/registry.py``.  Where the
+This is the **provider-side mirror** of ``lib/tools/registry/``.  Where the
 tool registry lets a third-party package contribute *tools*, this registry lets
 one contribute a *body dialect* — the engine-specific shape of the
 thinking/temperature parameters in a ``/chat/completions`` request body.

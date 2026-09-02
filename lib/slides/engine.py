@@ -36,7 +36,7 @@ def _emit(task: dict, event: dict) -> None:
 
 #: Task fields persisted so a crashed process can re-spawn this job.
 _MANIFEST_FIELDS = ('task_id', 'topic', 'lang', 'style', 'max_pages', 'size',
-                    'conv_id', 'workdir', 'model')
+                    'conv_id', 'workdir', 'model', 'user_id')
 
 
 def _write_manifest(task: dict, state: str) -> None:
@@ -53,7 +53,7 @@ def run_slides_task(task: dict) -> None:
     task_id = task['task_id']
     try:
         _write_manifest(task, 'running')
-        task['status'] = 'running'
+        _slides_runtime.mark_running(task_id)
         _emit(task, build_phase(Phase.START, topic=task.get('topic', '')))
         result = build_deck_from_topic(
             task['topic'], task['workdir'], lang=task.get('lang') or 'zh',
@@ -100,12 +100,16 @@ def resume_interrupted_decks() -> int:
     from lib.slides.runtime import _new_slides_task, _slides_runtime
 
     def _respawn(task_id: str, workdir: str, m: dict) -> None:
+        user_id = int(m['user_id'])
+        if user_id < 1:
+            raise ValueError('slides manifest has no valid owner')
         task = _new_slides_task(
             task_id, topic=m.get('topic') or '', workdir=workdir,
             lang=m.get('lang') or 'zh', style=m.get('style') or '',
             max_pages=int(m.get('max_pages') or 12),
             size=tuple(m.get('size') or (1280, 720)),
-            conv_id=m.get('conv_id') or '', model=m.get('model') or '')
+            conv_id=m.get('conv_id') or '', model=m.get('model') or '',
+            user_id=user_id)
         _slides_runtime.spawn(task_id, run_slides_task, task)
 
     return resume_running_jobs(
@@ -116,7 +120,7 @@ def resume_interrupted_decks() -> int:
 
 def start_slides_job(topic: str, *, lang: str = 'zh', style: str = '',
                      max_pages: int = 12, size=(1280, 720),
-                     conv_id: str = '', model: str = '') -> dict:
+                     conv_id: str = '', model: str = '', user_id: int) -> dict:
     """Create + spawn a deck job; returns {task_id, deduped}."""
     from lib.slides.runtime import (
         _cleanup_stale_slides_tasks, _new_slides_task,
@@ -124,7 +128,7 @@ def start_slides_job(topic: str, *, lang: str = 'zh', style: str = '',
         _slides_task_id)
 
     _cleanup_stale_slides_tasks()
-    key = (topic.strip(), lang, style.strip(), int(max_pages), tuple(size),
+    key = (user_id, topic.strip(), lang, style.strip(), int(max_pages), tuple(size),
            model.strip())
     existing = _slides_index_get(key)
     if existing:
@@ -135,7 +139,7 @@ def start_slides_job(topic: str, *, lang: str = 'zh', style: str = '',
     task = _new_slides_task(tid, topic=topic.strip(), workdir=wd, lang=lang,
                             style=style.strip(), max_pages=int(max_pages),
                             size=tuple(size), conv_id=conv_id,
-                            model=model.strip())
+                            model=model.strip(), user_id=user_id)
     _slides_index_register(key, tid)
     _slides_runtime.spawn(tid, run_slides_task, task)
     logger.info('[Slides] started %s topic=%r lang=%s pages=%d',

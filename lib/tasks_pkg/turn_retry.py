@@ -149,6 +149,13 @@ def should_auto_retry_turn(error_envelope, attempt: int,
     if not isinstance(error_envelope, dict):
         return False, 0.0
 
+    # Some inner recovery loops already exhausted a wall-clock-aware retry
+    # budget. Re-running the whole turn resets their phase counter and can
+    # multiply a bounded failure into an hour-long unattended loop. The error
+    # remains manually retryable; this marker only prevents automatic replay.
+    if error_envelope.get('autoRetryExhausted'):
+        return False, 0.0
+
     kind = error_envelope.get('kind')
     if kind not in _AUTO_RETRY_KINDS:
         return False, 0.0

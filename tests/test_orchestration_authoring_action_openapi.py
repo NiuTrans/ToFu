@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from lib.orchestration.definition_inspection import inspect_definition
-from lib.orchestration.definition_wire_contracts import (
+from lib.orchestration.definition_contract_schema import (
     definition_candidate_schema,
     definition_request_schema,
 )

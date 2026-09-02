@@ -24,11 +24,14 @@ import sys
 
 import pytest
 
+from tests._seed import delete_conversation, seed_conversation
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 _OLD_TS = 1_700_000_000_000  # deliberately ancient — any restamp would show
+TEST_OWNER_USER_ID = 1
 
 
 @pytest.mark.api
@@ -36,17 +39,19 @@ class TestSettingsPatchNeverRestampsRecency:
     @pytest.fixture()
     def old_conv(self, flask_client):
         conv_id = 'no-restamp-conv'
-        resp = flask_client.put(f'/api/v1/conversations/{conv_id}', json={
-            'title': 'No Restamp',
-            'messages': [
+        seed_conversation(
+            conv_id,
+            user_id=TEST_OWNER_USER_ID,
+            title='No Restamp',
+            messages=[
                 {'role': 'user', 'content': 'hi', 'timestamp': _OLD_TS},
                 {'role': 'assistant', 'content': 'done', 'timestamp': _OLD_TS + 1},
             ],
-            'createdAt': _OLD_TS, 'updatedAt': _OLD_TS,
-        })
-        assert resp.status_code == 200, resp.data
+            created_at=_OLD_TS,
+            updated_at=_OLD_TS,
+        )
         yield conv_id
-        flask_client.delete(f'/api/v1/conversations/{conv_id}')
+        delete_conversation(conv_id, user_id=TEST_OWNER_USER_ID)
 
     def _updated_at(self, flask_client, conv_id):
         resp = flask_client.get(f'/api/v1/conversations/{conv_id}')
@@ -54,13 +59,15 @@ class TestSettingsPatchNeverRestampsRecency:
         body = resp.get_json()
         return int(body.get('updatedAt') or body.get('updated_at') or 0)
 
-    def test_touch_flag_is_inert_and_updated_at_unchanged(self, flask_client, old_conv):
+    def test_touch_flag_is_rejected_and_updated_at_unchanged(
+        self, flask_client, old_conv,
+    ):
         before = self._updated_at(flask_client, old_conv)
         assert before == _OLD_TS, f'precondition: seeded recency, got {before}'
         # A stale bundle still sending the removed control flag.
         resp = flask_client.patch(f'/api/v1/conversations/{old_conv}/settings',
                                   json={'touchUpdatedAt': True, 'model': 'keep-me'})
-        assert resp.status_code == 200, resp.data
+        assert resp.status_code == 400, resp.data
         after = self._updated_at(flask_client, old_conv)
         assert after == _OLD_TS, (
             f'browsing/PATCH restamped recency: updated_at {before} → {after}. '
@@ -68,7 +75,7 @@ class TestSettingsPatchNeverRestampsRecency:
         # The flag must not leak into the persisted settings JSON either.
         data = flask_client.get(f'/api/v1/conversations/{old_conv}').get_json()
         settings = data.get('settings') or {}
-        assert settings.get('model') == 'keep-me', settings
+        assert 'model' not in settings, settings
         assert 'touchUpdatedAt' not in settings, (
             f'control flag leaked into settings JSON: {settings}')
 
@@ -120,11 +127,10 @@ class TestOpenBumpRemovedAtSource:
         assert 'SET updated_at' not in body, (
             'patch_conv_settings writes updated_at again — a settings-only '
             'PATCH must never restamp recency')
-        # The stale-bundle flag must still be popped so it cannot enter the
-        # settings JSON (see the behavioral test above).
-        assert "data.pop('touchUpdatedAt', None)" in body, (
-            'the stale touchUpdatedAt flag is no longer popped — it would '
-            'leak into the persisted settings JSON')
+        # A stale bundle is rejected as one atomic settings mutation, so the
+        # retired control flag and any sibling fields cannot leak into storage.
+        assert 'if "touchUpdatedAt" in updates:' in body
+        assert 'Browsing cannot mutate conversation recency' in body
 
 
 if __name__ == '__main__':

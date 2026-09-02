@@ -23,11 +23,7 @@ Token transports (priority, all modes):
   3. ``tofu_session`` cookie           — set on first browser visit.
   4. ``?token=<token>`` query string   — first-link flow; sets cookie
                                           + redirects to clean URL.
-  5. ``X-Tunnel-Token`` / cookie       — back-compat shim for legacy
-                                          deployments that still set
-                                          ``TUNNEL_TOKEN`` (deprecated).
-
-For all five valid paths the resolved context lives at ``g.auth_ctx``.
+For all four valid paths the resolved context lives at ``g.auth_ctx``.
 Routes consult it via :func:`require_auth` / :func:`require_scope`.
 
 Public path policy
@@ -39,6 +35,8 @@ A short allow-list of routes can be reached without a token:
   * ``/api/health``                      (liveness probe)
   * ``/api/openapi.json|yaml``,
     ``/api/docs``, ``/api/redoc``        (self-describing surface)
+  * ``/api/v4/meta``, ``/api/v4/openapi.json``
+                                             (v4 compatibility bootstrap)
   * ``/api/v1/capabilities``             (used by clients to auto-config)
   * ``/api/v1/keys/whoami``              (login probe \u2014 returns
                                           ``{authenticated:false}`` when
@@ -59,30 +57,28 @@ alone.
 Rate limiting
 -------------
 Pre-flight bucket check + standard ``X-RateLimit-*`` headers run for
-every authenticated API request. Cookie-authenticated requests bypass
-the bucket (the local UI is the user's own credential). Public paths
-never enforce 429.
+every authenticated API request. Public paths never enforce 429.
 """
 
 from __future__ import annotations
 
 import asyncio
 import functools
-import hashlib
 import logging
 import os
-import secrets
 from typing import Optional
 
 from quart import redirect, request
 from quart import Response, g
 
 from lib.api_keys import (
-    AuthContext, local_admin_context, touch_key, validate_token,
+    AuthContext, local_admin_context, validate_token,
 )
 from lib.api_response import api_forbidden, api_typed_error, api_unauthorized
 from lib.auth_mode import requires_credential as _mode_requires_credential
-from lib.log import audit_log, get_logger
+from lib.auth_mode import is_multi_user
+from lib.identity import PrincipalContext, principal_from_auth_context
+from lib.log import audit_log, get_logger, set_principal
 from lib.rate_limit_api import RateDecision, apply_headers, check_request
 from lib.usage_tracker import record as record_usage
 
@@ -117,10 +113,16 @@ _PUBLIC_EXACT = frozenset({
     '/favicon.svg',
     '/robots.txt',
     '/api/health',
+    '/api/ready',
+    '/health/live',
+    '/health/ready',
+    '/health/startup',
     '/api/openapi.json',
     '/api/openapi.yaml',
     '/api/docs',
     '/api/redoc',
+    '/api/v4/meta',
+    '/api/v4/openapi.json',
     '/api/v1/capabilities',
     '/api/v1/keys/whoami',
     '/api/v1/auth/mode',  # GET only; PUT goes through @require_scope('admin')
@@ -130,7 +132,7 @@ _PUBLIC_EXACT = frozenset({
     '/api/v1/users/signup',    # public registration (gated by relay.json)
     '/api/v1/users/login',     # public login
     '/api/v1/users/logout',    # public; idempotent on missing session
-    '/api/v1/users/me',        # public probe; returns {user: null} unauthed
+    '/api/v1/users/me',        # public probe; ownerId is null when unauthed
     '/api/desktop/pair',          # pairing exchange: the 6-digit code IS the credential (RWA P4a — code + audit, no bearer)
     '/dashboard',         # customer dashboard HTML; data fetches go through the gate
     '/dashboard/',
@@ -204,10 +206,10 @@ def _remote_is_loopback() -> bool:
     ⚠️ NOT a trust signal by itself. A reverse proxy on the SAME host
     (nginx / ngrok / cloudflared → 127.0.0.1, the standard tunnel shape)
     makes EVERY public request present as loopback, and ProxyFix is not
-    installed (pt_30d400a167df4440), so the server cannot tell them
+    installed (), so the server cannot tell them
     apart. Bridge endpoints therefore require a CREDENTIAL and never
     consult this — see :func:`_is_bridge_path` and
-    ``docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md`` §3.2b / §3.4.
+    ``docs/modules/integrations_api.md`` §3.2b / §3.4.
     """
     return address_is_loopback(request.remote_addr)
 
@@ -226,61 +228,35 @@ _BRIDGE_PATHS = frozenset({
     '/api/browser/result',
     '/api/desktop/poll',
 })
-
-# Process-local capability token for the SAME-PROCESS desktop agent the
-# packaged tray app spawns (desktop/launcher.py). Minted in memory at import,
-# NEVER written to disk and NEVER exported to the environment: persisting it
-# would downgrade "only this process knows it" into "any local user who can
-# read the file (or /proc/<pid>/environ) knows it" — the address-based trust
-# hole in a different costume (docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md §3.4).
-_LOOPBACK_AGENT_TOKEN = secrets.token_urlsafe(32)
-
-
-def loopback_agent_token() -> str:
-    """Return the in-memory token an in-process local agent must present.
-
-    Handed to the tray agent by direct function argument (never a file,
-    never an env var), so no other caller can obtain it.
-    """
-    return _LOOPBACK_AGENT_TOKEN
-
+_BRIDGE_PATH_PREFIXES = (
+    '/api/browser/file-transfers/',
+)
 
 def _is_bridge_path(path: str) -> bool:
-    return path in _BRIDGE_PATHS
+    return path in _BRIDGE_PATHS or any(
+        path.startswith(prefix) for prefix in _BRIDGE_PATH_PREFIXES)
 
 
-def _bridge_credential_ok() -> bool:
-    """True when the request carries a valid bridge credential.
-
-    Accepted, in order:
-      1. the in-process loopback agent token (packaged tray app);
-      2. ``TOFU_BRIDGE_SECRET`` — the shared global secret;
-      3. an API key carrying the ``agents:bridge`` scope (per-user token).
-
-    The peer address is NOT a credential and is deliberately not consulted.
-
-    The chain itself is the single shared implementation in
-    ``lib.bridge_auth.resolve_bridge_credential`` — the same one the browser
-    and desktop routes consume (via ``routes/_bridge_caller``), so gate and
-    routes can never again disagree on what a valid bridge credential is
-    (pt_3ba97339b4024fb4). Two deliberate refinements fell out of the
-    convergence:
-
-      * the scope check is now LITERAL membership (a bare ``admin`` key
-        without ``agents:bridge`` no longer passes this gate — it was always
-        rejected one layer later at the route, so the observable outcome is
-        unchanged);
-      * the ``CHATUI_BRIDGE_SECRET`` legacy alias is honoured here too (the
-        routes already did via ``getenv_compat``; the documented alias
-        promise now holds at every layer).
-    """
+async def _bridge_auth_context():
+    """Resolve the device caller once, with no address or shared-secret trust."""
     provided = (request.headers.get('X-Bridge-Secret') or '').strip()
     if not provided:
-        return False
+        return None
+    allow_process_agent = request.path == '/api/desktop/poll'
     from lib.bridge_auth import resolve_bridge_credential
-    ok, _user_id, _key_id = resolve_bridge_credential(
-        provided, loopback_token=_LOOPBACK_AGENT_TOKEN)
-    return ok
+    # Credential validation is a synchronous Sidecar write (it stamps
+    # last_used_at). Under writer pressure it may wait for the storage
+    # deadline, so it must run on the serving loop's bounded sync executor.
+    return await asyncio.to_thread(
+        resolve_bridge_credential,
+        provided,
+        allow_process_agent=allow_process_agent,
+    )
+
+
+async def _validate_token(token: str) -> Optional[AuthContext]:
+    """Validate and stamp a token without blocking Quart's event loop."""
+    return await asyncio.to_thread(validate_token, token)
 
 
 def _is_api_path(path: str) -> bool:
@@ -344,28 +320,6 @@ def _token_source(token: str) -> str:
     return 'unknown'
 
 
-def _legacy_tunnel_token_passes() -> bool:
-    """Back-compat: honour ``TUNNEL_TOKEN`` if a deployment still sets it.
-
-    Deprecated. New deployments use API keys exclusively. Existing ones
-    keep working without immediate migration. The acceptance paths
-    mirror the old ``server.py:tunnel_auth`` exactly.
-    """
-    tt = os.environ.get('TUNNEL_TOKEN', '')
-    if not tt:
-        return False
-    import hmac
-    cookie_val = request.cookies.get('_tunnel_auth') or ''
-    expected = hashlib.sha256(tt.encode()).hexdigest()[:32]
-    if hmac.compare_digest(cookie_val, expected):
-        return True
-    if hmac.compare_digest(request.headers.get('X-Tunnel-Token', ''), tt):
-        return True
-    if hmac.compare_digest(request.args.get('token', ''), tt):
-        return True
-    return False
-
-
 # \u2500\u2500 Middleware \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 
@@ -381,6 +335,29 @@ def _rate_limit_rejection(decision: RateDecision):
     return resp, status
 
 
+def _stamp_principal() -> PrincipalContext:
+    """Bind the resolved ``g.auth_ctx`` to the principal ContextVar.
+
+    Lets services consume one structured identity and ``lib.log.audit_log``
+    attach its stable subject/owner. Invalid or missing ownership raises so
+    the auth boundary can deny the request before a repository is reached.
+    """
+    ctx = getattr(g, 'auth_ctx', None)
+    principal = principal_from_auth_context(
+        ctx, allow_personal_owner=not is_multi_user())
+    g.principal_context = principal
+    set_principal(principal.subject_id, principal.owner_user_id or '')
+    return principal
+
+
+def _principal_binding_rejection(error: BaseException):
+    logger.warning('[Auth] principal binding refused: %s', error)
+    return api_typed_error(
+        'permission', status=403,
+        detail='Authenticated principal has no valid owner identity.',
+        source='api_v1.auth.principal')
+
+
 async def auth_before_request():
     """Resolve ``g.auth_ctx`` for every request.
 
@@ -389,7 +366,9 @@ async def auth_before_request():
     """
     path = request.path
     g.auth_ctx = None
+    g.principal_context = None
     g.rate_decision = None
+    g.browser_poll_admission_lease = None
 
     # Static assets short-circuit before any token work — they're hit
     # tens of times per page load and should never touch the cache.
@@ -400,7 +379,7 @@ async def auth_before_request():
     # Placed BEFORE the open-mode short-circuit on purpose: otherwise the
     # synthetic local-admin grant would wave a bridge poll through on peer
     # address alone, and under a same-host reverse proxy that is the whole
-    # public internet (docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md §3.2b).
+    # public internet (docs/modules/integrations_api.md §3.2b).
     # TOFU_OPEN_MODE_ALLOW_REMOTE cannot downgrade this (§3.4b).
     if _is_bridge_path(path):
         # CORS preflight carries NO credentials by spec (the browser strips
@@ -409,8 +388,36 @@ async def auth_before_request():
         # actual POST/GET that follows is still fully gated below.
         if request.method == 'OPTIONS':
             return None
-        if _bridge_credential_ok():
-            g.auth_ctx = local_admin_context()
+        if path == '/api/browser/poll':
+            from lib.browser.poll_admission import browser_poll_admission
+            from routes._bridge_caller import (
+                browser_poll_admission_rejection,
+            )
+            poll_controller = browser_poll_admission()
+            poll_decision, poll_lease = poll_controller.enter(
+                credential=request.headers.get('X-Bridge-Secret', ''),
+                peer=request.remote_addr or '',
+                reported_protocol_version=request.headers.get(
+                    'X-Browser-Protocol-Version', ''),
+            )
+            g.browser_poll_admission_lease = poll_lease
+            if not poll_decision.allowed:
+                return browser_poll_admission_rejection(poll_decision)
+        bridge_context = await _bridge_auth_context()
+        if bridge_context is not None:
+            g.auth_ctx = bridge_context
+            g.bridge_auth_context = bridge_context
+            try:
+                _stamp_principal()
+            except (PermissionError, ValueError) as exc:
+                return _principal_binding_rejection(exc)
+            if path == '/api/browser/poll':
+                owner_decision = poll_controller.admit_owner(
+                    poll_lease,
+                    owner_user_id=bridge_context.owner_user_id,
+                )
+                if not owner_decision.allowed:
+                    return browser_poll_admission_rejection(owner_decision)
             return None
         try:
             audit_log('bridge_auth_fail', kind='gate', path=path,
@@ -423,8 +430,7 @@ async def auth_before_request():
                           path, request.remote_addr)
         return api_unauthorized(
             'bridge_auth_required',
-            hint='set X-Bridge-Secret to TOFU_BRIDGE_SECRET or an '
-                 'agents:bridge-scoped API key')
+            hint='pair this device to obtain an agents:bridge credential')
 
     # ── Open mode short-circuit ─────────────────────────────────────
     # No credential required. Tokens are still honoured if presented
@@ -438,9 +444,7 @@ async def auth_before_request():
         token = _extract_bearer_or_cookie()
         ctx_open: Optional[AuthContext] = None
         if token:
-            ctx_open = validate_token(token)
-            if ctx_open is not None:
-                touch_key(ctx_open.key_id)
+            ctx_open = await _validate_token(token)
         # Synthetic full-admin grant is loopback-only by default. A
         # remote peer in open mode does NOT get the free admin context;
         # it must present a valid credential (resolved above) or it
@@ -460,8 +464,14 @@ async def auth_before_request():
                     request.remote_addr, path)
         if ctx_open is not None:
             g.auth_ctx = ctx_open
+            try:
+                _stamp_principal()
+            except (PermissionError, ValueError) as exc:
+                return _principal_binding_rejection(exc)
             if ctx_open.via_open_mode and _is_api_path(path):
-                decision = check_request(ctx_open)
+                # The open-mode limiter can use the shared DB backend. Keep
+                # that optional storage path off the serving loop as well.
+                decision = await asyncio.to_thread(check_request, ctx_open)
                 g.rate_decision = decision
                 if not decision.allowed:
                     return _rate_limit_rejection(decision)
@@ -477,9 +487,8 @@ async def auth_before_request():
     ctx: Optional[AuthContext] = None
     used_query_token = False
     if token:
-        ctx = validate_token(token)
+        ctx = await _validate_token(token)
         if ctx is not None:
-            touch_key(ctx.key_id)
             audit_log('api_request_auth', key_id=ctx.key_id,
                       name=ctx.name, path=path)
             if (request.args.get('token') or '').strip() == token:
@@ -504,16 +513,14 @@ async def auth_before_request():
                        'been rotated — restart the server to mint a fresh one.',
                 source='api_v1.auth.token')
 
-    # 2. Back-compat: legacy TUNNEL_TOKEN flow.
-    if ctx is None and _legacy_tunnel_token_passes():
-        ctx = AuthContext(
-            key_id='', name='tunnel', scopes=frozenset({'admin'}),
-            rate_limit_rpm=0, rate_limit_tpd=0, via_tunnel_token=True,
-        )
-
     g.auth_ctx = ctx
+    if ctx is not None:
+        try:
+            _stamp_principal()
+        except (PermissionError, ValueError) as exc:
+            return _principal_binding_rejection(exc)
 
-    # 3. Browser landed on / with ?token=<key>: install cookie + redirect.
+    # 2. Browser landed on / with ?token=<key>: install cookie + redirect.
     if used_query_token and request.method == 'GET':
         from urllib.parse import urlencode, parse_qs, urlparse, urlunparse
         parsed = urlparse(request.url)
@@ -575,21 +582,42 @@ async def auth_before_request():
     # 7. Per-key request counter (tokens recorded post-hoc by routes).
     if ctx.key_id:
         try:
-            record_usage(ctx.key_id, request_count=1)
+            # The amortized usage counter occasionally flushes its JSON file.
+            await asyncio.to_thread(
+                record_usage, ctx.key_id, request_count=1)
         except Exception as e:
             logger.debug('[Auth] usage record failed: %s', e)
     return None
 
 
 async def attach_rate_headers(response):
-    """After-request hook: copy bucket state onto the outgoing response."""
+    """Attach API rate headers and release any browser-poll admission lease."""
     try:
         decision = getattr(g, 'rate_decision', None)
         if decision is not None:
             apply_headers(response, decision)
     except Exception as e:
         logger.debug('[Auth] rate-header hook failed: %s', e)
+    finally:
+        _release_browser_poll_admission()
     return response
+
+
+def _release_browser_poll_admission() -> None:
+    """Release the request lease; after-request and teardown may both call."""
+    try:
+        lease = getattr(g, 'browser_poll_admission_lease', None)
+        if lease is None:
+            return
+        from lib.browser.poll_admission import browser_poll_admission
+        browser_poll_admission().release(lease)
+    except Exception as exc:
+        logger.warning('[Auth] browser poll admission release failed: %s', exc)
+
+
+async def release_browser_poll_admission_on_teardown(_error=None):
+    """Cancellation/error backstop for requests that never build a response."""
+    _release_browser_poll_admission()
 
 
 # \u2500\u2500 Decorators \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -603,6 +631,31 @@ def current_auth() -> Optional[AuthContext]:
         # Working outside of application/request context.
         logger.debug('[Auth] current_auth called outside request ctx: %s', e)
         return None
+
+
+def request_principal() -> PrincipalContext:
+    """Return the request identity or deny context-less/background callers."""
+    try:
+        principal = getattr(g, 'principal_context', None)
+    except RuntimeError:
+        principal = None
+    if isinstance(principal, PrincipalContext):
+        return principal
+    # Test adapters and a few blueprint-local contexts set ``g.auth_ctx``
+    # directly. Normalize them through the same boundary without restoring a
+    # context-less personal fallback.
+    return principal_from_auth_context(
+        current_auth(), allow_personal_owner=not is_multi_user())
+
+
+def request_user_id() -> int:
+    """Return the authenticated owner for the current request.
+
+    Personal mode maps an unbound local administrator to the declared personal
+    owner. Multi-user mode fails closed when authentication did not bind an
+    owner, so storage code never silently crosses tenant boundaries.
+    """
+    return request_principal().require_owner(context='request')
 
 
 def require_auth(fn):
@@ -770,11 +823,14 @@ __all__ = [
     'auth_before_request',
     'bearer_auth_before_request',
     'attach_rate_headers',
+    'release_browser_poll_admission_on_teardown',
     'require_auth',
     'require_scope',
     'model_relay_guard',
     'guard_model_relay_or_dispose',
     'current_auth',
+    'request_principal',
+    'request_user_id',
     'SESSION_COOKIE',
     'address_is_loopback',
     'open_mode_peer_allowed',

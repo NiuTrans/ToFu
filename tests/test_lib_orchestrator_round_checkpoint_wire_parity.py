@@ -1,11 +1,12 @@
-# Incident anchor: born in commit ca59f5f7 — refactor(orchestrator): pt_03f4cdf1 slice 20 — extract crash-recovery...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 20 wire-parity: _round_checkpoint.py extraction from _run.py."""
 
 import inspect
 from types import SimpleNamespace
 
-from lib.tasks_pkg.orchestrator import _round_checkpoint
+import pytest
+
+import lib.tasks_pkg.orchestrator._round_checkpoint as _round_checkpoint
+pytestmark = pytest.mark.unit
 
 
 class TestRoundCheckpointWireParity:
@@ -46,18 +47,14 @@ class TestRoundCheckpointWireParity:
         i_round_end = src.index("EventType.ROUND_END")
         assert i_checkpoint < i_round_end
 
-    def test_docstring_mentions_extraction(self):
-        assert "pt_03f4cdf1" in (_round_checkpoint.__doc__ or "")
-
-
 class TestRunTaskDelegation:
     def test_run_task_delegates_to_helper(self):
-        from lib.tasks_pkg.orchestrator import _run
-        src = inspect.getsource(_run.run_task)
+        import lib.tasks_pkg.orchestrator._root_agent_loop as _root_agent_loop
+        src = inspect.getsource(_root_agent_loop)
         assert "run_round_checkpoint_and_close(" in src
 
     def test_run_task_no_longer_carries_block_inline(self):
-        from lib.tasks_pkg.orchestrator import _run
+        import lib.tasks_pkg.orchestrator._run as _run
         src = inspect.getsource(_run.run_task)
         assert "checkpoint_task_partial(task, force=True)" not in src
         assert "roundNum=round_num, reason='tools')" not in src

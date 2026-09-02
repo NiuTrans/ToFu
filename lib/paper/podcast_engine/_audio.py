@@ -29,6 +29,7 @@ import tempfile
 
 from lib import tts as _tts
 from lib.log import get_logger
+from lib.paper.podcast_engine._errors import AudioSynthesisAborted
 
 logger = get_logger(__name__)
 
@@ -39,10 +40,6 @@ _PAUSE_SECTION_BREAK_MS = 800
 
 #: Sentence-ending punctuation for chunk splits (zh + en).
 _SENTENCE_END_RE = re.compile(r'(?<=[。！？；!?;.])\s*')
-
-
-class AudioSynthesisAborted(Exception):
-    """The task's abort_event fired between chunks."""
 
 
 def _chunk_text(text: str, max_chars: int) -> list[str]:

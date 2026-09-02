@@ -75,7 +75,6 @@ GUARD_CORE_BASENAMES = (
 )
 
 _RUN_ALL_FRACTION = 0.40
-_DEFAULT_MAX_WORKERS = 4
 
 
 # ─── Index (pure) ──────────────────────────────────────────────────────
@@ -209,39 +208,35 @@ def _parallel_workers(existing: list[str] | None,
                       jobs: str | None) -> str | None:
     """Return the requested/adaptive xdist worker count, or ``None``.
 
-    A pytest controller and every worker import the full test bootstrap.  For
-    a one-file inner loop that startup costs more than the tests, so the
-    implicit default stays serial.  Larger selections are capped at the same
-    conservative four workers used by the Makefile; an explicit ``--jobs``
-    remains authoritative.
+    A pytest controller and every worker import the full test bootstrap. For a
+    one-file inner loop that startup costs more than the tests, so the implicit
+    default stays serial. Larger selections request ``auto``; the repository's
+    xdist hook then applies the shared resource probe and selected-file cap. An
+    explicit ``--jobs`` remains authoritative.
     """
     if jobs is not None:
         return None if jobs == '0' else jobs
     if existing is not None and len(existing) <= 1:
         return None
-    if existing is None:
-        return str(_DEFAULT_MAX_WORKERS)
-    return str(min(_DEFAULT_MAX_WORKERS, len(existing)))
+    return 'auto'
 
 
 def build_pytest_command(existing: list[str] | None,
                          jobs: str | None) -> list[str]:
     """Build the hermetic selected-test command.
 
-    ``main`` disables pytest entry-point autoload to keep host-only plugins
-    out of the inner loop.  Parallel mode must therefore load xdist
-    explicitly *before* using its ``-n`` / ``--dist`` options.
+    ``main`` disables pytest entry-point autoload to keep host-only plugins out
+    of the inner loop. pyproject.toml explicitly loads xdist and owns the
+    ``worksteal`` scheduler, so this command only selects the worker count.
     """
     workers = _parallel_workers(existing, jobs)
     cmd = [sys.executable, '-m', 'pytest', '-p', 'no:napari']
-    if workers is not None:
-        cmd += ['-p', 'xdist.plugin']
     if existing is not None:
         cmd += existing
     else:
         cmd += ['-m', 'unit']
     if workers is not None:
-        cmd += ['-n', workers, '--dist', 'worksteal']
+        cmd += ['-n', workers]
     cmd += ['--timeout=300', '--tb=short', '-q']
     return cmd
 

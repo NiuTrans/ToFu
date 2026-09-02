@@ -98,6 +98,67 @@ class TestSyncSearchConfigKnobs:
         assert cap['filter_mode'] == 'rewrite'
         assert cap['filter_timeout'] == 120
 
+    # ── 0.10.0 multi-proxy failover chain (SOFT floor) ──
+
+    def _capture_with_pool(self, monkeypatch, *, pool, proxy_url='http://p1:1',
+                           env=None):
+        """sync_search_config with a stubbed pool + primary proxy."""
+        import lib.proxy as lp
+        import lib.search_bridge as sb
+
+        for k, v in _LIB_STUB.items():
+            monkeypatch.setattr(sb._lib, k, v, raising=False)
+        monkeypatch.setattr(sb, '_resolve_proxy_url', lambda: proxy_url)
+        monkeypatch.setattr(lp, 'global_proxy_failover_urls', lambda: list(pool))
+        for var in ('PREFETCH_GATE_ENABLED', 'PREFETCH_GATE_MIN_QUERY_TERMS',
+                    'PREFETCH_GATE_MIN_FETCH', 'TOFU_SEARCH_PROXY_DUAL_ATTEMPT',
+                    'TOFU_SEARCH_PROXY_RACE', 'FETCH_FILTER_MIN_CHARS',
+                    'FETCH_FILTER_TIMEOUT', 'FETCH_FILTER_MODE'):
+            monkeypatch.delenv(var, raising=False)
+        for k, v in (env or {}).items():
+            monkeypatch.setenv(k, v)
+        captured = {}
+        with patch('tofu_search.configure',
+                   side_effect=lambda **kw: captured.update(kw)):
+            sb.sync_search_config()
+        return captured
+
+    def test_failover_chain_flows_when_library_supports_it(self, monkeypatch):
+        import tofu_search
+        cap = self._capture_with_pool(
+            monkeypatch, pool=['http://p1:1', 'http://p2:2'])
+        supported = 'proxy_fallback_urls' in getattr(
+            tofu_search.SearchConfig, '__dataclass_fields__', {})
+        if supported:
+            # The primary is excluded; the rest of the pool becomes the chain.
+            assert cap['proxy_url'] == 'http://p1:1'
+            assert cap['proxy_fallback_urls'] == ['http://p2:2']
+            assert cap['proxy_race'] is True
+        else:
+            # SOFT floor: an older installed library receives NEITHER kwarg.
+            assert 'proxy_fallback_urls' not in cap
+            assert 'proxy_race' not in cap
+
+    def test_empty_pool_passes_no_fallback_kwarg(self, monkeypatch):
+        import tofu_search
+        cap = self._capture_with_pool(monkeypatch, pool=[])
+        assert 'proxy_fallback_urls' not in cap
+        supported = 'proxy_fallback_urls' in getattr(
+            tofu_search.SearchConfig, '__dataclass_fields__', {})
+        # proxy_race is passed whenever the field exists (it only gates the
+        # parallel behaviour, harmless without a chain).
+        assert ('proxy_race' in cap) is supported
+
+    def test_proxy_race_env_override(self, monkeypatch):
+        import tofu_search
+        cap = self._capture_with_pool(
+            monkeypatch, pool=['http://p2:2'],
+            env={'TOFU_SEARCH_PROXY_RACE': '0'})
+        supported = 'proxy_race' in getattr(
+            tofu_search.SearchConfig, '__dataclass_fields__', {})
+        if supported:
+            assert cap['proxy_race'] is False
+
     def test_prefetch_gate_disabled_via_lib_flag(self, monkeypatch):
         # PREFETCH_GATE_ENABLED env absent → falls back to _lib attribute.
         import lib.search_bridge as sb

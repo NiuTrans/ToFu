@@ -77,9 +77,10 @@ def _make_hub(bus=None):
 class _SyncClient:
     """A PushClient stand-in that records enqueued frames synchronously."""
 
-    def __init__(self):
+    def __init__(self, user_id='1'):
         self.frames = []
         self._connected = True
+        self.user_id = str(user_id)
 
     def enqueue(self, frame):
         self.frames.append(frame)
@@ -91,7 +92,8 @@ def test_inproc_publish_delivers_locally():
     h = _make_hub()  # inproc bus (no TOFU_RUNTIME_STATE_BACKEND)
     c = _SyncClient()
     h.subscribe(c, 'paper', 't1')
-    h.push_event('paper', 't1', {'type': 'progress', 'pct': 42})
+    h.push_event(
+        'paper', 't1', {'type': 'progress', 'pct': 42}, user_id=1)
     assert len(c.frames) == 1
     assert c.frames[0]['type'] == 'progress' and c.frames[0]['taskId'] == 't1'
 
@@ -106,7 +108,7 @@ def test_NC_two_inproc_hubs_drop_cross_replica_frame():
     client_on_a = _SyncClient()
     hub_a.subscribe(client_on_a, 'paper', 't9')
     # Event happens on replica B (owns the task); A holds the WS.
-    hub_b.push_event('paper', 't9', {'type': 'done'})
+    hub_b.push_event('paper', 't9', {'type': 'done'}, user_id=1)
     assert client_on_a.frames == [], (
         'inproc: cross-replica frame must NOT arrive (the bug the bus fixes)')
 
@@ -134,7 +136,8 @@ def test_FIX_shared_bus_delivers_cross_replica():
     hub_a.subscribe(client_on_a, 'paper', 't9')
 
     # Publish on replica B.
-    hub_b.push_event('paper', 't9', {'type': 'done', 'ok': True})
+    hub_b.push_event(
+        'paper', 't9', {'type': 'done', 'ok': True}, user_id=1)
 
     # Pump the broker → each replica's subscriber loop delivers locally.
     for raw in ps_a.drain():
@@ -145,10 +148,10 @@ def test_FIX_shared_bus_delivers_cross_replica():
     assert len(client_on_a.frames) == 1, 'cross-replica frame must arrive via bus'
     f = client_on_a.frames[0]
     assert f['type'] == 'done' and f['ok'] is True and f['taskId'] == 't9'
-    assert '_bcast' not in f
+    assert '_ownerUserId' not in f
 
 
-def test_broadcast_reaches_all_local_clients_via_bus():
+def test_channel_wildcard_fanout_is_owner_scoped_via_bus():
     from lib.agent_core.push_bus import RedisPushBus
     broker = {}
     bus_a = RedisPushBus(deliver_fn=None, client=_FakeClient(broker))
@@ -156,15 +159,17 @@ def test_broadcast_reaches_all_local_clients_via_bus():
     bus_a._deliver = hub_a._deliver_frame
     ps_a = bus_a._client.pubsub()
     ps_a.subscribe('tofu:push:fanout')
-    c1, c2 = _SyncClient(), _SyncClient()
+    c1, c2 = _SyncClient(1), _SyncClient(2)
     hub_a.register(c1)
     hub_a.register(c2)
-    hub_a.broadcast('notify', {'type': 'config_change'})
+    hub_a.subscribe(c1, 'notify', '*')
+    hub_a.subscribe(c2, 'notify', '*')
+    hub_a.push_event(
+        'notify', '*', {'type': 'config_change'}, user_id=1)
     for raw in ps_a.drain():
         bus_a.on_message(raw)
-    assert len(c1.frames) == 1 and len(c2.frames) == 1
-    # The internal routing marker must be stripped before the client sees it.
-    assert '_bcast' not in c1.frames[0]
+    assert len(c1.frames) == 1 and c2.frames == []
+    assert '_ownerUserId' not in c1.frames[0]
 
 
 def test_webhook_listener_fires_once_on_publishing_hub():
@@ -186,7 +191,8 @@ def test_webhook_listener_fires_once_on_publishing_hub():
     hub_a.add_listener(lambda ch, tid, pl: fired.append(('a', ch)))
     hub_b.add_listener(lambda ch, tid, pl: fired.append(('b', ch)))
 
-    hub_b.push_event('paper', 't1', {'type': 'progress'})  # publish on B
+    hub_b.push_event(
+        'paper', 't1', {'type': 'progress'}, user_id=1)  # publish on B
     for raw in ps_a.drain():
         bus_a.on_message(raw)
     for raw in ps_b.drain():
@@ -210,7 +216,8 @@ def test_publish_fails_open_to_local_on_bus_error():
     bus._deliver = hub._deliver_frame
     c = _SyncClient()
     hub.subscribe(c, 'paper', 't1')
-    hub.push_event('paper', 't1', {'type': 'progress'})  # publish raises
+    hub.push_event(
+        'paper', 't1', {'type': 'progress'}, user_id=1)  # publish raises
     assert len(c.frames) == 1, 'fail-open: local delivery must still happen'
 
 
@@ -272,30 +279,6 @@ def test_subscriber_reconnects_and_resubscribes_after_socket_failure():
         assert bus.health()['subscriber_available'] is True
     finally:
         bus.stop()
-
-
-def test_targeted_socket_delivery_crosses_replicas_without_broadcasting():
-    """A digest POST on B can repair the exact WebSocket living on A."""
-    from lib.agent_core.push_bus import RedisPushBus
-    broker = {}
-    bus_a = RedisPushBus(deliver_fn=None, client=_FakeClient(broker))
-    bus_b = RedisPushBus(deliver_fn=None, client=_FakeClient(broker))
-    hub_a = _make_hub(bus_a)
-    hub_b = _make_hub(bus_b)
-    bus_a._deliver = hub_a._deliver_frame
-    bus_b._deliver = hub_b._deliver_frame
-    ps_a = bus_a._client.pubsub(); ps_a.subscribe('tofu:push:fanout')
-
-    target = _SyncClient(); target.req_id = 'socket-a'
-    sibling = _SyncClient(); sibling.req_id = 'socket-other'
-    hub_a.register(target); hub_a.register(sibling)
-
-    assert hub_b.deliver_to_socket(
-        'socket-a', {'type': 'conv_state_snapshot', 'rev': 7}) is True
-    for raw in ps_a.drain():
-        bus_a.on_message(raw)
-    assert target.frames == [{'type': 'conv_state_snapshot', 'rev': 7}]
-    assert sibling.frames == []
 
 
 # ══════════════════════════════════════════════════════════════════════

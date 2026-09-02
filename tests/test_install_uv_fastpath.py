@@ -44,8 +44,10 @@ def _server_py() -> str:
         return f.read()
 
 
-def _bootstrap_py() -> str:
-    with open(os.path.join(ROOT, 'bootstrap.py'), 'r', encoding='utf-8') as f:
+def _bootstrap_env_reexec_py() -> str:
+    """Source owner for bootstrap.py's facade-exported environment logic."""
+    with open(os.path.join(ROOT, 'bootstrap_pkg', 'env_reexec.py'),
+              'r', encoding='utf-8') as f:
         return f.read()
 
 
@@ -87,26 +89,24 @@ def test_use_conda_flag_parses_and_defaults_off():
     _ok('--use-conda parses to USE_CONDA=1 and defaults off')
 
 
-def test_uv_path_gated_on_glibc_and_flags():
-    """The uv attempt must be gated: --use-conda / --with-postgres / glibc<2.28
-    all force the conda path; only otherwise is _try_uv_install called."""
+def test_uv_path_gated_on_glibc_and_conda_flag():
+    """Only --use-conda or glibc<2.28 forces the conda compatibility path."""
     text = _install_sh()
     # A glibc>=2.28 probe exists.
     assert '_glibc_ge_228' in text, 'no _glibc_ge_228 probe defined'
     assert re.search(r'a\[1\]>2\|\|\(a\[1\]==2&&a\[2\]>=28\)', text), \
         '_glibc_ge_228 does not compare against 2.28'
-    # The decision chain: USE_CONDA short-circuits; --with-postgres → conda;
-    # glibc<2.28 → conda; else run _try_uv_install.
+    # The decision chain: USE_CONDA short-circuits; glibc<2.28 selects conda;
+    # otherwise run _try_uv_install.
     chain = text[text.index('if [[ "$USE_CONDA" -eq 1 ]]; then'):]
     assert re.search(r'if \[\[ "\$USE_CONDA" -eq 1 \]\]; then', chain), \
         'decision chain does not start with the USE_CONDA short-circuit'
-    assert re.search(r'elif \[\[ "\$WITH_POSTGRES" -eq 1 \]\]; then.*?USE_CONDA=1',
-                     chain, re.S), '--with-postgres does not auto-switch to conda'
+    assert 'WITH_POSTGRES' not in chain
     assert re.search(r'elif ! _glibc_ge_228; then.*?USE_CONDA=1', chain, re.S), \
         'glibc<2.28 does not force the conda path'
     assert re.search(r'else\s+.*?_try_uv_install', chain, re.S), \
         '_try_uv_install is not the else (default) branch'
-    _ok('uv attempt is gated on --use-conda / --with-postgres / glibc>=2.28')
+    _ok('uv attempt is gated on --use-conda / glibc>=2.28')
 
 
 def test_uv_fallback_is_clean_and_smoke_tests_glibc_canaries():
@@ -142,7 +142,7 @@ def test_conda_pipeline_guarded_by_fast_path_flag():
     open_idx = text.index('if [[ "$_FAST_PATH_DONE" -ne 1 ]]; then')
     close_idx = text.index('fi  # ── end legacy conda path')
     step1 = text.index('#  Step 1: Locate, version-check, or install conda')
-    step85 = text.index('#  Step 8.5: Validate data/pgdata')
+    step85 = text.index('#  Step 8.5: Select the standalone personal storage')
     # Ordering: guard-open < Step1 < guard-close < Step 8.5.
     assert open_idx < step1 < close_idx < step85, \
         'conda pipeline is not fully wrapped by the _FAST_PATH_DONE guard'
@@ -182,7 +182,9 @@ def test_reexec_uses_prefix_not_just_executable():
     """server.py + bootstrap.py must decide 'already in env' by comparing
     sys.prefix to env_prefix (a venv's bin/python is a symlink to a base
     interpreter, so a bare executable compare can false-positive)."""
-    for src, name in ((_server_py(), 'server.py'), (_bootstrap_py(), 'bootstrap.py')):
+    for src, name in (
+            (_server_py(), 'server.py'),
+            (_bootstrap_env_reexec_py(), 'bootstrap_pkg/env_reexec.py')):
         assert re.search(r'os\.path\.realpath\(sys\.prefix\) == os\.path\.realpath\(env_prefix\)',
                          src), f'{name} does not use a sys.prefix vs env_prefix re-exec check'
     _ok('re-exec guard compares sys.prefix to env_prefix (symlink-safe) in both consumers')
@@ -225,7 +227,7 @@ def test_server_reexec_respects_uv_backend():
 def test_bootstrap_reexec_respects_uv_backend():
     """bootstrap.py (the other marker consumer) must also skip CONDA_PREFIX /
     CONDA_DEFAULT_ENV for a uv venv, else _running_in_conda_env() misfires."""
-    text = _bootstrap_py()
+    text = _bootstrap_env_reexec_py()
     assert "backend = cfg.get('backend')" in text, \
         "bootstrap.py re-exec does not read the marker's backend field"
     assert re.search(
@@ -260,8 +262,9 @@ def test_playwright_env_exported_before_reexec_early_return():
     behavioural counterpart (a real screenshot from a scrubbed env) lives in
     tests/test_chromium_env.py.
     """
-    for src, name, early_var in ((_server_py(), 'server.py', 'already_in_env'),
-                                 (_bootstrap_py(), 'bootstrap.py', 'same')):
+    for src, name, early_var in (
+            (_server_py(), 'server.py', 'already_in_env'),
+            (_bootstrap_env_reexec_py(), 'bootstrap_pkg/env_reexec.py', 'same')):
         assert '_tofu_export_env_native_paths' in src, \
             f'{name} has no native-path export helper'
         # Anchor on the CALL site (leading indent), not the bare name: the `def`
@@ -303,7 +306,7 @@ def test_fontconfig_exported_when_no_system_config():
         ('chromium_env.py does not bail out when /etc/fonts exists — it would '
          'override a real system fontconfig config')
     # And both entry points must actually route through it.
-    for name in ('server.py', 'bootstrap.py'):
+    for name in ('server.py', 'bootstrap_pkg/env_reexec.py'):
         assert _really_imports_chromium_env(name), \
             f'{name} does not import chromium_env.py for the fontconfig fallback'
     _ok('fontconfig falls back to the env config only when /etc/fonts is absent')
@@ -614,6 +617,64 @@ def test_force_reinstall_is_conditional_not_unconditional():
     _ok('--force-reinstall is gated on the purge actually removing something')
 
 
+def test_install_log_is_unique_private_and_created_without_overwrite():
+    """Installer transcripts may contain paths and third-party diagnostics.
+
+    Give simultaneous runs distinct names, create the file under a private
+    umask without following an existing target, and keep the explicit chmod as
+    a second ownership boundary before redirecting installer output into it.
+    """
+    text = _install_sh()
+    assignment = re.search(
+        r'^_TOFU_INSTALL_LOG_BASENAME=.*\$\{BASHPID\}\.log"$', text, re.M)
+    assert assignment, 'install log name does not include BASHPID'
+    create_idx = text.index(
+        '(umask 077; set -o noclobber; : > "$TOFU_INSTALL_LOG")')
+    chmod_idx = text.index('chmod 600 "$TOFU_INSTALL_LOG"')
+    redirect_idx = text.index('exec > >(')
+    assert assignment.start() < create_idx < chmod_idx < redirect_idx, (
+        'install log must be uniquely named, privately created without '
+        'overwrite, and chmodded before any output redirection')
+    assert '[[ -f "${INSTALL_DIR}/server.py" ]]' in text[assignment.start():create_idx]
+    assert '${_TOFU_INSTALL_LOG_BASENAME}.pending' in text[assignment.start():create_idx]
+    assert 'ln "$TOFU_INSTALL_LOG" "$_final_log"' in text
+    assert text.count('_finalize_install_log_location') == 2
+    _ok('install log is unique, private, and never opens an existing target')
+
+
+def test_source_checkout_is_prepared_once_unless_missing_git_defers_clone():
+    """Do not update or inspect the checkout twice on the conda path.
+
+    Source preparation runs before backend selection. The later conda step may
+    retry it only when the first attempt could not clone because git was absent.
+    Keeping the update in one helper also prevents requirements from changing
+    halfway through an otherwise deterministic installer run.
+    """
+    text = _install_sh()
+    assert text.count('_prepare_source_checkout() {') == 1
+    assert text.count('git pull --ff-only') == 1
+    assert text.count('step "Getting Tofu source code"') == 1
+    deferred = text.index('step "Completing deferred Tofu source checkout"')
+    guard = text.rfind('if [[ "$_SOURCE_CHECKOUT_READY" -ne 1 ]]', 0, deferred)
+    assert guard >= 0, 'the conda retry must be limited to a genuinely deferred clone'
+    _ok('source checkout is prepared once, with one explicit deferred retry')
+
+
+def test_rerun_preserves_existing_port_unless_user_explicitly_changes_it():
+    text = _install_sh()
+    assert 'PORT_FROM_ENV=0' in text
+    assert 'PORT_FROM_ENV=1' in text
+    assert 'PORT_EXPLICIT=0' in text
+    assert text.count('PORT_EXPLICIT=1') == 2
+    config = text[text.index('ENV_FILE="${INSTALL_DIR}/.env"'):]
+    assert 'from tofu_dotenv import read_dotenv_values' in config
+    assert 'Preserving existing PORT=${PORT} (pass --port to change it)' in config
+    assert 'Using explicit environment PORT=${PORT}; leaving existing .env unchanged' in config
+    assert '$_ENV_FILE_EXISTED" -eq 0 || "$PORT_EXPLICIT" -eq 1' in config
+    assert config.count('chmod 600 "$ENV_FILE"') >= 2
+    _ok('installer reruns preserve a valid existing port and re-protect .env')
+
+
 def test_chromium_env_survives_the_export():
     """Regression class (charter 2026-07-28): "export product is a first-class
     acceptance target". chromium_env.py is what makes Chromium launch in the
@@ -656,7 +717,7 @@ def main():
     print()
     tests = [
         test_use_conda_flag_parses_and_defaults_off,
-        test_uv_path_gated_on_glibc_and_flags,
+        test_uv_path_gated_on_glibc_and_conda_flag,
         test_uv_fallback_is_clean_and_smoke_tests_glibc_canaries,
         test_conda_pipeline_guarded_by_fast_path_flag,
         test_conda_only_globals_preseeded_for_set_u,
@@ -676,6 +737,7 @@ def main():
         test_docstrings_do_not_cite_deleted_symbols,
         test_browser_and_uv_caches_are_persistent_and_shared,
         test_force_reinstall_is_conditional_not_unconditional,
+        test_install_log_is_unique_private_and_created_without_overwrite,
         test_chromium_env_survives_the_export,
     ]
     for fn in tests:

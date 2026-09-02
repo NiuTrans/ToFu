@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -19,6 +20,7 @@ from pathlib import Path
 
 from .egress_proxy import EgressProxy
 from .guest_agent import GuestAgent, GuestAgentError
+from .loopback_service import LoopbackServiceRelay
 from .qemu import (
     QemuRuntime,
     QemuUnavailableError,
@@ -29,6 +31,9 @@ from .qemu import (
 
 _MARKER = ".rootless-vm-session.json"
 _FICLONE = 0x40049409
+_SERVICE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_CONTROL_PLANE_GUEST_HOST = "10.0.2.101"
+_MAX_LOOPBACK_SERVICES = 8
 
 
 def _private_clone(source: Path, target: Path, mode: int) -> None:
@@ -50,6 +55,43 @@ def _private_clone(source: Path, target: Path, mode: int) -> None:
 class NetworkMode(str, Enum):
     NONE = "none"
     PUBLIC = "public"
+
+
+@dataclass(frozen=True)
+class LoopbackServiceForward:
+    """One harness-owned guest endpoint mapped to a fixed host loopback port."""
+
+    name: str
+    guest_port: int
+    host_port: int
+    guest_host: str = _CONTROL_PLANE_GUEST_HOST
+    maximum_bytes: int = 2 * 1024**3
+    maximum_connections: int = 16
+
+    def validate(self) -> None:
+        if not isinstance(self.name, str) or not _SERVICE_NAME.fullmatch(self.name):
+            raise ValueError(
+                "loopback service name must be lowercase ASCII with optional hyphens"
+            )
+        if self.guest_host != _CONTROL_PLANE_GUEST_HOST:
+            raise ValueError(
+                f"loopback service guest_host must be {_CONTROL_PLANE_GUEST_HOST}"
+            )
+        for label, value in (
+            ("guest_port", self.guest_port),
+            ("host_port", self.host_port),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) \
+                    or not 1 <= value <= 65535:
+                raise ValueError(
+                    f"loopback service {label} must be an integer between 1 and 65535"
+                )
+        if self.maximum_bytes < 1024 * 1024:
+            raise ValueError("loopback service maximum_bytes must be at least 1 MiB")
+        if not 1 <= self.maximum_connections <= 32:
+            raise ValueError(
+                "loopback service maximum_connections must be between 1 and 32"
+            )
 
 
 def _existing_file(value: Path | None, label: str) -> Path | None:
@@ -89,6 +131,7 @@ class SandboxSpec:
     disk_virtual_size_gib: int | None = None
     read_only_images: tuple[Path, ...] = ()
     network: NetworkMode = NetworkMode.NONE
+    loopback_services: tuple[LoopbackServiceForward, ...] = ()
     egress_max_bytes: int = 4 * 1024**3
     egress_global_concurrency: int = 16
     require_qemu_sandbox: bool = True
@@ -103,7 +146,29 @@ class SandboxSpec:
             raise ValueError("egress_max_bytes must be at least 1 MiB")
         if not 1 <= self.egress_global_concurrency <= 128:
             raise ValueError("egress_global_concurrency must be between 1 and 128")
-        if self.network is NetworkMode.PUBLIC and not self.runtime.supports_user_network():
+        if not isinstance(self.loopback_services, tuple):
+            raise ValueError("loopback_services must be an immutable tuple")
+        if len(self.loopback_services) > _MAX_LOOPBACK_SERVICES:
+            raise ValueError(
+                f"at most {_MAX_LOOPBACK_SERVICES} loopback services are allowed"
+            )
+        service_names: set[str] = set()
+        guest_endpoints: set[tuple[str, int]] = set()
+        for service in self.loopback_services:
+            if not isinstance(service, LoopbackServiceForward):
+                raise ValueError(
+                    "loopback_services entries must be LoopbackServiceForward values"
+                )
+            service.validate()
+            endpoint = (service.guest_host, service.guest_port)
+            if service.name in service_names or endpoint in guest_endpoints:
+                raise ValueError("loopback service names and guest endpoints must be unique")
+            service_names.add(service.name)
+            guest_endpoints.add(endpoint)
+        has_restricted_network = (
+            self.network is NetworkMode.PUBLIC or bool(self.loopback_services)
+        )
+        if has_restricted_network and not self.runtime.supports_user_network():
             raise QemuUnavailableError(
                 "QEMU was built without rootless user-network support"
             )
@@ -117,11 +182,11 @@ class SandboxSpec:
             )
         if (
             self.require_qemu_sandbox
-            and self.network is NetworkMode.PUBLIC
+            and has_restricted_network
             and self.runtime.egress_bridge is None
         ):
             raise QemuUnavailableError(
-                "the native rootless egress bridge is required for public networking"
+                "the native rootless bridge is required for restricted networking"
             )
         if not 128 <= self.memory_mib <= 1024 * 1024:
             raise ValueError("memory_mib must be between 128 and 1048576")
@@ -182,9 +247,13 @@ class SandboxSession:
         self._initrd_guest_path: str | None = None
         self._read_only_guest_paths: list[str] = []
         self._bios_guest_path: str | None = None
+        self._overlay_virtual_size_bytes: int | None = None
         self.overlay: Path | None = None
         self.process: subprocess.Popen[bytes] | None = None
         self.egress_proxy: EgressProxy | None = None
+        self.loopback_service_relays: list[
+            tuple[LoopbackServiceForward, LoopbackServiceRelay]
+        ] = []
         try:
             if self.confined:
                 self._prepare_jail()
@@ -205,6 +274,14 @@ class SandboxSession:
                     gate_dir=self.state_root / ".egress-gate",
                     global_connections=spec.egress_global_concurrency,
                 )
+            for index, service in enumerate(spec.loopback_services):
+                relay = LoopbackServiceRelay(
+                    socket_path=self.run_dir / f"control-{index}.sock",
+                    host_port=service.host_port,
+                    maximum_bytes=service.maximum_bytes,
+                    maximum_connections=service.maximum_connections,
+                )
+                self.loopback_service_relays.append((service, relay))
             if spec.base_disk is not None:
                 self.overlay = self.run_dir / "root.qcow2"
                 self._overlay_guest_path = (
@@ -261,7 +338,7 @@ class SandboxSession:
         qemu = self.spec.runtime.qemu.resolve(strict=True)
         self._clone_absolute(qemu, executable=True)
         executables = [qemu]
-        if self.spec.network is NetworkMode.PUBLIC:
+        if self.spec.network is NetworkMode.PUBLIC or self.spec.loopback_services:
             bridge = self.spec.runtime.egress_bridge
             assert bridge is not None
             self._clone_absolute(bridge, executable=True)
@@ -396,14 +473,14 @@ class SandboxSession:
             "../inputs/base.qcow2" if self.confined else str(self.spec.base_disk.resolve()),
         ]
         base_virtual_size = image_info.get("virtual-size")
+        if not isinstance(base_virtual_size, int) or base_virtual_size <= 0:
+            raise RuntimeError("qemu-img did not report a valid base virtual size")
         requested_bytes = (
             self.spec.disk_virtual_size_gib * 1024**3
             if self.spec.disk_virtual_size_gib is not None
             else None
         )
         if self.confined:
-            if not isinstance(base_virtual_size, int) or base_virtual_size <= 0:
-                raise RuntimeError("qemu-img did not report a valid base virtual size")
             # The normalized backing paths only exist after chroot, so create
             # the top overlay without opening the backing chain host-side.
             command.append("-u")
@@ -428,6 +505,40 @@ class SandboxSession:
         )
         if result.returncode:
             raise RuntimeError(f"failed to create qcow2 overlay: {result.stderr.strip()}")
+        self._overlay_virtual_size_bytes = max(
+            base_virtual_size, requested_bytes or base_virtual_size
+        )
+
+    def _guest_forward(
+        self,
+        *,
+        guest_host: str,
+        guest_port: int,
+        jailed_socket: str,
+        host_socket: Path,
+    ) -> str:
+        if self.confined:
+            assert self.spec.runtime.egress_bridge is not None
+            bridge_parts = [
+                str(self.spec.runtime.egress_bridge),
+                "--socket",
+                jailed_socket,
+            ]
+        else:
+            bridge = Path(__file__).with_name("egress_bridge.py").resolve()
+            bridge_parts = [
+                sys.executable,
+                str(bridge),
+                "--socket",
+                str(host_socket),
+            ]
+        # Every field is harness-owned and validated before command assembly.
+        # libslirp invokes this fixed relay once per forwarded connection; no
+        # task-provided destination or shell fragment is interpolated here.
+        bridge_command = shlex.join(bridge_parts)
+        return (
+            f"guestfwd=tcp:{guest_host}:{guest_port}-cmd:{bridge_command}"
+        )
 
     def command(self, *, paused: bool = False) -> list[str]:
         prlimit = shutil.which("prlimit")
@@ -438,9 +549,18 @@ class SandboxSession:
         launcher = Path(__file__).with_name("qemu_launcher.py").resolve()
         parent_death_wrapper = Path(__file__).with_name("pdeath_exec.py").resolve()
         address_space_mib = self.spec.memory_mib * 2 + 2048
-        disk_limit_gib = (self.spec.disk_virtual_size_gib or 22) + 2
         address_space_bytes = address_space_mib * 1024 * 1024
-        file_size_bytes = disk_limit_gib * 1024 * 1024 * 1024
+        if self._overlay_virtual_size_bytes is not None:
+            # Harbor's storage value is a lower-bound hint. A trusted backing
+            # disk can already be larger (for example 20 GiB backing with a
+            # 10 GiB task hint), and _create_overlay deliberately never
+            # shrinks it. Bound the qcow2 by that effective virtual size plus
+            # metadata headroom; using the smaller hint makes QEMU hit
+            # RLIMIT_FSIZE, return guest I/O errors, and force ext4 into
+            # emergency read-only mode despite free guest space.
+            file_size_bytes = self._overlay_virtual_size_bytes + 2 * 1024**3
+        else:
+            file_size_bytes = ((self.spec.disk_virtual_size_gib or 22) + 2) * 1024**3
         command = [
             str(Path(prlimit).resolve()),
             "--core=0:0",
@@ -528,51 +648,48 @@ class SandboxSession:
             )
         if self._bios_guest_path is not None:
             command.extend(["-bios", self._bios_guest_path])
-        if self.egress_proxy is None:
+        guest_forwards: list[str] = []
+        if self.egress_proxy is not None:
+            guest_forwards.append(
+                self._guest_forward(
+                    guest_host=self.egress_proxy.guest_host,
+                    guest_port=self.egress_proxy.guest_port,
+                    jailed_socket="/run/egress.sock",
+                    host_socket=self.egress_proxy.socket_path,
+                )
+            )
+        for index, (service, relay) in enumerate(self.loopback_service_relays):
+            guest_forwards.append(
+                self._guest_forward(
+                    guest_host=service.guest_host,
+                    guest_port=service.guest_port,
+                    jailed_socket=f"/run/control-{index}.sock",
+                    host_socket=relay.socket_path,
+                )
+            )
+        if not guest_forwards:
             command.extend(["-nic", "none"])
         else:
-            if self.confined:
-                assert self.spec.runtime.egress_bridge is not None
-                bridge_parts = [
-                    str(self.spec.runtime.egress_bridge),
-                    "--socket",
-                    "/run/egress.sock",
-                ]
-            else:
-                bridge = Path(__file__).with_name("egress_bridge.py").resolve()
-                bridge_parts = [
-                    sys.executable,
-                    str(bridge),
-                    "--socket",
-                    str(self.egress_proxy.socket_path),
-                ]
-            # All fields are harness-owned absolute paths or integers. libslirp
-            # invokes this fixed command once per guest proxy connection; no
-            # task-controlled value is interpolated into its shell command.
-            bridge_command = shlex.join(
-                bridge_parts
-            )
             command.extend(
                 [
                     "-netdev",
                     (
                         "user,id=egress,restrict=on,ipv6=off,"
-                        f"guestfwd=tcp:{self.egress_proxy.guest_host}:"
-                        f"{self.egress_proxy.guest_port}-cmd:{bridge_command}"
+                        + ",".join(guest_forwards)
                     ),
                     "-device",
                     "virtio-net-pci,netdev=egress,romfile=",
                 ]
             )
         if self.spec.runtime.supports_sandbox():
-            public_network = self.spec.network is NetworkMode.PUBLIC
-            spawn_policy = "allow" if public_network else "deny"
+            restricted_network = bool(guest_forwards)
+            spawn_policy = "allow" if restricted_network else "deny"
             # libslirp's child setup uses session/process syscalls that QEMU's
             # elevateprivileges=deny group also blocks. QEMU is already an
             # unprivileged, capability-free process and the launcher imposed
             # no_new_privs before exec, so allowing that syscall group cannot
             # create privilege. Offline mode keeps the stricter deny policy.
-            privilege_policy = "allow" if public_network else "deny"
+            privilege_policy = "allow" if restricted_network else "deny"
             command.extend(
                 [
                     "-sandbox",
@@ -627,11 +744,31 @@ class SandboxSession:
             )
         return command
 
+    def _start_network_relays(self) -> None:
+        started: list[LoopbackServiceRelay] = []
+        try:
+            for _service, relay in self.loopback_service_relays:
+                started.append(relay)
+                relay.start()
+            if self.egress_proxy is not None:
+                self.egress_proxy.start()
+        except Exception:
+            if self.egress_proxy is not None:
+                self.egress_proxy.stop()
+            for relay in reversed(started):
+                relay.stop()
+            raise
+
+    def _stop_network_relays(self) -> None:
+        if self.egress_proxy is not None:
+            self.egress_proxy.stop()
+        for _service, relay in reversed(self.loopback_service_relays):
+            relay.stop()
+
     def start(self, *, paused: bool = False, timeout: float = 10.0) -> None:
         if self.process is not None:
             raise RuntimeError("session already started")
-        if self.egress_proxy is not None:
-            self.egress_proxy.start()
+        self._start_network_relays()
         try:
             parent_death_wrapper = Path(__file__).with_name("pdeath_exec.py")
             self.process = subprocess.Popen(
@@ -647,8 +784,7 @@ class SandboxSession:
                 env=_isolated_subprocess_env(),
             )
         except Exception:
-            if self.egress_proxy is not None:
-                self.egress_proxy.stop()
+            self._stop_network_relays()
             raise
         deadline = time.monotonic() + timeout
         while not self.qmp_path.is_socket():
@@ -658,8 +794,7 @@ class SandboxSession:
                     if self.process.stderr
                     else ""
                 )
-                if self.egress_proxy is not None:
-                    self.egress_proxy.stop()
+                self._stop_network_relays()
                 raise RuntimeError(f"QEMU exited during startup: {stderr.strip()}")
             if time.monotonic() >= deadline:
                 self.stop()
@@ -714,8 +849,7 @@ class SandboxSession:
     def stop(self, *, timeout: float = 5.0) -> None:
         process = self.process
         if process is None:
-            if self.egress_proxy is not None:
-                self.egress_proxy.stop()
+            self._stop_network_relays()
             return
         if process.poll() is None and self.qmp_path.is_socket():
             try:
@@ -736,8 +870,7 @@ class SandboxSession:
         if process.stderr:
             process.stderr.close()
         self.process = None
-        if self.egress_proxy is not None:
-            self.egress_proxy.stop()
+        self._stop_network_relays()
 
     @staticmethod
     def _signal_process_group(process: subprocess.Popen[bytes], signum: int) -> None:
@@ -780,8 +913,7 @@ class SandboxSession:
         if process.stderr:
             process.stderr.close()
         self.process = None
-        if self.egress_proxy is not None:
-            self.egress_proxy.stop()
+        self._stop_network_relays()
 
     def delete(self) -> None:
         self.stop()

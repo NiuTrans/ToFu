@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import type { I18nKey } from '../../i18n';
 type LooseObject = Record<string, any>;
 
 interface MediaModel {
@@ -27,7 +28,7 @@ function storageKey(panel: MediaPanel): string {
   return panel === 'podcast' ? 'paperPodcastModel' : 'paperVideoModel';
 }
 
-function translate(key: string, fallback: string): string {
+function translate(key: I18nKey, fallback: string): string {
   const fn = globals().t;
   return typeof fn === 'function' ? String(fn(key)) : fallback;
 }

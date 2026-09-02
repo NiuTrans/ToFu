@@ -26,14 +26,16 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('TRADING_ENABLED', '0')
 
+pytest_plugins = ('tests._artifact_sidecar',)
+
 if __name__ == '__main__':
-    # The engine import below freezes the DB backend from the ambient env —
-    # the standalone guard must run FIRST (under pytest this branch never
-    # fires, so the session DB is untouched).
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_paper_checkpoints.standalone')
+    # Start an isolated storage authority before importing the engine.
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_paper_checkpoints.standalone')
 
 import lib.paper.checkpoint_engine as ce  # noqa: E402
+
+TEST_OWNER_USER_ID = 1
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -140,7 +142,9 @@ class _Patched:
 
 def test_generate_anchor_persist():
     with _Patched() as p:
-        out = ce.run_report_checkpoints(_REPORT, 'en', phash='cp1', persist=True)
+        out = ce.run_report_checkpoints(
+            _REPORT, 'en', phash='cp1', persist=True,
+            user_id=TEST_OWNER_USER_ID)
     items = out['items']
     assert len(items) == 2, f'unresolved nomination must be DROPPED: {items}'
     assert items[0]['anchor_idx'] == 2 and items[0]['section'] == '💡 Method — How It Works'
@@ -158,7 +162,9 @@ def test_generate_anchor_persist():
 
 def test_repair_reask_recovers():
     with _Patched(break_first=True) as p:
-        out = ce.run_report_checkpoints(_REPORT, 'en', phash='cp2', persist=True)
+        out = ce.run_report_checkpoints(
+            _REPORT, 'en', phash='cp2', persist=True,
+            user_id=TEST_OWNER_USER_ID)
     assert p.calls == 2, f'repair re-ask not issued: calls={p.calls}'
     assert len(out['items']) == 2, 'repair did not recover the cards'
     _ok('修复重问:首发垃圾 → temp-0 重问救回卡片')
@@ -166,7 +172,9 @@ def test_repair_reask_recovers():
 
 def test_repair_both_fail_yields_nothing():
     with _Patched(break_first=True, break_repair=True) as p:
-        out = ce.run_report_checkpoints(_REPORT, 'en', phash='cp3', persist=True)
+        out = ce.run_report_checkpoints(
+            _REPORT, 'en', phash='cp3', persist=True,
+            user_id=TEST_OWNER_USER_ID)
     assert p.calls == 2
     assert out['items'] == [], 'both-fail must yield nothing (never garbage to the reader)'
     assert out['persisted'] is False
@@ -175,7 +183,9 @@ def test_repair_both_fail_yields_nothing():
 
 def test_zh_prompt_and_cards():
     with _Patched():
-        out = ce.run_report_checkpoints(_REPORT, 'zh', phash='cp4', persist=True)
+        out = ce.run_report_checkpoints(
+            _REPORT, 'zh', phash='cp4', persist=True,
+            user_id=TEST_OWNER_USER_ID)
     assert out['persisted'] is True
     assert out['items'], 'zh run produced no cards'
     _ok('zh 路径:提示词与持久化键随语言')
@@ -184,19 +194,26 @@ def test_zh_prompt_and_cards():
 # ── 5. hook wiring ───────────────────────────────────────────────────────
 def test_hook_emits_and_merges():
     import lib.paper.report_engine._hooks as hooks
+    import lib.paper.artifact_repository as artifact_repository
     events = []
     updates = []
     orig_run = ce.run_report_checkpoints
     orig_append = hooks._append_report_event
-    import lib.database as _dbmod
-    orig_thread = getattr(_dbmod, 'get_thread_db', None)
+    orig_repository = artifact_repository.PaperArtifactRepository
     import lib.cost as _cost_mod
     orig_cost = _cost_mod.compute_cost
 
-    class _FakeDB:
-        def execute(self, sql, params=None):
-            updates.append((sql, params))
-            return self
+    class _FakeRepository:
+        def __init__(self, owner_user_id):
+            assert owner_user_id == TEST_OWNER_USER_ID
+
+        def merge_report_second_pass(
+                self, paper_hash, lang, name, entry, *, command_id):
+            updates.append((paper_hash, lang, name, command_id))
+            return {
+                **task['report_meta'],
+                'secondPasses': {name: dict(entry)},
+            }
 
     ce.run_report_checkpoints = lambda *a, **k: {
         'items': [{'section': 'X', 'anchor_idx': 2, 'question': 'q', 'answer': 'a'}],
@@ -205,21 +222,22 @@ def test_hook_emits_and_merges():
                   'reasoning_tokens': 0},
         'persisted': True, 'llmError': False}
     hooks._append_report_event = lambda t, ev: events.append(ev)
-    _dbmod.get_thread_db = lambda: _FakeDB()
+    artifact_repository.PaperArtifactRepository = _FakeRepository
     _cost_mod.compute_cost = lambda u, **k: {'costCny': 0.002, 'costUsd': 0.0002}
-    task = {'lang': 'en', 'config': None,
+    task = {'lang': 'en', 'config': None, '_userId': TEST_OWNER_USER_ID,
             'report_meta': {'model': 'm', 'promptTokens': 100, 'completionTokens': 50}}
     try:
         hooks._maybe_run_checkpoints(task, 'hc', 'en', _REPORT, model='m')
     finally:
         ce.run_report_checkpoints = orig_run
         hooks._append_report_event = orig_append
-        _dbmod.get_thread_db = orig_thread
+        artifact_repository.PaperArtifactRepository = orig_repository
         _cost_mod.compute_cost = orig_cost
     assert any(e.get('type') == 'checkpoints' and e.get('items') for e in events), \
         f'checkpoints event not emitted: {events}'
     sp = task['report_meta'].get('secondPasses', {}).get('checkpoints')
     assert sp and sp['cards'] == 1 and sp['costCny'] == 0.002, f'secondPasses: {sp}'
+    assert updates and updates[0][:3] == ('hc', 'en', 'checkpoints')
     assert any(e.get('type') == 'report_meta' for e in events)
     _ok('钩子:checkpoints 事件 + secondPasses 合并 + report_meta 热更')
 
@@ -230,6 +248,7 @@ def test_hook_gate_respects_cfg_stamp():
     orig_run = ce.run_report_checkpoints
     ce.run_report_checkpoints = lambda *a, **k: called.append(1) or {'items': [], 'usage': None}
     task = {'lang': 'en', 'config': {'paperCheckpointsEnabled': False},
+            '_userId': TEST_OWNER_USER_ID,
             'report_meta': {'model': 'm'}}
     try:
         hooks._maybe_run_checkpoints(task, 'hg', 'en', _REPORT, model='m')
@@ -248,30 +267,41 @@ def _import_routes_paper():
                 mod.Blueprint.websocket = lambda self, *a, **k: (lambda f: f)
         except Exception:
             pass
-    import routes.paper as rp
+    import routes.paper_pkg._common as rp
     return rp
 
 
 def test_read_path_payload():
     rp = _import_routes_paper()
     phash = 'cpr'
-    meta = json.dumps({'kind': 'checkpoints', 'v': 2,
-                       'items': [{'section': 'X', 'anchor_idx': 1,
-                                  'question': 'q', 'answer': 'a'}]})
-    rows = {(phash, ce.checkpoints_lang_key('en')): {'meta': meta, 'report': 'x'}}
+    from lib.paper.artifact_repository import PaperReport
+    rows = {(phash, ce.checkpoints_lang_key('en')): PaperReport(
+        paper_hash=phash,
+        lang=ce.checkpoints_lang_key('en'),
+        report='x',
+        meta={'kind': 'checkpoints', 'v': 2,
+              'items': [{'section': 'X', 'anchor_idx': 1,
+                         'question': 'q', 'answer': 'a'}]},
+    )}
 
-    async def _fake_fetchone(sql, params, **kw):
-        return rows.get((params[0], params[1]))
+    class _Repository:
+        def __init__(self, owner_user_id):
+            assert owner_user_id == TEST_OWNER_USER_ID
 
-    orig = rp.async_fetchone
-    rp.async_fetchone = _fake_fetchone
+        def get_report(self, paper_hash, lang):
+            return rows.get((paper_hash, lang))
+
+    orig = rp.PaperArtifactRepository
+    rp.PaperArtifactRepository = _Repository
     try:
         payload = asyncio.new_event_loop().run_until_complete(
-            rp._load_cached_checkpoints_payload(phash, 'en'))
+            rp._load_cached_checkpoints_payload(
+                phash, 'en', user_id=TEST_OWNER_USER_ID))
         none_payload = asyncio.new_event_loop().run_until_complete(
-            rp._load_cached_checkpoints_payload('missing', 'en'))
+            rp._load_cached_checkpoints_payload(
+                'missing', 'en', user_id=TEST_OWNER_USER_ID))
     finally:
-        rp.async_fetchone = orig
+        rp.PaperArtifactRepository = orig
     assert payload and payload['items'][0]['anchor_idx'] == 1, f'payload: {payload}'
     assert none_payload is None
     _ok('读路径:持久行 → 结构化负载;无行 → None(不合并、不重算)')

@@ -38,7 +38,7 @@ pytestmark = pytest.mark.unit
 
 def _active_timer():
     return {
-        'id': 'tmr_test', 'status': 'active',
+        'id': 'tmr_test', 'user_id': 1, 'status': 'active',
         'check_instruction': 'Is it done?', 'check_command': '',
         'tools_config': '{}', 'poll_count': 0,
     }
@@ -51,7 +51,8 @@ def _tc(name, args):
 
 @pytest.fixture(autouse=True)
 def _stub_timer_row(monkeypatch):
-    monkeypatch.setattr(timer_mod, '_get_timer_row', lambda tid: _active_timer())
+    monkeypatch.setattr(
+        timer_mod, '_get_timer_row', lambda tid, **_kwargs: _active_timer())
 
 
 def _install_smart_chat(monkeypatch, script):
@@ -81,15 +82,18 @@ def test_multi_round_tool_then_decision(monkeypatch):
     _install_smart_chat(monkeypatch, script)
 
     executed = []
+    execution_kwargs = {}
 
-    def _fake_exec(tc, timer_id, project_path):
+    def _fake_exec(tc, timer_id, project_path, **kwargs):
         executed.append(tc['function']['name'])
+        execution_kwargs.update(kwargs)
         return ('tool output', 0.12, False)
 
     monkeypatch.setattr(timer_mod, '_execute_poll_tool', _fake_exec)
 
     (ready, reason, tokens, skipped, parse_error, cmd_output,
-     model, tool_trace, raw_content) = timer_mod.poll_timer('tmr_test')
+     model, tool_trace, raw_content) = timer_mod.poll_timer(
+        'tmr_test', user_id=1)
 
     assert ready is True
     assert reason == 'all green'
@@ -98,6 +102,10 @@ def test_multi_round_tool_then_decision(monkeypatch):
     assert tokens == 15, 'tokens must sum across both rounds'
     assert model == 'cheap-x', 'poll_model captured from usage[_dispatch]'
     assert executed == ['read_files']
+    contracts = execution_kwargs['tool_contract_documents_by_name']
+    assert set(contracts) == {'read_files'}
+    assert contracts['read_files']['contractVersion'] == 'tofu.tool-contract/v2'
+    assert execution_kwargs['owner_user_id'] == 1
     assert len(tool_trace) == 1
     assert tool_trace[0] == {
         # argsBrief is the name-keyed display label (format_tool_args_brief),
@@ -118,9 +126,9 @@ def test_tools_continue_until_natural_decision(monkeypatch):
     calls = _install_smart_chat(monkeypatch, [always_tool] * 8 + [final])
 
     monkeypatch.setattr(timer_mod, '_execute_poll_tool',
-                        lambda tc, tid, pp: ('r', 0.01, False))
+                        lambda tc, tid, pp, **_kwargs: ('r', 0.01, False))
 
-    result = timer_mod.poll_timer('tmr_test')
+    result = timer_mod.poll_timer('tmr_test', user_id=1)
     tool_trace = result[7]
 
     assert calls['n'] == 9
@@ -136,7 +144,8 @@ def test_dispatch_exception_reported(monkeypatch):
     monkeypatch.setattr(_ld, 'smart_chat', _boom, raising=True)
 
     (ready, reason, tokens, skipped, parse_error, cmd_output,
-     model, tool_trace, raw_content) = timer_mod.poll_timer('tmr_test')
+     model, tool_trace, raw_content) = timer_mod.poll_timer(
+        'tmr_test', user_id=1)
 
     assert ready is False
     assert parse_error is True
@@ -150,12 +159,97 @@ def test_parse_failure_on_prose_decision(monkeypatch):
     _install_smart_chat(monkeypatch, [('not json at all', {'total_tokens': 3})])
 
     (ready, reason, tokens, skipped, parse_error, cmd_output,
-     model, tool_trace, raw_content) = timer_mod.poll_timer('tmr_test')
+     model, tool_trace, raw_content) = timer_mod.poll_timer(
+        'tmr_test', user_id=1)
 
     assert ready is False
     assert parse_error is True
     assert raw_content == 'not json at all'
     assert tokens == 3
+
+
+@pytest.mark.parametrize(
+    ('tool_name', 'arguments', 'error_code'),
+    [
+        ('timer_contract_probe', '{"path": 7}', 'invalid_argument_type'),
+        ('not_visible_this_poll', '{"path": "ok"}', None),
+    ],
+)
+def test_v2_contract_rejects_before_timer_executor(
+        monkeypatch, tool_name, arguments, error_code):
+    """Invalid or non-visible calls never reach an unattended backend."""
+    from lib.tools.contracts import compile_execution_contract_documents
+
+    schema = {
+        'type': 'function',
+        'function': {
+            'name': 'timer_contract_probe',
+            'description': 'Read a bounded timer probe.',
+            'parameters': {
+                'type': 'object',
+                'properties': {'path': {'type': 'string'}},
+                'required': ['path'],
+                'additionalProperties': False,
+            },
+        },
+    }
+    contracts = compile_execution_contract_documents([schema], namespace='timer')
+
+    def _must_not_execute(*_args, **_kwargs):
+        raise AssertionError('rejected timer call reached _execute_tool_one')
+
+    import lib.tasks_pkg.executor as executor_mod
+    monkeypatch.setattr(
+        executor_mod, '_execute_tool_one', _must_not_execute, raising=True)
+
+    result, _elapsed, is_error = timer_mod._execute_poll_tool(
+        _tc(tool_name, arguments),
+        'tmr_contract_guard',
+        project_path='',
+        owner_user_id=1,
+        tool_contract_documents_by_name=contracts,
+    )
+
+    assert is_error is True
+    assert 'NOT executed' in result
+    if error_code:
+        assert error_code in result
+
+
+def test_contract_compile_failure_removes_unattended_tool_surface(monkeypatch):
+    """An ambiguous schema epoch degrades to a no-tool poll, never legacy."""
+    duplicate = {
+        'type': 'function',
+        'function': {
+            'name': 'duplicate_probe',
+            'description': 'probe',
+            'parameters': {'type': 'object', 'properties': {}},
+        },
+    }
+    monkeypatch.setattr(
+        'lib.scheduler.timer._poll._build_poll_tools',
+        lambda *_args, **_kwargs: [duplicate, duplicate],
+    )
+    seen = {}
+
+    def _decision(messages, **kwargs):
+        seen['tools'] = kwargs.get('tools')
+        return (json.dumps({'ready': False, 'reason': 'safe no-tool poll'}),
+                {'total_tokens': 2})
+
+    import lib.llm_dispatch as dispatch_mod
+    monkeypatch.setattr(dispatch_mod, 'smart_chat', _decision, raising=True)
+    monkeypatch.setattr(
+        timer_mod, '_execute_poll_tool',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError('compile-failed epoch executed a tool')),
+    )
+
+    result = timer_mod.poll_timer('tmr_test', user_id=1)
+
+    assert result[0] is False
+    assert result[1] == 'safe no-tool poll'
+    assert seen['tools'] is None
 
 
 if __name__ == '__main__':

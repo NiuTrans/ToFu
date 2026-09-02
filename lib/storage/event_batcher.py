@@ -12,11 +12,16 @@ from typing import Any, Callable
 
 from lib.storage.client import StorageClient
 from lib.storage.errors import StorageError
+from lib.log import get_logger
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
 class _PendingEvent:
-    payload: dict[str, Any]
+    # None is an in-order durability barrier, never sent to storage.
+    payload: dict[str, Any] | None
     enqueued_at: float = field(default_factory=time.monotonic)
     done: threading.Event = field(default_factory=threading.Event)
     result: dict[str, Any] | None = None
@@ -30,6 +35,7 @@ class StorageEventBatcher:
         self,
         client_provider: Callable[..., StorageClient] | None = None,
         *,
+        on_commit: Callable[[frozenset[str]], None] | None = None,
         max_batch: int = 500,
         max_window_ms: int = 250,
         coalesce_ms: int = 5,
@@ -39,6 +45,7 @@ class StorageEventBatcher:
             from lib.storage import get_storage_client
             client_provider = get_storage_client
         self._client_provider = client_provider
+        self._on_commit = on_commit
         self._max_batch = max(1, min(500, int(max_batch)))
         self._max_window_s = max(0.001, min(0.3, max_window_ms / 1000))
         self._coalesce_s = max(
@@ -117,6 +124,36 @@ class StorageEventBatcher:
             'inserted': False, 'task_id': task_id, 'sequence': sequence,
         }
 
+    def flush(self, timeout: float = 2.0) -> bool:
+        """Wait until every item accepted before this call is durable.
+
+        The barrier shares the bounded queue with events, so FIFO ordering is
+        the contract; it does not create a synthetic storage row or close the
+        reusable process-wide batcher.
+        """
+        wait_s = max(0.001, min(30.0, float(timeout)))
+        barrier = _PendingEvent(None)
+        with self._state_lock:
+            if self._closed:
+                raise StorageError(
+                    'database_unavailable', 'Storage event batcher is closed')
+            try:
+                self._queue.put(barrier, timeout=min(2.0, wait_s))
+            except queue.Full as exc:
+                raise StorageError(
+                    'database_busy', 'Storage event queue is full',
+                    True, 25) from exc
+        if not barrier.done.wait(wait_s):
+            raise StorageError(
+                'database_timeout', 'Storage event flush timed out', True, 25)
+        if barrier.error is not None:
+            if isinstance(barrier.error, StorageError):
+                raise barrier.error
+            raise StorageError(
+                'database_internal', 'Storage event flush failed') \
+                from barrier.error
+        return True
+
     def _take_batch(self) -> tuple[list[_PendingEvent], bool]:
         first = self._queue.get()
         if first is None:
@@ -159,35 +196,57 @@ class StorageEventBatcher:
             batch, stop_after = self._take_batch()
             if not batch:
                 return
+            storage_batch = [
+                pending for pending in batch if pending.payload is not None
+            ]
             try:
-                response = self._client_provider(write=True).command(
-                    'event.append_batch',
-                    {'events': [item.payload for item in batch]},
-                    None,
-                    priority='event',
-                    deadline=max(2.0, self._max_window_s + 1.0),
-                )
-                results = response.get('results') or []
-                if len(results) != len(batch):
-                    raise StorageError(
-                        'database_protocol_error',
-                        'Storage event batch response length mismatch')
-                for pending, result in zip(batch, results):
-                    pending.result = result
-                completed_at = time.monotonic()
-                with self._metrics_lock:
-                    self._metrics['batches'] += 1
-                    self._metrics['inserted'] += int(response.get('inserted') or 0)
-                    self._metrics['deduplicated'] += int(
-                        response.get('deduplicated') or 0)
-                    self._persist_lags_ms.extend(
-                        (completed_at - pending.enqueued_at) * 1000
-                        for pending in batch)
+                if storage_batch:
+                    response = self._client_provider(write=True).command(
+                        'event.append_batch',
+                        {'events': [item.payload for item in storage_batch]},
+                        None,
+                        priority='event',
+                        deadline=max(2.0, self._max_window_s + 1.0),
+                    )
+                    results = response.get('results') or []
+                    if len(results) != len(storage_batch):
+                        raise StorageError(
+                            'database_protocol_error',
+                            'Storage event batch response length mismatch')
+                    for pending, result in zip(storage_batch, results):
+                        pending.result = result
+                    completed_at = time.monotonic()
+                    with self._metrics_lock:
+                        self._metrics['batches'] += 1
+                        self._metrics['inserted'] += int(
+                            response.get('inserted') or 0)
+                        self._metrics['deduplicated'] += int(
+                            response.get('deduplicated') or 0)
+                        self._persist_lags_ms.extend(
+                            (completed_at - pending.enqueued_at) * 1000
+                            for pending in storage_batch)
             except BaseException as exc:
                 for pending in batch:
                     pending.error = exc
                 with self._metrics_lock:
-                    self._metrics['failed'] += len(batch)
+                    self._metrics['failed'] += len(storage_batch)
+            else:
+                # A producer invalidates read caches when it enqueues, but a
+                # reader can repopulate an old snapshot before this async
+                # transaction commits. Invalidate again at the durability
+                # boundary. The callback is observational: a cache failure
+                # must never turn an already-committed event into a reported
+                # storage failure.
+                if storage_batch and self._on_commit is not None:
+                    task_ids = frozenset(
+                        str(pending.payload['task_id'])
+                        for pending in storage_batch
+                        if pending.payload is not None)
+                    try:
+                        self._on_commit(task_ids)
+                    except Exception as exc:
+                        logger.exception(
+                            'storage event commit callback failed: %s', exc)
             finally:
                 for pending in batch:
                     pending.done.set()

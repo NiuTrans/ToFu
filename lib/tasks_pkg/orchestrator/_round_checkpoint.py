@@ -1,6 +1,6 @@
 """Per-round crash-recovery checkpoint + RENDER_CONTRACT round close.
 
-Extracted 2026-07-31 (pt_03f4cdf1 slice 20) from
+Extracted 2026-07-31 ( slice 20) from
 ``lib/tasks_pkg/orchestrator/_run.py`` run_task stream loop.
 
 Two steps run at the natural end of a tools-executed iteration,
@@ -58,7 +58,7 @@ def run_round_checkpoint_and_close(
         8-char task id for logging.
     """
     # ══════════════════════════════════════════
-    #  ★ Crash-recovery checkpoint: persist partial state to DB
+    #  Crash-recovery checkpoint: persist partial state to DB
     # ══════════════════════════════════════════
     # After each tool execution round, save current content/thinking
     # to task_results + conversation so data survives a server crash.
@@ -72,7 +72,7 @@ def run_round_checkpoint_and_close(
             logger.warning('[%s] Checkpoint after round %d failed (non-fatal): %s',
                            tid, round_num + 1, e, exc_info=True)
 
-    # ★ RENDER_CONTRACT Phase 3: explicit round-end boundary for a round
+    # RENDER_CONTRACT Phase 3: explicit round-end boundary for a round
     #   that issued tool calls and is about to loop into the next round.
     #   Reached only at the natural end of a tools-executed iteration
     #   (an early `continue` for a premature-close retry does NOT reach

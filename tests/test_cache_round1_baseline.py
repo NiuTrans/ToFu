@@ -2,7 +2,7 @@
 """Round-1 (new-turn) cache-break statistics honesty suite.
 
 WHY (the objective — "the cache-stats system is too optimistic"):
-  ``_cache_states`` is keyed per ``(conv_id, thread_id)`` and every new user
+  ``_cache_states`` is keyed per ``(owner, conv_id, thread_id)`` and every new user
   turn runs on a fresh ``run_task`` worker thread → a fresh ``CacheState`` with
   ``call_count == 0``. ``_classify_break``'s three predicates ALL gate on
   ``call_count > 0``, so the FIRST round of every turn is structurally exempt:
@@ -36,6 +36,7 @@ sys.modules.setdefault('flask', _quart)
 import pytest  # noqa: E402
 
 pytestmark = pytest.mark.unit
+OWNER = 1
 
 _FAKE_PREV_TURN_TID = 999_000_111  # a thread id that is NOT the test thread
 
@@ -56,17 +57,17 @@ def _tools():
 
 
 def _clean(conv):
-    from lib.tasks_pkg.cache_tracking import _state as _st
+    import lib.tasks_pkg.cache_tracking._state as _st
     with _st._cache_lock:
         for k in list(_st._cache_states):
-            if k[0] == conv:
+            if k[0] == OWNER and k[1] == conv:
                 _st._cache_states.pop(k, None)
 
 
 def _seed_prev_turn(conv, *, last_read, last_write=1000, calls=5):
     """Seed a PREVIOUS turn's CacheState under a DIFFERENT (fake) thread id so
     the current test thread sees a fresh round-1 state for ``conv``."""
-    from lib.tasks_pkg.cache_tracking import _state as _st
+    import lib.tasks_pkg.cache_tracking._state as _st
     from lib.tasks_pkg.cache_tracking._state import CacheState
     sib = CacheState()
     sib.call_count = calls
@@ -76,12 +77,12 @@ def _seed_prev_turn(conv, *, last_read, last_write=1000, calls=5):
     sib.model = 'claude-opus-4'
     sib.last_update_time = time.time()
     with _st._cache_lock:
-        _st._cache_states[(conv, _FAKE_PREV_TURN_TID)] = sib
+        _st._cache_states[(OWNER, conv, _FAKE_PREV_TURN_TID)] = sib
 
 
 def _cur_state(conv):
-    from lib.tasks_pkg.cache_tracking import _state as _st
-    return _st._cache_states.get(_st._state_key(conv))
+    import lib.tasks_pkg.cache_tracking._state as _st
+    return _st._cache_states.get(_st._state_key(conv, user_id=OWNER))
 
 
 def test_round1_boundary_rebill_is_flagged_and_bucketed():
@@ -89,8 +90,10 @@ def test_round1_boundary_rebill_is_flagged_and_bucketed():
     79k → a real boundary re-bill. It MUST now be flagged as a break, counted
     in total_breaks, and bucketed as turn_boundary_rebill (NOT laundered to
     server_side)."""
-    from lib.tasks_pkg.cache_tracking import (
-        detect_cache_break, classify_verdict)
+    from lib.tasks_pkg.cache_tracking._detect import (
+        detect_cache_break,
+        classify_verdict,
+    )
 
     conv = 'round1-boundary-flagged'
     _clean(conv)
@@ -99,7 +102,8 @@ def test_round1_boundary_rebill_is_flagged_and_bucketed():
     usage = {'cache_read_input_tokens': 79_000,
              'cache_creation_input_tokens': 190_000,
              'input_tokens': 5_000}
-    res = detect_cache_break(conv, _messages(), _tools(), 'claude-opus-4', usage)
+    res = detect_cache_break(
+        conv, _messages(), _tools(), 'claude-opus-4', usage, user_id=OWNER)
 
     assert res is not None, 'round-1 boundary re-bill must be flagged as a break'
     assert 'turn_boundary_rebill' in res, (
@@ -115,7 +119,7 @@ def test_round1_boundary_rebill_is_flagged_and_bucketed():
 def test_genuine_first_call_no_baseline_is_benign_write():
     """A genuine first-ever call (NO sibling turn → baseline 0) must remain a
     benign first-time cache write, NOT a false break (cold-start honesty)."""
-    from lib.tasks_pkg.cache_tracking import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
     conv = 'round1-cold-start'
     _clean(conv)  # no sibling seeded
@@ -123,7 +127,8 @@ def test_genuine_first_call_no_baseline_is_benign_write():
     usage = {'cache_read_input_tokens': 79_000,
              'cache_creation_input_tokens': 190_000,
              'input_tokens': 5_000}
-    res = detect_cache_break(conv, _messages(), _tools(), 'claude-opus-4', usage)
+    res = detect_cache_break(
+        conv, _messages(), _tools(), 'claude-opus-4', usage, user_id=OWNER)
 
     assert res is None, f'cold start (no prior turn) must not be a break: {res}'
     st = _cur_state(conv)
@@ -135,7 +140,7 @@ def test_round1_warm_prefix_carried_across_boundary_no_break():
     """Prev turn left 262k AND this turn's round-1 still reads ~262k (the warm
     prefix carried across the boundary) → NO drop → NO break. Proves the fix
     does not cry wolf when the boundary prefix survived."""
-    from lib.tasks_pkg.cache_tracking import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
     conv = 'round1-prefix-survived'
     _clean(conv)
@@ -144,7 +149,8 @@ def test_round1_warm_prefix_carried_across_boundary_no_break():
     usage = {'cache_read_input_tokens': 261_000,      # ~held, tiny variation
              'cache_creation_input_tokens': 3_000,
              'input_tokens': 4_000}
-    res = detect_cache_break(conv, _messages(), _tools(), 'claude-opus-4', usage)
+    res = detect_cache_break(
+        conv, _messages(), _tools(), 'claude-opus-4', usage, user_id=OWNER)
 
     assert res is None, f'a carried-over warm prefix must not be a break: {res}'
     _clean(conv)
@@ -154,7 +160,7 @@ def test_round1_baseline_below_floor_not_substituted():
     """NEUTER-style gate: a sibling whose final read is BELOW the miss floor
     (< _MIN_CACHE_MISS_TOKENS) provides no usable baseline → no substitution →
     no break. Proves the substitution is gated on a real prior warm prefix."""
-    from lib.tasks_pkg.cache_tracking import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
     conv = 'round1-baseline-too-small'
     _clean(conv)
@@ -163,7 +169,8 @@ def test_round1_baseline_below_floor_not_substituted():
     usage = {'cache_read_input_tokens': 200,
              'cache_creation_input_tokens': 190_000,
              'input_tokens': 5_000}
-    res = detect_cache_break(conv, _messages(), _tools(), 'claude-opus-4', usage)
+    res = detect_cache_break(
+        conv, _messages(), _tools(), 'claude-opus-4', usage, user_id=OWNER)
 
     assert res is None, (
         f'a sub-floor prior read is not a usable baseline → no break: {res}')

@@ -13,46 +13,57 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install ruff
-        run: pip install "ruff>=0.6"
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - name: Verify lock and sync development tools
+        run: uv lock --check && uv sync --frozen --extra dev
       - name: Lint
-        run: ruff check .
+        run: uv run --frozen --extra dev ruff check .
+      - name: Type-check migration-owned Python boundaries
+        run: uv run --frozen --extra dev pyright
+      - name: Verify generated API contracts
+        run: uv run --frozen --extra dev make contracts-check
+      - name: Verify current documentation catalog
+        run: uv run --frozen --extra dev make docs-check
+      - name: Verify architecture boundaries and debt ratchets
+        run: uv run --frozen --extra dev make architecture-check
+      - name: Verify test-suite health ratchet
+        run: uv run --frozen --extra dev make suite-health
+      - name: Run repository health diagnostics
+        run: uv run --frozen --extra dev make healthcheck
 
-  # ── Unit tier (the bulk: ~5300 tests) — parallelised across workers ──
+  # ── Unit tier (the bulk of the suite) — parallelised across workers ──
   # Split out from api/slow so the fast, DB-free bulk runs on its own and
   # in parallel. `-m unit` is the default CI tier (conftest auto-tags any
-  # untagged test `unit`, so nothing silently escapes). `-n auto` fans the
-  # tests across all runner cores; each xdist worker is its own process with
-  # its own session-scoped throwaway SQLite DB, so isolation holds. The
-  # 3.10↔3.12 endpoints of the supported range are covered (dropping 3.11
-  # halves the matrix cost; a pure-Python bug that only bites 3.11 is
-  # vanishingly unlikely between two green endpoints).
+  # untagged test `unit`, so nothing silently escapes). xdist uses the
+  # project-wide work-stealing policy; each worker is its own process with its
+  # own session-scoped throwaway SQLite DB. Python 3.12 is the single supported
+  # runtime and therefore the only CI interpreter.
   test-unit:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install package + test extra
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - name: Verify lock and sync test environment
+        run: uv lock --check && uv sync --frozen --extra test
       - name: Run unit tests
         # `-n auto` on a 4-vCPU runner = 4 workers, and each worker spawns
         # node/jsdom subprocesses + ML-lib thread pools on top — measured
         # 2026-08-05 (f0a930e): the oversubscription starved timing- and
         # DB-writer-sensitive suites into sqlite-locked / 300s-timeout reds
-        # that never reproduce on a fast box. `-n 2` halves the pressure;
-        # `--dist loadscope` keeps each module's tests on one worker so
-        # per-file fixtures can't interleave across workers.
+        # that never reproduce on a fast box. `-n 2` halves the pressure while
+        # retaining work stealing for long-tail balance.
         # Make owns the exclusion of retired classic-js harnesses and the
         # serial split for timing-sensitive backend contracts.
-        run: make test-unit JOBS=2
+        run: uv run --frozen --extra test make test-unit JOBS=2
 
   # ── API integration tier (needs a DB; smaller, ~140 tests) ──
   # These boot the real app + hit routes. Run parallel too, but on a single
@@ -64,31 +75,33 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install package + test extra
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - name: Verify lock and sync test environment
+        run: uv lock --check && uv sync --frozen --extra test
       - name: Run API tests (parallel)
-        run: pytest -m api -n auto --dist worksteal --timeout=300 -ra -q
+        run: uv run --frozen --extra test make test-api-core JOBS=auto
 
-  # ── Slow tier (endpoint-loop integration; ~90s each) — opt-in, serial ──
-  # Kept OFF the critical `unit`/`api` path so a green PR isn't gated on
-  # multi-minute orchestration loops. Non-blocking (continue-on-error) but
-  # visible, and still parallelised.
+  # ── Slow tier (endpoint-loop integration; ~90s each) — bounded parallel ──
+  # Kept in a separate job because the loops are multi-minute, but a release
+  # baseline is not green unless this lane completes successfully.
   test-slow:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install package + test extra
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - name: Verify lock and sync test environment
+        run: uv lock --check && uv sync --frozen --extra test
       - name: Run slow tests
-        run: pytest -m slow -n 4 --dist worksteal --timeout=600 -ra -q
+        run: uv run --frozen --extra test make test-slow JOBS=auto
 
   # ── Frontend tests (the shipped Vite/ESM graph) ──
   # This job builds once, then checks ESM owners, the recursively validated
@@ -107,6 +120,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
       - name: Install JS dev-deps from lockfile
         run: npm ci
       - name: Type-check and build TypeScript modules
@@ -119,12 +136,222 @@ jobs:
           name: ci-frontend-dist
           path: static/vite
           if-no-files-found: error
-      - name: Install package + test extra
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
+      - name: Verify lock and sync test environment
+        run: uv lock --check && uv sync --frozen --extra test
       - name: Run frontend tests (parallel)
-        run: make test-frontend JOBS=auto
+        run: uv run --frozen --extra test make test-frontend JOBS=auto
+
+  # Release inputs are scanned independently of the runnable images.  This
+  # catches lockfile vulnerabilities, checked-in secrets and Kubernetes/
+  # Docker misconfiguration before an image build can hide the source path.
+  # The scanner action is commit-pinned and the scanner binary is version-pinned.
+  supply-chain:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate repository CycloneDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          format: cyclonedx
+          output: tofu-repository.cdx.json
+          skip-dirs: codex,node_modules,static/vite,data,logs,outputs,.venv
+          timeout: 15m
+      - name: Upload repository SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: tofu-repository-cyclonedx
+          path: tofu-repository.cdx.json
+          if-no-files-found: error
+      - name: Gate source dependencies and deployment configuration
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          # The chart deliberately targets Kubernetes 1.28+; keep Trivy's Helm
+          # renderer on the same declared compatibility floor and provide the
+          # immutable digests required by the release chart.
+          TRIVY_HELM_KUBE_VERSION: "1.28.0"
+          TRIVY_HELM_SET_STRING: "images.api.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,images.worker.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        with:
+          version: v0.70.0
+          skip-setup-trivy: true
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: false
+          skip-dirs: codex,node_modules,static/vite,data,logs,outputs,.venv
+          timeout: 15m
+      - name: Gate checked-in secrets at every scanner severity
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          skip-setup-trivy: true
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          exit-code: '1'
+          skip-dirs: codex,node_modules,static/vite,data,logs,outputs,.venv
+          timeout: 15m
+
+  # Both distributed process-image candidates must remain buildable and rootless. The API
+  # target deliberately excludes browser and database-server runtimes; the
+  # worker target carries the optional Chromium capability.
+  container:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [api, worker]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ${{ matrix.target }} image
+        run: >-
+          docker build
+          --target ${{ matrix.target }}
+          --tag tofu-${{ matrix.target }}:ci
+          .
+      - name: Verify rootless runtime and excluded server toolchain
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' tofu-${{ matrix.target }}:ci)" = "tofu:tofu"
+          docker run --rm tofu-${{ matrix.target }}:ci sh -eu -c \
+            '! command -v pg_ctl; ! command -v initdb; ! command -v gcc; ! command -v g++'
+      - name: Verify API excludes Playwright
+        if: matrix.target == 'api'
+        run: >-
+          docker run --rm tofu-api:ci python -c
+          "import importlib.util;
+          assert importlib.util.find_spec('playwright') is None"
+      - name: Verify worker includes Playwright and Chromium
+        if: matrix.target == 'worker'
+        run: >-
+          docker run --rm tofu-worker:ci python -c
+          "import importlib.util, os;
+          assert importlib.util.find_spec('playwright') is not None;
+          assert os.path.isdir('/opt/ms-playwright')"
+      - name: Generate ${{ matrix.target }} CycloneDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          image-ref: tofu-${{ matrix.target }}:ci
+          scanners: vuln
+          format: cyclonedx
+          output: tofu-${{ matrix.target }}.cdx.json
+          timeout: 15m
+      - name: Upload ${{ matrix.target }} SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: tofu-${{ matrix.target }}-cyclonedx
+          path: tofu-${{ matrix.target }}.cdx.json
+          if-no-files-found: error
+      - name: Gate ${{ matrix.target }} OS and Python packages
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          skip-setup-trivy: true
+          image-ref: tofu-${{ matrix.target }}:ci
+          scanners: vuln
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: false
+          timeout: 15m
+
+  # Render the default distributed topology with a checksum-pinned Helm binary,
+  # then inspect security and ownership semantics in the resulting Kubernetes
+  # objects. Syntax-only Helm lint is intentionally not the release boundary.
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - name: Verify lock and sync test tools
+        run: uv lock --check && uv sync --frozen --extra test
+      - name: Install checksum-pinned Helm
+        run: |
+          HELM_ARCHIVE=/tmp/helm-v3.17.3-linux-amd64.tar.gz
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$HELM_ARCHIVE" \
+            https://get.helm.sh/helm-v3.17.3-linux-amd64.tar.gz
+          printf '%s  %s\n' \
+            ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd \
+            "$HELM_ARCHIVE" | sha256sum --check
+          tar --extract --gzip --file "$HELM_ARCHIVE" --directory /tmp
+          /tmp/linux-amd64/helm version --short
+      - name: Lint and render distributed release
+        run: |
+          /tmp/linux-amd64/helm lint deploy/helm/tofu \
+            --set-string images.api.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set-string images.worker.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          /tmp/linux-amd64/helm template tofu deploy/helm/tofu \
+            --namespace tofu-system \
+            --set-string images.api.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set-string images.worker.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+            > /tmp/tofu-rendered.yaml
+          uv run --frozen --extra test python \
+            scripts/check_helm_render.py /tmp/tofu-rendered.yaml
+      - name: Reject protected extraEnv overrides
+        run: |
+          if /tmp/linux-amd64/helm template tofu deploy/helm/tofu \
+            --namespace tofu-system \
+            --set-string images.api.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set-string images.worker.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+            --set-string 'extraEnv[0].name=TOFU_PROCESS_ROLE' \
+            --set-string 'extraEnv[0].value=all' \
+            >/tmp/tofu-unsafe-env.yaml 2>/tmp/tofu-unsafe-env.error; then
+            echo 'protected extraEnv override unexpectedly rendered' >&2
+            exit 1
+          fi
+          # Prove the template itself remains fail-closed even if a caller
+          # explicitly bypasses values.schema.json validation.
+          if /tmp/linux-amd64/helm template tofu deploy/helm/tofu \
+            --skip-schema-validation \
+            --namespace tofu-system \
+            --set-string images.api.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set-string images.worker.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+            --set-string 'extraEnv[0].name=TOFU_PROCESS_ROLE' \
+            --set-string 'extraEnv[0].value=all' \
+            >/tmp/tofu-unsafe-env-no-schema.yaml 2>/tmp/tofu-unsafe-env-no-schema.error; then
+            echo 'template accepted a protected extraEnv override' >&2
+            exit 1
+          fi
+      - name: Reject duplicate extraEnv names
+        run: |
+          if /tmp/linux-amd64/helm template tofu deploy/helm/tofu \
+            --namespace tofu-system \
+            --set-string images.api.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set-string images.worker.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+            --set-string 'extraEnv[0].name=TOFU_FEATURE_AUDIT' \
+            --set-string 'extraEnv[0].value=1' \
+            --set-string 'extraEnv[1].name=TOFU_FEATURE_AUDIT' \
+            --set-string 'extraEnv[1].value=2' \
+            >/tmp/tofu-duplicate-env.yaml 2>/tmp/tofu-duplicate-env.error; then
+            echo 'duplicate extraEnv names unexpectedly rendered' >&2
+            exit 1
+          fi
+      - name: Render one ordinary extraEnv setting
+        run: |
+          /tmp/linux-amd64/helm template tofu deploy/helm/tofu \
+            --namespace tofu-system \
+            --set-string images.api.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set-string images.worker.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+            --set-string 'extraEnv[0].name=TOFU_FEATURE_AUDIT' \
+            --set-string 'extraEnv[0].value=1' \
+            >/tmp/tofu-safe-env.yaml
+          uv run --frozen --extra test python \
+            scripts/check_helm_render.py /tmp/tofu-safe-env.yaml
 
   # ── End-to-end smoke (real app + Chromium, Firefox and WebKit) ──
   # Boots the actual app on an ephemeral port with a STUB LLM (no API key /
@@ -149,6 +376,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
       - name: Consume the frontend graph built by the frontend lane
         uses: actions/download-artifact@v4
         with:
@@ -156,12 +387,9 @@ jobs:
           path: static/vite
       - name: Verify the downloaded graph without Node
         run: python3 scripts/verify_frontend_dist.py
-      - name: Install package + test extra
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
-          pip install playwright
+      - name: Verify lock and sync test environment
+        run: uv lock --check && uv sync --frozen --extra test
       - name: Install ${{ matrix.browser }} + system deps
-        run: python -m playwright install --with-deps ${{ matrix.browser }}
+        run: uv run --frozen --extra test python -m playwright install --with-deps ${{ matrix.browser }}
       - name: Run E2E smoke + critical journeys (${{ matrix.browser }})
-        run: pytest tests/test_e2e_smoke.py tests/test_e2e_journeys.py -m visual -ra
+        run: uv run --frozen --extra test pytest tests/test_e2e_smoke.py tests/test_e2e_journeys.py -m visual -ra

@@ -29,7 +29,7 @@
             <div class="settings-field-hint" id="searchAdapterSummary" data-i18n="settings.browserAdaptersLoading">正在读取站点适配器…</div>
             <div class="stg-btn-row">
               <button type="button" class="stg-btn-secondary" data-tofu-action="_testSearchBrowser()" data-i18n="settings.browserTestConnection">测试连接</button>
-              <button type="button" class="stg-btn-secondary" data-tofu-action="if(typeof openLocalControl==='function')openLocalControl()" data-i18n="settings.browserInstallUpgrade">安装或升级扩展</button>
+              <button type="button" class="stg-btn-secondary" data-tofu-action="closeSettings();openLocalControlModal()" data-i18n="settings.browserInstallUpgrade">安装或升级扩展</button>
             </div>
           </div>
 

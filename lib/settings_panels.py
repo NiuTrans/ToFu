@@ -41,6 +41,82 @@ PANELS_DIR = os.path.join(BASE_DIR, 'static', 'settings_panels')
 # to a `settingsTab_<tab>` panel id and a `<tab>.html` fragment filename.
 _MARKER_RE = re.compile(r'<!--\s*SETTINGS_PANEL:([a-z_]+)\s*-->')
 
+# ── Maintainer-only tabs (hidden from opensource builds) ─────────────────
+# Most iteration feedback on this project comes from the maintainer, so the
+# settings UI stays deliberately detailed. Tabs in this set are dogfooding
+# knobs (e.g. the cost A/B experiment) that public users/developers should
+# never see: in opensource builds ``inject_panels`` strips the nav button AND
+# the panel marker at render time, and export.py additionally excludes the
+# fragment file from the exported tree and bakes the flag default below to
+# '1' — belt-and-braces, the same contract as lib/mcp/registry.py's
+# ``internal_only`` catalog filter.
+MAINTAINER_ONLY_TABS = frozenset({
+    'experiments',
+})
+
+# export.py's opensource sanitizer flips this default to '1' in the exported
+# copy of THIS file (literal replacement, filepath-gated), so the stripped
+# render below does not depend on the operator remembering to set the env var.
+# An env override is provided for tests / forced opensource runs.
+_OPENSOURCE_BUILD = os.environ.get('TOFU_OPENSOURCE_BUILD', '1').strip().lower() in {
+    '1', 'true', 'yes', 'on',
+}
+
+
+def is_opensource_build() -> bool:
+    """True when running an opensource build (maintainer-only tabs hidden)."""
+    return _OPENSOURCE_BUILD
+
+
+def _strip_nav_button(html, tab):
+    """Remove the settings nav ``<button>`` for ``tab`` (opensource builds).
+
+    Loud on drift: if the button is not found exactly once, index.html was
+    restructured and the strip would silently leak the tab — log an error so
+    the failure is visible (and the parity/opensource-strip tests go red).
+    """
+    rx = re.compile(
+        r'^[ \t]*<button class="settings-tab" data-tab="%s"[^>]*>.*?</button>\n?'
+        % re.escape(tab),
+        re.S | re.M,
+    )
+    html, n = rx.subn('', html, count=1)
+    if n != 1:
+        logger.error('[SettingsPanels] opensource strip: nav button for '
+                     'maintainer-only tab=%s matched %d times (expected 1) — '
+                     'index.html drifted?', tab, n)
+    return html
+
+
+def _strip_panel_marker(html, tab):
+    """Remove the ``<!-- SETTINGS_PANEL:tab -->`` marker line for ``tab``."""
+    rx = re.compile(
+        r'^[ \t]*<!--\s*SETTINGS_PANEL:%s\s*-->[ \t]*\n?' % re.escape(tab),
+        re.M,
+    )
+    html, n = rx.subn('', html, count=1)
+    if n != 1:
+        logger.error('[SettingsPanels] opensource strip: panel marker for '
+                     'maintainer-only tab=%s matched %d times (expected 1) — '
+                     'index.html drifted?', tab, n)
+    return html
+
+
+def strip_maintainer_only_tabs(html):
+    """Strip maintainer-only tabs (nav button + panel marker) in opensource builds.
+
+    Runs BEFORE fragment injection inside :func:`inject_panels`, so a stripped
+    marker never reaches ``_load_fragment`` — the fragment file may legitimately
+    be absent (export.py excludes it from the opensource tree). No-op in
+    personal/internal builds.
+    """
+    if not _OPENSOURCE_BUILD:
+        return html
+    for tab in sorted(MAINTAINER_ONLY_TABS):
+        html = _strip_nav_button(html, tab)
+        html = _strip_panel_marker(html, tab)
+    return html
+
 
 def marker_for(tab):
     """Return the canonical marker comment string for a tab id."""
@@ -117,6 +193,10 @@ def inject_panels(html):
     Returns:
         The HTML with all resolvable panel markers spliced in.
     """
+    # Opensource builds: maintainer-only tabs (nav button + marker) are removed
+    # before injection — see strip_maintainer_only_tabs.
+    html = strip_maintainer_only_tabs(html)
+
     def _sub(m):
         tab = m.group(1)
         frag = _load_fragment(tab)

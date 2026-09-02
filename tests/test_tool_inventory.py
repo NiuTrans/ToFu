@@ -28,6 +28,9 @@ Run isolated (project convention): PYTEST_DISABLE_PLUGIN_AUTOLOAD=1.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -49,7 +52,7 @@ def _families(inv):
 # ── Coverage: every built-in spec shows up, in its declared group ──────
 
 def test_every_builtin_spec_appears_in_its_category_group():
-    from lib.tools import all_specs
+    from lib.tools.registry import all_specs
     fams = _families(_inventory())
     missing = []
     for spec in all_specs():
@@ -68,7 +71,7 @@ def test_every_builtin_spec_appears_in_its_category_group():
 
 
 def test_full_provides_surface_listed_even_when_gated_off():
-    """The browser family (extension disconnected in tests) must list all 13
+    """The browser family (extension disconnected in tests) lists all 15
     declared tools as disabled rows — the panel shows the REGISTERED
     surface, not only the model-visible subset."""
     fams = _families(_inventory())
@@ -76,9 +79,32 @@ def test_full_provides_surface_listed_even_when_gated_off():
     assert browser['gate_state'] == 'off'
     names = {t['name'] for t in browser['tools']}
     assert {'browser_navigate', 'browser_click', 'browser_execute_js',
+            'browser_devtools',
             'browser_read_page', 'browser_list_tabs'} <= names
     assert all(not t['enabled'] for t in browser['tools'])
     assert browser['counts']['total'] == len(browser['tools'])
+
+
+@pytest.mark.parametrize('language', ['en', 'zh'])
+def test_builtin_inventory_rows_have_localized_descriptions(language):
+    """Dynamic inventory keys need a registry-to-locale parity guard."""
+    locale_path = (Path(__file__).resolve().parents[1] / 'frontend' / 'src'
+                   / 'i18n' / 'locales' / f'{language}.json')
+    translations = json.loads(locale_path.read_text(encoding='utf-8'))
+    missing = []
+    for group in _inventory()['groups']:
+        for family in group['families']:
+            if family.get('source') != 'builtin':
+                continue
+            family_key = f'toolsInv.family.{family["key"]}'
+            if family_key not in translations:
+                missing.append(family_key)
+            for tool in family['tools']:
+                tool_key = f'toolsInv.tool.{tool["name"]}'
+                if tool_key not in translations:
+                    missing.append(tool_key)
+    assert not missing, (
+        f'{language} tool-inventory translations missing: {sorted(missing)}')
 
 
 # ── Two-phase evaluation semantics (the naive-evaluation regression) ────
@@ -98,16 +124,23 @@ def test_capability_families_attach_on_has_base_tools(key):
 
 
 def test_skills_family_reflects_installed_eligible_packages(monkeypatch):
-    """Do not advertise ``load_skill`` when there is nothing it can load."""
+    """Catalog discovery remains available before the first installation."""
     import lib.skills
 
     monkeypatch.setattr(lib.skills, 'list_skills', lambda *a, **k: [])
     skills = next(
         family for (_group, key), family in _families(_inventory()).items()
         if key == 'skills')
-    assert skills['gate_state'] == 'off'
-    assert skills['gate_reason'] == 'gate_closed'
-    assert not any(tool['enabled'] for tool in skills['tools'])
+    assert skills['gate_state'] == 'on'
+    assert any(tool['name'] == 'search_skills' and tool['enabled']
+               for tool in skills['tools'])
+    install_family = next(
+        family for (_group, key), family in _families(_inventory()).items()
+        if key == 'skill_install')
+    install = next(tool for tool in install_family['tools']
+                   if tool['name'] == 'request_skill_install')
+    assert install['write'] is True
+    assert install['confirmation_required'] is True
 
     monkeypatch.setattr(lib.skills, 'list_skills', lambda *a, **k: [{
         'id': 'review', 'enabled': True, 'eligible': True,
@@ -145,7 +178,7 @@ def test_totals_are_internally_consistent():
 def test_every_builtin_spec_declares_a_gate_hint():
     """A built-in without a `gate` string renders as an unexplained dead
     family in the panel. New built-ins must fill it (presentation-only)."""
-    from lib.tools import all_specs
+    from lib.tools.registry import all_specs
     missing = [s.key for s in all_specs()
                if s.source == 'builtin' and not s.gate.strip()]
     assert not missing, (
@@ -157,8 +190,8 @@ def test_every_builtin_spec_declares_a_gate_hint():
 # ── Plugin visibility: registered-but-hidden is reported, not vanished ──
 
 def test_plugin_spec_reported_as_not_allowlisted():
-    from lib.tools import ToolSpec, register_tool_spec
-    from lib.tools import registry as _reg
+    from lib.tools.registry import ToolSpec, register_tool_spec
+    import lib.tools.registry as _reg
     spec = ToolSpec(
         key='_inv_fake_plugin',
         build=lambda ctx: [{'type': 'function',

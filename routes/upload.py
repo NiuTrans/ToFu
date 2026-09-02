@@ -26,7 +26,6 @@ def _detect_image_format(head: bytes) -> str | None:
         return 'bmp'
     return None
 
-from lib.env_compat import getenv_compat
 from lib.log import get_logger
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
@@ -39,6 +38,7 @@ logger = get_logger(__name__)
 upload_bp = Blueprint('upload', __name__)
 # v1 blueprint for the JSON routes (the 5 carve-outs above stay on upload_bp).
 from routes.api_v1.uploads import api_v1_uploads_bp  # noqa: E402
+from routes.api_v1.auth import request_user_id  # noqa: E402
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # User-uploaded images are USER STATE and must live under the resolved
@@ -46,6 +46,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # URL), NOT the code tree — see lib/runtime_paths.uploads_root(). In the
 # default in-tree layout this is byte-identical to <repo>/uploads/images.
 from lib.runtime_paths import uploads_root  # noqa: E402
+# TODO(enterprise, I6): flat single-tenant directory — serve_image performs
+# no ownership check; namespace keys per principal and authorize reads.
+# docs/ENTERPRISE_READINESS_AUDIT.md
 UPLOAD_DIR = os.path.join(uploads_root(), 'images')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -71,7 +74,7 @@ _DEFAULT_IMAGE_UPLOAD_MAX_PIXELS = 40_000_000       # ~160 MiB RGBA decode
 
 
 def _image_fetch_max_bytes() -> int:
-    raw = (getenv_compat('TOFU_IMAGE_FETCH_MAX_BYTES') or '').strip()
+    raw = (os.environ.get('TOFU_IMAGE_FETCH_MAX_BYTES') or '').strip()
     if not raw:
         return _DEFAULT_IMAGE_FETCH_MAX_BYTES
     try:
@@ -88,7 +91,7 @@ class _ImageFetchError(Exception):
 
 
 def _image_upload_max_bytes() -> int:
-    raw = (getenv_compat('TOFU_IMAGE_UPLOAD_MAX_BYTES') or '').strip()
+    raw = (os.environ.get('TOFU_IMAGE_UPLOAD_MAX_BYTES') or '').strip()
     try:
         value = int(raw) if raw else _DEFAULT_IMAGE_UPLOAD_MAX_BYTES
     except ValueError as exc:
@@ -99,7 +102,7 @@ def _image_upload_max_bytes() -> int:
 
 
 def _image_upload_max_pixels() -> int:
-    raw = (getenv_compat('TOFU_IMAGE_UPLOAD_MAX_PIXELS') or '').strip()
+    raw = (os.environ.get('TOFU_IMAGE_UPLOAD_MAX_PIXELS') or '').strip()
     try:
         value = int(raw) if raw else _DEFAULT_IMAGE_UPLOAD_MAX_PIXELS
     except ValueError as exc:
@@ -362,7 +365,7 @@ def upload_image():
             return api_error(
                 f'Image exceeds the {max_upload_bytes // (1024 * 1024)} MiB upload limit',
                 status=413)
-        # ★ SVG is intentionally excluded — user-supplied SVGs can embed
+        # SVG is intentionally excluded — user-supplied SVGs can embed
         # <script> and enable stored XSS when served inline. See §10.4.
         ext_map = {
             'image/png': '.png', 'image/jpeg': '.jpg', 'image/jpg': '.jpg',
@@ -439,7 +442,7 @@ def upload_image():
     if not file.filename:
         return api_bad_request('No filename')
     ext = os.path.splitext(file.filename)[1].lower()
-    # ★ SVG is intentionally excluded — user-supplied SVGs can embed <script>
+    # SVG is intentionally excluded — user-supplied SVGs can embed <script>
     # and enable stored XSS when served inline. See §10.4.
     if ext not in ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'):
         logger.warning('[upload_image] Rejected extension=%s (SVG/other not allowed)', ext)
@@ -862,7 +865,7 @@ def parse_pdf():
 @upload_bp.route('/api/pdf/vlm-parse', methods=['POST'])
 def pdf_vlm_parse():
     """Start async VLM-based PDF parsing."""
-    from lib.pdf_parser import start_vlm_task
+    from lib.pdf_parser.vlm import start_vlm_task
     from lib.pdf_parser._common import MAX_PDF_BYTES
 
     files = request_files()
@@ -888,7 +891,11 @@ def pdf_vlm_parse():
 
     filename = file.filename or 'document.pdf'
     try:
-        task_id = start_vlm_task(pdf_bytes, filename=filename)
+        task_id = start_vlm_task(
+            pdf_bytes,
+            filename=filename,
+            user_id=int(request_user_id()),
+        )
     except Exception as e:
         logger.error('[VLM-Parse] Failed to start task for %s (%d bytes): %s',
                      filename, len(pdf_bytes), e, exc_info=True)
@@ -900,9 +907,9 @@ def pdf_vlm_parse():
 @api_v1_uploads_bp.route('/api/v1/pdf/vlm-parse/<task_id>', methods=['GET'])
 def pdf_vlm_status(task_id):
     """Poll VLM parsing task status."""
-    from lib.pdf_parser import get_vlm_task
+    from lib.pdf_parser.vlm import get_vlm_task
 
-    task = get_vlm_task(task_id)
+    task = get_vlm_task(task_id, user_id=int(request_user_id()))
     if not task:
         return api_not_found('Task not found')
     resp = {
@@ -921,12 +928,15 @@ def pdf_vlm_status(task_id):
 @api_v1_uploads_bp.route('/api/v1/pdf/vlm-tasks', methods=['GET'])
 def pdf_vlm_find_tasks():
     """Find active VLM tasks by filename — used to reconnect after page refresh."""
-    from lib.pdf_parser import find_vlm_tasks_by_filename
+    from lib.pdf_parser.vlm import find_vlm_tasks_by_filename
 
     filename = request.args.get('filename', '')
     if not filename:
         return api_bad_request('filename parameter required')
-    tasks = find_vlm_tasks_by_filename(filename)
+    tasks = find_vlm_tasks_by_filename(
+        filename,
+        user_id=int(request_user_id()),
+    )
     return api_ok({'tasks': tasks})
 
 

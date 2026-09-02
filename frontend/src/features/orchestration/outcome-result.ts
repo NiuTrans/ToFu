@@ -80,7 +80,7 @@ export function normalizeOrchestrationOutcome(
   const status = String(projectionSource.engine_status
     || projectionRoot.status || rootValue.status || '');
   let stopReason = String(projectionSource.stop_reason
-    || projectionRoot.stop_reason || rootValue.endpointReason
+    || projectionRoot.stop_reason || rootValue.flowReason
     || errorEnvelope.message || '');
   let finishReason = String(
     projectionSource.finish_reason || rootValue.finishReason || '');

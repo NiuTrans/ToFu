@@ -12,7 +12,7 @@ stay perceivable from one place (and machine-discoverable via the
   A. **Backend → registry**: every ``phase='x'`` / ``'phase': 'x'`` literal
      and every ``Phase.X`` reference in ``lib/`` is a registered phase value
      (or a documented carve-out — a different channel that merely shares the
-     field name, e.g. ``endpoint_iteration.phase``).
+     field name, e.g. ``flow_iteration.phase``).
   B. **Frontend → registry**: every ``.phase === "x"`` the built-in chat
      frontend branches on is registered (or a documented client-local state).
   C. **Unified interface (the ratchet)**: no raw ``{'type': 'phase'`` dict
@@ -64,8 +64,13 @@ _PHASE_DICT_RE = re.compile(r"""['"]phase['"]\s*:\s*['"]([a-z_]+)['"]""")
 _PHASE_CONST_RE = re.compile(r"""\bPhase\.([A-Z_][A-Z0-9_]*)\b""")
 # Raw phase-event construction: ``{'type': 'phase'`` (either quote style).
 _RAW_PHASE_EVENT_RE = re.compile(r"""['"]type['"]\s*:\s*['"]phase['"]""")
-# Frontend branches: ``.phase === "x"`` (single or double quotes).
-_JS_PHASE_RE = re.compile(r"""\.phase\s*===\s*['"]([a-z_]+)['"]""")
+# Frontend branches over either an event property (``event.phase``) or the
+# explicitly scoped local projection (``const phase = value.phase``).  Scan
+# only the phase-owner files below so unrelated domain objects cannot widen
+# the registry accidentally.
+_JS_PHASE_RE = re.compile(
+    r"""(?:\.phase|\bphase)\s*===\s*['"]([a-z_]+)['"]"""
+)
 
 
 # ``phase='x'`` values that are NOT the PHASE event's status push — other
@@ -73,10 +78,9 @@ _JS_PHASE_RE = re.compile(r"""\.phase\s*===\s*['"]([a-z_]+)['"]""")
 # scan fails on any value not in this set and not in the registry, so a NEW
 # out-of-channel use must be justified here.
 _NON_PHASE_EVENT_VALUES: dict[str, str] = {
-    # endpoint_iteration / endpoint_new_turn events' phase field
-    # (Planner→Worker→Critic loop vocabulary, a different event type).
-    'planning': 'endpoint_iteration.phase',
-    'reviewing': 'endpoint_iteration.phase',
+    # flow_iteration / flow_new_turn events' phase field (a different type).
+    'planning': 'flow_iteration.phase',
+    'reviewing': 'flow_iteration.phase',
     'planner': 'endpoint next_phase marker / agent_verdict decision',
     'worker': 'agent_verdict decision / endpoint next_phase marker',
     'stop': 'agent_verdict decision / endpoint next_phase marker',
@@ -103,6 +107,12 @@ _NON_PHASE_EVENT_VALUES: dict[str, str] = {
     # routes/api_v1/agents.py progress events (headless agent-run channel).
     'started': 'api_v1 agents progress event',
     'finished': 'api_v1 agents progress event',
+    # Server boot lock lifecycle and swarm-agent failure rows are separate
+    # state machines; neither value is emitted on EventType.PHASE.
+    'booting': 'server_boot lock state',
+    'serving': 'server_boot lock state',
+    'error': 'swarm agent row / event phase',
+    'begin': 'SQLite writer transaction state',
 }
 
 # Frontend ``.phase === "x"`` values that are NOT pushed PHASE values.
@@ -110,16 +120,19 @@ _FRONTEND_PHASE_EXEMPTIONS: dict[str, str] = {
     # Derived CLIENT-side from thinking deltas (sse_pipeline.js /
     # streaming_render.js → setStreamPhase) — never pushed by the backend.
     'thinking_active': 'client-local derived phase state',
-    # endpoint_iteration event branches in sse_pipeline.js.
-    'planning': 'endpoint_iteration.phase branch',
-    'reviewing': 'endpoint_iteration.phase branch',
+    # Autopilot VU presentation states and the no-frame fallback are created
+    # by the typed conversation projection, not pushed by the backend.
+    'warming': 'client-local autopilot virtual-user presentation',
+    'responding': 'client-local autopilot virtual-user presentation',
+    'waiting': 'client-local missing-phase fallback presentation',
+    # flow_iteration branches in the typed conversation projection.
+    'planning': 'flow_iteration.phase branch',
+    'reviewing': 'flow_iteration.phase branch',
 }
 
 # Frontend files whose ``.phase ===`` branches consume the chat PHASE event.
 _FRONTEND_FILES = [
-    '@runtime:ui/streaming_ui.js',
-    '@runtime:ui/sse_pipeline.js',
-    '@runtime:ui/streaming_render.js',
+    'frontend/src/conversation/ui/classic-conversation-renderers.ts',
 ]
 
 
@@ -304,8 +317,8 @@ def test_build_phase_byte_identity_with_the_old_literal():
 
 
 def test_emit_phase_delivers_through_append_event():
-    from lib.tasks_pkg.manager import _chat_runtime
-    task = _chat_runtime.create()
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    task = chat_task_runtime.create(user_id=1)
     emit_phase(task, Phase.WORKING, detail='go')
     last = task['events'][-1]
     assert last['type'] == 'phase'

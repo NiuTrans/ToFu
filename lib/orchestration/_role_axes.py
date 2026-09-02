@@ -30,12 +30,8 @@ DEFAULT_ROLE_ISOLATION = 'fresh-context'
 # Shared vocabulary for default direction, feedback routing and diagnostics.
 VERIFIER_ROLES = frozenset({'critic', 'reviewer', 'virtual_user'})
 
-# Compatibility alias retained for consumers predating the public name.
-_USER_EMIT_ROLES = VERIFIER_ROLES
-
-
 def _node_and_params(node: dict) -> tuple[dict, dict]:
-    """Normalize persisted compatibility input at the policy boundary."""
+    """Normalize a node and its parameter object at the policy boundary."""
     normalized = node if isinstance(node, dict) else {}
     params = normalized.get('params') or {}
     return normalized, params if isinstance(params, dict) else {}
@@ -51,7 +47,7 @@ def resolve_emits(node: dict) -> str:
 
 
 def resolve_tier(node: dict) -> str:
-    """Resolve a role's model tier through the shared compatibility policy."""
+    """Resolve a role's model tier through the shared execution policy."""
     _, params = _node_and_params(node)
     tier = params.get('tier')
     return tier if tier in VALID_TIERS else DEFAULT_ROLE_TIER

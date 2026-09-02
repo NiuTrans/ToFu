@@ -33,13 +33,14 @@ matching NEUTER negative control: revert the fix, the guard must go red.
 
 from __future__ import annotations
 
-import json
 import os
-import time
 
 import pytest
 
 pytestmark = pytest.mark.unit
+
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
@@ -50,7 +51,7 @@ def _clear_task_registry():
     completes and would linger as 'running') can't make a conv look busy via
     _conv_has_live_task in a LATER test. Best-effort."""
     try:
-        from lib.tasks_pkg.manager import tasks, tasks_lock
+        from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
         with tasks_lock:
             tasks.clear()
     except Exception:
@@ -58,13 +59,14 @@ def _clear_task_registry():
 
 
 @pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    """Reuse the suite-wide app fixture so the DB schema exists."""
+def _ensure_schema(_chat_sidecar_runtime):
+    """Run this legacy incident suite against the real Sidecar authority."""
     yield
 
 
 @pytest.fixture(autouse=True)
-def _clean_registry(monkeypatch):
+def _clean_registry(chat_sidecar, monkeypatch):
+    del chat_sidecar
     _clear_task_registry()
     # post_task auto-claims + enqueues + DRAINS a kickoff through
     # on_epic_posted → project_dispatch._drain_idle_target. That drain runs
@@ -85,18 +87,16 @@ def _clean_registry(monkeypatch):
 
 
 def _mk_conv(conv_id: str, project_path: str):
-    """Create a real conversation row routed at ``project_path``."""
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    db = get_thread_db(DOMAIN_CHAT)
-    now = int(time.time() * 1000)
-    settings = json.dumps({'projectPath': project_path, 'model': 'test-model'})
-    db.execute(
-        'DELETE FROM conversations WHERE id=? AND user_id=1', (conv_id,))
-    db.execute(
-        'INSERT INTO conversations (id, user_id, title, messages, settings, '
-        'created_at, updated_at, msg_count) VALUES (?,1,?,?,?,?,?,0)',
-        (conv_id, 'stale-dispatch guard', json.dumps([]), settings, now, now))
-    db.commit()
+    """Create a real Sidecar conversation routed at ``project_path``."""
+    from tests._seed import delete_conversation, seed_conversation
+
+    delete_conversation(conv_id, user_id=TEST_OWNER_USER_ID)
+    seed_conversation(
+        conv_id,
+        user_id=TEST_OWNER_USER_ID,
+        title='stale-dispatch guard',
+        settings={'projectPath': project_path, 'model': 'test-model'},
+    )
 
 
 def _enqueue_brain_kickoff(conv_id: str, board_task_id: str, project_path: str):
@@ -109,16 +109,30 @@ def _enqueue_brain_kickoff(conv_id: str, board_task_id: str, project_path: str):
          BRAIN_DISPATCH_MARKER: True,
          'boardTaskId': board_task_id},
         {'model': 'test-model', 'projectPath': project_path},
-        kind=KIND_WORKFLOW)
+        kind=KIND_WORKFLOW, user_id=TEST_OWNER_USER_ID)
 
 
 def _queue_depth(conv_id: str) -> int:
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    db = get_thread_db(DOMAIN_CHAT)
-    row = db.execute(
-        'SELECT COUNT(*) c FROM message_queue WHERE conv_id=?',
-        (conv_id,)).fetchone()
-    return int(row['c'] if row else 0)
+    from lib.storage import get_storage_client
+
+    rows = get_storage_client().query(
+        'queue.list', {
+            'conv_id': conv_id,
+            'user_id': TEST_OWNER_USER_ID,
+        }) or []
+    return len(rows)
+
+
+def _record_turn_submissions(monkeypatch, attempt_id: str):
+    submitted = []
+
+    def submit(conv_id, user_id, command):
+        submitted.append((conv_id, command))
+        return {'attempt': {'attemptId': attempt_id}}
+
+    monkeypatch.setattr(
+        'lib.message_queue._submit_queued_turn_command', submit)
+    return submitted
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -142,7 +156,7 @@ def test_stale_kickoff_for_done_epic_is_discarded_not_spawned(tmp_path, monkeypa
     _mk_conv(conv, project)
 
     posted = post_task(project, conv,
-                       'epic that finishes before its kickoff drains')
+                       'epic that finishes before its kickoff drains', user_id=TEST_OWNER_USER_ID)
     epic_id = posted['id']
 
     # 20:38:01 — kickoff enqueued (epic still open/claimed)
@@ -150,28 +164,19 @@ def test_stale_kickoff_for_done_epic_is_discarded_not_spawned(tmp_path, monkeypa
     assert _queue_depth(conv) == 1
 
     # 21:01:55 — the epic's OWN task finishes the work and marks it done
-    complete_task(project, conv, epic_id)
+    complete_task(project, conv, epic_id, user_id=TEST_OWNER_USER_ID)
 
-    # Never let a real task spawn during the test; record if it was attempted.
-    spawned = []
-
-    def _fake_create_task(conv_id, api_messages, config, **kw):
-        spawned.append(conv_id)
-        return {'id': 'should-not-happen'}
-
-    monkeypatch.setattr('lib.tasks_pkg.create_task', _fake_create_task,
-                        raising=False)
-    monkeypatch.setattr('lib.tasks_pkg.spawn_task', lambda *a, **k: None,
-                        raising=False)
+    submitted = _record_turn_submissions(monkeypatch, 'should-not-happen')
 
     # 21:03:07 — the queue drains
-    task_id = dispatch_next_queued(conv)
+    task_id = dispatch_next_queued(conv, user_id=TEST_OWNER_USER_ID)
 
     assert task_id is None, (
         'a kickoff for an ALREADY-DONE epic spawned a task — this is the ¥26 '
         'Opus-5 re-verification burn (conv ms34yw0k74o2lq task 2ef5fcaa)')
-    assert not spawned, (
-        'create_task was reached for a done-epic kickoff: %r' % (spawned,))
+    assert not submitted, (
+        'turn submission was reached for a done-epic kickoff: %r' %
+        (submitted,))
     assert _queue_depth(conv) == 0, (
         'the stale kickoff must be DISCARDED (not left to retry forever) — a '
         'row left behind makes _epic_already_queued block re-dispatch as well')
@@ -188,26 +193,17 @@ def test_kickoff_for_still_open_epic_still_dispatches(tmp_path, monkeypatch):
     conv = 'stalecv_open01'
     _mk_conv(conv, project)
 
-    posted = post_task(project, conv, 'epic that is still open at drain time')
+    posted = post_task(project, conv, 'epic that is still open at drain time', user_id=TEST_OWNER_USER_ID)
     epic_id = posted['id']
     assert _enqueue_brain_kickoff(conv, epic_id, project).get('queueId')
 
-    spawned = []
+    submitted = _record_turn_submissions(monkeypatch, 'attempt-open')
 
-    def _fake_create_task(conv_id, api_messages, config, **kw):
-        spawned.append(conv_id)
-        return {'id': 'tsk_open_ok'}
-
-    monkeypatch.setattr('lib.tasks_pkg.create_task', _fake_create_task,
-                        raising=False)
-    monkeypatch.setattr('lib.tasks_pkg.spawn_task', lambda *a, **k: None,
-                        raising=False)
-
-    task_id = dispatch_next_queued(conv)
-    assert task_id == 'tsk_open_ok', (
+    attempt_id = dispatch_next_queued(conv, user_id=TEST_OWNER_USER_ID)
+    assert attempt_id == 'attempt-open', (
         'an OPEN epic\'s kickoff was discarded — the consume-time re-check is '
         'too aggressive and has broken normal brain dispatch')
-    assert spawned == [conv]
+    assert [item[0] for item in submitted] == [conv]
 
 
 def test_plain_human_message_is_never_board_gated(tmp_path, monkeypatch):
@@ -223,18 +219,12 @@ def test_plain_human_message_is_never_board_gated(tmp_path, monkeypatch):
 
     assert enqueue_message(
         conv, {'text': 'a real human turn'},
-        {'model': 'test-model', 'projectPath': project}).get('queueId')
+        {'model': 'test-model', 'projectPath': project}, user_id=TEST_OWNER_USER_ID).get('queueId')
 
-    spawned = []
-    monkeypatch.setattr(
-        'lib.tasks_pkg.create_task',
-        lambda c, m, cfg, **kw: (spawned.append(c), {'id': 'tsk_human'})[1],
-        raising=False)
-    monkeypatch.setattr('lib.tasks_pkg.spawn_task', lambda *a, **k: None,
-                        raising=False)
+    submitted = _record_turn_submissions(monkeypatch, 'attempt-human')
 
-    assert dispatch_next_queued(conv) == 'tsk_human'
-    assert spawned == [conv]
+    assert dispatch_next_queued(conv, user_id=TEST_OWNER_USER_ID) == 'attempt-human'
+    assert [item[0] for item in submitted] == [conv]
 
 
 def test_board_lookup_failure_fails_OPEN_and_still_dispatches(tmp_path, monkeypatch):
@@ -255,7 +245,7 @@ def test_board_lookup_failure_fails_OPEN_and_still_dispatches(tmp_path, monkeypa
     conv = 'stalecv_failopen'
     _mk_conv(conv, project)
 
-    posted = post_task(project, conv, 'epic whose board read will blow up')
+    posted = post_task(project, conv, 'epic whose board read will blow up', user_id=TEST_OWNER_USER_ID)
     assert _enqueue_brain_kickoff(conv, posted['id'], project).get('queueId')
 
     def _boom(*a, **k):
@@ -264,18 +254,12 @@ def test_board_lookup_failure_fails_OPEN_and_still_dispatches(tmp_path, monkeypa
     monkeypatch.setattr('lib.conversations.project_board.read_board', _boom,
                         raising=False)
 
-    spawned = []
-    monkeypatch.setattr(
-        'lib.tasks_pkg.create_task',
-        lambda c, m, cfg, **kw: (spawned.append(c), {'id': 'tsk_failopen'})[1],
-        raising=False)
-    monkeypatch.setattr('lib.tasks_pkg.spawn_task', lambda *a, **k: None,
-                        raising=False)
+    submitted = _record_turn_submissions(monkeypatch, 'attempt-fail-open')
 
-    assert dispatch_next_queued(conv) == 'tsk_failopen', (
+    assert dispatch_next_queued(conv, user_id=TEST_OWNER_USER_ID) == 'attempt-fail-open', (
         'a board-lookup failure SWALLOWED a legitimate kickoff — the re-check '
         'must fail OPEN, or one DB hiccup silently halts all brain dispatch')
-    assert spawned == [conv]
+    assert [item[0] for item in submitted] == [conv]
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -315,21 +299,22 @@ def test_completion_trigger_advances_chain_without_duplicating(tmp_path, monkeyp
     # drain the queue immediately. This reproduces the incident shape — a conv
     # already working when the epic becomes dispatchable — and keeps the queued
     # row observable instead of instantly consumed.
-    from lib.tasks_pkg.manager import tasks, tasks_lock
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
     with tasks_lock:
         tasks['live-task-busy'] = {
             'id': 'live-task-busy', 'convId': conv,
+            '_userId': TEST_OWNER_USER_ID,
             'status': 'running', 'aborted': False,
         }
     try:
-        posted = post_task(project, conv, 'epic advanced by the completion seam')
+        posted = post_task(project, conv, 'epic advanced by the completion seam', user_id=TEST_OWNER_USER_ID)
         epic_id = posted['id']
-        first = on_epic_completed(project, completed_conv_id=conv)
+        first = on_epic_completed(project, completed_conv_id=conv, user_id=TEST_OWNER_USER_ID)
         depth_after_first = _queue_depth(conv)
         # The real scatter fired several epics inside ONE second; re-entrant
         # calls must not stack further rows for the same epic.
-        again = (on_epic_completed(project, completed_conv_id=conv)
-                 + on_epic_completed(project, completed_conv_id=conv))
+        again = (on_epic_completed(project, completed_conv_id=conv, user_id=TEST_OWNER_USER_ID)
+                 + on_epic_completed(project, completed_conv_id=conv, user_id=TEST_OWNER_USER_ID))
         depth_after_repeat = _queue_depth(conv)
     finally:
         with tasks_lock:
@@ -341,7 +326,7 @@ def test_completion_trigger_advances_chain_without_duplicating(tmp_path, monkeyp
     assert again == 0 and depth_after_repeat == depth_after_first, (
         're-firing on_epic_completed stacked another kickoff for the same epic '
         '— each extra row drains into another billed task (20:38:01 scatter)')
-    epic = next(t for t in read_board(project)['tasks'] if t['id'] == epic_id)
+    epic = next(t for t in read_board(project, user_id=TEST_OWNER_USER_ID)['tasks'] if t['id'] == epic_id)
     assert epic['status'] == 'claimed' and epic['owner_conv_id'] == conv, (
         'the epic was queued without being claimed to its target — a second '
         'dispatcher pass would then select it again')
@@ -361,18 +346,18 @@ def test_completion_trigger_still_dispatches_to_idle_target(tmp_path, monkeypatc
     drained = []
     monkeypatch.setattr(
         'lib.conversations.project_dispatch._drain_idle_target',
-        lambda c: (drained.append(c), 'tsk_stub')[1], raising=False)
+        lambda c, **_kw: (drained.append(c), 'tsk_stub')[1], raising=False)
 
     # An IDLE target must receive the epic. Either seam may be the one that
     # does it — ``post_task``→``on_epic_posted`` sees it first (event channel),
     # ``on_epic_completed`` covers the dependency case. NEITHER firing means the
     # busy guard is over-broad and has killed the trigger.
-    posted = post_task(project, conv, 'epic routed to an idle conv')
+    posted = post_task(project, conv, 'epic routed to an idle conv', user_id=TEST_OWNER_USER_ID)
     epic_id = posted['id']
-    dispatched = on_epic_completed(project, completed_conv_id=conv)
+    dispatched = on_epic_completed(project, completed_conv_id=conv, user_id=TEST_OWNER_USER_ID)
 
     from lib.conversations.project_board import read_board
-    epic = next(t for t in read_board(project)['tasks'] if t['id'] == epic_id)
+    epic = next(t for t in read_board(project, user_id=TEST_OWNER_USER_ID)['tasks'] if t['id'] == epic_id)
     assert dispatched == 1 or epic['status'] == 'claimed', (
         'an idle target got NO dispatch from either seam — the busy guard is '
         'over-broad and has killed the trigger the event channel depends on')

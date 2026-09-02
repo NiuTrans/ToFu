@@ -17,8 +17,29 @@ from __future__ import annotations
 
 from lib.ids import short_id  # noqa: F401 — re-exported for back-compat
 from lib.log import get_logger
+from lib.turn_verdict import (
+    TerminalTaskFailure,
+    TurnVerdict,
+    require_deliverable_task,
+)
 
 logger = get_logger(__name__)
+
+
+CompatTerminalFailure = TerminalTaskFailure
+
+
+def require_deliverable_terminal(
+    task: dict,
+    terminal_event: dict | None = None,
+) -> TurnVerdict:
+    """Return one canonical terminal verdict or reject a false success.
+
+    Truncated and explicitly interrupted outputs remain representable in the
+    vendor protocols.  A failed verdict must travel on their error channel;
+    it must never be normalized to ``stop`` / ``end_turn``.
+    """
+    return require_deliverable_task(task, terminal_event)
 
 # ``short_id`` now lives in lib/ids.py (the single, dependency-free home shared
 # by billing / conversations / tasks / routes). Re-exported here so the compat
@@ -187,5 +208,11 @@ def apply_tools_and_personal_defaults(cfg: dict, body: dict) -> None:
     apply_headless_personal_defaults(cfg)
 
 
-__all__ = ['short_id', 'apply_common_cfg', 'apply_thinking_cfg',
-           'apply_tools_and_personal_defaults']
+__all__ = [
+    'CompatTerminalFailure',
+    'apply_common_cfg',
+    'apply_thinking_cfg',
+    'apply_tools_and_personal_defaults',
+    'require_deliverable_terminal',
+    'short_id',
+]

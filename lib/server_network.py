@@ -10,10 +10,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from lib.log import get_logger
+from tofu_dotenv import parse_env_boolean
 
 
-_TLS_TRUE_VALUES = frozenset(('1', 'true', 'yes', 'on', 'enabled'))
-_TLS_FALSE_VALUES = frozenset(('0', 'false', 'no', 'off', 'disabled'))
 _MODULE_LOG = get_logger(__name__)
 
 
@@ -47,12 +46,7 @@ def resolve_tls_policy(
 ) -> tuple[bool, str, str]:
     """Resolve explicit listener TLS policy without guessing upstream TLS."""
     raw = str(tls_value or '').strip()
-    normalized = raw.lower()
-    preference = (
-        True if normalized in _TLS_TRUE_VALUES
-        else False if normalized in _TLS_FALSE_VALUES
-        else None
-    )
+    preference = parse_env_boolean(raw)
     if no_tls:
         return False, 'command-line-disabled', ''
     if preference is False:
@@ -64,6 +58,32 @@ def resolve_tls_policy(
     if behind_proxy:
         return False, 'reverse-proxy', raw
     return False, 'proxy-safe-default', raw
+
+
+def listener_configuration_error(
+    *,
+    port: object,
+    no_tls: bool = False,
+    tls_value: Any = '',
+    certfile: str = '',
+    keyfile: str = '',
+) -> str:
+    """Return a human-facing error for an unsafe/ambiguous listener config."""
+    try:
+        numeric_port = int(port)
+    except (TypeError, ValueError):
+        numeric_port = 0
+    if not 1 <= numeric_port <= 65535:
+        return f'port must be an integer from 1 to 65535 (got {port!r})'
+    if bool(certfile) != bool(keyfile):
+        return '--certfile/TLS_CERTFILE and --keyfile/TLS_KEYFILE must be configured together'
+    raw_tls = str(tls_value or '').strip()
+    if raw_tls and parse_env_boolean(raw_tls) is None \
+            and not no_tls and not (certfile and keyfile):
+        return (
+            f'unsupported TOFU_TLS={raw_tls!r}; expected 0/1, false/true, '
+            'no/yes, off/on, or disabled/enabled')
+    return ''
 
 
 def find_free_port(start: int = 15000, end: int = 15100) -> int:
@@ -111,6 +131,7 @@ def wait_port_free(
 __all__ = [
     'detect_reverse_proxy',
     'find_free_port',
+    'listener_configuration_error',
     'resolve_tls_policy',
     'wait_port_free',
 ]

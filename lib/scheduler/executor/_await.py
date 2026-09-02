@@ -12,15 +12,14 @@ from lib.scheduler.executor._common import _coerce_int_arg
 logger = get_logger(__name__)
 
 
-def _execute_await_task(fn_args):
+def _execute_await_task(fn_args, *, user_id: int):
     """Handle await_task tool — list/wait/status for cross-conversation tasks."""
-    from lib.tasks_pkg.manager import tasks, tasks_lock
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
 
     action = fn_args.get('action', 'list')
 
     if action == 'list':
-        with tasks_lock:
-            running = [
+        running = [
                 {
                     'task_id': t['id'],
                     'conv_id': t.get('convId', '?'),
@@ -28,7 +27,7 @@ def _execute_await_task(fn_args):
                     'elapsed': round(_time.time() - t.get('created_at', _time.time())),
                     'content_len': len(t.get('content', '')),
                 }
-                for t in tasks.values()
+                for t in chat_task_runtime.snapshot_owned(user_id=int(user_id))
                 if t.get('status') == 'running'
             ]
         if not running:
@@ -50,8 +49,7 @@ def _execute_await_task(fn_args):
         return 'Error: task_id is required for wait/status actions. Use action="list" to discover running tasks.'
 
     if action == 'status':
-        with tasks_lock:
-            t = tasks.get(task_id)
+        t = chat_task_runtime.get_owned(task_id, user_id=int(user_id))
         if not t:
             return f'Error: Task {task_id} not found (may have already been cleaned up).'
         elapsed = round(_time.time() - t.get('created_at', _time.time()))
@@ -72,8 +70,7 @@ def _execute_await_task(fn_args):
         parent_task = fn_args.get('_parent_task')  # injected by tool_dispatch
 
         # First check if it exists
-        with tasks_lock:
-            t = tasks.get(task_id)
+        t = chat_task_runtime.get_owned(task_id, user_id=int(user_id))
         if not t:
             return f'Error: Task {task_id} not found. It may have already finished.'
 
@@ -95,8 +92,7 @@ def _execute_await_task(fn_args):
             if parent_task and parent_task.get('aborted'):
                 logger.info('[AwaitTask] Parent task aborted, stopping wait for %s', task_id)
                 return 'Wait cancelled: your task was aborted by the user.'
-            with tasks_lock:
-                t = tasks.get(task_id)
+            t = chat_task_runtime.get_owned(task_id, user_id=int(user_id))
             if not t:
                 logger.info('[AwaitTask] Task %s completed and cleaned up', task_id)
                 return f'Task {task_id} has completed and been cleaned up.'
@@ -115,8 +111,7 @@ def _execute_await_task(fn_args):
                 )
 
         # Timeout
-        with tasks_lock:
-            t = tasks.get(task_id)
+        t = chat_task_runtime.get_owned(task_id, user_id=int(user_id))
         content_len = len(t.get('content', '')) if t else 0
         logger.warning('[AwaitTask] Timeout after %ds waiting for task %s (output=%d chars)',
                        timeout, task_id, content_len)

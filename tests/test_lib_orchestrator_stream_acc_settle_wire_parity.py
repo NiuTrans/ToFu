@@ -1,12 +1,9 @@
-# Incident anchor: born in commit 52eb3266 — refactor(orchestrator): pt_03f4cdf1 slice 24 — extract streaming-accu...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 24 wire-parity: _stream_acc_settle.py extraction from _run.py."""
 
 import inspect
 from types import SimpleNamespace
 
-from lib.tasks_pkg.orchestrator import _stream_acc_settle
-
+import lib.tasks_pkg.orchestrator._stream_acc_settle as _stream_acc_settle
 
 class TestStreamAccSettleWireParity:
     def test_module_exists(self):
@@ -85,17 +82,19 @@ class TestStreamAccSettleWireParity:
         assert rs.tool_round_num == 3  # untouched
 
     def test_docstring_mentions_extraction(self):
-        assert "pt_03f4cdf1" in (_stream_acc_settle.__doc__ or "")
+        doc = _stream_acc_settle.__doc__ or ""
+        assert "Extracted from" in doc
+        assert "_run.py" in doc
 
 
 class TestRunTaskDelegation:
     def test_run_task_delegates_to_helper(self):
-        from lib.tasks_pkg.orchestrator import _run
-        src = inspect.getsource(_run.run_task)
+        import lib.tasks_pkg.orchestrator._root_agent_loop as _root_agent_loop
+        src = inspect.getsource(_root_agent_loop)
         assert "settle_stream_accumulator(" in src
 
     def test_run_task_no_longer_carries_cluster_inline(self):
-        from lib.tasks_pkg.orchestrator import _run
+        import lib.tasks_pkg.orchestrator._run as _run
         src = inspect.getsource(_run.run_task)
         assert "reconcile_announced_rounds" not in src
         assert "inject_into_cache" not in src

@@ -26,6 +26,7 @@ ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _PAGE = """
 <!DOCTYPE html><html data-theme="__THEME__"><head>
 <link rel="stylesheet" href="file://__ROOT__/static/styles.css">
+<link rel="stylesheet" href="file://__ROOT__/static/request-inspector-trace.css">
 </head><body>
 <div id="chatinner" style="padding:20px">
   <div data-prn="1"><div class="ptool-line">grep_search</div></div>

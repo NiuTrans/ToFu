@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from lib.orchestration.authoring_contract import (
     authoring_contract_response_schema,
-    role_contract_response_schema,
 )
 
 from .orchestration_authoring_action_openapi import (
@@ -26,22 +25,11 @@ def authoring_contract_responses() -> dict:
     }, 401, 403, 500)
 
 
-def role_contract_responses() -> dict:
-    """Document both compatibility shapes plus shared transport failures."""
-    return orchestration_api_responses({
-        '200': orchestration_json_response(
-            'Full authoring contract or one role contract',
-            role_contract_response_schema(),
-        ),
-    }, 401, 403, 500)
-
-
 def authoring_route_response_registry() -> dict[str, dict]:
     """Build every authoring-route response map behind one registration port."""
     responses = authoring_action_response_registry()
     responses.update({
         'authoring-contract': authoring_contract_responses(),
-        'role-schema': role_contract_responses(),
     })
     return responses
 
@@ -49,7 +37,5 @@ def authoring_route_response_registry() -> dict[str, dict]:
 __all__ = [
     'authoring_contract_response_schema',
     'authoring_contract_responses',
-    'role_contract_response_schema',
-    'role_contract_responses',
     'authoring_route_response_registry',
 ]

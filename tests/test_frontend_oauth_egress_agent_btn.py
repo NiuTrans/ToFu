@@ -26,7 +26,6 @@ def test_egress_renderer_never_offers_an_installer_or_permission_work():
         'openLocalControlModal',
         'EgressAgentBtn',
         'settings.egressGetAgent',
-        'settings.egressAgentNoCap',
         'setInterval',
     ):
         assert burden not in renderer

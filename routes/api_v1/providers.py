@@ -1,7 +1,7 @@
 """routes/api_v1/providers.py — BYO model-endpoint registration.
 
 Routes:
-  GET    /api/v1/providers              — list owned providers (key-scoped)
+  GET    /api/v1/providers              — list providers owned by the principal
   POST   /api/v1/providers              — register a new provider; auto-discovers models
   GET    /api/v1/providers/{id}         — fetch one (api_key redacted)
   PATCH  /api/v1/providers/{id}         — mutate name/url/key/models/disabled
@@ -44,11 +44,9 @@ logger = get_logger(__name__)
 api_v1_providers_bp = Blueprint('api_v1_providers', __name__)
 
 
-# ``sanitise_extra_headers`` (+ the forbidden-header allowlist and size
-# caps) moved to ``lib.byo_providers`` so non-route code (the shared BYO
-# resolver in ``lib.byo_resolve``) can reuse it without importing a
-# ``routes.*`` module. Re-exported here for back-compat with callers /
-# tests that import it from this module.
+# Header policy lives in the domain module so every caller, including direct
+# service use, crosses the same validation boundary.  This route imports the
+# public function only to expose it to its own request parsing below.
 
 
 # ── Routes ──────────────────────────────────────────────────────────
@@ -58,14 +56,15 @@ api_v1_providers_bp = Blueprint('api_v1_providers', __name__)
 @require_scope('providers')
 @api_meta(summary='List BYO providers',
           description='Returns providers registered against the calling '
-                       'API key. The api_key field is redacted to a '
-                       '`key_hint` (first six + last two characters).',
+                       'repository owner. The api_key field is redacted to a '
+                       '`key_hint` (first four + last four characters).',
           tags=['providers'], scope='providers')
 def list_providers_route():
     ctx = current_auth()
-    if ctx is None or not ctx.key_id:
+    if ctx is None or ctx.owner_user_id is None:
         return api_ok(providers=[])
-    return api_ok(providers=list_providers(ctx.key_id))
+    return api_ok(providers=list_providers(
+        ctx.owner_user_id, tenant_id=ctx.tenant_id))
 
 
 @api_v1_providers_bp.route('/api/v1/providers', methods=['POST'])
@@ -74,7 +73,7 @@ def list_providers_route():
     summary='Register a BYO model endpoint',
     description=(
         'Register an OpenAI-compatible LLM endpoint owned by the '
-        'calling API key. Returns the provider row including the '
+        'authenticated repository owner. Returns the provider row including the '
         'opaque `id` (e.g. `prov_a3f2c1`) which can be used to pin '
         'runs to this endpoint via the model-string convention '
         '`<model_id>@<prov_id>`.\n\n'
@@ -170,9 +169,8 @@ def list_providers_route():
             }}}}})
 def create_provider_route():
     ctx = current_auth()
-    if ctx is None or not ctx.key_id:
-        return api_bad_request('caller has no key_id; '
-                                'open-mode admin contexts cannot own providers')
+    if ctx is None or ctx.owner_user_id is None:
+        return api_bad_request('caller has no repository owner identity')
     body = parse_body()
     name = require_str(body, 'name', max_len=80)
     base_url = require_str(body, 'base_url', max_len=500)
@@ -222,7 +220,9 @@ def create_provider_route():
 
     try:
         row = create_provider(
-            owner_key_id=ctx.key_id, name=name, base_url=base_url,
+            owner_user_id=ctx.owner_user_id,
+            tenant_id=ctx.tenant_id,
+            name=name, base_url=base_url,
             api_key=api_key, models=models, extra_headers=extra_headers,
             thinking_format=final_thinking_format,
         )
@@ -241,9 +241,10 @@ def create_provider_route():
 @api_meta(summary='Get a BYO provider', tags=['providers'], scope='providers')
 def get_provider_route(prov_id):
     ctx = current_auth()
-    if ctx is None or not ctx.key_id:
+    if ctx is None or ctx.owner_user_id is None:
         return api_not_found('Provider not found')
-    row = get_public(prov_id, ctx.key_id)
+    row = get_public(
+        prov_id, ctx.owner_user_id, tenant_id=ctx.tenant_id)
     if row is None:
         return api_not_found('Provider not found')
     return api_ok(provider=row)
@@ -255,7 +256,7 @@ def get_provider_route(prov_id):
           scope='providers')
 def update_provider_route(prov_id):
     ctx = current_auth()
-    if ctx is None or not ctx.key_id:
+    if ctx is None or ctx.owner_user_id is None:
         return api_not_found('Provider not found')
     body = parse_body()
     fields = {}
@@ -279,12 +280,14 @@ def update_provider_route(prov_id):
     if not fields:
         return api_bad_request('No updatable fields provided')
     try:
-        ok = update_provider(prov_id, ctx.key_id, **fields)
+        ok = update_provider(
+            prov_id, ctx.owner_user_id, tenant_id=ctx.tenant_id, **fields)
     except ValueError as e:
         return api_bad_request(str(e))
     if not ok:
         return api_not_found('Provider not found')
-    return api_ok(provider=get_public(prov_id, ctx.key_id))
+    return api_ok(provider=get_public(
+        prov_id, ctx.owner_user_id, tenant_id=ctx.tenant_id))
 
 
 @api_v1_providers_bp.route('/api/v1/providers/<prov_id>', methods=['DELETE'])
@@ -293,12 +296,13 @@ def update_provider_route(prov_id):
           scope='providers')
 def delete_provider_route(prov_id):
     ctx = current_auth()
-    if ctx is None or not ctx.key_id:
+    if ctx is None or ctx.owner_user_id is None:
         return api_not_found('Provider not found')
-    if not delete_provider(prov_id, ctx.key_id):
+    if not delete_provider(
+            prov_id, ctx.owner_user_id, tenant_id=ctx.tenant_id):
         return api_not_found('Provider not found')
     audit_log('byo_provider_deleted_route', prov_id=prov_id,
-              key_id=ctx.key_id)
+              owner_user_id=ctx.owner_user_id)
     return api_ok({'deleted': prov_id})
 
 
@@ -311,9 +315,10 @@ def delete_provider_route(prov_id):
           tags=['providers'], scope='providers')
 def probe_provider_route(prov_id):
     ctx = current_auth()
-    if ctx is None or not ctx.key_id:
+    if ctx is None or ctx.owner_user_id is None:
         return api_not_found('Provider not found')
-    row = get_provider(prov_id, ctx.key_id)
+    row = get_provider(
+        prov_id, ctx.owner_user_id, tenant_id=ctx.tenant_id)
     if row is None:
         return api_not_found('Provider not found')
     try:
@@ -336,8 +341,10 @@ def probe_provider_route(prov_id):
     update_fields: dict = {'models': models}
     if auto_thinking_format and not (row.get('thinking_format') or ''):
         update_fields['thinking_format'] = auto_thinking_format
-    update_provider(prov_id, ctx.key_id, **update_fields)
-    return api_ok(provider=get_public(prov_id, ctx.key_id),
+    update_provider(
+        prov_id, ctx.owner_user_id, tenant_id=ctx.tenant_id, **update_fields)
+    return api_ok(provider=get_public(
+                       prov_id, ctx.owner_user_id, tenant_id=ctx.tenant_id),
                    discovered_count=len(models),
                    thinking_format_applied=update_fields.get(
                        'thinking_format', row.get('thinking_format', '')))

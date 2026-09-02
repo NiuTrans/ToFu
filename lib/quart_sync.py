@@ -58,7 +58,7 @@ def resolve(awaitable: Any, *, timeout: float | None = None) -> Any:
             'lib.quart_sync cannot run on the event loop; await Quart directly')
 
     try:
-        from lib.push import hub
+        from lib.agent_core.push import hub
         serving_loop = getattr(hub, '_loop', None)
     except ImportError as exc:
         logger.debug('[QuartSync] serving-loop lookup unavailable: %s', exc)

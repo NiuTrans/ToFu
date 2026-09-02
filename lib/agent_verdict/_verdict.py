@@ -6,8 +6,7 @@ Carries:
   * the verdict / plan-defect / unresolved-marker / loose-fallback regexes and
     the ``_WORKER_RATIONALIZATIONS`` blocklist, each kept WITH the function
     that uses it;
-  * ``_clean_feedback`` + ``classify_verdict`` — the unified core behind
-    endpoint mode's ``_parse_verdict`` and the engine's ``_classify_verdict``;
+  * ``_clean_feedback`` + ``classify_verdict`` — the unified verifier core;
   * ``INCOMPLETE_STOP_REASONS`` + ``is_incomplete_stop`` — the shared
     "cut off by a safety cap, not genuinely finished" contract both loops
     escalate on.
@@ -121,9 +120,8 @@ def classify_verdict(
 ) -> dict:
     """Parse a verifier's output into a structured verdict.
 
-    This is the unified core behind endpoint mode's ``_parse_verdict`` and
-    the orchestration engine's ``_classify_verdict``.  Both gate identically;
-    they differ only in (a) whether a missing tag falls back to loose
+    This is the orchestration engine's shared verdict classifier. Callers gate
+    identically; they differ only in (a) whether a missing tag falls back to loose
     plain-language heuristics, (b) virtual-user inversion, and (c) whether the
     caller wants the cleaned feedback text back.  Those are the kwargs.
 
@@ -137,12 +135,11 @@ def classify_verdict(
         reply (including empty) means ``worker`` (keep going).
     loose_fallback : bool
         When True and no explicit ``[VERDICT:]`` tag is present, fall back to
-        the loose STOP/CONTINUE heuristics (engine behaviour).  When False, a
-        missing tag defaults to ``worker`` (endpoint behaviour).
+        the loose STOP/CONTINUE heuristics. When False, a missing tag defaults
+        to ``worker`` (strict behavior).
     strip_feedback : bool
         When True, also compute the cleaned display feedback (tags + trailing
-        '### Verdict' header removed).  Endpoint needs this; the engine does
-        not.
+        '### Verdict' header removed).
 
     Returns
     -------
@@ -165,7 +162,7 @@ def classify_verdict(
             # "unresolved") is the virtual user rubber-stamping the agent's
             # self-report rather than verifying the objective.  Downgrade to
             # 'worker' so the autopilot loop keeps going.  Reuses the exact
-            # marker scan the endpoint critic's STOP guard uses — one policy,
+            # marker scan the verifier STOP guard uses — one policy,
             # one place.
             x_count = len(_UNRESOLVED_EMOJI_RE.findall(text or ''))
             phrase_hits = _UNRESOLVED_PHRASE_RE.findall(text or '')
@@ -261,9 +258,8 @@ def classify_verdict(
             phase = 'worker'   # CONTINUE_WORKER or legacy bare CONTINUE
         feedback = _clean_feedback(text, match) if strip_feedback else None
 
-    # The marker scan runs against the cleaned feedback when we have it
-    # (endpoint), else against the raw text (engine) — both contain the
-    # markers, and the engine never strips.
+    # The marker scan runs against cleaned feedback when requested, otherwise
+    # against raw text. Both forms retain the unresolved-work markers.
     marker_src = feedback if (strip_feedback and feedback is not None) else (text or '')
 
     # ── Guard: STOP with unresolved markers → downgrade to CONTINUE_WORKER ──
@@ -321,7 +317,7 @@ def classify_verdict(
             phase = 'worker'
         elif not replan_enabled():
             logger.info('[Verdict] Replan disabled — CONTINUE_PLANNER '
-                        'downgraded to CONTINUE_WORKER (TOFU_ENDPOINT_REPLAN=0)')
+                        'downgraded to CONTINUE_WORKER (TOFU_FLOW_REPLAN=0)')
             phase = 'worker'
 
     return {'phase': phase, 'plan_defect': plan_defect,
@@ -333,8 +329,8 @@ def classify_verdict(
 # ══════════════════════════════════════════════════════════
 
 # Stop reasons that mean "the loop was CUT OFF, not genuinely finished" — the
-# objective is NOT verified-complete.  Endpoint's max_iterations / max_replans /
-# stuck, autopilot's budget_exhausted / stuck / no_progress (the last from the
+# objective is NOT verified-complete. Flow's max_iterations / max_replans /
+# stuck, Autopilot's budget_exhausted / stuck / no_progress (the last from the
 # Part-2 diminishing-returns guard), plus the three MID-FLIGHT autopilot cutoffs
 # below.
 INCOMPLETE_STOP_REASONS = frozenset({

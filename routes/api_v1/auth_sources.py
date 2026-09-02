@@ -29,7 +29,7 @@ from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import parse_body
 
-from .auth import require_auth
+from .auth import current_auth, require_auth
 
 logger = get_logger(__name__)
 
@@ -133,7 +133,11 @@ def auth_source_live_session(domain):
     from lib.auth_sources import live_session_status
 
     refresh = (request.args.get('refresh') or '').strip() in ('1', 'true')
-    return api_ok(live_session_status(domain, refresh=refresh))
+    return api_ok(live_session_status(
+        domain,
+        owner_user_id=current_auth().owner_user_id,
+        refresh=refresh,
+    ))
 
 
 @api_v1_auth_sources_bp.route('/api/v1/auth-sources/<domain>', methods=['DELETE'])
@@ -176,6 +180,8 @@ def interactive_login(domain):
     timeout_s = max(30, min(timeout_s, 600))
 
     try:
+        from lib.search_runtime import prepare_search_dependency_import
+        prepare_search_dependency_import()
         from tofu_search.fetch.interactive_login import capture_login_cookies
     except Exception as e:
         logger.error('[AuthSrc.v1] interactive login module unavailable: %s', e, exc_info=True)

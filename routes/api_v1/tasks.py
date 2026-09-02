@@ -32,7 +32,7 @@ from lib.openapi import api_meta
 from lib.request_parser import optional_bool, parse_body, require_str
 from routes.task_http import task_replay_cursor, task_replay_parameters
 
-from .auth import current_auth, require_scope
+from .auth import current_auth, request_user_id, require_scope
 
 logger = get_logger(__name__)
 
@@ -53,8 +53,8 @@ def _registries() -> dict:
     """
     out = {}
     try:
-        from lib.tasks_pkg.manager import _chat_runtime
-        out['chat'] = _chat_runtime
+        from lib.tasks_pkg.manager.runtime import chat_task_runtime
+        out[chat_task_runtime.kind] = chat_task_runtime
     except Exception as e:
         logger.debug('[api_v1.tasks] chat runtime unavailable: %s', e)
     for mod_path, attr in (
@@ -70,7 +70,7 @@ def _registries() -> dict:
         # instances with the standard task shape, but were absent from this
         # list — so /api/v1/tasks could not see a motion job at all, and
         # podcast had to hand-write its own poll route
-        # (docs/PRODUCTION_PIPELINE_DESIGN.md §1.6).
+        # (docs/modules/production.md).
         ('lib.motion_video.runtime', '_motion_runtime'),
         ('lib.paper.podcast_runtime', '_podcast_runtime'),
         ('lib.longform.runtime', '_longform_runtime'),
@@ -133,11 +133,11 @@ def _starters() -> dict:
     if _STARTERS:
         return _STARTERS
     for mod_path, attr, kind, field, params in (
-        ('lib.research.engine', 'produce_research', 'research', 'direction',
+        ('lib.research.api', 'produce_research', 'research', 'direction',
          ('lang', 'n_ideas', 'seed_arxiv_ids')),
-        ('lib.longform.engine', 'start_report_job', 'longform-report', 'topic',
+        ('lib.longform.api', 'start_report_job', 'longform-report', 'topic',
          ('lang', 'depth')),
-        ('lib.slides.engine', 'start_slides_job', 'slides-deck', 'topic',
+        ('lib.slides.api', 'start_slides_job', 'slides-deck', 'topic',
          ('lang', 'style', 'max_pages', 'size', 'model')),
     ):
         try:
@@ -201,6 +201,7 @@ def start_task():
     conv_id = body.get('conv_id')
     if isinstance(conv_id, str) and conv_id:
         kwargs['conv_id'] = conv_id
+    kwargs['user_id'] = int(request_user_id())
 
     try:
         res = spec['start'](value.strip(), **kwargs) or {}
@@ -224,7 +225,7 @@ def start_task():
 
 
 def _public_task(task: dict) -> dict:
-    """Copy a task dict, dropping internal handles (locks, events_lock, etc.).
+    """Copy a task dict, dropping private runtime state and sync handles.
 
     ``artifact_quality`` (the product-quality axis — see
     lib/agent_core/task_runtime.py) MUST survive this copy. A degraded job
@@ -237,7 +238,13 @@ def _public_task(task: dict) -> dict:
     SKIP = {'events_lock', 'abort_event', 'content_lock'}
     out = {}
     for k, v in task.items():
-        if k in SKIP:
+        # Leading-underscore fields are process-private by repository
+        # convention. They include locks, callback carriers, dispatch state,
+        # credentials and bounded sets such as ``_budgetWarnings``. Exposing
+        # them was both an authority leak and a reliability bug: the first set
+        # reached Quart's JSON provider and made GET /api/v1/tasks/{id} return
+        # 500. Public metadata has explicit non-private mirrors on the task.
+        if k in SKIP or k.startswith('_'):
             continue
         if k == 'messages':
             # Don't dump the full prompt back; clients already have it.
@@ -260,6 +267,7 @@ def _public_task(task: dict) -> dict:
                'schema': {'type': 'integer', 'default': 50, 'maximum': 500}},
           ])
 def list_tasks():
+    owner_user_id = int(request_user_id())
     kind = request.args.get('kind') or ''
     status = request.args.get('status') or ''
     try:
@@ -273,8 +281,7 @@ def list_tasks():
         if kind and k != kind:
             continue
         try:
-            with rt._lock:  # type: ignore[attr-defined]
-                tasks = list(rt._tasks.values())  # type: ignore[attr-defined]
+            tasks = rt.snapshot_owned(user_id=owner_user_id)
         except Exception as e:
             logger.debug('[api_v1.tasks] snapshot %s failed: %s', k, e)
             continue
@@ -298,9 +305,9 @@ def list_tasks():
     return api_ok({'tasks': items[:limit], 'total': len(items)})
 
 
-def _find_task(task_id: str):
+def _find_task(task_id: str, *, user_id: int):
     for rt in _registries().values():
-        t = rt.get(task_id)
+        t = rt.get_owned(task_id, user_id=user_id)
         if t is not None:
             return rt, t
     return None, None
@@ -315,7 +322,7 @@ def _find_task(task_id: str):
               '404': {'description': 'Not Found'},
           })
 def get_task(task_id):
-    rt, task = _find_task(task_id)
+    rt, task = _find_task(task_id, user_id=int(request_user_id()))
     if task is None:
         return api_not_found('Task not found')
     return api_ok(_public_task(task))
@@ -328,7 +335,7 @@ def get_task(task_id):
           parameters=_TASK_REPLAY_PARAMETERS)
 def task_events(task_id):
     cursor = task_replay_cursor(request.args)
-    rt, task = _find_task(task_id)
+    rt, task = _find_task(task_id, user_id=int(request_user_id()))
     if task is None:
         return api_not_found('Task not found')
     return api_ok(rt.poll(task_id, cursor=cursor))
@@ -341,9 +348,15 @@ def task_events(task_id):
 def tasks_by_conv(conv_id):
     """Task rows for the Request Inspector drawer (live registry +
     task_results + exact kind-counted snapshot tallies)."""
+    from lib.conversations.repository import get_conversation
     from lib.tasks_pkg.request_inspector import list_conv_tasks
+    owner_user_id = int(request_user_id())
+    if get_conversation(
+            conv_id, user_id=owner_user_id,
+            include_messages=False) is None:
+        return api_not_found('Conversation not found')
     try:
-        return api_ok(list_conv_tasks(conv_id))
+        return api_ok(list_conv_tasks(conv_id, user_id=owner_user_id))
     except Exception as e:
         logger.error('[api_v1.tasks] by-conv failed for conv=%s: %s',
                      conv_id[:8], e, exc_info=True)
@@ -362,10 +375,33 @@ def task_requests(task_id):
     Returns 200 with ``eventsAvailable:false`` for expired (>6h) or
     unknown tasks so the UI can show an honest empty state."""
     from lib.tasks_pkg.request_inspector import fold_request_log
+    if _find_task(task_id, user_id=int(request_user_id()))[1] is None:
+        return api_not_found('Task not found')
     try:
         return api_ok(fold_request_log(task_id))
     except Exception as e:
         logger.error('[api_v1.tasks] requests fold failed for task=%s: %s',
+                     task_id[:8], e, exc_info=True)
+        return api_internal_error('internal_error')
+
+
+@api_v1_tasks_bp.route('/api/v1/tasks/<task_id>/trace', methods=['GET'])
+@require_scope('tasks')
+@api_meta(summary='Turn Trace: per-task timing span fold',
+          tags=['tasks'], scope='tasks')
+def task_trace(task_id):
+    """Fold the task's persisted event log into the timing span tree
+    (turn → round → llm/tool/wait/compaction + explicit gaps + the
+    declared-budget over-run list). Contract: docs/TURN_TRACE_CONTRACT.md.
+    Returns 200 with ``eventsAvailable:false`` for expired (>6h) or
+    unknown tasks so the UI can show an honest empty state."""
+    from lib.tasks_pkg.turn_trace import fold_task_trace
+    if _find_task(task_id, user_id=int(request_user_id()))[1] is None:
+        return api_not_found('Task not found')
+    try:
+        return api_ok(fold_task_trace(task_id))
+    except Exception as e:
+        logger.error('[api_v1.tasks] trace fold failed for task=%s: %s',
                      task_id[:8], e, exc_info=True)
         return api_internal_error('internal_error')
 
@@ -382,6 +418,8 @@ def task_request_payload(task_id, round_num):
     404 when the round has no matching snapshot (expired, wrong kind, or
     unknown)."""
     from lib.tasks_pkg.request_inspector import get_request_payload
+    if _find_task(task_id, user_id=int(request_user_id()))[1] is None:
+        return api_not_found('Task not found')
     try:
         payload = get_request_payload(
             task_id, round_num, turn=request.args.get('turn', ''),
@@ -408,7 +446,7 @@ def task_request_payload(task_id, round_num):
           })
 def task_stream(task_id):
     cursor = task_replay_cursor(request.args)
-    rt, task = _find_task(task_id)
+    rt, task = _find_task(task_id, user_id=int(request_user_id()))
     if task is None:
         return api_not_found('Task not found')
 
@@ -441,13 +479,14 @@ def task_stream(task_id):
 @require_scope('tasks')
 @api_meta(summary='Abort a task', tags=['tasks'], scope='tasks')
 def task_abort(task_id):
-    rt, task = _find_task(task_id)
+    owner_user_id = int(request_user_id())
+    rt, task = _find_task(task_id, user_id=owner_user_id)
     if task is None:
         return api_not_found('Task not found')
     if task.get('status') in ('done', 'error', 'aborted'):
         return api_ok(taskId=task_id, status=task['status'],
                        note='already finished')
-    rt.abort(task_id)
+    rt.abort_owned(task_id, user_id=owner_user_id)
     if 'aborted' in task:
         task['aborted'] = True
     audit_log('api_task_abort', task_id=task_id, kind=task.get('kind'),
@@ -473,7 +512,8 @@ def task_abort(task_id):
                        'content': {'type': 'string'},
                        'is_error': {'type': 'boolean'}}}}}})
 def task_tool_result(task_id):
-    _, task = _find_task(task_id)
+    owner_user_id = int(request_user_id())
+    _, task = _find_task(task_id, user_id=owner_user_id)
     if task is None:
         return api_not_found('Task not found')
     body = parse_body()
@@ -484,7 +524,13 @@ def task_tool_result(task_id):
         return api_bad_request(str(e))
     is_error = optional_bool(body, 'is_error', default=False)
     from lib.tools.tool_env import resolve_client_tool_result
-    ok = resolve_client_tool_result(call_id, content, is_error=is_error)
+    ok = resolve_client_tool_result(
+        call_id,
+        content,
+        task_id=task_id,
+        user_id=owner_user_id,
+        is_error=is_error,
+    )
     if not ok:
         return api_not_found(
             f'No pending custom tool call {call_id!r} (expired, already '
@@ -500,14 +546,12 @@ def task_tool_result(task_id):
 @api_meta(summary='Drop a task from the registry (admin)',
           tags=['tasks'], scope='admin')
 def task_delete(task_id):
-    rt, task = _find_task(task_id)
+    owner_user_id = int(request_user_id())
+    rt, task = _find_task(task_id, user_id=owner_user_id)
     if task is None:
         return api_not_found('Task not found')
-    try:
-        with rt._lock:  # type: ignore[attr-defined]
-            rt._tasks.pop(task_id, None)  # type: ignore[attr-defined]
-    except Exception as e:
-        logger.warning('[api_v1.tasks] delete %s failed: %s', task_id, e)
+    if not rt.remove_owned(task_id, user_id=owner_user_id):
+        return api_not_found('Task not found')
     audit_log('api_task_delete', task_id=task_id,
               key_id=(current_auth().key_id if current_auth() else ''))
     return api_ok(taskId=task_id, status='deleted')

@@ -11,7 +11,7 @@ copies drifted.
 This module holds that logic exactly once. The two transport shells keep
 only what genuinely differs:
 
-  - opening the stream + iterating lines (``requests`` vs ``httpx``);
+  - opening the stream + iterating raw bytes (``requests`` vs ``httpx``);
   - the retry/backoff loop's sleep call (blocking vs ``await``);
   - mapping ``httpx`` transport exceptions to ``RetryableAPIError``.
 
@@ -25,34 +25,38 @@ Public surface
     raw_dumper)`` — shared non-200 handling (delegates to
     ``_classify_http_error``); the caller reads the error body in its own
     transport-native way and passes the text in.
-  - ``SSEAccumulator`` — feed it one raw SSE line at a time via
-    ``feed_line(line)`` (returns ``True`` when the stream should stop),
-    then call ``finalize(...)`` for the ``(msg, finish_reason, usage)``
-    tuple. ``feed_line`` raises the same exceptions the inline loop did
+  - ``SSEAccumulator`` — frame raw bytes once with ``SSEFramer``, submit each
+    complete ``SSEEvent`` through ``feed_event(event)``, then call
+    ``finalize(...)`` for a tuple-compatible
+    :class:`ProviderStreamResult`. The historical ``feed_line`` adapter is
+    retained only for plugin/test migration. Payload submission raises the
+    same exceptions the inline loop did
     (``ModelLimitError`` / ``RateLimitError`` / ``PromptTooLongError`` /
     ``RetryableAPIError`` / ``Exception('SSE error: …')``), so the
     transport shell's retry wrapper handles them unchanged.
 
-This is a pure code-motion refactor: no retry cap, timeout, backoff, or
-cache constant is changed here. The ``usage`` anomaly fields
-(``_chunks_received``, ``_stream_anomaly``, ``_missing_done``,
-``_missing_finish_reason``, ``_empty_stop``, ``stream_elapsed_ms``,
-``trace_id``, ``resp_trace_id``) are emitted byte-for-byte as before
-because ``lib/tasks_pkg/stream_handler.py::analyse_stream_result`` keys
-its retry buckets off them.
+The accumulator records normalized progress into one ``StreamProgress`` and
+closes one typed ``ProviderStreamResult``. Historical ``usage`` anomaly fields
+are compatibility projections of that result/evidence; downstream callers do
+not reconstruct completion from an open-ended flag bag.
 """
 
 import json
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Optional
 
 import lib as _lib
-from lib.llm._transport import chat_url, headers
+from lib.llm._sse_framer import SSEEvent
+from lib.llm._transport import StreamProgress, chat_url, headers
 from lib.llm.cache import add_cache_breakpoints
 from lib.llm.diagnostics import RawSSEDumper
+from lib.llm.stream_result import (
+    ProviderStreamResult,
+    classify_provider_stream_state,
+)
 from lib.cost import canonicalize_usage_cache_keys, normalize_usage
 from lib.llm_errors import (
     ModelLimitError,
@@ -149,8 +153,8 @@ def _maybe_dump_cache_probe(body, task_id, log_prefix='', routing=None):
         conv_id = ''
         if task_id:
             try:
-                from lib.tasks_pkg.manager._state import _chat_runtime
-                _t = _chat_runtime.get(task_id)
+                from lib.tasks_pkg.manager.runtime import chat_task_runtime
+                _t = chat_task_runtime.get(task_id)
                 if _t:
                     conv_id = _t.get('convId') or ''
             except Exception as _re:
@@ -219,6 +223,8 @@ class RequestPlan:
     responses_state_key: str = ''
     responses_profile: str = ''
     tool_search_backend: str = ''
+    programmatic_backend: str = ''
+    multi_agent_backend: str = ''
 
 
 def activate_native_tool_search_fallback(
@@ -251,6 +257,55 @@ def activate_native_tool_search_fallback(
     return True
 
 
+def activate_native_orchestration_fallback(
+    status_code: int,
+    error_text: str,
+    *,
+    plan: RequestPlan,
+    canonical_body: dict,
+) -> bool:
+    """Retry an explicitly rejected native orchestration field locally.
+
+    This is deliberately narrower than a generic HTTP fallback: only request-
+    shape statuses and unmistakable PTC/Multi-agent field names qualify. A bad
+    model, prompt, token limit, or unrelated schema therefore keeps its normal
+    error classification instead of being hidden by a local retry.
+    """
+    if status_code not in (400, 404, 422):
+        return False
+    lower = str(error_text or '').casefold()
+    changed: list[str] = []
+
+    ptc_signals = (
+        'programmatic_tool_calling', 'programmatic tool calling',
+        'allowed_callers',
+    )
+    if (plan.programmatic_backend == 'native_openai'
+            and any(signal in lower for signal in ptc_signals)
+            and bool(canonical_body.get('_programmatic_eligible_tools'))):
+        canonical_body['_force_local_programmatic'] = True
+        changed.append('PTC')
+
+    multi_agent_signals = (
+        'multi_agent', 'multi-agent', 'max_concurrent_subagents',
+        'responses_multi_agent',
+    )
+    if (plan.multi_agent_backend == 'native_openai'
+            and any(signal in lower for signal in multi_agent_signals)):
+        from lib.swarm.routing import catalog_has_spawn_agents
+        authority = canonical_body.get('_executable_tool_catalog')
+        if catalog_has_spawn_agents(authority):
+            canonical_body['_force_local_multi_agent'] = True
+            changed.append('Multi-agent')
+
+    if not changed:
+        return False
+    logger.warning(
+        'Native %s rejected by provider (HTTP %d); retrying with local '
+        'orchestration', ' + '.join(changed), status_code)
+    return True
+
+
 def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                     base_url=None, extra_headers=None,
                     api_protocol='openai', oauth='') -> RequestPlan:
@@ -265,6 +320,17 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     # reusing an already-trimmed wire body would silently lose the immutable
     # executable catalog on the next attempt.
     body = dict(body)
+    _request_activity_sink = body.get('_request_activity_sink')
+    if not callable(_request_activity_sink):
+        _request_activity_sink = None
+
+    def _provider_tool_name(tool):
+        if not isinstance(tool, dict):
+            return ''
+        function = tool.get('function')
+        if isinstance(function, dict):
+            return str(function.get('name') or '')
+        return str(tool.get('name') or '')
 
     # Read the latch key NON-destructively and keep it on the body for the
     # WHOLE task life. The streaming retry loop re-feeds the SAME body dict to
@@ -287,11 +353,12 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     # protocol translation.  Authorization continues to use the task-owned
     # executable catalog in the dispatch pipeline; this only controls what the
     # model sees on the wire.
-    _enabled_catalog = body.get(
-        '_executable_tool_catalog', body.get('_enabled_tool_catalog'))
+    _executable_catalog = body.get('_executable_tool_catalog')
     _tool_search_backend = ''
-    if isinstance(_enabled_catalog, list):
+    _required_direct_names: set[str] = set()
+    if isinstance(_executable_catalog, list):
         from lib.tools.gateway import (
+            CODE_CORE_DIRECT_TOOL_NAMES,
             full_wire_tools,
             local_wire_tools,
             resolve_tool_search_backend,
@@ -310,6 +377,14 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         body['_resolved_tool_search_backend'] = _tool_search_backend
         _pins = list(body.get('_frontend_selected_tool_names') or ())
         _pin_set = {str(name) for name in _pins}
+        _schema_budget = int(body.get('_tool_schema_budget_tokens') or 0)
+        _choice = body.get('tool_choice')
+        if isinstance(_choice, dict):
+            _choice_function = _choice.get('function')
+            if isinstance(_choice_function, dict) \
+                    and _choice_function.get('name'):
+                _pin_set.add(str(_choice_function['name']))
+                _required_direct_names.add(str(_choice_function['name']))
 
         def _wire_catalog_tool(tool):
             if not isinstance(tool, dict):
@@ -317,7 +392,7 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
             fn = tool.get('function')
             name = str((fn.get('name') if isinstance(fn, dict) else '')
                        or tool.get('name') or '')
-            # MCP has already been searched by ChatUI before this boundary.
+            # MCP has already been searched by Tofu before this boundary.
             # Only the task-sticky active MCP schemas go to any provider;
             # inactive MCP tools remain in ``_executable_tool_catalog`` for
             # authorization and direct-name compatibility.
@@ -331,15 +406,26 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         if isinstance(_stable_wire_catalog, list):
             _wire_catalog = list(_stable_wire_catalog)
         else:
-            # Compatibility for direct callers that predate the sidecar.
-            _wire_catalog = [tool for tool in _enabled_catalog
+            # Direct boundary callers derive visibility from the same
+            # canonical authority when no narrower wire projection exists.
+            _wire_catalog = [tool for tool in _executable_catalog
                              if _wire_catalog_tool(tool)]
         if _tool_search_backend == 'full' and body.get(
                 '_tool_search_fail_open'):
             # A local retrieval failure is the one intentional exception: make
-            # the enabled directory visible so availability wins over cache.
-            _wire_catalog = [tool for tool in _enabled_catalog
+            # the executable directory visible so availability wins over cache.
+            _wire_catalog = [tool for tool in _executable_catalog
                              if _wire_catalog_tool(tool)]
+        _wire_names = {
+            str(((tool.get('function') or {}).get('name')
+                 if isinstance(tool.get('function'), dict)
+                 else tool.get('name')) or '')
+            for tool in _wire_catalog if isinstance(tool, dict)
+        }
+        _code_specific_floor = CODE_CORE_DIRECT_TOOL_NAMES - {'read_files'}
+        if _wire_names & _code_specific_floor:
+            _required_direct_names.update(
+                CODE_CORE_DIRECT_TOOL_NAMES & _wire_names)
         if _tool_search_backend == 'local':
             body['tools'] = local_wire_tools(
                 _wire_catalog,
@@ -348,7 +434,15 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                 discovery_catalog_size=body.get(
                     '_tool_search_catalog_size'),
                 searchable_count=body.get('_tool_searchable_count'),
-                include_search=True)
+                include_search=True,
+                schema_budget_tokens=_schema_budget,
+                model=body.get('model') or '',
+                priority_names=_pin_set,
+                required_names=_required_direct_names,
+                # PTC and multi-agent projection still follow. Reserve any
+                # needed discovery gateway now, but fit exactly once below.
+                apply_schema_budget=False,
+                on_tool_isolated=_request_activity_sink)
         else:
             # Native discovery receives the complete catalog and lets the
             # provider defer searchable tools.  ``off`` also gets the full
@@ -358,12 +452,169 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
             body['_anthropic_native_tool_search'] = True
         body['_frontend_selected_tool_names'] = _pins
 
+    # Programmatic Tool Calling: resolve the per-request backend at the same
+    # last common boundary (mirrors the Tool Search dual-backend precedent).
+    # ``off`` leaves the wire untouched; ``native_openai`` lets the Responses
+    # converter attach the hosted-only fields; ``local`` projects the
+    # ``execute_tools`` gateway schema so ANY tool-capable wire (any protocol,
+    # gateway, or OAuth profile) gets the full ToolScript surface — there is
+    # no model-size split.  Only the explicit ``TOFU_PTC_TIER=batch``
+    # operator/benchmark override strips the ``program`` parameter.
+    from lib.tools.programmatic import (
+        ACTIVE_PROGRAMMATIC_MODES,
+        resolve_programmatic_backend,
+    )
+    _requested_ptc = str(
+        body.get('_programmatic_tool_calling') or 'off').strip().lower()
+    if (body.get('_force_local_programmatic')
+            and _requested_ptc in ACTIVE_PROGRAMMATIC_MODES
+            and bool(body.get('_programmatic_eligible_tools'))):
+        # Nested local-Swarm workers and a retry after an explicit native-field
+        # rejection keep the program inside the application. This preserves
+        # one authority/catalog and avoids nesting provider continuations.
+        _ptc_backend = 'local'
+    else:
+        _ptc_backend = resolve_programmatic_backend(
+            _requested_ptc,
+            protocol=api_protocol, model=body.get('model') or '',
+            responses_profile=_responses_feature_profile,
+            base_url=base_url or '', oauth=oauth or '',
+            eligible_present=bool(body.get('_programmatic_eligible_tools')))
+    body['_resolved_programmatic_backend'] = _ptc_backend
+    _orchestration_sink = body.get('_tool_orchestration_decision_sink')
+    _record_orchestration_v2_evidence = (
+        isinstance(_orchestration_sink, dict)
+        and body.get('_tool_orchestration_policy_version')
+        == 'tool-orchestration/v2')
+    if isinstance(_orchestration_sink, dict):
+        _orchestration_sink['programmaticBackend'] = _ptc_backend
+        if _record_orchestration_v2_evidence and _ptc_backend != 'off':
+            from lib.orchestration_adoption import (
+                record_orchestration_projection)
+            record_orchestration_projection(
+                _orchestration_sink,
+                lane='programmatic', backend=_ptc_backend)
+    if _ptc_backend == 'local' and isinstance(body.get('tools'), list):
+        from lib.tools.gateway import ptc_local_wire_tools
+        body['tools'] = ptc_local_wire_tools(
+            body['tools'], tier=body.get('_programmatic_tier') or 'program',
+            eligible=body.get('_programmatic_eligible_tools') or ())
+
+    # Multi-agent is an independent control plane.  Resolve it after PTC so
+    # both lanes may be active in one request: local models see execute_tools
+    # plus a read-only spawn_agents projection, while public GPT-5.6 Responses
+    # receives the two native extensions together.  Native projection removes
+    # spawn_agents from the visible surface to avoid offering two competing
+    # control planes; execution authority remains task-owned and unchanged.
+    from lib.swarm.routing import (
+        catalog_has_spawn_agents,
+        project_multi_agent_wire_tools,
+        resolve_multi_agent_backend,
+    )
+    _multi_agent_authority_catalog = (
+        _executable_catalog if isinstance(_executable_catalog, list)
+        else body.get('tools') if isinstance(body.get('tools'), list)
+        else [])
+    _local_swarm_available = catalog_has_spawn_agents(
+        _multi_agent_authority_catalog)
+    if (body.get('_force_local_multi_agent')
+            and str(body.get('_multi_agent_mode') or '').lower()
+            == 'read_only'):
+        _multi_agent_backend = (
+            'local_swarm' if _local_swarm_available else 'off')
+    else:
+        _multi_agent_backend = resolve_multi_agent_backend(
+            body.get('_multi_agent_mode') or 'off',
+            protocol=api_protocol, model=body.get('model') or '',
+            responses_profile=_responses_feature_profile,
+            base_url=base_url or '', oauth=oauth or '',
+            local_swarm_available=_local_swarm_available)
+    body['_resolved_multi_agent_backend'] = _multi_agent_backend
+    if isinstance(_orchestration_sink, dict):
+        _orchestration_sink['multiAgentBackend'] = _multi_agent_backend
+        if (_record_orchestration_v2_evidence
+                and _multi_agent_backend != 'off'):
+            from lib.orchestration_adoption import (
+                record_orchestration_projection)
+            record_orchestration_projection(
+                _orchestration_sink,
+                lane='multi_agent', backend=_multi_agent_backend)
+    if isinstance(body.get('tools'), list):
+        body['tools'] = project_multi_agent_wire_tools(
+            body['tools'], authority_catalog=_multi_agent_authority_catalog,
+            backend=_multi_agent_backend,
+            stage=body.get('_multi_agent_stage') or '',
+            max_concurrent_agents=(body.get(
+                '_multi_agent_max_concurrent_agents')
+                or body.get('_multi_agent_max_concurrent_subagents') or 3),
+            programmatic_workers=(
+                _ptc_backend in ('local', 'native_openai')))
+
+    # PTC and Multi-agent may append schemas after Tool Search projection. Fit
+    # an explicit, model-neutral local cost target exactly once at this final
+    # common projection boundary.
+    _final_schema_budget = int(body.get('_tool_schema_budget_tokens') or 0)
+    _budget_dropped_names: list[str] = []
+    _budget_compacted_names: list[str] = []
+    if (_final_schema_budget and _tool_search_backend == 'local'
+            and isinstance(body.get('tools'), list)):
+        from lib.tools.gateway import fit_tool_schema_budget
+        _before_budget = {
+            _provider_tool_name(tool): tool for tool in body['tools']
+            if _provider_tool_name(tool)
+        }
+        _priority_names = set(body.get('_frontend_selected_tool_names') or ())
+        _required_names = set(_required_direct_names)
+        if _multi_agent_backend != 'off':
+            # Local Swarm is one lifecycle capability, not three independent
+            # optional schemas.  Keeping only ``spawn_agents`` under budget
+            # pressure can launch work that the model can neither wait for nor
+            # retrieve without paying an avoidable discovery round.
+            from lib.swarm.tools import SWARM_CONTROL_TOOL_NAMES
+            _required_names.update(SWARM_CONTROL_TOOL_NAMES)
+        body['tools'] = fit_tool_schema_budget(
+            body['tools'], budget_tokens=_final_schema_budget,
+            model=body.get('model') or '', priority_names=_priority_names,
+            required_names=_required_names,
+            on_tool_isolated=_request_activity_sink)
+        _after_budget = {
+            _provider_tool_name(tool): tool for tool in body['tools']
+            if _provider_tool_name(tool)
+        }
+        _budget_dropped_names = [
+            name for name in _before_budget if name not in _after_budget]
+        _budget_compacted_names = [
+            name for name, schema in _before_budget.items()
+            if name in _after_budget and _after_budget[name] != schema]
+
+    # Wire-contract invariant at the LAST common boundary: whatever shape the
+    # tools array arrived in (registry assembly, latched catalogs, headless
+    # custom tools, rescue re-dispatch), every element that reaches a provider
+    # is an object with a usable name, and function tools carry
+    # ``type='function'``.  A single ``None`` used to crash
+    # ``add_cache_breakpoints`` (2026-08-19 task c9aba5d0 FATAL) and 400
+    # Gemini ("'tools' array element to be an object"); a missing ``type``
+    # 400s kimi ("unknown tool type: ").  Clean arrays pass through by
+    # identity, so the prompt-cache hot path is untouched.
+    if isinstance(body.get('tools'), list):
+        from lib.tools.gateway import sanitize_wire_tools
+        body['tools'] = sanitize_wire_tools(
+            body['tools'], log_prefix=log_prefix,
+            on_tool_isolated=_request_activity_sink)
+        if not body['tools']:
+            # Some OpenAI-compatible providers reject an empty tools array,
+            # and a tool_choice without a surviving tool is necessarily
+            # invalid. A request whose only malformed tool was isolated must
+            # still be able to continue as an ordinary model request.
+            body.pop('tools', None)
+            body.pop('tool_choice', None)
+
     add_cache_breakpoints(body, log_prefix, api_protocol=api_protocol)
 
     # Auto-inject extended cache TTL beta header for Claude
     if is_claude(body.get('model', '')):
         if _task_id_for_latch:
-            from lib.tasks_pkg.cache_tracking import latch_extended_ttl
+            from lib.tasks_pkg.cache_tracking._ttl import latch_extended_ttl
             _use_ext_ttl = latch_extended_ttl(_task_id_for_latch)
         else:
             _use_ext_ttl = getattr(_lib, 'CACHE_EXTENDED_TTL', False)
@@ -456,10 +707,13 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         _internal_keys = {
             '_task_id', '_conv_id', '_working_set_tokens',
             '_gpt56_breakpoint_mode', '_programmatic_tool_calling',
-            '_programmatic_stage',
+            '_programmatic_stage', '_programmatic_tier',
+            '_programmatic_eligible_tools', '_programmatic_serial_chain',
+            '_resolved_programmatic_backend', '_force_local_programmatic',
             '_tool_search_mode', '_frontend_selected_tool_names',
+            '_tool_schema_budget_tokens',
             '_tool_namespace_by_name', '_responses_transport',
-            '_enabled_tool_catalog', '_executable_tool_catalog',
+            '_executable_tool_catalog',
             '_tool_wire_catalog',
             '_tool_discovery_policy_by_name',
             '_tool_search_catalog_size', '_tool_searchable_count',
@@ -468,7 +722,14 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
             '_force_local_tool_search', '_tool_search_fail_open',
             '_reasoning_mode', '_text_verbosity', '_image_detail',
             '_multi_agent_mode', '_multi_agent_stage',
-            '_multi_agent_max_concurrent_subagents', '_safety_identifier',
+            '_multi_agent_max_concurrent_agents',
+            '_multi_agent_max_concurrent_subagents',
+            '_resolved_multi_agent_backend',
+            '_force_local_multi_agent',
+            '_tool_orchestration_policy_version',
+            '_tool_orchestration_composition', '_safety_identifier',
+            '_tool_orchestration_decision_sink',
+            '_request_activity_sink',
             '_responses_feature_profile',
         }
         body = {key: value for key, value in body.items()
@@ -518,10 +779,45 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         if marker not in beta:
             hdrs[beta_key] = f'{beta},{marker}' if beta else marker
 
+    if _request_activity_sink is not None:
+        try:
+            from lib.tools.gateway import (
+                tool_schema_fingerprint, tool_schema_tokens)
+            _provider_tools = (
+                body.get('tools') if isinstance(body.get('tools'), list) else [])
+            _request_activity_sink({
+                'kind': 'wire_projection',
+                'model': body.get('model') or '',
+                'backend': _tool_search_backend,
+                'toolNames': [
+                    name for name in map(_provider_tool_name, _provider_tools)
+                    if name
+                ],
+                'toolCount': len(_provider_tools),
+                'schemaTokens': tool_schema_tokens(
+                    _provider_tools, model=body.get('model') or ''),
+                # Exact, cache-relevant provider projection fingerprint.  Names
+                # and token counts can stay unchanged while a description or
+                # parameter byte changes; this bounded digest makes that drift
+                # visible without persisting the full schema.
+                'schemaFingerprint': tool_schema_fingerprint(_provider_tools),
+                'schemaBudgetTokens': _final_schema_budget,
+                'budgetDroppedNames': _budget_dropped_names,
+                'compactedNames': _budget_compacted_names,
+                'executableToolCount': (
+                    len(_executable_catalog)
+                    if isinstance(_executable_catalog, list) else len(_provider_tools)),
+            })
+        except Exception:
+            logger.warning('%s provider wire projection diagnostic failed',
+                           log_prefix, exc_info=True)
+
     if log_prefix:
         logger.debug('%s M-TraceId=%s', log_prefix, trace_id)
 
-    t0 = time.time()
+    # This is the one request-attempt boundary used by transport, semantic
+    # progress and final evidence. Wall time remains for logs only.
+    t0 = time.monotonic()
     raw_dumper = RawSSEDumper(body.get('model', ''), trace_id, body)
     raw_dumper.start()
 
@@ -658,7 +954,9 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                        t0=t0, responses_transport=_responses_transport,
                        responses_state_key=_responses_state_key,
                        responses_profile=_responses_profile,
-                       tool_search_backend=_tool_search_backend)
+                       tool_search_backend=_tool_search_backend,
+                       programmatic_backend=_ptc_backend,
+                       multi_agent_backend=_multi_agent_backend)
 
 
 def classify_status_error(status_code, err_text, *, body, log_prefix, raw_dumper):
@@ -714,18 +1012,21 @@ class SSEAccumulator:
 
         acc = SSEAccumulator(body, trace_id, raw_dumper, wire_translator,
                              t0, log_prefix=..., on_thinking=..., ...)
-        for raw_line in transport_lines():
+        framer = SSEFramer()
+        for raw_chunk in transport_bytes():
             if abort_check and abort_check():
                 acc.mark_aborted(); break
-            if acc.feed_line(raw_line):   # True → saw [DONE]
-                break
+            for event in framer.feed(raw_chunk):
+                if acc.feed_event(event):   # True → saw [DONE]
+                    break
         acc.fire_final_tool_callback()
         msg, finish_reason, usage = acc.finalize(resp_trace=...)
     """
 
     def __init__(self, body, trace_id, raw_dumper, wire_translator, t0, *,
                  url='', log_prefix='', on_thinking=None, on_content=None,
-                 on_tool_call_ready=None):
+                 on_tool_call_ready=None, on_reasoning_progress=None,
+                 on_actionable_output=None, progress=None):
         self.body = body
         self.trace_id = trace_id
         self.raw_dumper = raw_dumper
@@ -736,22 +1037,36 @@ class SSEAccumulator:
         self.on_thinking = on_thinking
         self.on_content = on_content
         self.on_tool_call_ready = on_tool_call_ready
+        # Transport-liveness callbacks consume only normalized semantic
+        # events. Provider comments, signatures, and metadata never reach
+        # these seams, so all wire protocols share one timeout meaning.
+        self.on_reasoning_progress = on_reasoning_progress
+        self.on_actionable_output = on_actionable_output
+        self.progress = progress or StreamProgress(0)
 
         self.content = ''
         self.thinking_text = ''
         self.thinking_signature = ''
         self.tool_calls_acc: dict = {}
-        self.finish_reason = 'stop'
+        # No provider finish reason exists until a terminal choice frame says
+        # so.  The historical tuple adapter still exposes ``stop`` to callers
+        # that unpack the result, but semantic completion never comes from a
+        # constructor default again.
+        self.finish_reason: str | None = None
         self.usage: Optional[dict] = None
         self.saw_done = False
         self.saw_finish_reason = False
         self.chunk_count = 0
         self.aborted_by_client = False
+        self.semantic_progress_timeout_s = 0.0
+        self.semantic_progress_diagnostics: dict = {}
 
         self._mm_mode = is_minimax(body.get('model', ''))
         self._mm_in_think = False
         self._mm_buf = ''
         self._consecutive_parse_errors = 0
+        self._malformed_frame_count = 0
+        self._progress_tool_slots: set[str] = set()
         # ── tool_calls wire-shape OBSERVATION counters (pure diagnostics) ──
         # These exist to settle a 2026-07-27 open question: a concatenated
         # tool name (``read_filesrun_command``) reached tool_dispatch, and two
@@ -782,8 +1097,81 @@ class SSEAccumulator:
 
     def mark_aborted(self):
         self.aborted_by_client = True
+        self.progress.mark_client_aborted()
         logger.debug('%s Stream aborted by client after %d chunks',
                      self.log_prefix, self.chunk_count)
+
+    @property
+    def has_actionable_output(self) -> bool:
+        """Whether this attempt has produced deliverable text or a tool call.
+
+        Reasoning and protocol keep-alives intentionally do not count. They
+        prove the socket is alive, but they cannot advance the task or give the
+        user a final answer.
+        """
+        return bool(self.content or self.tool_calls_acc)
+
+    def mark_semantic_progress_timeout(
+            self, timeout_s: float, *, diagnostics=None) -> None:
+        """Record a semantic stall and its bounded monotonic diagnostics."""
+        try:
+            self.semantic_progress_timeout_s = max(
+                0.0, float(timeout_s or 0))
+        except (TypeError, ValueError, OverflowError):
+            self.semantic_progress_timeout_s = 0.0
+        source = diagnostics if isinstance(diagnostics, dict) else {}
+        numeric_keys = (
+            'request_elapsed_s',
+            'last_progress_age_s',
+            'reasoning_chars',
+            'reasoning_chunks',
+        )
+        bounded = {}
+        for key in numeric_keys:
+            if key not in source:
+                continue
+            try:
+                bounded[key] = max(0.0, float(source.get(key) or 0))
+            except (TypeError, ValueError, OverflowError):
+                bounded[key] = 0.0
+        self.semantic_progress_diagnostics = bounded
+        self.progress.mark_semantic_timeout()
+
+    # Historical internal spelling retained while callers migrate.
+    mark_no_actionable_timeout = mark_semantic_progress_timeout
+
+    def record_malformed_frames(self, count=1, diagnostics=()) -> None:
+        """Record malformed wire evidence without retaining provider data."""
+        try:
+            normalized_count = max(0, int(count or 0))
+        except (TypeError, ValueError, OverflowError):
+            normalized_count = 1
+        self._malformed_frame_count += normalized_count
+        self.progress.mark_malformed(normalized_count, diagnostics)
+
+    def _notify_reasoning_progress(self, text) -> None:
+        """Forward only non-blank normalized reasoning to transport policy."""
+        if (not isinstance(text, str) or not text.strip()
+                ):
+            return
+        self.progress.mark_reasoning(text)
+        if self.on_reasoning_progress is None:
+            return
+        try:
+            self.on_reasoning_progress(text)
+        except Exception as error:
+            logger.debug('%s reasoning-progress callback error: %s',
+                         self.log_prefix, error)
+
+    def _notify_actionable_output(self) -> None:
+        """Notify the transitional actionable-output callback."""
+        if self.on_actionable_output is None:
+            return
+        try:
+            self.on_actionable_output()
+        except Exception as error:
+            logger.debug('%s actionable-output callback error: %s',
+                         self.log_prefix, error)
 
     def feed_line(self, line) -> bool:
         """Process one raw SSE line. Returns True when the stream should stop.
@@ -795,11 +1183,42 @@ class SSEAccumulator:
         self.raw_dumper.line(line if line is not None else '')
         if not line or not line.startswith('data:'):
             return False
-        data_str = line[5:].strip()
+        data_str = line[5:]
+        if data_str.startswith(' '):
+            data_str = data_str[1:]
+        return self.feed_payload(data_str, count_event=True, dump_raw=False)
+
+    def feed_event(self, event: SSEEvent) -> bool:
+        """Consume one complete event produced by the shared byte framer."""
+        if not isinstance(event, SSEEvent):
+            raise TypeError('feed_event requires SSEEvent')
+        self.raw_dumper.line(
+            f'event: {event.event}' if event.event else 'event: message')
+        return self.feed_payload(event.data, count_event=True, dump_raw=True)
+
+    def feed_payload(
+            self, data_str: str, *, count_event: bool = True,
+            dump_raw: bool = True) -> bool:
+        """Consume one already-decoded provider payload.
+
+        WebSocket providers call this directly; HTTP providers arrive through
+        ``SSEFramer`` + ``feed_event``. No transport fabricates a ``data:``
+        line merely to reach the provider translator.
+        """
+        if not isinstance(data_str, str):
+            self.record_malformed_frames(
+                1, ('invalid_payload: provider payload was not text',))
+            return False
+        if dump_raw:
+            self.raw_dumper.line(
+                f'data: <decoded payload chars={len(data_str)}>')
+        if count_event:
+            self.progress.mark_sse_event()
         if data_str == '[DONE]':
             self.saw_done = True
+            self.progress.mark_done()
             return True
-        if not data_str:
+        if not data_str.strip():
             return False
         self.chunk_count += 1
 
@@ -812,17 +1231,22 @@ class SSEAccumulator:
             chunk = json.loads(data_str)
         except Exception as e:
             self._consecutive_parse_errors += 1
-            logger.warning('%s ⚠ SSE chunk JSON parse error (chunk #%d, consecutive=%d) '
-                           'model=%s trace=%s: %s — %s',
+            self.record_malformed_frames(
+                1,
+                (f'invalid_json: chunk={self.chunk_count} '
+                 f'error={type(e).__name__}',),
+            )
+            logger.warning('%s ⚠ SSE event JSON parse error (chunk #%d, consecutive=%d) '
+                           'model=%s trace=%s chars=%d error=%s',
                            self.log_prefix, self.chunk_count, self._consecutive_parse_errors,
-                           self.body.get('model', '?'), self.trace_id, data_str[:200], e,
+                           self.body.get('model', '?'), self.trace_id,
+                           len(data_str), type(e).__name__,
                            exc_info=True)
             if self._consecutive_parse_errors >= _MAX_CONSECUTIVE_PARSE_ERRORS:
                 self.raw_dumper.dump_anomaly(
                     'parse_error',
                     consecutive_errors=self._consecutive_parse_errors,
                     chunk_count=self.chunk_count,
-                    last_data_preview=data_str[:200],
                     model=self.body.get('model', '?'),
                 )
                 raise RetryableAPIError(
@@ -836,6 +1260,10 @@ class SSEAccumulator:
 
     def _process_openai_chunk(self, chunk):
         """Accumulate one OpenAI-shaped chat.completion chunk dict."""
+        if not isinstance(chunk, dict):
+            self.record_malformed_frames(
+                1, ('invalid_json_shape: provider event was not an object',))
+            return
         if 'error' in chunk:
             self._handle_sse_error(chunk['error'])
 
@@ -851,6 +1279,7 @@ class SSEAccumulator:
         if fr:
             self.finish_reason = fr
             self.saw_finish_reason = True
+            self.progress.mark_provider_finish()
         if choices[0].get('usage'):
             self.usage = choices[0]['usage']
 
@@ -874,14 +1303,37 @@ class SSEAccumulator:
 
         Returns True when the translator emits the ``[DONE]`` sentinel.
         """
+        try:
+            provider_event = json.loads(data_str)
+        except (json.JSONDecodeError, TypeError) as error:
+            self.record_malformed_frames(
+                1,
+                (f'invalid_json: translated provider event '
+                 f'error={type(error).__name__}',),
+            )
+            return False
+        if not isinstance(provider_event, dict):
+            self.record_malformed_frames(
+                1,
+                ('invalid_json_shape: translated provider event was not an '
+                 'object',),
+            )
+            return False
+
         for item in self.wire_translator.translate(data_str):
             if item == '[DONE]':
                 self.saw_done = True
+                self.progress.mark_done()
                 return True
             if isinstance(item, str):
                 try:
                     item = json.loads(item)
                 except Exception as e:
+                    self.record_malformed_frames(
+                        1,
+                        (f'invalid_translated_json: '
+                         f'error={type(e).__name__}',),
+                    )
                     logger.debug('[LLM] translated SSE chunk parse failed: %s', e)
                     continue
             self._process_openai_chunk(item)
@@ -913,7 +1365,7 @@ class SSEAccumulator:
             raise PromptTooLongError(f'SSE error: {err_text}')
         _sse_err_type = eo.get('type', '') if isinstance(eo, dict) else ''
         _sse_http_code = str(eo.get('http_code', '')) if isinstance(eo, dict) else ''
-        # ★ Some upstream gateways (AWS Bedrock, GCP Vertex) embed the HTTP
+        # Some upstream gateways (AWS Bedrock, GCP Vertex) embed the HTTP
         #   status inside the message text instead of a structured field,
         #   e.g. "(Service: BedrockRuntime, Status Code: 429, …)".
         if not _sse_http_code:
@@ -1005,6 +1457,7 @@ class SSEAccumulator:
                     self.thinking_signature += d['signature']
         if td:
             self.thinking_text += td
+            self._notify_reasoning_progress(td)
             if self.on_thinking:
                 self.on_thinking(td)
 
@@ -1023,6 +1476,8 @@ class SSEAccumulator:
                     self._feed_minimax(cd)
                 else:
                     self.content += cd
+                    if self.progress.mark_content(cd):
+                        self._notify_actionable_output()
                     if self.on_content:
                         self.on_content(cd)
 
@@ -1030,6 +1485,31 @@ class SSEAccumulator:
         _tc_list = delta.get('tool_calls') or []
         if _tc_list:
             for tc in _tc_list:
+                if not isinstance(tc, dict):
+                    self.record_malformed_frames(
+                        1, ('invalid_tool_delta: tool delta was not an object',))
+                    continue
+                _progress_fn = tc.get('function')
+                if not isinstance(_progress_fn, dict):
+                    _progress_fn = {}
+                _progress_key = str(
+                    tc.get('id') or f'index:{tc.get("index", "missing")}')
+                # An id-only/empty function shell is protocol scaffolding, not
+                # semantic progress. A non-blank function name opens the tool;
+                # subsequent non-empty argument deltas renew the same clock.
+                _recognized = bool(
+                    str(_progress_fn.get('name') or '').strip())
+                _new_recognized = bool(
+                    _recognized and _progress_key not in self._progress_tool_slots)
+                if _new_recognized:
+                    self._progress_tool_slots.add(_progress_key)
+                _argument_delta = _progress_fn.get('arguments')
+                if not isinstance(_argument_delta, str):
+                    _argument_delta = ''
+                if self.progress.mark_tool_delta(
+                        recognized=_new_recognized,
+                        argument_delta=_argument_delta):
+                    self._notify_actionable_output()
                 # OBSERVATION: an absent ``index`` silently lands in slot 0,
                 # which would merge two distinct tool calls. Never observed on
                 # the bedrock line; unmeasured elsewhere. Log once per stream.
@@ -1197,6 +1677,7 @@ class SSEAccumulator:
                 end_idx = self._mm_buf.find('</think>')
                 if end_idx == -1:
                     self.thinking_text += self._mm_buf
+                    self._notify_reasoning_progress(self._mm_buf)
                     if self.on_thinking:
                         self.on_thinking(self._mm_buf)
                     self._mm_buf = ''
@@ -1204,6 +1685,7 @@ class SSEAccumulator:
                     think_part = self._mm_buf[:end_idx]
                     if think_part:
                         self.thinking_text += think_part
+                        self._notify_reasoning_progress(think_part)
                         if self.on_thinking:
                             self.on_thinking(think_part)
                     self._mm_buf = self._mm_buf[end_idx + len('</think>'):]
@@ -1215,11 +1697,15 @@ class SSEAccumulator:
                         safe = self._mm_buf[:self._mm_buf.rfind('<', max(0, len(self._mm_buf) - 7))]
                         if safe:
                             self.content += safe
+                            if self.progress.mark_content(safe):
+                                self._notify_actionable_output()
                             if self.on_content:
                                 self.on_content(safe)
                         self._mm_buf = self._mm_buf[len(safe):]
                     else:
                         self.content += self._mm_buf
+                        if self.progress.mark_content(self._mm_buf):
+                            self._notify_actionable_output()
                         if self.on_content:
                             self.on_content(self._mm_buf)
                         self._mm_buf = ''
@@ -1227,6 +1713,8 @@ class SSEAccumulator:
                     before = self._mm_buf[:start_idx]
                     if before:
                         self.content += before
+                        if self.progress.mark_content(before):
+                            self._notify_actionable_output()
                         if self.on_content:
                             self.on_content(before)
                     self._mm_buf = self._mm_buf[start_idx + len('<think>'):]
@@ -1247,17 +1735,20 @@ class SSEAccumulator:
     def finalize(self, *, resp_trace=''):
         """Flush buffers, build the assistant msg, emit diagnostics + usage.
 
-        Returns ``(msg, finish_reason, usage)`` — identical shape and
-        anomaly fields to the former inline implementation.
+        Returns a typed, tuple-compatible ``ProviderStreamResult`` with the
+        former message/finish/usage projection and one closed semantic state.
         """
         # Flush MiniMax buffer
         if self._mm_mode and self._mm_buf:
             if self._mm_in_think:
                 self.thinking_text += self._mm_buf
+                self._notify_reasoning_progress(self._mm_buf)
                 if self.on_thinking:
                     self.on_thinking(self._mm_buf)
             else:
                 self.content += self._mm_buf
+                if self.progress.mark_content(self._mm_buf):
+                    self._notify_actionable_output()
                 if self.on_content:
                     self.on_content(self._mm_buf)
             self._mm_buf = ''
@@ -1395,7 +1886,10 @@ class SSEAccumulator:
         content = self.content
         thinking_text = self.thinking_text
         tool_calls_acc = self.tool_calls_acc
-        finish_reason = self.finish_reason
+        provider_finish_reason = self.finish_reason
+        # Tuple compatibility only.  All semantic decisions below use
+        # ``provider_finish_reason`` / ``saw_finish_reason`` instead.
+        finish_reason = provider_finish_reason or 'stop'
         usage = self.usage
 
         # Build assistant message
@@ -1449,7 +1943,8 @@ class SSEAccumulator:
             logger.debug('%s Done: finish=%s content=%d think=%d%s', self.log_prefix,
                          finish_reason, len(content), len(thinking_text), cache_info)
 
-        _stream_elapsed_s = time.time() - self.t0
+        _stream_evidence = self.progress.evidence()
+        _stream_elapsed_s = _stream_evidence.request_elapsed_ms / 1000
         aborted = self.aborted_by_client
         chunk_count = self.chunk_count
 
@@ -1465,23 +1960,60 @@ class SSEAccumulator:
                 self.saw_finish_reason, finish_reason,
                 len(content), len(thinking_text),
                 len(tool_calls_acc), self.body.get('model', '?'), self.url)
-            self.raw_dumper.dump_anomaly(
-                'missing_done',
-                elapsed_s=round(_stream_elapsed_s, 2),
-                chunks=chunk_count,
-                saw_finish_reason=self.saw_finish_reason,
-                finish_reason=finish_reason,
-                content_len=len(content),
-                thinking_len=len(thinking_text),
-                tool_calls=len(tool_calls_acc),
-                resp_trace=resp_trace or 'none',
-            )
-        elif not aborted and not self.saw_finish_reason and chunk_count > 0:
+            if self.semantic_progress_timeout_s > 0:
+                _stall_diag = self.semantic_progress_diagnostics
+                _request_elapsed = _stall_diag.get(
+                    'request_elapsed_s', _stream_elapsed_s)
+                _last_progress_age = _stall_diag.get(
+                    'last_progress_age_s',
+                    self.semantic_progress_timeout_s)
+                _reasoning_chunks = int(_stall_diag.get(
+                    'reasoning_chunks', 0))
+                logger.warning(
+                    '%s NO SEMANTIC PROGRESS: no new reasoning, assistant '
+                    'content, or tool action for %.1fs (window=%.1fs); '
+                    'request_elapsed=%.1fs reasoning=%d chars/%d semantic '
+                    'chunks sse_chunks=%d model=%s recovery policy will decide.',
+                    self.log_prefix, _last_progress_age,
+                    self.semantic_progress_timeout_s, _request_elapsed,
+                    len(thinking_text), _reasoning_chunks, chunk_count,
+                    self.body.get('model', '?'))
+                self.raw_dumper.dump_anomaly(
+                    'semantic_progress_timeout',
+                    timeout_s=round(
+                        self.semantic_progress_timeout_s, 2),
+                    elapsed_s=round(_stream_elapsed_s, 2),
+                    request_elapsed_s=round(_request_elapsed, 2),
+                    last_progress_age_s=round(_last_progress_age, 2),
+                    chunks=chunk_count,
+                    reasoning_chunks=_reasoning_chunks,
+                    saw_finish_reason=self.saw_finish_reason,
+                    finish_reason=finish_reason,
+                    content_len=len(content),
+                    thinking_len=len(thinking_text),
+                    tool_calls=len(tool_calls_acc),
+                    resp_trace=resp_trace or 'none',
+                    model=self.body.get('model', ''),
+                )
+            else:
+                self.raw_dumper.dump_anomaly(
+                    'missing_done',
+                    elapsed_s=round(_stream_elapsed_s, 2),
+                    chunks=chunk_count,
+                    saw_finish_reason=self.saw_finish_reason,
+                    finish_reason=finish_reason,
+                    content_len=len(content),
+                    thinking_len=len(thinking_text),
+                    tool_calls=len(tool_calls_acc),
+                    resp_trace=resp_trace or 'none',
+                )
+        elif not aborted and not self.saw_finish_reason:
             logger.warning(
-                '%s ⚠ MISSING FINISH_REASON: [DONE] received but no finish_reason chunk. '
-                'M-TraceId=%s elapsed=%.1fs Using default=%s chunks=%d '
+                '%s ⚠ MISSING FINISH_REASON: stream closed without an '
+                'authoritative finish_reason (saw_done=%s). M-TraceId=%s '
+                'elapsed=%.1fs compatibility_default=%s chunks=%d '
                 'content_len=%d model=%s',
-                self.log_prefix, self.trace_id, _stream_elapsed_s,
+                self.log_prefix, self.saw_done, self.trace_id, _stream_elapsed_s,
                 finish_reason, chunk_count, len(content), self.body.get('model', '?'))
             self.raw_dumper.dump_anomaly(
                 'missing_finish_reason',
@@ -1493,8 +2025,14 @@ class SSEAccumulator:
             )
 
         # Diagnostics: detect empty responses
-        if (not aborted and finish_reason == 'stop'
-                and not content and not tool_calls_acc and chunk_count > 0):
+        _empty_response = bool(
+            not aborted
+            and self.saw_finish_reason
+            and provider_finish_reason == 'stop'
+            and not content
+            and not tool_calls_acc
+        )
+        if _empty_response:
             logger.warning(
                 '%s ⚠ EMPTY STOP RESPONSE: finish=stop but no content and no tool_calls. '
                 'M-TraceId=%s elapsed=%.1fs chunks=%d thinking_len=%d model=%s',
@@ -1524,7 +2062,7 @@ class SSEAccumulator:
         #   'filtered' — pre-filter count >0: OUR phantom filter dropped
         #     every entry (its per-entry WARNINGs are then in the log).
         _tool_calls_void = None
-        if (not aborted and finish_reason in ('tool_calls', 'tool_use')
+        if (not aborted and provider_finish_reason in ('tool_calls', 'tool_use')
                 and not tool_calls_acc and chunk_count > 0):
             _tool_calls_void = ('filtered' if _tool_calls_seen
                                 else 'gateway_no_payload')
@@ -1550,17 +2088,45 @@ class SSEAccumulator:
                 resp_trace=resp_trace or 'none',
             )
 
+        if not aborted and self._malformed_frame_count:
+            logger.warning(
+                '%s ⚠ MALFORMED STREAM: %d provider frame(s) could not be '
+                'decoded; the response is incomplete even if a later finish '
+                'frame arrived. M-TraceId=%s model=%s',
+                self.log_prefix, self._malformed_frame_count, self.trace_id,
+                self.body.get('model', '?'))
+            self.raw_dumper.dump_anomaly(
+                'malformed_stream',
+                malformed_frames=self._malformed_frame_count,
+                chunks=chunk_count,
+                saw_done=self.saw_done,
+                saw_finish_reason=self.saw_finish_reason,
+                finish_reason=provider_finish_reason,
+                model=self.body.get('model', ''),
+            )
+
+        stream_state = classify_provider_stream_state(
+            aborted=aborted,
+            saw_finish_reason=self.saw_finish_reason,
+            malformed_frame_count=self._malformed_frame_count,
+            empty_response=_empty_response,
+            tool_payload_missing=bool(_tool_calls_void),
+            semantic_progress_timeout=(
+                self.semantic_progress_timeout_s > 0),
+        )
+        _stream_evidence = replace(
+            _stream_evidence,
+            empty_response=_empty_response,
+            tool_payload_missing=bool(_tool_calls_void),
+            tool_payload_missing_cause=_tool_calls_void or '',
+        )
+
         # Inject metadata into usage
         if usage is None:
             usage = {}
         usage['trace_id'] = self.trace_id
         if resp_trace and resp_trace != self.trace_id:
             usage['resp_trace_id'] = resp_trace
-        usage['stream_elapsed_ms'] = round(_stream_elapsed_s * 1000)
-        usage['_chunks_received'] = chunk_count
-        if _tool_calls_void:
-            usage['_tool_calls_void'] = _tool_calls_void
-
         # ── Relay the post-translation wire fingerprint into `usage` ──
         # Captured in prepare_request (the only point seeing the final wire
         # bytes) and carried on the RawSSEDumper. detect_cache_break reads these
@@ -1596,22 +2162,6 @@ class SSEAccumulator:
         if _wrouting is not None:
             usage['_wire_routing'] = _wrouting
 
-        # Stream anomaly flags
-        _has_anomaly = False
-        if not aborted and not self.saw_done:
-            usage['_missing_done'] = True
-            if not self.saw_finish_reason:
-                _has_anomaly = True
-        if not aborted and not self.saw_finish_reason and chunk_count > 0:
-            usage['_missing_finish_reason'] = True
-            _has_anomaly = True
-        if (not aborted and finish_reason == 'stop'
-                and not content and not tool_calls_acc and chunk_count > 0):
-            usage['_empty_stop'] = True
-            _has_anomaly = True
-        if _has_anomaly:
-            usage['_stream_anomaly'] = True
-
         self.raw_dumper.finish(
             finish_reason=finish_reason,
             content_len=len(content),
@@ -1621,4 +2171,15 @@ class SSEAccumulator:
             saw_finish_reason=self.saw_finish_reason,
         )
 
-        return msg, finish_reason, usage
+        result = ProviderStreamResult(
+            message=msg,
+            compatibility_finish_reason=finish_reason,
+            usage=usage,
+            state=stream_state,
+            provider_finish_reason=provider_finish_reason,
+            saw_done=self.saw_done,
+            saw_finish_reason=self.saw_finish_reason,
+            malformed_frame_count=self._malformed_frame_count,
+            evidence=_stream_evidence,
+        )
+        return result.with_usage(usage)

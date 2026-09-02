@@ -2,7 +2,7 @@
 
 from lib.cost import normalize_usage
 from lib.log import get_logger
-from lib.tasks_pkg.manager import append_event
+from lib.tasks_pkg.manager._events import append_event
 
 logger = get_logger(__name__)
 
@@ -51,6 +51,24 @@ def _emit_round_usage(task, round_num, model, usage, *, tag=''):
         else:
             tokens_in = inp
         out = usage.get('completion_tokens') or usage.get('output_tokens') or 0
+        # Live gauge feed for the v2 turn lane (2026-08-23 "context sphere
+        #   frozen during generation" root fix).  The v1 SSE lane delivered
+        #   this reading straight to the context-health bar; the v2 lane
+        #   reduces every raw frame to a projection fold, and ``apiRounds``
+        #   only lands on the task at finalize — so mid-turn the durable
+        #   projection carried NO per-round prompt size at all.  Stash a
+        #   compact reading on the task BEFORE append_event: the same call
+        #   folds ``_task_projection`` (lib/turn_lifecycle.py), which copies
+        #   it to the turn projection as ``lastRoundUsage``.  Compact fixed
+        #   shape on purpose — the raw usage dict's ``_wire_*`` diagnostics
+        #   are GiB-class bloat on durable rows (2026-08-20 measurement).
+        task['_lastRoundUsage'] = {
+            'round': round_num,
+            'model': model,
+            'tag': tag,
+            'tokensIn': int(tokens_in or 0),
+            'tokensOut': int(out or 0),
+        }
         append_event(task, {
             'type': 'round_usage',
             'roundNum': round_num,
@@ -58,7 +76,7 @@ def _emit_round_usage(task, round_num, model, usage, *, tag=''):
             'tag': tag,
             # Same endpoint-phase tag as the messages_snapshot (P4) — the
             # Request Inspector joins attempts per (turn, roundNum).
-            'turn': task.get('_endpoint_phase') or '',
+            'turn': task.get('_flow_phase') or '',
             'tokensIn': int(tokens_in or 0),
             'tokensOut': int(out or 0),
             'usage': dict(usage),
@@ -66,4 +84,3 @@ def _emit_round_usage(task, round_num, model, usage, *, tag=''):
     except Exception as e:
         logger.debug('[round_usage] emit failed (round=%s tag=%s): %s',
                      round_num, tag, e)
-

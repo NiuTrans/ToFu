@@ -33,15 +33,58 @@
 
 set -euo pipefail
 
-BUNDLE="${1:?usage: build-deb.sh <bundle_dir> <version> [out_dir]}"
-VERSION="${2:?version required, e.g. 0.16.0}"
+# This script invokes only host tools (cp, du, sed, dpkg-deb). An activated
+# Conda/venv can prepend its lib/ to LD_LIBRARY_PATH; on older enterprise hosts
+# that makes /usr/bin/cp load an incompatible libc/libacl and SIGSEGV before a
+# package is produced. The application bundle is copied as data and is never
+# executed here, so host tools must resolve against host libraries.
+unset LD_LIBRARY_PATH
+
+usage() {
+  cat <<'EOF'
+usage: desktop/build-deb.sh BUNDLE_DIR VERSION [OUT_DIR]
+
+Build the Linux amd64 .deb from an existing PyInstaller Tofu bundle.
+
+  BUNDLE_DIR  directory containing Tofu and _internal/
+  VERSION     Debian-compatible release version, for example 0.16.0
+  OUT_DIR     existing output directory (default: current directory)
+
+  -h, --help  show this help without building or changing files
+EOF
+}
+
+usage_error() {
+  echo "build-deb.sh: $*" >&2
+  usage >&2
+  exit 2
+}
+
+if [[ "$#" -eq 1 && ( "$1" == '-h' || "$1" == '--help' ) ]]; then
+  usage
+  exit 0
+fi
+if [[ "$#" -lt 2 || "$#" -gt 3 ]]; then
+  usage_error 'expected BUNDLE_DIR VERSION [OUT_DIR]'
+fi
+if [[ "$1" == -* ]]; then
+  usage_error "unsupported option: $1"
+fi
+
+BUNDLE="$1"
+VERSION="$2"
 OUT_DIR="${3:-.}"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
+[[ "$VERSION" =~ ^[0-9][-0-9A-Za-z.+:~]*$ ]] \
+  || usage_error "invalid Debian package version '$VERSION' (example: 0.16.0)"
 command -v dpkg-deb >/dev/null 2>&1 || fail "dpkg-deb not found (Debian/Ubuntu toolchain required)"
+[ -d "$BUNDLE" ] || fail "$BUNDLE is not a bundle directory"
 [ -f "$BUNDLE/Tofu" ] || fail "$BUNDLE/Tofu missing — pass the PyInstaller bundle dir"
 [ -f "$BUNDLE/_internal/static/icons/logo.png" ] || fail "$BUNDLE looks incomplete (no bundled logo)"
+[ -d "$OUT_DIR" ] || fail "$OUT_DIR is not an existing output directory"
+[ -w "$OUT_DIR" ] || fail "$OUT_DIR is not writable"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

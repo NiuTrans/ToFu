@@ -72,8 +72,11 @@ def test_build_autopilot_definition_is_valid_and_vu_persona_via_system_suffix():
     This pins the fix for the step-1 regression where the persona was wrongly
     stuffed into the capped objective and broke build_autopilot_definition."""
     from lib.agent_verdict import VU_ROLE_PROMPT
-    from lib.orchestration import build_autopilot_definition, validate_definition
-    from lib.orchestration._roles import MAX_OBJECTIVE_LEN
+    from lib.orchestration._builtin_definitions import (
+        build_autopilot_definition,
+    )
+    from lib.orchestration._role_specs import MAX_OBJECTIVE_LEN
+    from lib.orchestration._validate import validate_definition
     from lib.swarm.registry import get_role_system_suffix
 
     defn = build_autopilot_definition()
@@ -99,9 +102,9 @@ def test_no_drifted_paraphrase_survives_in_consumers():
     import inspect
 
     import lib.swarm.registry as reg
-    import lib.orchestration._build as build
+    import lib.orchestration._builtin_definitions as builtins
 
-    for mod in (reg, build):
+    for mod in (reg, builtins):
         src = inspect.getsource(mod)
         assert 'Reply in 1-3' not in src, (
             f'{mod.__name__} still hardcodes the drifted VU paraphrase')

@@ -11,9 +11,11 @@ import json
 import re
 
 from lib.log import get_logger
+from lib.orchestration_message_compat import normalize_flow_message
+from lib.plan_contract import plan_execution_model_prompt
 
 from lib.tasks_pkg.conv_message_builder._dedup import (
-    _collapse_historical_endpoint_sessions,
+    _collapse_historical_flow_sessions,
     _dedup_duplicate_user_messages,
     _merge_consecutive_same_role,
 )
@@ -62,6 +64,9 @@ def _transform_messages(
 
     # Determine source slice — exclude last message if requested
     src = raw_messages[:-1] if (exclude_last and raw_messages) else raw_messages
+    # Retired endpoint-runner markers are accepted only at this historical
+    # message-read boundary. Every downstream pass sees canonical Flow fields.
+    src = [normalize_flow_message(message) for message in src]
     # For normal flow: exclude the trailing assistant message (it's the one being generated)
     # The frontend's buildApiMessages did: conv.messages.slice(0, -1)
     # But here we get the FULL DB state. The frontend pushed the empty assistant msg
@@ -86,25 +91,25 @@ def _transform_messages(
     # contract (server copy wins).
     src = _dedup_duplicate_user_messages(src)
 
-    # ── Pre-process: collapse historical endpoint sessions ──
-    # Historical (completed) endpoint sessions are replaced with just their
+    # ── Pre-process: collapse historical Flow sessions ──
+    # Historical (completed) Flow sessions are replaced with just their
     # last worker output so follow-up messages have proper context.
     # The trailing (current/in-progress) session's messages are left as-is
     # for the skip-filter below.
-    src = _collapse_historical_endpoint_sessions(src)
+    src = _collapse_historical_flow_sessions(src)
 
     for msg in src:
-        # 2. Skip endpoint-mode display-only messages
-        #    Only the trailing (current in-progress) endpoint session survives
-        #    _collapse_historical_endpoint_sessions — skip all its messages.
-        #    _isEndpointReview = critic feedback (role=user)
-        #    _isEndpointPlanner = planner output (role=assistant)
-        #    _epIteration = worker turn output (role=assistant)
-        if msg.get('_isEndpointReview'):
+        # 2. Skip Flow display-only messages
+        #    Only the trailing (current in-progress) Flow session survives
+        #    _collapse_historical_flow_sessions — skip all its messages.
+        #    _isFlowReview = critic feedback (role=user)
+        #    _isFlowPlanner = planner output (role=assistant)
+        #    _flowIteration = worker turn output (role=assistant)
+        if msg.get('_isFlowReview'):
             continue
-        if msg.get('_isEndpointPlanner'):
+        if msg.get('_isFlowPlanner'):
             continue
-        if msg.get('_epIteration'):
+        if msg.get('_flowIteration'):
             continue
         # NOTE: autopilot run summaries are NO LONGER messages — they live in
         # the conversation sidecar (settings.autopilotSummaries[runId]), human-
@@ -117,8 +122,15 @@ def _transform_messages(
         role = msg.get('role', '')
 
         if role == 'user':
-            built_user = _build_user_message(msg, model=model,
-                                             image_budget=_remaining_budget())
+            if isinstance(msg.get('planExecution'), dict):
+                built_user = {
+                    'role': 'user',
+                    'content': plan_execution_model_prompt(
+                        msg['planExecution']),
+                }
+            else:
+                built_user = _build_user_message(
+                    msg, model=model, image_budget=_remaining_budget())
             messages.append(built_user)
             _images_used += _count_image_blocks(built_user)
 
@@ -471,7 +483,7 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
         return []
 
     # ── Attempt structured reconstruction ──
-    # Segment-first (epic pt_cb8f98b0cb9b47fb, step 4): when this row carries a
+    # Segment-first (, step 4): when this row carries a
     # persisted `segments` timeline, drive the rebuild FROM the segment
     # structure (rehydrate against toolRounds first so Gemini extraContent is
     # recovered). Byte-identical to the toolRounds path by the reconstructor

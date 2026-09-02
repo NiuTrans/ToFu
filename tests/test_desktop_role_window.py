@@ -2,7 +2,7 @@
 
 Owner directive 2026-08-03: the desktop app must SAY whether it is the
 client or the server at startup, and the client controls must not live
-ONLY in the system tray. Design: docs/DESKTOP_STARTUP_ROLE_UX_DESIGN.md
+ONLY in the system tray. Contract: docs/modules/remote_execution.md
 (S2 = this module + agent wiring; S3 = full-app wiring).
 
 The tk renderer cannot run on headless CI, so every FACT the window shows

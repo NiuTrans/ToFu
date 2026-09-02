@@ -22,16 +22,16 @@ from ._domains import _domain_of
 logger = get_logger(__name__)
 
 
-def _collect_scheduler_signals() -> dict:
+def _collect_scheduler_signals(*, owner_user_id: int) -> dict:
     """Mine scheduled_tasks rows for failing / idle-proactive tasks."""
     try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
-        rows = db.execute(
-            'SELECT id, name, task_type, enabled, run_count, fail_count, '
-            'poll_count, execution_count, last_poll_decision, '
-            'last_execution_status, schedule '
-            'FROM scheduled_tasks').fetchall()
+        from lib.storage import get_storage_client
+        rows = get_storage_client().query(
+            'scheduler.task.list', {
+                'user_id': owner_user_id,
+                'limit': 1000,
+                'enabled_only': False,
+            }) or []
     except Exception as e:
         logger.warning('[Optimizer.analyzer] scheduler scan skipped: %s', e)
         return {'failing_scheduled_tasks': [], 'idle_proactive_tasks': []}
@@ -68,12 +68,12 @@ def _collect_scheduler_signals() -> dict:
     }
 
 
-def _collect_cost_outliers() -> dict:
+def _collect_cost_outliers(*, owner_user_id: int) -> dict:
     """Surface top-cost conversations from daily_cost_cache (no full scan)."""
     try:
         from lib.storage import get_storage_client
         row = get_storage_client().query(
-            'daily_cost.latest', {'user_id': 1})
+            'daily_cost.latest', {'user_id': owner_user_id})
     except Exception as e:
         logger.debug('[Optimizer.analyzer] cost cache scan skipped: %s', e)
         return {'top_cost_conversations': []}
@@ -108,20 +108,22 @@ def _collect_cost_outliers() -> dict:
     }
 
 
-def _collect_conversation_tool_distribution(cutoff_local: datetime) -> dict:
+def _collect_conversation_tool_distribution(
+    cutoff_local: datetime,
+    *,
+    owner_user_id: int,
+) -> dict:
     """Scan recent conversation messages for tool usage distribution.
 
     Best-effort — on any DB error we return empty counters."""
     try:
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        from lib.database.conversation_repository import load_conversation
-        db = get_thread_db(DOMAIN_CHAT)
         updated_ms = int(cutoff_local.timestamp() * 1000)
-        ids = db.execute(
-            'SELECT id FROM conversations '
-            'WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT 200',
-            [updated_ms]).fetchall()
-        rows = [load_conversation(db, row['id']) for row in ids]
+        from lib.conversations.repository import list_conversations
+        rows = list_conversations(
+            user_id=owner_user_id,
+            updated_at_gte=updated_ms,
+            limit=200,
+        )
     except Exception as e:
         logger.warning('[Optimizer.analyzer] conversation scan skipped: %s', e)
         return {'tool_counts': {}, 'search_urls': [], 'fetch_urls': []}
@@ -133,17 +135,18 @@ def _collect_conversation_tool_distribution(cutoff_local: datetime) -> dict:
     for row in rows:
         if row is None:
             continue
-        messages = row.messages
+        messages = (row.get('messages') if isinstance(row, dict)
+                    else row.messages)
         for m in messages:
             if not isinstance(m, dict):
                 continue
-            rounds = m.get('toolRounds') or m.get('searchRounds') or []
+            rounds = m.get('toolRounds') or []
             if not isinstance(rounds, list):
                 continue
             for r in rounds:
                 if not isinstance(r, dict):
                     continue
-                name = r.get('tool') or r.get('name') or ''
+                name = r.get('toolName') or ''
                 if name:
                     tool_counts[name] += 1
                 if name == 'web_search':

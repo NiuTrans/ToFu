@@ -5,7 +5,8 @@ Public API:
   - add_cache_breakpoints(body, log_prefix='')
 """
 
-from lib.env_compat import getenv_compat
+import os
+
 from lib.log import get_logger
 from lib.model_info import is_claude
 
@@ -133,7 +134,7 @@ def _mid_placement_mode() -> str:
     ``TOFU_CACHE_MID_MODE=current`` for an instant rollback to the pre-2026-07-20
     single-mid behaviour.
     """
-    raw = (getenv_compat('TOFU_CACHE_MID_MODE', default='drop')
+    raw = (os.environ.get('TOFU_CACHE_MID_MODE', 'drop')
            or 'drop').strip().lower()
     if raw not in _MID_MODE_VALID:
         return 'drop'
@@ -173,7 +174,7 @@ def _gateway_honors_cache_markers(model: str) -> bool:
     """Return True if attaching cache_control markers helps this model."""
     if is_claude(model):
         return True
-    enabled = getenv_compat('TOFU_CACHE_MARKERS_NONCLAUDE', default='1')
+    enabled = os.environ.get('TOFU_CACHE_MARKERS_NONCLAUDE', '1')
     if enabled.strip().lower() in ('0', 'false', 'no', 'off', ''):
         return False
     lowered = (model or '').lower()
@@ -232,7 +233,7 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
     # allowlist so it never leaks there.
     _task_id = body.get('_task_id', '')
     if _task_id:
-        from lib.tasks_pkg.cache_tracking import latch_extended_ttl
+        from lib.tasks_pkg.cache_tracking._ttl import latch_extended_ttl
         use_extended_ttl = latch_extended_ttl(_task_id)
     else:
         import lib as _lib
@@ -260,6 +261,11 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
     tools = body.get('tools')
     if tools:
         for t_idx, tool in enumerate(tools):
+            # Non-dict entries are dropped at the prepare_request wire
+            # boundary (sanitize_wire_tools); this guard keeps the marker
+            # pass total even when a caller reaches us directly.
+            if not isinstance(tool, dict):
+                continue
             fn = tool.get('function')
             if fn and 'cache_control' in fn:
                 tools[t_idx] = {**tool,
@@ -301,7 +307,7 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
             # an assistant turn that also carries ``tool_calls`` (the
             # prose-before-run_command shape).
             #
-            # ★ THE {content} FLOOR-MISS FIX. An ``assistant/tool_call`` turn
+            # THE {content} FLOOR-MISS FIX. An ``assistant/tool_call`` turn
             #   with prose was PREVIOUSLY carved out (``and not tool_calls``).
             #   That left its ``str`` content un-normalized, so the tail phase
             #   wrapped it into a block the round it was the tail, and it

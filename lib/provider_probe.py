@@ -34,6 +34,7 @@ import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from lib.config_dir import config_path as _config_path
+from lib.error_envelope import from_exception
 from lib.json_store import read_json, write_json_atomic  # noqa: F401  (read_json re-used by routes)
 from lib.log import get_logger
 from lib.model_info.capability_taxonomy import is_chat_model as _is_chat_model
@@ -55,7 +56,10 @@ PROBE_SCHEMA_VERSION = 2
 
 _HTTP_STATUS_RE = re.compile(r'\bHTTP\s+(\d{3})\b', re.IGNORECASE)
 _CHAT_PROBE_PROMPT = 'Reply with exactly OK.'
-_CHAT_PROBE_MAX_TOKENS = 16
+# Reasoning-capable models burn tokens on thinking BEFORE any visible text
+# (observed: glm-5.2 spent all 16 on reasoning_tokens under the old budget),
+# so the budget must leave room for thinking AND a short answer.
+_CHAT_PROBE_MAX_TOKENS = 64
 _UNSET = object()
 
 # Image cells generate one real (tiny) billed image per probe, so they get a
@@ -457,6 +461,16 @@ def _chat_json_text(parsed, protocol: str) -> str:
                 text = _content_text(msg.get('content'))
                 if text:
                     return text
+                # Hybrid-reasoning models under the tiny probe budget can
+                # spend EVERY token thinking (finish_reason='length',
+                # content='') — reasoning_content/reasoning is still generated
+                # output, so the cell provably routes, authenticates and
+                # generates. 2026-08-18 incident: LongCat-2.0 / glm-5.2 /
+                # deepseek-v4 / kimi-k2.5 were all falsely invalid_response.
+                for _rkey in ('reasoning_content', 'reasoning'):
+                    text = _content_text(msg.get(_rkey))
+                    if text:
+                        return text
             text = _content_text(choice.get('text'))
             if text:
                 return text
@@ -1162,7 +1176,8 @@ def run_cell_probe_task(task: dict, work: list, timeout: int):
                      provider_id, e, exc_info=True)
         with CELL_PROBE_LOCK:
             task['status'] = 'error'
-            task['error'] = str(e)[:300]
+            task['error'] = from_exception(
+                e, context='provider-cell-probe', source='provider-probe')
             task['finished_at'] = _time.time()
         persist_probe_task(task)
 

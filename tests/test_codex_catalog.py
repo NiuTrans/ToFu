@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-from lib.oauth import codex_catalog
+import lib.oauth.codex_catalog as codex_catalog
 
 pytestmark = pytest.mark.unit
 
@@ -104,6 +104,7 @@ def test_refresh_uses_authenticated_codex_endpoint_and_writes_private_cache(tmp_
 
     assert result['ok'] is True
     assert result['changed'] is True
+    assert result['catalog_changed'] is True
     assert result['catalog_source'] == 'remote_cache'
     assert [m['model_id'] for m in projected] == ['gpt-hidden', 'gpt-visible']
     url = get.call_args.args[0]
@@ -117,6 +118,28 @@ def test_refresh_uses_authenticated_codex_endpoint_and_writes_private_cache(tmp_
     assert cached['etag'] == 'W/"catalog-v1"'
     assert cached['account_fingerprint']
     assert 'access_token' not in cached
+
+
+def test_successful_200_with_same_normalised_rows_is_not_a_catalog_change(
+        tmp_path):
+    cache_path = tmp_path / 'codex_models_cache.json'
+    rows = codex_catalog._normalise_models(_payload())
+    with mock.patch.object(codex_catalog, '_cache_path',
+                           return_value=str(cache_path)), \
+         mock.patch('lib.oauth.token_store.load_token', return_value=_token()):
+        codex_catalog._write_cache(
+            rows, 'old-etag', codex_catalog._account_fingerprint(_token()))
+        with mock.patch.object(
+                codex_catalog, '_fetch_catalog',
+                return_value=(rows, 'new-etag', False)), \
+             mock.patch.object(codex_catalog,
+                               '_provision_from_best_available',
+                               return_value=False):
+            result = codex_catalog.refresh_codex_model_catalog(force=True)
+
+    assert result['ok'] is True
+    assert result['not_modified'] is False
+    assert result['catalog_changed'] is False
 
 
 def test_refresh_failure_keeps_last_good_cache(tmp_path):
@@ -136,6 +159,7 @@ def test_refresh_failure_keeps_last_good_cache(tmp_path):
         projected = codex_catalog.cached_codex_provider_models()
 
     assert result['ok'] is False
+    assert result['catalog_changed'] is False
     assert result['catalog_source'] == 'remote_cache'
     assert result['catalog_stale'] is False
     assert 'upstream down' in result['catalog_error']
@@ -177,3 +201,38 @@ def test_account_change_rejects_previous_accounts_cache(tmp_path):
 def test_empty_upstream_catalogue_is_rejected():
     with pytest.raises(ValueError, match='empty'):
         codex_catalog._normalise_models({'models': []})
+
+
+@pytest.mark.parametrize(
+    ('current', 'result', 'explicit_wake', 'expected'),
+    [
+        (180, {'ok': True, 'catalog_changed': False}, False, 360),
+        (360, {'ok': True, 'catalog_changed': False}, False, 720),
+        (720, {'ok': True, 'catalog_changed': False}, False, 1440),
+        (1440, {'ok': True, 'catalog_changed': False}, False, 2880),
+        (2880, {'ok': True, 'catalog_changed': False}, False, 3600),
+        (3600, {'ok': True, 'catalog_changed': False}, False, 3600),
+        (3600, {'ok': True, 'catalog_changed': True}, False, 180),
+        (3600, {'ok': True, 'catalog_changed': False}, True, 180),
+        (720, {'ok': False, 'catalog_changed': False}, False, 1440),
+        (180, {'ok': False, 'skipped': 'not_authenticated'}, False, 3600),
+    ],
+)
+def test_refresh_interval_adapts_without_exceeding_one_hour(
+        current, result, explicit_wake, expected):
+    assert codex_catalog._next_refresh_interval(
+        current, result, explicit_wake=explicit_wake) == expected
+
+
+def test_unauthenticated_start_keeps_catalog_worker_absent(monkeypatch):
+    codex_catalog.stop_codex_catalog_refresher(timeout=0)
+    monkeypatch.setattr(codex_catalog, '_worker_thread', None)
+    monkeypatch.setattr(codex_catalog, '_worker_started', False)
+    monkeypatch.setattr('lib.oauth.token_store.load_token', lambda _name: {})
+    thread = mock.Mock(side_effect=AssertionError('must remain thread-free'))
+    monkeypatch.setattr(codex_catalog.threading, 'Thread', thread)
+
+    assert codex_catalog.start_codex_catalog_refresher() is False
+    assert codex_catalog._worker_thread is None
+    assert codex_catalog._worker_started is False
+    thread.assert_not_called()

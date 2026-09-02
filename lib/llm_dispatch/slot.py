@@ -205,9 +205,8 @@ class Slot:
     # 限流排队). One of: '' (none) / 'rate_limit' (per-key 429, 0.5s) /
     # 'upstream' (gateway 5xx, upstream-vendor transient, endpoint
     # unreachable) / 'error' (consecutive-error backoff) / 'quota' (billing).
-    # ('contention' retired 2026-08-03: shared-project 429s no longer park
-    # the family — LLMDispatcher.note_shared_contention is telemetry-only,
-    # owner directive: retry immediately with no backoff.)
+    # Shared-project contention never appears here: its provider/model retry
+    # probes are coordinated without parking or teaching individual slot health.
     cooldown_reason: str = ''
 
     # ── Cost ──
@@ -349,7 +348,8 @@ class Slot:
         except Exception as e:
             logger.debug('[Slot] key_stats record_outcome(success) failed: %s', e)
 
-    def record_truncation(self, error: str = ''):
+    def record_truncation(
+            self, error: str = '', *, release_reservation: bool = False):
         """Call when a response was syntactically successful (HTTP 200, parseable)
         but the body was unusable — truncated mid-output, or empty when content
         was expected. The dispatcher should treat this as a soft failure: bump
@@ -358,6 +358,8 @@ class Slot:
         key itself is healthy.
         """
         with self._lock:
+            if release_reservation:
+                self.inflight = max(0, self.inflight - 1)
             self.consecutive_errors += 1
             self.total_errors += 1
             self.last_error_time = time.time()
@@ -476,7 +478,7 @@ class Slot:
                 if not is_shared_contention:
                     self.rpm_limit = max(5, self.rpm_limit * 0.8)
                 if cooldown_s and cooldown_s > 0:
-                    # ★ Subscription-quota timed hold — the upstream named
+                    # Subscription-quota timed hold — the upstream named
                     #   the reset time, so park the slot for exactly that
                     #   long instead of the generic 0.5s steering nudge.
                     #   Reason 'quota' (long hold — NOT worth a sticky-key

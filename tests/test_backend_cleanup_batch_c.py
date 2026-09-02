@@ -1,87 +1,82 @@
-#!/usr/bin/env python3
-"""Batch C backend-cleanup test: routes/api_v1/memory._project_path dedup.
+"""Behavioral contract for the memory-route project-path resolver.
 
-Finding: _project_path() parsed request JSON TWICE (once in the `if` guard,
-once to read .get('project_path')). Under the sync→loop shim each parse is a
-cross-thread hop to the event loop, so the guard doubled the
-body-read cost of every memory route. Deduped to a single parse while keeping
-the JSON-body branch's precedence over the query-string branch.
-
-Static + behavioral guard (no live request context needed for the static one).
-Run standalone (``python tests/test_backend_cleanup_batch_c.py``) or via pytest.
+The JSON branch is intentionally parsed once because every request_json call
+crosses the Quart sync bridge. A non-empty JSON value takes precedence;
+otherwise the shared query decoder owns proxy-path normalization.
 """
 
-import os
-import re
-import sys
+from __future__ import annotations
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import asyncio
 
-# Read the source WITHOUT importing (routes.api_v1.memory transitively imports
-# routes.push, whose @push_bp.websocket decorator needs the server.py
-# Flask→Quart shim installed — a known test-harness artifact unrelated to this
-# change). A static-source guard is exactly what this dedup needs.
-_MEM_SRC_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    'routes', 'api_v1', 'memory.py')
+from quart import Quart
+import pytest
 
 
-def _project_path_source() -> str:
-    src = open(_MEM_SRC_PATH, encoding='utf-8').read()
-    start = src.index('\ndef _project_path()')
-    # End at the next top-level def (the function body includes the inline
-    # `from lib.request_parser import decode_proxy_path_arg` fallback).
-    nxt = src.index('\ndef ', start + 1)
-    return src[start:nxt]
+pytestmark = pytest.mark.unit
 
 
-def _color(s, c): return f'\033[{c}m{s}\033[0m'
-def _ok(msg): print(' ', _color('✓', '32'), msg)
-def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
+def _run_async(coroutine):
+    """Drive Quart's async request context without pytest-asyncio."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coroutine)
+    finally:
+        loop.close()
 
 
-def test_project_path_parses_body_once():
-    """Static guard: _project_path calls request_json at most once."""
-    src = _project_path_source()
-    n = src.count('request_json(')
-    assert n <= 1, f'_project_path should call request_json at most once, found {n}'
-    _ok(f'_project_path: request_json called {n}× (deduped from 2)')
+def test_project_path_parses_json_once_and_takes_precedence(monkeypatch):
+    import lib.request_parser as request_parser
+    import routes.api_v1.memory as memory_routes
+
+    body_calls: list[bool] = []
+
+    def request_json_once(*, silent=False):
+        body_calls.append(bool(silent))
+        return {'project_path': '/from-body'}
+
+    def query_decoder_must_not_run(_name):
+        raise AssertionError('query fallback ran despite an explicit JSON path')
+
+    monkeypatch.setattr(memory_routes, 'request_json', request_json_once)
+    monkeypatch.setattr(
+        request_parser, 'decode_proxy_path_arg', query_decoder_must_not_run)
+
+    async def exercise_request():
+        app = Quart(__name__)
+        async with app.test_request_context(
+                '/api/v1/memory?project_path=%2Ffrom-query',
+                method='POST',
+                json={'project_path': '/from-body'}):
+            assert memory_routes._project_path() == '/from-body'
+
+    _run_async(exercise_request())
+
+    assert body_calls == [True], 'JSON body must cross the sync bridge once'
 
 
-def test_project_path_json_branch_precedence_documented():
-    """The JSON body branch still precedes the query-string branch (in CODE,
-    not counting the docstring which mentions decode_proxy_path_arg in prose)."""
-    src = _project_path_source()
-    # Drop the docstring so prose mentions don't skew position checks.
-    code = re.sub(r'""".*?"""', '', src, count=1, flags=re.S)
-    json_pos = code.find('request_json(')
-    qs_pos = code.find('decode_proxy_path_arg')
-    assert json_pos != -1 and qs_pos != -1 and json_pos < qs_pos, \
-        'JSON body branch must precede the query-string fallback'
-    _ok('_project_path: JSON body branch still precedes query-string fallback')
+def test_project_path_uses_shared_query_decoder_without_json(monkeypatch):
+    import lib.request_parser as request_parser
+    import routes.api_v1.memory as memory_routes
 
+    query_calls: list[str] = []
 
-def main():
-    print()
-    print(_color('═══ Backend Cleanup Batch C (routes dedup) ═══', '36'))
-    print()
-    tests = [
-        test_project_path_parses_body_once,
-        test_project_path_json_branch_precedence_documented,
-    ]
-    for fn in tests:
-        try:
-            fn()
-        except AssertionError as e:
-            _fail(f'{fn.__name__}: {e}')
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            _fail(f'{fn.__name__}: unexpected {type(e).__name__}: {e}')
-    print()
-    print(_color(f'═══ ALL {len(tests)} TESTS PASSED ═══', '32'))
-    print()
+    def query_decoder(name):
+        query_calls.append(name)
+        return '/from-query'
 
+    def body_parser_must_not_run(*_args, **_kwargs):
+        raise AssertionError('non-JSON request unexpectedly parsed a body')
 
-if __name__ == '__main__':
-    main()
+    monkeypatch.setattr(memory_routes, 'request_json', body_parser_must_not_run)
+    monkeypatch.setattr(request_parser, 'decode_proxy_path_arg', query_decoder)
+
+    async def exercise_request():
+        app = Quart(__name__)
+        async with app.test_request_context(
+                '/api/v1/memory?project_path=%2Ffrom-query', method='GET'):
+            assert memory_routes._project_path() == '/from-query'
+
+    _run_async(exercise_request())
+
+    assert query_calls == ['project_path']

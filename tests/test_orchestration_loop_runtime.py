@@ -11,7 +11,7 @@ from lib.orchestration_loop_runtime import (
     OrchestrationLoopAborted,
     OrchestrationLoopRuntime,
 )
-from lib.orchestration_outcome import OrchestrationOutcomeLedger
+from lib.orchestration.outcome_ledger import OrchestrationOutcomeLedger
 from lib.orchestration_progress import OrchestrationProgressLedger
 from lib.orchestration_transcript import OrchestrationTranscript
 

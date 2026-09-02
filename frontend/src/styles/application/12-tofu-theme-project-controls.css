@@ -1,0 +1,1728 @@
+/* ══════════════════════════════════════════════════════════
+   🎮 PROJECT BAR — Pixel Game Notification Bar
+   Fun speech-bubble style with bouncy interaction,
+   pixel border, and a tiny running pixel character.
+   ══════════════════════════════════════════════════════════ */
+[data-theme="tofu"] .project-bar{
+  background:
+    linear-gradient(180deg, #FAF8F2 0%, #F2EFE6 100%);
+  /* A slim, single-tone warm frame around the Impressionist canvas — a
+     gallery-hung PAINTING, not a chunky bevelled game panel. One frame line
+     (no 4-colour SNES bevel, no concentric inner ring — per the aesthetic:
+     "no concentric borders"). */
+  border:1.5px solid rgba(140,116,80,0.34);
+  /* An EVEN, single-value frame radius (owner, 2026-07-26: the earlier
+     per-corner irregular radii read as a wobbly, unappealing outline). Held in
+     a var so every scene clip-path (canvas / fg / ground) follows the SAME
+     outline — the painting is cropped to the frame, not to a separate rect. */
+  --bar-frame-radius:16px;
+  border-radius:var(--bar-frame-radius);
+  color:#6B5A40;
+  /* Soft, realistic elevation — a tight contact shadow + a wide, feathered
+     ambient shadow (negative spread so it stays a gentle halo under the frame),
+     replacing the hard stacked `0 3px 0 / 0 4px 0` block. Reads as a framed
+     picture floating a few mm off the wall. */
+  box-shadow:
+    0 1px 2px rgba(74,58,36,0.10),
+    0 8px 22px -8px rgba(96,76,48,0.22);
+  position:relative;
+  z-index:1;
+  padding:8px 16px;
+  transition:transform 0.2s cubic-bezier(0.22,0.9,0.3,1.1), box-shadow 0.2s ease;
+  /* overflow VISIBLE so the organic top-edge overlay (grass/waves/clouds) can
+     poke ABOVE the rim; the ground scene is instead kept inside via clip-path. */
+  overflow:visible
+}
+/* Lift the real INTERACTIVE controls above the roaming pet (z1) + scene ground
+   (z0) so the pet passes BEHIND them and can never block a hit target (see
+   tofu-pet.js). This is an ALLOWLIST (only the real controls), NOT a denylist
+   of `*:not(.tofu-pet)` — a denylist forced every decorative/overlay child
+   (the speech bubble, the FX layer, the scene canvas, any future effect layer)
+   into position:relative, so it reserved an in-flow flex slot and rendered as
+   an empty box (the "blank space to the right of the kitten" bug). With an
+   allowlist, the pet + bubble + fx + canvas + any NEW overlay are safe-by-
+   default: they keep their own absolute positioning and own z-band. */
+[data-theme="tofu"] .project-bar > .project-bar-icon,
+[data-theme="tofu"] .project-bar > .project-bar-folders,
+[data-theme="tofu"] .project-bar > .project-bar-stats,
+[data-theme="tofu"] .project-bar > .project-autoapply-toggle,
+[data-theme="tofu"] .project-bar > .project-bar-btn,
+[data-theme="tofu"] .project-bar > .project-bar-close{position:relative;z-index:3}
+/* ── The Tofu PET (static/js/tofu-pet.js) — a chibi tofu CHARACTER that ROAMS
+   left-right along the scene's baseline inside .project-bar (a tiny living
+   diorama, per the desktop-pet / oneko / Shimeji wander model). TWO nested
+   layers so their transforms never fight: .tofu-pet owns POSITION (translateX,
+   set inline by JS as it wanders) and .tofu-pet-img owns the per-frame LIFE
+   animation (breathe / walk-bob). DIRECTION is NOT a layer — it lives on the
+   <img> frame elements themselves (scaleX(var(--pet-face-flip)), below), so
+   the mirror never fights the keyframes on their parent. The pet is clamped
+   to a safe track between the left chip and the right controls, and paints
+   BELOW them (z1 < z2) so it never blocks a hit target.
+   Mounted regardless of theme; other themes hide it (neutraliser below). ── */
+.tofu-pet{
+  position:absolute;
+  left:0;
+  bottom:1px;
+  width:30px;
+  height:30px;
+  z-index:1;
+  cursor:grab;              /* the pet is draggable (press+move) */
+  touch-action:none;        /* let a touch-drag move the pet, not scroll the page */
+  will-change:transform;
+  -webkit-tap-highlight-color:transparent;
+  /* LIVE SCENE LIGHTING (set per-frame by tofu-pet.js from TofuScene.lightInfo).
+     Defaults = neutral overhead, so a scene-less / non-tofu pet is unchanged.
+     --pet-shadow-dx : cast-shadow horizontal offset, AWAY from the sun
+     --pet-shadow-scale : cast-shadow length (grows as the sun drops to a side)
+     --pet-shade-dx  : form-shadow offset onto the shaded (anti-sun) side
+     --pet-light-warm: 0..1 warm over-light on the sunlit sprite
+     --pet-bright    : hover brightness hook (folded into the one filter) */
+  --pet-shadow-dx:0px;
+  --pet-shadow-scale:1;
+  --pet-shade-dx:0px;
+  --pet-light-warm:0;
+  --pet-bright:1;
+  /* ±1 — mirrors the WHOLE frame (body + gaze + stride). Safe because the
+     AI-designed character is FRONT-FACING with soft symmetric shading: there
+     is no baked sun to drag around. REQUIRED for the same reason: the body
+     must turn with the stride, or the pet moonwalks (the 2026-07-30 report). */
+  --pet-face-flip:1;
+}
+.tofu-pet[data-state="drag"]{cursor:grabbing}
+/* OVERLAP FIX (owner: "the way it overlaps the foreground seems strange"): the
+   near occluder plane sits at z2, IN FRONT of the resting pet (z1) so grass
+   hides its feet — correct while it stands IN the scene. But a PICKED-UP pet is
+   airborne: it must rise ABOVE that near plane, not stay trapped behind the
+   grass. Lift the held sprite above the fg canvas (z2) while dragging. */
+.tofu-pet[data-state="drag"]{z-index:5}
+/* DIRECTION lives on the <img> FRAME ELEMENTS (--pet-face-flip, consumed by
+   the `.tofu-pet-img > img` rule below), NOT on the .tofu-pet-img layer: that
+   layer's transform is owned by the breathe/walk keyframes, and an animation
+   always wins over a static transform on the SAME element. The imgs are its
+   children, so their own transform is free. History: the isometric SVG body
+   could not be mirrored without moving its baked sun, so the flip was
+   confined to a character-space subgroup INSIDE the svg — which froze the
+   body's 3/4 orientation and made it moonwalk half the time. The front-facing
+   raster art has no baked sun, so the whole frame turns together. Still a
+   bare property write with NO transition: tweening the flip would pass the
+   face through scaleX(0) and smear it, the "flips like a sheet of paper" bug
+   the old wrapper avoided. The turn's motion is carried by the data-turning
+   pivot pop below. */
+/* A turn is a PIVOT, not a page-flip — see the .tofu-pet[data-turning] rule
+   BELOW the walk/turn animation rule. It must come after it (and out-specify
+   it) or the pivot never plays; the history is documented there. */
+.tofu-pet .tofu-pet-img{
+  display:block;
+  position:relative;
+  width:100%;
+  height:100%;
+  user-select:none;
+  -webkit-user-drag:none;
+  /* the pet is an AI-designed transparent PNG frame (static/icons/pet/tofu/
+     tofu-<x>.png, ≤160px native rendered into this 30px box) → downscaling
+     keeps it crisp at any DPR. pixelated/crisp-edges applies to native-
+     resolution pixel art; here it would only jag the soft outline into mud. */
+  image-rendering:auto;
+  transform-origin:50% 92%;
+  animation:tofuPetBreathe 3.8s ease-in-out infinite;
+  /* FORM LIGHT (the pet's own lighting system). A directional drop-shadow lays
+     a thin dark rim on the side AWAY from the sun (--pet-shade-dx), reading as
+     the shaded side of a rounded body; a mild warmth/brightness lift over-lights
+     the sunlit sprite. All driven by the live light props above, so the sprite
+     responds to the SAME sun that moves across the scene. Neutral at the
+     defaults, so a scene-less pet looks exactly as before. */
+  filter:
+    drop-shadow(var(--pet-shade-dx,0px) 0.5px 0.4px rgba(44,32,18,0.30))
+    brightness(calc(var(--pet-bright,1) + var(--pet-light-warm,0) * 0.05))
+    saturate(calc(1 + var(--pet-light-warm,0) * 0.14));
+}
+/* Every frame is kept as a live <img> child; the engine toggles which one is
+   visible rather than re-decoding a PNG 13×/s. They stack in the same box, so
+   each fills the layer and only the current one is displayed. object-fit:
+   contain anchors each trimmed frame's own box, so the feet of every pose
+   share one baseline while squash/stretch poses keep their height contrast;
+   and it centres the art horizontally, which is what the facing mirror flips
+   about. The mirror (scaleX(var(--pet-face-flip))) lives HERE — a child of
+   the animated layer, so it never fights the keyframes (see the direction
+   note above). */
+.tofu-pet .tofu-pet-img > img{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  object-fit:contain;
+  /* bottom-ANCHOR, not the centre default: a wide squash pose (scratch2) is
+     shorter than the box, and centring would float its feet off the ground.
+     Every frame's trim bottom IS the foot line, so they all plant here. */
+  object-position:center bottom;
+  transform:scaleX(var(--pet-face-flip, 1));
+  -webkit-user-drag:none;
+}
+/* Walking → a gentle vertical BOUNCE synced to the ~600ms 8-frame stride. The
+   FRAMES carry the squash/stretch + the gait; CSS only adds the up/down travel
+   bob (two bounces per full cycle), so the two don't fight. */
+.tofu-pet[data-state="walk"] .tofu-pet-img,
+.tofu-pet[data-state="turn"] .tofu-pet-img{animation:tofuPetWalk .3s ease-in-out infinite}
+/* ★ THE PIVOT MUST OUT-RANK THE WALK ANIMATION (cascade fix, 2026-07-31).
+   tofu-pet.js stamps data-turning="1" for ~260ms whenever the facing flips, and
+   this brief squash-hop is what makes the pet read as PLANTING its feet and
+   spinning rather than flipping like a sheet of paper.
+   It previously sat ABOVE the walk rule at EQUAL specificity (0,2,0 each), so
+   the later walk rule won — and because a facing flip only ever happens while
+   walking/turning/chasing, the pivot NEVER played in ANY reachable state. Now it
+   comes AFTER the walk rule and adds `:not(:root)` on the pet to reach (0,3,0)
+   without depending on any DATA ATTRIBUTE being present. That distinction is
+   load-bearing: `[data-turning][data-state]` would also out-specify the walk
+   rule, but mount() does NOT set an initial data-state (only _enter does), and
+   _startle() → _face() can fire a pivot before the first _enter — so an
+   attribute-based bump would silently miss exactly the flip a user just poked.
+   `:not(:root)` is always true for the pet and adds specificity structurally.
+   `animation` is a SHORTHAND: the winning rule replaces the entire list, so the
+   pivot cannot "merge" with the walk bob — it restates the breathe it
+   composites over, and the travel bob is deliberately suspended for those
+   260ms, which is the correct read: the pet PLANTS and spins instead of
+   continuing to bob along. ONE rule only, deliberately — two overlapping
+   pivot rules at different specificities is how this broke in the first place.
+   No !important: specificity + order, so a future rule can still win cleanly. */
+.tofu-pet:not(:root)[data-turning] .tofu-pet-img{animation:tofuPetPivot .26s ease-out 1, tofuPetBreathe 3.8s ease-in-out infinite}
+/* Reaction accents (the art carries the sparkles/Zzz/etc.). */
+.tofu-pet[data-expr="celebrating"] .tofu-pet-img{animation:tofuPetHop .5s cubic-bezier(0.34,1.56,0.64,1) 3, tofuPetBreathe 3.8s ease-in-out infinite}
+.tofu-pet[data-expr="surprised"] .tofu-pet-img{animation:tofuPetJolt .42s ease-out 1, tofuPetBreathe 3.8s ease-in-out infinite}
+.tofu-pet[data-expr="sleeping"] .tofu-pet-img{animation:tofuPetSnooze 5.2s ease-in-out infinite}
+.tofu-pet:hover .tofu-pet-img{--pet-bright:1.08}
+.tofu-pet:active .tofu-pet-img{transform:scale(0.9)}
+/* ── Contact SHADOW — the soft dark ellipse the kitten casts on the ground, so
+   it reads as PLANTED in the scene, not a sprite floating on top (owner ask).
+   It lives on the POSITION layer (.tofu-pet, translateX only) — NOT the img
+   layer — so it stays put on the ground while the sprite bobs/breathes above
+   it (a real cast shadow doesn't bounce with the body). Sits just below the
+   foot line, behind the sprite. When the cat is picked up ([data-state=drag])
+   it shrinks + fades: the classic "object rises, shadow detaches" cue, the
+   visual counterpart to the airborne cat no longer pressing the grass. */
+.tofu-pet::after{
+  content:'';
+  position:absolute;
+  left:50%;
+  bottom:-1px;
+  width:22px;
+  height:5px;
+  /* DIRECTIONAL cast shadow: offset AWAY from the sun (--pet-shadow-dx) and
+     stretched longer as the sun drops toward a side (--pet-shadow-scale), so
+     the shadow swings + lengthens as the scene's sun drifts overhead — the
+     ground-truth cue that the cat and the scene share one light. */
+  transform:translateX(calc(-50% + var(--pet-shadow-dx,0px))) scaleX(var(--pet-shadow-scale,1));
+  border-radius:50%;
+  background:radial-gradient(ellipse at center, rgba(64,52,34,0.34) 0%, rgba(64,52,34,0.18) 45%, rgba(64,52,34,0) 72%);
+  pointer-events:none;
+  z-index:-1;                /* behind the sprite, on the ground */
+  transition:width .18s ease, height .18s ease, opacity .18s ease;
+}
+/* Lifted: the shadow pulls in tight + faint under the raised cat.
+   ★ CONTINUOUS, driven by --pet-lift (0..1, written every frame by _place()
+   from the pet's HEIGHT) instead of by [data-state="drag"]. Two reasons the
+   state selector was wrong: (a) it snapped between two fixed sizes the instant
+   you grabbed, carrying no information about HOW high the pet was; (b) it
+   stopped applying the moment the pointer was released — but the pet is still
+   airborne then, it is FALLING — so the shadow popped back to full size under a
+   sprite that had not landed.
+   The sun-direction transform is deliberately NOT overridden here:
+   --pet-shadow-dx/scale must keep steering the shadow while the pet is held, or
+   the lift would silently undo the scene-light coupling. Height changes the
+   shadow's SIZE and OPACITY only; direction stays the sun's job. */
+.tofu-pet::after{
+  width:calc(22px - 13px * var(--pet-lift, 0));
+  height:calc(5px - 3px * var(--pet-lift, 0));
+  opacity:calc(1 - 0.5 * var(--pet-lift, 0));
+}
+
+/* ── Click-to-report speech bubble (tofu-pet.js _showBubble). A tap on the pet
+   pops a small SVG-shaped bubble summarising the backend day digest. It floats
+   ABOVE the controls (z3) but is pointer-events:none so it can never block a
+   hit target; auto-dismisses on a timer. The bubble SHAPE is inline SVG (no
+   emoji/glyph, per §3.4); the text is the live backend counts. ── */
+[data-theme="tofu"] .tofu-pet-bubble{
+  position:absolute;
+  bottom:26px;
+  z-index:4;
+  pointer-events:none;
+  transform:translateX(-50%);
+  min-width:74px;
+  max-width:200px;
+  padding:4px 10px 9px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  animation:tofuBubblePop .22s cubic-bezier(0.34,1.56,0.64,1) 1;
+}
+.tofu-pet-bubble-shape{
+  position:absolute;
+  inset:0;
+  z-index:0;
+}
+.tofu-pet-bubble-shape svg{
+  display:block;
+  width:100%;
+  height:100%;
+  fill:#FAF8F2;
+  stroke:#C9BE9E;
+  stroke-width:1.5;
+  filter:drop-shadow(0 2px 4px rgba(120,100,70,0.22));
+}
+.tofu-pet-bubble-text{
+  position:relative;
+  z-index:1;
+  font-size:11px;
+  font-weight:500;
+  line-height:1.25;
+  color:#5E4E36;
+  white-space:nowrap;
+  text-align:center;
+}
+@keyframes tofuBubblePop{0%{opacity:0;transform:translateX(-50%) translateY(3px) scale(0.85)}100%{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}}
+
+@keyframes tofuPetBreathe{0%,100%{transform:scale(1) translateY(0)}50%{transform:scale(1.045,0.97) translateY(-0.5px)}}
+@keyframes tofuPetSnooze{0%,100%{transform:scale(1) translateY(0.5px)}50%{transform:scale(1.03,0.965) translateY(-0.5px)}}
+@keyframes tofuPetWalk{0%,100%{transform:translateY(0)}50%{transform:translateY(-1.6px)}}
+@keyframes tofuPetHop{0%,100%{transform:translateY(0)}40%{transform:translateY(-3px)}}
+@keyframes tofuPetJolt{0%{transform:translateY(0) rotate(0)}25%{transform:translateY(-2px) rotate(-5deg)}60%{transform:translateY(0) rotate(4deg)}100%{transform:rotate(0)}}
+/* Pivot = a natural about-face: a quick low squash (plant the paws) → small hop
+   → settle. NO horizontal scale here (the facing layer owns the instant mirror),
+   so it can never re-create the paper-flip smear. */
+@keyframes tofuPetPivot{0%{transform:translateY(0) scaleY(1)}30%{transform:translateY(1px) scaleY(0.9)}60%{transform:translateY(-2.5px) scaleY(1.04)}100%{transform:translateY(0) scaleY(1)}}
+/* LANDING squash — the third beat of lift → carry → land. A dropped object that
+   simply stops at the floor reads as teleporting; the brief compress-and-recover
+   is what gives it mass. Lives on the FRAME layer (like the pivot) so it
+   composites over .tofu-pet's translateX/translateY rather than replacing them:
+   an animation on the POSITION layer always beats an inline transform, so it
+   would fight the drop integration in _step and the pet would visibly jump.
+   Gated by data-landing, which tofu-pet.js stamps for 240ms on touchdown. */
+.tofu-pet[data-landing] .tofu-pet-img{animation:tofuPetLand .24s cubic-bezier(0.22,0.9,0.3,1.1) 1, tofuPetBreathe 3.8s ease-in-out infinite}
+@keyframes tofuPetLand{0%{transform:scale(1.06,0.9) translateY(1.5px)}55%{transform:scale(0.97,1.03) translateY(-1px)}100%{transform:scale(1) translateY(0)}}
+
+/* ── The bar as a tiny SCENE (a living diorama). A low ground strip (grass
+   lawn / pool lane) tiles seamlessly across the full width along the BOTTOM;
+   the pet roams its baseline. Which scene shows is driven by --bar-scene,
+   switched per style via [data-decor] (set by tofu-pet.js / TofuPet.setDecor,
+   persisted; right-click the pet to cycle). Extend by adding a style + a
+   [data-decor="<style>"] rule + a scene-<style>.svg asset. ── */
+[data-theme="tofu"] .project-bar{
+  --bar-scene:url("icons/pet/scene-meadow.svg");   /* default ground */
+  --bar-edge:url("icons/pet/edge-meadow.svg");     /* default top edge */
+}
+/* Per-scene BAR-BODY wash: a subtle full-height scene-tinted gradient so the
+   frosted-glass pills float on continuous scene ATMOSPHERE top-to-bottom (not
+   flat cream in the vertical middle), with the detailed SVG ground strip +
+   crest as the grounded bottom of that same wash. Attr selector = (0,3,0) >
+   the base .project-bar (0,2,0), so the tint wins; only `background` is
+   overridden (border/shadow/etc. inherit). `off` keeps the plain cream.
+   Very low saturation so the #5E4E36 pill-label contrast holds. */
+[data-theme="tofu"] .project-bar[data-decor="pool"]{--bar-scene:url("icons/pet/scene-pool.svg");--bar-edge:url("icons/pet/edge-pool.svg");background:linear-gradient(180deg,#F1F6F5 0%,#DFEDEA 100%)}
+[data-theme="tofu"] .project-bar[data-decor="meadow"]{--bar-scene:url("icons/pet/scene-meadow.svg");--bar-edge:url("icons/pet/edge-meadow.svg");background:linear-gradient(180deg,#F5F7EF 0%,#E7EEDD 100%)}
+[data-theme="tofu"] .project-bar[data-decor="sky"]{--bar-scene:url("icons/pet/scene-sky.svg");--bar-edge:url("icons/pet/edge-sky.svg");background:linear-gradient(180deg,#F2F5F9 0%,#E4EBF4 100%)}
+[data-theme="tofu"] .project-bar[data-decor="off"]{--bar-scene:none;--bar-edge:none}
+
+/* ── PROCEDURAL IMPRESSIONIST CANVAS (static/js/tofu-scene.js). A <canvas>
+   painted with thousands of oriented brush-dabs (Monet broken-colour) in depth
+   planes + a slow-drifting sun glow & specular shimmer — the "rich, vibrant,
+   ever-changing" backdrop, asset-free. It fills the WHOLE bar body at z0 and
+   paints an OPAQUE base, so it sits BELOW the pet (z1) + controls (z2) and
+   fully occludes the SVG ::after ground beneath it. The SVG scene/edge stays as
+   the no-JS / no-canvas fallback (untouched). Clipped to the rounded shell so
+   it never spills past the corners; pointer-transparent so it can't steal a
+   click. Hidden when the scene is 'off'. */
+[data-theme="tofu"] .project-bar .tofu-scene-canvas{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  z-index:0;
+  pointer-events:none;
+  border-radius:inherit;
+  /* This clip is the ONLY crop the painting gets: tofu-scene.js paints
+     FULL-BLEED to the canvas edges (the torn deckle edge + white margin were
+     removed per owner, 2026-07-26), and this rule cuts it to the rounded shell
+     — free, per-frame, no canvas-side cut/clip. It lives on the canvas rather
+     than on .project-bar because a clip-path on the bar would also crop the
+     pet's speech bubble (which deliberately pokes above the rim) and the
+     frame's drop shadow. */
+  clip-path:inset(0 round var(--bar-frame-radius, var(--radius)));
+  display:block;
+}
+[data-theme="tofu"] .project-bar[data-decor="off"] .tofu-scene-canvas{display:none}
+/* The canvas is tofu-theme only; hide it defensively if the element lingers
+   after a theme switch away from tofu. */
+html:not([data-theme="tofu"]) .project-bar .tofu-scene-canvas{display:none}
+
+/* ── FOREGROUND OCCLUSION CANVAS (static/js/tofu-scene.js _paintForeground).
+   The 2.5D DEPTH fix (owner: "the pet floats ON the background / refer to game
+   rendering"). The bg scene canvas (z0) can only ever paint BEHIND the DOM pet
+   (z1) — so the cat read as a sprite pasted on a backdrop. THIS canvas sits at
+   z2, IN FRONT of the pet, and paints only the NEAR band of the scene (tall
+   grass / reeds / low mist) so the cat is partly OCCLUDED and reads as standing
+   AMONG the scene. It is pointer-transparent, and the real controls are lifted
+   to z3 ABOVE it (below) so the near fringe never covers a hit target. Same
+   clip + tofu-only + off gates as the bg canvas. */
+[data-theme="tofu"] .project-bar .tofu-scene-fg-canvas{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  z-index:2;
+  pointer-events:none;
+  border-radius:inherit;
+  clip-path:inset(0 round var(--bar-frame-radius, var(--radius)));
+  display:block;
+}
+[data-theme="tofu"] .project-bar[data-decor="off"] .tofu-scene-fg-canvas{display:none}
+html:not([data-theme="tofu"]) .project-bar .tofu-scene-fg-canvas{display:none}
+
+/* The scene GROUND layer (::after): a low strip tiled full-width along the
+   BOTTOM, painted BEHIND the pet (z1) + controls (z2). Since the bar is now
+   overflow:visible, the ground is kept inside the rounded shell via clip-path
+   (rounded rect matching --radius) so it doesn't spill past the corners. */
+[data-theme="tofu"] .project-bar::after{
+  content:'';
+  position:absolute;
+  left:0;
+  right:0;
+  bottom:0;
+  height:17px;
+  z-index:0;
+  pointer-events:none;
+  /* Seamless flat-vector SVG (120-wide tile, bumps return to baseline → no
+     seam). Muted tofu palette, so it sits at full opacity without shouting;
+     resolution-independent (crisp on any DPR, unlike the old raster strip). */
+  background-image:var(--bar-scene);
+  background-repeat:repeat-x;
+  background-size:120px 100%;
+  /* Subtle ground parallax: the tiled scene shifts a fraction of the pet's
+     travel (--bar-scene-x, set by tofu-pet.js _place). Seamless 120px tile, so
+     any x offset still meets its neighbour with no seam. Defaults to 0 when the
+     var is unset (pet not mounted / reduced-motion → pet never moves). */
+  background-position:calc(var(--bar-scene-x, 0px)) bottom;
+  clip-path:inset(0 round 0 0 var(--radius) var(--radius));
+}
+/* The organic TOP-EDGE overlay (::before): grass tufts / wave crests / cloud
+   puffs that STRADDLE the top rim and POKE ABOVE it, so the bar no longer reads
+   as a neat rectangle. Tiled full-width; sits above the ground but below the
+   controls; pointer-transparent. This is the deliberate "less neat / artistic
+   edge" the design calls for. */
+[data-theme="tofu"] .project-bar::before{
+  content:'';
+  position:absolute;
+  left:8px;
+  right:8px;
+  top:-6px;
+  height:14px;
+  z-index:1;
+  pointer-events:none;
+  /* A GENTLE organic silhouette (grass blades / wave crest / cloud puffs) that
+     straddles the rim and pokes only a few px above it — enough to break the
+     neat rectangle without a busy fringe. Seamless 120-wide SVG tile. */
+  background-image:var(--bar-edge);
+  background-repeat:repeat-x;
+  background-size:120px 100%;
+  background-position:left top;
+  filter:drop-shadow(0 1px 0.5px rgba(120,100,70,0.10));
+}
+[data-theme="tofu"] .project-bar[data-decor="off"]::after,
+[data-theme="tofu"] .project-bar[data-decor="off"]::before{display:none}
+
+/* ── Canvas-wins-over-SVG gate (root fix for the z0 stacking collision).
+   tofu-scene.js stamps data-scene-canvas="on" on the bar ONLY after a 2d
+   context is secured. Both the SVG scene GROUND (::after) and the procedural
+   canvas live at z-index:0, but a generated ::after composites AFTER the
+   element's real children — so a full-height opaque ::after would paint ON TOP
+   of the canvas and hide the whole painting. There is no z integer between the
+   canvas (0) and the ::before crest (1), so the correct fix is to SUPPRESS the
+   SVG ground when the canvas is live — NOT a z nudge, NOT deleting the SVG
+   rules (they remain the no-JS / no-canvas fallback, which is exactly why this
+   gates on the runtime marker). The ::before edge crest is INTENTIONALLY kept:
+   it pokes above the rim where the body-clipped canvas cannot reach, and it
+   composites cleanly above the canvas with no collision. */
+[data-theme="tofu"] .project-bar[data-scene-canvas="on"]::after{display:none}
+/* ...and the SVG top-edge CREST (::before) too. When the procedural canvas is
+   live the bar reads as a GALLERY-HUNG PAINTING inside the slim frame — a clean
+   framed rectangle. The old flat-vector grass/wave garland poking above the rim
+   was the pre-canvas "break the neat rectangle" gesture; it's the same
+   simple-illustration language the canvas replaced, just relocated to the rim,
+   and a hard clip-art silhouette clashes with the soft painting. So it is
+   SUPPRESSED here (not deleted — the SVG crest remains the no-JS/no-canvas
+   fallback, gated on the same runtime marker as the ground). */
+[data-theme="tofu"] .project-bar[data-scene-canvas="on"]::before{display:none}
+
+/* ── MEADOW full-height painterly scene (root-cause cure for the "empty middle":
+   the shared ::after ground above is a 17px bottom strip, so grass only lived
+   in the bottom ~40% while the middle was flat wash. These meadow-scoped
+   overrides (attr selector (0,3,1) > the shared (0,2,1) rules) stretch the
+   scene to the bar's FULL height and let the crest poke deeper over the rim,
+   WITHOUT touching the shared rules → pool/sky stay byte-identical. The
+   scene-meadow.svg tile is preserveAspectRatio="none", so background-size
+   120px 100% stretches it top-to-bottom; density rises to the base, hazy top
+   behind the pills. Only meadow is converted this pass (pool/sky pending
+   owner sign-off). ── */
+[data-theme="tofu"] .project-bar[data-decor="meadow"]::after{
+  top:0;
+  bottom:0;
+  height:auto;          /* override the shared height:17px so top+bottom bound it */
+  /* full-body scene: painterly, resolution-independent, rasterizes once */
+  background-size:120px 100%;
+  /* clip to the WHOLE rounded shell (all four corners) now that it fills the
+     body, not just the bottom two — the same frame outline. */
+  clip-path:inset(0 round var(--bar-frame-radius, var(--radius)));
+}
+/* the meadow crest reaches higher over the rim than the gentle shared poke */
+[data-theme="tofu"] .project-bar[data-decor="meadow"]::before{
+  top:-10px;
+  height:20px;
+}
+
+/* POOL + SKY get the identical full-height treatment (same recipe validated on
+   meadow): decor-scoped ::after (attr (0,3,1) > shared (0,2,1)) stretches the
+   painterly scene over the whole bar body, and a deeper ::before crest feathers
+   over the rim. Shared rules + meadow untouched. */
+[data-theme="tofu"] .project-bar[data-decor="pool"]::after,
+[data-theme="tofu"] .project-bar[data-decor="sky"]::after{
+  top:0;
+  bottom:0;
+  height:auto;
+  background-size:120px 100%;
+  clip-path:inset(0 round var(--bar-frame-radius, var(--radius)));
+}
+[data-theme="tofu"] .project-bar[data-decor="pool"]::before,
+[data-theme="tofu"] .project-bar[data-decor="sky"]::before{
+  top:-10px;
+  height:20px;
+}
+
+/* Respect reduced-motion: hold a static frame (MDN: reduce ≠ remove state cues).
+   The pet's footstep disturbance lives on the scene canvas (tofu-scene.js),
+   which already parks its rAF loop under reduced-motion. */
+@media (prefers-reduced-motion: reduce){
+  .tofu-pet .tofu-pet-img{animation:none !important}
+  [data-theme="tofu"] .tofu-pet-bubble{animation:none !important}
+}
+/* Non-tofu themes: the pet + garland are themed for tofu only. Hide the pet
+   DELIBERATELY — this is a decision, not an inherited leftover from when the
+   pet was an off-brand cat. Re-examined 2026-07-29 when the pet became the
+   mascot itself, and KEPT, because the pet is not a standalone sprite: it is
+   one actor in a diorama whose every other layer is tofu-scoped. Measured —
+   `tofu-scene.js:629` refuses to paint unless `data-theme === 'tofu'`, and the
+   ground (`--bar-scene`), the foreground occlusion canvas, the organic top
+   edge and the speech bubble are ALL `[data-theme="tofu"]` rules. So on
+   dark/light the pet would walk on a bare flat toolbar with no ground, no
+   scene lighting and no critter to chase — reading as a sticker pasted on a
+   bar, which is the exact "sprite, not inhabitant" failure the brand work
+   fought. To surface it on all three themes, port the diorama first (ground +
+   fg canvas + lightInfo), not just this one line.
+
+   Hidden via CSS rather than by skipping the mount, so dark/light bars stay
+   byte-identical to before (their base .project-bar keeps padding:8px 12px,
+   and they have no ::before/::after garland). */
+html:not([data-theme="tofu"]) .tofu-pet{display:none}
+[data-theme="tofu"] .project-bar:hover{
+  transform:translateY(-2px);
+  border-color:rgba(140,116,80,0.45);
+  box-shadow:
+    0 2px 4px rgba(74,58,36,0.12),
+    0 16px 34px -10px rgba(96,76,48,0.28)
+}
+[data-theme="tofu"] .project-bar-icon{
+  font-size:16px;
+  transition:transform 0.2s cubic-bezier(0.34,1.56,0.64,1)
+}
+[data-theme="tofu"] .project-bar-icon:hover{transform:scale(1.15) rotate(-8deg)}
+[data-theme="tofu"] .project-bar-stats{
+  color:#8A7A5A;
+  font-family:var(--sans-body);
+  font-size:10px;
+  letter-spacing:0.02em
+}
+[data-theme="tofu"] .project-bar-close{
+  color:#B8A890;
+  border-radius:50%;
+  width:20px;
+  height:20px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  border:2px solid transparent;
+  transition:all 0.15s
+}
+[data-theme="tofu"] .project-bar-close:hover{
+  color:#fff;
+  background:#D06050;
+  border-color:#D06050;
+  transform:scale(1.1)
+}
+
+/* Project bar buttons — SNES 3D mini buttons */
+[data-theme="tofu"] .project-bar-btn{
+  border:2px solid rgba(196,184,158,0.7);
+  border-top-color:rgba(221,214,196,0.8);
+  border-left-color:rgba(221,214,196,0.8);
+  border-right-color:rgba(168,152,120,0.75);
+  border-bottom-color:rgba(168,152,120,0.75);
+  color:#5E4E36;
+  border-radius:8px;
+  /* Frosted glass: translucent tofu-cream fill + backdrop blur so the diorama
+     scene reads THROUGH the pill (kills the opaque-tile occlusion) while the
+     tofu palette keeps chrome + scenery one surface. */
+  background:linear-gradient(180deg, rgba(250,248,242,0.5) 0%, rgba(240,237,228,0.4) 100%);
+  -webkit-backdrop-filter:blur(6px) saturate(1.05);
+  backdrop-filter:blur(6px) saturate(1.05);
+  box-shadow:0 2px 0 rgba(168,152,120,0.45);
+  font-family:var(--sans-body);
+  font-weight:600;
+  font-size:10px;
+  transition:transform 0.08s,box-shadow 0.08s,background 0.15s
+}
+[data-theme="tofu"] .project-bar-btn:hover{
+  background:linear-gradient(180deg, rgba(255,255,255,0.62) 0%, rgba(245,242,233,0.55) 100%);
+  color:#4A3820
+}
+[data-theme="tofu"] .project-bar-btn:active{
+  transform:translateY(2px);
+  box-shadow:none;
+  border-top-color:#A89878;
+  border-left-color:#A89878;
+  border-right-color:#DDD6C4;
+  border-bottom-color:#DDD6C4
+}
+
+/* Auto-apply toggle — SNES 3D toggle */
+[data-theme="tofu"] .project-autoapply-toggle{
+  border:2px solid rgba(196,184,158,0.7);
+  border-top-color:rgba(221,214,196,0.8);
+  border-left-color:rgba(221,214,196,0.8);
+  border-right-color:rgba(168,152,120,0.75);
+  border-bottom-color:rgba(168,152,120,0.75);
+  background:linear-gradient(180deg, rgba(250,248,242,0.5) 0%, rgba(240,237,228,0.4) 100%);
+  -webkit-backdrop-filter:blur(6px) saturate(1.05);
+  backdrop-filter:blur(6px) saturate(1.05);
+  color:#5E4E36;
+  border-radius:8px;
+  box-shadow:0 2px 0 rgba(168,152,120,0.45);
+  font-weight:700;
+  font-size:9px;
+  transition:transform 0.08s,box-shadow 0.08s,background 0.15s
+}
+[data-theme="tofu"] .project-autoapply-toggle:hover{
+  background:linear-gradient(180deg, rgba(255,255,255,0.62) 0%, rgba(245,242,233,0.55) 100%)
+}
+[data-theme="tofu"] .project-autoapply-toggle .autoapply-dot{
+  background:#C4956A;
+  box-shadow:0 0 4px rgba(196,149,106,0.3)
+}
+/* Auto mode keeps its green identity in the TEXT/dot/bevels, but the fill must
+   be a near-solid cream frost: the bar behind it IS a painted green meadow, so
+   a translucent green fill + green text was green-on-green (owner 2026-08-14:
+   "the Auto contrast is too poor to read"). Deep-green ink on cream stays
+   readable over every scene (meadow/pool/sky). */
+[data-theme="tofu"] .project-autoapply-toggle.auto-mode{
+  border-color:rgba(106,158,90,0.75);
+  border-top-color:rgba(138,190,122,0.85);
+  border-left-color:rgba(138,190,122,0.85);
+  border-right-color:rgba(78,138,64,0.8);
+  border-bottom-color:rgba(78,138,64,0.8);
+  background:linear-gradient(180deg, rgba(252,250,243,0.94) 0%, rgba(240,237,225,0.9) 100%);
+  -webkit-backdrop-filter:blur(6px) saturate(1.05);
+  backdrop-filter:blur(6px) saturate(1.05);
+  color:#2F5A22;
+  box-shadow:0 2px 0 rgba(78,138,64,0.3)
+}
+[data-theme="tofu"] .project-autoapply-toggle.auto-mode .autoapply-dot{
+  background:#6A9E5A;
+  box-shadow:0 0 4px rgba(106,158,90,0.4)
+}
+[data-theme="tofu"] .project-autoapply-toggle.auto-mode:hover{
+  background:linear-gradient(180deg, rgba(255,255,255,0.97) 0%, rgba(246,243,233,0.94) 100%)
+}
+
+/* Folder badges — FROSTED-GLASS LOZENGES hung on the diorama.
+   Redesign (2026-07): the old "SNES 3D item tag" (a 4-colour hard bevel + a
+   `0 2px 0` block drop) read as a pasted game button floating ON the painted
+   meadow — the two tells of the "not blended" look. This reworks each chip into
+   a frosted-glass CAPSULE that lets the scene blur THROUGH it (blend) while a
+   substantial cream frost + a white ink scrim keep the label crisp over the
+   busy field (readability). It adopts the bar frame's "gallery-hung painting"
+   language: ONE warm hairline (no bevel), soft feathered elevation (no hard
+   drop), and a glass-edge inner top highlight. Design research: frosted glass
+   needs MORE blur over intricate backgrounds (NN/g); a near-solid protected
+   panel + a light text-shadow scrim give per-letter figure-ground separation
+   over a busy field (badgezoo / Smashing); an inner light edge is what makes it
+   read as real glass (Comeau). The capsule shape also correctly signals a
+   TAG/identity chip, distinct from the rounded-rect control buttons. */
+[data-theme="tofu"] .folder-badge{
+  background:linear-gradient(180deg, rgba(252,250,245,0.72) 0%, rgba(244,240,231,0.6) 100%);
+  -webkit-backdrop-filter:blur(10px) saturate(1.35);
+  backdrop-filter:blur(10px) saturate(1.35);
+  color:#5A4A32;
+  border:1px solid rgba(140,116,80,0.3);
+  border-radius:999px;
+  padding:3px 12px;
+  box-shadow:
+    0 1px 2px rgba(74,58,36,0.10),
+    0 4px 10px -5px rgba(96,76,48,0.22),
+    inset 0 1px 0 rgba(255,255,255,0.65);
+  text-shadow:0 1px 0 rgba(255,255,255,0.5);
+  font-weight:700;
+  transition:transform 0.16s cubic-bezier(0.22,0.9,0.3,1.1), box-shadow 0.16s ease, background 0.16s ease
+}
+[data-theme="tofu"] .folder-badge:hover{
+  background:linear-gradient(180deg, rgba(255,255,255,0.82) 0%, rgba(250,246,238,0.7) 100%);
+  border-color:rgba(140,116,80,0.45);
+  color:#4A3820;
+  transform:translateY(-1px);
+  box-shadow:
+    0 2px 4px rgba(74,58,36,0.12),
+    0 8px 18px -6px rgba(96,76,48,0.28),
+    inset 0 1px 0 rgba(255,255,255,0.75)
+}
+[data-theme="tofu"] .folder-badge:active{
+  transform:translateY(0);
+  box-shadow:
+    0 1px 2px rgba(74,58,36,0.12),
+    inset 0 1px 0 rgba(255,255,255,0.6)
+}
+/* Read-only root — a cooler, de-saturated frost + the lock glyph, so "locked"
+   reads distinctly from a writable chip while staying the SAME glass material.
+   Own selector at (0,3,0) so it wins over the writable tofu chip regardless of
+   source order. */
+[data-theme="tofu"] .folder-badge.folder-badge-ro{
+  background:linear-gradient(180deg, rgba(238,238,236,0.66) 0%, rgba(226,226,224,0.56) 100%);
+  -webkit-backdrop-filter:blur(10px) saturate(0.9);
+  backdrop-filter:blur(10px) saturate(0.9);
+  color:#6A6252;
+  border-color:rgba(120,112,96,0.34)
+}
+[data-theme="tofu"] .folder-badge.folder-badge-ro:hover{
+  background:linear-gradient(180deg, rgba(246,246,244,0.78) 0%, rgba(236,236,233,0.66) 100%);
+  border-color:rgba(120,112,96,0.5);
+  color:#565044
+}
+
+/* Scanning state — amber glow shimmer */
+[data-theme="tofu"] .project-bar.scanning{
+  border-color:#C4956A;
+  border-top-color:#D4BC9E;
+  border-left-color:#D4BC9E;
+  border-right-color:#A87A50;
+  border-bottom-color:#A87A50;
+  background:
+    linear-gradient(90deg,#FAF8F2 0%,rgba(196,149,106,0.15) 50%,#FAF8F2 100%);
+  background-size:200% 100%;
+  animation:tofuProjectScan 1.8s ease-in-out infinite;
+  box-shadow:
+    0 3px 0 #C4956A,
+    0 4px 0 #A87A50,
+    0 5px 10px rgba(196,149,106,0.15)
+}
+[data-theme="tofu"] .project-bar.scanning .project-bar-stats{color:#C4956A;font-weight:600}
+
+/* Indexing state — lavender shimmer */
+[data-theme="tofu"] .project-bar.indexing{
+  border-color:rgba(154,136,192,0.6);
+  border-top-color:rgba(180,168,210,0.7);
+  border-left-color:rgba(180,168,210,0.7);
+  border-right-color:rgba(120,106,160,0.5);
+  border-bottom-color:rgba(120,106,160,0.5);
+  background:
+    linear-gradient(90deg,#FAF8F2 0%,rgba(154,136,192,0.12) 50%,#FAF8F2 100%);
+  background-size:200% 100%;
+  animation:tofuProjectScan 2s ease-in-out infinite;
+  box-shadow:
+    0 3px 0 rgba(140,124,176,0.3),
+    0 4px 0 rgba(120,106,160,0.25),
+    0 5px 10px rgba(154,136,192,0.12)
+}
+
+@keyframes tofuProjectScan{
+  0%{background-position:100% 0}
+  100%{background-position:-100% 0}
+}
+
+/* Project badge (topbar) — pixel tag */
+[data-theme="tofu"] .project-badge{background:rgba(196,149,106,0.14);color:#8A6240;border-color:rgba(196,149,106,0.25);border-radius:4px;box-shadow:none;font-family:var(--sans-body);font-size:11px;font-weight:600}
+
+/* File changes bar — calm notification */
+[data-theme="tofu"] .file-changes-bar{
+  border:1px solid rgba(106,158,90,0.4);
+  border-left:3px solid #6A9E5A;
+  border-radius:var(--radius-sm);
+  background:rgba(106,158,90,0.05);
+  box-shadow:var(--clay-sm);
+  position:relative
+}
+[data-theme="tofu"] .file-changes-bar::before{
+  content:none;
+  display:none
+}
+[data-theme="tofu"] .file-changes-bar:hover{
+  transform:translateY(-1px);
+  box-shadow:var(--clay-md)}
+[data-theme="tofu"] .file-changes-bar.fc-pulse{
+  border-color:#5E8A50;
+  box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .fc-summary{color:#5E8A50;font-family:var(--sans-body);font-size:11px;font-weight:600}
+[data-theme="tofu"] .fc-count{color:#5E8A50;font-weight:800}
+[data-theme="tofu"] .fc-undo-btn{
+  color:#A67B52;
+  border:2px solid #8A7A5A;
+  border-radius:10px;
+  box-shadow:var(--clay-sm);
+  font-family:var(--sans-body);
+  font-size:10px;
+  transition:transform 0.12s cubic-bezier(0.34,1.56,0.64,1),box-shadow 0.12s
+}
+[data-theme="tofu"] .fc-undo-btn:hover{
+  background:rgba(196,149,106,0.08);
+  transform:translateY(-2px) scale(1.03);
+  box-shadow:var(--clay-md)}
+
+/* ── Folder browser ── */
+[data-theme="tofu"] .folder-browser{border-radius:var(--radius-sm);border:1px solid rgba(184,176,160,0.4);box-shadow:0 2px 8px rgba(74,63,47,0.06);overflow:hidden}
+[data-theme="tofu"] .folder-browser-header{background:#E4E1D7;border-bottom:var(--stitch)}
+[data-theme="tofu"] .folder-browser-footer{background:#E4E1D7;border-top:var(--stitch)}
+[data-theme="tofu"] .folder-item.selected{background:rgba(196,149,106,0.08);border-left:3px solid #C4956A}
+[data-theme="tofu"] .folder-code-badge{background:rgba(196,149,106,0.1);color:#A67B52;border-radius:var(--radius-sm)}
+[data-theme="tofu"] .recent-search .recent-search-input{border:2px solid #1a1814;border-radius:var(--radius-sm);background:#F5F3ED}
+[data-theme="tofu"] .recent-search .recent-search-input:focus{border-color:#1a1814;box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .recent-hl{background:rgba(196,149,106,0.22);color:#A67B52}
+[data-theme="tofu"] .recent-path-item{border-radius:var(--radius-sm);border:1px solid #D6D1C3;box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .recent-path-item:hover{background:rgba(196,149,106,0.06);box-shadow:none;color:#A67B52;transform:none}
+[data-theme="tofu"] .recent-path-item:hover .recent-path-name{color:#A67B52}
+
+/* ── Capability mode picker — tofu (clay) theme ──
+ * The trigger inherits the pixel-pill [data-theme="tofu"] .submenu-trigger
+ * style and the popover inherits [data-theme="tofu"] .flow-menu, so only the
+ * active-Studio accent is bespoke here. */
+[data-theme="tofu"] .chat-mode-trigger[data-mode="studio"]{color:#A67B52;background:rgba(196,149,106,0.12);border-color:rgba(196,149,106,0.35)}
+[data-theme="tofu"] .submenu-section-label{color:#8A7A56;font-family:var(--sans-body)}
+/* ── Light theme ── */
+[data-theme="light"] .chat-mode-trigger[data-mode="studio"]{color:var(--accent);background:var(--accent-subtle);border-color:var(--accent-subtle)}
+[data-theme="light"] .submenu-section-label{color:var(--text-tertiary)}
+/* Mobile capability-mode rows read as a radio group — active row painted
+ * like an active submenu item (accent tint), NOT a check toggle. */
+.mobile-mode-item.active .mobile-sheet-item-name{color:var(--accent)}
+.mobile-mode-item .mobile-sheet-item-check{opacity:0}
+.mobile-mode-item.active .mobile-sheet-item-check{opacity:1}
+
+/* ── Submenu triggers — pixel pill buttons with JetBrains Mono ── */
+[data-theme="tofu"] .submenu-trigger{
+  border-radius:4px;
+  border:1.5px solid rgba(194,188,164,0.4);
+  border-top-color:rgba(255,252,246,0.6);
+  border-left-color:rgba(255,252,246,0.6);
+  border-right-color:rgba(168,152,120,0.4);
+  border-bottom-color:rgba(168,152,120,0.4);
+  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
+  /* Item 2 — true frosted glass matching the project bar's pills */
+  -webkit-backdrop-filter:blur(6px) saturate(1.05);
+  backdrop-filter:blur(6px) saturate(1.05);
+  color:#3D3022;
+  box-shadow:0 1px 0 rgba(154,144,122,0.3);
+  clip-path:none;
+  padding:4px 10px;
+  font-family:var(--sans-body);
+  font-size:11px;
+  font-weight:700;
+  letter-spacing:0.02em;
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+  transition:color 0.15s,background 0.15s,transform 0.08s ease,box-shadow 0.08s ease
+}
+[data-theme="tofu"] .submenu-trigger:hover{
+  background:linear-gradient(180deg, rgba(251,248,240,0.8) 0%, rgba(242,239,229,0.8) 100%);
+  color:#2A2018;
+  box-shadow:0 2px 0 rgba(154,144,122,0.3), 0 2px 6px rgba(74,63,47,0.06);
+  transform:translateY(-1px)
+}
+[data-theme="tofu"] .submenu-trigger:active{
+  transform:translateY(1px);
+  box-shadow:0 0 0 rgba(154,144,122,0.3)
+}
+[data-theme="tofu"] .submenu-trigger:disabled,[data-theme="tofu"] .submenu-trigger:disabled:hover{
+  opacity:.5;
+  cursor:not-allowed;
+  transform:none;
+  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
+  color:#3D3022;
+  box-shadow:0 1px 0 rgba(154,144,122,0.3)
+}
+[data-theme="tofu"] .submenu-trigger.open{
+  background:rgba(196,149,106,0.12);
+  color:#3D3022;
+  border-color:rgba(196,149,106,0.35);
+  font-weight:700
+}
+[data-theme="tofu"] .submenu-trigger.has-active{
+  color:#6A4E2E;
+  background:rgba(196,149,106,0.1);
+  border-color:rgba(196,149,106,0.35);
+  font-weight:700
+}
+[data-theme="tofu"] .submenu-item.active .submenu-item-name,[data-theme="tofu"] .submenu-item.active .submenu-item-icon,[data-theme="tofu"] .submenu-item.active .submenu-item-check{color:#A67B52}
+[data-theme="tofu"] .submenu-item.active .submenu-item-icon{background:rgba(196,149,106,0.1)}
+[data-theme="tofu"] .submenu-item{border-radius:3px;padding:8px 10px;font-family:var(--sans-body);font-size:11px;font-weight:600}
+[data-theme="tofu"] .submenu-item:hover{background:rgba(196,149,106,0.08)}
+[data-theme="tofu"] .submenu-item.active{background:rgba(196,149,106,0.07);border-radius:3px}
+[data-theme="tofu"] .submenu-item-icon{border-radius:3px;background:transparent;color:#8A7A5A}
+[data-theme="tofu"] .submenu-item.active .submenu-item-icon{background:#E8E5DC}
+[data-theme="tofu"] .submenu-item-name{color:#3D3022;font-weight:700;-webkit-font-smoothing:antialiased}
+[data-theme="tofu"] .submenu-item-desc{font-size:10px;color:#6A5A3A;font-weight:500}
+[data-theme="tofu"] .submenu-count{background:rgba(196,149,106,0.18);color:#8E6B48;border-radius:8px;box-shadow:none;font-family:var(--sans-body);font-size:9px;font-weight:700;padding:0 5px;min-width:14px;height:14px;line-height:1}
+[data-theme="tofu"] .submenu-dropdown{
+  border-radius:4px;
+  border:2px solid #C2BCA4;
+  border-top-color:#FFFCF6;
+  border-left-color:#FFFCF6;
+  border-right-color:#A89878;
+  border-bottom-color:#A89878;
+  box-shadow:var(--clay-sm);
+  background:#F4F2EB;
+  padding:4px;
+  overflow:visible;
+  z-index:9999;
+  max-height:none;
+  clip-path:none
+}
+[data-theme="tofu"] .submenu-dropdown::after{background:#F4F2EB;border-right-color:#A89878;border-bottom-color:#A89878;border-bottom-right-radius:1px;bottom:-6px}
+
+/* ── Flow menu: same clay treatment as the Mode/Enhance/Tools sub-menus ── */
+[data-theme="tofu"] .flow-menu{
+  border-radius:4px;
+  border:2px solid #C2BCA4;
+  border-top-color:#FFFCF6;
+  border-left-color:#FFFCF6;
+  border-right-color:#A89878;
+  border-bottom-color:#A89878;
+  box-shadow:var(--clay-sm);
+  background:#F4F2EB;
+  padding:4px;
+  z-index:9999
+}
+[data-theme="tofu"] .flow-menu::after{background:#F4F2EB;border-right-color:#A89878;border-bottom-color:#A89878;border-bottom-right-radius:1px;bottom:-6px}
+[data-theme="tofu"] .flow-menu-item{border-radius:3px;padding:8px 10px;font-family:var(--sans-body);font-size:11px;font-weight:600}
+[data-theme="tofu"] .flow-menu-item:hover{background:rgba(196,149,106,0.08)}
+[data-theme="tofu"] .flow-menu-item.selected{background:rgba(196,149,106,0.07);border-radius:3px}
+[data-theme="tofu"] .flow-menu-item.selected .flow-menu-name,[data-theme="tofu"] .flow-menu-item.selected .flow-menu-icon,[data-theme="tofu"] .flow-menu-item.selected .flow-menu-check{color:#A67B52}
+[data-theme="tofu"] .flow-menu-icon{border-radius:3px;background:transparent;color:#8A7A5A}
+[data-theme="tofu"] .flow-menu-item.selected .flow-menu-icon{background:#E8E5DC}
+[data-theme="tofu"] .flow-menu-name{color:#3D3022;font-weight:700;-webkit-font-smoothing:antialiased}
+[data-theme="tofu"] .flow-menu-desc{font-size:10px;color:#6A5A3A;font-weight:500}
+
+/* ── Scrollbar — thin pixel track ── */
+[data-theme="tofu"] ::-webkit-scrollbar{width:5px}
+[data-theme="tofu"] ::-webkit-scrollbar-track{background:transparent}
+[data-theme="tofu"] .conversations-list:hover::-webkit-scrollbar-thumb,
+[data-theme="tofu"] .chat-container:hover::-webkit-scrollbar-thumb,
+[data-theme="tofu"] .modal:hover::-webkit-scrollbar-thumb{
+  background:rgba(196,149,106,0.35);
+  border-radius:2px;
+  border:1px solid rgba(255,252,246,0.3)
+}
+[data-theme="tofu"] .conversations-list:hover,
+[data-theme="tofu"] .chat-container:hover,
+[data-theme="tofu"] .modal:hover{scrollbar-color:rgba(196,149,106,0.3) transparent}
+
+/* ── Debug panel — pixel window ── */
+[data-theme="tofu"] .debug-panel{
+  background:rgba(245,243,237,0.98);color:#716A55;
+  border:1px solid rgba(160,152,128,0.35);
+  box-shadow:0 4px 12px rgba(74,63,47,0.08);border-radius:var(--radius)}
+[data-theme="tofu"] .debug-msg-block{border-color:#D8D1C0}
+[data-theme="tofu"] .debug-msg-body pre{color:#4A3F2F}
+/* Darkened from the original #5A8AA8/#6A8A5E/#B8884A/#8A78B0, which measured
+   2.75-3.40:1 on the paper ground (#F4EFE5) — the same hues, taken to >=4.5:1
+   so the palette still reads as tofu rather than as the dark theme. */
+[data-theme="tofu"] .debug-msg-body pre .debug-key{color:#2F5A72}
+[data-theme="tofu"] .debug-msg-body pre .debug-str{color:#3D5C33}
+[data-theme="tofu"] .debug-msg-body pre .debug-num{color:#8A5A1E}
+[data-theme="tofu"] .debug-msg-body pre .debug-null{color:#5A4A80}
+/* Role labels had no tofu override either (1.51-2.08:1 before). */
+[data-theme="tofu"] .debug-msg-header .role-system{color:#8A5A1E}
+[data-theme="tofu"] .debug-msg-header .role-user{color:#2F5A72}
+[data-theme="tofu"] .debug-msg-header .role-assistant{color:#3A6B45}
+[data-theme="tofu"] .debug-msg-header .role-tool{color:#63508F}
+[data-theme="tofu"] .debug-msg-header .role-tools{color:#8A5A1E}
+[data-theme="tofu"] .debug-tool-calls{color:#8A5A1E}
+[data-theme="tofu"] pre.code-long[data-collapsed="true"]::after{background:linear-gradient(to bottom,transparent,#EDE9DF);border-radius:0 0 11px 11px}
+
+/* ── Modal — neo-brutalist tofu block (generic shell) ──
+   Drives every plain .modal under the tofu theme. Bespoke modals that
+   want a different identity out-specify this via [data-theme="tofu"]
+   .settings-panel (Settings), !important (Memory) or the pin below
+   (My Day). Plain modals (browser, apply) + project-modal inherit it. */
+/* :not(.memory-modal) — as with the input rule below, the memory modal owns
+   its own --m-* shell (border/background/shadow/radius) and must not inherit
+   the generic tofu block styling. Excluding it at the source lets its own
+   .memory-modal shell rule win by normal cascade, retiring the shell
+   counter-!important overrides. */
+[data-theme="tofu"] .modal:not(.memory-modal){
+  background:#faf8f3;
+  border:3px solid #1a1814;
+  border-radius:var(--radius);
+  box-shadow:var(--clay-sm);
+  animation:tofuSlam .25s cubic-bezier(0.2,1.2,0.4,1) both
+}
+/* Stamped header — only direct-child h3 (browser/apply); bespoke modals
+   nest their title inside their own .*-header so are unaffected. */
+[data-theme="tofu"] .modal > h3{
+  position:relative;
+  font-weight:900;
+  text-transform:uppercase;
+  letter-spacing:-0.01em;
+  color:#1a1814;
+  padding-bottom:12px;
+  border-bottom:2px solid #1a1814
+}
+[data-theme="tofu"] .modal > h3::after{
+  content:'';position:absolute;left:0;right:0;bottom:-2px;height:2px;
+  background:linear-gradient(90deg,transparent,#c9993f 15%,#c9993f 50%,#a87d2e 85%,transparent);
+  opacity:.55
+}
+[data-theme="tofu"] .modal .modal-actions{border-top-color:rgba(26,24,20,.15)}
+/* Pin My Day to its heavier shell (4px border / 10px shadow) so the
+   generic rule above can't flatten it. */
+[data-theme="tofu"] .modal.myday-modal{
+  border-width:4px;
+  box-shadow:var(--clay-sm)}
+/* :not(.memory-modal) — the memory modal owns a complete --m-* design system
+   and must not inherit the generic tofu input styling. Excluding it here at the
+   SOURCE (specificity 0,3,1) lets its own .memory-modal .memory-* rules win by
+   normal cascade in every theme, retiring ~15 counter-!important overrides that
+   previously existed only to beat this over-broad bleed.
+   :not(.recent-search-input) — SAME source-exclusion pattern: the project
+   modal's Recent-search box owns its own blocky tofu styling
+   ([data-theme="tofu"] .recent-search .recent-search-input, specificity 0,3,0).
+   Without this carve-out this bleed (0,3,1) out-specifies it and flattens its
+   intended 2px ink border to the generic 1px — so exclude it at the source
+   rather than adding an !important counter-rule. Proven by
+   tests/test_recent_search_tofu_specificity.py. */
+[data-theme="tofu"] .modal:not(.memory-modal) input:not(.recent-search-input){
+  border-radius:var(--radius);
+  border:1px solid rgba(184,176,160,0.4);
+  background:#F5F3ED;
+  box-shadow:none
+}
+[data-theme="tofu"] .modal:not(.memory-modal) input:not(.recent-search-input):focus{border-color:#BB9572;box-shadow:none}
+
+/* ── Project modal — tofu header band + blocky close (it nests its own
+      .pm-header, so the generic > h3 rule doesn't reach it). ── */
+[data-theme="tofu"] .pm-header{
+  background:#f2ecda;
+  border-bottom:3px solid #1a1814;
+  position:relative
+}
+[data-theme="tofu"] .pm-header::after{
+  content:'';position:absolute;left:0;right:0;bottom:-2px;height:2px;
+  background:linear-gradient(90deg,transparent,#c9993f 15%,#c9993f 50%,#a87d2e 85%,transparent);
+  opacity:.55
+}
+[data-theme="tofu"] .pm-workbench h3{font-weight:900;text-transform:uppercase;letter-spacing:-0.01em;color:#1a1814}
+[data-theme="tofu"] .pm-header-icon{color:#a87d2e}
+[data-theme="tofu"] .pm-subtitle{color:#3d362c}
+/* Blocky close button shared by plain modals (browser/apply) + project. */
+[data-theme="tofu"] .modal-close-btn,
+[data-theme="tofu"] .pm-close{
+  border:2px solid #1a1814;border-radius:var(--radius);background:#fff;color:#1a1814;
+  box-shadow:var(--clay-sm);
+  transition:transform .1s,box-shadow .1s,background .1s,color .1s
+}
+[data-theme="tofu"] .modal-close-btn:hover,
+[data-theme="tofu"] .pm-close:hover{
+  transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f87171;color:#fff
+}
+[data-theme="tofu"] .modal-close-btn:active,
+[data-theme="tofu"] .pm-close:active{transform:translate(2px,2px);box-shadow:0 0 0 #1a1814}
+/* pm rail/cards: square + ink on the cream shell */
+[data-theme="tofu"] .pm-rail-card{border:2px solid #1a1814;border-radius:var(--radius);box-shadow:var(--clay-sm);background:#fff}
+
+/* ═══════════════════════════════════════════
+   Update modal — neo-brutalist tofu treatment
+   (matches Settings / My Day; overrides the flat
+    [data-theme="tofu"] .modal reset above)
+   ═══════════════════════════════════════════ */
+[data-theme="tofu"] .update-modal{
+  background:#faf8f3;
+  border:3px solid #1a1814;
+  border-radius:var(--radius);
+  box-shadow:var(--clay-sm);
+  animation:tofuSlam .25s cubic-bezier(0.2,1.2,0.4,1) both;
+}
+[data-theme="tofu"] .update-modal-header{
+  background:#f2ecda;
+  border-bottom:3px solid #1a1814;
+  padding:16px 20px;
+  position:relative;
+}
+/* gold kintsugi line under the header */
+[data-theme="tofu"] .update-modal-header::after{
+  content:'';position:absolute;bottom:-2px;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,#c9993f 15%,#c9993f 50%,#a87d2e 85%,transparent);
+  opacity:.55;
+}
+[data-theme="tofu"] .upd-head-icon{
+  border-radius:var(--radius-sm);border:2px solid #1a1814;background:#fff;color:#1a1814;
+  box-shadow:var(--clay-sm);
+}
+[data-theme="tofu"] .update-modal-header h3{
+  font-weight:900;text-transform:uppercase;letter-spacing:-0.01em;color:#1a1814;
+}
+[data-theme="tofu"] .upd-head-sub{color:#3d362c}
+[data-theme="tofu"] .modal-close-btn{
+  width:34px;height:34px;border:2px solid #1a1814;border-radius:var(--radius);background:#fff;color:#1a1814;
+  box-shadow:var(--clay-sm);font-size:18px;
+  transition:transform .1s,box-shadow .1s,background .1s,color .1s;
+}
+[data-theme="tofu"] .modal-close-btn:hover{
+  transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f87171;color:#fff;
+}
+[data-theme="tofu"] .modal-close-btn:active{transform:translate(2px,2px);box-shadow:0 0 0 #1a1814}
+[data-theme="tofu"] .update-modal-body{padding:20px;min-height:140px}
+/* Checking + retry */
+[data-theme="tofu"] .upd-checking-wrap .upd-big-spin{border-color:rgba(26,24,20,.18);border-top-color:#c9993f}
+[data-theme="tofu"] .upd-checking-wrap span{color:#3d362c}
+[data-theme="tofu"] .upd-retry-btn{
+  border-radius:var(--radius-sm);border:2px solid #1a1814;background:#fff;color:#1a1814;
+  box-shadow:var(--clay-sm);font-weight:700;transition:transform .1s,box-shadow .1s,background .1s;
+}
+[data-theme="tofu"] .upd-retry-btn:hover{transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f2ecda}
+/* Version hero — current → latest */
+[data-theme="tofu"] .upd-hero{
+  background:linear-gradient(135deg,#f2ecda,#f5eedd);
+  border:2px solid #1a1814;border-radius:var(--radius);box-shadow:var(--clay-sm);
+}
+[data-theme="tofu"] .upd-ver-label{color:#3d362c}
+[data-theme="tofu"] .upd-ver-num{color:#1a1814}
+[data-theme="tofu"] .upd-ver.latest .upd-ver-num{color:#a87d2e}
+[data-theme="tofu"] .upd-hero.up-to-date .upd-ver.latest .upd-ver-num{color:#1a1814}
+[data-theme="tofu"] .upd-arrow{border-radius:var(--radius-sm);border:2px solid #1a1814;background:#fff;color:#1a1814}
+[data-theme="tofu"] .upd-hero:not(.up-to-date) .upd-arrow{background:#c9993f;color:#fff;box-shadow:var(--clay-sm)}
+/* Apply / restart action button — tofu block */
+[data-theme="tofu"] .upd-apply-btn{
+  background:#c9993f;color:#1a1814;border:2px solid #1a1814;border-radius:var(--radius-sm);
+  box-shadow:var(--clay-sm);font-weight:800;text-transform:uppercase;letter-spacing:.01em;
+  transition:transform .1s,box-shadow .1s,background .1s;
+}
+[data-theme="tofu"] .upd-apply-btn:hover{background:#d4a44a;transform:translate(1px,1px);box-shadow:var(--clay-md)}
+[data-theme="tofu"] .upd-apply-btn:active{transform:translate(3px,3px);box-shadow:0 0 0 #1a1814}
+[data-theme="tofu"] .upd-apply-btn:disabled{transform:none;box-shadow:var(--clay-sm)}
+/* Live stepper — square dots, ink rails */
+[data-theme="tofu"] .upd-step-dot{border-radius:var(--radius-sm);border:2px solid #1a1814;color:#1a1814}
+[data-theme="tofu"] .upd-step:not(:last-child)::before{background:rgba(26,24,20,.25)}
+[data-theme="tofu"] .upd-step.is-done:not(:last-child)::before{background:#1a1814}
+[data-theme="tofu"] .upd-step.is-done .upd-step-dot{background:#4ade80;border-color:#1a1814}
+[data-theme="tofu"] .upd-step.is-active .upd-step-dot{border-color:#c9993f;border-top-color:transparent}
+[data-theme="tofu"] .upd-step.is-error .upd-step-dot{background:#f87171;border-color:#1a1814}
+[data-theme="tofu"] .upd-step.is-active .upd-step-label,
+[data-theme="tofu"] .upd-step.is-done .upd-step-label{color:#1a1814}
+/* Badges, file lists, hints */
+[data-theme="tofu"] .upd-badge{border-radius:var(--radius-sm);border-width:2px;border-color:#1a1814;box-shadow:var(--clay-sm);font-weight:800}
+[data-theme="tofu"] .upd-badge.ok{background:#dff5e3;color:#2f7d4f}
+[data-theme="tofu"] .upd-badge.ok .upd-badge-icon{background:#4ade80;color:#1a1814;border-radius:var(--radius-sm)}
+[data-theme="tofu"] .upd-badge.warn{background:#f5eedd;color:#3d362c}
+[data-theme="tofu"] .upd-files{border-radius:var(--radius-sm);border:2px solid #1a1814;background:#f5eedd;color:#3d362c}
+[data-theme="tofu"] .upd-log-label{color:#1a1814}
+[data-theme="tofu"] .upd-log-copy{border:2px solid #1a1814;border-radius:var(--radius-sm);background:#f5eedd;color:#1a1814;font-weight:700}
+[data-theme="tofu"] .upd-log-copy.copied{color:#2f7d4f}
+[data-theme="tofu"] .upd-ready,[data-theme="tofu"] .upd-uptodate,[data-theme="tofu"] .upd-warn{color:#1a1814}
+[data-theme="tofu"] .upd-hint{color:#3d362c}
+/* Check-failure card — ink heading, muted reason */
+[data-theme="tofu"] .upd-err-icon{color:#c0392b}
+[data-theme="tofu"] .upd-err-title{color:#1a1814;font-weight:900}
+[data-theme="tofu"] .upd-err-reason{color:#3d362c}
+/* ── Settings-panel inputs override tofu modal reset — keep pixel-art shadow ── */
+[data-theme="tofu"] .settings-panel input,
+[data-theme="tofu"] .settings-panel select {
+  background: #fff;
+  border: 2px solid var(--s-ink);
+  border-radius:var(--radius);
+  box-shadow:var(--clay-sm);
+}
+[data-theme="tofu"] .settings-panel input:focus,
+[data-theme="tofu"] .settings-panel select:focus {
+  transform: translate(1px, 1px);
+  box-shadow:var(--clay-sm);
+  background: #fffef5;
+  border-color: var(--s-ink);
+}
+[data-theme="tofu"] .settings-panel input[type="range"] {
+  box-shadow: none;
+  background: var(--s-skin);
+  border: 2px solid var(--s-ink);
+}
+[data-theme="tofu"] .settings-panel input[type="range"]:focus {
+  transform: none;
+  box-shadow: none;
+}
+/* Override tofu console-style gold text for settings textareas (white bg) */
+[data-theme="tofu"] .settings-panel textarea,
+[data-theme="tofu"] .settings-panel .stg-field textarea {
+  color: var(--s-ink);
+  font-family:var(--sans-body);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: normal;
+  caret-color: var(--s-ink);
+}
+/* 🧱 btn-primary — neo-brutalist gold block (matches the modal's ink border + hard shadow) */
+[data-theme="tofu"] .btn-primary{
+  background:#C9993F;color:#1a1814;
+  border:2px solid #1a1814;
+  border-radius:var(--radius-sm);
+  position:relative;overflow:visible;
+  box-shadow:var(--clay-sm);
+  clip-path:none;
+  font-family:var(--sans-body);
+  font-size:13px;font-weight:800;letter-spacing:0.02em;
+  padding:9px 20px;
+  image-rendering:auto;
+  transition:transform 0.08s ease,box-shadow 0.08s ease,background 0.12s
+}
+[data-theme="tofu"] .btn-primary:hover{
+  background:#D6A848;
+  transform:translate(-1px,-1px);
+  box-shadow:var(--clay-md)}
+[data-theme="tofu"] .btn-primary:active{
+  transform:translate(3px,3px);
+  box-shadow:0 0 0 #1a1814;
+  background:#BC8A35
+}
+/* 🧱 btn-secondary — neo-brutalist cream block (matches btn-primary geometry exactly) */
+[data-theme="tofu"] .btn-secondary{
+  background:#faf8f3;color:#1a1814;
+  border:2px solid #1a1814;
+  border-radius:var(--radius-sm);
+  position:relative;overflow:visible;
+  box-shadow:var(--clay-sm);
+  clip-path:none;
+  font-family:var(--sans-body);
+  font-size:13px;font-weight:700;letter-spacing:0.02em;
+  padding:9px 20px;
+  image-rendering:auto;
+  transition:transform 0.08s ease,box-shadow 0.08s ease,background 0.12s,color 0.1s
+}
+[data-theme="tofu"] .btn-secondary:hover{
+  background:#ECE7DD;color:#1a1814;
+  transform:translate(-1px,-1px);
+  box-shadow:var(--clay-md)}
+[data-theme="tofu"] .btn-secondary:active{
+  transform:translate(3px,3px);
+  box-shadow:0 0 0 #1a1814;
+  background:#E2DCCF
+}
+/* Settings footer — ensure pixel buttons override .settings-footer .btn base */
+[data-theme="tofu"] .settings-footer .btn{
+  border:none;border-radius:var(--radius-sm);box-shadow:none;
+  font-family:var(--sans-body);
+  font-size:13px;font-weight:650;letter-spacing:0.02em;
+  padding:9px 20px;text-transform:none;
+  image-rendering:auto;
+}
+[data-theme="tofu"] .settings-footer .btn-primary{
+  background:#BB9572;color:#FFFCF6;
+  border:2px solid #C4956A;
+  border-top-color:#D4BC9E;border-left-color:#D4BC9E;
+  border-right-color:#8E6B48;border-bottom-color:#8E6B48;
+  box-shadow:0 2px 0 #6B4F32;
+  clip-path:none
+}
+[data-theme="tofu"] .settings-footer .btn-primary:hover{
+  background:#A8845E;
+  box-shadow:0 2px 0 #5E4228
+}
+[data-theme="tofu"] .settings-footer .btn-secondary{
+  background:#E9E5DC;color:#5C5340;
+  border:2px solid #C8C0AE;
+  border-top-color:#FFFCF6;border-left-color:#FFFCF6;
+  border-right-color:#B0A890;border-bottom-color:#B0A890;
+  box-shadow:0 2px 0 #A09880;
+  clip-path:none
+}
+[data-theme="tofu"] .settings-footer .btn-secondary:hover{
+  background:#DDD8CC;color:#4A3F2F;
+  box-shadow:0 2px 0 #908870
+}
+[data-theme="tofu"] .settings-footer .btn:active{
+  transform:translateY(2px);
+  box-shadow:none
+}
+
+/* 🧱 Brutalist primary/secondary buttons in Settings — match `btn btn-danger btn-xs`
+   look (square 2px ink border, hard offset shadow, uppercase, press-down). Applies
+   in ALL themes; the high-specificity `.settings-panel`/`.settings-footer` scope plus
+   the trailing position out-specifies both the global rounded `.btn` base and the
+   tofu pixel-art skin above. */
+.settings-panel .btn-primary,
+.settings-panel .btn-secondary,
+.settings-panel .settings-footer .btn-primary,
+.settings-panel .settings-footer .btn-secondary{
+  border:var(--s-border);
+  border-radius:var(--s-radius);
+  box-shadow:var(--s-shadow-xs);
+  font-weight:800;
+  text-transform:uppercase;
+  letter-spacing:0.04em;
+  font-family:inherit;
+  image-rendering:auto;
+  transition:transform 0.1s, box-shadow 0.1s, background 0.1s;
+}
+.settings-panel .btn-primary,
+.settings-panel .settings-footer .btn-primary{
+  background:var(--s-gold);
+  color:var(--s-ink);
+}
+.settings-panel .btn-secondary,
+.settings-panel .settings-footer .btn-secondary{
+  background:var(--s-white);
+  color:var(--s-ink);
+}
+.settings-panel .btn-primary:hover,
+.settings-panel .settings-footer .btn-primary:hover{
+  background:var(--s-gold-dim);
+  transform:translate(1px, 1px);
+  box-shadow:1px 1px 0 var(--s-ink);
+}
+.settings-panel .btn-secondary:hover,
+.settings-panel .settings-footer .btn-secondary:hover{
+  background:var(--s-cream);
+  color:var(--s-ink);
+  transform:translate(1px, 1px);
+  box-shadow:1px 1px 0 var(--s-ink);
+}
+.settings-panel .btn-primary:active,
+.settings-panel .btn-secondary:active,
+.settings-panel .settings-footer .btn-primary:active,
+.settings-panel .settings-footer .btn-secondary:active{
+  transform:translate(2px, 2px);
+  box-shadow:0 0 0 var(--s-ink);
+}
+
+/* ══════════════════════════════════════════════════════
+   🎮 AUTO-SETUP MODAL — Game Cartridge Insert Screen
+   Concept: inserting a new game cartridge into a console.
+   The modal is a chunky game-boy-style dialog with pixel
+   borders, warm parchment bg, and SNES button styling.
+   ══════════════════════════════════════════════════════ */
+
+/* ── Overlay — warm tinted fog ── */
+[data-theme="tofu"] .stg-modal-overlay {
+  background: rgba(74, 63, 47, 0.45);
+  backdrop-filter: blur(2px);
+}
+
+/* ── Modal shell — game cartridge card ── */
+[data-theme="tofu"] .stg-modal {
+  background: #FAF8F2;
+  border: 3px solid #8A7A5A;
+  border-top-color: #C4B89E;
+  border-left-color: #C4B89E;
+  border-right-color: #6B5A3A;
+  border-bottom-color: #6B5A3A;
+  border-radius: 12px;
+  box-shadow:
+    0 4px 0 #5C4A33,
+    0 5px 0 #4A3D28,
+    0 8px 20px rgba(74, 63, 47, 0.25);
+  animation: tofuModalPop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  overflow: hidden;
+  position: relative;
+}
+[data-theme="tofu"] .stg-modal::before {
+  content: none;
+  display: none;
+}
+@keyframes tofuModalPop {
+  0% { transform: scale(0.9) translateY(20px); opacity: 0; }
+  100% { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+/* ── Header — cartridge label strip ── */
+[data-theme="tofu"] .stg-modal-header {
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  position: relative;
+  z-index: 1;
+}
+/* Gold kintsugi line under header */
+[data-theme="tofu"] .stg-modal-header::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 12px; right: 12px;
+  height: 1.5px;
+  background: linear-gradient(90deg, transparent, #C4956A 20%, #C4956A 80%, transparent);
+  opacity: 0.4;
+}
+[data-theme="tofu"] .stg-modal-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #4A3820;
+  letter-spacing: 0.04em;
+}
+
+/* ── Close button — pixel X ── */
+[data-theme="tofu"] .stg-modal-close {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid rgba(138, 122, 90, 0.3);
+  border-top-color: rgba(255, 252, 246, 0.6);
+  border-left-color: rgba(255, 252, 246, 0.6);
+  border-right-color: rgba(168, 152, 120, 0.4);
+  border-bottom-color: rgba(168, 152, 120, 0.4);
+  border-radius: 6px;
+  background: linear-gradient(180deg, #F6F4EE, #EBE8DF);
+  color: #8A7A5A;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 0;
+  box-shadow: 0 1px 0 rgba(154, 144, 122, 0.3);
+  transition: all 0.1s;
+}
+[data-theme="tofu"] .stg-modal-close:hover {
+  background: #E85050;
+  color: #fff;
+  border-color: #C04040;
+  box-shadow: 0 1px 0 #903030;
+}
+
+/* ── Body ── */
+[data-theme="tofu"] .stg-modal-body {
+  padding: 18px;
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Description — warm muted text ── */
+[data-theme="tofu"] .stg-modal-desc {
+  font-size: 11px;
+  color: #8A7A5A;
+  line-height: 1.7;
+  margin-bottom: 18px;
+  padding: 10px 12px;
+  background: rgba(196, 149, 106, 0.06);
+  border: 1.5px dashed rgba(196, 149, 106, 0.25);
+  border-radius: 8px;
+}
+
+/* ── Field labels — pixel game font ── */
+[data-theme="tofu"] .stg-modal .stg-field label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #5C4A33;
+  letter-spacing: 0.03em;
+  text-transform: none;
+}
+[data-theme="tofu"] .stg-modal .stg-required {
+  color: #D06050;
+}
+
+/* ── Inputs — SNES recessed screen ── */
+[data-theme="tofu"] .stg-modal .stg-field input {
+  background: #F5F3ED;
+  border: 2.5px solid #B8AD94;
+  border-top-color: #9A9070;
+  border-left-color: #9A9070;
+  border-right-color: #D8D2C0;
+  border-bottom-color: #D8D2C0;
+  border-radius: 8px;
+  box-shadow: inset 0 2px 4px rgba(74, 63, 47, 0.08);
+  font-family:var(--sans-body);
+  font-size: 13px;
+  font-weight: 500;
+  color: #4A3820;
+  padding: 10px 14px;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+[data-theme="tofu"] .stg-modal .stg-field input:focus {
+  transform: none;
+  background: #FFFEF8;
+  border-color: #C4956A;
+  border-top-color: #A07850;
+  border-left-color: #A07850;
+  border-right-color: #DEB890;
+  border-bottom-color: #DEB890;
+  box-shadow:
+    inset 0 2px 4px rgba(74, 63, 47, 0.06),
+    0 0 0 3px rgba(196, 149, 106, 0.15);
+}
+[data-theme="tofu"] .stg-modal .stg-field input::placeholder {
+  color: #B8AD94;
+  font-weight: 400;
+  font-style: italic;
+}
+
+/* ── Hint text ── */
+[data-theme="tofu"] .stg-modal .stg-hint {
+  font-size: 10px;
+  color: #A89878;
+}
+
+/* ── Footer — action bar ── */
+[data-theme="tofu"] .stg-modal-footer {
+  padding: 14px 18px 16px;
+  border-top: 2px solid rgba(168, 152, 120, 0.25);
+  background: linear-gradient(180deg, #F5F3ED, #F0EDE4);
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Secondary button — pixel ghost ── */
+[data-theme="tofu"] .stg-modal .stg-btn-secondary {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 18px;
+  background: linear-gradient(180deg, #F0EDE4, #E9E5DC);
+  border: 2.5px solid #B8AD94;
+  border-top-color: #DDD6C4;
+  border-left-color: #DDD6C4;
+  border-right-color: #9A9070;
+  border-bottom-color: #9A9070;
+  border-radius: 8px;
+  color: #5C4A33;
+  box-shadow: 0 2px 0 #8A8060;
+  cursor: pointer;
+  transition: transform 0.08s, box-shadow 0.08s, background 0.1s;
+}
+[data-theme="tofu"] .stg-modal .stg-btn-secondary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 0 #8A8060, 0 4px 8px rgba(74, 63, 47, 0.1);
+  background: linear-gradient(180deg, #F5F3ED, #EBE8DF);
+}
+[data-theme="tofu"] .stg-modal .stg-btn-secondary:active {
+  transform: translateY(2px);
+  box-shadow: none;
+  border-top-color: #9A9070;
+  border-left-color: #9A9070;
+  border-right-color: #DDD6C4;
+  border-bottom-color: #DDD6C4;
+}
+
+/* ── Primary button — pixel game action ── */
+[data-theme="tofu"] .stg-modal .stg-btn-primary {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 8px 20px;
+  background: linear-gradient(180deg, #D4AA80, #C4956A);
+  border: 2.5px solid #C4956A;
+  border-top-color: #E8CCA8;
+  border-left-color: #E8CCA8;
+  border-right-color: #A07850;
+  border-bottom-color: #A07850;
+  border-radius: 8px;
+  color: #FFFCF6;
+  box-shadow: 0 2px 0 #8A6840, 0 3px 6px rgba(187, 149, 114, 0.2);
+  cursor: pointer;
+  text-shadow: 0 1px 1px rgba(74, 50, 20, 0.25);
+  transition: transform 0.08s, box-shadow 0.08s, background 0.1s;
+}
+[data-theme="tofu"] .stg-modal .stg-btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 0 #8A6840, 0 4px 10px rgba(187, 149, 114, 0.3);
+  background: linear-gradient(180deg, #DEB890, #CCA078);
+}
+[data-theme="tofu"] .stg-modal .stg-btn-primary:active {
+  transform: translateY(2px);
+  box-shadow: none;
+  border-top-color: #A07850;
+  border-left-color: #A07850;
+  border-right-color: #E8CCA8;
+  border-bottom-color: #E8CCA8;
+  background: linear-gradient(180deg, #C4956A, #B88A5E);
+}
+[data-theme="tofu"] .stg-modal .stg-btn-primary:disabled {
+  background: #D8D2C4;
+  color: #B0A890;
+  border-color: #C8C2B4;
+  box-shadow: none;
+  text-shadow: none;
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ── Status messages — pixel HUD alerts ── */
+[data-theme="tofu"] .stg-auto-status {
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 10px 14px;
+  line-height: 1.6;
+}
+[data-theme="tofu"] .stg-auto-loading {
+  background: rgba(196, 149, 106, 0.08);
+  color: #A07850;
+  border: 2px solid rgba(196, 149, 106, 0.3);
+  border-top-color: rgba(222, 184, 144, 0.4);
+  border-left-color: rgba(222, 184, 144, 0.4);
+  border-right-color: rgba(160, 120, 80, 0.3);
+  border-bottom-color: rgba(160, 120, 80, 0.3);
+  animation: tofuProbeShimmer 2s ease-in-out infinite;
+}
+@keyframes tofuProbeShimmer {
+  0%, 100% { background: rgba(196, 149, 106, 0.08); }
+  50% { background: rgba(196, 149, 106, 0.14); }
+}
+[data-theme="tofu"] .stg-auto-success {
+  background: rgba(106, 168, 120, 0.08);
+  color: #4A8A58;
+  border: 2px solid rgba(106, 168, 120, 0.3);
+  border-top-color: rgba(140, 200, 150, 0.4);
+  border-left-color: rgba(140, 200, 150, 0.4);
+  border-right-color: rgba(80, 130, 90, 0.3);
+  border-bottom-color: rgba(80, 130, 90, 0.3);
+}
+[data-theme="tofu"] .stg-auto-error {
+  background: rgba(184, 106, 90, 0.08);
+  color: #A85A4A;
+  border: 2px solid rgba(184, 106, 90, 0.3);
+  border-top-color: rgba(220, 140, 120, 0.4);
+  border-left-color: rgba(220, 140, 120, 0.4);
+  border-right-color: rgba(150, 80, 65, 0.3);
+  border-bottom-color: rgba(150, 80, 65, 0.3);
+}
+
+/* 🕹️ Image-gen generate btn — pixel art style */
+[data-theme="tofu"] .ig-generate-btn{
+  background:#BB9572;color:#FFFCF6;
+  border-radius:var(--radius-sm);
+  border:2px solid #C4956A;
+  border-top-color:#D4BC9E;border-left-color:#D4BC9E;
+  border-right-color:#8E6B48;border-bottom-color:#8E6B48;
+  box-shadow:0 2px 0 #6B4F32;
+  clip-path:none;
+  image-rendering:auto;
+  transition:transform 0.06s,box-shadow 0.06s,background 0.1s
+}
+[data-theme="tofu"] .ig-generate-btn:hover{
+  background:#A8845E;
+  box-shadow:0 2px 0 #5E4228
+}
+[data-theme="tofu"] .ig-generate-btn:active{
+  transform:translateY(2px);
+  box-shadow:none;
+  border-top-color:#8E6B48;border-left-color:#8E6B48;
+  border-right-color:#D4BC9E;border-bottom-color:#D4BC9E;
+  background:#9A7A58
+}
+/* ── Finish area — Pixel HUD Status Strip ──
+   Instead of 5 heavy bordered tags competing for attention,
+   unify everything into a single retro game status bar.
+   Individual tags become borderless text segments inside one strip. */
+/* Calm telemetry strip: no card chrome, no drop shadow. The turn footer is
+ * quiet metadata on the reading column, not a Pixel HUD banner. Everywhere it
+ * renders (surface footer or a stray copy) it shares one baseline. */
+[data-theme="tofu"] .message-finish{
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:2px 10px;
+  margin-top:6px;
+  padding:2px 0 0;
+  border:0;
+  background:transparent;
+  box-shadow:none;
+  border-radius:0;
+  position:relative;
+  overflow:visible;
+  color:var(--text-tertiary);
+  font-family:var(--sans-body);
+  font-size:11px;
+  line-height:1.5;
+  font-variant-numeric:tabular-nums;
+  user-select:none
+}
+/* (retired) scanline texture on the finish strip */
+[data-theme="tofu"] .message-finish::before{
+  content:none;display:none
+}
+/* ── All tags inside the strip: borderless text segments ── */
+[data-theme="tofu"] .finish-tag,
+[data-theme="tofu"] .token-tag,
+[data-theme="tofu"] .cost-tag,
+[data-theme="tofu"] .subscription-quota-tag{
+  display:inline-flex;
+  align-items:center;
+  gap:3px;
+  border:none !important;
+  background:transparent !important;
+  box-shadow:none !important;
+  border-radius:0 !important;
+  font-family:inherit;
+  font-size:inherit;font-weight:500;
+  line-height:1.5;
+  padding:0;
+  position:relative;
+  color:inherit;
+  white-space:nowrap
+}
+/* Separators removed: the flex `gap` on .message-finish spaces the tags, so
+ * no oversized `·` glyph (which used to push an icon-only tag's block SVG
+ * onto a second line and break the shared baseline). */
+[data-theme="tofu"] .message-finish :is(
+  .finish-tag,.token-tag,.cost-tag,.subscription-quota-tag
+)::before{
+  content:none
+}
+/* ── Model preset tag — emphasized by weight + warm tone only, no chip ── */
+[data-theme="tofu"] .finish-tag.preset{
+  background:transparent !important;
+  border-left:0 !important;
+  padding-left:0;
+  color:#8A6E4E;
+  font-weight:650
+}
+/* ── Status indicators — colored text on the shared baseline ── */
+[data-theme="tofu"] .finish-tag.ok{
+  color:#6A8A5E;
+  font-weight:700;
+  font-size:inherit
+}
+[data-theme="tofu"] .finish-tag.warn{
+  color:#B8884A
+}
+[data-theme="tofu"] .finish-tag.err{
+  color:#B86A5A
+}
+/* ── Cost tag — warm accent text ── */
+[data-theme="tofu"] .cost-tag{
+  color:#A67B52 !important;
+  font-weight:700 !important
+}
+[data-theme="tofu"] .cost-tag .cost-breakdown{color:#B8A080}
+[data-theme="tofu"] #browserToggle.active{background:rgba(196,149,106,0.08);color:#A67B52;border-bottom-color:rgba(196,149,106,0.5)}
+[data-theme="tofu"] #desktopToggle.active{background:rgba(138,120,176,0.08);color:#8A78B0;border-bottom-color:rgba(138,120,176,0.5)}
+
+/* ── Conv action buttons — pixel overlay ── */
+[data-theme="tofu"] .conv-actions{
+  background:linear-gradient(90deg,transparent 0%, #EDEBE2 30%, #EDEBE2 100%)
+}
+[data-theme="tofu"] .conv-item:hover>.conv-actions{
+  background:linear-gradient(90deg,transparent 0%, rgba(237,235,226,0.95) 30%)
+}
+[data-theme="tofu"] .conv-item.active>.conv-actions{
+  background:linear-gradient(90deg,transparent 0%, rgba(232,229,219,0.95) 30%)
+}
+[data-theme="tofu"] .conv-action-btn{
+  width:24px;height:24px;
+  border-radius:3px;
+  border:1px solid transparent;
+  transition:all 0.08s ease
+}
+[data-theme="tofu"] .conv-action-btn:hover{
+  background:rgba(196,149,106,0.12);
+  border-color:rgba(196,149,106,0.2);
+  color:#8E6B48
+}
+[data-theme="tofu"] .conv-action-btn.conv-delete:hover{
+  background:rgba(207,56,56,0.08);
+  border-color:rgba(207,56,56,0.2);
+  color:#C05050
+}
+/* tofu conv-pin removed — replaced by folders */
+

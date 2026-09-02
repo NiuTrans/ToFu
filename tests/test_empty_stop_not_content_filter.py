@@ -31,8 +31,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.tasks_pkg.llm_fallback import _flag_empty_stop_for_retry  # noqa: E402
-from lib.tasks_pkg.stream_handler import analyse_stream_result  # noqa: E402
+from lib.tasks_pkg.llm_fallback._retry import _flag_empty_stop_for_retry  # noqa: E402
+from lib.tasks_pkg.stream_handler.api import analyse_stream_result  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -139,7 +139,7 @@ def test_flagged_empty_stop_retries_not_terminal():
 def test_flagged_empty_stop_surfaces_abnormal_not_content_filter_when_exhausted():
     """Once the retry budget is exhausted the round surfaces as abnormal_stop —
     an honest transient-failure label — never a fabricated content_filter."""
-    from lib.tasks_pkg.stream_handler import _PREMATURE_RETRY_MAX_ZERO_BYTE
+    from lib.tasks_pkg.stream_handler._budget import _PREMATURE_RETRY_MAX_ZERO_BYTE
     usage = {'_chunks_received': 0, 'stream_elapsed_ms': 800,
              'trace_id': 'M-EMPTY-STOP-EX'}
     _flag_empty_stop_for_retry(

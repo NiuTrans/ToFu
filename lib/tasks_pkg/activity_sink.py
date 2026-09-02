@@ -24,7 +24,8 @@ __all__ = ['emit_project_activity']
 
 
 def emit_project_activity(project_path: str, conv_id: str, kind: str,
-                          summary: str, *, task_id: str = '', title: str = '',
+                          summary: str, *, user_id: int,
+                          task_id: str = '', title: str = '',
                           payload: dict | None = None) -> dict | None:
     """Emit one project Activity Feed event via ``lib.conversations.project_feed``.
 
@@ -35,4 +36,5 @@ def emit_project_activity(project_path: str, conv_id: str, kind: str,
     """
     from lib.conversations.project_feed import emit_project_event
     return emit_project_event(project_path, conv_id, kind, summary,
-                              task_id=task_id, title=title, payload=payload)
+                              user_id=user_id, task_id=task_id,
+                              title=title, payload=payload)

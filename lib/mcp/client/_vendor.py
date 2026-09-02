@@ -19,7 +19,9 @@ Facade-routing: every access to a monkeypatchable name (state dicts,
 
 from __future__ import annotations
 
+import json
 import os
+import time
 
 from lib.log import get_logger
 from lib.mcp.client._state import _pkg
@@ -42,6 +44,29 @@ _SUPPLY_CUTOFF_DEFAULT = '2026-08-14T00:00:00Z'
 #: Marker file written into each npm ``_npx/<hash>/`` slot recording the
 #: cutoff its ``package-lock.json`` was resolved under.
 _NPX_CUTOFF_MARKER = '.tofu-supply-cutoff'
+
+#: Standard proxy / SSL vars the ``uv`` launcher (and any pip/npm resolver it
+#: shells out to) reads from its environment.  A child env built from
+#: ``os.environ`` already carries them, but ``_propagate_proxy_env`` makes
+#: that contract explicit AND lets an operator inject a proxy through the
+#: ``TOFU_*`` aliases when the server process itself was started without
+#: ``HTTP(S)_PROXY`` set.
+_PROXY_ENV_KEYS = (
+    'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy',
+    'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy',
+)
+_TOFU_PROXY_ALIASES = {
+    'HTTPS_PROXY': 'TOFU_HTTPS_PROXY',
+    'HTTP_PROXY': 'TOFU_HTTP_PROXY',
+    'ALL_PROXY': 'TOFU_ALL_PROXY',
+    'NO_PROXY': 'TOFU_NO_PROXY',
+}
+
+#: Disk-backed negative-cache marker: records the last package-index
+#: unreachability failure so a boot that already proved pypi.org is
+#: unreachable does not re-attempt a cold resolve for every vendored server
+#: on every boot cycle.
+_PREWARM_UNREACHABLE_MARKER = '.prewarm-unreachable.json'
 
 
 def _reconcile_npx_cache(npm_cache: str, cutoff: str) -> int:
@@ -130,6 +155,14 @@ def _reconcile_npx_cache(npm_cache: str, cutoff: str) -> int:
     return evicted
 
 
+def _mcp_cache_root() -> str:
+    """Writable project-local root for launcher caches + pre-warm bookkeeping."""
+    return os.environ.get('TOFU_MCP_CACHE_DIR') or os.path.join(
+        os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')),
+        'data', 'mcp-cache',
+    )
+
+
 def _ensure_writable_caches(env: dict[str, str]) -> None:
     """Redirect launcher caches AND data dirs to a project-local dir when
     ``$HOME`` is read-only.
@@ -154,10 +187,7 @@ def _ensure_writable_caches(env: dict[str, str]) -> None:
     hardlink across filesystems. No-op when the chosen directory cannot be
     created.
     """
-    cache_root = os.environ.get('TOFU_MCP_CACHE_DIR') or os.path.join(
-        os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')),
-        'data', 'mcp-cache',
-    )
+    cache_root = _mcp_cache_root()
     share_root = os.path.join(cache_root, 'share')
     try:
         os.makedirs(cache_root, exist_ok=True)
@@ -222,6 +252,130 @@ def _ensure_writable_caches(env: dict[str, str]) -> None:
         # measured 58.6s / 65.0s / 63.8s across three trials, i.e. a coin flip.
         # Reconciliation is a cache-MIGRATION concern, not a per-spawn one, so
         # it belongs in connect_server's pre-flight; see reconcile_for_connect.
+
+
+def _propagate_proxy_env(env: dict[str, str]) -> None:
+    """Carry the process's outbound proxy into a launcher subprocess env.
+
+    ``uv`` / ``pip`` / ``npm`` all read the standard proxy variables from
+    their environment. A child env built from ``os.environ`` already contains
+    them, but this seam (1) makes that contract explicit and testable and (2)
+    lets an operator inject the proxy via the ``TOFU_*`` aliases when the
+    server process itself was started without ``HTTP(S)_PROXY`` set (the
+    deployed shape: the proxy credential lives in the vault, never in the
+    env). Values already present in ``env`` win.
+    """
+    for key in _PROXY_ENV_KEYS:
+        if env.get(key):
+            continue
+        value = os.environ.get(key)
+        alias = _TOFU_PROXY_ALIASES.get(key)
+        if not value and alias:
+            value = os.environ.get(alias)
+        if value:
+            env[key] = value
+    _propagate_pool_proxy_env(env)
+
+
+def _propagate_pool_proxy_env(env: dict[str, str]) -> None:
+    """Last-resort proxy: ride the app's configured global proxy pool.
+
+    When neither the process env nor the ``TOFU_*`` aliases provide a proxy
+    — the deployed shape, where the server runs with no proxy env and
+    external DNS resolves nothing — a launcher spawns unable to reach ANY
+    package index: ``npx`` hangs until the handshake budget elapses
+    ("Request 'initialize' timed out"), ``uv``/``uvx`` exits on the DNS
+    error ("Connection closed by server during initialize"). The app
+    already keeps a working global proxy in ``proxy_pool`` (Settings →
+    Network); hand the launcher the SAME resolved entry the rest of the
+    app uses — via ``first_reachable_global_proxy_url``, which additionally
+    TCP-probes each candidate because a dead first entry cannot be failed
+    over from inside the child. The pool NEVER overrides an explicit
+    env/alias value, and the resolved URL (credential injected from the
+    vault, never logged) stays inside the child env exactly like an
+    operator-exported ``HTTPS_PROXY`` would.
+    """
+    if any(env.get(k) for k in (
+            'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy')):
+        return
+    try:
+        from lib import proxy as _lib_proxy
+        # Reachability, not just pool health: the child cannot fail over,
+        # so a first-entry-but-dead proxy (e.g. gateway process down) must
+        # be skipped HERE, once, before the env is frozen into the spawn.
+        url = _lib_proxy.first_reachable_global_proxy_url()
+    except Exception as e:
+        logger.debug('[MCP] global proxy pool unavailable for launcher env: %s', e)
+        return
+    if not url:
+        return
+    for key in ('HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'):
+        env.setdefault(key, url)
+
+
+def _prewarm_negative_cache_hours() -> float:
+    """How long an index-unreachable failure stays cached (0 = disabled)."""
+    try:
+        return max(0.0, float(os.environ.get(
+            'TOFU_MCP_PREWARM_NEGATIVE_CACHE_HOURS', '6')))
+    except (TypeError, ValueError) as e:
+        logger.debug('[MCP] invalid TOFU_MCP_PREWARM_NEGATIVE_CACHE_HOURS: %s', e)
+        return 6.0
+
+
+def _prewarm_unreachable_marker_path() -> str:
+    return os.path.join(_mcp_cache_root(), _PREWARM_UNREACHABLE_MARKER)
+
+
+def _prewarm_unreachable_reason() -> str:
+    """Return the cached 'package index unreachable' reason, or '' when stale.
+
+    A short-lived, DISK-backed negative cache: a boot that already proved
+    pypi.org is unreachable (no DNS / proxy egress) must not re-attempt a
+    network resolve for every vendored server on every subsequent boot cycle.
+    """
+    hours = _prewarm_negative_cache_hours()
+    if hours <= 0:
+        return ''
+    path = _prewarm_unreachable_marker_path()
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        ts = float(data.get('ts') or 0)
+        reason = str(data.get('reason') or '')
+    except (OSError, ValueError, TypeError) as e:
+        logger.debug('[MCP] pre-warm negative cache unreadable (%s) — ignoring', e)
+        return ''
+    if time.time() - ts < hours * 3600:
+        return reason or 'package index unreachable'
+    return ''
+
+
+def _prewarm_note_unreachable(reason: str) -> None:
+    """Persist an index-unreachable failure for the negative-cache window."""
+    path = _prewarm_unreachable_marker_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'ts': time.time(), 'reason': reason[:300]}, f)
+    except OSError as e:
+        logger.debug('[MCP] could not persist pre-warm negative cache: %s', e)
+
+
+def _is_index_unreachable(text: str) -> bool:
+    """True when a ``uv`` warm failure is an index-reachability failure.
+
+    Only this shape is negative-cached: a DNS/egress failure to the package
+    index hits EVERY vendored launcher identically and does not self-heal
+    within a boot cycle. A single server's own resolution error is specific
+    to that server and is deliberately NOT cached.
+    """
+    low = (text or '').lower()
+    dns = ('dns error' in low
+           or 'name or service not known' in low
+           or 'temporary failure in name resolution' in low
+           or 'could not resolve host' in low)
+    return dns and ('pypi' in low or 'simple' in low)
 
 
 def _npx_rebuild_pending(npm_cache: str, cutoff: str) -> int:
@@ -449,6 +603,7 @@ def _run_vendor_script(command: str, root: str) -> bool:
         return False
     child_env = dict(os.environ)
     child_env['TOFU_PYTHON'] = sys.executable
+    _propagate_proxy_env(child_env)
     _ensure_writable_caches(child_env)
     try:
         proc = pkg.subprocess.run(
@@ -624,7 +779,19 @@ def prewarm_vendored_launcher(command: str) -> tuple[bool, str]:
         # Not something we can warm — let connect surface the hint.
         return True, ''
 
+    cached = _prewarm_unreachable_reason()
+    if cached:
+        # Fail fast WITHOUT spawning: the index was proven unreachable within
+        # the negative-cache window. Record the reason so the connect error
+        # can still explain WHY this warm is missing.
+        with pkg._install_lock:
+            pkg._install_last_error[command] = cached
+        logger.debug('[MCP] pre-warm of %r skipped (index unreachable): %s',
+                     command, cached)
+        return False, cached
+
     env = dict(os.environ)
+    _propagate_proxy_env(env)
     _ensure_writable_caches(env)
     import_name = command.replace('-', '_')
     warm = argv[:-1] + ['python', '-c', f'import {import_name}']
@@ -634,14 +801,17 @@ def prewarm_vendored_launcher(command: str) -> tuple[bool, str]:
             warm, env=env, capture_output=True, text=True, timeout=300)
     except (pkg.subprocess.TimeoutExpired, OSError) as e:
         msg = f'uv warm did not complete: {e}'
-        logger.error('[MCP] pre-warm of %r failed: %s', command, e)
+        logger.warning('[MCP] pre-warm of %r failed: %s', command, e)
         with pkg._install_lock:
             pkg._install_last_error[command] = msg
         return False, msg
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or '').strip().splitlines()[-5:]
-        msg = f'uv warm exited {proc.returncode}: ' + ' | '.join(tail)
-        logger.error('[MCP] pre-warm of %r failed: %s', command, msg)
+        joined = ' | '.join(tail)
+        msg = f'uv warm exited {proc.returncode}: ' + joined
+        if _is_index_unreachable(joined):
+            _prewarm_note_unreachable('package index unreachable: ' + joined)
+        logger.warning('[MCP] pre-warm of %r failed: %s', command, msg)
         with pkg._install_lock:
             pkg._install_last_error[command] = msg
         return False, msg
@@ -665,6 +835,22 @@ def prewarm_all_vendored() -> dict[str, str]:
     pkg = _pkg()
     pkg._reload_vendored_if_changed()
     out: dict[str, str] = {}
+
+    cached = _prewarm_unreachable_reason()
+    if cached:
+        # A previous boot already proved the package index is unreachable.
+        # Fail fast with ONE clear log instead of re-running a doomed network
+        # resolve for every vendored server on every boot cycle.
+        for command in list(pkg._VENDORED_LAUNCHERS.keys()):
+            if pkg._find_vendored_source(command) is not None:
+                out[command] = cached
+        if out:
+            logger.warning(
+                '[MCP] pre-warm skipped for %d vendored server(s): %s '
+                '(negative cache active — will retry after the cache window)',
+                len(out), cached)
+        return out
+
     for command in list(pkg._VENDORED_LAUNCHERS.keys()):
         try:
             if pkg._find_vendored_source(command) is None:

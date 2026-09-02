@@ -106,7 +106,7 @@ def test_shutdown_gate_skips_network_and_database(monkeypatch):
 
     called = []
     monkeypatch.setattr(
-        refresh, '_fetch_exchange_rate', lambda: called.append('exchange'))
+        refresh, '_fetch_exchange_rates', lambda: called.append('exchange'))
     monkeypatch.setattr(
         refresh, '_fetch_model_pricing_online',
         lambda _model: called.append('pricing'))
@@ -129,7 +129,9 @@ def test_refresh_persists_through_semantic_sidecar_operation(monkeypatch):
             return {'version': 1}
 
     monkeypatch.setattr(refresh, '_storage', lambda **_kwargs: Client())
-    monkeypatch.setattr(refresh, '_fetch_exchange_rate', lambda: 7.2)
+    monkeypatch.setattr(refresh, '_fetch_exchange_rates', lambda: {
+        'USD': 1.0, 'CNY': 7.2, 'JPY': 144.0, 'KRW': 1320.0,
+    })
     monkeypatch.setattr(
         refresh, '_fetch_model_pricing_online', lambda _model: None)
     monkeypatch.setattr(lib, 'LLM_MODEL', 'test-unknown-model')
@@ -142,6 +144,9 @@ def test_refresh_persists_through_semantic_sidecar_operation(monkeypatch):
     assert payload['namespace'] == 'pricing_cache'
     assert payload['key'] == 'pricing'
     assert payload['value']['usdToCny'] == 7.2
+    assert payload['value']['usdRates'] == {
+        'USD': 1.0, 'CNY': 7.2, 'JPY': 144.0, 'KRW': 1320.0,
+    }
     assert command_id.startswith('pricing-cache:')
     assert kwargs['priority'] == 'event'
 

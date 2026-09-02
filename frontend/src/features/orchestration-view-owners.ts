@@ -3,6 +3,7 @@
 // per-chunk budget. These modules publish the same temporary window ports as
 // their classic predecessors before the compatibility domain is evaluated.
 import './orchestration/dialog';
+import './orchestration/flow-picker';
 import './orchestration/roving-items';
 import './orchestration/responsive';
 import './orchestration/task-mode-services';

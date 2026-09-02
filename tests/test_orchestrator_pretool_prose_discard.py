@@ -19,6 +19,7 @@ IS present), then apply the real production helper and assert it's gone AND the
 delta_reset event fired.
 """
 
+import itertools
 import os
 import sys
 import threading
@@ -26,7 +27,23 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
+import pytest  # noqa: E402
 sys.modules.setdefault('flask', _quart)
+
+pytestmark = pytest.mark.unit
+
+
+_TASK_IDS = itertools.count()
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_chat_runtime_tasks():
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+
+    before = set(chat_task_runtime.task_ids())
+    yield
+    for task_id in set(chat_task_runtime.task_ids()) - before:
+        chat_task_runtime.discard(task_id)
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -40,9 +57,12 @@ FINAL_ANSWER = '## 1. 设计梳理\n调用链如下……\n## 2. 潜在问题\n�
 
 def _make_task():
     """Minimal task dict with the fields _discard_pretool_prose touches."""
-    return {
-        'id': 'pretool_prose_test0',
+    task = {
+        'id': f'pretool_prose_test{next(_TASK_IDS)}',
         'convId': 'convtest',
+        '_userId': 1,
+        'kind': 'chat',
+        'status': 'running',
         'content': '',
         'thinking': '',
         'content_lock': threading.Lock(),
@@ -51,6 +71,9 @@ def _make_task():
         'toolRounds': [{'roundNum': 1, 'toolName': 'read_files',
                         'assistantContent': NARRATION}],
     }
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    assert chat_task_runtime.adopt(task) is True
+    return task
 
 
 def _simulate_stream(task, text):
@@ -74,7 +97,7 @@ def test_leak_reproduces_without_fix():
 
 def test_discard_removes_leak_and_emits_reset():
     """WITH the real helper, narration is gone and delta_reset is emitted."""
-    from lib.tasks_pkg.orchestrator import _discard_pretool_prose
+    from lib.tasks_pkg.orchestrator._finalize import _discard_pretool_prose
     task = _make_task()
     # Round 1: model streams narration, then issues a tool call.
     _simulate_stream(task, NARRATION)
@@ -99,7 +122,7 @@ def test_discard_removes_leak_and_emits_reset():
 
 def test_tool_rounds_preserved():
     """delta_reset must NOT drop the turn's tool rounds (unlike retry_reset)."""
-    from lib.tasks_pkg.orchestrator import _discard_pretool_prose
+    from lib.tasks_pkg.orchestrator._finalize import _discard_pretool_prose
     task = _make_task()
     _simulate_stream(task, NARRATION)
     _discard_pretool_prose(task, round_num=1)

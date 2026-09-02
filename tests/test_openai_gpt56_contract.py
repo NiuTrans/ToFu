@@ -135,7 +135,9 @@ def test_lean_prompt_is_default_for_gpt56_and_materially_smaller():
 
 
 def test_ptc_and_multi_agent_auto_modes_are_task_gated(monkeypatch):
-    from lib.tasks_pkg.gpt56_optimization import resolve_gpt56_optimizations
+    from lib.tasks_pkg.tool_orchestration_policy import (
+        resolve_tool_orchestration,
+    )
     import lib.tools.programmatic as programmatic
 
     monkeypatch.setattr(
@@ -146,29 +148,31 @@ def test_ptc_and_multi_agent_auto_modes_are_task_gated(monkeypatch):
         'content': (
             '全面并行检查多个模块，分别比较所有文件，筛选、去重并汇总结果'),
     }]
-    decision = resolve_gpt56_optimizations(
+    decision = resolve_tool_orchestration(
         requested_programmatic='auto', requested_multi_agent='auto',
         messages=complex_task, tools=[_tool('read_files')], round_num=1)
     assert decision['programmaticCalling'] == 'auto'
     assert decision['programmaticEligibleTools'] == ['read_files']
-    assert decision['multiAgent'] == 'off'
-    assert decision['multiAgentReason'] == 'bounded_reduction_prefers_ptc'
+    assert decision['multiAgent'] == 'read_only'
+    assert decision['multiAgentReason'] == 'independent_complex_workstreams'
+    assert decision['compositionMode'] == (
+        'multi_agent_with_programmatic_workers')
     assert decision['programmaticStage']
 
-    delegated = resolve_gpt56_optimizations(
+    delegated = resolve_tool_orchestration(
         requested_programmatic='off', requested_multi_agent='auto',
         messages=complex_task, tools=[_tool('read_files')], round_num=1)
     assert delegated['multiAgent'] == 'read_only'
     assert delegated['multiAgentStage']
 
-    small = resolve_gpt56_optimizations(
+    small = resolve_tool_orchestration(
         requested_programmatic='auto', requested_multi_agent='auto',
         messages=[{'role': 'user', 'content': '打开一个文件'}],
         tools=[_tool('read_files')], round_num=1)
     assert small['programmaticCalling'] == 'off'
     assert small['multiAgent'] == 'off'
 
-    later = resolve_gpt56_optimizations(
+    later = resolve_tool_orchestration(
         requested_programmatic='auto', requested_multi_agent='auto',
         messages=complex_task, tools=[_tool('read_files')], round_num=2)
     assert later['multiAgent'] == 'off'
@@ -290,6 +294,8 @@ def test_frontend_defaults_expose_auto_gates_and_no_fake_pro_model():
     assert 'id="settingResponsesPromptProfile"' in panel
     assert '<option value="auto">auto</option>' in panel
     assert "responsesCfg.promptProfile, 'auto'" in runtime
-    assert "responsesCfg.multiAgent, 'auto'" in runtime
-    assert "toolsCfg.programmaticCalling, 'auto'" in runtime
+    assert "orchestrationCfg.multiAgent : responsesCfg.multiAgent" in runtime
+    assert 'config.orchestration = Object.assign' in runtime
+    assert 'Native multi-agent worker:' in runtime
+    assert "toolsCfg.programmaticCalling, 'on'" in runtime
     assert "model_id: 'gpt-5.6-pro'" not in runtime

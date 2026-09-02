@@ -29,6 +29,8 @@ logger = get_logger(__name__)
 
 __all__ = [
     'start_oauth_flow',
+    'start_device_flow',
+    'stop_device_flow',
     'get_oauth_status',
     'get_all_oauth_status',
     'exchange_code',
@@ -69,6 +71,16 @@ from lib.oauth.manager._flow import (  # noqa: E402,F401
     start_oauth_flow,
     get_oauth_status,
     get_all_oauth_status,
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Device-authorization flow (Codex — no localhost redirect involved)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from lib.oauth.manager._device import (  # noqa: E402,F401
+    start_device_flow,
+    stop_device_flow,
 )
 
 

@@ -31,7 +31,9 @@ sys.modules.setdefault('flask', _quart)
 
 import pytest  # noqa: E402
 
-pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
+pytestmark = pytest.mark.unit
+
+TEST_OWNER_USER_ID = 1
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -93,9 +95,9 @@ def test_env_master_kill_switch():
 def test_engine_resolves_interactive_on_headless_off():
     """The engine hook must fire for an interactive task (no cfg key) and NOT
     fire for a headless task (cfg stamped False), with NO env flag set."""
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     import lib.paper.terminology_backfill as tb
-    from lib.paper import _new_report_task
+    from lib.paper.report_runtime import _new_report_task
 
     os.environ.pop('TOFU_PAPER_TERMFILL', None)  # rely on the new default, not the env
 
@@ -120,8 +122,8 @@ def test_engine_resolves_interactive_on_headless_off():
         # termfill scenario only needs paperTermfillEnabled to stay absent.)
         t1 = _new_report_task('rpt_int', 'phashint0000000000000000000000', 'en', None,
                               client_title='T', config={'paperInsightEnabled': False,
-                                        'paperCheckpointsEnabled': False})
-        re_mod._run_report_task(t1, [{'role': 'system', 'content': 's'},
+                                        'paperCheckpointsEnabled': False}, user_id=TEST_OWNER_USER_ID)
+        re_mod.run_report_task(t1, [{'role': 'system', 'content': 's'},
                                      {'role': 'user', 'content': 'p'}], [])
         assert calls, 'interactive task (no cfg) must fire the backfill by default'
 
@@ -130,8 +132,8 @@ def test_engine_resolves_interactive_on_headless_off():
         t2 = _new_report_task('rpt_hl', 'phashhl00000000000000000000000', 'en', None,
                               client_title='T', config={'paperTermfillEnabled': False,
                                                         'paperInsightEnabled': False,
-                                                        'paperCheckpointsEnabled': False})
-        re_mod._run_report_task(t2, [{'role': 'system', 'content': 's'},
+                                                        'paperCheckpointsEnabled': False}, user_id=TEST_OWNER_USER_ID)
+        re_mod.run_report_task(t2, [{'role': 'system', 'content': 's'},
                                      {'role': 'user', 'content': 'p'}], [])
         assert not calls, 'headless task (termfill stamped False) must NOT fire the backfill'
     finally:

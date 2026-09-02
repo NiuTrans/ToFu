@@ -29,7 +29,7 @@ from lib.api_response import api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
 
-from .auth import require_auth
+from .auth import request_user_id, require_auth
 
 logger = get_logger(__name__)
 
@@ -55,7 +55,8 @@ api_v1_tools_bp = Blueprint('api_v1_tools', __name__)
 )
 def list_tools_v1():
     from lib.tools.registry._introspect import build_tool_inventory
-    response, status = api_ok(build_tool_inventory())
+    response, status = api_ok(build_tool_inventory(
+        owner_user_id=int(request_user_id())))
     # The catalogue promises a fresh process snapshot on every open/refresh.
     # Make that true across browsers and reverse proxies, not merely inside the
     # Python builder (which is already intentionally uncached).

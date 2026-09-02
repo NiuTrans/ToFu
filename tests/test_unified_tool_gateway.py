@@ -12,7 +12,7 @@ from lib.llm._sse_core import (
     activate_native_tool_search_fallback,
     prepare_request,
 )
-from lib.tasks_pkg.tool_dispatch import parse_tool_calls
+from lib.tasks_pkg.tool_dispatch.api import parse_tool_calls
 from lib.tools.gateway import (
     EXECUTE_TOOLS_NAME,
     SEARCH_TOOLS_NAME,
@@ -21,7 +21,7 @@ from lib.tools.gateway import (
     local_wire_tools,
     normalize_execute_request,
     resolve_tool_search_backend,
-    search_enabled_catalog,
+    search_executable_catalog,
 )
 from lib.tools.toolscript import ToolScriptError, execute_toolscript
 
@@ -87,12 +87,12 @@ def test_gateway_schema_teaches_search_execute_and_toolscript_precisely():
 
 
 def test_search_result_names_the_stable_execution_gateway():
-    result = search_enabled_catalog([_tool('read_doc')], 'read document')
+    result = search_executable_catalog([_tool('read_doc')], 'read document')
     assert result['execute_with'] == EXECUTE_TOOLS_NAME
     assert result['notice'] == (
         "Call execute_tools with a result's exact name and arguments matching "
         'arguments_schema.')
-    empty = search_enabled_catalog([], 'read document')
+    empty = search_executable_catalog([], 'read document')
     assert empty['execute_with'] == EXECUTE_TOOLS_NAME
     assert empty['notice'] == result['notice']
 
@@ -157,6 +157,24 @@ def test_gateway_fuzzy_name_requires_high_confidence_and_clear_margin():
     assert call['id'].startswith('gw_')
 
 
+def test_gateway_repairs_tool_result_reader_name_and_ref_key_together():
+    catalog = [_tool(
+        'read_tool_artifact',
+        properties={'artifact_ref': {'type': 'string'}},
+        required=['artifact_ref'],
+    )]
+    result = normalize_execute_request(
+        {'calls': {'name': 'read_artifact', 'arguments': {'ref': 'result-1'}}},
+        catalog=catalog, namespace_by_name={}, gateway_call_id='artifact-1')
+
+    assert result['errors'] == []
+    call = result['calls'][0]
+    assert call['function']['name'] == 'read_tool_artifact'
+    assert call['_normalized_arguments'] == {'artifact_ref': 'result-1'}
+    assert {repair['kind'] for repair in call['_normalization_repairs']} >= {
+        'alias_tool_name', 'param_alias'}
+
+
 def test_execute_program_wins_with_warning_and_disabled_tool_is_rejected():
     catalog = [_tool('allowed')]
     both = normalize_execute_request(
@@ -191,6 +209,33 @@ def test_missing_or_semantic_argument_repairs_are_not_guessed():
         'invalid_argument_type', 'invalid_argument_value'}
 
 
+def test_gateway_final_validation_uses_request_contract_not_catalog_drift():
+    from lib.tools.contracts import adapt_legacy_tool_contract
+
+    catalog = [_tool(
+        'read_batch', properties={
+            'ids': {'type': 'array', 'items': {'type': 'string'}},
+        }, required=['ids'])]
+    authoritative_schema = _tool(
+        'read_batch', properties={
+            'ids': {'type': 'array', 'minItems': 1, 'maxItems': 2,
+                    'items': {'type': 'string', 'minLength': 1}},
+        }, required=['ids'])
+    document = adapt_legacy_tool_contract(
+        authoritative_schema).search_document()
+
+    result = normalize_execute_request(
+        {'calls': {'name': 'read_batch', 'arguments': {'ids': []}}},
+        catalog=catalog, namespace_by_name={}, gateway_call_id='contract-1',
+        contract_documents_by_name={'read_batch': document})
+
+    assert result['calls'] == []
+    assert result['errors'][0]['code'] == 'too_few_items'
+    assert result['errors'][0]['path'] == '$.ids'
+    assert result['errors'][0]['retryable'] is True
+    assert result['errors'][0]['retry_hint']
+
+
 def test_searchable_tool_not_on_wire_is_still_a_real_native_call():
     searchable = _tool('hidden_but_enabled')
     task = {
@@ -198,7 +243,7 @@ def test_searchable_tool_not_on_wire_is_still_a_real_native_call():
         'model': 'test', 'events': [], 'events_lock': threading.Lock(),
         'toolRounds': [], 'aborted': False,
         '_tool_schema': [_tool('visible')],
-        '_enabled_tool_catalog': [searchable],
+        '_executable_tool_catalog': [searchable],
     }
     assistant = {'content': '', 'tool_calls': [{
         'id': 'native-1', 'type': 'function', 'source': 'native_direct',
@@ -215,7 +260,64 @@ def test_searchable_tool_not_on_wire_is_still_a_real_native_call():
     assert parsed[0][5].get('status') != 'rejected'
 
 
-def test_executable_catalog_name_is_the_preferred_direct_call_authority():
+def test_direct_dispatch_fails_closed_on_request_contract_violation():
+    from lib.tools.contracts import adapt_legacy_tool_contract
+
+    executable = _tool(
+        'guarded_read', properties={
+            'path': {'type': 'string', 'minLength': 3, 'maxLength': 20},
+        }, required=['path'])
+    document = adapt_legacy_tool_contract(executable).search_document()
+    task = {
+        'id': 'task_contract_authority', 'convId': 'conv-contract',
+        'model': 'test', 'events': [], 'events_lock': threading.Lock(),
+        'toolRounds': [], 'aborted': False,
+        '_tool_schema': [executable],
+        '_executable_tool_catalog': [executable],
+        '_toolContractDocumentsByName': {'guarded_read': document},
+    }
+    assistant = {'content': '', 'tool_calls': [{
+        'id': 'contract-direct-1', 'type': 'function',
+        'function': {'name': 'guarded_read',
+                     'arguments': json.dumps({'path': '.'})},
+    }]}
+
+    parsed, _ = parse_tool_calls(
+        assistant, task, round_num=0, tool_round_num=0,
+        project_enabled=False)
+
+    assert len(parsed) == 1
+    assert '[invalid_argument_length]' in parsed[0][6]
+    assert parsed[0][5]['status'] == 'rejected'
+    assert parsed[0][5]['_contractError']['code'] == (
+        'invalid_argument_length')
+
+
+def test_direct_dispatch_rejects_missing_contract_in_v2_epoch():
+    executable = _tool('guarded_read')
+    task = {
+        'id': 'task_missing_contract', 'convId': 'conv-missing-contract',
+        'model': 'test', 'events': [], 'events_lock': threading.Lock(),
+        'toolRounds': [], 'aborted': False,
+        '_tool_schema': [executable],
+        '_executable_tool_catalog': [executable],
+        '_toolContractDocumentsByName': {},
+    }
+    assistant = {'content': '', 'tool_calls': [{
+        'id': 'contract-direct-2', 'type': 'function',
+        'function': {'name': 'guarded_read', 'arguments': '{}'},
+    }]}
+
+    parsed, _ = parse_tool_calls(
+        assistant, task, round_num=0, tool_round_num=0,
+        project_enabled=False)
+
+    assert '[tool_contract_unavailable]' in parsed[0][6]
+    assert parsed[0][5]['status'] == 'rejected'
+    assert parsed[0][5]['_contractError']['retryable'] is True
+
+
+def test_executable_catalog_is_the_direct_call_authority():
     executable = _tool('guessed_available_tool')
     task = {
         'id': 'task_executable_authority', 'convId': 'conv-executable',
@@ -223,8 +325,6 @@ def test_executable_catalog_name_is_the_preferred_direct_call_authority():
         'toolRounds': [], 'aborted': False,
         '_tool_schema': [_tool('visible')],
         '_executable_tool_catalog': [executable],
-        # A stale compatibility alias must not narrow the new authority.
-        '_enabled_tool_catalog': [],
     }
     assistant = {'content': '', 'tool_calls': [{
         'id': 'native-executable-1', 'type': 'function',
@@ -251,7 +351,7 @@ def test_hidden_composer_tool_flows_from_assembly_to_direct_call_admission():
         task_id='task-hidden-direct', search_mode='off',
         search_enabled=False, fetch_enabled=False,
         code_exec_enabled=False, browser_enabled=False,
-        desktop_enabled=False, swarm_enabled=False,
+        desktop_enabled=False,
         image_gen_enabled=False, human_guidance_enabled=False,
         messages=[])
     assert 'run_command' not in _names(wire)
@@ -285,12 +385,13 @@ def test_local_search_bridges_paraphrases_and_languages_without_embedding():
         _tool('memory_write', description='Save a long-term memory.'),
         _tool('memory_search', description='Search long-term memories.'),
     ]
-    code = search_enabled_catalog(
+    code = search_executable_catalog(
         catalog, 'find symbol references in code', limit=2)
     assert _names([{'function': {'name': row['name']}}
                    for row in code['items']])[0] == 'grep_search'
 
-    memory = search_enabled_catalog(catalog, '找回之前拍板的决定', limit=2)
+    memory = search_executable_catalog(
+        catalog, '找回之前拍板的决定', limit=2)
     assert memory['items'][0]['name'] == 'memory_search'
 
 
@@ -300,7 +401,7 @@ def test_private_search_hints_improve_ranking_but_never_leak_to_results():
         _tool('mcp__chat__post', description='Post to a channel.'),
     ]
     secret_hint = 'notify coworkers team group chat private-index-marker'
-    result = search_enabled_catalog(
+    result = search_executable_catalog(
         catalog, 'tell everyone in the team chat', limit=2,
         search_text_by_name={'mcp__chat__post': secret_hint})
 
@@ -309,7 +410,7 @@ def test_private_search_hints_improve_ranking_but_never_leak_to_results():
 
 
 def test_builtin_specs_carry_per_function_private_search_hints():
-    from lib.tools import all_specs
+    from lib.tools.registry import all_specs
 
     by_key = {spec.key: spec for spec in all_specs()}
     assert 'symbol references' in by_key['project'].search_hints['grep_search']
@@ -327,7 +428,7 @@ def test_explicitly_empty_authority_never_falls_back_to_latched_wire_schema():
         'model': 'test', 'events': [], 'events_lock': threading.Lock(),
         'toolRounds': [], 'aborted': False,
         '_tool_schema': [_tool('read_files')],
-        '_enabled_tool_catalog': [],
+        '_executable_tool_catalog': [],
     }
     assert 'read_files' not in _known_tool_names(task)
 
@@ -375,7 +476,7 @@ def test_small_latched_projection_keeps_search_for_large_authority_catalog():
     body = {
         'model': 'qwen-test', 'messages': [{'role': 'user', 'content': 'work'}],
         'tools': visible, '_tool_wire_catalog': visible,
-        '_enabled_tool_catalog': authority,
+        '_executable_tool_catalog': authority,
         '_tool_discovery_policy_by_name': {'read_doc': 'eager'},
         '_tool_search_catalog_size': 20, '_tool_searchable_count': 19,
         '_tool_search_mode': 'local',
@@ -395,7 +496,7 @@ def test_provider_boundary_uses_latched_wire_catalog_not_live_authority():
     base = {
         'model': 'qwen-test', 'messages': [{'role': 'user', 'content': 'work'}],
         'tools': frozen, '_tool_wire_catalog': frozen,
-        '_enabled_tool_catalog': authority,
+        '_executable_tool_catalog': authority,
         '_tool_search_mode': 'off',
     }
 
@@ -418,10 +519,11 @@ def test_local_wire_bytes_ignore_live_authority_changes_after_latch():
         '_tool_search_mode': 'local',
     }
     before = prepare_request(
-        {**base, '_enabled_tool_catalog': frozen}, api_protocol='openai',
+        {**base, '_executable_tool_catalog': frozen}, api_protocol='openai',
         base_url='https://compatible.example/v1')
     after = prepare_request(
-        {**base, '_enabled_tool_catalog': frozen + [_tool('new_live_tool')]},
+        {**base,
+         '_executable_tool_catalog': frozen + [_tool('new_live_tool')]},
         api_protocol='openai', base_url='https://compatible.example/v1')
 
     assert before.body['tools'] == after.body['tools']
@@ -435,11 +537,11 @@ def test_hidden_execute_gateway_is_admitted_when_model_guesses_it():
 
     task = {
         'id': 'task-no-execute-wrapper',
-        '_enabled_tool_catalog': [_tool('read_doc')],
+        '_executable_tool_catalog': [_tool('read_doc')],
         '_tool_gateway_names': [EXECUTE_TOOLS_NAME, SEARCH_TOOLS_NAME],
     }
     assert EXECUTE_TOOLS_NAME in _known_tool_names(task)
-    # Schema-less recovery also preserves the registered compatibility path.
+    # Schema-less recovery still preserves the registered gateway path.
     assert EXECUTE_TOOLS_NAME in _known_tool_names({'id': 'bare-task'})
 
     assistant = {'content': '', 'tool_calls': [{
@@ -457,7 +559,7 @@ def test_hidden_execute_gateway_is_admitted_when_model_guesses_it():
     assert parsed[0][6] is None
     assert parsed[0][5].get('status') != 'rejected'
 
-    from lib.tools import all_specs
+    from lib.tools.registry import all_specs
     gateway_spec = next(spec for spec in all_specs()
                         if spec.key == 'tool_gateway')
     assert gateway_spec.provides == frozenset({
@@ -466,8 +568,7 @@ def test_hidden_execute_gateway_is_admitted_when_model_guesses_it():
 
 def test_round_assembly_admits_hidden_execute_without_exposing_schema(
         monkeypatch):
-    from lib.tasks_pkg.orchestrator import _tool_assembly_prep as prep
-
+    import lib.tasks_pkg.orchestrator._tool_assembly_prep as prep
     monkeypatch.setattr(
         prep, '_assemble_tool_list',
         lambda *_args, **_kwargs: ([_tool('read_doc')], True))
@@ -478,9 +579,7 @@ def test_round_assembly_admits_hidden_execute_without_exposing_schema(
         'search_mode': 'multi', 'search_enabled': True,
         'fetch_enabled': True, 'code_exec_enabled': False,
         'browser_enabled': False, 'desktop_enabled': False,
-        # True avoids involving the pending-swarm recovery seam; this test is
-        # solely about gateway admission after ordinary tool assembly.
-        'swarm_enabled': True, 'image_gen_enabled': False,
+        'image_gen_enabled': False,
         'human_guidance_enabled': False, 'scheduler_enabled': False,
     }
     prep.assemble_round_tools({}, task, mcfg)
@@ -517,10 +616,10 @@ def test_guessed_execute_gateway_runs_normalized_children(monkeypatch):
     monkeypatch.setattr(handler, '_execute_normalized', fake_execute)
     monkeypatch.setattr(handler, '_finalize', lambda *args, **kwargs: None)
     task = {
-        'model': 'test', '_enabled_tool_catalog': [_tool(
+        'model': 'test', '_executable_tool_catalog': [_tool(
             'scale', properties={'count': {'type': 'integer'}},
             required=['count'])],
-        '_enabledToolNamespaceByName': {},
+        '_executableToolNamespaceByName': {},
     }
     tc_id, content, aborted = handler.handle_execute_tools(
         task, {}, EXECUTE_TOOLS_NAME, 'guessed-wrapper-1',
@@ -532,6 +631,117 @@ def test_guessed_execute_gateway_runs_normalized_children(monkeypatch):
     assert '"status":"ok"' in content
     assert seen[0]['function']['name'] == 'scale'
     assert seen[0]['_normalized_arguments'] == {'count': 3}
+
+
+def test_execute_gateway_receipts_handle_kimi_recycled_ids_and_stay_bounded(
+        monkeypatch):
+    from lib.tasks_pkg.handlers import tool_gateway as handler
+
+    executed = []
+    finalized = []
+
+    def fake_execute(task, calls, execution, **kwargs):
+        count = calls[0]['_normalized_arguments']['count']
+        executed.append(count)
+        return [{
+            'call_id': calls[0]['id'], 'name': 'scale', 'status': 'done',
+            'approval': {'required': False, 'status': 'not_required'},
+            'duration': 1, 'source': 'execute_calls', 'output': str(count),
+        }]
+
+    monkeypatch.setattr(handler, '_execute_normalized', fake_execute)
+    monkeypatch.setattr(
+        handler, '_finalize',
+        lambda *_args, **kwargs: finalized.append(bool(kwargs.get('ok'))))
+    task = {
+        'model': 'kimi-k3', '_executable_tool_catalog': [_tool(
+            'scale', properties={'count': {'type': 'integer'}},
+            required=['count'])],
+        '_executableToolNamespaceByName': {},
+    }
+
+    def invoke(count, llm_round, *, call_id='execute_tools_0'):
+        return handler.handle_execute_tools(
+            task, {}, EXECUTE_TOOLS_NAME, call_id,
+            {'calls': [{'name': 'scale', 'arguments': {'count': count}}]},
+            llm_round + 1, {'llmRound': llm_round}, {}, None, False)[1]
+
+    first = invoke(1, 0)
+    second = invoke(2, 1)
+    replay = invoke(2, 1)
+    assert json.loads(first)['results'][0]['output'] == '1'
+    assert json.loads(second)['results'][0]['output'] == '2'
+    assert replay == second
+    assert executed == [1, 2], (
+        'a recycled positional ID must execute new args, while an exact frame '
+        'replay in the same round must not execute twice')
+
+    for llm_round in range(2, 270):
+        invoke(llm_round, llm_round)
+    assert len(task['_execute_gateway_receipts']) <= 256
+    assert all(finalized)
+
+
+def test_execute_gateway_replay_preserves_error_verdict(monkeypatch):
+    from lib.tasks_pkg.handlers import tool_gateway as handler
+
+    verdicts = []
+    monkeypatch.setattr(
+        handler, '_finalize',
+        lambda *_args, **kwargs: verdicts.append(bool(kwargs.get('ok'))))
+    task = {
+        'model': 'kimi-k3',
+        '_executable_tool_catalog': [_tool('only_available_tool')],
+        '_executableToolNamespaceByName': {},
+    }
+    args = {'calls': [{
+        'name': 'missing_tool', 'arguments': {},
+    }]}
+    for _attempt in range(2):
+        _tc_id, content, _aborted = handler.handle_execute_tools(
+            task, {}, EXECUTE_TOOLS_NAME, 'execute_tools_0', args,
+            1, {'llmRound': 0}, {}, None, False)
+        assert json.loads(content)['status'] == 'error'
+
+    assert verdicts == [False, False], (
+        'replaying a cached gateway failure must never project it as done')
+
+
+def test_execute_handler_rejects_nested_call_before_dispatch(monkeypatch):
+    from lib.tasks_pkg.handlers import tool_gateway as handler
+    from lib.tools.contracts import adapt_legacy_tool_contract
+
+    catalog_tool = _tool(
+        'read_batch', properties={
+            'ids': {'type': 'array', 'items': {'type': 'string'}},
+        }, required=['ids'])
+    contract_tool = _tool(
+        'read_batch', properties={
+            'ids': {'type': 'array', 'minItems': 1,
+                    'items': {'type': 'string'}},
+        }, required=['ids'])
+    document = adapt_legacy_tool_contract(contract_tool).search_document()
+
+    def must_not_execute(*_args, **_kwargs):
+        raise AssertionError('contract-rejected child reached execution')
+
+    monkeypatch.setattr(handler, '_execute_normalized', must_not_execute)
+    monkeypatch.setattr(handler, '_finalize', lambda *args, **kwargs: None)
+    task = {
+        'model': 'test', '_executable_tool_catalog': [catalog_tool],
+        '_executableToolNamespaceByName': {},
+        '_toolContractDocumentsByName': {'read_batch': document},
+    }
+
+    _, content, aborted = handler.handle_execute_tools(
+        task, {}, EXECUTE_TOOLS_NAME, 'contract-wrapper-1',
+        {'calls': {'tool': 'read_batch', 'args': {'ids': []}}},
+        1, {}, {}, None, False)
+
+    payload = json.loads(content)
+    assert aborted is False
+    assert payload['status'] == 'error'
+    assert payload['errors'][0]['code'] == 'too_few_items'
 
 
 def test_execute_program_can_search_then_call_without_wire_promotion(monkeypatch):
@@ -550,11 +760,11 @@ def test_execute_program_can_search_then_call_without_wire_promotion(monkeypatch
     monkeypatch.setattr(handler, '_execute_normalized', fake_execute)
     monkeypatch.setattr(handler, '_finalize', lambda *args, **kwargs: None)
     task = {
-        'model': 'test', '_enabled_tool_catalog': [_tool(
+        'model': 'test', '_executable_tool_catalog': [_tool(
             'scale', description='Scale a number.',
             properties={'count': {'type': 'integer'}}, required=['count'])],
-        '_enabledToolNamespaceByName': {},
-        '_enabledToolSearchTextByName': {},
+        '_executableToolNamespaceByName': {},
+        '_executableToolSearchTextByName': {},
     }
     _, content, aborted = handler.handle_execute_tools(
         task, {}, EXECUTE_TOOLS_NAME, 'program-wrapper-1', {
@@ -598,7 +808,7 @@ def test_gateway_repair_audit_keeps_argument_values_private(monkeypatch):
 
 def test_fuzzy_repaired_write_still_enters_the_real_approval_gate(monkeypatch):
     from lib.tasks_pkg.handlers.tool_gateway import _execute_call_batch
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
 
     approvals = []
 
@@ -620,10 +830,12 @@ def test_fuzzy_repaired_write_still_enters_the_real_approval_gate(monkeypatch):
 
     task = {
         'id': 'gateway-write-approval', 'convId': 'gateway-write-conv',
+        '_userId': 1,
         'status': 'running', 'aborted': False, 'model': 'test', 'events': [],
+        'config': {'tools': {'resultEnvelope': 'legacy'}},
         'events_lock': threading.Lock(), '_attended': True,
         '_dispatch_heartbeat': 0.0, '_t_last_event': 0.0, 'toolRounds': [],
-        '_enabled_tool_catalog': catalog,
+        '_executable_tool_catalog': catalog,
     }
     result = _execute_call_batch(
         task, normalized['calls'], cfg={'autoApply': False},
@@ -635,13 +847,79 @@ def test_fuzzy_repaired_write_still_enters_the_real_approval_gate(monkeypatch):
     assert result[0]['error'] == 'User rejected this write.'
 
 
+def test_execute_gateway_nested_snapshot_keeps_tool_call_result_pair(
+        monkeypatch):
+    """Nested gateway execution must never build a result-only transcript.
+
+    Attended tasks emit a post-tool wire snapshot inside the shared pipeline.
+    The gateway used to pass an empty local message list, so the pipeline
+    appended only ``role=tool`` and the sanitizer necessarily removed it as
+    an orphan.  Capture the snapshot boundary and require the assistant
+    carrier and result to stay paired.
+    """
+    from lib.tasks_pkg.handlers.tool_gateway import _execute_call_batch
+    import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
+    from lib.tasks_pkg import wire_messages
+
+    captured = []
+    real_sanitize = wire_messages.apply_wire_sanitize
+
+    def capture_sanitize(messages, **kwargs):
+        captured.append([dict(message) for message in messages])
+        return real_sanitize(messages, **kwargs)
+
+    def fake_execute(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
+                     cfg, project_path, project_enabled, all_tools=None):
+        return tc_id, 'nested-result', False
+
+    monkeypatch.setattr(wire_messages, 'apply_wire_sanitize', capture_sanitize)
+    monkeypatch.setattr(_pipeline, '_execute_tool_one', fake_execute)
+    monkeypatch.setattr(_heartbeat, '_execute_tool_one', fake_execute)
+
+    catalog = [_tool('nested_read')]
+    task = {
+        'id': 'gateway-snapshot-pair', 'convId': 'gateway-snapshot-conv',
+        '_userId': 1,
+        'status': 'running', 'aborted': False, 'model': 'test', 'events': [],
+        'config': {'tools': {'resultEnvelope': 'legacy'}},
+        'events_lock': threading.Lock(), '_attended': True,
+        '_dispatch_heartbeat': 0.0, '_t_last_event': 0.0, 'toolRounds': [],
+        '_executable_tool_catalog': catalog,
+    }
+    call = {
+        'id': 'nested-call-id', 'type': 'function',
+        'source': 'execute_calls', '_normalized_arguments': {},
+        'function': {'name': 'nested_read', 'arguments': '{}'},
+    }
+
+    result = _execute_call_batch(
+        task, [call], cfg={'autoApply': True}, project_path=None,
+        project_enabled=False, model='test', llm_round=0)
+
+    assert result[0]['output'] == 'nested-result'
+    assert captured
+    local_transcript = captured[-1]
+    assert local_transcript[0]['role'] == 'assistant'
+    call_ids = {
+        tool_call['id']
+        for message in local_transcript
+        for tool_call in message.get('tool_calls') or []
+    }
+    result_ids = {
+        message['tool_call_id'] for message in local_transcript
+        if message.get('role') == 'tool'
+    }
+    assert call_ids == result_ids == {call['id']}
+
+
 def test_provider_boundary_injects_execute_only_for_local_search():
     catalog = [_tool(f'tool_{index}') for index in range(12)]
     base = {
         'model': 'qwen-test',
         'messages': [{'role': 'user', 'content': 'find a tool'}],
         'tools': catalog,
-        '_enabled_tool_catalog': catalog,
+        '_executable_tool_catalog': catalog,
         '_tool_discovery_policy_by_name': {
             f'tool_{index}': 'searchable' for index in range(12)},
     }
@@ -804,11 +1082,22 @@ def test_toolscript_data_flow_calls_and_security_limits():
     assert nested.value.code == 'nesting_limit'
 
 
-def test_shared_pipeline_replays_call_id_and_rejects_conflicting_reuse(
+def test_shared_pipeline_executes_exact_reemit_and_recycled_id(
         monkeypatch):
-    from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline
+    """A completed call id is NEVER receipt-replayed: an exact same-id+
+    same-args re-emit EXECUTES again (the model deliberately re-issued it —
+    re-read after an edit, re-run after a fix; replaying the stale receipt
+    made edits report success without running and re-reads return pre-edit
+    bytes — tasks f8149620/0c2e3a92, 2026-08-19), and the same id recycled
+    with DIFFERENT args is likewise a fresh call — positional-id models
+    (kimi-k3 ``{tool}_{index-in-message}``) cannot mint fresh ids, so
+    rejecting a recycled id locked the tool out for the rest of the task and
+    pushed the model into sacrificial-call superstitions (conv mswu06rpir1hwv,
+    the ``search_tools query="noop ping placeholder"`` burn, 2026-08-17)."""
+    from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
     from lib.tasks_pkg.tool_display import _build_tool_round_entry
-    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
 
     executions = []
 
@@ -822,7 +1111,9 @@ def test_shared_pipeline_replays_call_id_and_rejects_conflicting_reuse(
 
     task = {
         'id': 'call-id-task', 'convId': 'call-id-conv', 'status': 'running',
+        '_userId': 1,
         'aborted': False, 'model': 'test', 'events': [],
+        'config': {'tools': {'resultEnvelope': 'legacy'}},
         'events_lock': threading.Lock(), '_attended': False,
         '_dispatch_heartbeat': 0.0, '_t_last_event': 0.0,
         'toolRounds': [],
@@ -848,20 +1139,49 @@ def test_shared_pipeline_replays_call_id_and_rejects_conflicting_reuse(
         return messages, item[5]
 
     first_messages, first_row = run(parsed(1, 1))
-    replay_messages, replay_row = run(parsed(1, 2))
+    reemit_messages, reemit_row = run(parsed(1, 2))
     conflict_messages, conflict_row = run(parsed(2, 3))
+    recycle_reemit_messages, recycle_reemit_row = run(parsed(2, 4))
 
-    assert executions == [('side_effect_tool', {'value': 1})]
+    # Every emission EXECUTED — no receipt replay, no stale content. The exact
+    # re-emit produces the same text only because this fake is deterministic;
+    # the behavioural pin is the second execution itself.
+    assert executions == [
+        ('side_effect_tool', {'value': 1}),
+        ('side_effect_tool', {'value': 1}),
+        ('side_effect_tool', {'value': 2}),
+        ('side_effect_tool', {'value': 2}),
+    ]
     assert first_messages[-1]['content'] == 'ran:1'
-    assert replay_messages[-1]['content'] == 'ran:1'
-    assert replay_row['_idempotentReplay'] is True
-    assert conflict_row['status'] == 'rejected'
-    assert 'already used' in conflict_messages[-1]['content']
+    assert reemit_messages[-1]['content'] == 'ran:1'
+    assert not reemit_row.get('_idempotentReplay')
+    # Recycled id with new args: executes as a fresh call.
+    assert conflict_messages[-1]['content'] == 'ran:2'
+    # The fake executor skips _finalize_tool_round, so the row keeps its
+    # dispatch-time status here; the behavioral pin is that the conflict was
+    # EXECUTED (not rejected): no replay marker, fresh content above.
+    assert conflict_row['status'] != 'rejected'
+    assert not conflict_row.get('_idempotentReplay')
+    assert recycle_reemit_messages[-1]['content'] == 'ran:2'
+    assert not recycle_reemit_row.get('_idempotentReplay')
+    # Every re-issued id was reminted — the wire never carries two
+    # tool_call/tool_result pairs with the same id across rounds.
+    assert first_row['toolCallId'] == 'stable-call-id'
+    assert reemit_row['toolCallId'] != 'stable-call-id'
+    assert conflict_row['toolCallId'] != 'stable-call-id'
+    assert recycle_reemit_row['toolCallId'] != 'stable-call-id'
 
 
-def test_execute_gateway_children_do_not_bypass_call_id_conflicts(monkeypatch):
+def test_execute_gateway_children_never_replay_completed_call_ids(
+        monkeypatch):
+    """Gateway children ride the shared pipeline id-reuse detection: an exact
+    same-id re-emit EXECUTES again (a program that re-runs a command must see
+    its real fresh output — never the stale receipt), and a recycled id with
+    new args must EXECUTE FRESH — never silently serve the old result for a
+    different call."""
     from lib.tasks_pkg.handlers.tool_gateway import _execute_call_batch
-    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
 
     executions = []
 
@@ -874,10 +1194,12 @@ def test_execute_gateway_children_do_not_bypass_call_id_conflicts(monkeypatch):
     monkeypatch.setattr(_heartbeat, '_execute_tool_one', fake_execute)
     task = {
         'id': 'gateway-child-id', 'convId': 'gateway-child-conv',
+        '_userId': 1,
         'status': 'running', 'aborted': False, 'model': 'test', 'events': [],
+        'config': {'tools': {'resultEnvelope': 'legacy'}},
         'events_lock': threading.Lock(), '_attended': False,
         '_dispatch_heartbeat': 0.0, '_t_last_event': 0.0, 'toolRounds': [],
-        '_enabled_tool_catalog': [_tool(
+        '_executable_tool_catalog': [_tool(
             'side_effect_tool', properties={'value': {'type': 'integer'}},
             required=['value'])],
     }
@@ -895,9 +1217,14 @@ def test_execute_gateway_children_do_not_bypass_call_id_conflicts(monkeypatch):
         'project_enabled': False, 'model': 'test', 'llm_round': 0,
     }
     first = _execute_call_batch(task, [child(1)], **common)
-    conflict = _execute_call_batch(task, [child(2)], **common)
+    reemit = _execute_call_batch(task, [child(1)], **common)
+    recycled = _execute_call_batch(task, [child(2)], **common)
 
-    assert executions == [{'value': 1}]
+    assert executions == [{'value': 1}, {'value': 1}, {'value': 2}]
     assert first[0]['output'] == 'ran:1'
-    assert conflict[0]['status'] == 'rejected'
-    assert 'already used' in conflict[0]['error']
+    # Exact re-emit: executed again (fresh result), no receipt replay.
+    assert reemit[0]['output'] == 'ran:1'
+    assert reemit[0]['status'] == 'done'
+    # Recycled id, different args: a real fresh result, not the stale one.
+    assert recycled[0]['status'] == 'done'
+    assert recycled[0]['output'] == 'ran:2'

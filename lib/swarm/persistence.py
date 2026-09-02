@@ -176,6 +176,31 @@ def mark_delivered(swarm_key: str, agent_ids) -> None:
 
 
 # ═══════════════════════════════════════════════════════════
+#  Point lookup (status route fallback)
+# ═══════════════════════════════════════════════════════════
+
+def load_session(swarm_key: str) -> dict | None:
+    """Fetch one persisted session row (+ agent rows) by swarm key.
+
+    Used by ``integration.get_swarm_status`` when the session is NOT in
+    process memory — the difference between "this swarm terminated, here are
+    the real per-agent outcomes" and "no record at all, keep probing". A
+    crash/restart evicts memory but leaves this durable row, so answering
+    from it is what lets a reloaded panel settle with TRUTH instead of the
+    unknown/无结果 limbo. Best-effort: returns None on any storage error.
+    """
+    if not swarm_key:
+        return None
+    try:
+        row = _storage().query('swarm.session.get', {'swarm_key': swarm_key})
+    except Exception as e:
+        logger.warning('[SwarmPersist] load_session(%s) failed: %s',
+                       swarm_key, e)
+        return None
+    return row if isinstance(row, dict) else None
+
+
+# ═══════════════════════════════════════════════════════════
 #  Rehydration (startup)
 # ═══════════════════════════════════════════════════════════
 

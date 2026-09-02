@@ -159,7 +159,6 @@ RID_REQUIRED_LINES = (
     'Subscribe:',
     'Sender error',
     'Receiver error',
-    'connect snapshot enqueue failed',
 )
 
 
@@ -248,15 +247,15 @@ def test_rid_rides_the_push_client():
     locals, so PushClient is the carrier (mirroring ``user_id``, which exists
     for exactly this reason). Asserted as behaviour on the real class.
     """
-    from lib.push import PushClient
+    from lib.agent_core.push import PushClient
 
     c = PushClient(user_id='u1', req_id='page1-ws3')
     assert c.req_id == 'page1-ws3'
     assert c.user_id == 'u1'
     # Absent id must be the empty string, never None — it is spliced into
     # %s log args and 'None' would read as a real id.
-    assert PushClient().req_id == ''
-    assert PushClient(req_id=None).req_id == ''
+    assert PushClient(user_id=1).req_id == ''
+    assert PushClient(user_id=1, req_id=None).req_id == ''
 
 
 def test_socket_always_has_an_id():

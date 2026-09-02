@@ -31,7 +31,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-from lib.oauth import outbound
+import lib.oauth.outbound as outbound
 from lib.oauth.outbound import (
     CLAUDE_CODE_IDENTITY,
     apply_claude_cloak,

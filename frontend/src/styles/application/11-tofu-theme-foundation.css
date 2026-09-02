@@ -1,0 +1,1363 @@
+/* ══════════════════════════════════════════════════════════
+   TOFU — "Warm Reading Room" (editorial · Ma restraint · one clay accent)
+   Direction refs: iA-lineage reading-first typography, Japanese Ma /
+   MUJI negative space, warm-paper palette (never pure white).
+   Variable NAMES are a stable contract consumed app-wide — retune
+   VALUES only; do not rename or remove.
+   ══════════════════════════════════════════════════════════ */
+[data-theme="tofu"]{
+  /* Paper grounds — warm off-white, never #fff; quiet tonal steps */
+  --bg-primary:#FAF7F0;
+  --bg-secondary:#F4EFE5;
+  --bg-tertiary:#ECE6D9;
+  --bg-hover:#E5DECE;
+  --bg-active:#DBD2BF;
+  /* Borders — soft, low-contrast (restraint over ruled lines) */
+  --border:#E2DAC8;
+  --border-light:#EDE6D8;
+  /* Ink — warm charcoal, high legibility on paper */
+  --text-primary:#2E2822;
+  --text-secondary:#6C6352;
+  --text-tertiary:#A69D88;
+  /* One confident clay accent (was muddy tan #BB9572) */
+  --accent:#C1794B;
+  --accent-hover:#A96536;
+  --accent-subtle:rgba(193,121,75,0.10);
+  /* 品牌字身专用墨色 — 当前与 --accent-hover 同值,但刻意独立:品牌色不随交互态色阶演进 */
+  --brand-ink:#A96536;
+  --thinking-bg:rgba(193,121,75,0.055);
+  --thinking-border:rgba(193,121,75,0.22);
+  --thinking-text:#9A6238;
+  --error-bg:rgba(178,96,80,0.07);
+  --error-border:rgba(178,96,80,0.22);
+  --error-text:#B05B48;
+  --user-bubble:#F0E8D9;
+  --shadow:0 1px 2px rgba(92,72,44,0.04),0 3px 14px rgba(92,72,44,0.06);
+  /* Soft-organic corners (editorial 8–16px) */
+  --radius:14px;
+  --radius-sm:10px;
+  --radius-xs:8px;
+  /* Editorial type: Newsreader serif is the Latin heading/brand hero; the
+     humanist Plus Jakarta sans is the Latin body. CRITICAL for CJK: both
+     tokens end in the SAME --cjk-fallback face, so Chinese glyphs always
+     resolve to ONE typeface (PingFang/黑体) regardless of which token is
+     applied — a Latin serif/sans split must NOT become a Chinese
+     宋体/黑体 split. Latin serif faces (Newsreader/Songti) are placed
+     BEFORE the CJK fallback only for Latin glyphs; they carry no usable
+     Han glyphs, so the shared tail wins for Chinese either way. */
+  --cjk-fallback:'PingFang SC','Microsoft YaHei','Hiragino Sans GB','Noto Sans SC','Noto Sans CJK SC';
+  --serif-display:'Newsreader','Iowan Old Style','Palatino Linotype',Palatino,Georgia,var(--cjk-fallback),serif;
+  --sans-body:'Inter','Plus Jakarta Sans',var(--cjk-fallback),system-ui,sans-serif;
+  --search-blue:#5E90AE;
+  --search-cyan:#4FA3AC;
+  --search-purple:#8C7FB0;
+  --fetch-green:#C1794B;
+  --fetch-teal:#5E9E8C;
+  /* Shadow tokens — soft, warm-tinted, diffuse (no hard pixel offset) */
+  --clay-sm:0 1px 2px rgba(92,72,44,0.05);
+  --clay-md:0 2px 10px rgba(92,72,44,0.07);
+  --clay-lg:0 10px 30px rgba(92,72,44,0.10);
+  --clay-pressed:inset 0 1px 3px rgba(92,72,44,0.10);
+  --stitch:1px solid #E2DAC8
+}
+
+/* ── Typography: reading-optimized with CJK care ── */
+[data-theme="tofu"]{
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+  text-rendering:optimizeLegibility
+}
+[data-theme="tofu"] .md-content{
+  font-family:var(--sans-body);
+  font-size:15px;line-height:1.7;letter-spacing:0.005em;font-weight:400
+  /* NOTE: the former `max-width:72ch` here was the ONLY reading-measure cap in
+   * the whole app, and being theme-scoped it left dark/light uncapped. The
+   * measure is now `--msg-measure` on `.message-content` (theme-agnostic — see
+   * that rule). Do NOT reintroduce a per-theme measure: two sources drift, and
+   * the drift is invisible until someone switches theme. */
+}
+[data-theme="tofu"] .md-content.user-content{font-weight:500}
+[data-theme="tofu"] .md-content p{margin-bottom:16px}
+[data-theme="tofu"] .md-content li{margin-bottom:6px;line-height:1.75}
+[data-theme="tofu"] .md-content li::marker{color:var(--accent)}
+[data-theme="tofu"] .md-content strong{font-weight:660}
+[data-theme="tofu"] .md-content em{color:var(--text-secondary);font-style:italic}
+[data-theme="tofu"] .md-content h1{
+  font-family:var(--serif-display);
+  font-size:22px;margin:26px 0 10px;font-weight:600;letter-spacing:-0.01em;
+  line-height:1.3;color:var(--text-primary);
+  border-bottom:none;padding-bottom:0;padding-left:0;display:block
+}
+[data-theme="tofu"] .md-content h2{font-family:var(--serif-display);font-size:18.5px;margin:22px 0 9px;font-weight:600;letter-spacing:-0.005em;line-height:1.35}
+[data-theme="tofu"] .md-content h3{font-family:var(--serif-display);font-size:16px;font-weight:600;letter-spacing:0;line-height:1.4}
+/* ══════════════════════════════════════════════════════════
+   MESSAGES — Warm Reading Room
+   Assistant = a quiet page on soft paper (no frame theatrics)
+   User = a gently tinted note
+   ══════════════════════════════════════════════════════════ */
+[data-theme="tofu"] .message{
+  margin-bottom:30px;
+  position:relative
+}
+
+/* ── Assistant messages — open prose on the page, no card ──
+ * The theme direction above says it plainly: "no frame theatrics". The card
+ * (bg + border + clay shadow) wrapped EVERY reply in a box while thinking
+ * strips / tool panels / tables drew their own boxes inside it — that
+ * boxes-in-boxes stack was the visual mess. Dark/light never had an
+ * assistant card; tofu now matches: prose sits directly on the paper, and
+ * only real containers (code / tables / thinking / tool panels) keep a
+ * frame. Geometry-neutral: same --msg-measure track, zero inset change to
+ * the content box (the rail-geometry sweep subtracts padding/border). */
+[data-theme="tofu"] .message:not(.user-msg) .message-content{
+  background:transparent;
+  border:none;
+  border-radius:0;
+  box-shadow:none;
+  padding:0;
+  position:relative;
+  overflow:visible
+}
+/* ── No speech bubble tail — clean rounded card ── */
+[data-theme="tofu"] .message:not(.user-msg) .message-content::before{
+  display:none
+}
+[data-theme="tofu"] .message:not(.user-msg) .message-content::after{
+  display:none
+}
+
+/* ── Role label — humanist sans, quiet ── */
+[data-theme="tofu"] .message-role{
+  font-family:var(--sans-body);
+  font-size:12.5px;
+  font-weight:650;
+  letter-spacing:0.01em;
+  color:var(--text-secondary)
+}
+/* ── Time label — quiet sans ── */
+[data-theme="tofu"] .message-time{
+  font-family:var(--sans-body);
+  font-size:11px;
+  color:var(--text-tertiary);
+  letter-spacing:0
+}
+
+/* ── Message header — clean game-style ── */
+[data-theme="tofu"] .message-header{
+  margin-bottom:5px;
+  padding-bottom:0;
+  border-bottom:none
+}
+
+/* ── Message actions — quiet ghost icon buttons ── */
+[data-theme="tofu"] .message-actions{
+  gap:4px
+}
+[data-theme="tofu"] .msg-action-btn{
+  border-radius:var(--radius-xs);
+  border:1px solid transparent;
+  background:transparent;
+  color:var(--text-tertiary);
+  box-shadow:none;
+  transition:background 0.18s ease,color 0.18s ease,border-color 0.18s ease;
+  padding:3px 6px;
+  font-family:var(--sans-body);
+  font-size:11px
+}
+[data-theme="tofu"] .msg-action-btn:hover{
+  background:var(--bg-hover);
+  color:var(--text-primary);
+  transform:none;
+  box-shadow:none;
+  border-color:var(--border)
+}
+[data-theme="tofu"] .msg-action-btn:active{
+  transform:none;
+  background:var(--bg-active)
+}
+
+[data-theme="tofu"] .msg-delete-btn:hover{
+  color:#D4533B!important;
+  background:rgba(212,83,59,0.08)!important;
+  border-color:rgba(212,83,59,0.3)
+}
+[data-theme="tofu"] .delete-turn-popup{
+  background:#FFFDF9;
+  border:1px solid var(--border);
+  box-shadow:var(--clay-lg)
+}
+[data-theme="tofu"] .delete-popup-btn{
+  border-radius:var(--radius-xs);
+  font-family:var(--sans-body);
+  font-size:11px
+}
+[data-theme="tofu"] .delete-popup-turn:hover{color:#D4533B;background:rgba(212,83,59,0.08)}
+[data-theme="tofu"] .delete-popup-single:hover{color:#C4956A;background:rgba(196,149,106,0.1)}
+
+/* ── Stream elapsed timer — quiet chip ── */
+[data-theme="tofu"] .stream-elapsed-timer{
+  font-family:var(--sans-body);
+  font-size:11px;
+  color:var(--text-tertiary);
+  background:var(--accent-subtle);
+  padding:1px 7px;
+  border-radius:999px;
+  border:1px solid transparent
+}
+
+/* ── Error block — calm alert, no glyph theatrics ── */
+[data-theme="tofu"] .error-block{
+  border:1px solid var(--error-border);
+  border-left:3px solid var(--error-text);
+  border-radius:var(--radius-sm);
+  background:var(--error-bg);
+  box-shadow:var(--clay-sm);
+  color:var(--error-text);
+  font-family:var(--sans-body);
+  position:relative
+}
+[data-theme="tofu"] .error-block::before{
+  display:none
+}
+
+/* ── Font rendering: crisp grayscale AA on light paper (no subpixel fringing) ── */
+[data-theme="tofu"]{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+
+/* ── Unified shell: sidebar + topbar as one calm paper panel ── */
+/* ══════════════════════════════════════════════════════
+   SIDEBAR — Warm Reading Room
+   A quiet paper rail: soft ground, hairline divider, no CRT/pixel chrome.
+   ══════════════════════════════════════════════════════ */
+[data-theme="tofu"] .sidebar{
+  background:var(--bg-secondary);
+  border-right:1px solid var(--border);
+  box-shadow:none;
+  position:relative;
+  overflow:visible
+}
+/* ── (retired) sidebar corner glyph ── */
+[data-theme="tofu"] .sidebar::before{
+  content:none;
+  display:none
+}
+
+[data-theme="tofu"] .topbar{
+  background:var(--bg-secondary);
+  border-bottom:1px solid var(--border);
+  box-shadow:none;
+}
+[data-theme="tofu"] .topbar-title{
+  font-family:var(--sans-body);
+  font-size:13px;
+  font-weight:600;
+  letter-spacing:0;
+  color:var(--text-primary)
+}
+[data-theme="tofu"] .topbar-folder-badge{
+  font-family:var(--sans-body);
+  font-size:11px;
+  color:var(--text-secondary);
+}
+[data-theme="tofu"] .welcome-folder-badge{
+  font-family:var(--sans-body);
+  background:var(--accent-subtle);
+  border-color:var(--border);
+  color:var(--text-secondary);
+  font-size:11px;
+}
+/* Toggle sidebar btn — quiet ghost icon */
+[data-theme="tofu"] .toggle-sidebar-btn{
+  border-radius:var(--radius-xs);
+  border:1px solid transparent;
+  background:transparent;
+  transition:background 0.18s ease,border-color 0.18s ease
+}
+[data-theme="tofu"] .toggle-sidebar-btn:hover{
+  transform:none;
+  background:var(--bg-hover);
+  border-color:var(--border);
+  box-shadow:none
+}
+
+/* ── Sidebar header: editorial masthead ── */
+[data-theme="tofu"] .sidebar-header{
+  border-bottom:1px solid var(--border);
+  padding:16px 16px 12px;
+  position:relative;
+  background:transparent
+}
+[data-theme="tofu"] .sidebar-header::after{
+  content:none;
+  display:none
+}
+[data-theme="tofu"] .sidebar-header h1{
+  font-family:var(--serif-display);
+  font-size:20px;font-weight:600;letter-spacing:0;text-transform:none
+}
+/* Header action buttons — quiet ghost icons */
+[data-theme="tofu"] .sidebar-header .action-btn{
+  width:28px;height:28px;
+  border-radius:var(--radius-xs);
+  border:1px solid transparent;
+  background:transparent;
+  box-shadow:none;
+  transition:background 0.18s ease,border-color 0.18s ease
+}
+[data-theme="tofu"] .sidebar-header .action-btn:hover{
+  transform:none;
+  background:var(--bg-hover);
+  border-color:var(--border);
+  box-shadow:none
+}
+[data-theme="tofu"] .sidebar-header .action-btn:active{
+  transform:none;
+  background:var(--bg-active);
+  box-shadow:none
+}
+/* ── TOFU wordmark — 软豆腐抖动(侧栏与欢迎页共用);--brand-tilt 让每个字母回弹到自己的静置倾角 ── */
+@keyframes tofuWobble{
+  0%,100%{transform:rotate(var(--brand-tilt,0deg)) translateY(0) scale(1,1)}
+  28%{transform:rotate(calc(var(--brand-tilt,0deg) - 1.6deg)) translateY(-1.5px) scale(1.03,.94)}
+  58%{transform:rotate(calc(var(--brand-tilt,0deg) + 1.1deg)) translateY(.5px) scale(.97,1.04)}
+  82%{transform:rotate(calc(var(--brand-tilt,0deg) - .5deg)) translateY(0) scale(1.01,.99)}
+}
+@media (prefers-reduced-motion:reduce){
+  [data-theme="tofu"] .sidebar-header h1:hover .sidebar-brand>span,
+  [data-theme="tofu"] .tofu-brand:hover>span{animation:none}
+}
+
+
+/* ══ TOFU wordmark — SINGLE SOURCE OF LETTERFORM ══════════════════════════
+   侧栏(18px)与欢迎屏(42px)是同一个字标的两个字号,不是两个设计。字身字体、
+   字重、字距、色彩四项在此一次性供给,两处共同消费;各自的 block 只允许再声明
+   字号与自己的悬停编排。这条合并规则就是「两处不再漂移」的机制本身——
+   2026-07-29 之前它们各写一套,结果侧栏停在旧工艺(::after 渐变方块 o)、欢迎屏
+   已走 owner 方案 A(真字母 o),同一品牌出现两套字标。守卫:
+   tests/test_brand_wordmark_parity.py 钉死「两处解析出的字形/色/字距必须相等」。
+   色彩纪律:字身走 --brand-ink(深陶土),比墨黑暖一度、与吉祥物奶油-琥珀同族;
+   不用主题 accent #C1794B(会与链接/按钮撞色,显不出品牌)。 */
+[data-theme="tofu"] .sidebar-header h1 .sidebar-brand,
+[data-theme="tofu"] .welcome h2.tofu-brand{
+  font-family:var(--sans-body);
+  font-weight:800;
+  letter-spacing:-0.03em;
+  text-transform:none
+}
+[data-theme="tofu"] .sidebar-header h1 .sidebar-brand>span,
+[data-theme="tofu"] .welcome h2.tofu-brand>span{
+  display:inline-block;
+  background:none;background-image:none;
+  color:var(--brand-ink);-webkit-text-fill-color:currentColor;
+  transform:rotate(var(--brand-tilt,0deg));
+  transform-origin:50% 88%
+}
+/* 2026-07-28 owner 拍板方案 A:字标里不放扁平方块 o——欢迎屏上方已有具象立方体
+   吉祥物,再放一只是重复元素打架;o 是真字母,可选中可复制。此处显式清掉旧工艺的
+   ::after,让任何遗留/复制来的方块 o 规则都无法复活。 */
+[data-theme="tofu"] .sidebar-header h1 .sidebar-brand>span::after,
+[data-theme="tofu"] .welcome h2.tofu-brand>span::after{content:none}
+/* ── Sidebar wordmark — 与欢迎屏 .tofu-brand 同一字标,只差字号(18px vs 42px)。
+   2026-07-29:侧栏此前停留在旧工艺(o 由 ::after 渐变方块接管、字距 -0.01em),而欢迎屏
+   已按 owner 2026-07-28 方案 A 改为真字母 o + 字距 -0.03em ⇒ 同一品牌两套字标。
+   方案 A 的理由在两处同样成立(画面里已有具象立方体吉祥物,字标里再放一只扁平方块是
+   重复元素打架),故此处补齐漏改面而非另立设计。字身/字距/色彩三项由下方
+   `.sidebar-brand-*, .tofu-brand-*` 合并规则单一供给,禁止在此重复声明。 ── */
+[data-theme="tofu"] .sidebar-header h1{font-family:var(--sans-body);font-size:18px;font-weight:800}
+[data-theme="tofu"] .sidebar-header h1:hover .sidebar-brand-t{animation:tofuWobble .6s cubic-bezier(.34,1.56,.64,1)}
+[data-theme="tofu"] .sidebar-header h1:hover .sidebar-brand-o{animation:tofuWobble .6s cubic-bezier(.34,1.56,.64,1);animation-delay:.06s}
+[data-theme="tofu"] .sidebar-header h1:hover .sidebar-brand-f{animation:tofuWobble .6s cubic-bezier(.34,1.56,.64,1);animation-delay:.12s}
+[data-theme="tofu"] .sidebar-header h1:hover .sidebar-brand-u{animation:tofuWobble .6s cubic-bezier(.34,1.56,.64,1);animation-delay:.18s}
+/* 吉祥物的 opacity / hover 编排 / image-rendering 已移入基础层的
+   「TOFU BRAND LOCKUP」块 —— 与字标同源,三主题共用。此处不得再声明。 */
+
+/* ── Conversation items: quiet rows ── */
+[data-theme="tofu"] .conv-item{
+  border-radius:var(--radius-xs);
+  border:1px solid transparent;
+  margin:1px 8px;
+  padding:8px 10px;
+  position:relative;
+  transition:background 0.18s ease,border-color 0.18s ease
+}
+/* Hover — gentle wash */
+[data-theme="tofu"] .conv-item:hover{
+  background:var(--bg-hover);
+  border-color:transparent;
+  box-shadow:none
+}
+/* Active — quiet selected row with a slim accent edge */
+[data-theme="tofu"] .conv-item.active{
+  background:var(--accent-subtle);
+  border:1px solid transparent;
+  border-left:2px solid var(--accent);
+  box-shadow:none
+}
+/* (retired) pixel cursor indicator */
+[data-theme="tofu"] .conv-item.active::before{
+  content:none;
+  display:none
+}
+[data-theme="tofu"] .conv-item .conv-title{
+  font-size:13.5px;font-weight:500;letter-spacing:0.01em;
+  color:var(--text-primary)
+}
+/* Date line — quiet sans timestamp */
+[data-theme="tofu"] .conv-item .conv-date{
+  margin-top:2px
+}
+[data-theme="tofu"] .conv-item .conv-date-text{
+  font-family:var(--sans-body);
+  font-size:11px;
+  font-weight:450;
+  color:var(--text-tertiary);
+  letter-spacing:0
+}
+[data-theme="tofu"] .conv-item .conv-date-time{
+  font-family:var(--sans-body);
+  font-size:10.5px;
+  color:var(--text-tertiary);
+  letter-spacing:0
+}
+[data-theme="tofu"] .conv-item .conv-date-sep{
+  color:var(--text-tertiary);
+  font-size:9px
+}
+/* Status tags — quiet badges */
+[data-theme="tofu"] .conv-status-tag{
+  font-family:var(--sans-body);
+  font-size:9px;
+  font-weight:600;
+  border-radius:999px;
+  letter-spacing:0.02em;
+  text-transform:uppercase;
+  padding:1px 6px
+}
+/* Snippet in search */
+[data-theme="tofu"] .conv-item-snippet{
+  font-family:var(--sans-body);
+  font-size:11px;
+  color:var(--text-secondary);
+  opacity:0.9
+}
+/* Feishu badge — pixel tag */
+[data-theme="tofu"] .conv-feishu-badge{
+  font-family:var(--sans-body);
+  font-size:8px;
+  font-weight:700;
+  letter-spacing:0.04em;
+  background:rgba(51,144,236,0.1);
+  color:#4A90C8;
+  padding:1px 4px;
+  border-radius:2px;
+  border:1px solid rgba(51,144,236,0.15);
+  filter:none
+}
+/* Pinned zone removed — replaced by folders */
+
+/* ══════════════════════════════════════════════════════
+   🕹️ PIXEL ART SYSTEM — identity through BORDER + FONT
+   SNES-style 3D borders: light top-left, dark bottom-right.
+   JetBrains Mono for cute monospace text in buttons/toggles.
+   Pixel identity = square corners (4px radius) +
+   directional borders + bottom drop shadow + press-down :active.
+
+   Technique: 2px border with per-side colors (FFFCF6 top/left,
+   A89878 bottom/right) + 0 2px 0 drop-shadow.
+   Font: JetBrains Mono 600 for crisp, dark (#5C4A33) text.
+   ══════════════════════════════════════════════════════ */
+
+/* ── New Chat — buttered-toast primary button ──
+   A golden toast-crust gradient (linear) topped by a soft melting-butter
+   sheen (radial highlight) — the Jon Kantner stacked-gradient skeuomorphic
+   recipe. Puffy "bread" depth via an inset top butter-rim + a warm baked
+   bottom crust shadow. Drop shadow stays in tofu's neutral warm-charcoal
+   clay vocabulary (rgba(92,72,44,…) — NO accent glow; guarded by
+   tests/test_frontend_new_chat_btn_style.py, which also rewrites the
+   rgba(92,72,44,0.10) token, so keep it present). */
+[data-theme="tofu"] .new-chat-btn{
+  background:
+    radial-gradient(58% 48% at 22% 32%,rgba(165,100,38,0.16) 0%,transparent 62%),
+    radial-gradient(52% 46% at 78% 66%,rgba(165,100,38,0.13) 0%,transparent 60%),
+    radial-gradient(42% 60% at 90% 22%,rgba(175,105,42,0.11) 0%,transparent 56%),
+    radial-gradient(100% 130% at 50% -8%,rgba(255,246,222,0.28) 0%,rgba(255,246,222,0) 46%),
+    linear-gradient(180deg,#E6C486 0%,#D8B168 56%,#CA9F52 100%);
+  color:#5A3A16;
+  border:1px solid rgba(150,100,45,0.34);
+  border-radius:12px;
+  box-shadow:0 1px 2px rgba(92,72,44,0.08),0 4px 12px rgba(92,72,44,0.10),inset 0 1px 0 rgba(255,248,228,0.34),inset 0 -3px 4px rgba(150,95,40,0.20);
+  font-family:var(--sans-body);
+  font-size:13px;font-weight:600;letter-spacing:0.01em;line-height:1;
+  text-transform:none;
+  text-shadow:0 1px 0 rgba(255,250,232,0.45);
+  padding:10px 16px;
+  margin:0;
+  width:auto;
+  position:relative;
+  clip-path:none;
+  image-rendering:auto;
+  transition:background 0.18s ease,box-shadow 0.18s ease,transform 0.15s cubic-bezier(.34,1.56,.64,1)
+}
+[data-theme="tofu"] .new-chat-btn:hover{
+  background:
+    radial-gradient(58% 48% at 22% 32%,rgba(165,100,38,0.14) 0%,transparent 62%),
+    radial-gradient(52% 46% at 78% 66%,rgba(165,100,38,0.11) 0%,transparent 60%),
+    radial-gradient(100% 130% at 50% -8%,rgba(255,248,226,0.34) 0%,rgba(255,248,226,0) 46%),
+    linear-gradient(180deg,#EFCA8C 0%,#E2BA6F 56%,#D3A85A 100%);
+  color:#4E3213;
+  box-shadow:0 2px 4px rgba(92,72,44,0.12),0 7px 18px rgba(92,72,44,0.16),inset 0 1px 0 rgba(255,250,232,0.42),inset 0 -3px 4px rgba(150,95,40,0.22);
+  transform:translateY(-1px)
+}
+[data-theme="tofu"] .new-chat-btn:active{
+  transform:translateY(0);
+  box-shadow:var(--clay-pressed),inset 0 2px 4px rgba(150,95,40,0.35);
+  background:linear-gradient(180deg,#D29A4A 0%,#BC833B 100%)
+}
+[data-theme="tofu"] .new-chat-btn svg{
+  transition:transform 0.2s ease;
+  width:13px;height:13px;
+  stroke-width:2.2;
+  filter:none
+}
+[data-theme="tofu"] .new-chat-btn:hover svg{
+  transform:rotate(90deg)
+}
+/* Toasted-bread grain: an organic fractal-noise texture (inline SVG
+   feTurbulence), multiply-blended low so it reads as a fine baked grain,
+   NOT a mechanical dot grid. Sits above the crust, below the label. */
+[data-theme="tofu"] .new-chat-btn::before{
+  content:"";
+  position:absolute;
+  inset:1px;
+  border-radius:inherit;
+  pointer-events:none;
+  z-index:0;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='52'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size:120px 52px;
+  mix-blend-mode:multiply;
+  opacity:0.30
+}
+/* Toasted corners: a soft warm vignette so the edges look more baked. */
+[data-theme="tofu"] .new-chat-btn::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  border-radius:inherit;
+  pointer-events:none;
+  z-index:0;
+  background:radial-gradient(120% 135% at 50% 42%,transparent 62%,rgba(140,80,30,0.14) 100%);
+  mix-blend-mode:multiply
+}
+[data-theme="tofu"] .new-chat-btn > *{position:relative;z-index:1}
+[data-theme="tofu"] .new-chat-btn:hover::before{opacity:0.24}
+
+/* ── Tofu theme: sidebar action row ── */
+[data-theme="tofu"] .sidebar-action-row{padding:10px 10px 6px}
+[data-theme="tofu"] .folder-dialog{background:#FDF8F3;border-color:#E8D5C0}
+[data-theme="tofu"] .folder-dialog-input{background:#FFF9F4;border-color:#D4B896;color:#5C4A38}
+[data-theme="tofu"] .folder-dialog-input:focus{border-color:#C4956A}
+[data-theme="tofu"] .folder-dialog-cancel{background:#F0E3D5;border-color:#D4B896;color:#8A7458}
+[data-theme="tofu"] .folder-dialog-ok{background:linear-gradient(180deg,#C4956A 0%,#A67B55 100%)}
+[data-theme="tofu"] .conv-rename-card{background:#FDF8F3;border-color:#E8D5C0}
+[data-theme="tofu"] .conv-rename-input{background:#FFF9F4;border-color:#D4B896;color:#5C4A38}
+[data-theme="tofu"] .conv-rename-input:focus{border-color:#C4956A}
+[data-theme="tofu"] .conv-rename-btn.cancel{background:#F0E3D5;border-color:#D4B896;color:#8A7458}
+[data-theme="tofu"] .conv-rename-btn.ok{background:linear-gradient(180deg,#C4956A 0%,#A67B55 100%)}
+
+/* ── Tofu theme: project rail ── */
+[data-theme="tofu"] .project-rail{background:linear-gradient(180deg,#EAE6DC 0%,#E4E0D5 100%);border-right:2px solid #C2BCA4}
+[data-theme="tofu"] .project-rail-title{color:#A89878}
+[data-theme="tofu"] .project-rail-collapse{color:#B8A090}
+[data-theme="tofu"] .project-rail-collapse:hover{color:#A67B55;background:rgba(196,149,106,0.12)}
+[data-theme="tofu"] .folder-tab{color:#8A7458;font-size:12px}
+[data-theme="tofu"] .folder-tab:hover{background:rgba(196,149,106,0.12);color:#5C4A38}
+[data-theme="tofu"] .folder-tab.active{background:rgba(196,149,106,0.18);color:#A67B55}
+[data-theme="tofu"] .folder-tab.active::before{background:#C4956A}
+[data-theme="tofu"] .folder-tab-count{background:rgba(196,149,106,0.18);color:#8A7458}
+[data-theme="tofu"] .folder-tab.active .folder-tab-count{background:#C4956A;color:#FFF9F4}
+[data-theme="tofu"] .folder-tab-inbox-dot,[data-theme="tofu"] .folder-tab-add-dot{color:#B8A090}
+[data-theme="tofu"] .folder-tab.active .folder-tab-inbox-dot{color:#A67B55}
+[data-theme="tofu"] .folder-tab-add{color:#B8A090}
+[data-theme="tofu"] .folder-tab-add:hover{color:#A67B55;background:rgba(196,149,106,0.12)}
+[data-theme="tofu"] .folder-quickadd{color:#B8A090;border-color:#E8D5C0}
+[data-theme="tofu"] .folder-quickadd:hover{color:#A67B55;border-color:#C4956A;background:rgba(196,149,106,0.1)}
+[data-theme="tofu"] .folder-tab-menu{background:#FDF8F3;border-color:#E8D5C0}
+[data-theme="tofu"] .folder-tab-menu-item{color:#5C4A38}
+[data-theme="tofu"] .folder-tab-menu-item:hover{background:rgba(196,149,106,0.1)}
+[data-theme="tofu"] .folder-tab-menu-delete:hover{color:#D4544A;background:rgba(212,84,74,0.08)}
+
+[data-theme="tofu"] .folder-tab-dot.streaming{animation:tofuBreathing 2.2s cubic-bezier(0.45,0.05,0.55,0.95) infinite}
+
+/* ── Message avatar — clean, no frame, 40×40 ── */
+[data-theme="tofu"] .message-avatar img,[data-theme="tofu"] .message-avatar svg{filter:none}
+[data-theme="tofu"] .message.user-msg .message-avatar{
+  background:transparent;
+  color:#8A7458;
+  border-radius:var(--radius-sm);
+  border:none;
+  box-shadow:none;
+  width:40px;
+  height:40px
+}
+[data-theme="tofu"] .message:not(.user-msg) .message-avatar{
+  background:transparent;
+  border-radius:var(--radius-sm);
+  border:none;
+  box-shadow:none;
+  width:40px;
+  height:40px
+}
+[data-theme="tofu"] .avatar.assistant{
+  background:transparent;
+  color:#A67B52;
+  border-radius:var(--radius-sm)}
+[data-theme="tofu"] .model-badge{
+  background:linear-gradient(180deg, #F8F6F0 0%, #F1EEE6 100%);
+  color:#6B5A40;
+  border-radius:4px;
+  font-family:var(--sans-body);
+  border:1.5px solid rgba(168,152,120,0.4);
+  border-top-color:rgba(255,252,246,0.7);
+  border-left-color:rgba(255,252,246,0.7);
+  border-right-color:rgba(168,152,120,0.45);
+  border-bottom-color:rgba(168,152,120,0.45);
+  box-shadow:0 1px 0 rgba(154,144,122,0.2);
+  font-size:10px;
+  font-weight:700;
+  padding:3px 8px;
+  letter-spacing:0.02em
+}
+
+/* ══════════════════════════════════════════════════════
+   🕹️ Topbar feature launchers (Paper / My Day / Trading) +
+   update btn — previously UNSTYLED in tofu, so they rendered as
+   flat ghost buttons clashing with the beveled pixel buttons in
+   the sidebar. Bring them into the same SNES-bevel language:
+   warm parchment fill, light top-left / dark bottom-right border,
+   JetBrains Mono label, steps() press-down. Active = kinako fill.
+   ══════════════════════════════════════════════════════ */
+[data-theme="tofu"] .topbar-tool-btn,
+[data-theme="tofu"] .update-btn{
+  height:28px;
+  border-radius:4px;
+  border:1.5px solid rgba(194,188,164,0.5);
+  border-top-color:rgba(255,252,246,0.6);
+  border-left-color:rgba(255,252,246,0.6);
+  border-right-color:rgba(168,152,120,0.4);
+  border-bottom-color:rgba(168,152,120,0.4);
+  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
+  box-shadow:0 1px 0 rgba(154,144,122,0.25);
+  color:#7C6A4E;
+  font-family:var(--sans-body);
+  font-size:11px;
+  font-weight:600;
+  letter-spacing:0.02em;
+  transition:transform 0.08s ease,box-shadow 0.08s ease,color 0.12s,background 0.12s
+}
+[data-theme="tofu"] .topbar-tool-btn:hover,
+[data-theme="tofu"] .update-btn:hover{
+  color:#5C4A33;
+  background:linear-gradient(180deg, rgba(250,247,240,0.85) 0%, rgba(240,237,228,0.85) 100%);
+  border-right-color:rgba(168,152,120,0.55);
+  border-bottom-color:rgba(168,152,120,0.55);
+  transform:translateY(-1px);
+  box-shadow:0 2px 0 rgba(154,144,122,0.25)
+}
+[data-theme="tofu"] .topbar-tool-btn:active,
+[data-theme="tofu"] .update-btn:active{
+  transform:translateY(1px);
+  box-shadow:none
+}
+/* Active launcher (e.g. Paper mode on) — bright kinako selected slot */
+[data-theme="tofu"] .topbar-tool-btn.active{
+  color:#FFF8F0;
+  background:linear-gradient(180deg, #C4956A 0%, #B8895E 100%);
+  border-color:#C4956A;
+  border-top-color:#DEB890;
+  border-left-color:#DEB890;
+  border-right-color:#8A6840;
+  border-bottom-color:#8A6840;
+  text-shadow:0 1px 1px rgba(74,50,20,0.3);
+  box-shadow:0 1px 0 #7A5830
+}
+[data-theme="tofu"] .topbar-tool-btn.active:hover{
+  background:linear-gradient(180deg, #D4A57A 0%, #C8996E 100%);
+  transform:translateY(-1px);
+  box-shadow:0 2px 0 #7A5830
+}
+[data-theme="tofu"] .topbar-tool-btn svg,
+[data-theme="tofu"] .update-btn svg{stroke-width:2.2}
+/* Latency badge — mirror the kinako tool-button shell in the tofu theme. */
+[data-theme="tofu"] .net-latency-badge{
+  height:28px;
+  border-radius:4px;
+  border:1.5px solid rgba(194,188,164,0.5);
+  border-top-color:rgba(255,252,246,0.6);
+  border-left-color:rgba(255,252,246,0.6);
+  border-right-color:rgba(168,152,120,0.4);
+  border-bottom-color:rgba(168,152,120,0.4);
+  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
+  box-shadow:0 1px 0 rgba(154,144,122,0.25);
+  color:#7C6A4E;
+  font-family:var(--sans-body);
+  font-size:11px;
+  font-weight:600;
+  letter-spacing:0.02em
+}
+[data-theme="tofu"] .net-latency-badge:hover{
+  color:#5C4A33;
+  background:linear-gradient(180deg, rgba(250,247,240,0.85) 0%, rgba(240,237,228,0.85) 100%);
+  border-right-color:rgba(168,152,120,0.55);
+  border-bottom-color:rgba(168,152,120,0.55)
+}
+[data-theme="tofu"] .net-latency-badge .net-ms{color:#9A8A6E}
+
+/* ══════════════════════════════════════════════════════
+   🕹️ Send btn — pixel art primary action button
+   Warm kinako fill, NES 3D shadow, press-down on click
+   ══════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════
+   🕹️ Send btn — SNES bordered square (NO clip-path!)
+   Clean 2px border with light top-left / dark bottom-right
+   ══════════════════════════════════════════════════════ */
+[data-theme="tofu"] .send-btn{
+  background:var(--accent);
+  color:#FFFCF6;
+  border:1px solid transparent;
+  border-radius:var(--radius-sm);
+  font-weight:600;
+  position:relative;overflow:visible;
+  box-shadow:var(--clay-sm);
+  clip-path:none;
+  image-rendering:auto;
+  transition:background 0.18s ease,box-shadow 0.18s ease
+}
+[data-theme="tofu"] .send-btn:hover{
+  background:var(--accent-hover);
+  box-shadow:var(--clay-md);
+  transform:none
+}
+[data-theme="tofu"] .send-btn:active{
+  transform:none;
+  box-shadow:var(--clay-pressed);
+  background:var(--accent-hover)
+}
+/* Icon — slight nudge on hover */
+[data-theme="tofu"] .send-btn svg{
+  transition:transform 0.12s ease
+}
+[data-theme="tofu"] .send-btn:hover svg{
+  transform:translate(1px,-1px)
+}
+/* Disabled state — muted */
+[data-theme="tofu"] .send-btn:disabled{
+  background:var(--bg-active);
+  color:var(--text-tertiary);
+  border:1px solid var(--border);
+  box-shadow:none;
+  opacity:0.5
+}
+[data-theme="tofu"] .send-btn:disabled::before,
+[data-theme="tofu"] .send-btn:disabled::after{display:none}
+
+/* Attach button — quiet ghost icon */
+[data-theme="tofu"] .attach-btn{
+  color:var(--text-secondary);
+  border:none;
+  border-radius:var(--radius-xs)
+}
+[data-theme="tofu"] .attach-btn:hover{
+  color:var(--text-primary);
+  background:var(--bg-hover)
+}
+[data-theme="tofu"] .attach-btn:active{
+  transform:scale(.94)
+}
+/* Stop btn — calm solid, gentle pulse */
+[data-theme="tofu"] .send-btn.stop-btn{
+  background:var(--error-text);
+  border:1px solid transparent;
+  box-shadow:var(--clay-sm);
+  animation:tofuPixelPulse 1.8s ease-in-out infinite
+}
+[data-theme="tofu"] .send-btn.stop-btn:hover{
+  background:#9E4E3E;
+  box-shadow:var(--clay-md)
+}
+[data-theme="tofu"] .send-btn.stop-btn:active{
+  transform:none;
+  box-shadow:var(--clay-pressed);
+  animation:none
+}
+/* Gentle pulse for stop */
+@keyframes tofuPixelPulse{
+  0%,100%{opacity:1}
+  50%{opacity:0.82}
+}
+
+/* ══════════════════════════════════════════════════════
+   🕹️ Action buttons — rounded icon buttons
+   ══════════════════════════════════════════════════════ */
+/* ── Action buttons — pixel icon buttons with 3D frame ── */
+[data-theme="tofu"] .action-btn{
+  border-radius:4px;
+  border:1.5px solid rgba(194,188,164,0.4);
+  border-top-color:rgba(255,252,246,0.6);
+  border-left-color:rgba(255,252,246,0.6);
+  border-right-color:rgba(168,152,120,0.4);
+  border-bottom-color:rgba(168,152,120,0.4);
+  background:linear-gradient(180deg, rgba(245,242,234,0.5) 0%, rgba(235,232,222,0.5) 100%);
+  color:#6B5A40;
+  box-shadow:0 1px 0 rgba(154,144,122,0.3);
+  clip-path:none;
+  transition:color 0.15s,background 0.15s,transform 0.08s ease,box-shadow 0.08s ease
+}
+[data-theme="tofu"] .action-btn:hover{
+  background:linear-gradient(180deg, rgba(251,248,240,0.7) 0%, rgba(242,239,229,0.7) 100%);
+  color:#4A3820;
+  box-shadow:0 2px 0 rgba(154,144,122,0.3), 0 2px 6px rgba(74,63,47,0.06);
+  transform:translateY(-1px)
+}
+[data-theme="tofu"] .action-btn:active{
+  transform:translateY(1px);
+  box-shadow:0 0 0 rgba(154,144,122,0.3);
+  background:linear-gradient(180deg, rgba(232,229,219,0.7) 0%, rgba(226,223,212,0.7) 100%)
+}
+[data-theme="tofu"] .action-btn.active{
+  color:#8E6B48;
+  background:rgba(196,149,106,0.14);
+  border-color:rgba(196,149,106,0.35);
+  box-shadow:inset 0 1px 2px rgba(0,0,0,0.06)
+}
+[data-theme="tofu"] .conv-streaming-dot{
+  background:#BB9572;
+  border-radius:50%;
+  width:7px;height:7px;
+  box-shadow:0 0 6px rgba(187,149,114,0.4);
+  animation:tofuBreathing 2.2s cubic-bezier(0.45,0.05,0.55,0.95) infinite;
+  will-change:transform,opacity
+}
+[data-theme="tofu"] .conv-translating-dot{
+  border-radius:50%;
+  width:7px;height:7px;
+  box-shadow:0 0 5px rgba(20,184,166,0.35);
+  animation:tofuBreathing 1.8s cubic-bezier(0.45,0.05,0.55,0.95) infinite;
+  will-change:transform,opacity
+}
+[data-theme="tofu"] .conv-memprefetch-dot{
+  border-radius:50%;
+  width:7px;height:7px;
+  box-shadow:0 0 5px rgba(234,179,8,0.35);
+  animation:tofuBreathing 1.8s cubic-bezier(0.45,0.05,0.55,0.95) infinite;
+  will-change:transform,opacity
+}
+[data-theme="tofu"] .conv-awaiting-human-dot{
+  border-radius:50%;
+  width:8px;height:8px;
+  box-shadow:0 0 6px rgba(245,158,11,0.4);
+  animation:tofuBreathingAmber 1.5s cubic-bezier(0.45,0.05,0.55,0.95) infinite;
+  will-change:transform,opacity
+}
+[data-theme="tofu"] .conv-error-dot{
+  border-radius:50%;
+  width:8px;height:8px;
+  box-shadow:0 0 6px rgba(239,68,68,0.45)
+}
+[data-theme="tofu"] .conv-incomplete-dot{
+  border-radius:50%;
+  width:8px;height:8px;
+  box-shadow:0 0 6px rgba(245,158,11,0.45)
+}
+[data-theme="tofu"] .conv-streaming-dot.conv-ratelimit-dot{
+  background:#eab308;
+  box-shadow:0 0 5px rgba(234,179,8,0.35)
+}
+
+/* ── Welcome screen — pixel tofu block ── */
+[data-theme="tofu"] .welcome-icon{
+  /* 尺度(100px / margin-bottom:24px / 倒角 / overflow)已上提到基础层 BRAND-AREA SCALE
+     三主题共用;此处只留 tofu 自己的口音。position:relative 同样在基础层。 */
+  background:transparent;
+  border:none;
+  box-shadow:none
+}
+[data-theme="tofu"] .welcome-icon:hover{
+  box-shadow:none
+}
+/* Tofu mascot image */
+[data-theme="tofu"] .welcome-icon img{
+  width:100%;height:100%;object-fit:contain;border-radius:var(--radius-sm);
+  transition:transform .3s cubic-bezier(0.34,1.56,0.64,1);
+  filter:drop-shadow(0 2px 3px rgba(140,120,80,0.12))
+}
+[data-theme="tofu"] .welcome-icon:hover img{transform:scale(1.06) rotate(-3deg)}
+/* Legacy SVG fallback */
+/* (retired) steam puffs — ::after stays retired; ::before is now the ground
+   shadow (see the brand-area block below), so it must NOT be blanked here. */
+[data-theme="tofu"] .welcome-icon::after{content:none;display:none}
+
+/* ── Welcome text ── */
+[data-theme="tofu"] .welcome h2{
+  /* font-size 已上提到基础层 `.welcome h2.tofu-brand{42px}`(三主题共用);
+     此处只留 tofu 的颜色与字身口音。 */
+  color:var(--text-primary);background:none;
+  -webkit-text-fill-color:var(--text-primary);
+  font-family:var(--sans-body);
+  font-weight:800;letter-spacing:-0.03em;text-transform:none
+}
+/* 非品牌的说明小字。必须排除 .tofu-brand —— 它与基础层的印章规则同为 (0,2,2)
+   且位置在后,不排除就会把印面字拉回 Jakarta 500/13px(实测如此)。 */
+[data-theme="tofu"] .welcome h2:not(.tofu-brand) small{
+  -webkit-text-fill-color:#9C9178;
+  font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;
+  letter-spacing:.12em;font-weight:500;font-size:13px
+}
+[data-theme="tofu"] .welcome p{
+  color:#736750;
+  font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;
+  font-size:15px;line-height:1.65
+}
+
+/* ── Feature pills — quiet token chips ── */
+[data-theme="tofu"] .feature-pill{
+  border-radius:999px;
+  background:var(--bg-tertiary);
+  border:1px solid var(--border);
+  color:var(--text-secondary);
+  font-family:var(--sans-body);
+  font-size:11.5px;font-weight:500;letter-spacing:0;
+  text-transform:none;
+  box-shadow:none;
+  transition:background 0.18s ease,color 0.18s ease,border-color 0.18s ease
+}
+[data-theme="tofu"] .feature-pill:hover{
+  background:var(--bg-hover);
+  color:var(--text-primary);
+  transform:none;
+  box-shadow:none;
+  border-color:var(--accent-subtle)
+}
+
+/* ── TOFU brand wordmark(欢迎屏 42px 面)— 字身字体/字重/字距/色彩/字母倾角全部由
+   上方 `.sidebar-brand, .tofu-brand` 合并规则供给(单一字形真源);此处只声明这一面
+   独有的东西:横向编排(inline-flex + baseline)、外边距、悬停波浪的时序。
+   禁止在此重复声明 font-family / font-weight / letter-spacing / color —— 那正是
+   2026-07-29 之前侧栏与欢迎屏漂移成两套字标的原因。 ── */
+[data-theme="tofu"] .tofu-brand{
+  /* font-size 由上方 [data-theme="tofu"] .welcome h2(42px,特异性 0,2,1)决定,此处不再重复声明 */
+  display:inline-flex;align-items:baseline;margin-bottom:10px;cursor:default
+}
+[data-theme="tofu"] .tofu-brand:hover .tofu-brand-t{animation:tofuWobble .72s cubic-bezier(.34,1.56,.64,1)}
+[data-theme="tofu"] .tofu-brand:hover .tofu-brand-o1{animation:tofuWobble .72s cubic-bezier(.34,1.56,.64,1);animation-delay:.07s}
+[data-theme="tofu"] .tofu-brand:hover .tofu-brand-f{animation:tofuWobble .72s cubic-bezier(.34,1.56,.64,1);animation-delay:.14s}
+[data-theme="tofu"] .tofu-brand:hover .tofu-brand-u{animation:tofuWobble .72s cubic-bezier(.34,1.56,.64,1);animation-delay:.21s}
+/* ── 品牌落款印 ——「豆腐」从飘在右侧的稀疏小字(letter-spacing .34em、opacity .9,
+   在 42px 主标旁读作漏排的说明文字)改为一枚微斜陶土印章:中文渊源与「奶油纸底 +
+   编辑气质」的主题一致,且给品牌区第二个视觉落点,不必新增任何图形资产。
+   三个数字是实拍定的,不是估的(static/icons/_gen/wordmark-preview/a3.png):
+   ① font-size 用 clamp 而非纯 em —— 纯 .30em 在移动 20px 主标下只有 6px,中文两字
+      糊成一团;纯 px(12.5)反过来在 20px 主标旁几乎与主标同高、比例失衡。
+      clamp(10.5px, .30em, 13px) 两端都实拍过:桌面取 12.6px、移动取 10.5px 下限。
+   ② padding 左右不等(.64em 左 / .50em 右)—— letter-spacing 会在末字「腐」后
+      多留一份字距,左右等距会看起来右边更空。
+   ③ margin-left .52em —— .36em 实拍贴住了 u 的右侧。
+   几何全部用 em,所以随 clamp 后的字号一起缩放,只有字号本身有下限。 ── */
+/* tofu 不再为印章/落影写任何规则 —— 奶油纸底上基础层原值已达标(印面字 4.82:1、
+   印章对页底 4.78:1),再写一份同值副本就多一个会漂移的地方。只有 dark/light 真需要
+   偷换颜色,它们在下方各自一条。 */
+/* ── 品牌区的两处主题口音 —— 只允许改「印底色」与「落影浓度」,形态一律走基础层。
+   ● dark:印底色沜用基础层(实测已达标 —— 印面奶油字 4.82:1、印章对深底 3.87:1),
+     故只调落影:深底上暖棕色落影几乎不可见且会发脏,改用更淡的中性阴影。
+   ● light:白底需要更深的印底(印面字 5.28:1、印章对白底 5.60:1),落影略加深以免化开。
+   ★ 本区域的任何新增覆盖都不得再写几何/字号/倒角 —— 那正是把形态拆成三份、
+   切主题就退化的根因;守卫按三主题参数化钉死。 ── */
+[data-theme="dark"] .welcome-icon::before{
+  background:radial-gradient(ellipse at 50% 50%,rgba(255,241,214,.18),rgba(255,241,214,0) 72%)
+}
+[data-theme="light"] .welcome h2.tofu-brand small{
+  background:linear-gradient(150deg,#9A5716 0%,#7C4210 100%)
+}
+[data-theme="light"] .welcome-icon::before{
+  background:radial-gradient(ellipse at 50% 50%,rgba(120,84,40,.38),rgba(120,84,40,0) 72%)
+}
+
+/* ── Mobile breakpoints: 品牌主标恢复全局移动意图 — 42px 是桌面值(基础层 BRAND-AREA
+   SCALE 里的 .welcome h2.tofu-brand,0,2,1),全局 .welcome h2 移动规则(0,1,1)
+   specificity 不够被压死;以下三条与全局断点一一对应。新数字不发明:20/18px 即全局
+   断点原值。**不带 [data-theme] 前缀** —— 尺度同属品牌形态,三主题共用。 ── */
+@media(max-width:768px){
+  .welcome h2.tofu-brand{font-size:20px}
+}
+@media(max-width:380px){
+  .welcome h2.tofu-brand{font-size:18px}
+}
+@media(orientation:landscape) and (max-height:600px) and (max-width:900px){
+  .welcome h2.tofu-brand{font-size:18px}
+}
+
+/* ── Turn nav — a quiet pill (the beveled "pixel bar" read as a toy
+   toolbar floating over the paper; one hairline + one soft shadow is enough) ── */
+[data-theme="tofu"] .turn-nav{
+  background:rgba(250,247,240,0.96);
+  border:1px solid var(--border);
+  border-radius:999px;
+  box-shadow:var(--clay-sm);
+  backdrop-filter:none
+}
+[data-theme="tofu"] .turn-dot{border-radius:50%;transition:all 0.12s}
+[data-theme="tofu"] .turn-dot.active{
+  background:#BB9572;
+  border-color:transparent;color:#FFF8F0;
+  box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .turn-dot:hover{
+  background:rgba(196,149,106,0.1);color:#A67B52;border-color:transparent;
+  box-shadow:none
+}
+[data-theme="tofu"] .turn-dot-writes{border-color:transparent;color:#A67B52;background:rgba(196,149,106,0.06)}
+[data-theme="tofu"] .turn-dot-writes:hover{border-color:transparent;color:#A67B52;background:rgba(196,149,106,0.1);box-shadow:none}
+[data-theme="tofu"] .turn-dot-writes.active{
+  background:#BB9572;
+  color:#FFF8F0;border-color:transparent;
+  box-shadow:var(--clay-sm)}
+
+/* ── Content & overlays ── */
+[data-theme="tofu"] .md-content a{color:#5A8AA8;text-decoration:none;border-bottom:1px dashed rgba(90,138,168,0.35)}
+[data-theme="tofu"] .md-content a:hover{color:#4A7898;border-bottom-style:solid;border-bottom-color:#5A8AA8}
+[data-theme="tofu"] .md-content blockquote{
+  border:none;
+  border-left:2px solid var(--accent);
+  background:var(--accent-subtle);
+  border-radius:0 var(--radius-sm) var(--radius-sm) 0;
+  box-shadow:none;
+  padding:10px 18px 10px 18px;
+  margin:16px 0;
+  color:var(--text-secondary);
+  position:relative
+}
+/* (retired) pixel quote mark decoration */
+[data-theme="tofu"] .md-content blockquote::before{
+  content:none;
+  display:none
+}
+[data-theme="tofu"] .md-content hr{
+  border:none;
+  height:1px;
+  background:var(--border);
+  margin:26px 0
+}
+[data-theme="tofu"] .md-content code{
+  background: rgba(178,166,140,0.15);
+  border: none;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  color: #6B5D45;
+  font-size: 0.85em;
+  padding: 1px 6px;
+  box-shadow: none;
+}
+[data-theme="tofu"] .modal-overlay{background:rgba(74,63,47,0.3);backdrop-filter:none}
+[data-theme="tofu"] #previewModal{background:rgba(74,63,47,0.4)}
+
+[data-theme="tofu"] .preview-close-btn{color:#3D3022;background:rgba(61,48,34,0.15)}[data-theme="tofu"] .preview-close-btn:hover{background:rgba(61,48,34,0.3)}
+[data-theme="tofu"] .drop-overlay{background:rgba(246,243,235,0.95);backdrop-filter:none}
+/* Old conic-gradient ring hidden — replaced by box-shadow pixel glow on :focus-within */
+[data-theme="tofu"] .input-box::before{display:none !important}
+
+/* ── Sidebar pinned zone — ★ FAVORITES inventory ── */
+/* Tofu pinned zone + freeze border removed — replaced by folders */
+
+/* ── Sidebar search — pixel command terminal ── */
+[data-theme="tofu"] .sidebar-search-wrapper{
+  padding:2px 8px 6px
+}
+[data-theme="tofu"] .sidebar-search-box{
+  border-radius:3px;
+  border:2px solid #C4956A;
+  border-top-color:#A89878;
+  border-left-color:#A89878;
+  border-right-color:#E8D5B8;
+  border-bottom-color:#E8D5B8;
+  background:#EBE8DE;
+  box-shadow:
+    inset 0 1px 4px rgba(196,149,106,0.12),
+    0 0 0 2px rgba(196,149,106,0.08);
+  padding:0 8px;
+  transition:border-color 0.15s,box-shadow 0.15s,background 0.15s
+}
+[data-theme="tofu"] #sidebarSearchToggle.active{color:#A67B55;background:rgba(196,149,106,0.15)}
+[data-theme="tofu"] .sidebar-search-box .sidebar-search-input{
+  font-family:var(--sans-body);
+  font-size:11.5px;
+  font-weight:500;
+  letter-spacing:0.02em;
+  color:#4A3F2F;
+  padding:7px 6px
+}
+[data-theme="tofu"] .sidebar-search-box .sidebar-search-input::placeholder{
+  font-family:var(--sans-body);
+  color:rgba(155,148,128,0.5);
+  font-size:10.5px;
+  letter-spacing:0.04em
+}
+/* Search icon — pixel magnifier */
+[data-theme="tofu"] .sidebar-search-icon{
+  color:#A67B52;
+  opacity:0.8
+}
+[data-theme="tofu"] .sidebar-search-icon svg{
+  width:13px;height:13px;
+  stroke-width:2.5
+}
+/* Clear button — pixel X */
+[data-theme="tofu"] .sidebar-search-clear{
+  border-radius:2px;
+  transition:all 0.08s ease
+}
+[data-theme="tofu"] .sidebar-search-clear:hover{
+  background:rgba(196,149,106,0.15);
+  color:#8E6B48
+}
+[data-theme="tofu"] .sidebar-search-highlight{
+  background:rgba(196,149,106,0.35);
+  border-radius:1px;
+  padding:0 2px;
+  box-shadow:0 0 0 1px rgba(196,149,106,0.15)
+}
+/* Search stats — pixel counter */
+[data-theme="tofu"] .sidebar-search-stats{
+  font-family:var(--sans-body);
+  font-size:9px;
+  color:#A89878;
+  letter-spacing:0.04em;
+  padding:3px 4px 0
+}
+/* Search empty state */
+[data-theme="tofu"] .sidebar-search-empty{
+  font-family:var(--sans-body);
+  font-size:11px;
+  color:#A89878
+}
+[data-theme="tofu"] .sidebar-search-empty-icon{
+  font-size:24px;
+  opacity:0.4
+}
+
+/* ── Search toggle — pixel pill, consistent with toolbar items ── */
+[data-theme="tofu"] .search-mode-toggle{
+  border-radius:4px;
+  border:1.5px solid rgba(194,188,164,0.4);
+  border-top-color:rgba(255,252,246,0.6);
+  border-left-color:rgba(255,252,246,0.6);
+  border-right-color:rgba(168,152,120,0.4);
+  border-bottom-color:rgba(168,152,120,0.4);
+  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
+  /* Item 2 — true frosted glass matching the project bar's pills */
+  -webkit-backdrop-filter:blur(6px) saturate(1.05);
+  backdrop-filter:blur(6px) saturate(1.05);
+  color:#3D3022;
+  box-shadow:0 1px 0 rgba(154,144,122,0.3);
+  clip-path:none;
+  padding:4px 10px;
+  font-family:var(--sans-body);
+  font-size:11px;
+  font-weight:700;
+  letter-spacing:0.02em;
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+  transition:color 0.15s,background 0.15s,border-color 0.2s,transform 0.08s ease,box-shadow 0.08s ease;
+  animation:none !important
+}
+[data-theme="tofu"] .search-mode-toggle::before{display:none !important}
+[data-theme="tofu"] .search-mode-toggle:hover{
+  background:linear-gradient(180deg, rgba(251,248,240,0.8) 0%, rgba(242,239,229,0.8) 100%);
+  color:#2A2018;
+  transform:translateY(-1px);
+  box-shadow:0 2px 0 rgba(154,144,122,0.3), 0 2px 6px rgba(74,63,47,0.06)
+}
+[data-theme="tofu"] .search-mode-toggle:active{
+  transform:translateY(1px);
+  box-shadow:0 0 0 rgba(154,144,122,0.3)
+}
+/* Single search — subtle blue accent */
+[data-theme="tofu"] .search-mode-toggle[data-mode="single"]{
+  color:#4A7898;
+  background:rgba(90,138,168,0.06);
+  border-color:rgba(90,138,168,0.3);
+  animation:none !important
+}
+[data-theme="tofu"] .search-mode-toggle[data-mode="single"]:hover{background:rgba(90,138,168,0.12)}
+[data-theme="tofu"] .search-mode-toggle[data-mode="single"] .sm-icon{color:#4A7898;animation:none}
+[data-theme="tofu"] .search-mode-toggle[data-mode="single"] .sm-mode-pill{background:rgba(90,138,168,0.18);color:#2A5A72;border-radius:999px;font-family:var(--sans-body);font-size:10px;font-weight:600}
+/* Multi search — subtle purple accent */
+[data-theme="tofu"] .search-mode-toggle[data-mode="multi"]{
+  color:#6A5898;
+  background:rgba(138,120,176,0.06);
+  border-color:rgba(138,120,176,0.3);
+  animation:none !important
+}
+[data-theme="tofu"] .search-mode-toggle[data-mode="multi"]:hover{background:rgba(138,120,176,0.12)}
+[data-theme="tofu"] .search-mode-toggle[data-mode="multi"] .sm-icon{color:#6A5898;animation:none}
+[data-theme="tofu"] .search-mode-toggle[data-mode="multi"] .sm-mode-pill{background:rgba(138,120,176,0.18);color:#4A3870;border-radius:999px;font-family:var(--sans-body);font-size:10px;font-weight:600}
+/* Off state pill */
+[data-theme="tofu"] .search-mode-toggle[data-mode="off"] .sm-mode-pill{background:rgba(184,176,160,0.18);color:#5C5240;border-radius:999px;font-family:var(--sans-body);font-size:10px;font-weight:600}
+
+/* ── Badges — pixel chips ── */
+[data-theme="tofu"] .timer-trigger .tm-dot{background:#C4956A}
+[data-theme="tofu"] .timer-trigger .timer-count{background:#B8895E}
+[data-theme="tofu"] .search-orbit-center{background:#6A9EC0}
+
+/* ── Stream phase indicator — warm kinako capsule ── */
+[data-theme="tofu"] .stream-phase{
+  background:rgba(196,149,106,0.1);
+  border:1px solid rgba(196,149,106,0.22);
+  border-radius:4px;
+  color:#8A6240;
+  font-family:var(--sans-body);
+  font-size:10px;
+  font-weight:600
+}
+[data-theme="tofu"] .stream-phase-retrying{
+  background:rgba(180,140,60,0.1);
+  border-color:rgba(180,140,60,0.22);
+  color:#8A6A20
+}
+/* Storage-write wedge (pushWithheld) — same amber family as the stall
+ * banner: delivery is blocked on storage retries, not on the model. */
+[data-theme="tofu"] .stream-phase-wedged{
+  background:rgba(196,120,40,0.12);
+  border-color:rgba(196,120,40,0.38);
+  color:#9A5A10
+}
+[data-theme="tofu"] .stream-phase-thinking{
+  background:rgba(138,120,176,0.1);
+  border-color:rgba(138,120,176,0.22);
+  color:#6A5898
+}
+[data-theme="tofu"] .stream-phase-counter{
+  background:rgba(138,120,176,0.15);
+  color:#5A4880;
+  border-radius:8px
+}
+[data-theme="tofu"] .stream-phase-text{
+  opacity:1
+}
+[data-theme="tofu"] .stream-phase-text{
+  opacity:1
+}
+/* ── Stall-watch banner (pt_e0ea29f2) — amber, distinct from retrying:
+ *   the tool has produced NOTHING for Ns (heartbeat self-ticks only).
+ *   Announces the wedge and carries a Stop affordance; self-heals off. */
+[data-theme="tofu"] .stream-phase-stalled{
+  background:rgba(196,120,40,0.12);
+  border-color:rgba(196,120,40,0.38);
+  color:#9A5A10;
+  display:inline-flex;
+  align-items:center;
+  gap:8px
+}
+[data-theme="tofu"] .stream-stalled-stop{
+  font:inherit;
+  font-size:10.5px;
+  font-weight:600;
+  color:#9A5A10;
+  background:rgba(196,120,40,0.16);
+  border:1px solid rgba(196,120,40,0.45);
+  border-radius:8px;
+  padding:1px 10px;
+  cursor:pointer
+}
+[data-theme="tofu"] .stream-stalled-stop:hover{
+  background:rgba(196,120,40,0.28)
+}
+
+/* ── In-bubble liveness verdict, MERGED into the phase row (owner ruling
+ *   2026-08-19): the verdict replaces the phase text instead of sitting
+ *   beneath it as a second banner. Amber like the stall card; only
+ *   actionable states (reconnecting / unexplained no-update / severe)
+ *   ever mount it — an explained silence leaves the normal phase row. */
+[data-theme="tofu"] .stream-phase-liveness{
+  background:rgba(196,120,40,0.12);
+  border-color:rgba(196,120,40,0.38);
+  color:#9A5A10;
+  display:inline-flex;
+  align-items:center;
+  gap:8px
+}
+/* The old pill becomes the row's text: drop its own chrome so the merged
+ * row reads as ONE line, not a badge nested inside a banner. */
+.stream-phase-liveness .stream-liveness{
+  background:transparent;
+  padding:0;
+  color:inherit;
+  font:inherit;
+  animation:none;
+}
+
+/* ── Log clean banner — readable on ivory ── */
+[data-theme="tofu"] .log-clean-banner{
+  background:rgba(90,138,168,0.14);
+  border:2px solid rgba(90,138,168,0.35);
+  border-radius:var(--radius);
+  box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .log-clean-banner-info{color:#3A6878}
+[data-theme="tofu"] .log-clean-banner-info strong{color:#2A5868}
+[data-theme="tofu"] .log-clean-tag{
+  background:rgba(90,138,168,0.18);
+  border:1px solid rgba(90,138,168,0.35);
+  color:#3A6878;
+  border-radius:var(--radius-sm)}
+[data-theme="tofu"] .log-clean-btn{
+  background:rgba(90,138,168,0.14);
+  border:2px solid rgba(90,138,168,0.35);
+  color:#2A5868;
+  border-radius:var(--radius-sm);
+  box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .log-clean-btn:hover{
+  background:rgba(90,138,168,0.25);
+  border-color:rgba(90,138,168,0.50)
+}
+[data-theme="tofu"] .log-clean-btn.apply{
+  background:rgba(90,138,168,0.20);
+  border-color:rgba(90,138,168,0.45);
+  color:#1A4858
+}
+[data-theme="tofu"] .log-clean-btn.apply:hover{
+  background:rgba(90,138,168,0.30)
+}
+[data-theme="tofu"] .log-clean-btn.ai-compress{
+  background:rgba(138,120,176,0.18);
+  border-color:rgba(138,120,176,0.40);
+  color:#5A4880
+}
+[data-theme="tofu"] .log-clean-btn.ai-compress:hover{
+  background:rgba(138,120,176,0.28)
+}
+[data-theme="tofu"] .log-clean-btn.dismiss{
+  background:transparent;
+  border-color:transparent;
+  color:#8A7A68;
+  box-shadow:none
+}
+[data-theme="tofu"] .log-clean-btn.dismiss:hover{
+  color:#5A4A38;
+  background:rgba(196,149,106,0.12)
+}
+
+/* ── Search/fetch result blocks — card style ── */
+[data-theme="tofu"] .search-result-title{color:#5A8AA8}
+[data-theme="tofu"] .search-result-title a{color:#5A8AA8}
+[data-theme="tofu"] .search-result-title a:hover{color:#4A7898}
+
+/* ── Code syntax — warm woodland palette ── */
+[data-theme="tofu"] .hljs{color:#4A4233;background:#E9E5DC}
+[data-theme="tofu"] .hljs-keyword,[data-theme="tofu"] .hljs-type,[data-theme="tofu"] .hljs-variable.language_{color:#A8607A}
+[data-theme="tofu"] .hljs-title,[data-theme="tofu"] .hljs-title.class_,[data-theme="tofu"] .hljs-title.function_{color:#6A7EAA}
+[data-theme="tofu"] .hljs-string,[data-theme="tofu"] .hljs-regexp{color:#6A8A5E}
+[data-theme="tofu"] .hljs-number,[data-theme="tofu"] .hljs-literal{color:#B8884A}
+[data-theme="tofu"] .hljs-attr,[data-theme="tofu"] .hljs-attribute{color:#5A8AA8}
+[data-theme="tofu"] .hljs-built_in,[data-theme="tofu"] .hljs-symbol{color:#AA8A50}
+[data-theme="tofu"] .hljs-comment{color:#9C9178}
+[data-theme="tofu"] .hljs-name,[data-theme="tofu"] .hljs-selector-tag{color:#A8607A}
+[data-theme="tofu"] .hljs-meta{color:#8A78B0}
+[data-theme="tofu"] .hljs-addition{color:#6A8A5E;background:rgba(106,138,94,0.08)}
+[data-theme="tofu"] .hljs-deletion{color:#B86A5A;background:rgba(184,106,90,0.08)}
+

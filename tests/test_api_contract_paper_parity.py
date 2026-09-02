@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wire-parity + shipped-source guards for the FINAL api-contract batch
+"""Wire-parity behavior contract for the FINAL api-contract batch
 (epic pt_931e16c4): routes/paper.py — the last 47 ad-hoc jsonify sites
 (the split-roadmap hold lifted 2026-08-01: no sibling is splitting
 paper.py; migrate-first order — the envelope helpers travel with their
@@ -18,7 +18,7 @@ Site shapes (census 2026-08-01, all 47 classified):
   * 5 explicit 404s (task / podcast / podcast-audio) → api_not_found
     (additive request_id only — popped by the parity harness below)
 
-Layers: PARITY + SHIPPED-SOURCE.
+Layer: public response-envelope parity.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import sys
 
 import pytest
@@ -35,9 +34,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart
 sys.modules.setdefault('flask', _quart)
-
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_PAPER = os.path.join(_ROOT, 'routes', 'paper.py')
 
 pytestmark = pytest.mark.unit
 
@@ -132,23 +128,7 @@ def test_envelope_parity():
     asyncio.run(_t())
 
 
-def test_shipped_source_converted():
-    """routes/paper.py carries no ad-hoc jsonify( and no flask jsonify
-    import (RED-first tripwire)."""
-    with open(_PAPER, encoding='utf-8') as f:
-        src = f.read()
-    assert 'jsonify(' not in src, (
-        'routes/paper.py still builds responses with bare jsonify(')
-    assert not re.search(r'from flask import[^\n]*\bjsonify\b', src), (
-        'routes/paper.py still imports jsonify')
-    assert 'api_payload(' in src, (
-        'routes/paper.py must use api_payload for the passthrough/'
-        'custom-status sites (9 resp passthroughs + 4 bare ok:False + '
-        '3 custom error dicts)')
-
-
 if __name__ == '__main__':
-    for fn in (test_envelope_parity, test_shipped_source_converted):
-        fn()
-        print('ok', fn.__name__)
+    test_envelope_parity()
+    print('ok', test_envelope_parity.__name__)
     print('ALL PASSED')

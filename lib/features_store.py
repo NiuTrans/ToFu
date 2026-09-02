@@ -12,6 +12,7 @@ calls this, and ``jsonify``s the result.
 import threading
 
 from lib.config_dir import config_path as _config_path
+from lib.identity import PrincipalContext
 from lib.json_store import JsonStoreReadError, read_json, update_json_atomic
 from lib.log import get_logger
 
@@ -51,7 +52,7 @@ def read_features() -> dict:
     return data
 
 
-def apply_feature_updates(data: dict):
+def apply_feature_updates(data: dict, *, principal: PrincipalContext):
     """Merge requested flag changes into features.json + hot-reload lib toggles.
 
     Args:
@@ -61,11 +62,16 @@ def apply_feature_updates(data: dict):
         ``{saved, changed, needs_restart}`` on success, or
         ``{error: 'internal_error'}`` if the file write failed.
     """
+    if not isinstance(principal, PrincipalContext):
+        raise TypeError('feature update requires PrincipalContext')
+    principal.require_scope('admin')
+    owner_user_id = principal.require_owner(context='feature update')
     with _APPLY_LOCK:
-        return _apply_feature_updates_locked(data)
+        return _apply_feature_updates_locked(
+            data, owner_user_id=owner_user_id)
 
 
-def _apply_feature_updates_locked(data: dict):
+def _apply_feature_updates_locked(data: dict, *, owner_user_id: int):
     """Persist and hot-apply one update while preserving commit order."""
     import lib as _lib
 
@@ -106,6 +112,7 @@ def _apply_feature_updates_locked(data: dict):
             from lib.log import audit_log as _audit
             for _param in changed:
                 _audit('feature_flag_change',
+                       user_id=owner_user_id,
                        param=_param,
                        new=bool(existing.get(_param, False)))
         except Exception as _aerr:
@@ -152,15 +159,17 @@ def _apply_feature_updates_locked(data: dict):
         logger.info('[Features] Hot-reloaded OPTIMIZER_ENABLED → %s',
                     _lib.OPTIMIZER_ENABLED)
         try:
-            from lib.scheduler import get_scheduler
+            from lib.scheduler.manager import get_scheduler
             mgr = get_scheduler()
-            db = mgr._get_db()
-            rows = db.execute(
-                "SELECT id FROM scheduled_tasks WHERE task_type=? AND name=?",
-                ['optimizer', 'Daily Optimizer']).fetchall()
+            rows = [row for row in mgr.list_tasks(
+                    user_id=owner_user_id, include_disabled=True)
+                    if row.get('task_type') == 'optimizer'
+                    and row.get('name') == 'Daily Optimizer']
             for r in rows:
-                tid = r['id'] if isinstance(r, dict) else r[0]
-                mgr.toggle_task(tid, enabled=_lib.OPTIMIZER_ENABLED)
+                tid = r['id']
+                mgr.toggle_task(
+                    tid, user_id=owner_user_id,
+                    enabled=_lib.OPTIMIZER_ENABLED)
         except Exception as _te:
             logger.warning('[Features] Could not toggle Daily Optimizer task: %s',
                            _te, exc_info=True)

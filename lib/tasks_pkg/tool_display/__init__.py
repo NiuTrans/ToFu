@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 from lib.tasks_pkg.tool_display._renderers import (  # noqa: E402,F401
     _persisted_read_labels,
     _short_url,
+    _tool_display_artifact,
     _tool_display_brain,
     _tool_display_browser,
     _tool_display_code_exec,

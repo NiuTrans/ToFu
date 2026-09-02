@@ -15,18 +15,7 @@ from lib.orchestration.runtime_outcome import (
     aborted_race_outcome,
     failure_outcome,
 )
-from lib.orchestration.runtime_service import (
-    FlowEventSink as CompatibilityFlowEventSink,
-    FlowRunOutcome as CompatibilityFlowRunOutcome,
-)
-
-
 pytestmark = pytest.mark.unit
-
-
-def test_runtime_service_reexports_focused_component_owners():
-    assert CompatibilityFlowEventSink is FlowEventSink
-    assert CompatibilityFlowRunOutcome is FlowRunOutcome
 
 
 def test_outcome_helpers_preserve_executor_and_terminal_semantics():
@@ -36,11 +25,10 @@ def test_outcome_helpers_preserve_executor_and_terminal_semantics():
     assert failed.executor is executor
     assert failed.lifecycle_status == 'error'
     assert failed.failure_kind == 'exception'
-    assert failed.durable_error is not None
-    assert failed.error_envelope == failed.durable_error
-    assert failed.durable_error['kind'] == 'generic'
-    assert failed.durable_error['detail'] == 'RuntimeError: worker failed'
-    assert failed.durable_error['outcome']['stop_reason'] == 'exception'
+    assert failed.error_envelope is not None
+    assert failed.error_envelope['kind'] == 'generic'
+    assert failed.error_envelope['detail'] == 'RuntimeError: worker failed'
+    assert failed.error_envelope['outcome']['stop_reason'] == 'exception'
 
     aborted = aborted_race_outcome(FlowRunOutcome(
         {'ok': True, 'status': 'completed', 'final': 'late'},

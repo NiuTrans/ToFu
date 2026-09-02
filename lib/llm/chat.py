@@ -119,7 +119,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
 
     if is_claude(body.get('model', '')):
         if _task_id_for_latch:
-            from lib.tasks_pkg.cache_tracking import latch_extended_ttl
+            from lib.tasks_pkg.cache_tracking._ttl import latch_extended_ttl
             _use_ext_ttl = latch_extended_ttl(_task_id_for_latch)
         else:
             _use_ext_ttl = getattr(_lib, 'CACHE_EXTENDED_TTL', False)

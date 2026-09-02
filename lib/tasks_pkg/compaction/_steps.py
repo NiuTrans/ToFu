@@ -282,7 +282,7 @@ def _estimate_msg_chars(msg: dict) -> int:
 
 class _ConstantsView:
     """Read-only overlay of per-call overrides on top of the compaction
-    package namespace.  Attribute reads hit the override dict first, then
+    constants module. Attribute reads hit the override dict first, then
     fall through to the package.  Nothing is ever written back to the
     global, so concurrent arms can use different values safely."""
 

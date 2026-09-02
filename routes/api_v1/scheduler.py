@@ -27,9 +27,8 @@ from lib.api_response import (
 )
 from lib.log import get_logger
 from lib.openapi import api_meta
-from lib.scheduler import get_scheduler
-
-from .auth import require_auth, require_scope
+from lib.scheduler.manager import get_scheduler
+from .auth import request_user_id as _request_user_id, require_auth, require_scope
 
 logger = get_logger(__name__)
 
@@ -45,7 +44,8 @@ api_v1_scheduler_bp = Blueprint('api_v1_scheduler', __name__)
 def list_tasks():
     mgr = get_scheduler()
     include_disabled = request.args.get('include_disabled', 'false').lower() == 'true'
-    tasks = mgr.list_tasks(include_disabled=include_disabled)
+    tasks = mgr.list_tasks(
+        user_id=int(_request_user_id()), include_disabled=include_disabled)
     return api_ok({'tasks': tasks})
 
 
@@ -54,8 +54,7 @@ def list_tasks():
 @api_meta(summary='Get a scheduled task', tags=['scheduler'])
 def get_task(task_id):
     mgr = get_scheduler()
-    tasks = mgr.list_tasks(include_disabled=True)
-    task = next((t for t in tasks if t['id'] == task_id), None)
+    task = mgr.get_task(task_id, user_id=int(_request_user_id()))
     if not task:
         return api_not_found('Task not found')
     return api_ok({'task': task})
@@ -68,7 +67,8 @@ def get_task(task_id):
 def task_history(task_id):
     mgr = get_scheduler()
     limit = request.args.get('limit', 20, type=int)
-    history = mgr.get_task_history(task_id, limit=limit)
+    history = mgr.get_task_history(
+        task_id, user_id=int(_request_user_id()), limit=limit)
     return api_ok({'history': history})
 
 
@@ -87,7 +87,8 @@ def task_history(task_id):
 def proactive_poll_log(task_id):
     from lib.scheduler.proactive import get_poll_log
     limit = request.args.get('limit', 30, type=int)
-    entries = get_poll_log(task_id, limit=limit)
+    entries = get_poll_log(
+        task_id, user_id=int(_request_user_id()), limit=limit)
     return api_ok({'poll_log': entries})
 
 
@@ -105,7 +106,8 @@ def proactive_poll_log(task_id):
 )
 def proactive_status():
     mgr = get_scheduler()
-    all_tasks = mgr.list_tasks(include_disabled=True)
+    all_tasks = mgr.list_tasks(
+        user_id=int(_request_user_id()), include_disabled=True)
     agent_tasks = [t for t in all_tasks if t.get('task_type') == 'agent']
 
     active = [t for t in agent_tasks if t.get('enabled')]
@@ -145,8 +147,9 @@ def proactive_status():
           tags=['scheduler'], scope='admin')
 def pause_task(task_id):
     logger.info('[Scheduler.v1] pausing task %s', task_id)
-    get_scheduler().update_task(task_id, enabled=False)
-    return api_ok()
+    changed = get_scheduler().update_task(
+        task_id, user_id=int(_request_user_id()), enabled=False)
+    return api_ok() if changed else api_not_found('Task not found')
 
 
 @api_v1_scheduler_bp.route('/api/v1/scheduler/tasks/<task_id>/resume',
@@ -156,8 +159,9 @@ def pause_task(task_id):
           tags=['scheduler'], scope='admin')
 def resume_task(task_id):
     logger.info('[Scheduler.v1] resuming task %s', task_id)
-    get_scheduler().update_task(task_id, enabled=True)
-    return api_ok()
+    changed = get_scheduler().update_task(
+        task_id, user_id=int(_request_user_id()), enabled=True)
+    return api_ok() if changed else api_not_found('Task not found')
 
 
 @api_v1_scheduler_bp.route('/api/v1/scheduler/tasks/<task_id>',
@@ -167,8 +171,9 @@ def resume_task(task_id):
           tags=['scheduler'], scope='admin')
 def delete_task(task_id):
     logger.warning('[Scheduler.v1] deleting task %s', task_id)
-    get_scheduler().delete_task(task_id)
-    return api_ok()
+    deleted = get_scheduler().delete_task(
+        task_id, user_id=int(_request_user_id()))
+    return api_ok() if deleted else api_not_found('Task not found')
 
 
 @api_v1_scheduler_bp.route('/api/v1/scheduler/tasks/<task_id>/trigger',
@@ -187,8 +192,8 @@ def trigger_proactive_task(task_id):
     from lib.scheduler.proactive import execute_proactive_task, is_task_executing
     mgr = get_scheduler()
 
-    tasks = mgr.list_tasks(include_disabled=True)
-    task = next((t for t in tasks if t['id'] == task_id), None)
+    user_id = int(_request_user_id())
+    task = mgr.get_task(task_id, user_id=user_id)
     if not task:
         return api_not_found('Task not found')
     if task.get('task_type') != 'agent':
@@ -204,7 +209,7 @@ def trigger_proactive_task(task_id):
 
     from datetime import datetime
     now = datetime.now().isoformat()
-    mgr.update_task(task_id,
+    mgr.update_task(task_id, user_id=user_id,
                      last_execution_at=now,
                      last_execution_task_id=exec_task_id,
                      last_execution_status='running',
@@ -223,14 +228,15 @@ def timer_list():
         has_timer_history,
         list_active_timers,
     )
+    user_id = int(_request_user_id())
     if request.args.get('summary') == '1':
         return api_ok({
-            'has_timers': has_timer_history(),
-            'active_count': get_active_timer_count(),
+            'has_timers': has_timer_history(user_id=user_id),
+            'active_count': get_active_timer_count(user_id=user_id),
         })
     return api_ok({
-        'timers': list_active_timers(),
-        'active_count': get_active_timer_count(),
+        'timers': list_active_timers(user_id=user_id),
+        'active_count': get_active_timer_count(user_id=user_id),
     })
 
 
@@ -242,11 +248,12 @@ def timer_list():
 )
 def timer_status(timer_id):
     from lib.scheduler.timer import get_timer, get_timer_poll_log
-    timer = get_timer(timer_id)
+    user_id = int(_request_user_id())
+    timer = get_timer(timer_id, user_id=user_id)
     if not timer:
         return api_not_found('Timer not found')
     limit = request.args.get('limit', 20, type=int)
-    poll_log = get_timer_poll_log(timer_id, limit=limit)
+    poll_log = get_timer_poll_log(timer_id, user_id=user_id, limit=limit)
     return api_ok({'timer': timer, 'poll_log': poll_log})
 
 
@@ -257,7 +264,8 @@ def timer_status(timer_id):
 def timer_cancel(timer_id):
     from lib.scheduler.timer import cancel_timer
     logger.info('[Timer.v1] Cancelling timer %s', timer_id)
-    cancel_timer(timer_id)
+    if not cancel_timer(timer_id, user_id=int(_request_user_id())):
+        return api_not_found('Active timer not found')
     return api_ok()
 
 
@@ -269,7 +277,8 @@ def timer_cancel(timer_id):
 )
 def timer_trigger(timer_id):
     from lib.scheduler.timer import force_trigger_timer, get_timer
-    timer = get_timer(timer_id)
+    user_id = int(_request_user_id())
+    timer = get_timer(timer_id, user_id=user_id)
     if not timer:
         return api_not_found('Timer not found')
     if timer['status'] != 'active':
@@ -277,7 +286,7 @@ def timer_trigger(timer_id):
             f'Timer is not active (status={timer["status"]})',
             field='status')
     logger.info('[Timer.v1] Force-triggering timer %s', timer_id)
-    exec_task_id = force_trigger_timer(timer_id)
+    exec_task_id = force_trigger_timer(timer_id, user_id=user_id)
     if not exec_task_id:
         return api_internal_error('Trigger failed',
                                   context='timer_trigger',

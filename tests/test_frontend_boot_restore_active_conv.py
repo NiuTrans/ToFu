@@ -7,7 +7,7 @@ BEFORE the network-bound boot load (`initActiveTasks`) resolves. The boot
 `.then()` used to UNCONDITIONALLY `loadConversation(_restoredConvId)` (the conv
 active before the refresh) — yanking the user off whatever they had just opened.
 
-`_bootRestoreActiveConv(restoredId)` (static/js/main.js) fixes this by acting
+`_bootRestoreActiveConv(restoredId)` (retained `runtime/sections/main.js`) fixes this by acting
 ONLY when `activeConvId` is still null (still on the welcome screen). This runs
 the REAL shipped function body under node with a minimal harness; the biting
 NEUTER strips the early `if (activeConvId) return;` guard and proves the user's

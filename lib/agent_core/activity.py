@@ -52,7 +52,8 @@ def set_activity_sink(sink: Optional[_ActivitySink]) -> None:
 
 
 def emit_activity_event(project_path: str, conv_id: str, kind: str,
-                        summary: str, *, task_id: str = '', title: str = '',
+                        summary: str, *, user_id: int,
+                        task_id: str = '', title: str = '',
                         payload: dict | None = None) -> dict | None:
     """Emit one project Activity Feed event through the active sink.
 
@@ -80,7 +81,8 @@ def emit_activity_event(project_path: str, conv_id: str, kind: str,
         return None
     try:
         return sink(project_path, conv_id, kind, summary,
-                    task_id=task_id, title=title, payload=payload)
+                    user_id=user_id, task_id=task_id, title=title,
+                    payload=payload)
     except Exception as e:
         logger.debug('[Activity] sink emit failed (swallowed): %s', e)
         return None

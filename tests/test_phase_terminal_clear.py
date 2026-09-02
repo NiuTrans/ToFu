@@ -5,15 +5,15 @@ pt_f222e9ed288a44b3 — the multi-hour stale "compressing context…" HUD).
 WHY
 ---
 ``append_event`` (lib/tasks_pkg/manager/_events.py) tracks ``task['phase']``
-for the poll-fallback consumer and clears it ONLY on ``delta`` events. A task
-that ENDS while its last phase is still up — killed mid-compaction-summary,
-error right after a retrying phase — keeps serving that live-looking phase to
-every poll / cold-replay consumer FOREVER (measured 2026-08-01: the 20:10
+for reconnect projection and clears it on ``delta`` events. A task that ends
+while its last phase is still up — killed mid-compaction-summary or errored
+after a retrying phase — would keep serving that live-looking phase to
+cold replay indefinitely (measured 2026-08-01: the 20:10
 "compacting" phase was still visible on a bubble at 22:22, with NO compaction
 having run for two hours — DB-verified). Two holes, one fix:
 
   1. ``done`` / ``error`` / ``aborted`` never cleared the snapshot. A finished
-     task has no "current phase" — the poll lane must see None.
+     task has no "current phase" — cold projection must see None.
   2. ``compaction_done`` — the compacting phase's OWN terminal — did not fold
      the phase either, so even on the happy path the HUD outlived the
      compaction until the next round happened to emit a phase.
@@ -40,8 +40,8 @@ pytestmark = pytest.mark.unit
 
 
 def _mk_task():
-    from lib.tasks_pkg.manager import _chat_runtime
-    return _chat_runtime.create()
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    return chat_task_runtime.create(user_id=1)
 
 
 @pytest.fixture()
@@ -77,14 +77,14 @@ def test_phase_set_then_delta_clears(_no_persist):
 
 def test_done_clears_phase(_no_persist):
     """FAILING-FIRST: a terminal done must retire the phase snapshot — a
-    finished task has no current phase for the poll lane to serve."""
+    finished task has no current phase for reconnect projection."""
     from lib.tasks_pkg.manager import append_event
     task = _mk_task()
     _phase(task, 'compacting', detailKey='stream.phase.compactingWindow')
     append_event(task, {'type': 'done'})
     assert task['phase'] is None, (
         f'done must clear the phase snapshot, got {task["phase"]!r} — this '
-        f'stale snapshot is what the poll lane serves as a live HUD for hours')
+        f'stale snapshot would make reconnect serve a live HUD for hours')
 
 
 def test_error_and_aborted_clear_phase(_no_persist):

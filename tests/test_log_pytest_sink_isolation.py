@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import uuid
 
 import pytest
@@ -101,6 +102,19 @@ def test_console_handler_still_targets_stderr():
     # A StreamHandler over stderr has no baseFilename — it must NOT have been
     # accidentally swapped for a file handler.
     assert not hasattr(h, 'baseFilename')
+
+
+def test_all_active_file_handlers_are_owner_only():
+    """Permissive process umasks must not make diagnostic evidence readable."""
+    handlers = [getattr(server, name, None) for name in (
+        '_app_handler', '_error_handler', '_vendor_handler', '_access_handler',
+        '_frontend_handler',
+    )]
+    paths = [handler.baseFilename for handler in handlers
+             if handler is not None and hasattr(handler, 'baseFilename')]
+    assert paths
+    for path in paths:
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600, path
 
 
 def test_mock_error_does_not_reach_production_error_log():

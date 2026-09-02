@@ -15,9 +15,9 @@ import pytest
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 TRANSPORT = ROOT / 'frontend/src/api/transport.ts'
-RUNTIME = ROOT / 'frontend/src/runtime/app-runtime.js'
+PUSH_RUNTIME = ROOT / 'frontend/src/runtime/sections/push.js'
 SERVER = ROOT / 'server.py'
-ESBUILD = ROOT / 'node_modules/.bin/esbuild'
+ESBUILD = ROOT / 'scripts' / 'vite_test_bundle.mjs'
 
 
 @pytest.fixture(scope='module')
@@ -89,10 +89,38 @@ def test_request_ids_share_page_prefix_and_are_unique(transport_capture):
         assert re.fullmatch(r'[a-z0-9]+-\d+', request_id)
 
 
-def test_sync_digest_carries_stable_page_observer_id():
-    source = RUNTIME.read_text(encoding='utf-8')
-    assert 'Object.assign({ digests, probeId: pageRequestId() }' in source
-    assert '_rid ? { pushRid: _rid } : {}' in source
+def test_push_socket_carries_stable_page_observer_id():
+    if not shutil.which('node'):
+        pytest.skip('node unavailable')
+    harness = r"""
+global.window = { location: { protocol: 'https:', host: 'tofu.test' } };
+var runtimeScope = global;
+global.Api = { pageRequestId: () => 'page-observer' };
+global.apiUrl = (path) => path;
+global.WebSocket = class WebSocket {
+  static OPEN = 1;
+  static CONNECTING = 0;
+  constructor(url) { global.capturedUrl = url; }
+  send() {}
+  close() {}
+};
+""" + PUSH_RUNTIME.read_text(encoding='utf-8') + r"""
+pushConnect();
+console.log(JSON.stringify({
+  requestId: pushSocketRequestId(),
+  url: global.capturedUrl,
+}));
+"""
+    executed = subprocess.run(
+        ['node', '-e', harness], cwd=ROOT,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert executed.returncode == 0, executed.stdout + executed.stderr
+    captured = json.loads(executed.stdout.strip().splitlines()[-1])
+    assert captured == {
+        'requestId': 'page-observer-ws1',
+        'url': 'wss://tofu.test/api/push?_rid=page-observer-ws1',
+    }
 
 
 def test_errors_carry_request_ids_to_the_user_surface():
@@ -134,5 +162,15 @@ def test_backend_wires_the_resolver_into_the_request_lifecycle():
     assert {'_resolve_inbound_rid', 'resolve_inbound_rid'} & called
     assert re.search(r"response\.headers\[['\"]X-Request-ID['\"]\]\s*=\s*rid", source)
     assert 'configure_application(' in SERVER.read_text(encoding='utf-8')
-    assert 'register_request_lifecycle(app)' in (
-        ROOT / 'lib/app_assembly.py').read_text(encoding='utf-8')
+    assembly_tree = ast.parse(
+        (ROOT / 'lib/app_assembly.py').read_text(encoding='utf-8'))
+    registration = next(
+        (node for node in ast.walk(assembly_tree)
+         if isinstance(node, ast.Call)
+         and isinstance(node.func, ast.Name)
+         and node.func.id == 'register_request_lifecycle'),
+        None,
+    )
+    assert registration is not None
+    assert registration.args and isinstance(registration.args[0], ast.Name)
+    assert registration.args[0].id == 'app'

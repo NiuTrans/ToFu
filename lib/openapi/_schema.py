@@ -72,14 +72,6 @@ def _components() -> dict:
                     '`POST /api/v1/keys` (admin scope) or the Settings UI.'
                 ),
             },
-            'tunnelTokenHeader': {
-                'type': 'apiKey', 'in': 'header',
-                'name': 'X-Tunnel-Token',
-                'description': (
-                    'UI/cookie path. Single shared secret in '
-                    '`TUNNEL_TOKEN` env var. Use Bearer for headless.'
-                ),
-            },
         },
         'schemas': {
             # The inner, reusable error object. Runtime validation and this

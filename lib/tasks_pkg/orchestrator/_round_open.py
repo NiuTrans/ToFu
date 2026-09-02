@@ -1,6 +1,6 @@
 """Per-round open — ROUND_START event + phase emit + accumulator build.
 
-Extracted 2026-08-01 (pt_03f4cdf1 slice 32) from ``run_task``'s stream
+Extracted 2026-08-01 ( slice 32) from ``run_task``'s stream
 loop. Two helpers at two different points of each iteration:
 
 * ``emit_round_open`` runs at the TOP of the iteration (right after the

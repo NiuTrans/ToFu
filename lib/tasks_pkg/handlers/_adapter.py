@@ -167,7 +167,7 @@ def run_batch_concurrent(
         ``web_search(queries=[a,b,c])`` is ONE tool round, so without this the
         round has a single transition for N independent network calls and a
         user watching a spinner cannot tell whether all three queries are slow
-        or just one is (pt_67ffc2b7). Fired for FAILURES too (``ok=False``) —
+        or just one is (). Fired for FAILURES too (``ok=False``) —
         a silent failure would stall the done-counter and make an already-dead
         query look like it is still working. A raising callback is logged and
         swallowed: progress reporting must never fail the batch.

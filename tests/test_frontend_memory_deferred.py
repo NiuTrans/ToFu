@@ -46,8 +46,8 @@ def test_esc_position_before_consumers():
     names = runtime_section_names()
     escape_index = names.index('core/escape_html.js')
     for consumer in ('artifacts.js', 'compaction-viewer.js', 'core/toast.js',
-                     'log-clean.js', 'ui/streaming_ui.js',
-                     'ui/translation_render.js'):
+                     'log-clean.js', 'ui/streaming_render.js',
+                     'ui/tool_rounds.js'):
         assert names.index(consumer) > escape_index
 
 

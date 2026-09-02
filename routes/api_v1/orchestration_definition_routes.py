@@ -7,7 +7,9 @@ from quart import Blueprint
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.orchestration.application_provider_ports import DefinitionServiceProvider
-from lib.orchestration.definition_wire_contracts import definition_request_schema
+from lib.orchestration.definition_contract_schema import (
+    definition_request_schema,
+)
 from lib.request_parser import parse_body
 
 from .auth import require_auth

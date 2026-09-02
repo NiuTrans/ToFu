@@ -124,7 +124,8 @@ def handle_message_event(event_data) -> None:
                 return
 
             # Regular message → run LLM pipeline
-            response = run_task_pipeline(open_id, text)
+            response = run_task_pipeline(
+                open_id, text, source_message_id=message_id)
             send_text(message_id, response, chat_id=chat_id, open_id=open_id)
 
         finally:

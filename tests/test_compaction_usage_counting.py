@@ -25,14 +25,35 @@ def test_accumulator_sums_and_pops():
         pop_compaction_usage, reset_compaction_usage)
     reset_compaction_usage('cv')
     record_compaction_usage('cv', {'prompt_tokens': 1000, 'completion_tokens': 200,
-                                   'total_tokens': 1200}, 'L2')
+                                   'total_tokens': 1200,
+                                   '_dispatch': {
+                                       'latency_ms': 50,
+                                       'queue_wait_ms': 5,
+                                       'queue_wait_measurement': 'dispatcher_backpressure_only',
+                                       'first_content_at_unix_ns': 200,
+                                       'ttft_measurement': 'upper_bound',
+                                   }}, 'L2')
     record_compaction_usage('cv', {'prompt_tokens': 500, 'completion_tokens': 100,
-                                   'total_tokens': 600}, 'advanced')
+                                   'total_tokens': 600,
+                                   '_dispatch': {
+                                       'latency_ms': 25,
+                                       'queue_wait_ms': 7,
+                                       'queue_wait_measurement': 'dispatcher_backpressure_only',
+                                       'first_content_at_unix_ns': 150,
+                                       'ttft_measurement': 'upper_bound',
+                                   }}, 'advanced')
     g = get_compaction_usage('cv')
     assert g['prompt_tokens'] == 1500
     assert g['completion_tokens'] == 300
     assert g['total_tokens'] == 1800
     assert g['n_calls'] == 2
+    assert g['timing'] == {
+        'modelWallMs': 75.0,
+        'queueWaitMs': 12.0,
+        'queueMeasurement': 'dispatcher_backpressure_only',
+        'firstModelOutputAtUnixNs': 150,
+        'ttftMeasurement': 'upper_bound',
+    }
     # pop clears
     popped = pop_compaction_usage('cv')
     assert popped['prompt_tokens'] == 1500
@@ -54,7 +75,7 @@ def test_advanced_summarizer_usage_is_captured(monkeypatch):
     """The advanced-host summarizer's dispatch_chat usage must land in the
     accumulator (the bug this fixes: usage was discarded)."""
     import lib.tasks_pkg.compaction._advanced as adv
-    import lib.tasks_pkg.compaction._faithful_methods as fm
+    import lib.tasks_pkg.compaction._faithful_methods._openclaw as openclaw
     import lib.tasks_pkg.compaction._compaction_usage as cu
     import lib.llm_dispatch as ld
 
@@ -63,10 +84,10 @@ def test_advanced_summarizer_usage_is_captured(monkeypatch):
                         lambda msgs, **kw: ('SUMMARY', {'prompt_tokens': 4200,
                                                         'completion_tokens': 310,
                                                         'total_tokens': 4510}))
-    monkeypatch.setattr(fm, '_raw_context_limit', lambda ctx: 200_000)
-    monkeypatch.setattr(fm, '_tok', lambda m, t: 999_999)
-    monkeypatch.setattr(fm, '_cooldown_ok', lambda c: True)
-    monkeypatch.setattr(fm, '_select_middle_turns',
+    monkeypatch.setattr(openclaw, '_raw_context_limit', lambda ctx: 200_000)
+    monkeypatch.setattr(openclaw, '_tok', lambda m, t: 999_999)
+    monkeypatch.setattr(openclaw, '_cooldown_ok', lambda c: True)
+    monkeypatch.setattr(openclaw, '_select_middle_turns',
                         lambda ctx, keep_recent_tokens, protect_first_n=1, protect_last_n=0:
                         ([t for t in ctx.edit.turns()[1:-1]], 'MIDDLE ' * 200))
 

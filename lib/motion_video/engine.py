@@ -183,7 +183,7 @@ def _render_one(mv, scene_dir: str, mp4_path: str, *, quality: str,
 #: persisted value a resumed job's elapsed clock silently restarts at the
 #: restart instant.
 _MANIFEST_FIELDS = (
-    'task_id', 'kind', 'created_at',
+    'task_id', 'user_id', 'kind', 'created_at',
     'srt_path', 'scenes_path', 'workdir', 'voice', 'speed',
     'alignment', 'narration', 'quality', 'parallel', 'width', 'height',
     'burn_in', 'burn_in_fontsdir', 'topic', 'lang', 'max_scenes', 'paper_hash',
@@ -215,7 +215,13 @@ def write_job_manifest(task: dict, *, kind: str, state: str) -> None:
     rather than restart).
     """
     from lib.production.jobs import write_manifest
-    write_manifest(task.get('workdir') or '', task, fields=_MANIFEST_FIELDS,
+    owner_user_id = int(task.get('_userId') or task.get('user_id') or 0)
+    if owner_user_id < 1:
+        raise ValueError('motion manifest requires an explicit owner user_id')
+    manifest_task = dict(task)
+    manifest_task['user_id'] = owner_user_id
+    write_manifest(task.get('workdir') or '', manifest_task,
+                   fields=_MANIFEST_FIELDS,
                    kind=kind, state=state, log_label='MotionVideo')
 
 
@@ -471,7 +477,7 @@ def _visual_qa_round(task: dict, sc: dict, scene_dir: str,
                             duration=duration, scene_index=scene_index,
                             total_scenes=total_scenes, theme=theme):
             return html
-        from lib.design_sys import visual_qa as vqa
+        import lib.design_sys.visual_qa as vqa
         avail = task.get('_visual_qa_available')
         if avail is None:
             avail = vqa.visual_qa_available()
@@ -1132,7 +1138,7 @@ def run_motion_task(task: dict) -> None:
                 if audio_plan else ''),
         }
         task['result'] = result
-        # ★ Computed BEFORE the manifest write, not after: job.json is the ONLY
+        # Computed BEFORE the manifest write, not after: job.json is the ONLY
         #   thing the paper panel can read once the process restarts (the task
         #   is gone from the runtime and poll() 404s), so a verdict reached
         #   after the write would survive exactly until the next restart and
@@ -1275,6 +1281,9 @@ def resume_interrupted_jobs() -> int:
     from lib.production.jobs import resume_running_jobs
 
     def _respawn(task_id: str, workdir: str, m: dict) -> None:
+        user_id = int(m['user_id'])
+        if user_id < 1:
+            raise ValueError('motion manifest has no valid owner')
         task = _new_motion_task(
             task_id, srt_path=m.get('srt_path') or '', workdir=workdir,
             voice=m.get('voice') or '', speed=m.get('speed'),
@@ -1284,7 +1293,7 @@ def resume_interrupted_jobs() -> int:
             parallel=int(m.get('parallel') or 2),
             width=int(m.get('width') or 1080),
             height=int(m.get('height') or 1440),
-            scenes_path=m.get('scenes_path') or '')
+            scenes_path=m.get('scenes_path') or '', user_id=user_id)
         for k in ('burn_in', 'burn_in_fontsdir', 'topic', 'lang',
                   'max_scenes', 'paper_hash', 'kind', 'scene_author',
                   'author_token_budget', 'model', 'qa_model', 'audio_plan',

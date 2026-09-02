@@ -1,5 +1,3 @@
-# Incident anchor: born in commit 3f6e7474 — refactor(orchestrator): pt_03f4cdf1 slice 31 — extract provider pin +...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 31 — extract the hard
 provider pin + conversation-sticky routing from _run.py into
 lib.tasks_pkg.orchestrator._provider_binding

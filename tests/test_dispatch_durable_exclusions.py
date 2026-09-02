@@ -274,6 +274,49 @@ class TestStrictBranchPassesPreferModel:
 
 
 @pytest.mark.unit
+def test_dispatch_chat_distinguishes_local_slot_wait_from_upstream_429(monkeypatch):
+    from lib.llm_dispatch import api
+
+    slot = _make_slot(model='gpt-4o', key='kA')
+
+    class _WaitOnce:
+        slots = [slot]
+
+        def __init__(self):
+            self.picks = 0
+
+        def pick_and_reserve(self, **_kwargs):
+            self.picks += 1
+            if self.picks == 1:
+                return None
+            slot.record_request()
+            return slot
+
+        def has_capable_slots(self, *_args, **_kwargs):
+            return True
+
+        def summarize_slots(self, *_args, **_kwargs):
+            return 'wait-once'
+
+    router = _WaitOnce()
+    monkeypatch.setattr(api, 'get_dispatcher', lambda: router)
+    monkeypatch.setattr(api.time, 'sleep', lambda _seconds: None)
+    monkeypatch.setattr(
+        'lib.llm.chat', lambda *args, **kwargs: ('ok', {'completion_tokens': 1})
+    )
+
+    _content, usage = api.dispatch_chat(
+        [{'role': 'user', 'content': 'hi'}],
+        prefer_model='gpt-4o',
+        strict_model=True,
+    )
+
+    assert usage['_dispatch']['429_retries'] == 1
+    assert usage['_dispatch']['slot_wait_cycles'] == 1
+    assert usage['_dispatch']['upstream_429_retries'] == 0
+
+
+@pytest.mark.unit
 def test_dispatch_chat_excludes_stream_only_model_on_first_pick(monkeypatch):
     """A Responses subscription slot must never receive stream=false.
 

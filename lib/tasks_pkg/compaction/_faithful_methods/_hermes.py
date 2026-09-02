@@ -17,20 +17,22 @@ from lib.tasks_pkg.compaction._steps import (
     register_step,
 )
 
-from ._shared import _content_text, _msg_tokens
-from ._state import _log_id, _running_summaries, _summary_state_lock
+from ._shared import (
+    _apply_summary,
+    _content_text,
+    _msg_tokens,
+    _raw_context_limit,
+    _select_middle_turns,
+    _tok,
+)
+from ._state import (
+    _cooldown_ok,
+    _log_id,
+    _running_summaries,
+    _summary_state_lock,
+)
 
 logger = get_logger(__name__)
-
-
-# The tunable helpers (context-limit resolution, token counting, cooldown
-# gate, middle-turn selection, summary splicing) are resolved through the
-# package FACADE at CALL time — never bound at import — so that callers /
-# tests that patch ``lib.tasks_pkg.compaction._faithful_methods.<helper>``
-# take effect, exactly as when everything lived in one module.
-def _facade():
-    import lib.tasks_pkg.compaction._faithful_methods as _fm
-    return _fm
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -111,21 +113,23 @@ def summarize_hermes(ctx: CompactionContext) -> int:
     """Hermes _generate_summary: trigger prompt_tokens ≥ context_length×0.50;
     protect head (protect_first_n=3) + tail (ratio 0.20, floor protect_last_n=20);
     ITERATIVE running summary (previous fed back); 4-section SUMMARY_PREFIX."""
-    _fm = _facade()
-    ctx_len = _fm._raw_context_limit(ctx)
+    ctx_len = _raw_context_limit(ctx)
     threshold = int(ctx_len * _HERMES_THRESHOLD_PCT)
-    total = _fm._tok(ctx.messages, ctx.task)
+    total = _tok(ctx.messages, ctx.task)
     if total < threshold:
         logger.debug('[Hermes] conv=%s under threshold (%d<%d) — skip',
                      _log_id(ctx.conv_id), total, threshold)
         return 0
-    if not _fm._cooldown_ok(ctx.conv_id):
+    if not _cooldown_ok(ctx.conv_id):
         return 0
 
     tail_budget = int(threshold * _HERMES_TAIL_RATIO)
-    middle, text = _fm._select_middle_turns(ctx, tail_budget,
-                                            protect_first_n=_HERMES_PROTECT_FIRST_N,
-                                            protect_last_n=_HERMES_PROTECT_LAST_N)
+    middle, text = _select_middle_turns(
+        ctx,
+        tail_budget,
+        protect_first_n=_HERMES_PROTECT_FIRST_N,
+        protect_last_n=_HERMES_PROTECT_LAST_N,
+    )
     if not middle or len(text) < 400:
         return 0
 
@@ -155,8 +159,8 @@ def summarize_hermes(ctx: CompactionContext) -> int:
         return 0
     with _summary_state_lock:
         _running_summaries[ctx.conv_id] = summary
-    saved = _fm._apply_summary(ctx, middle, summary,
-                               '[Running summary of session so far]', total)
+    saved = _apply_summary(
+        ctx, middle, summary, '[Running summary of session so far]', total)
     logger.info('[Hermes] conv=%s threshold %d≥%d → iterative summary (%s, %d turns, ~%d tok)',
                 _log_id(ctx.conv_id), total, threshold,
                 'updated' if prev else 'initial', len(middle), saved)

@@ -64,10 +64,11 @@ def project_definition_entry(
     return response
 
 
-def parse_definition_write_precondition(raw_value: str | None) -> int | None:
+def parse_definition_write_precondition(raw_value: str | None) -> int:
     """Parse the definition ``If-Match`` token without HTTP dependencies."""
     if raw_value is None:
-        return None
+        header = definition_write_contract()['preconditionHeader']
+        raise ValueError(f'{header} is required')
     token = str(raw_value).strip()
     if token.startswith('W/'):
         token = token[2:].strip()
@@ -96,8 +97,8 @@ def definition_write_version_token(version: int) -> str:
 
 
 def definition_write_conflict(
-    expected_updated_at: int | None,
-    current_updated_at: int | None,
+    expected_updated_at: int,
+    current_updated_at: int,
     *,
     operation: str = 'replace',
 ) -> dict:
@@ -110,9 +111,9 @@ def definition_write_conflict(
         for semantic, spec in contract['conflictFields'].items()
     }
     expected_updated_at = require_definition_version(
-        expected_updated_at, field=fields['expectedUpdatedAt'], nullable=True)
+        expected_updated_at, field=fields['expectedUpdatedAt'])
     current_updated_at = require_definition_version(
-        current_updated_at, field=fields['currentUpdatedAt'], nullable=True)
+        current_updated_at, field=fields['currentUpdatedAt'])
     return {
         'conflict': reason,
         'write': {

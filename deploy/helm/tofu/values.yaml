@@ -1,0 +1,113 @@
+images:
+  api:
+    repository: ghcr.io/rangehow/tofu-api
+    digest: ""
+  worker:
+    repository: ghcr.io/rangehow/tofu-worker
+    digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+secrets:
+  existingSecret: tofu-external-services
+  postgresDsnKey: postgres-dsn
+  redisUrlKey: redis-url
+
+authMode: private
+terminationGracePeriodSeconds: 45
+
+roles:
+  api:
+    enabled: true
+    # Keep one until the distributed execution composition root and takeover
+    # acceptance gate are complete. This chart is not a scaling claim.
+    replicas: 1
+    resources:
+      requests: {cpu: 500m, memory: 1Gi}
+      limits: {cpu: "2", memory: 4Gi}
+  worker:
+    enabled: true
+    # Keep one until durable claim/heartbeat/fencing chaos acceptance passes.
+    replicas: 1
+    resources:
+      requests: {cpu: "1", memory: 2Gi}
+      limits: {cpu: "4", memory: 8Gi}
+  scheduler:
+    enabled: true
+    replicas: 1
+    resources:
+      requests: {cpu: 250m, memory: 512Mi}
+      limits: {cpu: "1", memory: 2Gi}
+
+sidecar:
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+service:
+  type: ClusterIP
+  port: 80
+  annotations: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+extraEnv: []
+extraEnvFrom: []
+
+autoscaling:
+  api:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+  worker:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 75
+
+podDisruptionBudget:
+  api:
+    enabled: true
+    minAvailable: 1
+  worker:
+    enabled: false
+    minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  apiIngressNamespaceSelector: {}
+  apiIngressPodSelector: {}
+
+migration:
+  enabled: true
+  activeDeadlineSeconds: 900
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400
+
+maintenance:
+  enabled: true
+  schedule: "17 3 * * *"
+  activeDeadlineSeconds: 900
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+
+probes:
+  startup:
+    periodSeconds: 5
+    failureThreshold: 36
+  readiness:
+    periodSeconds: 10
+    failureThreshold: 3
+  liveness:
+    periodSeconds: 30
+    failureThreshold: 3

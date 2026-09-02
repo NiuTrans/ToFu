@@ -29,7 +29,7 @@ from tests._jsdom import JS_DIR, run_harness
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_TS = ROOT / 'frontend/src/features/settings/speech.ts'
-ESBUILD = ROOT / 'node_modules/.bin/esbuild'
+ESBUILD = ROOT / 'scripts' / 'vite_test_bundle.mjs'
 
 _BODY = r'''
 const { setup } = require(process.env.JSDOM_HARNESS);
@@ -186,7 +186,7 @@ def test_stt_settings_frontend():
     )
 
 
-@pytest.mark.skipif(not ESBUILD.is_file(), reason='esbuild not installed')
+@pytest.mark.skipif(not ESBUILD.is_file(), reason='vite test bundler not installed')
 def test_vite_stt_settings_matches_classic_write_contract(tmp_path):
     built = tmp_path / 'speech.js'
     compiled = subprocess.run(
@@ -203,7 +203,7 @@ def test_vite_stt_settings_matches_classic_write_contract(tmp_path):
     )
 
 
-@pytest.mark.skipif(not ESBUILD.is_file(), reason='esbuild not installed')
+@pytest.mark.skipif(not ESBUILD.is_file(), reason='vite test bundler not installed')
 def test_vite_stt_status_generation_and_panel_lifecycle(tmp_path):
     built = tmp_path / 'speech-lifecycle.js'
     compiled = subprocess.run(

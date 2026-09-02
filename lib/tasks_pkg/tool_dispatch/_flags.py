@@ -4,10 +4,13 @@
 Houses the stateless tool-partition tables (write vs idempotent),
 per-task partition union, the deterministic cache-key builder, project-cache
 invalidation, cache-entry unpacking, and the rich cache-hit display metadata.
+Also the Layer-0/Layer-1 idempotency feature flags
+(``TOFU_CANONICAL_CALL_IDS``) and the shared call signature builder.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from typing import Any
@@ -17,6 +20,32 @@ from lib.token_counter import count_text
 from lib.tasks_pkg.executor import _build_simple_meta
 
 logger = get_logger(__name__)
+
+
+def _canonical_call_ids_enabled() -> bool:
+    """Layer-0 switch: harness-minted canonical call ids (default ON).
+
+    ``TOFU_CANONICAL_CALL_IDS=0`` falls back to the pre-2026-08-17 behaviour
+    (the model's own tool_call id is trusted as the execution identity; the
+    receipt-layer conflict-execute fix stays active as the compat path).
+    Read live so tests and operators can toggle without a restart.
+    """
+    raw = os.environ.get('TOFU_CANONICAL_CALL_IDS', '1').strip().lower()
+    return raw not in ('0', 'false', 'off', 'no')
+
+
+def _call_id_signature(fn_name: str, fn_args: Any) -> str:
+    """Stable identity for replay protection; never trusts display metadata."""
+    try:
+        payload = json.dumps(
+            {'name': str(fn_name or ''),
+             'arguments': fn_args if isinstance(fn_args, dict) else {}},
+            ensure_ascii=False, sort_keys=True, separators=(',', ':'),
+            default=str)
+    except (TypeError, ValueError) as exc:
+        logger.debug('[ToolDispatch] call signature JSON fallback: %s', exc)
+        payload = f'{fn_name!s}\0{fn_args!r}'
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
 def _safe_count_tokens(text: str, model: str = '') -> int:
@@ -43,17 +72,12 @@ def _safe_count_tokens(text: str, model: str = '') -> int:
 # that the ToolSpec registry doesn't enumerate).  We then union the
 # ``idempotent_tools`` flags declared by every registered ToolSpec — so a
 # third-party plugin that marks its tool idempotent is honoured automatically
-# with no edit here.  See lib/tools/registry.py.
+# with no edit here.  See lib/tools/registry/.
 _IDEMPOTENT_TOOLS_BASE = frozenset({
     'web_search', 'fetch_url',
     'read_files', 'list_dir', 'grep_search', 'find_files',
-    'browser_read_tab', 'browser_list_tabs',
+    'browser_list_tabs', 'browser_read_page',
     'browser_get_history', 'browser_get_cookies',
-    'browser_summarize_page', 'browser_get_app_state',
-    'browser_get_interactive_elements',
-    # v2 unified perception entry (pt_869e5648403e4745) — same cacheability
-    # as the read_tab it absorbed.
-    'browser_read_page',
     'list_conversations', 'get_conversation',
     'project_charter_read', 'project_board_read',
     'project_peer_status',
@@ -68,7 +92,7 @@ _IDEMPOTENT_TOOLS_BASE = frozenset({
 _WRITE_TOOLS_BASE = frozenset({
     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
-    'create_project', 'run_command',
+    'run_command',
     'create_memory', 'update_memory', 'delete_memory', 'merge_memories',
 })
 
@@ -83,13 +107,38 @@ def _registry_tool_flags() -> tuple[frozenset, frozenset]:
     write = set(_WRITE_TOOLS_BASE)
     idem = set(_IDEMPOTENT_TOOLS_BASE)
     try:
-        from lib.tools import all_specs
+        from lib.tools.registry import all_specs
         for spec in all_specs():
             write |= set(spec.write_tools)
             idem |= set(spec.idempotent_tools)
     except Exception as e:
         logger.debug('[tool_dispatch] registry flag union skipped: %s', e)
     return frozenset(write), frozenset(idem)
+
+
+def _registry_confirmation_tools() -> frozenset[str]:
+    """Resolve ToolSpec always-confirm writes live for each task."""
+    names: set[str] = set()
+    try:
+        from lib.tools.registry import all_specs
+        for spec in all_specs():
+            names |= set(spec.confirmation_tools)
+    except Exception as exc:
+        logger.debug('[tool_dispatch] confirmation flag union skipped: %s', exc)
+    return frozenset(names)
+
+
+def _task_confirmation_tools(task: dict[str, Any]) -> frozenset[str]:
+    """Task-local confirmation partition, including reviewed custom tools."""
+    names = set(_registry_confirmation_tools())
+    env = task.get('_tool_env')
+    if env is not None:
+        try:
+            names |= set(getattr(env, 'confirmation_names', ()))
+        except Exception as exc:
+            logger.debug('[tool_dispatch] task confirmation union skipped: %s',
+                         exc)
+    return frozenset(names)
 
 
 _WRITE_TOOLS, _IDEMPOTENT_TOOLS = _registry_tool_flags()
@@ -104,25 +153,15 @@ def _task_partitions(task: dict[str, Any]) -> tuple[frozenset, frozenset]:
     replacement cannot leave a stale concurrency/cache partition. Per-request
     custom tools (``task['_tool_env']``) add their own flags afterward.
     """
-    # Resolve the module-level partitions through the FACADE so a test that
-    # patches ``tool_dispatch._WRITE_TOOLS`` / ``._IDEMPOTENT_TOOLS`` on the
-    # package is honoured at call time (byte-identical to the pre-split
-    # single-module behaviour). Falls back to this module's own globals.
-    try:
-        import lib.tasks_pkg.tool_dispatch as _facade
-        _wt = getattr(_facade, '_WRITE_TOOLS', _WRITE_TOOLS)
-        _it = getattr(_facade, '_IDEMPOTENT_TOOLS', _IDEMPOTENT_TOOLS)
-    except Exception as e:
-        logger.debug('[tool_dispatch] facade partition resolve failed, using local: %s', e)
-        _wt, _it = _WRITE_TOOLS, _IDEMPOTENT_TOOLS
     live_write, live_idem = _registry_tool_flags()
-    # Tests and compatibility callers may deliberately replace the facade
-    # constants. Preserve that override; otherwise use the live registry so
-    # removed flags do not survive forever in the import-time snapshot.
+    # An explicit owner-module override is useful for isolated policy tests;
+    # otherwise the live registry prevents removed plugin flags surviving in
+    # an import-time snapshot.
     write = set(
-        live_write if _wt is _INITIAL_WRITE_TOOLS else _wt)
+        live_write if _WRITE_TOOLS is _INITIAL_WRITE_TOOLS else _WRITE_TOOLS)
     idem = set(
-        live_idem if _it is _INITIAL_IDEMPOTENT_TOOLS else _it)
+        live_idem if _IDEMPOTENT_TOOLS is _INITIAL_IDEMPOTENT_TOOLS
+        else _IDEMPOTENT_TOOLS)
     # ── MCP tools: conservative write classification ──
     # External MCP tools carry no built-in safety partition, so by default we
     # treat every discovered MCP tool as a WRITE tool (serial dispatch +
@@ -196,9 +235,14 @@ def _invalidate_project_cache(cache: dict, trigger: str = 'write_op') -> None:
 
 
 def _unpack_cache_entry(cached) -> tuple:
-    """Unpack a dedup cache entry into (content, is_search, source, display, engine_breakdown, vertical).
+    """Unpack a dedup cache entry into (content, is_search, source, display,
+    engine_breakdown, vertical, search_diag).
 
-    Handles all legacy tuple lengths (2–6) and bare values gracefully.
+    Handles all legacy tuple lengths (2–8) and bare values gracefully.
+    ``search_diag`` (slot 7) carries the orchestrator's zero-result
+    diagnostic (``reason`` / ``engine_errors`` / …) so a cache/prefetch hit
+    of a FAILED search renders the honest network-error/no-matches row
+    instead of a fabricated single "result".
     """
     if not isinstance(cached, (tuple, list)):
         # A non-(tuple/list) entry means a buggy writer poisoned the dedup
@@ -210,13 +254,27 @@ def _unpack_cache_entry(cached) -> tuple:
         else:
             logger.warning('[Dedup] cache value is unexpected type %s (not tuple/str/dict) '
                            '— wrapping; model will see str() of it', type(cached).__name__)
-        return (cached, False, 'dedup', None, None, None)
-    # Pad to length 6 with defaults
-    defaults = (None, False, 'dedup', None, None, None)
+        return (cached, False, 'dedup', None, None, None, None)
+    # Pad to length 7 with defaults. Slot 8 is deliberately handled by
+    # ``_cache_entry_projection_items`` so this long-standing return contract
+    # remains backward compatible for callers that unpack exactly 7 values.
+    defaults = (None, False, 'dedup', None, None, None, None)
     padded = tuple(cached) + defaults[len(cached):]
-    if len(cached) < 2 or len(cached) > 6:
+    if len(cached) < 2 or len(cached) > 8:
         logger.warning('[Dedup] cache entry has unexpected length %d', len(cached))
-    return padded[:6]
+    return padded[:7]
+
+
+def _cache_entry_projection_items(cached):
+    """Return optional bounded model-projection items from cache slot 8.
+
+    The slot is additive: old cache entries remain valid, and the ordinary
+    seven-field cache unpacking API does not change shape.
+    """
+    if isinstance(cached, (tuple, list)) and len(cached) >= 8:
+        items = cached[7]
+        return items if isinstance(items, list) else None
+    return None
 
 
 def _build_cache_hit_meta(
@@ -339,30 +397,13 @@ def _build_cache_hit_meta(
             'fetchedChars': chars if fetched_ok else 0,
         }
 
-    # ── web_search: keep results from cached content (already display-formatted) ──
-    # For web_search, the cached_content is the text formatted for the LLM,
-    # not display_results.  Build a minimal meta with char count.
-    if fn_name == 'web_search':
-        queries = fn_args.get('queries')
-        if queries and isinstance(queries, list):
-            n = len(queries)
-            return {
-                'toolName': fn_name,
-                'title': f'{n} searches{badge_suffix}',
-                'snippet': f'{chars:,} chars total',
-                'source': source_label,
-                'fetched': True,
-                'fetchedChars': chars,
-            }
-        query = fn_args.get('query', '')
-        return {
-            'toolName': fn_name,
-            'title': f'Search: {query[:60]}{badge_suffix}',
-            'snippet': f'{chars:,} chars',
-            'source': source_label,
-            'fetched': True,
-            'fetchedChars': chars,
-        }
+    # ── web_search: NO synthetic meta here ──
+    # A web_search cache hit is finalized upstream (_pipeline.py) from the
+    # stored display_results / search_diag — including the 0-result case,
+    # which renders the honest diagnostic row. The synthetic single meta
+    # this branch used to build ('Search: {query}' + fetched:True + N chars)
+    # fabricated a "1 result ✓ fetched" row out of what was actually a
+    # FAILED search's model-facing diagnostic text.
 
     # ── Fallback for all other tools ──
     if is_prefetch:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import signal
 import socket
 import ssl
@@ -23,6 +24,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from runtime_guards import (
+    RESOURCE_BUDGET_ENV_KEYS,
+    _persistent_data_path,
+    deployment_resource_default,
+    install_process_resource_defaults,
+)
+
 
 STATE_VERSION = 1
 DEFAULT_SERVER_PORT = 15000
@@ -33,8 +41,9 @@ DEFAULT_WEDGE_STREAK = 120.0
 DEFAULT_MAX_FAILURES = 5
 DEFAULT_FAILURE_WINDOW = 120.0
 DEFAULT_FAILURE_HISTORY_KEEP = 50
-DEFAULT_WORKER_RSS_RECYCLE_MB = 8192.0
 DEFAULT_WORKER_RSS_CGROUP_FRACTION = 0.70
+DEFAULT_SIDECAR_LEASE_RELEASE_WAIT = 10.0
+DEFAULT_STORAGE_LEASE_POLL_INTERVAL = 0.1
 MIB = 1024 * 1024
 CGROUP_OOM_EVENT_PATHS = (
     '/sys/fs/cgroup/memory.events',
@@ -46,8 +55,17 @@ CGROUP_MEMORY_LIMIT_PATHS = (
 )
 SERVER_ENV_KEYS = frozenset({
     'PORT', 'BIND_HOST', 'TOFU_TLS', 'TLS_CERTFILE', 'TLS_KEYFILE',
-    'TOFU_PROCESS_RSS_RECYCLE_MB',
-})
+    'TOFU_DEPLOYMENT_MODE',
+    'TOFU_DATA_DIR', 'TOFU_DATA_LAYOUT',
+    'XDG_DATA_HOME', 'LOCALAPPDATA',
+    'TOFU_SERVER_PYTHON_CACHE', 'TOFU_SERVER_PYTHON_CACHE_DIR',
+    # These must exist before the Python worker starts. Loading them later in
+    # server.py's dotenv phase cannot reconfigure glibc or already-imported
+    # BLAS/OpenMP runtimes.
+    'TOFU_MALLOC_ARENA_MAX', 'TOFU_NUMERIC_THREADS',
+    'OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS',
+    'NUMEXPR_NUM_THREADS',
+}) | RESOURCE_BUDGET_ENV_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +127,11 @@ def proc_rss_bytes(pid: int) -> int | None:
         return None
 
 
-def worker_rss_recycle_limit_bytes(raw_mb: str | None = None) -> int:
+def worker_rss_recycle_limit_bytes(
+    raw_mb: str | None = None,
+    *,
+    environment: dict[str, str] | None = None,
+) -> int:
     """Resolve the manager's external worker RSS ceiling; zero disables it."""
     if raw_mb not in (None, ''):
         try:
@@ -123,7 +145,8 @@ def worker_rss_recycle_limit_bytes(raw_mb: str | None = None) -> int:
             logger.warning(
                 'invalid TOFU_PROCESS_RSS_RECYCLE_MB=%r; using adaptive default',
                 raw_mb)
-    default = int(DEFAULT_WORKER_RSS_RECYCLE_MB * MIB)
+    default = int(deployment_resource_default(
+        'TOFU_PROCESS_RSS_RECYCLE_MB', environment) * MIB)
     cgroup_limit = cgroup_memory_limit_bytes()
     if cgroup_limit is not None:
         default = min(
@@ -230,6 +253,139 @@ def pid_is_server(pid: int) -> bool:
     return cmdline is None or 'server.py' in cmdline
 
 
+_OFFLINE_STORAGE_COMMAND_LABELS = (
+    ('scripts/storage_deep_clean.py', 'SQLite deep clean'),
+    ('scripts/migrate_sqlite_to_postgres.py',
+     'SQLite to PostgreSQL migration'),
+)
+_OFFLINE_STORAGECTL_COMMANDS = frozenset({
+    'baseline', 'integrity-check', 'restore', 'handoff',
+})
+
+
+def _legacy_storage_lease_owner(cmdline: str | None) -> tuple[str, str]:
+    """Classify old lease stamps without exposing the holder's command line."""
+    command = str(cmdline or '')
+    for marker, label in _OFFLINE_STORAGE_COMMAND_LABELS:
+        if marker in command:
+            return 'offline_maintenance', label
+    if 'scripts/storagectl.py' in command:
+        try:
+            arguments = set(shlex.split(command))
+        except ValueError:
+            arguments = set(command.split())
+        operation = next(
+            (item for item in _OFFLINE_STORAGECTL_COMMANDS
+             if item in arguments),
+            None,
+        )
+        if operation:
+            return 'offline_maintenance', f'Storage {operation}'
+    if '-m lib.storage_sidecar' in command:
+        return 'storage_sidecar', 'Storage sidecar'
+    return 'unknown', 'Storage operation'
+
+
+def read_storage_lease_status(data_dir: str | Path) -> dict[str, Any]:
+    """Inspect one storage lease using its OS lock as the sole authority.
+
+    The JSON stamp is diagnostic metadata only.  A stale ``status=running``
+    stamp never blocks startup; conversely, an unreadable held lock remains a
+    fail-closed unknown owner.  Returned data deliberately excludes command
+    lines, lease IDs and authority paths so the manager API cannot leak
+    operator arguments or credentials.
+    """
+    root = Path(data_dir)
+    lock_path = root / '.storage-sidecar.lock'
+    lease_path = root / '.storage-sidecar-lease.json'
+    result: dict[str, Any] = {
+        'held': False,
+        'kind': None,
+        'label': None,
+        'pid': None,
+        'host': None,
+        'startedAt': None,
+        'ageSeconds': None,
+        'holderVerified': False,
+    }
+    if not lock_path.is_file():
+        return result
+    try:
+        handle = lock_path.open('r+b')
+    except OSError:
+        return {
+            **result,
+            'held': True,
+            'kind': 'unknown',
+            'label': 'Storage operation',
+        }
+    try:
+        try:
+            if os.name == 'nt':  # pragma: no cover - Windows CI
+                import msvcrt
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return result
+        except (OSError, BlockingIOError):
+            result['held'] = True
+    finally:
+        handle.close()
+
+    stamp = _read_json(lease_path)
+    host = str(stamp.get('host') or '').strip()[:255] or None
+    try:
+        pid = int(stamp.get('pid'))
+        if pid <= 1:
+            pid = None
+    except (TypeError, ValueError):
+        pid = None
+    try:
+        started_at = float(stamp.get('started_unix_ms')) / 1000.0
+        if started_at <= 0:
+            started_at = None
+    except (TypeError, ValueError):
+        started_at = None
+
+    kind = str(stamp.get('owner_kind') or '').strip().lower()
+    label = ' '.join(str(stamp.get('owner_label') or '').split())[:120]
+    known_kinds = {'offline_maintenance', 'storage_sidecar', 'storage_operation'}
+    if kind not in known_kinds:
+        kind = ''
+    same_host = bool(host and host == _hostname())
+    process_alive = bool(pid and same_host and pid_is_alive(pid))
+    if process_alive:
+        inferred_kind, inferred_label = _legacy_storage_lease_owner(
+            proc_cmdline(pid))
+        if not kind or inferred_kind == 'offline_maintenance':
+            kind = inferred_kind
+            label = inferred_label
+    if not kind:
+        kind = 'unknown'
+    if not label:
+        label = {
+            'offline_maintenance': 'Offline storage maintenance',
+            'storage_sidecar': 'Storage sidecar',
+            'storage_operation': 'Storage operation',
+        }.get(kind, 'Storage operation')
+    age_seconds = (
+        max(0.0, _now() - started_at) if started_at is not None else None)
+    return {
+        **result,
+        'kind': kind,
+        'label': label,
+        'pid': pid,
+        'host': host,
+        'startedAt': started_at,
+        'ageSeconds': round(age_seconds, 1) if age_seconds is not None else None,
+        'holderVerified': process_alive,
+    }
+
+
 def read_lock_status(project_path: str) -> dict[str, Any]:
     project = os.path.realpath(project_path)
     lock_path = Path(project) / 'data' / '.server.lock'
@@ -321,23 +477,231 @@ def port_accepts(port: int, host: str = '127.0.0.1', timeout: float = 0.5) -> bo
         return False
 
 
-def _server_port(args: list[str], env: dict[str, str] | None = None) -> int:
+def _valid_server_port(raw: Any) -> int | None:
+    try:
+        port = int(raw)
+    except (ValueError, TypeError):
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
+HTTP_PROBE_RESPONSE_LIMIT = 64 * 1024
+
+
+def _read_probe_json(
+    url: str, *, timeout: float, context: ssl.SSLContext | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """Read one bounded JSON probe response, including structured HTTP errors."""
+    try:
+        with urllib.request.urlopen(
+                url, timeout=timeout, context=context) as response:
+            status = int(response.status)
+            body = response.read(HTTP_PROBE_RESPONSE_LIMIT + 1)
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        try:
+            body = exc.read(HTTP_PROBE_RESPONSE_LIMIT + 1)
+        finally:
+            exc.close()
+    if len(body) > HTTP_PROBE_RESPONSE_LIMIT:
+        raise ValueError(
+            f'probe response exceeds {HTTP_PROBE_RESPONSE_LIMIT} bytes')
+    payload = json.loads(body.decode('utf-8') or '{}')
+    if not isinstance(payload, dict):
+        raise ValueError('probe response must be a JSON object')
+    return status, payload
+
+
+def _readiness_failure_detail(
+    status: int, payload: dict[str, Any],
+) -> str:
+    error = payload.get('error')
+    error_code = ''
+    error_message = ''
+    if isinstance(error, dict):
+        error_code = str(error.get('code') or '').strip()
+        error_message = str(error.get('message') or '').strip()
+    elif error:
+        error_message = str(error).strip()
+    message = str(payload.get('message') or error_message or '').strip()
+    state = str(payload.get('state') or 'unknown').strip()
+    storage = payload.get('storage')
+    storage_state = (
+        str(storage.get('state') or 'unknown').strip()
+        if isinstance(storage, dict) else 'unknown')
+    reason = ': '.join(part for part in (error_code, message) if part)
+    suffix = f'lifecycle={state}, storage={storage_state}, HTTP {status}'
+    return f'{reason}; {suffix}' if reason else suffix
+
+
+def probe_application_readiness(
+    port: int,
+    expected_pid: int | None,
+    *,
+    preferred_scheme: str = '',
+    timeout: float = 2.0,
+) -> dict[str, Any]:
+    """Verify loopback worker identity, then its dependency readiness.
+
+    ``health`` remains a compatibility alias for identity liveness. It must
+    not be used as traffic readiness; callers require both ``liveness`` and
+    ``ready``.
+    """
+    result: dict[str, Any] = {
+        'health': False,
+        'liveness': False,
+        'ready': False,
+        'scheme': None,
+        'url': None,
+        'liveUrl': None,
+        'payloadPid': None,
+        'pidMatches': False,
+        'livenessError': '',
+        'readinessError': '',
+        'readinessState': None,
+        'storageState': None,
+    }
+    checked_port = _valid_server_port(port)
+    if checked_port is None:
+        result['livenessError'] = f'invalid application port: {port!r}'
+        result['error'] = result['livenessError']
+        return result
+    if not isinstance(expected_pid, int):
+        result['livenessError'] = 'locked worker PID is unavailable'
+        result['error'] = result['livenessError']
+        return result
+
+    schemes = ([preferred_scheme]
+               if preferred_scheme in ('http', 'https') else [])
+    schemes.extend(
+        scheme for scheme in ('http', 'https') if scheme not in schemes)
+    last_error = ''
+    for scheme in schemes:
+        context = ssl._create_unverified_context() if scheme == 'https' else None
+        base_url = f'{scheme}://127.0.0.1:{checked_port}'
+        try:
+            health_status, health_payload = _read_probe_json(
+                base_url + '/api/health', timeout=timeout, context=context)
+        except (OSError, ValueError, urllib.error.URLError,
+                json.JSONDecodeError) as exc:
+            last_error = f'{scheme} identity liveness probe failed: {exc}'
+            continue
+
+        payload_pid = health_payload.get('pid')
+        pid_matches = payload_pid == expected_pid
+        live = bool(
+            200 <= health_status < 300
+            and health_payload.get('ok') is True
+            and pid_matches)
+        if not live:
+            if not pid_matches:
+                last_error = (
+                    'identity liveness response PID does not match the '
+                    f'locked worker (expected {expected_pid}, got {payload_pid})')
+            else:
+                last_error = (
+                    f'identity liveness probe returned HTTP {health_status} '
+                    'without ok=true')
+            continue
+
+        result.update({
+            'health': True,
+            'liveness': True,
+            'scheme': scheme,
+            'liveUrl': f'{scheme}://localhost:{checked_port}',
+            'payloadPid': payload_pid,
+            'pidMatches': True,
+            'livenessError': '',
+        })
+        try:
+            ready_status, ready_payload = _read_probe_json(
+                base_url + '/api/ready', timeout=timeout, context=context)
+        except (OSError, ValueError, urllib.error.URLError,
+                json.JSONDecodeError) as exc:
+            detail = f'{scheme} readiness probe failed: {exc}'
+            result.update(readinessError=detail, error=detail)
+            return result
+
+        storage = ready_payload.get('storage')
+        readiness_state = ready_payload.get('state')
+        storage_state = (
+            storage.get('state') if isinstance(storage, dict) else None)
+        ready = bool(
+            200 <= ready_status < 300
+            and ready_payload.get('ok') is True
+            and ready_payload.get('ready') is True)
+        result.update({
+            'ready': ready,
+            'readinessState': readiness_state,
+            'storageState': storage_state,
+        })
+        if ready:
+            result['url'] = f'{scheme}://localhost:{checked_port}'
+            return result
+        detail = 'application readiness failed: ' + _readiness_failure_detail(
+            ready_status, ready_payload)
+        result.update(readinessError=detail, error=detail)
+        return result
+
+    result['livenessError'] = last_error or 'identity liveness probe failed'
+    result['error'] = result['livenessError']
+    return result
+
+
+def _explicit_server_port(args: list[str]) -> int | None:
     for index, arg in enumerate(args):
         if arg == '--port' and index + 1 < len(args):
-            try:
-                return int(args[index + 1])
-            except ValueError:
-                break
+            return _valid_server_port(args[index + 1])
         if arg.startswith('--port='):
-            try:
-                return int(arg.partition('=')[2])
-            except ValueError:
-                break
+            return _valid_server_port(arg.partition('=')[2])
+    return None
+
+
+def _server_port(args: list[str], env: dict[str, str] | None = None) -> int:
+    explicit = _explicit_server_port(args)
+    if explicit is not None:
+        return explicit
     source = env if env is not None else os.environ
-    try:
-        return int(source.get('PORT', DEFAULT_SERVER_PORT))
-    except (ValueError, TypeError):
-        return DEFAULT_SERVER_PORT
+    return _valid_server_port(source.get('PORT')) or DEFAULT_SERVER_PORT
+
+
+def _live_worker_port(status: dict[str, Any]) -> tuple[int | None, str]:
+    """Return a verified worker's self-declared bind port and its source.
+
+    The lifecycle state is durable intent, not proof of what an adopted or
+    in-place re-executed process actually serves.  Prefer argv because it wins
+    over ``PORT`` in ``server.py``; fall back to the process environment for a
+    normal manager spawn.  Callers must establish worker identity first.
+    """
+    cmdline = status.get('cmdline')
+    if isinstance(cmdline, str) and cmdline.strip():
+        try:
+            args = shlex.split(cmdline)
+        except ValueError:
+            args = cmdline.split()
+        explicit = _explicit_server_port(args)
+        if explicit is not None:
+            return explicit, 'argv'
+    pid = status.get('pid')
+    if isinstance(pid, int):
+        for name in ('_TOFU_RUNTIME_PORT', 'PORT'):
+            observed = _valid_server_port(proc_env_value(pid, name))
+            if observed is not None:
+                return observed, f'env:{name}'
+    return None, ''
+
+
+def _rewrite_explicit_server_port(args: list[str], port: int) -> list[str]:
+    """Keep stored argv consistent when an adopted worker corrects its port."""
+    rewritten = list(args)
+    for index, arg in enumerate(rewritten):
+        if arg == '--port' and index + 1 < len(rewritten):
+            rewritten[index + 1] = str(port)
+            return rewritten
+        if arg.startswith('--port='):
+            rewritten[index] = f'--port={port}'
+            return rewritten
+    return rewritten
 
 
 def project_server_env(project_path: str) -> dict[str, str]:
@@ -369,9 +733,13 @@ class LifecycleManager:
         self.logs_dir = Path(self.project) / 'logs'
         self.state_path = self.data_dir / 'server-manager-state.json'
         self.worker_log = self.logs_dir / 'server-console.log'
+        self._last_log_maintenance_at = 0.0
+        self._last_monitor_error = ''
+        self._monitor_error_count = 0
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._monitor: threading.Thread | None = None
+        self._worker_bytecode_cache_lock_fd: int | None = None
         self._project_env = project_server_env(self.project)
         loaded = _read_json(self.state_path)
         self._had_state = loaded.get('version') == STATE_VERSION
@@ -398,10 +766,13 @@ class LifecycleManager:
         rss_limit_mb = (
             os.environ.get('TOFU_PROCESS_RSS_RECYCLE_MB')
             or self._project_env.get('TOFU_PROCESS_RSS_RECYCLE_MB'))
+        profile_environment = dict(os.environ)
+        profile_environment.update(self._project_env)
         self.worker_rss_recycle_bytes = worker_rss_recycle_limit_bytes(
-            rss_limit_mb)
+            rss_limit_mb, environment=profile_environment)
         self._state = self._load_state()
         self._adopt_existing()
+        self._restore_worker_bytecode_cache_lease()
 
     def _default_state(self) -> dict[str, Any]:
         default_env = dict(self._project_env)
@@ -424,10 +795,15 @@ class LifecycleManager:
             'lastCgroupOomDelta': 0,
             'lastCgroupOomKillCount': None,
             'workerRssBytes': None,
+            'workerBytecodeCache': {},
             'lastMemoryRecycleAt': 0.0,
             'lastMemoryRecycleRssBytes': None,
             'lastRecoveredAt': 0.0,
             'lastRecoverySeconds': None,
+            'storageBlocker': {},
+            'lastPortReconciledAt': 0.0,
+            'lastPortReconciledFrom': None,
+            'lastPortReconciledSource': '',
             'nextRetryAt': 0.0,
             'wedgeSince': 0.0,
             'lastError': '',
@@ -450,6 +826,10 @@ class LifecycleManager:
             state['serverEnv'] = {}
         if not isinstance(state.get('failureHistory'), list):
             state['failureHistory'] = []
+        if not isinstance(state.get('storageBlocker'), dict):
+            state['storageBlocker'] = {}
+        if not isinstance(state.get('workerBytecodeCache'), dict):
+            state['workerBytecodeCache'] = {}
         return state
 
     def _recent_failure_times(self, now: float | None = None) -> list[float]:
@@ -472,9 +852,129 @@ class LifecycleManager:
         self._state['activeFailureAt'] = 0.0
         self._state['nextRetryAt'] = 0.0
 
+    def _storage_data_dir(self) -> Path:
+        """Resolve the worker's declared authority root without app imports."""
+        environment = dict(os.environ)
+        environment.update({
+            str(key): str(value)
+            for key, value in (self._state.get('serverEnv') or {}).items()
+        })
+        environment['TOFU_PROJECT_PATH'] = self.project
+        return _persistent_data_path(environment)
+
+    def _active_storage_lease(self) -> dict[str, Any]:
+        return read_storage_lease_status(self._storage_data_dir())
+
+    def _wait_for_stopped_sidecar_release(
+        self,
+        *,
+        timeout: float = DEFAULT_SIDECAR_LEASE_RELEASE_WAIT,
+    ) -> dict[str, Any]:
+        """Let a just-stopped worker's child sidecar release its OS lease.
+
+        A forced or slow worker shutdown can finish a fraction before the
+        parent-watched sidecar exits.  Treating that short drain as a foreign
+        storage authority makes an otherwise successful restart report 409,
+        even though reconciliation starts the worker moments later.  Only the
+        known sidecar kind gets this bounded grace; offline maintenance and
+        unknown holders retain the normal fail-closed start behavior.
+        """
+        started = time.monotonic()
+        deadline = started + max(0.0, float(timeout))
+        while True:
+            lease = self._active_storage_lease()
+            if (not lease.get('held')
+                    or lease.get('kind') != 'storage_sidecar'):
+                waited = time.monotonic() - started
+                if waited >= DEFAULT_STORAGE_LEASE_POLL_INTERVAL:
+                    logger.info(
+                        'stopped storage sidecar released its lease after %.1fs',
+                        waited,
+                    )
+                return lease
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    'stopped storage sidecar still holds its lease after %.1fs',
+                    max(0.0, float(timeout)),
+                )
+                return lease
+            time.sleep(min(DEFAULT_STORAGE_LEASE_POLL_INTERVAL, remaining))
+
+    @staticmethod
+    def _storage_blocker_message(lease: dict[str, Any]) -> str:
+        label = str(lease.get('label') or 'Storage operation')
+        pid = lease.get('pid')
+        host = lease.get('host')
+        holder = (
+            f'{label} (PID {pid})' if isinstance(pid, int)
+            else (f'{label} on {host}' if host else label)
+        )
+        if lease.get('kind') == 'offline_maintenance':
+            return (
+                f'{holder} holds the storage lease; start is queued and will '
+                'resume automatically after maintenance')
+        return (
+            f'{holder} holds the storage lease; refusing to start a second '
+            'storage authority')
+
+    def _defer_for_storage_lease(self, lease: dict[str, Any]) -> bool:
+        """Persist a bounded startup blocker; return true for maintenance."""
+        maintenance = lease.get('kind') == 'offline_maintenance'
+        self._state['storageBlocker'] = {
+            key: lease.get(key)
+            for key in (
+                'held', 'kind', 'label', 'pid', 'host', 'startedAt',
+                'holderVerified',
+            )
+        }
+        self._release_worker_bytecode_cache_lease()
+        self._state['worker'] = {}
+        self._state['nextRetryAt'] = 0.0
+        self._set_observed(
+            'maintenance' if maintenance else 'conflict',
+            self._storage_blocker_message(lease),
+        )
+        self._save()
+        return maintenance
+
     def _save(self) -> None:
         self._state['updatedAt'] = _now()
         _atomic_json(self.state_path, self._state)
+
+    def _release_worker_bytecode_cache_lease(self) -> None:
+        descriptor = self._worker_bytecode_cache_lock_fd
+        self._worker_bytecode_cache_lock_fd = None
+        if descriptor is None:
+            return
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+    def _restore_worker_bytecode_cache_lease(self) -> None:
+        """Protect an adopted worker's exact cache without pruning it."""
+        cache_status = self._state.get('workerBytecodeCache') or {}
+        if not cache_status.get('managed') or not self._launcher_is_alive():
+            return
+        try:
+            from serverctl_pkg.python_bytecode_cache import (
+                reacquire_server_python_cache_lease,
+            )
+            descriptor = reacquire_server_python_cache_lease(
+                self.project,
+                self.python,
+                str(cache_status.get('cacheRoot') or ''),
+                str(cache_status.get('namespace') or ''),
+            )
+        except Exception as exc:
+            logger.warning('server bytecode cache lease restore skipped: %s', exc)
+            return
+        if descriptor is None:
+            logger.warning(
+                'server bytecode cache lease restore could not validate namespace')
+            return
+        self._worker_bytecode_cache_lock_fd = descriptor
 
     def _set_observed(self, observed: str, error: str = '') -> None:
         if self._state.get('observed') != observed:
@@ -496,6 +996,34 @@ class LifecycleManager:
         if source:
             self._state['launchSource'] = source
 
+    def _reconcile_live_worker_port(self, status: dict[str, Any]) -> bool:
+        """Adopt the endpoint declared by an already identity-checked worker.
+
+        Direct/manual starts and in-place ``execv`` keep a legitimate worker
+        alive without passing through ``_spawn``.  Persisted lifecycle intent
+        can therefore drift from the real listener indefinitely, making the
+        manager probe an unrelated port and later recover onto that stale
+        endpoint.  Adoption means absorbing the live endpoint into both the
+        status port and the next-spawn configuration.
+        """
+        observed, source = _live_worker_port(status)
+        if observed is None or observed == self.port:
+            return False
+        previous = self.port
+        self._state['port'] = observed
+        server_env = dict(self._state.get('serverEnv') or {})
+        server_env['PORT'] = str(observed)
+        self._state['serverEnv'] = server_env
+        self._state['serverArgs'] = _rewrite_explicit_server_port(
+            [str(arg) for arg in self._state.get('serverArgs') or []], observed)
+        self._state['lastPortReconciledAt'] = _now()
+        self._state['lastPortReconciledFrom'] = previous
+        self._state['lastPortReconciledSource'] = source
+        logger.warning(
+            'reconciled live worker port pid=%s persisted=%s observed=%s source=%s',
+            status.get('pid'), previous, observed, source)
+        return True
+
     def _adopt_existing(self) -> None:
         with self._lock:
             status = read_lock_status(self.project)
@@ -505,6 +1033,7 @@ class LifecycleManager:
                     self._set_observed('conflict', identity_error)
                     self._save()
                     return
+                self._reconcile_live_worker_port(status)
                 # Fresh install: adopt without a restart. Recovery of an
                 # existing desired=stopped record is different: stop won
                 # before the manager died, so never resurrect it on boot.
@@ -535,6 +1064,7 @@ class LifecycleManager:
         with self._lock:
             if self._monitor and self._monitor.is_alive():
                 return
+            self._maintain_process_logs(force=True)
             self._monitor = threading.Thread(
                 target=self._monitor_loop,
                 name=f'tofu-manager-{Path(self.project).name}', daemon=True)
@@ -551,12 +1081,72 @@ class LifecycleManager:
             try:
                 self.reconcile()
             except Exception as exc:
+                save_error = None
                 with self._lock:
                     self._set_observed('degraded', f'monitor error: {exc}')
                     try:
                         self._save()
-                    except OSError:
-                        pass
+                    except OSError as state_exc:
+                        save_error = state_exc
+                signature = f'{type(exc).__name__}: {exc}'[:240]
+                if signature == self._last_monitor_error:
+                    self._monitor_error_count += 1
+                else:
+                    self._last_monitor_error = signature
+                    self._monitor_error_count = 1
+                occurrence = self._monitor_error_count
+                if occurrence == 1 or occurrence & (occurrence - 1) == 0:
+                    logger.error(
+                        'lifecycle monitor reconcile failed '
+                        '(occurrences=%d, degraded_state_saved=%s): %s',
+                        occurrence, save_error is None, exc,
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
+                    if save_error is not None:
+                        logger.warning(
+                            'lifecycle monitor could not persist degraded '
+                            'state: %s', save_error,
+                        )
+            else:
+                self._last_monitor_error = ''
+                self._monitor_error_count = 0
+
+    def _maintain_process_logs(self, *, force: bool = False) -> None:
+        """Bound inherited stdout files without application dependencies.
+
+        The real checkout provides the shared policy implementation.  A
+        standalone copied manager (used by recovery tooling/tests) deliberately
+        degrades to a no-op so lifecycle control remains stdlib-only.
+        """
+        now = time.monotonic()
+        if not force and now - self._last_log_maintenance_at < 900.0:
+            return
+        self._last_log_maintenance_at = now
+        try:
+            from lib.log_policy import stream_backup_count, stream_max_bytes
+            from lib.log_retention import (
+                copytruncate_if_oversize, ensure_private_log_directory,
+                ensure_private_log_file,
+            )
+        except Exception:
+            return
+        ensure_private_log_directory(self.logs_dir)
+        for name, path in (
+                ('server_console', self.worker_log),
+                ('server_manager', self.logs_dir / 'server-manager.log')):
+            try:
+                ensure_private_log_file(path, create=True)
+                copytruncate_if_oversize(
+                    path, max_bytes=stream_max_bytes(name),
+                    backup_count=stream_backup_count(name))
+            except Exception as exc:
+                # Observability maintenance must never make start/stop/status
+                # unavailable; the server janitor will retry the same policy.
+                logger.warning(
+                    'lifecycle log maintenance failed for stream=%s path=%s: %s',
+                    name, path, exc,
+                )
+                continue
 
     def _launcher_is_alive(self) -> bool:
         worker = self._state.get('worker') or {}
@@ -567,35 +1157,30 @@ class LifecycleManager:
         actual = proc_start_ticks(pid)
         return expected is None or actual is None or expected == actual
 
-    def _http_healthy(self, timeout: float = 2.0) -> bool:
+    def _http_probe(
+        self, expected_pid: int, timeout: float = 2.0,
+    ) -> dict[str, Any]:
         mode = ''
         try:
             mode = (self.data_dir / '.last_serve_mode').read_text().strip()
         except OSError:
             pass
-        schemes = ['https', 'http'] if mode == 'https' else ['http', 'https']
-        context = ssl._create_unverified_context()
-        for scheme in schemes:
-            try:
-                with urllib.request.urlopen(
-                    f'{scheme}://127.0.0.1:{self.port}/api/health', timeout=timeout,
-                    context=context if scheme == 'https' else None,
-                ) as response:
-                    if 200 <= response.status < 300:
-                        payload = json.loads(response.read().decode('utf-8') or '{}')
-                        if isinstance(payload, dict):
-                            return True
-            except (OSError, ValueError, urllib.error.URLError, json.JSONDecodeError):
-                continue
-        return False
+        preferred_scheme = 'https' if mode == 'https' else 'http'
+        return probe_application_readiness(
+            self.port,
+            expected_pid,
+            preferred_scheme=preferred_scheme,
+            timeout=timeout,
+        )
+
+    def _http_healthy(self, expected_pid: int, timeout: float = 2.0) -> bool:
+        """Compatibility predicate for the complete readiness contract."""
+        probe = self._http_probe(expected_pid, timeout=timeout)
+        return bool(probe.get('liveness') and probe.get('ready'))
 
     def _heartbeat_age(self, pid: int) -> float | None:
         root = (os.environ.get('TOFU_HEARTBEAT_DIR') or '').strip()
-        if root:
-            path = Path(root) / 'server.heartbeat'
-        else:
-            local_root = (os.environ.get('TOFU_DB_LOCAL_ROOT') or '').strip() or '/tmp/tofu'
-            path = Path(local_root) / 'heartbeat' / 'server.heartbeat'
+        path = Path(root or '/tmp/tofu/heartbeat') / 'server.heartbeat'
         value = _read_json(path)
         try:
             if int(value.get('pid')) != int(pid):
@@ -685,6 +1270,14 @@ class LifecycleManager:
             worker = dict(self._state.get('worker') or {})
             recent_failure_count = len(self._recent_failure_times())
             observed = self._state.get('observed') or 'stopped'
+            desired = self._state.get('desired')
+            launcher_alive = self._launcher_is_alive()
+            storage_lease: dict[str, Any] = {}
+            if (desired == 'running' and not low.get('running')
+                    and not launcher_alive):
+                candidate = self._active_storage_lease()
+                if candidate.get('held'):
+                    storage_lease = candidate
             identity_error = self._identity_error(low) if low.get('running') else None
             if conflict or identity_error:
                 observed = 'conflict'
@@ -693,29 +1286,53 @@ class LifecycleManager:
                     observed = 'stopping'
                 else:
                     observed = 'running' if port_accepts(self.port) else 'starting'
-            elif self._state.get('desired') == 'stopped':
+            elif desired == 'stopped':
                 observed = 'stopped'
-            elif self._launcher_is_alive():
+            elif launcher_alive:
                 observed = 'starting'
+            elif storage_lease:
+                observed = (
+                    'maintenance'
+                    if storage_lease.get('kind') == 'offline_maintenance'
+                    else 'conflict')
             elif (int(self._state.get('consecutiveFailures') or 0) >= self.max_failures
                   or recent_failure_count >= self.max_failures):
                 observed = 'crashloop'
-            health = None
+            probe: dict[str, Any] = {}
+            liveness = None
+            ready = None
             if probe_health and low.get('running') and not conflict:
-                health = self._http_healthy()
-                if not health and observed == 'running':
+                probe = self._http_probe(int(low['pid']))
+                liveness = probe.get('liveness') is True
+                ready = probe.get('ready') is True
+                if not (liveness and ready) and observed == 'running':
                     observed = 'degraded'
             last_error = self._state.get('lastError') or ''
-            if health is True:
+            if liveness is True and ready is True:
                 # The returned snapshot should never contradict its own live
                 # probe while the background reconcile is between ticks.
                 last_error = ''
+            elif probe:
+                last_error = str(
+                    probe.get('readinessError') if liveness
+                    else probe.get('livenessError') or last_error)
             return {
                 **low,
                 'desired': self._state.get('desired'),
                 'observed': observed,
                 'port': self.port,
-                'health': health,
+                # ``health`` is retained for older CLI consumers and means
+                # identity liveness, exactly as it did before readiness became
+                # an explicit second probe.
+                'health': liveness,
+                'liveness': liveness,
+                'ready': ready,
+                'probeScheme': probe.get('scheme'),
+                'livenessError': probe.get('livenessError') or '',
+                'readinessError': probe.get('readinessError') or '',
+                'readinessState': probe.get('readinessState'),
+                'storageState': probe.get('storageState'),
+                'storageLease': storage_lease or None,
                 'owner': 'tofu-manager',
                 'managerPid': os.getpid(),
                 'worker': worker,
@@ -734,6 +1351,8 @@ class LifecycleManager:
                 'workerRssBytes': self._state.get('workerRssBytes'),
                 'workerRssRecycleBytes': self.worker_rss_recycle_bytes,
                 'workerRssGuardEnabled': bool(self.worker_rss_recycle_bytes),
+                'workerBytecodeCache': dict(
+                    self._state.get('workerBytecodeCache') or {}),
                 'lastMemoryRecycleAt': float(
                     self._state.get('lastMemoryRecycleAt') or 0),
                 'lastMemoryRecycleRssBytes': self._state.get(
@@ -752,20 +1371,53 @@ class LifecycleManager:
             }
 
     def _spawn(self, source: str) -> dict[str, Any]:
+        self._release_worker_bytecode_cache_lease()
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self._maintain_process_logs(force=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._disable_legacy_guard()
         env = os.environ.copy()
         env['TOFU_SERVER_WORKER'] = '1'
-        env['TOFU_SERVER_PROCESS'] = '1'
         env['TOFU_MANAGED_BY'] = 'supervisor'
+        env['TOFU_EXTERNAL_CONSOLE_LOG'] = str(self.worker_log)
+        env['TOFU_EXTERNAL_CONSOLE_STREAM'] = 'server_console'
+        # The manager may supervise a project other than the checkout that
+        # supplied this module. Probe that project's persistent data volume,
+        # never an incidental source/supervisor filesystem.
+        env['TOFU_PROJECT_PATH'] = self.project
         env['PORT'] = str(self.port)
         env.update({str(key): str(value)
                     for key, value in (self._state.get('serverEnv') or {}).items()})
+        # Apply native-process settings only after the project .env overlay is
+        # present. glibc reads MALLOC_ARENA_MAX at exec time; translating the
+        # Tofu knob before this merge would silently ignore a user's override.
+        install_process_resource_defaults(env)
+        self.worker_rss_recycle_bytes = worker_rss_recycle_limit_bytes(
+            env.get('TOFU_PROCESS_RSS_RECYCLE_MB'), environment=env)
+        bytecode_activation = None
+        bytecode_status: dict[str, object] = {
+            'selected': False,
+            'managed': False,
+            'reason': 'cache-helper-unavailable',
+        }
+        try:
+            from serverctl_pkg.python_bytecode_cache import (
+                prepare_server_python_cache,
+            )
+            bytecode_activation = prepare_server_python_cache(
+                self.project, self.python, env)
+            bytecode_status = bytecode_activation.as_status()
+            if bytecode_activation.managed:
+                env['PYTHONPYCACHEPREFIX'] = bytecode_activation.pycache_prefix
+        except Exception as exc:
+            logger.warning('server bytecode cache setup skipped: %s', exc)
+        self._state['workerBytecodeCache'] = bytecode_status
         args = [str(item) for item in self._state.get('serverArgs') or []]
         try:
             log_fh = self.worker_log.open('ab')
         except OSError as exc:
+            if bytecode_activation is not None:
+                bytecode_activation.close_parent_lock()
             self._set_observed('crashloop', f'cannot open worker log: {exc}')
             self._save()
             return {'ok': False, 'message': str(exc)}
@@ -776,11 +1428,15 @@ class LifecycleManager:
                 start_new_session=True, close_fds=True,
             )
         except Exception as exc:
+            if bytecode_activation is not None:
+                bytecode_activation.close_parent_lock()
             self._set_observed('crashloop', f'spawn failed: {exc}')
             self._save()
             return {'ok': False, 'message': f'spawn failed: {exc}'}
         finally:
             log_fh.close()
+        if bytecode_activation is not None:
+            self._worker_bytecode_cache_lock_fd = bytecode_activation.lock_fd
         self._state['worker'] = {
             'pid': proc.pid,
             'host': _hostname(),
@@ -790,6 +1446,7 @@ class LifecycleManager:
         }
         self._state['launchSource'] = source
         self._state['lastError'] = ''
+        self._state['storageBlocker'] = {}
         self._set_observed('starting')
         self._save()
         return {
@@ -810,6 +1467,8 @@ class LifecycleManager:
             status = read_lock_status(self.project)
             if status.get('running'):
                 identity_error = self._identity_error(status)
+                if not identity_error:
+                    self._reconcile_live_worker_port(status)
                 conflict, foreign = self._port_conflict(status)
                 if identity_error or conflict:
                     error = identity_error or (
@@ -876,6 +1535,18 @@ class LifecycleManager:
                 return {'ok': True, 'alreadyRunning': True,
                         'launcherPid': (self._state.get('worker') or {}).get('pid'),
                         'message': 'startup already in progress', **self.status()}
+            storage_lease = self._active_storage_lease()
+            if storage_lease.get('held'):
+                maintenance = self._defer_for_storage_lease(storage_lease)
+                return {
+                    'ok': maintenance,
+                    'alreadyRunning': False,
+                    'launcherPid': None,
+                    'waitingForMaintenance': maintenance,
+                    'blockedByStorageLease': True,
+                    'message': self._storage_blocker_message(storage_lease),
+                    **self.status(),
+                }
             return self._spawn(source)
 
     def _terminate(self, status: dict[str, Any], *, timeout: float = 12.0) -> tuple[bool, bool, str]:
@@ -942,6 +1613,7 @@ class LifecycleManager:
             logger.error('%s; termination failed: %s', message, error)
             return True
         self._state['worker'] = {}
+        self._release_worker_bytecode_cache_lease()
         self._state['lastError'] = (
             f'{message}; {"forced SIGKILL" if killed else "graceful SIGTERM"}')
         logger.warning('%s; worker stopped (%s)', message, error)
@@ -956,12 +1628,16 @@ class LifecycleManager:
             was_running = bool(status.get('running'))
             self._state['desired'] = 'running' if keep_desired_running else 'stopped'
             self._state['launchSource'] = source
+            if not keep_desired_running:
+                self._state['storageBlocker'] = {}
             self._set_observed('stopping' if was_running else 'stopped')
             self._disable_legacy_guard()
             self._save()  # desired=stopped must win before the signal is sent
             ok, killed, message = self._terminate(status)
             if ok:
                 self._state['worker'] = {}
+                self._release_worker_bytecode_cache_lease()
+                self._state['storageBlocker'] = {}
                 self._set_observed('stopped')
                 self._state['lastError'] = ''
             else:
@@ -983,6 +1659,10 @@ class LifecycleManager:
                 return {'ok': False, 'message': 'serverArgs must be a JSON array'}
             if server_env is not None and not isinstance(server_env, dict):
                 return {'ok': False, 'message': 'serverEnv must be a JSON object'}
+            if server_args is None and server_env is None:
+                live = read_lock_status(self.project)
+                if live.get('running') and not self._identity_error(live):
+                    self._reconcile_live_worker_port(live)
             if server_args is not None:
                 self._state['serverArgs'] = [str(arg) for arg in server_args]
             if server_env is not None:
@@ -1003,6 +1683,7 @@ class LifecycleManager:
             stopped = self.stop(source=source, keep_desired_running=True)
             if not stopped.get('ok'):
                 return stopped
+            self._wait_for_stopped_sidecar_release()
             self._clear_failure_budget()
             return self.start(server_args=self._state.get('serverArgs') or [],
                               server_env=self._state.get('serverEnv') or {},
@@ -1010,6 +1691,7 @@ class LifecycleManager:
 
     def reconcile(self) -> None:
         with self._lock:
+            self._maintain_process_logs()
             status = read_lock_status(self.project)
             if not status.get('running') and self._state.get('desired') == 'stopped':
                 status = self._remembered_worker_status() or status
@@ -1019,6 +1701,8 @@ class LifecycleManager:
                 self._set_observed('conflict', identity_error)
                 self._save()
                 return
+            if status.get('running'):
+                self._reconcile_live_worker_port(status)
             conflict, foreign = self._port_conflict(status)
             if conflict:
                 owner = f'pid(s) {foreign}' if foreign else 'an unknown process'
@@ -1038,6 +1722,8 @@ class LifecycleManager:
                         self._save()
                         return
                 self._state['worker'] = {}
+                self._release_worker_bytecode_cache_lease()
+                self._state['storageBlocker'] = {}
                 self._set_observed('stopped')
                 self._save()
                 return
@@ -1045,8 +1731,8 @@ class LifecycleManager:
                 self._remember_worker(status)
                 if self._enforce_worker_rss_limit(status):
                     return
-                healthy = self._http_healthy()
-                if healthy:
+                probe = self._http_probe(int(status['pid']))
+                if probe.get('liveness') and probe.get('ready'):
                     recovered_from = float(self._state.get('activeFailureAt') or 0)
                     now = _now()
                     if recovered_from:
@@ -1068,9 +1754,26 @@ class LifecycleManager:
                     self._set_observed('running')
                     self._save()
                     return
+                if probe.get('liveness'):
+                    # Dependency readiness is not process liveness. Keep the
+                    # worker available to finish startup/recovery and never
+                    # feed a Sidecar outage into the wedge-restart policy.
+                    self._state['wedgeSince'] = 0.0
+                    self._set_observed(
+                        'degraded',
+                        str(probe.get('readinessError')
+                            or 'application readiness probe failed'),
+                    )
+                    self._save()
+                    return
                 age = self._heartbeat_age(int(status['pid']))
                 if age is None or age < DEFAULT_WEDGE_STALE:
-                    self._set_observed('degraded', 'HTTP health failed; heartbeat not stale')
+                    self._set_observed(
+                        'degraded',
+                        str(probe.get('livenessError')
+                            or 'identity liveness failed')
+                        + '; heartbeat not stale',
+                    )
                     self._save()
                     return
                 first = float(self._state.get('wedgeSince') or 0)
@@ -1089,6 +1792,7 @@ class LifecycleManager:
                     self._save()
                     return
                 self._state['worker'] = {}
+                self._release_worker_bytecode_cache_lease()
                 self._state['wedgeSince'] = 0.0
                 self._state['lastError'] = f'recovered wedged worker pid {status["pid"]}'
                 self._record_failure()
@@ -1099,9 +1803,33 @@ class LifecycleManager:
                     self._set_observed('starting')
                     self._save()
                     return
+            storage_lease = self._active_storage_lease()
+            if storage_lease.get('held'):
+                self._defer_for_storage_lease(storage_lease)
+                return
+            prior_storage_blocker = dict(
+                self._state.get('storageBlocker') or {})
+            if prior_storage_blocker:
+                self._state['storageBlocker'] = {}
+                self._state['lastError'] = ''
+                self._clear_failure_budget()
+                source = (
+                    'storage-maintenance-complete'
+                    if prior_storage_blocker.get('kind')
+                    == 'offline_maintenance'
+                    else 'storage-lease-released')
+                self._spawn(source)
+                return
             self._record_failure()
 
     def _record_failure(self) -> None:
+        # A crash-loop is a latched operator boundary. Reconciliation keeps
+        # observing the absent worker every monitor interval, but that is not
+        # a new worker exit and must not inflate lifetime diagnostics (or turn
+        # the manager state file into a periodic write source). An explicit
+        # start/restart clears this latch via _clear_failure_budget().
+        if self._state.get('observed') == 'crashloop':
+            return
         retry_at = float(self._state.get('nextRetryAt') or 0)
         if retry_at:
             if _now() < retry_at:
@@ -1148,6 +1876,7 @@ class LifecycleManager:
         self._state['consecutiveFailures'] = failures
         self._state['restartCount'] = int(self._state.get('restartCount') or 0) + 1
         self._state['worker'] = {}
+        self._release_worker_bytecode_cache_lease()
         logger.warning(
             'worker failure %d/%d in %.0fs window (consecutive=%d, cause=%s): %s',
             recent_failures, self.max_failures, self.failure_window,

@@ -21,9 +21,7 @@ logger = get_logger(__name__)
 # Each row: (tag, input_max_per_1m, output_max_per_1m).
 # A model earns the tag when its input price < input_max AND its output
 # price < output_max (both strict).  When only a blended $/1K cost is
-# available, we compare blended_1m <= (input_max + output_max) / 2
-# (assumes symmetric pricing — matches the legacy CHEAP_BLENDED_THRESHOLD
-# of 9.0 which is (3.0 + 15.0) / 2).
+# available, we compare blended_1m <= (input_max + output_max) / 2.
 #
 # Reference for 'cheap' bracket: Claude Sonnet 4.6 — input $3/1M,
 # output $15/1M.  A model strictly cheaper on both axes is "cheap".
@@ -37,11 +35,6 @@ PRICING_TIERS: list[tuple[str, float, float]] = [
 # Tier tags whose presence/absence is managed by reevaluate_pricing_tags.
 # Never put operational capability tags (text / vision / thinking / …) here.
 MANAGED_TIER_TAGS: frozenset[str] = frozenset(tag for tag, *_ in PRICING_TIERS)
-
-# Legacy constants (kept for backward compat with external imports).
-CHEAP_INPUT_THRESHOLD = 3.0
-CHEAP_OUTPUT_THRESHOLD = 15.0
-CHEAP_BLENDED_THRESHOLD = 9.0
 
 # Caps that indicate a non-chat model — pricing tier tags never apply.
 # Must list EVERY non-chat cap: a stray managed tag (e.g. 'cheap') on a non-chat

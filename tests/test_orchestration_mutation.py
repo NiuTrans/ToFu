@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from lib.orchestration_mutation import (
+from lib.orchestration.mutation_contract import mutation_contract
+from lib.orchestration.mutation_operations import (
+    resolved_mutation,
+    runtime_abort_mutation,
+)
+from lib.orchestration.mutation_response import mutation_response
+from lib.orchestration.mutation_result import (
     MUTATION_ACCEPTED,
     MUTATION_ACTIVE,
     MUTATION_ACTION_ABORT_RUN,
@@ -18,41 +24,10 @@ from lib.orchestration_mutation import (
     MUTATION_PERSISTENCE_FAILED,
     MUTATION_TRANSPORT_FAILED,
     OrchestrationMutationResult,
-    mutation_contract,
-    mutation_response,
-    resolved_mutation,
-    runtime_abort_mutation,
 )
 
 
 pytestmark = pytest.mark.unit
-
-
-def test_mutation_layers_have_stable_facade_identities():
-    from pathlib import Path
-
-    import lib.orchestration.mutation_contract as contract_owner
-    import lib.orchestration.mutation_operations as operation_owner
-    import lib.orchestration.mutation_response as response_owner
-    import lib.orchestration.mutation_result as result_owner
-    import lib.orchestration_mutation as facade
-
-    assert facade.OrchestrationMutationResult is \
-        result_owner.OrchestrationMutationResult
-    assert facade.RunMutationResult is result_owner.RunMutationResult
-    assert facade.resolved_mutation is operation_owner.resolved_mutation
-    assert facade.runtime_abort_mutation is \
-        operation_owner.runtime_abort_mutation
-    assert facade.mutation_response is response_owner.mutation_response
-    assert facade.mutation_contract is contract_owner.mutation_contract
-    assert facade.mutation_response_schema is \
-        contract_owner.mutation_response_schema
-
-    source = Path('lib/orchestration_mutation.py').read_text()
-    assert 'class OrchestrationMutationResult' not in source
-    assert 'def runtime_abort_mutation' not in source
-    assert 'def mutation_response' not in source
-    assert 'def mutation_contract' not in source
 
 
 def test_versioned_payload_keeps_machine_state_and_retryability():
@@ -78,22 +53,18 @@ def test_versioned_payload_keeps_machine_state_and_retryability():
     }
 
 
-def test_success_has_one_explicit_reason_and_preserves_compatibility_fields():
+def test_success_has_one_explicit_reason_and_one_canonical_payload():
     result = OrchestrationMutationResult(
         True,
         run_status='aborted',
         action=MUTATION_ACTION_ABORT_RUN,
         target_id='run-1',
     )
-    payload, status = mutation_response(
-        result,
-        compatibility={'run_id': 'run-1', 'status': 'aborted'},
-    )
+    payload, status = mutation_response(result)
 
     assert status == 200
     assert payload['ok'] is True
-    assert payload['run_id'] == 'run-1'
-    assert payload['status'] == 'aborted'
+    assert set(payload) == {'ok', 'mutation'}
     assert payload['mutation']['reason'] == MUTATION_ACCEPTED
     assert payload['mutation']['target_exists'] is True
     assert payload['mutation']['reconcile_required'] is False
@@ -210,20 +181,22 @@ def test_runtime_abort_distinguishes_accepted_terminal_and_missing():
                 'done': {'status': 'done'},
             }
 
-        def abort(self, task_id):
-            return task_id == 'live'
+        def abort_owned(self, task_id, *, user_id):
+            return user_id == 41 and task_id == 'live'
 
-        def get(self, task_id):
-            return self.tasks.get(task_id)
+        def get_owned(self, task_id, *, user_id):
+            return self.tasks.get(task_id) if user_id == 41 else None
 
     runtime = Runtime()
-    accepted = runtime_abort_mutation(runtime, 'live')
-    terminal = runtime_abort_mutation(runtime, 'done')
-    missing = runtime_abort_mutation(runtime, 'missing')
+    accepted = runtime_abort_mutation(runtime, 'live', 41)
+    terminal = runtime_abort_mutation(runtime, 'done', 41)
+    missing = runtime_abort_mutation(runtime, 'missing', 41)
+    cross_owner = runtime_abort_mutation(runtime, 'live', 42)
 
     assert accepted.ok and accepted.run_status == 'aborting'
     assert terminal.reason == 'terminal' and terminal.run_status == 'done'
     assert missing.reason == MUTATION_NOT_FOUND
+    assert cross_owner.reason == MUTATION_NOT_FOUND
     assert all(result.action == MUTATION_ACTION_ABORT_RUN for result in (
         accepted, terminal, missing,
     ))

@@ -1,6 +1,6 @@
 """routes/plugin_registry.py — Pluggable Flask/Quart Blueprint discovery.
 
-This is the **route-side mirror** of ``lib/tools/registry.py`` (tools) and
+This is the **route-side mirror** of ``lib/tools/registry/`` (tools) and
 ``lib/llm_dispatch/provider_registry.py`` (LLM body dialects).  Where those let
 a third-party package contribute *tools* or *body dialects*, this registry lets
 one contribute whole *Blueprints* — a self-contained feature surface (routes +

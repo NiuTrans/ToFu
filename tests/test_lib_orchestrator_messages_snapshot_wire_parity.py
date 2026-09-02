@@ -1,5 +1,3 @@
-# Incident anchor: born in commit e604a4dc — refactor(orchestrator): pt_03f4cdf1 slice 15 — extract pre-flight mes...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 15 — extract the
 Request-Inspector messages-snapshot emission block from _run.py's
 stream loop into
@@ -34,6 +32,22 @@ from __future__ import annotations
 import importlib
 import inspect
 import pathlib
+
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_chat_runtime_tasks():
+    """Keep synthetic live-task registrations local to each example."""
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+
+    before = set(chat_task_runtime.task_ids())
+    yield
+    for task_id in set(chat_task_runtime.task_ids()) - before:
+        chat_task_runtime.discard(task_id)
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -194,15 +208,15 @@ def test_leaf_carries_request_kind_marker():
         'ONLY pre-flight MESSAGES_SNAPSHOT site')
 
 
-def test_leaf_carries_endpoint_phase_turn_tag():
-    """Endpoint-mode tasks (Planner/Worker/Critic) each re-run
+def test_leaf_carries_flow_phase_turn_tag():
+    """Flow-managed tasks (Planner/Worker/Critic) each re-run
     run_task with their own round numbering, so the driver's phase is
-    tagged onto the event via ``turn=task.get('_endpoint_phase') or
+    tagged onto the event via ``turn=task.get('_flow_phase') or
     ''``. Losing this tag makes same-numbered rounds
     indistinguishable in the Request Inspector."""
     src = LEAF_PY.read_text()
-    assert "_endpoint_phase" in src, (
-        'emit_messages_snapshot_event must forward _endpoint_phase as '
+    assert "_flow_phase" in src, (
+        'emit_messages_snapshot_event must forward _flow_phase as '
         'the turn tag on the emitted event')
 
 
@@ -243,7 +257,7 @@ def test_helper_swallows_exceptions_from_wire_sanitize(monkeypatch):
     # No exception must escape — the LLM round survives.
     import threading
     task = {'id': 'a' * 32, 'convId': 'conv-x', 'events': [],
-            'events_lock': threading.RLock()}
+            'events_lock': threading.RLock(), '_userId': 1}
     mod.emit_messages_snapshot_event(
         task, [],
         tid='abcd1234', round_num=0, model='claude-x',
@@ -259,9 +273,12 @@ def _make_task(**overrides):
     import threading
     t = {
         'id': 'a' * 32, 'convId': 'conv-x', 'events': [],
-        '_endpoint_phase': '', 'events_lock': threading.RLock(),
+        '_flow_phase': '', 'events_lock': threading.RLock(),
+        '_userId': 1, 'status': 'running', 'kind': 'chat',
     }
     t.update(overrides)
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    assert chat_task_runtime.adopt(t) is True
     return t
 
 

@@ -28,10 +28,12 @@ if __name__ == '__main__':
     # The engine import below freezes the DB backend from the ambient env —
     # the standalone guard must run FIRST (under pytest this branch never
     # fires, so the session DB is untouched).
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_paper_deepen.standalone')
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_paper_deepen.standalone')
 
 import lib.paper.deepen_engine as de  # noqa: E402
+
+TEST_OWNER_USER_ID = 1
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -74,6 +76,7 @@ class _DbPatched:
 
             def query(self, operation, payload):
                 assert operation == 'paper.report.get'
+                assert payload['user_id'] == TEST_OWNER_USER_ID
                 row = db.rows.get((payload['paper_hash'], payload['lang']))
                 if row is None:
                     return None
@@ -81,6 +84,7 @@ class _DbPatched:
 
             def command(self, operation, payload, command_id):
                 assert command_id
+                assert payload['user_id'] == TEST_OWNER_USER_ID
                 key = (payload['paper_hash'], payload['lang'])
                 if operation == 'paper.report.upsert':
                     db.rows[key] = dict(payload)
@@ -154,14 +158,23 @@ def test_cache_freshness():
     with _DbPatched() as p:
         sec = de.extract_report_section(_REPORT, 1)
         de._write_deepen_cache('h1', 'deeper', 1, 'en', sec['hash'],
-                               'DEEP CONTENT', {'prompt_tokens': 10}, 'm1')
-        hit = de.read_deepen_cache('h1', 'deeper', 1, 'en', sec['hash'])
+                               'DEEP CONTENT', {'prompt_tokens': 10}, 'm1',
+                               user_id=TEST_OWNER_USER_ID)
+        hit = de.read_deepen_cache(
+            'h1', 'deeper', 1, 'en', sec['hash'],
+            user_id=TEST_OWNER_USER_ID)
         assert hit and hit['content'] == 'DEEP CONTENT', 'fresh cache not served'
-        stale = de.read_deepen_cache('h1', 'deeper', 1, 'en', 'differenthash')
+        stale = de.read_deepen_cache(
+            'h1', 'deeper', 1, 'en', 'differenthash',
+            user_id=TEST_OWNER_USER_ID)
         assert stale is None, 'stale cache served (regeneration not detected)'
-        miss = de.read_deepen_cache('h1', 'derive', 1, 'en', sec['hash'])
+        miss = de.read_deepen_cache(
+            'h1', 'derive', 1, 'en', sec['hash'],
+            user_id=TEST_OWNER_USER_ID)
         assert miss is None, 'different mode must be a different cache slot'
-        miss2 = de.read_deepen_cache('h1', 'deeper', 1, 'zh', sec['hash'])
+        miss2 = de.read_deepen_cache(
+            'h1', 'deeper', 1, 'zh', sec['hash'],
+            user_id=TEST_OWNER_USER_ID)
         assert miss2 is None, 'different lang must be a different cache slot'
     _ok('缓存新鲜度:命中/再生失效/模式与语言分槽')
 
@@ -172,27 +185,30 @@ def test_neuter_hash_validation_is_load_bearing():
     with _DbPatched() as p:
         sec = de.extract_report_section(_REPORT, 1)
         de._write_deepen_cache('h2', 'deeper', 1, 'en', sec['hash'],
-                               'STALE DEPTH', None, 'm1')
+                               'STALE DEPTH', None, 'm1',
+                               user_id=TEST_OWNER_USER_ID)
         # Neutered read: hash check removed.
         row = p.db.rows.get(('h2', de.deepen_lang_key('deeper', 1, 'en')))
         served_stale = row['report'] if row else None
         assert served_stale == 'STALE DEPTH', \
             'NEUTER precondition: without the check the stale row IS served'
         # Real read rejects it.
-        assert de.read_deepen_cache('h2', 'deeper', 1, 'en', 'newhash') is None
+        assert de.read_deepen_cache(
+            'h2', 'deeper', 1, 'en', 'newhash',
+            user_id=TEST_OWNER_USER_ID) is None
     _ok('NEUTER:摘掉 hash 校验 → 旧深挖被误服;校验是真闸')
 
 
 # ── 3. start validation + 4. spawn/dedup ─────────────────────────────────
 def test_start_validation():
     with _DbPatched():
-        bad = de.start_deepen('hx', 'en', 'bogus-mode', 1, 'paper')
+        bad = de.start_deepen('hx', 'en', 'bogus-mode', 1, 'paper', user_id=TEST_OWNER_USER_ID)
         assert bad['error'][1] == 400, f'bad mode not rejected: {bad}'
-        norep = de.start_deepen('hx', 'en', 'deeper', 1, 'paper')
+        norep = de.start_deepen('hx', 'en', 'deeper', 1, 'paper', user_id=TEST_OWNER_USER_ID)
         assert norep['error'][1] == 409, f'missing report not 409: {norep}'
     with _DbPatched() as p:
         p.db.rows[('hx', 'en')] = {'report': _REPORT, 'meta': '{}'}
-        badsec = de.start_deepen('hx', 'en', 'deeper', 99, 'paper')
+        badsec = de.start_deepen('hx', 'en', 'deeper', 99, 'paper', user_id=TEST_OWNER_USER_ID)
         assert badsec['error'][1] == 400, f'out-of-range section not 400: {badsec}'
     _ok('start 校验:坏模式 400/无报告 409/坏小节 400')
 
@@ -202,30 +218,69 @@ def test_start_cache_hit_and_spawn_dedup():
     with _DbPatched() as p:
         p.db.rows[('hx', 'en')] = {'report': _REPORT, 'meta': '{}'}
         de._write_deepen_cache('hx', 'deeper', 1, 'en', sec['hash'],
-                               'CACHED DEPTH', {'prompt_tokens': 5}, 'm1')
-        hit = de.start_deepen('hx', 'en', 'deeper', 1, 'paper')
+                               'CACHED DEPTH', {'prompt_tokens': 5}, 'm1',
+                               user_id=TEST_OWNER_USER_ID)
+        hit = de.start_deepen('hx', 'en', 'deeper', 1, 'paper', user_id=TEST_OWNER_USER_ID)
         assert hit.get('cached') is True and hit['content'] == 'CACHED DEPTH', \
             f'cache hit path broken: {hit}'
+        # A request-local long-agent arm must measure a real run, not consume
+        # the canonical cached answer produced by another runtime policy.
+        orig_run = de._run_deepen_task
+        de._run_deepen_task = lambda *a, **k: None
+        isolated = {}
+        try:
+            isolated = de.start_deepen(
+                'hx', 'en', 'deeper', 1, 'paper',
+                config={'tools': {
+                    'schemaBudgetTokens': 4_000,
+                    'resultEnvelope': 'legacy',
+                }},
+                user_id=TEST_OWNER_USER_ID)
+            assert 'task' in isolated and not isolated.get('cached'), isolated
+            assert (isolated['task']['requestPolicyV1']['cacheMode']
+                    == 'request_local')
+        finally:
+            de._run_deepen_task = orig_run
+            with de._deepen_dedup_lock:
+                de._deepen_dedup.pop(
+                    isolated.get('task', {}).get('_dedupKey'), None)
     # Spawn + dedup (worker patched to a no-op so no real LLM call happens).
     with _DbPatched() as p:
         p.db.rows[('hy', 'en')] = {'report': _REPORT, 'meta': '{}'}
         orig_run = de._run_deepen_task
         de._run_deepen_task = lambda *a, **k: None
+        first = third = arm = model_variant = {}
         try:
-            first = de.start_deepen('hy', 'en', 'deeper', 1, 'paper')
+            first = de.start_deepen('hy', 'en', 'deeper', 1, 'paper', user_id=TEST_OWNER_USER_ID)
             assert 'task' in first, f'no task spawned: {first}'
             tid = first['task']['task_id']
-            second = de.start_deepen('hy', 'en', 'deeper', 1, 'paper')
+            second = de.start_deepen('hy', 'en', 'deeper', 1, 'paper', user_id=TEST_OWNER_USER_ID)
             assert 'joined' in second and second['joined']['task_id'] == tid, \
                 f'in-flight dedup broken: {second}'
             # Different section = different task.
-            third = de.start_deepen('hy', 'en', 'deeper', 3, 'paper')
+            third = de.start_deepen('hy', 'en', 'deeper', 3, 'paper', user_id=TEST_OWNER_USER_ID)
             assert 'task' in third and third['task']['task_id'] != tid
-            import time as _t
-            _t.sleep(0.05)   # let the no-op threads finish + clear the dedup
+            # Same section but a different experiment arm or model is distinct
+            # work; neither may join the baseline task.
+            arm = de.start_deepen(
+                'hy', 'en', 'deeper', 1, 'paper', model='paper',
+                config={'tools': {
+                    'schemaBudgetTokens': 4_000,
+                    'resultEnvelope': 'legacy',
+                }}, user_id=TEST_OWNER_USER_ID)
+            assert 'task' in arm and arm['task']['task_id'] != tid, arm
+            model_variant = de.start_deepen(
+                'hy', 'en', 'deeper', 1, 'paper', model='other-model',
+                user_id=TEST_OWNER_USER_ID)
+            assert ('task' in model_variant
+                    and model_variant['task']['task_id'] != tid), model_variant
         finally:
             de._run_deepen_task = orig_run
-    _ok('start:缓存命中不再生成;首发 spawn;在飞 dedup join;异节异任务')
+            with de._deepen_dedup_lock:
+                for value in (first, third, arm, model_variant):
+                    de._deepen_dedup.pop(
+                        value.get('task', {}).get('_dedupKey'), None)
+    _ok('start:缓存命中;实验绕缓存;精确 arm/model dedup;异节异任务')
 
 
 # ── 5. worker: done event + cache write + cost accumulation ──────────────
@@ -235,9 +290,7 @@ def test_worker_done_cache_cost():
             'report': _REPORT,
             'meta': json.dumps({'model': 'm1', 'promptTokens': 1000,
                                 'completionTokens': 200})}
-        events = []
         orig_dispatch = de.dispatch_stream
-        orig_append = de._append_deepen_event
 
         def _fake_dispatch(messages, *, on_content=None, tools=None, **kw):
             body = '## Deeper expansion\nStep by step content.'
@@ -247,31 +300,29 @@ def test_worker_done_cache_cost():
                     'stop', {'prompt_tokens': 500, 'completion_tokens': 120})
 
         de.dispatch_stream = _fake_dispatch
-        de._append_deepen_event = lambda t, ev: events.append(ev)
         import lib.cost as _cost_mod
         orig_cost = _cost_mod.compute_cost
         _cost_mod.compute_cost = lambda u, **k: {'costCny': 0.001, 'costUsd': 0.0001}
         try:
             task = de._new_deepen_task('dt1', 'hz', 'en', 'm1',
                                        section_idx=1, mode='deeper',
-                                       section_heading='💡 Method — How It Works')
+                                       section_heading='💡 Method — How It Works', user_id=TEST_OWNER_USER_ID)
             section = de.extract_report_section(_REPORT, 1)
             de._run_deepen_task(task, [{'role': 'user', 'content': 'x'}],
                                 paper_hash='hz', section=section, ui_lang='en')
             # A SECOND deepen (another mode) accumulates ON TOP.
             task2 = de._new_deepen_task('dt2', 'hz', 'en', 'm1',
                                         section_idx=3, mode='derive',
-                                        section_heading='📊 Experimental Analysis')
+                                        section_heading='📊 Experimental Analysis', user_id=TEST_OWNER_USER_ID)
             section3 = de.extract_report_section(_REPORT, 3)
             de._run_deepen_task(task2, [{'role': 'user', 'content': 'x'}],
                                 paper_hash='hz', section=section3, ui_lang='en')
         finally:
             de.dispatch_stream = orig_dispatch
-            de._append_deepen_event = orig_append
             _cost_mod.compute_cost = orig_cost
 
         assert task['status'] == 'done'
-        done = [e for e in events if e.get('type') == 'done']
+        done = [e for e in task['events'] if e.get('type') == 'done']
         assert done and done[0]['usage']['prompt_tokens'] == 500
         # Cache row written for BOTH sections.
         row1 = p.db.rows.get(('hz', de.deepen_lang_key('deeper', 1, 'en')))

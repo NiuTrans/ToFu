@@ -1,7 +1,7 @@
 """lib/longform/recipe.py — topic → long-form research report (P7).
 
 The THIRD production capability, whose real job is to TEST the substrate
-abstraction (docs/PRODUCTION_PIPELINE_DESIGN.md P7; owner ruling 2026-07-26:
+abstraction (docs/modules/production.md):
 "third recipe first, then extract"). It is deliberately a different SHAPE
 from the video recipe so the test is meaningful:
 
@@ -37,8 +37,10 @@ _MAX_SECTIONS = 10
 # ── Seams (monkeypatchable, same pattern as the video recipe) ──
 
 def _web_search(query: str, *, user_question: str = ''):
-    from lib.tasks_pkg.handlers import search as _facade
-    return _facade.perform_web_search(query, user_question=user_question)
+    from lib.search_runtime import ensure_search_runtime
+    search_runtime = ensure_search_runtime()
+    return search_runtime.perform_web_search(
+        query, user_question=user_question)
 
 
 def _llm_chat(messages, **kwargs):

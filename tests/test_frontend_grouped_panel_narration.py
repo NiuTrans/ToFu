@@ -103,7 +103,7 @@ const segments = [
   { type: 'text', text: 'THE ANSWER', deliverable: true, terminal: true },
 ];
 
-// Drive the REAL grouped render with segments (what chat_render.js now passes).
+// Drive the real grouped renderer with selector-projected segments.
 const narrByRound = _narrationByRound(segments);
 const html = _renderToolGroupsHTML(rounds, rounds, narrByRound);
 

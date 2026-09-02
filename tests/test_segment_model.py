@@ -1,6 +1,6 @@
 """Golden byte-identity gate for the segment-timeline model (step 1).
 
-Board epic pt_cb8f98b0cb9b47fb / docs/EPIC_SEGMENT_TIMELINE_DESIGN.md §5-6.
+Board epic pt_cb8f98b0cb9b47fb / docs/RENDER_CONTRACT.md §5-6.
 
 Step 1 ships DARK: ``task['segments']`` is populated alongside the three
 existing channels (``content`` / ``thinking`` / ``toolRounds``). This suite is
@@ -20,7 +20,8 @@ later steps flip them onto segments.
     the pre-tool ``assistantContent`` snapshot and the terminal string
     separately. Pinned by ``test_deliverable_rule_is_position_based``.
 
-Pure-unit: no Flask, no DB, no LLM.
+Most cases are pure; two integration cases run a stubbed model through the
+real task pipeline and disposable Sidecar persistence.
 """
 
 from __future__ import annotations
@@ -31,12 +32,13 @@ import sys
 import pytest
 
 pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._chat_sidecar',)
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from lib.tasks_pkg.manager import _merge_tool_rounds
+from lib.tasks_pkg.manager._persist import _merge_tool_rounds
 from lib.tasks_pkg.segments import (
     SEG_TEXT,
     SEG_THINKING,
@@ -315,6 +317,21 @@ class TestGoldenByteIdentity:
             (SEG_TEXT, True, None),                # terminal deliverable answer
         ]
 
+    def test_segment_block_ids_are_unique_stable_and_content_independent(self):
+        """A growing projection updates blocks; it never remints their keys."""
+        original = _task_multi_round()
+        first = assemble_segments(original)
+        changed = _task_multi_round()
+        changed['content'] += ' More streamed text.'
+        second = assemble_segments(changed)
+
+        first_ids = [segment['blockId'] for segment in first]
+        second_ids = [segment['blockId'] for segment in second]
+        assert len(first_ids) == len(set(first_ids))
+        assert first_ids == second_ids
+        assert 'tool:tc_1' in first_ids
+        assert first_ids[-2:] == ['thinking:terminal', 'text:terminal']
+
     def test_batch_prose_emitted_once_per_llmround(self):
         """Two tool calls in one llmRound → narration segment appears ONCE."""
         segs = assemble_segments(_task_multi_round())
@@ -480,41 +497,50 @@ class TestNeuterGuardsGolden:
 
 import json as _json
 
-os.environ.setdefault('TOFU_DB_BACKEND', 'sqlite')
-os.environ.setdefault('TOFU_DB_PATH', '/tmp/segment_model_unittest.db')
-
 
 def _seed_conv(conv_id):
-    from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
-    from lib.database._core_schema import CONVERSATIONS, upsert
-    import time as _time
-    messages = [
-        {'role': 'user', 'content': 'search then answer', 'timestamp': 1},
-        {'role': 'assistant', 'content': '', 'thinking': '', 'toolRounds': [],
-         'timestamp': 2},
-    ]
-    db = get_thread_db(DOMAIN_CHAT)
-    now_ms = int(_time.time() * 1000)
-    upsert(db, CONVERSATIONS, {
-        'id': conv_id, 'user_id': 1, 'title': 'segment-groundtruth',
-        'messages': json_dumps_pg(messages), 'msg_count': len(messages),
-        'created_at': now_ms, 'updated_at': now_ms,
-    }, insert_cols=['id', 'user_id', 'title', 'messages', 'msg_count',
-                    'created_at', 'updated_at'], retry=True)
-    db.commit()
+    from tests._seed import seed_conversation
+    seed_conversation(conv_id, title='segment-groundtruth')
 
 
 def _cleanup_conv(conv_id):
-    from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db
+    from tests._seed import delete_conversation
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        db_execute_with_retry(db, 'DELETE FROM conversations WHERE id=? AND user_id=1', (conv_id,))
-        db.commit()
+        delete_conversation(conv_id)
     except Exception:
         pass
 
 
-@pytest.mark.ci_serial  # real run_task writes through the shared pool;
+def _create_ground_truth_task(conv_id):
+    """Create a task bound to the canonical public turn/attempt authority."""
+    from lib.tasks_pkg.manager import create_task
+    from lib.turn_lifecycle import claim_attempt_start, create_turn_pair
+    config = {
+        'model': 'test-model',
+        'projectEnabled': False,
+        'webSearchEnabled': True,
+    }
+    created = create_turn_pair(
+        conv_id,
+        command_id=f'segment-ground-truth:{conv_id}',
+        input_projection={'content': 'search then answer'},
+        config=config,
+        user_id=1,
+    )
+    config.update({
+        '_turnId': created['turn']['turnId'],
+        '_attemptId': created['attempt']['attemptId'],
+    })
+    assert claim_attempt_start(created['attempt']['attemptId'], user_id=1)
+    return create_task(
+        conv_id,
+        [{'role': 'user', 'content': 'search then answer'}],
+        config,
+        user_id=1,
+    )
+
+
+@pytest.mark.serial  # real run_task writes through the shared pool;
 # under the CI parallel lane's contention the writes hit 'database is locked'
 # (7a4c727 unit leg) while passing on any uncontended box. The in-memory
 # golden classes above stay in the parallel lane.
@@ -522,13 +548,13 @@ class TestGroundTruthRealRunTask:
     """Assert the derivation over a task dict PRODUCED by real run_task."""
 
     def _install_stub(self, monkeypatch):
-        """Stub stream_llm_response at ALL binding sites (mgr/orch/llm_fb) so a
-        multi-round turn runs: round 0 emits a web_search tool_call with
+        """Stub the fallback call owner's stream dependency so a multi-round
+        turn runs: round 0 emits a web_search tool_call with
         pre-tool narration; round 1 streams the deliverable answer."""
-        import lib.tasks_pkg.manager as mgr
-        import lib.tasks_pkg.orchestrator as orch
-        import lib.tasks_pkg.llm_fallback as llm_fb
-        import lib.tasks_pkg.handlers.search as search_h
+        from lib.agent_core.events import EventType, build_event
+        import lib.tasks_pkg.llm_fallback._call as llm_fb
+        import lib.tasks_pkg.handlers.search._core as search_core
+        from lib.tasks_pkg.manager._events import append_event
         import tofu_search
 
         def _stub(task, body, tag='', on_tool_call_ready=None):
@@ -538,7 +564,7 @@ class TestGroundTruthRealRunTask:
                 narration = 'Let me search for that.'
                 with task['content_lock']:
                     task['content'] += narration
-                mgr.append_event(task, mgr.build_event(mgr.EventType.DELTA, content=narration))
+                append_event(task, build_event(EventType.DELTA, content=narration))
                 tc = {'id': 'call_gt_1', 'index': 0, 'type': 'function',
                       'function': {'name': 'web_search',
                                    'arguments': _json.dumps({'query': 'gt query'})}}
@@ -556,7 +582,7 @@ class TestGroundTruthRealRunTask:
                 cd = w + (' ' if i < len(answer.split(' ')) - 1 else '')
                 with task['content_lock']:
                     task['content'] += cd
-                mgr.append_event(task, mgr.build_event(mgr.EventType.DELTA, content=cd))
+                append_event(task, build_event(EventType.DELTA, content=cd))
             return ({'role': 'assistant', 'content': answer, 'tool_calls': []},
                     'stop',
                     {'prompt_tokens': 20, 'completion_tokens': 9, 'total_tokens': 29})
@@ -564,39 +590,20 @@ class TestGroundTruthRealRunTask:
         def _stub_search(query, user_question='', freshness='', **kwargs):
             return [{'title': 'GT stub', 'snippet': 'deterministic', 'url': 'https://x.invalid', 'source': 'stub'}]
 
-        for mod in (mgr, orch, llm_fb):
-            if hasattr(mod, 'stream_llm_response'):
-                monkeypatch.setattr(mod, 'stream_llm_response', _stub)
+        monkeypatch.setattr(llm_fb, 'stream_llm_response', _stub)
         monkeypatch.setattr(tofu_search, 'perform_web_search', _stub_search)
-        monkeypatch.setattr(search_h, 'perform_web_search', _stub_search)
+        monkeypatch.setattr(search_core, 'perform_web_search', _stub_search)
 
-    def test_derivation_matches_produced_task_dict(self, monkeypatch):
-        from lib.database import init_db
-        from lib.tasks_pkg.manager import create_task, _merge_tool_rounds
-        from lib.tasks_pkg.orchestrator import run_task
-
-        # DB bootstrap is required for the real create_task/run_task/persist
-        # path. Skip with a concrete reason (NOT a silent pass) when the local
-        # environment can't bootstrap it — e.g. SQLAlchemy < 2.0 lacks
-        # sa.Double used by _core_schema.py. Same discipline as the e2e
-        # browser fixture: degrade to skip only on a genuine env gap.
-        try:
-            init_db()
-        except Exception as e:
-            pytest.skip(f'DB bootstrap unavailable in this env ({type(e).__name__}: {e}); '
-                        'ground-truth run_task path needs a working DB')
+    def test_derivation_matches_produced_task_dict(self, monkeypatch, chat_sidecar):
+        from lib.tasks_pkg.manager._persist import _merge_tool_rounds
+        from lib.tasks_pkg.orchestrator.api import run_task
         conv_id = 'cv-seg-gt-' + str(id(self))
         _cleanup_conv(conv_id)
         _seed_conv(conv_id)
         self._install_stub(monkeypatch)
 
         try:
-            task = create_task(
-                conv_id,
-                [{'role': 'user', 'content': 'search then answer'}],
-                {'model': 'test-model', 'projectEnabled': False,
-                 'webSearchEnabled': True},
-            )
+            task = _create_ground_truth_task(conv_id)
             run_task(task)
 
             # run_task → persist_task_result populated task['segments'] (dark).
@@ -740,7 +747,7 @@ class TestThinRehydrateRoundTrip:
 #  STEP 2 — DB round-trip: re-READ segments from the persisted row
 # ═══════════════════════════════════════════════════════════
 
-@pytest.mark.ci_serial  # same contention reason as TestGroundTruthRealRunTask
+@pytest.mark.serial  # same contention reason as TestGroundTruthRealRunTask
 class TestSegmentsDBRoundTrip:
     """Drive real run_task, then re-READ the persisted segments from BOTH the
     task_results.segments column AND the conversation messages dict — proving
@@ -749,16 +756,11 @@ class TestSegmentsDBRoundTrip:
     serialization bug; this is the step-2 acceptance gate held to the
     ground-truth bar."""
 
-    def test_persisted_segments_reread_and_rehydrate(self, monkeypatch):
-        from lib.database import init_db, DOMAIN_CHAT, get_thread_db
-        from lib.tasks_pkg.manager import create_task, _merge_tool_rounds
-        from lib.tasks_pkg.orchestrator import run_task
-
-        try:
-            init_db()
-        except Exception as e:
-            pytest.skip(f'DB bootstrap unavailable in this env ({type(e).__name__}: {e}); '
-                        'segments DB round-trip needs a working DB')
+    def test_persisted_segments_reread_and_rehydrate(
+            self, monkeypatch, chat_sidecar):
+        from lib.storage import get_storage_client
+        from lib.tasks_pkg.manager._persist import _merge_tool_rounds
+        from lib.tasks_pkg.orchestrator.api import run_task
 
         conv_id = 'cv-seg-rt-' + str(id(self))
         _cleanup_conv(conv_id)
@@ -767,27 +769,19 @@ class TestSegmentsDBRoundTrip:
         TestGroundTruthRealRunTask._install_stub(self, monkeypatch)
 
         try:
-            task = create_task(
-                conv_id,
-                [{'role': 'user', 'content': 'search then answer'}],
-                {'model': 'test-model', 'projectEnabled': False,
-                 'webSearchEnabled': True},
-            )
+            task = _create_ground_truth_task(conv_id)
             run_task(task)
 
             in_memory = task.get('segments')
             assert in_memory, 'run_task did not populate task["segments"]'
             expected_tr = _merge_tool_rounds(task)
 
-            db = get_thread_db(DOMAIN_CHAT)
-
-            # ── (A) task_results.segments column ──
-            row = db.execute(
-                'SELECT segments, tool_rounds FROM task_results WHERE task_id=?',
-                (task['id'],)
-            ).fetchone()
-            assert row is not None, 'task_results row not written'
-            col_segments = row['segments'] if not isinstance(row, tuple) else row[0]
+            # ── (A) task-results semantic record ──
+            row = get_storage_client().query(
+                'record.get', {'namespace': 'task_results', 'key': task['id']})
+            assert row is not None, 'task result record not written'
+            value = row['value']
+            col_segments = value.get('segments')
             assert col_segments, 'segments column is empty — persist did not write it'
             thin_from_db = _json.loads(col_segments)
             # The persisted form is THIN (no _round mirror — it would duplicate
@@ -799,12 +793,9 @@ class TestSegmentsDBRoundTrip:
             assert derive_thinking(rehydrated) == task['thinking']
             assert derive_tool_rounds(rehydrated) == expected_tr
 
-            # ── (B) conversation messages dict ──
-            crow = db.execute(
-                'SELECT messages FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,)
-            ).fetchone()
-            messages = _json.loads((crow['messages'] if not isinstance(crow, tuple) else crow[0]) or '[]')
+            # ── (B) canonical conversation projection ──
+            from tests._seed import conv_document
+            messages = conv_document(conv_id)['messages']
             asst = [m for m in messages if m.get('role') == 'assistant']
             assert asst, 'no assistant message persisted'
             msg_segments = asst[-1].get('segments')

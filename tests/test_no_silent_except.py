@@ -34,6 +34,11 @@ from __future__ import annotations
 import ast
 import os
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 # ── Configuration ────────────────────────────────────────────────────
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, '..'))
@@ -50,28 +55,16 @@ _STRUCT_NAMES = {'jsonify', 'abort', 'make_response'}
 # Keyed by repo-relative path → count of pinned sites in that file.
 # Each entry documents WHY the handler must not log/raise.
 ALLOWED: dict[str, int] = {
-    # safe_route's _handle(e) routes to api_internal_error, which itself
-    # logs the full traceback (exc_info=True). Logging here too would
-    # double-log; the trace exists one call downstream.
-    'lib/api_response.py': 2,
+    # These handlers ARE the logging/incident safety net. Recursing into the
+    # same pipeline after formatting, sanitization, stderr, or sink failure can
+    # turn a diagnostic fault into an application failure.
+    'lib/incident_journal.py': 1,
+    'lib/log.py': 2,
+    'lib/log_rate_limit.py': 3,
     # _emit_context_summary guards the logging backend itself. A second log
     # attempt can recurse into the same failure, so this last-resort swallow is
     # deliberately silent and prompt assembly remains authoritative.
     'lib/tasks_pkg/context_composer/_render.py': 1,
-    # terminal_state_log_summary BUILDS the diagnostic string that the
-    # persist-failure branch then hands to logger.error. Its own fallback
-    # returns a marker string instead of logging, for the same reason as
-    # _trace_fallback above: logging here would recurse into the very failure
-    # it is describing. §2.2 logging-path exemption.
-    #
-    # This entry was MISSING while the sibling guard
-    # (test_code_quality.py::TestSilentCatches.ACCEPTABLE_SIGS) had blessed
-    # the same handler with that documented reason — so the two guards
-    # disagreed and this one produced a permanent false positive. Measured
-    # 2026-07-28: "fixing" the product to satisfy this guard immediately broke
-    # test_code_quality's dead-entry meta-assertion, which is what surfaced the
-    # disagreement. When you bless or un-bless a handler, update BOTH lists.
-    'lib/tasks_pkg/manager/_persist.py': 1,
 }
 
 
@@ -90,6 +83,10 @@ def _is_broad(exc_type: ast.expr | None) -> bool:
 def _handler_is_silent(node: ast.ExceptHandler) -> bool:
     """True when the handler swallows control flow without leaving a trace."""
     for st in ast.walk(node):
+        # A value-bearing return is an explicit fallback/error result observed
+        # by the caller. Only a bare ``return`` silently discards the failure.
+        if isinstance(st, ast.Return) and st.value is not None:
+            return False
         if isinstance(st, ast.Call):
             f = st.func
             if isinstance(f, ast.Attribute) and f.attr in _LOG_ATTRS:

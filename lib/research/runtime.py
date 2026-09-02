@@ -23,13 +23,8 @@ _production = ProductionRuntime(
     push_channel='research', error_source='lib.research.engine',
     log_label='Research')
 
-#: The underlying TaskRuntime — what ``routes/api_v1/tasks.py::_registries()``
-#: discovers (so the generic /api/v1/tasks/* poll+abort serve this capability
-#: with ZERO bespoke routes), and what legacy call sites expect.
+#: The underlying TaskRuntime discovered by the generic task API.
 _research_runtime = _production.runtime
-_research_tasks = _production.tasks
-_research_tasks_lock = _production.lock
-_research_dedup_index = _production.dedup_index
 
 
 def _research_index_get(key: tuple):
@@ -41,21 +36,22 @@ def _research_index_register(key: tuple, task_id: str) -> None:
 
 
 def _new_research_task(task_id: str, *, direction: str, workdir: str, lang: str,
-                       n_ideas: int = 6, conv_id: str = ''):
+                       user_id: int, n_ideas: int = 6, conv_id: str = ''):
     """Create + register a pending research task with the engine's field shape."""
     return _production.create_task(
         task_id,
+        user_id=user_id,
         meta={'direction': direction, 'lang': lang, 'n_ideas': n_ideas},
         fields={'direction': direction, 'workdir': workdir, 'lang': lang,
                 'n_ideas': n_ideas, 'conv_id': conv_id})
 
 
 def _claim_research_task(key: tuple, task_id: str, *, direction: str,
-                         workdir: str, lang: str, n_ideas: int = 6,
+                         workdir: str, lang: str, user_id: int, n_ideas: int = 6,
                          conv_id: str = ''):
     """Atomic start path; resume continues to use _new_research_task."""
     return _production.claim_task(
-        key, task_id,
+        key, task_id, user_id=user_id,
         meta={'direction': direction, 'lang': lang, 'n_ideas': n_ideas},
         fields={'direction': direction, 'workdir': workdir, 'lang': lang,
                 'n_ideas': n_ideas, 'conv_id': conv_id})
@@ -74,8 +70,7 @@ def _research_task_id():
 
 
 __all__ = [
-    '_production', '_research_runtime', '_research_tasks',
-    '_research_tasks_lock', '_research_dedup_index', '_research_index_get',
+    '_production', '_research_runtime', '_research_index_get',
     '_research_index_register', '_new_research_task',
     '_claim_research_task',
     '_append_research_event', '_cleanup_stale_research_tasks',

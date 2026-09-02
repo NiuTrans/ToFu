@@ -108,7 +108,7 @@ def test_prepare_selects_last_assistant_and_captures_partial_trace_once():
     assert completion.prepare() is terminal
     assert content.values == ['deliverable']
     assert task['_flow_trace'] == [{'node_id': 'worker'}]
-    assert task['_endpoint_turns'] is messages
+    assert task['_flow_turns'] is messages
     assert task['_flow_turns'] is messages
     assert turns.calls == 1
 
@@ -145,10 +145,10 @@ def test_finish_projects_honest_terminal_event_and_is_idempotent(
     assert len(events) == 2
     assert all(owner is task for owner, _event in events)
     assert [event['type'] for _owner, event in events] == [
-        'endpoint_complete', 'done']
+        'flow_complete', 'done']
     done = events[-1][1]
     assert done['finishReason'] == terminal.finish_reason
-    assert done['endpointReason'] == terminal.stop_reason
+    assert done['flowReason'] == terminal.stop_reason
     assert done['model'] == 'model-x'
     assert done['orchestrationOutcome']['category'] == terminal.category
     if expected_extra.get('incomplete'):
@@ -164,8 +164,8 @@ def test_finish_projects_honest_terminal_event_and_is_idempotent(
     assert notified == [task]
 
 
-def test_endpoint_runner_keeps_only_projection_specific_completion_logic():
-    runner = (ROOT / 'lib' / 'orchestration_endpoint_runner.py').read_text()
+def test_flow_runner_keeps_only_projection_specific_completion_logic():
+    runner = (ROOT / 'lib' / 'orchestration_chat_flow_runner.py').read_text()
     runtime = (
         ROOT / 'lib' / 'orchestration_chat_flow_runtime.py').read_text()
 
@@ -173,5 +173,5 @@ def test_endpoint_runner_keeps_only_projection_specific_completion_logic():
     assert 'OrchestrationChatFlowCompletion(' in runtime
     assert 'terminal = completion.prepare()' in runtime
     assert 'completion.finish()' in runtime
-    assert "EventType.ENDPOINT_COMPLETE" not in runner + runtime
+    assert "EventType.FLOW_COMPLETE" not in runner + runtime
     assert "result.get('final'" not in runner + runtime

@@ -212,7 +212,7 @@ def test_prompt_without_a_brief_has_no_empty_asset_section():
 def test_brief_reaches_the_scene_dict(monkeypatch):
     """recipe beat -> paper scene. A brief that dies in transit is a gate
     nobody can satisfy."""
-    from lib.paper import video_abstract as va
+    import lib.paper.video_abstract as va
 
     beats = [{'text': '第一段旁白内容足够长以构成一个镜头。',
               'on_screen': '要点一',
@@ -234,7 +234,7 @@ def test_brief_reaches_the_scene_dict(monkeypatch):
 def test_split_beat_keeps_its_brief_on_every_piece(monkeypatch):
     """A split beat is ONE beat continuing across two scenes — its imagery
     applies to both pieces, exactly as its caption and art direction do."""
-    from lib.paper import video_abstract as va
+    import lib.paper.video_abstract as va
 
     long_text = '这是一段非常长的旁白内容需要被拆分成多个镜头才能装下。' * 4
     beats = [{'text': long_text, 'on_screen': '要点',

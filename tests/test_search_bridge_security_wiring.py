@@ -79,7 +79,7 @@ def test_searxng_instances_only_overrides_when_asked():
 
 def test_fetch_failure_reason_reaches_the_tool_surface():
     """A refused fetch must yield a typed reason AND a human error_msg."""
-    from lib.tasks_pkg.handlers.search import _core
+    import lib.tasks_pkg.handlers.search._core as _core
 
     diag_payload = {
         'reason': 'ssrf_blocked',
@@ -91,8 +91,7 @@ def test_fetch_failure_reason_reaches_the_tool_surface():
             diag.update(diag_payload)
         return None
 
-    fake_facade = mock.Mock(fetch_page_content=_fake_fetch)
-    with mock.patch.object(_core, '_facade_mod', return_value=fake_facade), \
+    with mock.patch.object(_core, 'fetch_page_content', side_effect=_fake_fetch), \
          mock.patch.object(_core, '_stage_binary_asset', return_value=None):
         item = _core._fetch_url_one('https://x.internal/p', 'q', fetch_reason='t')
 
@@ -107,7 +106,7 @@ def test_fetch_failure_reason_reaches_the_tool_surface():
 
 def test_distinct_failures_stay_distinguishable():
     """Different causes must NOT collapse into one opaque message."""
-    from lib.tasks_pkg.handlers.search import _core
+    import lib.tasks_pkg.handlers.search._core as _core
     seen = {}
     for token, detail in (('timeout', 'Host did not respond within 15s.'),
                           ('spa_shell', 'Page is a JavaScript shell.'),
@@ -116,7 +115,7 @@ def test_distinct_failures_stay_distinguishable():
             if diag is not None:
                 diag.update({'reason': _t, 'detail': _d})
             return None
-        with mock.patch.object(_core, '_facade_mod', return_value=mock.Mock(fetch_page_content=_fake)), \
+        with mock.patch.object(_core, 'fetch_page_content', side_effect=_fake), \
              mock.patch.object(_core, '_stage_binary_asset', return_value=None):
             it = _core._fetch_url_one(f'https://e.example/{token}', 'q')
         seen[token] = (it['reason'], it['error_msg'])
@@ -124,17 +123,22 @@ def test_distinct_failures_stay_distinguishable():
     assert len({v[1] for v in seen.values()}) == 3, seen
 
 
-def test_library_without_diag_param_still_fetches():
-    """Older tofu-search has no `diag` kwarg — that must not become a failure."""
-    from lib.tasks_pkg.handlers.search import _core
+def test_fetch_type_error_is_reported_without_a_hidden_retry():
+    """A dependency bug must not be mistaken for an obsolete API signature."""
+    import lib.tasks_pkg.handlers.search._core as _core
 
-    def _legacy_fetch(url, max_chars=None, pdf_max_chars=None):
-        return 'real page text ' * 20
+    calls = []
 
-    with mock.patch.object(_core, '_facade_mod',
-                           return_value=mock.Mock(fetch_page_content=_legacy_fetch)), \
-         mock.patch.object(_core, 'filter_web_content', side_effect=lambda c, *a, **k: c):
+    def _broken_fetch(url, **kwargs):
+        calls.append((url, kwargs))
+        raise TypeError('internal parser contract broke')
+
+    with mock.patch.object(_core, 'fetch_page_content', side_effect=_broken_fetch), \
+         mock.patch.object(_core, '_stage_binary_asset', return_value=None):
         item = _core._fetch_url_one('https://ok.example/p', 'q')
 
-    assert item['page_content'], 'legacy signature must still return content'
-    assert item['reason'] == 'extracted_ok'
+    assert len(calls) == 1
+    assert calls[0][1]['diag'] == {}
+    assert item['page_content'] is None
+    assert item['reason'] == 'fetch_failed:TypeError'
+    assert 'internal parser contract broke' in item['error_msg']

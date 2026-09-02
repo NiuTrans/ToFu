@@ -144,9 +144,8 @@ def test_shipped_source_converted():
         'jsonify( — convert per docs/API_CONTRACT.md §7')
     assert not re.search(r'from flask import[^\n]*\bjsonify\b', src), (
         'routes/conversations.py still imports jsonify')
-    assert "'items': convs" in src, (
-        'expected the bare-array list branches to wrap as '
-        "api_ok({'items': convs}) — coordinated migration, batch 9")
+    assert '"items": page_items' in src and 'api_ok(payload)' in src, (
+        'expected the metadata page to wrap items in the canonical payload')
 
 
 if __name__ == '__main__':

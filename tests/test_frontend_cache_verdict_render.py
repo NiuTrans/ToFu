@@ -370,13 +370,14 @@ def _derive_backend_causes():
         # Client-side culprits.
         ('ttl_flip', cause(prefix_culprits=['<ttl-flip>'])),
         ('breakpoint_lost', cause(prefix_culprits=['<breakpoint-lost>'])),
+        ('hoisted_structure', cause(
+            prefix_mutation_break=True,
+            prefix_culprits=['<hoisted>.tools', '<bytes>tools'])),
         ('bytes_region', cause(prefix_culprits=['<bytes>system'])),
         ('bytes_generic', cause(prefix_culprits=['<bytes>user:ab.content'])),
         ('prefix_mutation',
          cause(prefix_mutation_break=True, cache_read=0,
                prefix_culprits=['user:ab.content'])),
-        ('history_rewrite',
-         cause(history_rewrite=True, prefix_culprits=['user:ab.content'])),
         # TTL expiry + the no-wire-fingerprint fallbacks (honestly hedged).
         ('ttl_expiry', cause(elapsed=400)),
         ('unproven_read', cause(cache_read=5000)),

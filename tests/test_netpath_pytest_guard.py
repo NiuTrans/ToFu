@@ -1,5 +1,3 @@
-# Incident anchor: born in commit 3cde053e — tests: pin TOFU_NETPATH=off under pytest — keep netpath prober out of...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Regression guard: the netpath prober must never start in a pytest process,
 and the production netpath store must stay free of test/doc ghost hosts.
 

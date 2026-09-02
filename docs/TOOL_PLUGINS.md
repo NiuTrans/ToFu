@@ -17,7 +17,7 @@ Use the table in §7 to pick which mechanism you want.
 ## 1. The problem
 
 A third-party package contributes native tools by declaring a `tofu.tools`
-entry point (see `lib/tools/registry.py::discover_plugin_specs`):
+entry point (see `lib/tools/registry/_plugins.py::discover_plugin_specs`):
 
 ```toml
 [project.entry-points."tofu.tools"]
@@ -97,7 +97,7 @@ The three states of `enabled_plugins`:
 
 ## 3. Resolving the allow-list per request
 
-`resolve_enabled_plugins(cfg)` (`lib/tools/registry.py`) is the single
+`resolve_enabled_plugins(cfg)` (`lib/tools/registry/_plugins.py`) is the single
 resolution point, called from `lib/tasks_pkg/model_config.py::_assemble_tool_list`
 when it builds the `ToolContext`. Resolution order — **first present wins**:
 
@@ -143,7 +143,9 @@ POST /api/v1/agent/run                 lib/tasks_pkg/model_config.py
 The **caller-supplied `tools=[…]` short-circuit** in `_assemble_tool_list`
 (documented in `COMPAT_OPENAI.md`) returns *before* the `ToolContext` is built,
 so a request that fully specifies its own tool list bypasses the plugin gate
-entirely — which is correct: it asked for exactly those tools and nothing else.
+entirely. Plan Mode is the safety exception: its request policy removes
+unproven/mutating schemas and injects the canonical built-in `ask_human`
+contract before returning the final executable catalog.
 
 ---
 
@@ -183,7 +185,7 @@ request.
 
 ### 5.3 Discovering what's installed
 
-`available_plugins()` (`lib/tools/registry.py`) maps each loaded plugin name →
+`available_plugins()` (`lib/tools/registry/_plugins.py`) maps each loaded plugin name →
 the spec keys it registered (built-ins excluded). Surface it from ops tooling
 or a `/api/v1/capabilities`-style endpoint so a caller knows what names are
 valid in `config.plugins`.
@@ -221,7 +223,7 @@ valid in `config.plugins`.
 
 | File | Change |
 |---|---|
-| `lib/tools/registry.py` | `ToolSpec.source` / `.plugin_name` fields; `ToolContext.enabled_plugins` + `plugin_allowed()`; `assemble_tool_list` visibility gate; auto-stamping wrapper in `discover_plugin_specs`; `resolve_enabled_plugins()`, `_parse_plugin_spec()`, `available_plugins()`; module "Plugin isolation" note |
+| `lib/tools/registry/` | `ToolSpec.source` / `.plugin_name` fields; `ToolContext.enabled_plugins` + `plugin_allowed()`; `assemble_tool_list` visibility gate; auto-stamping wrapper in `discover_plugin_specs`; `resolve_enabled_plugins()`, `_parse_plugin_spec()`, `available_plugins()`; package "Plugin isolation" note |
 | `lib/tools/__init__.py` | export `resolve_enabled_plugins`, `available_plugins` |
 | `lib/tasks_pkg/model_config.py` | resolve `enabled_plugins` from cfg and pass into `ToolContext` |
 | `routes/api_v1/agent_run.py` | `config.plugins` alias → `cfg['plugins']`; docstring + OpenAPI note |

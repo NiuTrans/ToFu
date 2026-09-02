@@ -30,8 +30,6 @@ import json
 import re
 import time
 
-from requests.exceptions import ChunkedEncodingError, ConnectionError
-
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -455,9 +453,25 @@ _WRAPPED_OVERLOAD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Errors considered transient and worth retrying ON THE SAME KEY
-_RETRYABLE = (ConnectionError, ChunkedEncodingError, BrokenPipeError,
-              ConnectionResetError, RetryableAPIError)
+# Errors considered transient and worth retrying ON THE SAME KEY. The tuple is
+# resolved through ``__getattr__`` below so importing the transport-neutral
+# error taxonomy does not initialize requests/urllib3. Sync transport modules
+# still receive the same concrete exception tuple when they import it.
+_BASE_RETRYABLE = (
+    BrokenPipeError,
+    ConnectionResetError,
+    RetryableAPIError,
+)
+
+
+def __getattr__(name: str):
+    if name != '_RETRYABLE':
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    from requests.exceptions import ChunkedEncodingError, ConnectionError
+
+    retryable = (ConnectionError, ChunkedEncodingError, *_BASE_RETRYABLE)
+    globals()['_RETRYABLE'] = retryable
+    return retryable
 
 
 # ══════════════════════════════════════════════════════════
@@ -715,7 +729,10 @@ def _is_stream_only_error(error_text: str) -> bool:
     return ('only support stream' in _lower
             or 'only supports stream' in _lower
             or 'enable the stream parameter' in _lower
-            or 'stream mode only' in _lower)
+            or 'stream mode only' in _lower
+            or 'stream must be set to true' in _lower
+            or '"stream" must be set to true' in _lower
+            or "'stream' must be set to true" in _lower)
 
 
 # ══════════════════════════════════════════════════════════
@@ -747,7 +764,7 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
     display_msg = summarize_error_body(err_msg)
 
     if status_code == 429:
-        # ★ OAuth-SUBSCRIPTION quota exhaustion (Codex usage_limit_reached /
+        # OAuth-SUBSCRIPTION quota exhaustion (Codex usage_limit_reached /
         #   "selected model is at capacity") — rate-limit class, but the
         #   cooldown duration comes from resets_at/resets_in_seconds, not
         #   the generic 0.5s steering nudge. Checked BEFORE billing quota
@@ -764,7 +781,7 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
                                  is_subscription_quota=True,
                                  retry_after_s=_retry_after,
                                  reason=display_msg[:200])
-        # ★ Distinguish fatal billing 429s from transient rate-limit 429s.
+        # Distinguish fatal billing 429s from transient rate-limit 429s.
         #   OpenAI returns HTTP 429 with code="insufficient_quota" for
         #   expired-balance keys — retrying on the same key is futile.
         if _is_quota_exhausted(err_msg):
@@ -783,7 +800,7 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
                                  reason=display_msg[:200])
         raise RateLimitError(display_msg, status_code=429)
     if status_code == 402:
-        # ★ HTTP 402 Payment Required — DeepSeek and some providers return
+        # HTTP 402 Payment Required — DeepSeek and some providers return
         #   this for exhausted-balance keys. Treat identically to a quota-
         #   exhausted 429 so it hard-disables the key for the day.
         logger.warning('%s Payment required (HTTP 402): %s',
@@ -794,7 +811,7 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
         logger.warning('%s Content filter triggered (HTTP 450)', log_prefix)
         raise ContentFilterError(display_msg)
     if status_code in _PERMISSION_STATUS_CODES:
-        # ★ A 401/403 whose body is an upstream-vendor TRANSIENT is NOT an
+        # A 401/403 whose body is an upstream-vendor TRANSIENT is NOT an
         #   auth failure (toio UPSTREAM_VENDOR wrap, 2026-07-26: the
         #   claude-opus-5 vendor outage returned HTTP 403 "请求失败,请稍后再
         #   尝试"). Treating it as one excluded the (key, model) pair and fed
@@ -831,7 +848,7 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
             logger.warning('%s Model %s only supports stream mode — '
                            'non-streaming request rejected', log_prefix, model)
             raise StreamOnlyError(display_msg, model)
-        # ★ Upstream-vendor transient wrapped as HTTP 400 (toio 2026-07-26:
+        # Upstream-vendor transient wrapped as HTTP 400 (toio 2026-07-26:
         #   "请求失败,请稍后重试", ext.error.source=UPSTREAM_VENDOR). The
         #   specific matchers above (token limit / image / prompt / stream-
         #   only) already claimed the deterministic shapes; what remains here
@@ -844,7 +861,7 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
             raise RateLimitError(display_msg, is_gateway=True,
                                  reason=f'HTTP 400: {display_msg[:180]}',
                                  status_code=400)
-        # ★ Codex capacity pressure can also arrive as a 400-class body —
+        # Codex capacity pressure can also arrive as a 400-class body —
         #   "selected model is at capacity" is rate-limit class, NOT a
         #   payload rejection; route it to the timed-cooldown channel.
         if is_subscription_quota_error(err_msg):
@@ -867,7 +884,7 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
                      log_prefix, err_msg[:_ERR_BODY_LIMIT])
         raise BadRequestError(display_msg)
     if status_code in _GATEWAY_THROTTLE_STATUS:
-        # ★ 502/503/504 from the gateway = upstream overload or transient
+        # 502/503/504 from the gateway = upstream overload or transient
         #   backend failure. Treat identically to 429: bubble to dispatch
         #   layer, cooldown this slot 0.5s, rotate to another slot, retry
         #   indefinitely. Retrying on the SAME key is futile — another
@@ -880,7 +897,7 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
                              reason=f'HTTP {status_code}: {display_msg[:180]}',
                              status_code=status_code)
     if status_code in _REQUEST_SCOPED_STATUS_CODES:
-        # ★ 404/422 — request-scoped semantic rejection. Must NOT enter
+        # 404/422 — request-scoped semantic rejection. Must NOT enter
         #   slot/model cooldown (a 404 "model not found" on one wire says
         #   nothing about the key's health, and a 422 says the payload is
         #   unprocessable). Surface to the caller untouched.
@@ -889,7 +906,7 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
                        log_prefix, status_code, err_msg[:_ERR_BODY_LIMIT])
         raise RequestScopedError(display_msg, status_code=status_code)
     if is_subscription_quota_error(err_msg):
-        # ★ The subscription signal on any other status (a 5xx costume, an
+        # The subscription signal on any other status (a 5xx costume, an
         #   odd gateway mapping) is still rate-limit class with its reset
         #   time — never a generic non-retryable Exception.
         _retry_after = parse_subscription_retry_after(err_msg)
@@ -901,7 +918,7 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
                              retry_after_s=_retry_after,
                              reason=f'HTTP {status_code}: {display_msg[:180]}')
     if status_code in _RETRYABLE_STATUS_CODES:
-        # ★ Detect wrapped overload / rate-limit inside a generic 500.
+        # Detect wrapped overload / rate-limit inside a generic 500.
         #   Some gateways receive 429 or 529 from the model server but
         #   can't map it, so they wrap it as HTTP 500 with a body like:
         #     {"status":500,"data":"No matching constant for [529]"}

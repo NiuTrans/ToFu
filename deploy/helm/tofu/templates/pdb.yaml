@@ -1,0 +1,19 @@
+{{- $root := . -}}
+{{- range $role := list "api" "worker" -}}
+{{- $budget := index $root.Values.podDisruptionBudget $role -}}
+{{- $roleValues := index $root.Values.roles $role -}}
+{{- if and $roleValues.enabled $budget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tofu.fullname" $root }}-{{ $role }}
+  labels:
+{{ include "tofu.labels" $root | indent 4 }}
+spec:
+  minAvailable: {{ $budget.minAvailable }}
+  selector:
+    matchLabels:
+{{ include "tofu.selectorLabels" (dict "root" $root "role" $role) | indent 6 }}
+---
+{{- end }}
+{{- end }}

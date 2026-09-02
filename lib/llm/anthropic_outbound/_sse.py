@@ -11,8 +11,8 @@ import json
 from lib.log import get_logger
 
 from lib.llm.anthropic_outbound._from_anthropic import (
-    _STOP_REASON_MAP,
     _convert_usage,
+    _map_stop_reason,
 )
 
 logger = get_logger(__name__)
@@ -172,7 +172,7 @@ class AnthropicSSETranslator:
             chunk = {'choices': [{'delta': {}}]}
             stop = delta.get('stop_reason')
             if stop:
-                chunk['choices'][0]['finish_reason'] = _STOP_REASON_MAP.get(stop, 'stop')
+                chunk['choices'][0]['finish_reason'] = _map_stop_reason(stop)
             if ev.get('usage'):
                 # Merge onto the message_start counts rather than replace them.
                 # output_tokens is the growing cumulative count → take the

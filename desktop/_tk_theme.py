@@ -341,17 +341,6 @@ STRINGS = {
               '保持已登录的 Tofu 标签页打开，并在控制面板点「通过浏览器连接」。'
               '再点一次「连接」可先强制保存。',
     },
-    'desktop.comp.postgresql.name': {
-        'en': 'PostgreSQL Database',
-        'zh': 'PostgreSQL 数据库',
-    },
-    'desktop.comp.postgresql.desc': {
-        'en': 'High-performance database: better concurrency, JSONB, '
-              'full-text search. Without it the app uses SQLite '
-              '(single-user, still fully functional).',
-        'zh': '高性能数据库：更好的并发、JSONB 与全文检索。'
-              '不安装则使用 SQLite（单用户场景同样完整可用）。',
-    },
     'desktop.comp.chromium.name': {
         'en': 'Browser Engine (Chromium)',
         'zh': '浏览器引擎（Chromium）',
@@ -622,10 +611,6 @@ STRINGS = {
         'en': '~115 MB download',
         'zh': '需下载约 115 MB',
     },
-    'desktop.comp.postgresql.size': {
-        'en': '~50 MB download',
-        'zh': '需下载约 50 MB',
-    },
     # Component worker messages (install() + progress_callback tokens).
     'desktop.compmsg.chromiumOk': {
         'en': 'Chromium browser installed successfully.',
@@ -642,25 +627,6 @@ STRINGS = {
     'desktop.compmsg.chromiumDownloading': {
         'en': 'Downloading Chromium…',
         'zh': '正在下载 Chromium…',
-    },
-    'desktop.compmsg.pgOk': {
-        'en': 'PostgreSQL configured successfully.',
-        'zh': 'PostgreSQL 配置完成。',
-    },
-    'desktop.compmsg.pgBootstrapFailed': {
-        'en': 'PostgreSQL bootstrap failed. The app will use SQLite '
-              'instead. You can install PostgreSQL manually later.',
-        'zh': 'PostgreSQL 引导失败——应用将改用 SQLite；也可以稍后手动安装 '
-              'PostgreSQL。',
-    },
-    'desktop.compmsg.pgNoModule': {
-        'en': 'Database bootstrap module not available. PostgreSQL can be '
-              'installed manually.',
-        'zh': '数据库引导模块不可用——可手动安装 PostgreSQL。',
-    },
-    'desktop.compmsg.pgSettingUp': {
-        'en': 'Setting up PostgreSQL…',
-        'zh': '正在配置 PostgreSQL…',
     },
     # Dynamic worker details (stderr etc.) stay raw but get a localized
     # prefix — the owner rule for the sweep.
@@ -721,10 +687,6 @@ _COMP_MSG_KEYS = {
     'chromium_timeout': 'desktop.compmsg.chromiumTimeout',
     'chromium_no_module': 'desktop.compmsg.chromiumNoModule',
     'chromium_downloading': 'desktop.compmsg.chromiumDownloading',
-    'pg_ok': 'desktop.compmsg.pgOk',
-    'pg_bootstrap_failed': 'desktop.compmsg.pgBootstrapFailed',
-    'pg_no_module': 'desktop.compmsg.pgNoModule',
-    'pg_setting_up': 'desktop.compmsg.pgSettingUp',
 }
 
 

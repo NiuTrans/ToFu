@@ -33,7 +33,6 @@ should call ``data_root()`` instead so a single policy governs every artifact.
 import os
 import sys
 
-from lib.env_compat import getenv_compat
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -111,7 +110,7 @@ def _source_checkout_base() -> str:
 
     ``$TOFU_DATA_DIR`` (handled by the caller) still overrides everything.
     """
-    layout = (getenv_compat('TOFU_DATA_LAYOUT', default='auto') or 'auto').strip().lower()
+    layout = (os.environ.get('TOFU_DATA_LAYOUT', 'auto') or 'auto').strip().lower()
     intree = _REPO_ROOT
     if layout == 'intree':
         logger.info('Data layout: in-tree repo root (TOFU_DATA_LAYOUT=intree) → %s', intree)
@@ -136,7 +135,7 @@ def _source_checkout_base() -> str:
 
 def _resolve_base() -> str:
     """Resolve the writable base directory that holds data/ and logs/."""
-    explicit = getenv_compat('TOFU_DATA_DIR', default='')
+    explicit = os.environ.get('TOFU_DATA_DIR', '')
     if explicit:
         # The launcher passes a full path to the DATA directory itself; accept
         # both "…/data" (use its parent as the base) and a base dir.

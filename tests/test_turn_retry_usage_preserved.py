@@ -78,7 +78,8 @@ def _task(*, usage=None, api_rounds=None, err='abnormal_stop', **extra):
 @pytest.fixture()
 def seam(monkeypatch):
     """_maybe_auto_retry_turn with run_task spied and backoff zeroed."""
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._finalize as orch
+    import lib.tasks_pkg.orchestrator._ports as orchestrator_ports
     import lib.tasks_pkg.turn_retry as tr
 
     seen = {'calls': 0, 'usage_at_rerun': None}
@@ -87,7 +88,7 @@ def seam(monkeypatch):
         seen['calls'] += 1
         seen['usage_at_rerun'] = dict(task.get('usage') or {})
 
-    monkeypatch.setattr(orch, 'run_task', _spy)
+    monkeypatch.setattr(orchestrator_ports, 'rerun_task', _spy)
     monkeypatch.setattr(tr, 'auto_turn_backoff_seconds', lambda attempt: 0.0)
     return orch, seen
 
@@ -222,7 +223,7 @@ def test_abort_during_backoff_leaves_usage_intact(monkeypatch, seam):
     """User pressed Stop mid-backoff: no re-run, so the bill stays where the
     finalizer will read it."""
     orch, seen = seam
-    import lib.tasks_pkg.stream_handler as sh
+    import lib.tasks_pkg.stream_handler._budget as sh
     import lib.tasks_pkg.turn_retry as tr
     # The seam fixture zeroes the backoff, but `_maybe_auto_retry_turn` only
     # sleeps when backoff > 0 — a zero would skip the sleep and never reach the

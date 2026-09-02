@@ -36,12 +36,12 @@ def _execute_tool_one(
     Dispatch is handled by :data:`tool_registry` — a :class:`ToolRegistry`
     singleton that supports exact-name, special, and set-based lookup.
     """
-    # ★ Abort check: skip execution if user already clicked Stop
+    # Abort check: skip execution if user already clicked Stop
     if task.get('aborted'):
         logger.info('[Executor] Skipping tool %s (tc_id=%s) — task aborted', fn_name, tc_id[:8])
         return tc_id, 'Task aborted by user.', False
 
-    # ★ Start-clock backfill (pt_67ffc2b7). Chat's rounds are stamped with
+    # Start-clock backfill (). Chat's rounds are stamped with
     #   `tStart` by _build_tool_round_entry, but SECONDARY surfaces (paper
     #   report / Q&A, swarm sub-agents, the timer poller) hand-build their round
     #   dicts and never went through that constructor. Backfilling at THIS seam
@@ -53,14 +53,7 @@ def _execute_tool_one(
         from lib.agent_core.events import now_ms
         round_entry['tStart'] = now_ms()
 
-    # ★ Per-client browser routing: propagate client_id to worker threads
-    #   (ThreadPoolExecutor threads don't inherit the parent's thread-locals)
-    _browser_cid = cfg.get('browserClientId')
-    if _browser_cid:
-        from lib.browser import _set_active_client
-        _set_active_client(_browser_cid)
-
-    # ★ Per-request custom tools resolve task-locally, BEFORE the global
+    # Per-request custom tools resolve task-locally, BEFORE the global
     #   registry — a request's tools never persist into tool_registry and
     #   never leak into another task. See lib/tools/tool_env.py.
     handler = None
@@ -74,7 +67,7 @@ def _execute_tool_one(
     if handler is None:
         handler = tool_registry.lookup(fn_name, round_entry)
     if handler is not None:
-        # ★ Universal exception safety net: any uncaught exception inside
+        # Universal exception safety net: any uncaught exception inside
         # a tool handler (unexpected arg shape, downstream bug, I/O failure…)
         # is converted into an error tool-result returned to the LLM, so the
         # model can see what went wrong and retry with corrected parameters
@@ -149,7 +142,11 @@ def _execute_tool_one(
                 f'Arguments received: {_arg_preview}'
             )
             # Finalize the round so the UI doesn't show a dangling
-            # "searching…" tool forever.
+            # "searching…" tool forever. The tool CRASHED: stamp + ship the
+            # 'error' verdict (status='done' here once rendered a raised
+            # handler as a ✓ success card — and the safety-net return below
+            # means the pool never records a tool_verdicts entry for this
+            # lane, so THIS stamp is the only failure signal the UI gets).
             if round_entry is not None and round_entry.get('status') != 'done':
                 try:
                     _finalize_tool_round(
@@ -157,6 +154,7 @@ def _execute_tool_one(
                         [{'type': 'error', 'content': err_msg,
                           'toolName': fn_name}],
                         query_override=round_entry.get('query', fn_name),
+                        status='error',
                     )
                 except Exception as _fin_err:
                     logger.debug('[Executor] _finalize_tool_round on error path '

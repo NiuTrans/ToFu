@@ -9,12 +9,13 @@ module-level defaults they fall back to:
   * ``AUTOPILOT_SUMMARY_RETENTION_DEFAULT`` / ``autopilot_summary_retention`` —
     max concluded-run (fold) records retained in settings.
 
-Pure logic — imports only ``lib.log`` and ``lib.env_compat``.
+Pure logic — imports only the standard library and ``lib.log``.
 """
 
 from __future__ import annotations
 
-from lib.env_compat import getenv_compat
+import os
+
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -26,8 +27,8 @@ logger = get_logger(__name__)
 
 # Hard ceiling on VU turns per autopilot run — the safety valve the loop
 # historically lacked ("No turn cap, no state-change watchdog" — see
-# autopilot.py docstring).  Endpoint caps a SINGLE task at MAX_ITERATIONS=10
-# worker↔critic rounds; an autopilot run is coarser (each turn is a whole
+# autopilot.py docstring). A Flow loop caps one task's worker↔critic rounds;
+# an Autopilot run is coarser (each turn is a whole
 # agent task) and legitimately longer-horizon, so the default is higher.
 AUTOPILOT_MAX_TURNS_DEFAULT = 40
 
@@ -51,7 +52,7 @@ def autopilot_summary_retention() -> int:
     :func:`autopilot_max_turns`: unset→default, ``0``/<=0→UNLIMITED (never
     prune — the pre-cap behaviour), garbage→default.
     """
-    raw = getenv_compat('TOFU_AUTOPILOT_SUMMARY_RETENTION', default='').strip()
+    raw = os.environ.get('TOFU_AUTOPILOT_SUMMARY_RETENTION', '').strip()
     if not raw:
         return AUTOPILOT_SUMMARY_RETENTION_DEFAULT
     try:
@@ -79,7 +80,7 @@ def autopilot_max_turns() -> int:
     int
         The turn budget, or ``0`` for unlimited.
     """
-    raw = getenv_compat('TOFU_AUTOPILOT_MAX_TURNS', default='').strip()
+    raw = os.environ.get('TOFU_AUTOPILOT_MAX_TURNS', '').strip()
     if not raw:
         return AUTOPILOT_MAX_TURNS_DEFAULT
     try:

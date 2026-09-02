@@ -102,15 +102,6 @@ def _prefetch_user_urls(
     list[tuple[str, str]]
         List of ``(url, fetched_content)`` pairs for successfully fetched URLs.
     """
-    # tofu_search is imported HERE, not at module level, so a failure inside it
-    # (it pulls trafilatura → lxml → libicuuc, which on 2026-07-31 raised a
-    # GLIBCXX linkage ImportError eight times) degrades URL prefetch instead of
-    # killing the whole server. This module sits on the boot chain via
-    # routes/paper.py → lib/paper → handlers → executor, so a module-level
-    # import here is a whole-process hazard for one optional capability.
-    from tofu_search import extract_urls_from_text, fetch_urls
-    from tofu_search.fetch.content_filter import filter_web_contents_batch
-
     last_text = ''
     for msg in reversed(messages):
         if msg.get('role') != 'user': continue
@@ -119,6 +110,19 @@ def _prefetch_user_urls(
             last_text = ' '.join(p.get('text','') for p in c if isinstance(p,dict) and p.get('type')=='text')
         elif isinstance(c, str): last_text = c
         break
+
+    # Most turns contain no URL. This dependency-free negative gate prevents a
+    # plain coding/writing request from loading the optional search/PDF stack
+    # merely to run tofu-search's URL regex. The authoritative extractor still
+    # handles every positive candidate, preserving punctuation and dedup caps.
+    if 'http://' not in last_text and 'https://' not in last_text:
+        return []
+
+    from lib.search_runtime import ensure_search_runtime
+    search_runtime = ensure_search_runtime()
+    extract_urls_from_text = search_runtime.extract_urls_from_text
+    fetch_urls = search_runtime.fetch_urls
+    from tofu_search.fetch.content_filter import filter_web_contents_batch
 
     urls = extract_urls_from_text(last_text)
     if not urls: return []

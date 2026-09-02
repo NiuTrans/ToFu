@@ -28,8 +28,6 @@ def test_runtime_side_effect_ports_are_complete_and_immutable():
         stamp_terminal=_noop,
         store_turns=_noop,
         sync_turns=_noop,
-        translate_turn=_noop,
-        translate_final=_noop,
         complete_autopilot=_noop,
     )
 
@@ -49,7 +47,6 @@ def test_execution_core_consumes_ports_not_task_package_internals():
     assert 'from lib.tasks_pkg' not in execution
     for name in (
         'append_event', 'persist_task_result', 'notify_terminal',
-        'stamp_terminal', 'store_turns', 'sync_turns', 'translate_turn',
-        'translate_final', 'complete_autopilot',
+        'stamp_terminal', 'store_turns', 'sync_turns', 'complete_autopilot',
     ):
         assert f'ports.{name}' in execution

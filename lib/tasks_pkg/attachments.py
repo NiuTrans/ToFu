@@ -123,7 +123,9 @@ def _get_modified_files_attachment(messages: list, project_path: str) -> str | N
     if last_reminder_idx > last_write_idx:
         return None
 
-    from lib.tasks_pkg.compaction import _extract_recently_accessed_files
+    from lib.tasks_pkg.compaction._layer2._anchor import (
+        _extract_recently_accessed_files,
+    )
     files = _extract_recently_accessed_files(messages, max_files=5)
     if not files:
         return None
@@ -318,7 +320,7 @@ def inject_attachments(messages: list, attachments: list[str],
                         round_num: int = 0, model: str = ''):
     """Inject computed attachments into the messages list.
 
-    ★ CACHE-CRITICAL: attachments are appended as a NEW trailing message,
+    CACHE-CRITICAL: attachments are appended as a NEW trailing message,
     NOT merged into the last historical user message.
 
     The old behaviour walked backward to the last ``user`` message and

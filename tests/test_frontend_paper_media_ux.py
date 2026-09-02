@@ -31,11 +31,12 @@ import subprocess
 import tempfile
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
-pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
+pytestmark = [pytest.mark.unit, pytest.mark.serial]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 PODCAST_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'podcast.js')
 VIDEO_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'video.js')
 PODCAST_RUNTIME_TS = os.path.join(
@@ -46,7 +47,9 @@ PUSH_TRANSPORT_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'push-transport.ts')
 MEDIA_MODEL_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'media-model-ui.ts')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
+FEATURE_REGISTRY_TS = os.path.join(
+    ROOT, 'frontend', 'src', 'feature-registry.ts')
 _NODE_HARNESS_TIMEOUT_S = 180
 
 
@@ -133,10 +136,10 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
   check('lost_after_5_fails', _podcast.status === 'lost');
   check('lost_render_text', host().innerHTML.includes('LOST_TEXT'));
   const recheckBtn = Array.from(host().querySelectorAll('button'))
-    .find(b => (b.getAttribute('onclick') || '').includes('_initPodcastTab'));
+    .find(b => (b.getAttribute('data-tofu-action') || '').includes('_initPodcastTab'));
   check('lost_recheck_wired', !!recheckBtn);
   const regenBtn = Array.from(host().querySelectorAll('button'))
-    .find(b => (b.getAttribute('onclick') || '').includes('_podcastGenerate(true)'));
+    .find(b => (b.getAttribute('data-tofu-action') || '').includes('_podcastGenerate(true)'));
   check('lost_regen_wired', !!regenBtn);
   // spinner has a lifetime: no poll timer survives the lost state
   check('lost_stops_polling', _podcast.pollTimer === null && _podcast.taskId === '');
@@ -463,8 +466,21 @@ def _run_harness(harness_src: str, renderer_path: str,
             f.write(harness_src)
         for source, output in ((PUSH_TRANSPORT_TS, push_built),
                                (runtime_path, runtime_built)):
+            # Native owners register their legacy globals on the module-private
+            # featureRegistry, so bundle through an entry that publishes both
+            # the owner's exports and the registry onto globalThis — bare
+            # `_initPodcastTab()` calls in the harness resolve exactly like
+            # the production classic-script fallback.
+            entry = os.path.join(
+                temp_dir, os.path.basename(output) + '.entry.ts')
+            with open(entry, 'w', encoding='utf-8') as f:
+                f.write(
+                    f'import * as owner from {source!r};\n'
+                    f'import {{ featureRegistry }} from '
+                    f'{FEATURE_REGISTRY_TS!r};\n'
+                    'Object.assign(globalThis, owner, featureRegistry);\n')
             compiled = subprocess.run(
-                [ESBUILD, source, '--bundle', '--format=iife',
+                [ESBUILD, entry, '--bundle', '--format=iife',
                  '--platform=browser', f'--outfile={output}'],
                 capture_output=True, text=True, timeout=60)
             assert compiled.returncode == 0, compiled.stderr
@@ -476,8 +492,10 @@ def _run_harness(harness_src: str, renderer_path: str,
 
 
 def _portable_runtime_source(source: str) -> str:
-    """Keep a mutated runtime's real dependency resolvable outside src/."""
-    return source.replace("'./media-model-ui'", repr(MEDIA_MODEL_TS), 1)
+    """Keep a mutated runtime's real dependencies resolvable outside src/."""
+    return source.replace(
+        "'./media-model-ui'", repr(MEDIA_MODEL_TS), 1).replace(
+        "'../../feature-registry'", repr(FEATURE_REGISTRY_TS), 1)
 
 
 @pytest.mark.skipif(not _node_deps_available(),
@@ -632,7 +650,14 @@ def test_NEUTER_empty_poll_must_not_fake_activity(module, name, state):
 
 
 def test_static_i18n_keys():
-    src = open(os.path.join(ROOT, 'static', 'js', 'i18n.js'), encoding='utf-8').read()
+    # i18n authority is the locale JSON pair, not the deleted static/js tree.
+    import json
+    locales = {}
+    for lang in ('zh', 'en'):
+        with open(os.path.join(
+                ROOT, 'frontend', 'src', 'i18n', 'locales',
+                f'{lang}.json'), encoding='utf-8') as f:
+            locales[lang] = json.load(f)
     keys = ('paper.podcastPhaseSource', 'paper.podcastPhaseScript',
             'paper.podcastPhaseAudio', 'paper.podcastStepDraft',
             'paper.podcastStepValidate', 'paper.podcastStepRevise',
@@ -642,12 +667,10 @@ def test_static_i18n_keys():
             'paper.mediaStillRunning', 'paper.mediaEtaPrefix',
             'paper.videoPhaseRender')
     for key in keys:
-        m = re.search(re.escape(f"'{key}'") +
-                      r":\s*\{\s*zh:\s*'((?:[^'\\]|\\.)*)',\s*en:\s*'((?:[^'\\]|\\.)*)'\s*\}",
-                      src)
-        assert m, f'i18n key {key} missing'
-        assert m.group(1).strip() and m.group(2).strip(), \
-            f'i18n key {key} has an empty zh or en'
+        for lang in ('zh', 'en'):
+            value = locales[lang].get(key)
+            assert isinstance(value, str), f'i18n key {key} missing in {lang}'
+            assert value.strip(), f'i18n key {key} has an empty {lang}'
 
 
 def test_static_css_classes():

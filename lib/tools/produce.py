@@ -1,6 +1,6 @@
 """lib/tools/produce.py — High-level "one sentence → finished video" tool.
 
-The chat surface of the production substrate (docs/PRODUCTION_PIPELINE_DESIGN.md
+The chat surface of the production substrate (docs/modules/production.md
 拍板 #5): a SINGLE semantically-clear tool so the model naturally selects it
 when the user says "make me a science-explainer video about <topic>", instead
 of orchestrating the 8 low-level ``motion_video_*`` tools by hand.

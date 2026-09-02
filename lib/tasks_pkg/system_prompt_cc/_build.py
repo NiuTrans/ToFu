@@ -29,6 +29,32 @@ from lib.tasks_pkg.system_prompt_cc._environment import (
 
 logger = get_logger(__name__)
 
+_LEAN_ABLATION_OMISSIONS = {
+    'lean_no_url': frozenset({'url'}),
+    'lean_no_safety': frozenset({'safety'}),
+    'lean_no_tools': frozenset({'tools'}),
+    'lean_no_output': frozenset({'output'}),
+    'lean_no_autonomy': frozenset({'autonomy'}),
+}
+_STATIC_PROMPT_PROFILES = frozenset({
+    'full', 'lean', *_LEAN_ABLATION_OMISSIONS,
+})
+
+
+def resolve_static_prompt_profile(model: str, profile: str = 'auto') -> str:
+    """Resolve one requested profile to the contract actually assembled.
+
+    Kimi ``auto`` deliberately remains ``full`` until the frozen paired
+    matrix clears every release gate. Explicit experiment profiles are
+    provider-neutral so the Kimi lean and named-ablation arms use the exact
+    same deterministic assembler as production requests.
+    """
+    normalized = str(profile or 'auto').strip().lower()
+    if normalized == 'auto':
+        from lib.model_info._openai_gpt56 import is_official_gpt56_model
+        return 'lean' if is_official_gpt56_model(model) else 'full'
+    return normalized if normalized in _STATIC_PROMPT_PROFILES else 'full'
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Assembler — returns the full static block, joined with "\n\n"
@@ -38,9 +64,8 @@ logger = get_logger(__name__)
 # Stable IDs for each toggleable static-prompt block. The editor stores
 # which IDs the user has switched OFF (keyed on ID, never on rendered text —
 # text changes between releases, IDs don't). ``intro`` is deliberately NOT
-# listed as user-toggleable in the UI because it carries the
-# ``_CC_STATIC_MARKER`` idempotency probe, but the backend will honour a
-# disable for any ID if asked.
+# listed as user-toggleable in the UI because it carries the platform identity,
+# but the backend will honour a disable for any ID if asked.
 #
 # ``BLOCK_META`` drives the editor: id → (human title, whether the block's
 # text is dynamic/read-only). Dynamic blocks (environment, current_date) are
@@ -90,10 +115,13 @@ def build_static_blocks(*, cwd: str, is_git: bool, model: str,
     """
     _web_tools = bool(tool_names) and bool(
         {'web_search', 'fetch_url'} & set(tool_names))
-    if str(profile or '').lower() == 'lean':
+    normalized_profile = str(profile or '').lower()
+    if normalized_profile == 'lean' or normalized_profile in _LEAN_ABLATION_OMISSIONS:
         raw: list[tuple[str, str]] = [('intro', section_gpt56_lean(
             is_code_context=is_code_context, tool_names=tool_names,
-            web_tools=_web_tools))]
+            web_tools=_web_tools,
+            omit_sections=_LEAN_ABLATION_OMISSIONS.get(
+                normalized_profile, frozenset())))]
     else:
         raw = [
             ('intro', section_intro(is_code_context=is_code_context)),
@@ -182,13 +210,7 @@ def build_static_prompt(*, cwd: str, is_git: bool, model: str,
                          OFF in the per-block editor. Those blocks are dropped
                          from the assembled prompt. ``None`` keeps every block.
     """
-    normalized_profile = str(profile or 'auto').strip().lower()
-    if normalized_profile == 'auto':
-        from lib.model_info._openai_gpt56 import is_official_gpt56_model
-        normalized_profile = ('lean' if is_official_gpt56_model(model)
-                              else 'full')
-    if normalized_profile not in {'full', 'lean'}:
-        normalized_profile = 'full'
+    normalized_profile = resolve_static_prompt_profile(model, profile)
     disabled = disabled_blocks or set()
     blocks = build_static_blocks(
         cwd=cwd, is_git=is_git, model=model, extra_roots=extra_roots,

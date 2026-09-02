@@ -11,12 +11,17 @@ from __future__ import annotations
 from lib.log import audit_log, get_logger
 
 from . import storage
-from .actions import ACTION_REGISTRY
+from .actions import ACTION_REGISTRY, action_available_in_this_deployment
 
 logger = get_logger(__name__)
 
 
-def apply_proposal(proposal: dict, *, dry_run: bool = False) -> dict:
+def apply_proposal(
+    proposal: dict,
+    *,
+    owner_user_id: int,
+    dry_run: bool = False,
+) -> dict:
     """Apply one validated proposal.
 
     Returns a dict describing the outcome:
@@ -29,7 +34,10 @@ def apply_proposal(proposal: dict, *, dry_run: bool = False) -> dict:
 
     # Every proposal is persisted first (so humans can see what was suggested,
     # even if auto-apply is off).
+    action_available = bool(
+        entry and action_available_in_this_deployment(entry))
     initial_status = 'applied' if (entry and entry.get('auto_apply')
+                                    and action_available
                                     and not dry_run) else 'pending_review'
     status_reason = ''
     if initial_status == 'pending_review':
@@ -37,10 +45,13 @@ def apply_proposal(proposal: dict, *, dry_run: bool = False) -> dict:
             status_reason = 'dry_run'
         elif not entry:
             status_reason = f'unknown action_type: {action_type}'
+        elif not action_available:
+            status_reason = 'action unavailable in this deployment mode'
         else:
             status_reason = 'not in auto-apply whitelist'
 
     proposal_id = storage.create_proposal(
+        owner_user_id=owner_user_id,
         title=proposal.get('title', ''),
         rationale=proposal.get('rationale', ''),
         action_type=action_type,
@@ -65,14 +76,18 @@ def apply_proposal(proposal: dict, *, dry_run: bool = False) -> dict:
         apply_fn = entry['apply']
         if not callable(apply_fn):
             raise RuntimeError(f'action {action_type} has no apply handler')
-        detail = apply_fn(action_args) or {}
+        detail = apply_fn(
+            action_args, owner_user_id=owner_user_id) or {}
     except Exception as e:
         logger.error('[Optimizer.applier] apply failed for proposal=%s type=%s: %s',
                      proposal_id, action_type, e, exc_info=True)
         storage.update_proposal_status(
             proposal_id, 'rejected',
-            reason=f'apply failed: {type(e).__name__}: {str(e)[:200]}')
+            reason=f'apply failed: {type(e).__name__}: {str(e)[:200]}',
+            owner_user_id=owner_user_id,
+        )
         audit_log('optimizer_action_failed',
+                  user_id=owner_user_id,
                   proposal_id=proposal_id, action_type=action_type,
                   error=str(e)[:200])
         return {
@@ -84,6 +99,7 @@ def apply_proposal(proposal: dict, *, dry_run: bool = False) -> dict:
 
     # Record the apply in the action log for the learning loop
     storage.record_applied(
+        owner_user_id=owner_user_id,
         proposal_id=proposal_id,
         ttl_days=ttl_days,
         pre_metric=proposal.get('pre_metric') or {},
@@ -97,11 +113,12 @@ def apply_proposal(proposal: dict, *, dry_run: bool = False) -> dict:
     }
 
 
-def revert_expired_actions() -> list[dict]:
+def revert_expired_actions(*, owner_user_id: int) -> list[dict]:
     """Scan ``optimizer_action_log`` for rows past their ``expires_at`` and
     revert them.  Returns a list of revert descriptors."""
     reverts: list[dict] = []
-    expired = storage.list_expired_applied_actions()
+    expired = storage.list_expired_applied_actions(
+        owner_user_id=owner_user_id)
     for row in expired:
         action_type = row.get('p_action_type') or ''
         entry = ACTION_REGISTRY.get(action_type)
@@ -118,27 +135,48 @@ def revert_expired_actions() -> list[dict]:
             logger.warning('[Optimizer.applier] no revert handler for expired '
                            'action=%s log_id=%s — marking expired without revert',
                            action_type, row.get('id'))
-            storage.mark_reverted(row['id'], reason + ' (no revert handler)')
-            storage.update_proposal_status(row['proposal_id'], 'expired', reason)
+            storage.mark_reverted(
+                row['id'], reason + ' (no revert handler)',
+                owner_user_id=owner_user_id)
+            storage.update_proposal_status(
+                row['proposal_id'], 'expired', reason,
+                owner_user_id=owner_user_id)
             reverts.append({'log_id': row['id'], 'status': 'expired',
                             'note': 'no revert handler'})
             continue
 
+        if not action_available_in_this_deployment(entry):
+            logger.warning(
+                '[Optimizer.applier] action %s is unavailable in this '
+                'deployment; leaving log_id=%s active',
+                action_type, row.get('id'))
+            reverts.append({
+                'log_id': row.get('id'),
+                'status': 'blocked',
+                'note': 'action unavailable in this deployment mode',
+            })
+            continue
+
         try:
-            entry['revert'](args)
+            entry['revert'](args, owner_user_id=owner_user_id)
         except Exception as e:
             logger.error('[Optimizer.applier] revert handler failed for %s: %s',
                          row.get('id'), e, exc_info=True)
             storage.mark_reverted(row['id'],
-                                  f'revert errored: {type(e).__name__}: {str(e)[:120]}')
+                                  f'revert errored: {type(e).__name__}: {str(e)[:120]}',
+                                  owner_user_id=owner_user_id)
             storage.update_proposal_status(row['proposal_id'], 'expired',
-                                           reason + ' (revert errored)')
+                                           reason + ' (revert errored)',
+                                           owner_user_id=owner_user_id)
             reverts.append({'log_id': row['id'], 'status': 'expired',
                             'error': str(e)[:200]})
             continue
 
-        storage.mark_reverted(row['id'], reason)
-        storage.update_proposal_status(row['proposal_id'], 'expired', reason)
+        storage.mark_reverted(
+            row['id'], reason, owner_user_id=owner_user_id)
+        storage.update_proposal_status(
+            row['proposal_id'], 'expired', reason,
+            owner_user_id=owner_user_id)
         reverts.append({'log_id': row['id'], 'status': 'expired',
                         'action_type': action_type, 'args': args})
 

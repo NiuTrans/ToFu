@@ -14,9 +14,9 @@ from lib.orchestration.human_gate_runtime import (
     HumanGateRequestPorts,
     OrchestrationHumanGateRuntime,
 )
-from lib.orchestration import human_gate_request_identity
-from lib.orchestration import human_gate_runtime_ports
-from lib.orchestration import human_gate_runtime_result
+import lib.orchestration.human_gate_request_identity as human_gate_request_identity
+import lib.orchestration.human_gate_runtime_ports as human_gate_runtime_ports
+import lib.orchestration.human_gate_runtime_result as human_gate_runtime_result
 from lib.orchestration_engine import FlowExecutor
 
 
@@ -150,7 +150,7 @@ def test_engine_consumes_runtime_port_without_task_registry_imports():
 
 
 def test_runtime_facade_preserves_split_owner_identities():
-    from lib.orchestration import human_gate_runtime
+    import lib.orchestration.human_gate_runtime as human_gate_runtime
 
     assert human_gate_runtime.HumanGateRequestPorts is \
         human_gate_runtime_ports.HumanGateRequestPorts

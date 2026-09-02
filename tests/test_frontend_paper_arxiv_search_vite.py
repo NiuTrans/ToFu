@@ -16,7 +16,7 @@ pytestmark = pytest.mark.unit
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
 SOURCE = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'arxiv-search.ts')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 _HARNESS = r"""

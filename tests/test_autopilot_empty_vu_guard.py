@@ -43,6 +43,7 @@ def _make_task():
     return {
         'id': 'parent-g-1',
         'convId': 'conv-g',
+        '_userId': 1,
         'config': {'model': 'm', 'autopilot': True},
         'messages': [
             {'role': 'user', 'content': 'go'},
@@ -65,10 +66,10 @@ def test_carrier_user_abort_returns_none(monkeypatch):
     NEGATIVE CONTROL: deleting the ``sub_task.get('aborted')`` branch makes
     this return {'text': '', ...} (the incident shape), failing here.
     """
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._turn as orch
 
-    monkeypatch.setattr(ap, '_get_or_persist_objective', lambda cid, msgs: 'obj')
-    monkeypatch.setattr(ap, '_has_pending_real_message', lambda cid: False)
+    monkeypatch.setattr(ap, '_get_or_persist_objective', lambda cid, msgs, *, user_id: 'obj')
+    monkeypatch.setattr(ap, '_has_pending_real_message', lambda cid, *, user_id: False)
 
     def _fake_turn(sub_task):
         # routes.chat_poll_abort.chat_abort landing on the CARRIER: stamps
@@ -89,10 +90,10 @@ def test_carrier_user_abort_returns_none(monkeypatch):
 def test_carrier_preemption_still_routes_first(monkeypatch):
     """ORDERING: a carrier abort carrying real-message preemption keeps its
     own branch (queue dispatch takes over) — guard ① must not shadow it."""
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._turn as orch
 
-    monkeypatch.setattr(ap, '_get_or_persist_objective', lambda cid, msgs: 'obj')
-    monkeypatch.setattr(ap, '_has_pending_real_message', lambda cid: True)
+    monkeypatch.setattr(ap, '_get_or_persist_objective', lambda cid, msgs, *, user_id: 'obj')
+    monkeypatch.setattr(ap, '_has_pending_real_message', lambda cid, *, user_id: True)
 
     def _fake_turn(sub_task):
         sub_task['aborted'] = True
@@ -114,20 +115,18 @@ def _wire_inner(monkeypatch, vu_text):
 
     monkeypatch.setattr(mgr, 'append_event', lambda task, event: None)
     monkeypatch.setattr(ap, 'is_autopilot_enabled', lambda task: True)
-    monkeypatch.setattr(ap, '_get_or_persist_run_id', lambda cid: 'ar-g')
-    monkeypatch.setattr(ap, '_has_pending_real_message', lambda cid: False)
+    monkeypatch.setattr(ap, '_get_or_persist_run_id', lambda cid, *, user_id: 'ar-g')
+    monkeypatch.setattr(ap, '_has_pending_real_message', lambda cid, *, user_id: False)
     monkeypatch.setattr(ap, '_successor_already_running', lambda t, c: False)
     monkeypatch.setattr(ap, 'run_virtual_user',
                         lambda task, vu_msg_id=None: {
                             'text': vu_text, 'rounds': [], 'segments': []})
-    monkeypatch.setattr(ap, '_presync_parent_reply', lambda task: None)
-    monkeypatch.setattr(ap, '_maybe_auto_translate_vu', lambda c, v, t: None)
     monkeypatch.setattr(ap, '_record_vu_turn_and_check_budget',
-                        lambda c, t, targets=None: {'stop': False})
+                        lambda c, t, targets=None, *, user_id: {'stop': False})
 
     appended: list = []
     monkeypatch.setattr(
-        ap, '_append_vu_message_to_conv',
+        ap, '_append_conversation_autopilot_turns',
         lambda *a, **kw: appended.append(1) or {'role': 'user'})
     spawned: list = []
     monkeypatch.setattr(ap, '_start_followup_task',
@@ -145,7 +144,7 @@ def test_empty_vu_text_no_append_no_spawn(monkeypatch, vu_text):
     and must NOT spawn a follow-up — the run stands down.
 
     NEGATIVE CONTROL: deleting the empty-text gate lets the flow reach
-    _append_vu_message_to_conv + _start_followup_task, failing here.
+    atomic baton append + follow-up start, failing here.
     """
     appended, spawned = _wire_inner(monkeypatch, vu_text)
 

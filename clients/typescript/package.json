@@ -1,11 +1,19 @@
 {
-  "name": "@tofu/sdk",
-  "version": "1.0.0",
+  "name": "@rangehow/tofu-sdk",
+  "version": "0.17.0",
   "description": "TypeScript client for the Tofu headless API",
   "main": "dist/index.js",
-  "module": "dist/index.mjs",
+  "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --experimental-vm-modules ./test.mjs"
@@ -17,6 +25,16 @@
   ],
   "engines": {
     "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rangehow/ToFu.git",
+    "directory": "clients/typescript"
+  },
+  "homepage": "https://github.com/rangehow/ToFu#readme",
+  "bugs": "https://github.com/rangehow/ToFu/issues",
+  "devDependencies": {
+    "typescript": "5.9.3"
   },
   "license": "MIT"
 }

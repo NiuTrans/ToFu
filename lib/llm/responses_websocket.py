@@ -18,6 +18,8 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 
 from lib.llm._sse_core import SSEAccumulator
+from lib.llm._transport import StreamProgress
+from lib.llm.stream_result import ProviderStreamState
 from lib.llm_errors import (
     AbortedError,
     EndpointUnreachableError,
@@ -170,7 +172,7 @@ def _request_payload(plan, session: _Session) -> tuple[dict, Counter]:
 def stream_responses_websocket(
         plan, *, on_thinking=None, on_content=None,
         on_tool_call_ready=None, abort_check=None, log_prefix='',
-        on_first_byte_wait=None):
+        on_first_byte_wait=None, on_stream_wait=None):
     """Run one Responses turn on a task-local persistent WebSocket."""
     key = _session_key(plan)
     session = _sessions().get(key)
@@ -186,51 +188,97 @@ def stream_responses_websocket(
         session.connection.send(json.dumps(
             envelope, ensure_ascii=False, separators=(',', ':')))
         session.last_used = time.monotonic()
+        import lib.llm._transport as _tp
+        progress = StreamProgress(0, started_at=plan.t0)
+        progress.mark_response_headers()
         acc = SSEAccumulator(
             plan.body, plan.trace_id, plan.raw_dumper, plan.wire_translator,
             plan.t0, url=plan.url, log_prefix=log_prefix,
             on_thinking=on_thinking, on_content=on_content,
-            on_tool_call_ready=on_tool_call_ready)
-        last_activity = time.monotonic()
-        last_beat = last_activity
+            on_tool_call_ready=on_tool_call_ready,
+            progress=progress)
+        idle_timeout = _tp.stream_idle_timeout_seconds()
+        last_beat = time.monotonic()
         while True:
+            now = time.monotonic()
+            if progress.transport_timed_out(idle_timeout, now):
+                _close_session(key, reason='stream idle timeout')
+                break
             if abort_check and abort_check():
                 acc.mark_aborted()
                 _close_session(key, reason='user abort')
                 raise AbortedError(
                     f'User aborted while waiting on {plan.url}')
             try:
-                message = session.connection.recv(timeout=_POLL_SECONDS)
+                remaining = progress.transport_remaining_seconds(
+                    idle_timeout, now)
+                poll_seconds = (
+                    _POLL_SECONDS if remaining is None
+                    else max(0.01, min(_POLL_SECONDS, remaining)))
+                message = session.connection.recv(timeout=poll_seconds)
             except TimeoutError:
                 now = time.monotonic()
-                if (on_first_byte_wait is not None
-                        and now - last_beat >= 5.0):
+                if progress.transport_timed_out(idle_timeout, now):
+                    _close_session(key, reason='stream idle timeout')
+                    break
+                heartbeat = _tp.IDLE_HEARTBEAT_S
+                beat_due = heartbeat > 0 and now - last_beat >= heartbeat
+                if beat_due:
                     last_beat = now
+                if on_first_byte_wait is not None and beat_due:
                     try:
-                        on_first_byte_wait(now - last_activity)
+                        on_first_byte_wait(
+                            progress.transport_idle_seconds(now))
                     except Exception as exc:
                         logger.debug('%s ResponsesWS wait callback failed: %s',
+                                     log_prefix, exc)
+                if on_stream_wait is not None and beat_due:
+                    try:
+                        on_stream_wait(progress.wait_status(now))
+                    except Exception as exc:
+                        logger.debug('%s ResponsesWS progress callback failed: %s',
                                      log_prefix, exc)
                 continue
             if message is None:
                 raise RetryableAPIError('Responses WebSocket closed')
-            last_activity = time.monotonic()
             if isinstance(message, bytes):
-                message = message.decode('utf-8', errors='replace')
+                progress.mark_transport_bytes(len(message))
+                try:
+                    message = message.decode('utf-8', errors='strict')
+                except UnicodeDecodeError as exc:
+                    acc.record_malformed_frames(
+                        1,
+                        (f'invalid_utf8: websocket event '
+                         f'error={type(exc).__name__}',),
+                    )
+                    _close_session(key, reason='invalid UTF-8')
+                    break
+            else:
+                progress.mark_transport_bytes(
+                    len(str(message).encode('utf-8')))
             try:
                 event = json.loads(message)
             except (TypeError, json.JSONDecodeError) as exc:
-                raise RetryableAPIError(
-                    f'invalid Responses WebSocket event: {exc}') from exc
+                acc.record_malformed_frames(
+                    1,
+                    (f'invalid_json: websocket event '
+                     f'error={type(exc).__name__}',),
+                )
+                _close_session(key, reason='invalid JSON')
+                break
             if event.get('type') == 'error':
                 event = {'type': 'response.error',
                          'error': event.get('error') or event}
                 message = json.dumps(event, ensure_ascii=False)
-            if acc.feed_line('data: ' + message):
+            if acc.feed_payload(message, count_event=True):
                 break
 
         acc.fire_final_tool_callback()
         result = acc.finalize()
+        if result.state is ProviderStreamState.PREMATURE_CLOSE:
+            usage = dict(result.usage)
+            usage['_failure_stage'] = 'midstream_close'
+            result = result.with_usage(usage)
         translator = plan.wire_translator
         response_id = str(getattr(translator, 'response_id', '') or '')
         if not response_id:

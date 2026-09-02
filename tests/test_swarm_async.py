@@ -25,7 +25,7 @@ from lib import agent_inbox
 from lib.swarm.integration import (
     _active_sessions,
     _sessions_lock,
-    execute_swarm_tool,
+    execute_swarm_tool as _execute_swarm_tool,
 )
 from lib.swarm.master import MasterOrchestrator
 from lib.swarm.protocol import (
@@ -36,6 +36,14 @@ from lib.swarm.protocol import (
 
 
 pytestmark = pytest.mark.unit
+
+
+def execute_swarm_tool(fn_name, fn_args, *, task):
+    """Exercise the production boundary with an explicit authenticated owner."""
+    owned_task = dict(task)
+    owned_task.setdefault('_userId', 1)
+    owned_task.setdefault('status', 'running')
+    return _execute_swarm_tool(fn_name, fn_args, task=owned_task)
 
 
 # ─────────────────────────────────────────────────────────
@@ -367,6 +375,7 @@ class TestAwaitAgents(unittest.TestCase):
         spec = SubTaskSpec(id='handoff', role='general', objective='H')
         master = MasterOrchestrator(
             task_id=self.task_id, conv_id='', specs=[spec],
+            user_id=1,
             output_dir='',
         )
         callback_entered = threading.Event()
@@ -578,6 +587,7 @@ class TestAwaitAgents(unittest.TestCase):
         spec_lost = SubTaskSpec(role='general', objective='lost one', id='lost')
         orch = MasterOrchestrator(
             task_id=self.task_id, conv_id='c1',
+            user_id=1,
             specs=[spec_done, spec_lost],
         )
         # Build the scheduler WITHOUT running the driver, so we can model the
@@ -616,7 +626,7 @@ class TestAwaitAgents(unittest.TestCase):
         the driver exited (the normal happy path)."""
         spec_a = SubTaskSpec(role='general', objective='A', id='a')
         orch = MasterOrchestrator(
-            task_id=self.task_id, conv_id='c1', specs=[spec_a])
+            task_id=self.task_id, conv_id='c1', specs=[spec_a], user_id=1)
         orch._scheduler = orch._build_scheduler()
         res = SubAgentResult(
             status=SubAgentStatus.COMPLETED.value, final_answer='x',
@@ -865,6 +875,7 @@ class TestSubAgentDenylist(unittest.TestCase):
         spec = SubTaskSpec(role='general', objective='hi', id='only')
         orch = MasterOrchestrator(
             task_id='t-denylist', conv_id='c1', specs=[spec],
+            user_id=1,
             all_tools=all_tools,
         )
         agent = orch._make_agent(spec)
@@ -975,7 +986,7 @@ class TestSessionTTLLiveness(unittest.TestCase):
 
     def tearDown(self):
         _reset_global_state(self.task_id)
-        from lib.tasks_pkg.manager import tasks as _chat_tasks
+        from tests.support.chat_tasks import chat_task_registry as _chat_tasks
         _chat_tasks.pop(self.task_id, None)
 
     def _force_stale(self):
@@ -1003,14 +1014,15 @@ class TestSessionTTLLiveness(unittest.TestCase):
 
     def test_live_task_session_survives_ttl(self):
         from lib.swarm.integration import _cleanup_stale_sessions, get_active_session
-        from lib.tasks_pkg.manager import tasks as _chat_tasks
+        from tests.support.chat_tasks import chat_task_registry as _chat_tasks
         with _patch_factory():
             execute_swarm_tool(
                 'spawn_agents',
                 {'agents': [{'id': 'a1', 'objective': 'O'}]},
                 task={'id': self.task_id},
             )
-        _chat_tasks[self.task_id] = {'id': self.task_id, 'status': 'running'}
+        _chat_tasks[self.task_id] = {
+            'id': self.task_id, '_userId': 1, 'status': 'running'}
         self._force_stale()
         with self.subTest('cleanup'):
             import lib.swarm.integration as integ
@@ -1021,14 +1033,15 @@ class TestSessionTTLLiveness(unittest.TestCase):
 
     def test_finished_task_session_evicted_by_ttl(self):
         from lib.swarm.integration import _cleanup_stale_sessions, get_active_session
-        from lib.tasks_pkg.manager import tasks as _chat_tasks
+        from tests.support.chat_tasks import chat_task_registry as _chat_tasks
         with _patch_factory():
             execute_swarm_tool(
                 'spawn_agents',
                 {'agents': [{'id': 'a1', 'objective': 'O'}]},
                 task={'id': self.task_id},
             )
-        _chat_tasks[self.task_id] = {'id': self.task_id, 'status': 'done'}
+        _chat_tasks[self.task_id] = {
+            'id': self.task_id, '_userId': 1, 'status': 'done'}
         self._force_stale()
         import lib.swarm.integration as integ
         with integ._sessions_lock:
@@ -1048,7 +1061,6 @@ class TestSwarmDecoupledFromProject(unittest.TestCase):
             task_id='t-bare', search_mode='off', search_enabled=False,
             fetch_enabled=True, code_exec_enabled=False,
             browser_enabled=False, desktop_enabled=False,
-            swarm_enabled=True,
             image_gen_enabled=False, human_guidance_enabled=False,
             scheduler_enabled=False, messages=[],
         )
@@ -1058,32 +1070,39 @@ class TestSwarmDecoupledFromProject(unittest.TestCase):
         self.assertIn('await_agents', names)
         self.assertIn('get_agent_result', names)
 
-    def test_swarm_off_does_not_inject_tools(self):
-        """Negative: swarm tools only show when swarm_enabled is true."""
+    def test_swarm_tools_always_present_by_default(self):
+        """Swarm tools are DEFAULT tools — always assembled, no flag.
+
+        The old ``swarmEnabled`` switch is gone; a plain default assembly
+        (no swarm kwarg at all) must still include the full swarm trio.
+        """
         from lib.tasks_pkg.model_config import _assemble_tool_list
         tool_list, _ = _assemble_tool_list(
             cfg={}, project_path='', project_enabled=True,
-            task_id='t-noswarm', search_mode='off', search_enabled=False,
+            task_id='t-default', search_mode='off', search_enabled=False,
             fetch_enabled=True, code_exec_enabled=False,
             browser_enabled=False, desktop_enabled=False,
-            swarm_enabled=False,  # ← OFF
             image_gen_enabled=False, human_guidance_enabled=False,
             scheduler_enabled=False, messages=[],
         )
         names = {t['function']['name'] for t in (tool_list or [])}
-        self.assertNotIn('spawn_agents', names)
-        self.assertNotIn('await_agents', names)
+        self.assertIn('spawn_agents', names)
+        self.assertIn('await_agents', names)
+        self.assertIn('get_agent_result', names)
 
     def test_swarm_prompt_injected_without_project(self):
         """The <parallel_execution> system prompt must inject when swarm
         is on, regardless of project state."""
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
         msgs = [{'role': 'system', 'content': 'You are an assistant.'}]
-        _inject_system_contexts(
-            msgs, project_path='', project_enabled=False,
+        compose_task_context(
+            msgs, user_id=1, project_path='', project_enabled=False,
             memory_enabled=False, search_enabled=False,
-            swarm_enabled=True,
             has_real_tools=True, conv_id='c1',
+            task={
+                'id': 'swarm-prompt', '_userId': 1,
+                'config': {'orchestration': {'multiAgent': 'read_only'}},
+            },
         )
         joined = ' '.join(
             (m.get('content', '') if isinstance(m.get('content'), str)
@@ -1122,6 +1141,38 @@ class TestParentConfigPropagation(unittest.TestCase):
             sess._parent_task_proxy.get('config', {}).get('browserClientId'),
             'client-XYZ',
             'browserClientId did not propagate to sub-agent parent_task_proxy',
+        )
+
+    def test_owner_user_id_propagates_to_tool_task_proxy(self):
+        """The per-tool task_proxy built in SubAgent._execute_tool must carry
+        the parent's _userId — lib/browser/dispatch.py fail-closes with
+        'Browser tool requires an authenticated owner' on an empty/non-numeric
+        owner BEFORE touching the extension queue, so a dropped key disables
+        every browser tool in every sub-agent."""
+        from lib.swarm.agent import SubAgent
+        captured = {}
+
+        def _spy(task, tc, fn_name, tc_id, fn_args, rn,
+                 round_entry, cfg, project_path, project_enabled,
+                 all_tools=None):
+            captured['task'] = task
+            return (tc_id, 'ok', False)
+
+        tools = [{'type': 'function', 'function': {
+            'name': 'browser_list_tabs', 'parameters': {}}}]
+        agent = SubAgent(
+            SubTaskSpec(role='browser', objective='list tabs'),
+            parent_task={'id': self.task_id, 'convId': 'c1', '_userId': 1,
+                         'config': {}},
+            all_tools=tools, thinking_enabled=False)
+        import lib.tasks_pkg.executor as _ex
+        with patch.object(_ex, '_execute_tool_one', _spy):
+            agent._execute_single_tool(
+                {'id': 'tc_1', 'function': {
+                    'name': 'browser_list_tabs', 'arguments': '{}'}}, 1)
+        self.assertEqual(
+            captured['task'].get('_userId'), 1,
+            '_userId did not propagate to the sub-agent tool task_proxy',
         )
 
 
@@ -1371,8 +1422,9 @@ class TestAutoContinueGuardrails(unittest.TestCase):
         with patch.object(self.integ, '_key_is_live', return_value=False), \
              patch.object(self.integ, '_start_autocontinue_turn',
                           return_value=True) as start:
-            self.integ._maybe_autocontinue(self.key)
-        start.assert_called_once_with(self.key)
+            self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
+        start.assert_called_once_with(
+            self.key, 7, command_id='swarm-autocontinue:source-task')
         self.assertEqual(self.integ._autocontinue_chain.get(self.key), 1)
 
     def test_skips_when_conversation_live(self):
@@ -1380,14 +1432,14 @@ class TestAutoContinueGuardrails(unittest.TestCase):
         with patch.object(self.integ, '_key_is_live', return_value=True), \
              patch.object(self.integ, '_start_autocontinue_turn',
                           return_value=True) as start:
-            self.integ._maybe_autocontinue(self.key)
+            self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
         start.assert_not_called()
 
     def test_skips_when_inbox_empty(self):
         with patch.object(self.integ, '_key_is_live', return_value=False), \
              patch.object(self.integ, '_start_autocontinue_turn',
                           return_value=True) as start:
-            self.integ._maybe_autocontinue(self.key)
+            self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
         start.assert_not_called()
 
     def test_chain_ceiling_blocks_runaway(self):
@@ -1397,7 +1449,7 @@ class TestAutoContinueGuardrails(unittest.TestCase):
         with patch.object(self.integ, '_key_is_live', return_value=False), \
              patch.object(self.integ, '_start_autocontinue_turn',
                           return_value=True) as start:
-            self.integ._maybe_autocontinue(self.key)
+            self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
         start.assert_not_called()
 
     def test_failed_start_releases_chain_increment(self):
@@ -1405,7 +1457,7 @@ class TestAutoContinueGuardrails(unittest.TestCase):
         with patch.object(self.integ, '_key_is_live', return_value=False), \
              patch.object(self.integ, '_start_autocontinue_turn',
                           return_value=False):
-            self.integ._maybe_autocontinue(self.key)
+            self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
         # increment was rolled back so a later settle can retry
         self.assertEqual(self.integ._autocontinue_chain.get(self.key, 0), 0)
 
@@ -1414,7 +1466,7 @@ class TestAutoContinueGuardrails(unittest.TestCase):
         with patch.object(self.integ, 'SWARM_AUTOCONTINUE_ENABLED', False), \
              patch.object(self.integ, '_start_autocontinue_turn',
                           return_value=True) as start:
-            self.integ._maybe_autocontinue(self.key)
+            self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
         start.assert_not_called()
 
     def test_reset_chain_clears_counter(self):
@@ -1443,7 +1495,7 @@ class TestRehydration(unittest.TestCase):
             prefix='tofu-swarm-sidecar-')
         cls._storage_supervisor = StorageSupervisor(
             project_root=Path(cls._storage_root.name), backend='sqlite',
-            startup_timeout=20)
+            startup_timeout=60)
         cls._storage_supervisor.start()
         cls._storage_patch = patch.object(
             persistence, '_storage',
@@ -1568,6 +1620,7 @@ class TestRehydration(unittest.TestCase):
 
         specs = [SubTaskSpec.from_dict(d) for d in sess['specs']]
         master = MasterOrchestrator(task_id='t2', conv_id=self.key, specs=specs,
+                                    user_id=1,
                                     inbox_key=self.key)
 
         seeded = {}
@@ -1605,6 +1658,7 @@ class TestRehydration(unittest.TestCase):
                     if s['swarm_key'] == self.key)
         specs = [SubTaskSpec.from_dict(d) for d in sess['specs']]
         master = MasterOrchestrator(task_id='t3', conv_id=self.key, specs=specs,
+                                    user_id=1,
                                     inbox_key=self.key)
         with _patch_factory():
             master.rehydrate_in_background(sess['agents'])

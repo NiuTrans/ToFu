@@ -36,6 +36,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
+
+TEST_OWNER_USER_ID = 1
 sys.modules.setdefault('flask', _quart)
 
 
@@ -115,7 +117,7 @@ The end.
 # ── Direct unit tests on build_terminology_audit ────────────────────────────
 
 def test_missing_term_caught():
-    from lib.paper.terminology_audit import build_terminology_audit
+    from lib.paper.terminology_audit.audit import build_terminology_audit
     audit = build_terminology_audit(_FAILING_BODY)
     assert audit is not None, 'a gap exists — the card MUST be attached'
     missing = {m['term'] for m in audit.get('missing', [])}
@@ -133,7 +135,7 @@ def test_missing_term_caught():
 
 
 def test_dangling_definition_caught():
-    from lib.paper.terminology_audit import build_terminology_audit
+    from lib.paper.terminology_audit.audit import build_terminology_audit
     audit = build_terminology_audit(_FAILING_BODY)
     assert audit is not None
     dangling = audit.get('dangling', [])
@@ -148,7 +150,7 @@ def test_dangling_definition_caught():
 
 
 def test_clean_body_empty_gate():
-    from lib.paper.terminology_audit import build_terminology_audit
+    from lib.paper.terminology_audit.audit import build_terminology_audit
     audit = build_terminology_audit(_CLEAN_BODY)
     assert audit is None, f'a self-contained body must produce NO card, got {audit}'
     _ok('negative control: a clean, self-contained body produces an empty gate (None)')
@@ -158,17 +160,17 @@ def test_no_glossary_returns_none():
     """Best-effort: a body without a Core Terminology section is not audited
     (avoids false positives on non-report text) — mirrors citation_audit's
     'nothing to check → None'."""
-    from lib.paper.terminology_audit import build_terminology_audit
+    from lib.paper.terminology_audit.audit import build_terminology_audit
     body = '## ⚡ TL;DR\nAn SFT model trained with PPO.\n## 📝 Technical Reference\nEnd.\n'
     assert build_terminology_audit(body) is None
     assert build_terminology_audit('') is None
     _ok('no glossary section / empty text → None (no false-positive card)')
 
 
-# ── Engine wiring (drives the REAL _run_report_task) ────────────────────────
+# ── Engine wiring (drives the REAL run_report_task) ────────────────────────
 
 def _patch_dispatch(body):
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
 
     def _fake_dispatch(messages, on_content=None, on_thinking=None, **kw):
         if body and on_content:
@@ -181,10 +183,10 @@ def _patch_dispatch(body):
 
 
 def _make_task(tid, lang='en'):
-    from lib.paper import _new_report_task
+    from lib.paper.report_runtime import _new_report_task
     task = _new_report_task(
         tid, 'phashterm00000000000000000000000', lang, None,
-        client_title='Efficient RLHF Training')
+        client_title='Efficient RLHF Training', user_id=TEST_OWNER_USER_ID)
     # This suite owns the primary report/audit boundary.  Keep independently
     # tested post-report agents from making real dispatcher calls as their
     # defaults evolve.
@@ -197,10 +199,10 @@ def _make_task(tid, lang='en'):
 
 
 def _run(tid, body, lang='en'):
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     _patch_dispatch(body)
     task = _make_task(tid, lang)
-    re_mod._run_report_task(task, [
+    re_mod.run_report_task(task, [
         {'role': 'system', 'content': 'sys'},
         {'role': 'user', 'content': 'paper'},
     ], [])
@@ -208,7 +210,7 @@ def _run(tid, body, lang='en'):
 
 
 def test_engine_attaches_terminology_audit():
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     orig = re_mod.dispatch_stream
     try:
         task = _run('rpt_term_1', _FAILING_BODY)
@@ -227,7 +229,7 @@ def test_engine_attaches_terminology_audit():
 
 
 def test_engine_clean_body_no_card():
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     orig = re_mod.dispatch_stream
     try:
         task = _run('rpt_term_2', _CLEAN_BODY)
@@ -242,7 +244,7 @@ def test_engine_skips_review_mode():
     """Review Mode is a decision document, not an illustrated explainer — the
     terminology audit is skipped there (call-site guard, mirrors the text-only
     image handling)."""
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     orig = re_mod.dispatch_stream
     try:
         # A review composite lang key; the body still has the gap, but the audit
@@ -260,7 +262,7 @@ def test_negctl_gap_finders_load_bearing():
     build returns None (no card) even on the FAILING body; restoring them brings
     the card back. Proves the card is driven by DETECTED gaps, not by the mere
     presence of a glossary."""
-    import lib.paper.terminology_audit as ta
+    import lib.paper.terminology_audit.audit as ta
     orig_missing = ta._find_missing_terms
     orig_dangling = ta._find_dangling_refs
     ta._find_missing_terms = lambda *a, **k: []

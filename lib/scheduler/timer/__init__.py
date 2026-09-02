@@ -66,7 +66,6 @@ from ._poll import (  # noqa: E402,F401
     _increment_poll_count,
     _mark_exhausted,
     _mark_expired,
-    _mark_orphaned,
     _reconcile_audit,
     _reconcile_audit_lock,
     _record_poll,

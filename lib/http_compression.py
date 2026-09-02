@@ -14,6 +14,8 @@ from typing import Any
 
 from quart import request
 
+from runtime_guards import resolve_deployment_mode
+
 from lib.ttl_cache import TTLCache
 
 
@@ -34,13 +36,44 @@ COMPRESS_CACHE = TTLCache(ttl=6 * 3600, max_size=48)
 COMPRESS_CACHE_MAX_BYTES = 8 * 1024 * 1024
 BR_QUALITY_CACHED = 9
 BR_QUALITY_LIVE = 4
+BR_QUALITY_PERSONAL_LARGE = 2
+GZIP_LEVEL_CACHED = 6
+GZIP_LEVEL_LIVE = 6
+GZIP_LEVEL_PERSONAL_LARGE = 1
+LARGE_DYNAMIC_RESPONSE_BYTES = 1024 * 1024
+
+
+def compression_quality(
+    encoding: str,
+    data_bytes: int,
+    *,
+    cached: bool,
+    deployment_mode: str,
+) -> int:
+    """Choose bounded compression effort for one explicit deployment profile."""
+    if encoding not in {'br', 'gzip'}:
+        raise ValueError('encoding must be br or gzip')
+    if deployment_mode not in {'personal', 'distributed'}:
+        raise ValueError('deployment_mode must be personal or distributed')
+    if cached:
+        return BR_QUALITY_CACHED if encoding == 'br' else GZIP_LEVEL_CACHED
+    if (
+        deployment_mode == 'personal'
+        and data_bytes >= LARGE_DYNAMIC_RESPONSE_BYTES
+    ):
+        return (
+            BR_QUALITY_PERSONAL_LARGE
+            if encoding == 'br'
+            else GZIP_LEVEL_PERSONAL_LARGE
+        )
+    return BR_QUALITY_LIVE if encoding == 'br' else GZIP_LEVEL_LIVE
 
 
 def compress_bytes(data: bytes, encoding: str, quality: int) -> bytes:
     """Compress bytes synchronously; callers must run this off the loop."""
     if encoding == 'br' and brotli is not None:
         return brotli.compress(data, quality=quality)
-    return gzip.compress(data, 6)
+    return gzip.compress(data, quality)
 
 
 async def compress_response(response: Any) -> Any:
@@ -77,7 +110,12 @@ async def compress_response(response: Any) -> Any:
 
     compressed = COMPRESS_CACHE.get(cache_key) if cache_key else None
     if compressed is None:
-        quality = BR_QUALITY_CACHED if cache_key else BR_QUALITY_LIVE
+        quality = compression_quality(
+            encoding,
+            len(data),
+            cached=cache_key is not None,
+            deployment_mode=resolve_deployment_mode(),
+        )
         compressed = await asyncio.get_running_loop().run_in_executor(
             None, compress_bytes, data, encoding, quality)
         if cache_key:
@@ -106,12 +144,18 @@ def register_http_compression(app: Any) -> bool:
 __all__ = [
     'BR_QUALITY_CACHED',
     'BR_QUALITY_LIVE',
+    'BR_QUALITY_PERSONAL_LARGE',
     'COMPRESS_CACHE',
     'COMPRESS_CACHE_MAX_BYTES',
     'COMPRESS_MIMETYPES',
     'COMPRESS_MIN_SIZE',
+    'GZIP_LEVEL_CACHED',
+    'GZIP_LEVEL_LIVE',
+    'GZIP_LEVEL_PERSONAL_LARGE',
+    'LARGE_DYNAMIC_RESPONSE_BYTES',
     'brotli',
     'compress_bytes',
     'compress_response',
+    'compression_quality',
     'register_http_compression',
 ]

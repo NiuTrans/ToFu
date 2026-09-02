@@ -1,11 +1,11 @@
-"""Contract tests for the read_tab / fetch_url payload optimization (#5).
+"""Contract tests for browser page/fetch HTML-first payload extraction.
 
 The extension now ships page HTML as the PRIMARY payload and only includes
 ``text`` (innerText) as a fallback when the HTML is too small for the server
 to extract from. These tests pin that the two server-side consumers behave
 correctly against the new payload shapes:
 
-  * ``lib.browser.handlers._handle_read_tab``
+  * ``lib.browser.handlers._handle_read_page(mode='text')``
   * ``lib.browser.fetch.fetch_url_via_browser``
 
 They monkeypatch the wire call (``send_browser_command``) so no real Chrome
@@ -15,7 +15,8 @@ extension is needed.
 import pytest
 
 import lib.browser.fetch as bfetch
-import lib.browser.handlers as bhandlers
+from lib.browser.handlers import _handle_read_page
+from lib.browser.tool_runtime import BrowserToolRuntime
 
 _REAL_HTML = (
     '<html><head><title>Doc</title></head><body>'
@@ -26,9 +27,17 @@ _REAL_HTML = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _file_aware_extension(monkeypatch):
+    monkeypatch.setattr(
+        'lib.browser.protocol.require_capabilities',
+        lambda client_id, required: {'client_id': client_id},
+    )
+
+
 @pytest.mark.unit
-class TestReadTabHtmlPrimary:
-    def test_extracts_from_html_when_text_absent(self, monkeypatch):
+class TestReadPageHtmlPrimary:
+    def test_extracts_from_html_when_text_absent(self):
         """Common path: HTML present, NO innerText shipped → extract from HTML."""
         payload = {
             'html': _REAL_HTML,
@@ -38,14 +47,17 @@ class TestReadTabHtmlPrimary:
             'url': 'https://example.com/a',
             # note: no 'text' key — the optimization omits it on the hot path
         }
-        monkeypatch.setattr(bhandlers, 'send_browser_command',
-                            lambda *a, **k: (payload, None))
-        out = bhandlers._handle_read_tab({'tabId': 1})
+        runtime = BrowserToolRuntime(
+            owner_user_id='41', client_id='test-browser',
+            sender=lambda *a, **k: (payload, None),
+        )
+        out = _handle_read_page(
+            {'tabId': 1, 'mode': 'text'}, runtime)
         assert 'Real Heading' in out
         assert 'readable article content' in out
         assert 'html→extract' in out  # proves the HTML pipeline ran
 
-    def test_falls_back_to_text_when_html_too_small(self, monkeypatch):
+    def test_falls_back_to_text_when_html_too_small(self):
         """Shell page: tiny HTML + innerText fallback present → use the text."""
         payload = {
             'html': '<html><body></body></html>',  # < server's 200-char gate
@@ -57,9 +69,12 @@ class TestReadTabHtmlPrimary:
             'title': 'Shell',
             'url': 'https://example.com/shell',
         }
-        monkeypatch.setattr(bhandlers, 'send_browser_command',
-                            lambda *a, **k: (payload, None))
-        out = bhandlers._handle_read_tab({'tabId': 2})
+        runtime = BrowserToolRuntime(
+            owner_user_id='41', client_id='test-browser',
+            sender=lambda *a, **k: (payload, None),
+        )
+        out = _handle_read_page(
+            {'tabId': 2, 'mode': 'text'}, runtime)
         assert 'Fallback visible text' in out
         assert 'innerText' in out
 
@@ -74,12 +89,24 @@ class TestFetchUrlHtmlPrimary:
             'title': 'Doc',
             'url': 'https://example.com/a',
         }
-        monkeypatch.setattr(bfetch, 'is_extension_connected', lambda *a, **k: True)
-        monkeypatch.setattr(bfetch, '_get_active_client', lambda: None)
-        monkeypatch.setattr(bfetch, 'send_browser_command',
-                            lambda *a, **k: (payload, None))
-        out = bfetch.fetch_url_via_browser('https://example.com/a')
+        seen = {}
+
+        def fake_connected(client_id, *, owner_user_id):
+            return client_id == 'test-browser' and owner_user_id == '41'
+
+        def fake_send(*args, client_id=None, owner_user_id=None, **kwargs):
+            seen['route'] = (client_id, owner_user_id)
+            return payload, None
+
+        monkeypatch.setattr(bfetch, 'is_extension_connected', fake_connected)
+        monkeypatch.setattr(bfetch, 'send_browser_command', fake_send)
+        out = bfetch.fetch_url_via_browser(
+            'https://example.com/a',
+            client_id='test-browser',
+            owner_user_id='41',
+        )
         assert out and 'readable article content' in out
+        assert seen['route'] == ('test-browser', '41')
 
     def test_falls_back_to_innertext_when_html_small(self, monkeypatch):
         payload = {
@@ -90,9 +117,21 @@ class TestFetchUrlHtmlPrimary:
             'title': 'Shell',
             'url': 'https://example.com/shell',
         }
-        monkeypatch.setattr(bfetch, 'is_extension_connected', lambda *a, **k: True)
-        monkeypatch.setattr(bfetch, '_get_active_client', lambda: None)
-        monkeypatch.setattr(bfetch, 'send_browser_command',
-                            lambda *a, **k: (payload, None))
-        out = bfetch.fetch_url_via_browser('https://example.com/shell')
+        seen = {}
+
+        def fake_connected(client_id, *, owner_user_id):
+            return client_id == 'test-browser' and owner_user_id == '41'
+
+        def fake_send(*args, client_id=None, owner_user_id=None, **kwargs):
+            seen['route'] = (client_id, owner_user_id)
+            return payload, None
+
+        monkeypatch.setattr(bfetch, 'is_extension_connected', fake_connected)
+        monkeypatch.setattr(bfetch, 'send_browser_command', fake_send)
+        out = bfetch.fetch_url_via_browser(
+            'https://example.com/shell',
+            client_id='test-browser',
+            owner_user_id='41',
+        )
         assert out == 'x' * 120
+        assert seen['route'] == ('test-browser', '41')

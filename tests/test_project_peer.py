@@ -33,17 +33,26 @@ Four MANDATORY source-level negative controls (each byte-reverting):
 
 from __future__ import annotations
 
-import os
-
 import pytest
-
-from tests._nc_harness import patch_restore as _patch_restore
 
 pytestmark = pytest.mark.unit
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
-_PEER_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_peer.py')
+TEST_OWNER_USER_ID = 1
+
+
+def _resolve_synthetic_target(target, *, user_id):
+    """Resolve synthetic ids while proving the owner crosses the test seam."""
+    assert user_id == TEST_OWNER_USER_ID
+    return (target or '').strip(), ''
+
+
+def _owned_static(value):
+    """Return a storage stub that rejects a missing or cross-owner read."""
+    def _read(*_args, user_id):
+        assert user_id == TEST_OWNER_USER_ID
+        return value
+
+    return _read
 
 
 @pytest.fixture(autouse=True)
@@ -64,7 +73,10 @@ def _stub_io(monkeypatch):
     send_peer_message is DB-free. Returns a list capturing enqueue calls."""
     calls = []
 
-    def _fake_enqueue(conv_id, message_data, config, kind='real'):
+    def _fake_enqueue(
+        conv_id, message_data, config, kind='real', *, user_id,
+    ):
+        assert user_id == TEST_OWNER_USER_ID
         calls.append({'conv_id': conv_id, 'kind': kind,
                       'payload': message_data, 'config': config})
         return {'queueId': 'q_' + conv_id[:6], 'position': 1, 'kind': kind}
@@ -78,7 +90,7 @@ def _stub_io(monkeypatch):
     # (cA/cB) without a conversations table. The real resolver is covered by
     # the dedicated seeded-DB tests below (test_resolve_* / test_send_*_target).
     monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
-                        lambda t: ((t or '').strip(), ''))
+                        _resolve_synthetic_target)
     return calls
 
 
@@ -175,16 +187,18 @@ def test_build_peer_status_convCount_excludes_subagents(monkeypatch):
     """
     import lib.conversations.project_peer as pp
     # 1 conversation (cA) running 2 sub-agents → presence has 3 peers total.
-    monkeypatch.setattr('lib.presence.registry.snapshot', lambda p: {'peers': [
+    monkeypatch.setattr('lib.presence.registry.snapshot', _owned_static({'peers': [
         {'convId': 'cA', 'agentId': '', 'title': 'Parser work', 'statusLabel': 'working'},
         {'convId': 'cA', 'agentId': 'sub1', 'statusLabel': 'working'},
         {'convId': 'cA', 'agentId': 'sub2', 'statusLabel': 'working'},
-    ]})
+    ]}))
     monkeypatch.setattr('lib.conversations.project_board.read_board',
-                        lambda p: {'tasks': []})
-    monkeypatch.setattr('lib.conversations.project_peer._live_task_by_conv', lambda: {})
-    monkeypatch.setattr('lib.conversations.project_peer._titles_by_conv', lambda ids: {})
-    out = pp.build_peer_status('/proj')
+                        _owned_static({'tasks': []}))
+    monkeypatch.setattr('lib.conversations.project_peer._live_task_by_conv',
+                        _owned_static({}))
+    monkeypatch.setattr('lib.conversations.project_peer._titles_by_conv',
+                        _owned_static({}))
+    out = pp.build_peer_status('/proj', user_id=TEST_OWNER_USER_ID)
     # All 3 peers are returned + rendered as cards …
     assert out['count'] == 3, out
     assert len(out['peers']) == 3, out
@@ -196,18 +210,20 @@ def test_build_peer_status_convCount_counts_distinct_conversations(monkeypatch):
     """Two distinct conversations (each with a sub-agent) → convCount == 2,
     even though 4 peers are present. Excludes the caller's own conv."""
     import lib.conversations.project_peer as pp
-    monkeypatch.setattr('lib.presence.registry.snapshot', lambda p: {'peers': [
+    monkeypatch.setattr('lib.presence.registry.snapshot', _owned_static({'peers': [
         {'convId': 'cA', 'agentId': '', 'statusLabel': 'working'},
         {'convId': 'cA', 'agentId': 'sub1', 'statusLabel': 'working'},
         {'convId': 'cB', 'agentId': '', 'statusLabel': 'generating'},
         {'convId': 'cB', 'agentId': 'sub1', 'statusLabel': 'working'},
-    ]})
+    ]}))
     monkeypatch.setattr('lib.conversations.project_board.read_board',
-                        lambda p: {'tasks': []})
-    monkeypatch.setattr('lib.conversations.project_peer._live_task_by_conv', lambda: {})
-    monkeypatch.setattr('lib.conversations.project_peer._titles_by_conv', lambda ids: {})
+                        _owned_static({'tasks': []}))
+    monkeypatch.setattr('lib.conversations.project_peer._live_task_by_conv',
+                        _owned_static({}))
+    monkeypatch.setattr('lib.conversations.project_peer._titles_by_conv',
+                        _owned_static({}))
     # Caller is cA → excluded; only cB (+ its sub-agent) remains.
-    out = pp.build_peer_status('/proj', conv_id='cA')
+    out = pp.build_peer_status('/proj', conv_id='cA', user_id=TEST_OWNER_USER_ID)
     assert out['convCount'] == 1, out
     assert {p['convId'] for p in out['peers']} == {'cB'}, out
 
@@ -218,16 +234,16 @@ def test_build_peer_status_convCount_counts_distinct_conversations(monkeypatch):
 
 def test_send_refuses_self_and_empty(_stub_io):
     from lib.conversations.project_peer import send_peer_message
-    assert send_peer_message('/p', 'cA', 'cA', 'hi')['error'] == 'cannot_message_self'
-    assert send_peer_message('/p', 'cA', 'cB', '  ')['error'] == 'empty message'
-    assert send_peer_message('', 'cA', 'cB', 'hi')['error'] == 'no project'
+    assert send_peer_message('/p', 'cA', 'cA', 'hi', user_id=TEST_OWNER_USER_ID)['error'] == 'cannot_message_self'
+    assert send_peer_message('/p', 'cA', 'cB', '  ', user_id=TEST_OWNER_USER_ID)['error'] == 'empty message'
+    assert send_peer_message('', 'cA', 'cB', 'hi', user_id=TEST_OWNER_USER_ID)['error'] == 'no project'
     assert _stub_io == [], 'no enqueue on a refused send'
 
 
 def test_send_enqueues_peer_msg_kind(_stub_io):
     from lib.conversations.project_peer import send_peer_message
     from lib.message_queue import KIND_PEER_MSG
-    res = send_peer_message('/p', 'cA', 'cB', 'watch out for the parser epic')
+    res = send_peer_message('/p', 'cA', 'cB', 'watch out for the parser epic', user_id=TEST_OWNER_USER_ID)
     assert res['ok'] and res['queueId']
     assert len(_stub_io) == 1
     call = _stub_io[0]
@@ -245,15 +261,15 @@ def test_rate_limit_storm_guard(_stub_io):
         _PEER_MSG_MAX_PER_WINDOW, send_peer_message,
     )
     assert _PEER_MSG_MAX_PER_WINDOW == 3
-    oks = [send_peer_message('/p', 'cA', 'cB', f'msg {i}')['ok'] for i in range(3)]
+    oks = [send_peer_message('/p', 'cA', 'cB', f'msg {i}', user_id=TEST_OWNER_USER_ID)['ok'] for i in range(3)]
     assert all(oks), 'first 3 within cap must succeed'
-    blocked = send_peer_message('/p', 'cA', 'cB', 'msg 4 (storm)')
+    blocked = send_peer_message('/p', 'cA', 'cB', 'msg 4 (storm)', user_id=TEST_OWNER_USER_ID)
     assert blocked['ok'] is False and blocked['error'] == 'rate_limited'
     assert blocked.get('retryAfter', 0) > 0
     # Only 3 enqueues happened — the 4th never reached the queue.
     assert len(_stub_io) == 3, 'a rate-limited message must NOT be enqueued'
     # A DIFFERENT target is a different (sender,target) pair → still allowed.
-    assert send_peer_message('/p', 'cA', 'cC', 'to a different peer')['ok']
+    assert send_peer_message('/p', 'cA', 'cC', 'to a different peer', user_id=TEST_OWNER_USER_ID)['ok']
 
 
 def test_failed_enqueue_refunds_rate_slot(monkeypatch):
@@ -271,7 +287,7 @@ def test_failed_enqueue_refunds_rate_slot(monkeypatch):
     monkeypatch.setattr('lib.conversations.project_peer.audit_log',
                         lambda *a, **k: None)
     monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
-                        lambda t: ((t or '').strip(), ''))
+                        _resolve_synthetic_target)
 
     def _boom(*a, **k):
         raise RuntimeError('queue down')
@@ -280,7 +296,7 @@ def test_failed_enqueue_refunds_rate_slot(monkeypatch):
     # Five consecutive FAILED sends — far past the cap of 3. Each must refund,
     # so none is ever rate_limited (the failure is surfaced, not the budget).
     for i in range(5):
-        res = send_peer_message('/p', 'cA', 'cB', f'flap {i}')
+        res = send_peer_message('/p', 'cA', 'cB', f'flap {i}', user_id=TEST_OWNER_USER_ID)
         assert res['ok'] is False
         assert res['error'] != 'rate_limited', (
             f'send {i}: a failed enqueue must refund its slot, never exhaust '
@@ -297,8 +313,8 @@ def test_refund_only_on_failure_not_on_success(_stub_io):
     rate_limited exactly as before (the refund only covers failures)."""
     from lib.conversations.project_peer import send_peer_message
     for i in range(3):
-        assert send_peer_message('/p', 'cA', 'cB', f'ok {i}')['ok']
-    blocked = send_peer_message('/p', 'cA', 'cB', 'msg 4')
+        assert send_peer_message('/p', 'cA', 'cB', f'ok {i}', user_id=TEST_OWNER_USER_ID)['ok']
+    blocked = send_peer_message('/p', 'cA', 'cB', 'msg 4', user_id=TEST_OWNER_USER_ID)
     assert blocked['ok'] is False and blocked['error'] == 'rate_limited', \
         'successful sends are NOT refunded — the storm guard must still bite'
 
@@ -307,7 +323,7 @@ def test_no_auto_relay_body_is_plain_content(_stub_io):
     """The received message is PLAIN turn content — it carries no send
     directive, so receiving one can never auto-trigger another send."""
     from lib.conversations.project_peer import send_peer_message
-    send_peer_message('/p', 'cA', 'cB', 'hello peer')
+    send_peer_message('/p', 'cA', 'cB', 'hello peer', user_id=TEST_OWNER_USER_ID)
     text = _stub_io[0]['payload']['text']
     # advisory framing present; no tool-call / send instruction embedded
     assert 'advisory' in text.lower()
@@ -320,7 +336,7 @@ def test_no_auto_relay_body_is_plain_content(_stub_io):
 
 def test_intervene_advisory_routes_to_message(_stub_io):
     from lib.conversations.project_peer import intervene_peer
-    res = intervene_peer('/p', 'cA', 'cB', 'you are duplicating epic X')
+    res = intervene_peer('/p', 'cA', 'cB', 'you are duplicating epic X', user_id=TEST_OWNER_USER_ID)
     assert res['ok'] and res['mode'] == 'advisory'
     assert len(_stub_io) == 1 and _stub_io[0]['conv_id'] == 'cB'
 
@@ -330,7 +346,7 @@ def test_intervene_hard_abort_refused_without_approval(_stub_io, monkeypatch):
     aborted = []
     monkeypatch.setattr('lib.tasks_pkg.manager.abort_running_tasks_for_conv',
                         lambda c, **k: aborted.append(c) or 1)
-    res = intervene_peer('/p', 'cA', 'cB', 'stop', hard_abort=True, approved_by='')
+    res = intervene_peer('/p', 'cA', 'cB', 'stop', hard_abort=True, approved_by='', user_id=TEST_OWNER_USER_ID)
     assert res['ok'] is False
     assert res['error'] == 'hard_abort_requires_approval'
     assert aborted == [], 'no abort may run without approval'
@@ -345,7 +361,7 @@ def test_intervene_hard_abort_runs_when_approved(_stub_io, monkeypatch):
     monkeypatch.setattr('lib.conversations.project_peer.audit_log',
                         lambda ev, **k: audits.append((ev, k)))
     res = intervene_peer('/p', 'cA', 'cB', 'stop', hard_abort=True,
-                         approved_by='owner')
+                         approved_by='owner', user_id=TEST_OWNER_USER_ID)
     assert res['ok'] and res['mode'] == 'hard_abort' and res['aborted'] == 2
     assert aborted == ['cB'], 'approved hard abort targets the peer task only'
     assert any(ev == 'intervention' for ev, _ in audits), 'must audit the intervention'
@@ -356,8 +372,8 @@ def test_intervene_refuses_self(monkeypatch):
     # Identity target resolution (synthetic ids, no conversations table); the
     # self-check must still fire on the resolved id.
     monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
-                        lambda t: ((t or '').strip(), ''))
-    assert intervene_peer('/p', 'cA', 'cA', 'x')['error'] == 'cannot_intervene_self'
+                        _resolve_synthetic_target)
+    assert intervene_peer('/p', 'cA', 'cA', 'x', user_id=TEST_OWNER_USER_ID)['error'] == 'cannot_intervene_self'
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -383,7 +399,7 @@ def test_intervene_hard_abort_requests_approval_then_runs(_stub_io, monkeypatch)
         return 'alice'   # the approving human
 
     res = intervene_peer('/p', 'cA', 'cB', 'stop', hard_abort=True,
-                         approved_by='', approval_fn=_grant)
+                         approved_by='', approval_fn=_grant, user_id=TEST_OWNER_USER_ID)
     assert res['ok'] and res['mode'] == 'hard_abort' and res['aborted'] == 3
     assert aborted == ['cB'], 'granted abort must target the peer task'
     assert prompts and 'HARD ABORT' in prompts[0], 'human must be asked to approve'
@@ -404,7 +420,7 @@ def test_intervene_hard_abort_denied_stays_advisory(_stub_io, monkeypatch):
         return None   # human clicked Deny (or task aborted)
 
     res = intervene_peer('/p', 'cA', 'cB', 'stop', hard_abort=True,
-                         approved_by='', approval_fn=_deny)
+                         approved_by='', approval_fn=_deny, user_id=TEST_OWNER_USER_ID)
     assert res['ok'] is False and res['error'] == 'denied_by_human'
     assert aborted == [], 'a denied hard abort must NOT stop the peer'
 
@@ -414,7 +430,7 @@ def _drive_handler_intervene(monkeypatch, decision, autopilot=False):
     stubbed request_human_guidance returning ``decision`` → execute_peer_tool.
     Returns (result_string, aborted_list, events_list, audits_list)."""
     import lib.conversations.project_peer as pp
-    import lib.tasks_pkg.handlers.misc as misc
+    import lib.tasks_pkg.handlers.misc._brain as peer_handlers
     aborted, audits, events = [], [], []
     monkeypatch.setattr('lib.tasks_pkg.manager.abort_running_tasks_for_conv',
                         lambda c, **k: aborted.append(c) or 2)
@@ -422,7 +438,7 @@ def _drive_handler_intervene(monkeypatch, decision, autopilot=False):
                         lambda ev, **k: audits.append((ev, k)))
     monkeypatch.setattr('lib.conversations.project_feed.emit_project_event',
                         lambda *a, **k: None)
-    monkeypatch.setattr('lib.tasks_pkg.handlers.misc.append_event',
+    monkeypatch.setattr(peer_handlers, 'append_event',
                         lambda t, ev: events.append(ev))
     monkeypatch.setattr('lib.tasks_pkg.human_guidance.request_human_guidance',
                         lambda gid, task=None: decision)
@@ -435,13 +451,14 @@ def _drive_handler_intervene(monkeypatch, decision, autopilot=False):
     # fragility, not a product bug. The seeded-DB resolver tests cover the real
     # path.
     monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
-                        lambda t: ((t or '').strip(), ''))
+                        _resolve_synthetic_target)
     task = {'id': 't1', 'convId': 'cA', 'messages': [], 'toolRounds': []}
     round_entry = {'query': 'project_intervene', 'status': 'searching'}
     fn_args = {'to_conv_id': 'cB', 'message': 'stop', 'hard_abort': True}
-    approval_fn = misc._make_intervention_approval_fn(task, 1, 'tc', round_entry)
+    approval_fn = peer_handlers._make_intervention_approval_fn(
+        task, 1, 'tc', round_entry)
     out = pp.execute_peer_tool('project_intervene', fn_args, current_conv_id='cA',
-                               project_path='/proj', config={}, approval_fn=approval_fn)
+                               project_path='/proj', config={}, approval_fn=approval_fn, user_id=TEST_OWNER_USER_ID)
     return out, aborted, events, audits
 
 
@@ -484,219 +501,6 @@ def test_intervene_presupplied_token_skips_approval(_stub_io, monkeypatch):
                         lambda *a, **k: None)
     res = intervene_peer('/p', 'cA', 'cB', 'stop', hard_abort=True,
                          approved_by='ci-token',
-                         approval_fn=lambda p: called.append(p) or 'should-not-run')
+                         approval_fn=lambda p: called.append(p) or 'should-not-run', user_id=TEST_OWNER_USER_ID)
     assert res['ok'] and res['aborted'] == 1
     assert called == [], 'a pre-supplied token must short-circuit the approval request'
-
-
-# ════════════════════════════════════════════════════════════════════
-#  Observability: peer-message markers survive dispatch onto the turn
-#  (so the arrival is structurally attributable, not silently == user input)
-# ════════════════════════════════════════════════════════════════════
-
-class _HybridRow:
-    """A DB row supporting BOTH ``row['col']`` (SELECT messages/updated_at) and
-    ``row[0]`` (SELECT COUNT(*) in _get_queue_depth)."""
-    _D = {'messages': '[]', 'updated_at': 0, 'settings': '{}'}
-    def keys(self):
-        return self._D.keys()
-
-    def __getitem__(self, k):
-        if isinstance(k, int):
-            if k == 0:
-                return 0        # COUNT(*) → 0 remaining
-            raise IndexError(k)  # terminate Python's sequence fallback
-        return self._D.get(k, None)
-
-
-class _FakeDB:
-    def execute(self, sql, params=()):
-        class _Cur:
-            def fetchone(self_inner):
-                return _HybridRow()
-        return _Cur()
-    def commit(self):
-        pass
-
-
-def test_peer_markers_survive_dispatch(monkeypatch):
-    """A KIND_PEER_MSG payload carries ``_peerMessage``/``_fromConv``; when the
-    queue dispatches it, those markers MUST land on the persisted user message
-    (else the turn is byte-identical to real user input and the UI can't
-    attribute it). DB-free: dequeue_next is stubbed to return the peer payload
-    and the built message is captured at append_user_msg_idempotent."""
-    import lib.message_queue as mq
-
-    captured = {}
-
-    monkeypatch.setattr(mq, 'dequeue_next', lambda c: {
-        'queueId': 'q1', 'config': {},
-        'payload': {'text': 'watch the parser epic',
-                    '_peerMessage': True, '_fromConv': 'cSENDER'}})
-    monkeypatch.setattr(mq, 'get_thread_db', lambda *a, **k: _FakeDB())
-    monkeypatch.setattr(mq, 'db_execute_with_retry', lambda *a, **k: None)
-    monkeypatch.setattr('lib.database.json_dumps_pg', lambda x: '[]')
-    monkeypatch.setattr(
-        mq, '_append_user_msg_with_cas',
-        lambda db, conv_id, msg: bool(captured.setdefault('msg', msg)))
-    # Short-circuit AFTER the user_msg is built+appended (return [] → None).
-    monkeypatch.setattr('lib.tasks_pkg.conv_message_builder.build_api_messages_from_db',
-                        lambda *a, **k: [])
-
-    mq.dispatch_next_queued('cTARGET')
-    m = captured.get('msg')
-    assert m is not None, 'user_msg must be built for a peer turn'
-    assert m.get('_peerMessage') is True, \
-        'the peer marker MUST propagate onto the persisted turn'
-    assert m.get('_fromConv') == 'cSENDER', 'sender attribution must survive'
-    assert 'watch the parser epic' in m.get('content', '')
-
-
-def test_NC_dispatch_drops_peer_markers(monkeypatch):
-    """NC-OBSERVE: no-op the marker-propagation block in dispatch_next_queued →
-    the persisted turn loses its peer markers → the observability test FAILS
-    (the arrival becomes indistinguishable from user input)."""
-    captured = {}
-
-    def run():
-        # The harness already swapped the NEUTERED module into sys.modules —
-        # this import resolves to it (no reload; a reload would un-neuter).
-        import lib.message_queue as mq
-        monkeypatch.setattr(mq, 'dequeue_next', lambda c: {
-            'queueId': 'q1', 'config': {},
-            'payload': {'text': 'hi', '_peerMessage': True, '_fromConv': 'cS'}})
-        monkeypatch.setattr(mq, 'get_thread_db', lambda *a, **k: _FakeDB())
-        monkeypatch.setattr(mq, 'db_execute_with_retry', lambda *a, **k: None)
-        monkeypatch.setattr('lib.database.json_dumps_pg', lambda x: '[]')
-        monkeypatch.setattr(
-            mq, '_append_user_msg_with_cas',
-            lambda db, conv_id, msg: bool(captured.setdefault('msg', msg)))
-        monkeypatch.setattr('lib.tasks_pkg.conv_message_builder.build_api_messages_from_db',
-                            lambda *a, **k: [])
-        mq.dispatch_next_queued('cTARGET')
-        m = captured.get('msg') or {}
-        assert m.get('_peerMessage') is None, \
-            'NC-OBSERVE: with propagation disabled the marker must be ABSENT ' \
-            '(proving the real block is what makes the arrival observable)'
-
-    _MQ_SRC = os.path.join(ROOT, 'lib', 'message_queue.py')
-    _patch_restore(
-        _MQ_SRC,
-        "            if payload.get('_peerMessage'):\n                user_msg['_peerMessage'] = True\n                user_msg['_fromConv'] = payload.get('_fromConv', '')",
-        "            pass  # NC-OBSERVE (marker propagation disabled)",
-        run,
-    )
-
-
-# ════════════════════════════════════════════════════════════════════
-#  Source-level NEGATIVE CONTROLS (in-memory harness: the neutered module is
-#  compiled into a throwaway sys.modules entry — the shipped file is READ-ONLY)
-# ════════════════════════════════════════════════════════════════════
-
-def test_NC_storm_guard_noop_breaks_rate_limit(_stub_io):
-    """NC-STORM: disable the rate cap in _prune_and_check → the 4th message is
-    no longer refused → the storm guard test FAILS."""
-    def run():
-        # The harness already swapped the NEUTERED module into sys.modules —
-        # this import resolves to it (no reload; a reload would un-neuter).
-        import lib.conversations.project_peer as pp
-        # The neutered module binds the real (DB-reading) resolver; re-stub to
-        # identity on the swapped module so this DB-free NC uses synthetic ids.
-        pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
-        # Re-stub via module attrs the neutered code reads at call time.
-        for i in range(3):
-            pp.send_peer_message('/p', 'cA', 'cB', f'm{i}')
-        blocked = pp.send_peer_message('/p', 'cA', 'cB', 'm4')
-        # With the cap removed, the 4th send is (wrongly) allowed → the storm
-        # invariant no longer holds.
-        assert blocked['ok'] is True, \
-            'NC-STORM: with the rate cap disabled the 4th message must go ' \
-            'through (proving the real guard is what refuses it)'
-
-    _patch_restore(
-        _PEER_SRC,
-        "    if len(kept) < max(1, max_n):\n        return True, kept + [now], 0.0\n    # At capacity: the oldest in-window send determines when a slot frees.\n    oldest = min(kept)\n    retry_after = max(0.0, (oldest + window_s) - now)\n    return False, kept, retry_after",
-        "    return True, kept + [now], 0.0  # NC-STORM (rate cap disabled)",
-        run,
-    )
-
-
-def test_NC_audit_gate_noop_allows_unapproved_abort(monkeypatch):
-    """NC-GATE: no-op the approval check in _authorize_hard_abort → an
-    unapproved hard abort now proceeds → the gate test FAILS."""
-    aborted = []
-    monkeypatch.setattr('lib.tasks_pkg.manager.abort_running_tasks_for_conv',
-                        lambda c, **k: aborted.append(c) or 1)
-    monkeypatch.setattr('lib.conversations.project_feed.emit_project_event',
-                        lambda *a, **k: None)
-
-    def run():
-        # Harness already swapped the NEUTERED module into sys.modules.
-        import lib.conversations.project_peer as pp
-        pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
-        monkeypatch.setattr('lib.conversations.project_peer.audit_log',
-                            lambda *a, **k: None)
-        res = pp.intervene_peer('/p', 'cA', 'cB', 'stop',
-                                hard_abort=True, approved_by='')
-        # With the gate no-opped, an UNAPPROVED abort executes.
-        assert res.get('ok') is True and aborted == ['cB'], \
-            'NC-GATE: with the approval check disabled an unapproved abort ' \
-            'must run (proving the real gate is what blocks it)'
-
-    _patch_restore(
-        _PEER_SRC,
-        "    if not hard_abort:\n        return True, 'advisory'\n    if not (approved_by or '').strip():\n        return False, 'hard_abort_requires_approval'\n    return True, 'approved'",
-        "    return True, 'approved'  # NC-GATE (approval check disabled)",
-        run,
-    )
-
-
-def test_NC_deny_branch_noop_runs_abort_despite_denial(_stub_io, monkeypatch):
-    """NC-DENY: no-op the deny branch (treat a falsy approval as approved) → a
-    DENIED hard abort now runs the abort anyway → the deny-path test FAILS.
-    This proves the deny branch is what actually stops an unapproved kill."""
-    aborted = []
-    monkeypatch.setattr('lib.tasks_pkg.manager.abort_running_tasks_for_conv',
-                        lambda c, **k: aborted.append(c) or 1)
-    monkeypatch.setattr('lib.conversations.project_feed.emit_project_event',
-                        lambda *a, **k: None)
-
-    def run():
-        # Harness already swapped the NEUTERED module into sys.modules.
-        import lib.conversations.project_peer as pp
-        pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
-        monkeypatch.setattr('lib.conversations.project_peer.audit_log',
-                            lambda *a, **k: None)
-        res = pp.intervene_peer('/p', 'cA', 'cB', 'stop', hard_abort=True,
-                                approved_by='', approval_fn=lambda prompt: None)
-        # With the deny branch no-opped, a human "Deny" is ignored — the abort
-        # (wrongly) runs. That is exactly what the real deny branch prevents.
-        assert res.get('ok') is True and aborted == ['cB'], \
-            'NC-DENY: with the deny branch disabled a denied abort must run ' \
-            '(proving the real branch is what enforces the denial)'
-
-    _patch_restore(
-        _PEER_SRC,
-        "        if approver:\n            approved_by = str(approver).strip()\n        else:\n            logger.info('[Intervene] hard-abort DENIED by human %s→%s',\n                        from_conv_id[:8], to_conv_id[:8])\n            return {'ok': False, 'mode': 'hard_abort', 'error': 'denied_by_human'}",
-        "        approved_by = str(approver).strip() if approver else 'nc-deny-forced'  # NC-DENY",
-        run,
-    )
-
-
-def test_NC_join_exclude_noop_leaks_self():
-    """NC-JOIN: no-op the exclude_conv filter → a conversation sees ITSELF in
-    its own peer list → the self-exclusion test FAILS."""
-    def run():
-        # Harness already swapped the NEUTERED module into sys.modules.
-        import lib.conversations.project_peer as pp
-        view = pp._join_peers(_peers(), {}, {}, exclude_conv='cA')
-        # With the exclusion disabled, cA leaks into its own peer view.
-        assert any(v['convId'] == 'cA' for v in view), \
-            'NC-JOIN: with exclude_conv disabled the caller must see itself'
-
-    _patch_restore(
-        _PEER_SRC,
-        "        if not conv_id or (exclude_conv and conv_id == exclude_conv):\n            continue",
-        "        if not conv_id:\n            continue  # NC-JOIN (self-exclude disabled)",
-        run,
-    )

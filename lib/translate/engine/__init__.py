@@ -27,6 +27,7 @@ from lib import translate_cache  # noqa: F401
 # ``engine.translate_refusal.get`` / ``.put``).
 from lib import translate_refusal  # noqa: F401
 from lib.log import get_logger
+from lib.translate.errors import TranslationContentRefused
 
 # Sentence-completeness helpers (pure primitives)
 from ._split import (
@@ -36,7 +37,6 @@ from ._split import (
 
 # Engine proper: routing + retry loop + entrypoints
 from ._engine import (
-    TranslationContentRefused,
     _build_trace,
     _translate_freetext,
     _translate_one_chunk,

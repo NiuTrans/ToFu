@@ -419,7 +419,8 @@ def test_detector_names_mid_out_of_window_not_upstream():
     read collapsed, and the mid anchor is OUT of the lookback window → the miss
     must be NAMED ``cache_mid_out_of_window`` (a client-side breakpoint-layout
     miss), NEVER ``server_side`` / laundered into the upstream verdict."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
 
     _cache_states.clear()
@@ -437,8 +438,8 @@ def test_detector_names_mid_out_of_window_not_upstream():
     u2 = {'cache_read_tokens': 79615, 'cache_creation_input_tokens': 190000,
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
           '_wire_routing': dict(r_same), '_wire_markers': dict(mk)}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None, 'expected a break (read collapsed to the floor)'
     assert 'cache_mid_out_of_window' in r, (
         f'a byte-identical, same-routing read-collapse with the mid anchor out '
@@ -454,7 +455,8 @@ def test_detector_NEUTER_without_block_positions_launders_to_upstream():
     The SAME collapse, but with marker signatures that DROP ``msg_blocks`` (the
     pre-fix signature) → the detector can't see the out-of-window layout and the
     miss launders back into the byte-identical ``upstream cache miss`` verdict."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
 
     _cache_states.clear()
@@ -472,8 +474,8 @@ def test_detector_NEUTER_without_block_positions_launders_to_upstream():
     u2 = {'cache_read_tokens': 79615, 'cache_creation_input_tokens': 190000,
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
           '_wire_routing': dict(r_same), '_wire_markers': dict(mk)}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None
     assert 'cache_mid_out_of_window' not in r, (
         f'NEUTER: without msg_blocks the out-of-window layout MUST NOT be named '
@@ -526,7 +528,8 @@ def test_body_change_not_mislabelled_mid_out_of_window():
     body change), NEVER cache_mid_out_of_window (a layout-only cause). Pre-fix
     the <mid-out-of-window> token was appended regardless of byte-identity and
     its verdict branch preempted the real culprit."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.cache_tracking._detect import classify_verdict
     from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
 
@@ -547,8 +550,8 @@ def test_body_change_not_mislabelled_mid_out_of_window():
     u2 = {'cache_read_tokens': 79615, 'cache_creation_input_tokens': 190000,
           '_wire_fp': fp2, '_wire_static': st2, '_wire_bytes': wb2,
           '_wire_routing': dict(r_same), '_wire_markers': dict(mk)}
-    detect_cache_break(conv, m1, None, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, m2, None, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, m1, None, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, m2, None, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None, 'expected a break (prefix mutated + read collapsed)'
     assert 'cache_mid_out_of_window' not in r, (
         f'a round whose prefix BYTES changed must NOT be labelled '
@@ -565,7 +568,8 @@ def test_mid_out_of_window_still_fires_when_body_identical():
     named cache_mid_out_of_window (the legitimate layout miss). This is the
     NEUTER's opposite pole: proves the gate discriminates on byte-identity, not
     that it disabled the bucket wholesale."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.cache_tracking._detect import classify_verdict
     from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
 
@@ -584,8 +588,8 @@ def test_mid_out_of_window_still_fires_when_body_identical():
     u2 = {'cache_read_tokens': 79615, 'cache_creation_input_tokens': 190000,
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
           '_wire_routing': dict(r_same), '_wire_markers': dict(mk)}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None
     assert classify_verdict(r) == 'cache_mid_out_of_window', (
         f'a byte-IDENTICAL out-of-window collapse must still be named the '

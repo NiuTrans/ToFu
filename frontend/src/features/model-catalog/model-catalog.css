@@ -1,0 +1,326 @@
+/* Centralized model catalog panel. Scoped under .stg-mc-* to avoid leaking
+ * into the retained settings stylesheet. The parent adapter provides the host
+ * container (#stgModelCatalogList); this owner only styles its own subtree. */
+
+#stgModelCatalogList {
+  display: block;
+}
+
+.stg-mc-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.stg-mc-btn {
+  padding: 7px 14px;
+  border: 1px solid var(--tofu-border, #2a2e3a);
+  border-radius: 8px;
+  background: var(--tofu-surface-raised, #1f232f);
+  color: var(--tofu-text, #e8eaf0);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.stg-mc-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.stg-mc-primary {
+  background: var(--tofu-accent, #6c8cff);
+  border-color: transparent;
+  color: #fff;
+}
+
+.stg-mc-state {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--tofu-border, #2a2e3a);
+  border-radius: 10px;
+  color: var(--tofu-text, #e8eaf0);
+  background: var(--tofu-surface, #171a23);
+  font-size: 13px;
+}
+
+.stg-mc-error {
+  border-color: var(--tofu-danger, #d9605a);
+}
+
+.stg-mc-conflict {
+  border-color: var(--tofu-warning, #d9a45a);
+}
+
+.stg-mc-retry {
+  margin-left: auto;
+  padding: 6px 12px;
+  border: 1px solid var(--tofu-border, #2a2e3a);
+  border-radius: 8px;
+  background: var(--tofu-surface-raised, #1f232f);
+  color: inherit;
+  cursor: pointer;
+}
+
+.stg-mc-status {
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--tofu-warning, #d9a45a);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--tofu-warning, #d9a45a) 10%, transparent);
+  color: var(--tofu-text, #e8eaf0);
+  font-size: 12.5px;
+}
+
+.stg-mc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stg-mc-model {
+  border: 1px solid var(--tofu-border, #2a2e3a);
+  border-radius: 10px;
+  background: var(--tofu-surface, #171a23);
+  overflow: hidden;
+}
+
+.stg-mc-model-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  flex-wrap: wrap;
+}
+
+.stg-mc-expand {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--tofu-text, #e8eaf0);
+  cursor: pointer;
+}
+
+.stg-mc-expand:hover {
+  border-color: var(--tofu-border, #2a2e3a);
+}
+
+.stg-mc-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.stg-mc-toggle input {
+  accent-color: var(--tofu-accent, #6c8cff);
+}
+
+.stg-mc-model-label {
+  font-weight: 600;
+}
+
+.stg-mc-model-id {
+  color: var(--tofu-muted, #8a90a3);
+  font-size: 12px;
+}
+
+.stg-mc-model-meta {
+  margin-left: auto;
+  color: var(--tofu-muted, #8a90a3);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stg-mc-link {
+  border: none;
+  background: transparent;
+  color: var(--tofu-accent, #6c8cff);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.stg-mc-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.stg-mc-danger {
+  color: var(--tofu-danger, #d9605a);
+}
+
+.stg-mc-offerings {
+  border-top: 1px solid var(--tofu-border, #2a2e3a);
+  padding: 4px 8px 8px;
+}
+
+.stg-mc-offering {
+  display: grid;
+  grid-template-columns: 30px minmax(90px, 1.2fr) 90px minmax(90px, 1fr) 50px 150px 70px 70px auto;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.stg-mc-offering + .stg-mc-offering {
+  border-top: 1px solid color-mix(
+    in srgb, var(--tofu-border, #2a2e3a) 55%, transparent);
+}
+
+.stg-mc-offering-provider,
+.stg-mc-offering-protocol,
+.stg-mc-offering-wire,
+.stg-mc-offering-rpm,
+.stg-mc-offering-pricing,
+.stg-mc-offering-context {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stg-mc-offering-wire {
+  color: var(--tofu-muted, #8a90a3);
+  font-family: var(--tofu-mono, ui-monospace, monospace);
+}
+
+.stg-mc-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--tofu-surface-raised, #1f232f);
+  color: var(--tofu-muted, #8a90a3);
+}
+
+.stg-mc-protocol.openai,
+.stg-mc-protocol.anthropic,
+.stg-mc-protocol.responses {
+  color: var(--tofu-accent, #6c8cff);
+}
+
+.stg-mc-offering-health.healthy {
+  color: var(--tofu-ok, #6fbd7a);
+}
+
+.stg-mc-offering-health.unhealthy {
+  color: var(--tofu-danger, #d9605a);
+}
+
+.stg-mc-offering-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+/* Add / attach / edit form */
+.stg-mc-form {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--tofu-border, #2a2e3a);
+  border-radius: 10px;
+  background: var(--tofu-surface, #171a23);
+}
+
+.stg-mc-form-title {
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.stg-mc-form-title-sm {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.stg-mc-form-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.stg-mc-form-identity-label {
+  color: var(--tofu-muted, #8a90a3);
+  font-size: 12px;
+}
+
+.stg-mc-form-identity-value {
+  font-family: var(--tofu-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.stg-mc-field {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.5fr) minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.stg-mc-field-label {
+  color: var(--tofu-muted, #8a90a3);
+  font-size: 12px;
+}
+
+.stg-mc-field-hint {
+  grid-column: 2;
+  color: var(--tofu-muted, #8a90a3);
+  font-size: 11px;
+}
+
+.stg-mc-field input,
+.stg-mc-field select {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--tofu-border, #2a2e3a);
+  border-radius: 6px;
+  background: var(--tofu-surface-raised, #1f232f);
+  color: var(--tofu-text, #e8eaf0);
+}
+
+.stg-mc-pricing {
+  border-top: 1px solid var(--tofu-border, #2a2e3a);
+  padding-top: 8px;
+  margin-top: 4px;
+}
+
+.stg-mc-form-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.stg-mc-validation {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--tofu-danger, #d9605a);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--tofu-danger, #d9605a) 10%, transparent);
+  color: var(--tofu-text, #e8eaf0);
+  font-size: 12.5px;
+}
+
+.stg-mc-validation-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.stg-mc-validation-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+@media (max-width: 900px) {
+  .stg-mc-offering {
+    grid-template-columns: 30px 1fr 1fr;
+  }
+}

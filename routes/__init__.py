@@ -1,7 +1,8 @@
 """routes/ — Quart blueprints for each domain.
 
 Each module is self-contained and registers its own routes.
-Shared helpers: lib/database/, lib/llm/ (package), lib/__init__.py (config).
+Shared helpers live in focused ``lib/`` service packages. Durable reads and
+writes go through semantic ``lib.storage`` clients; routes never own SQL.
 
 Optional feature bundles (e.g. the trading subsystem, now the standalone
 ``tofu-trading`` package) are NOT imported here — they mount via the
@@ -10,12 +11,11 @@ Optional feature bundles (e.g. the trading subsystem, now the standalone
 """
 
 from .browser import browser_bp
-from .chat import chat_bp
-# Side-effect imports: each registers additional routes on chat_bp.
+# Side-effect imports: each registers focused controls on api_v1_chat_bp.
 from . import chat_queue  # noqa: F401  — /api/chat/queue/*
 from . import chat_human_io  # noqa: F401  — /api/chat/{stdin,human}_response
 from . import chat_tool_state  # noqa: F401  — /api/chat/tool-state/<id>
-from . import chat_poll_abort  # noqa: F401  — poll/abort/flow-trace (pt_04686ac6 slice 10)
+from . import chat_poll_abort  # noqa: F401  — abort/interrupt/flow-trace
 from . import conversations_search  # noqa: F401  — /api/conversations/search
 from . import conversations_compaction  # noqa: F401  — /api/conversations/<id>/compactions[/<id>]
 
@@ -38,16 +38,15 @@ from .api_v1 import ALL_V1_BLUEPRINTS
 from .compat_openai import compat_openai_bp
 from .compat_anthropic import compat_anthropic_bp
 from .api_docs import api_docs_bp
+from .api_v4 import api_v4_bp
 from .metrics import metrics_bp
-from .turns_v2 import turns_v2_bp
-from .legacy_redirects import legacy_redirects_bp
+from .conversation_sync_v3 import conversation_sync_v3_bp
 
 # ── Core (always-on) blueprints ──
 ALL_BLUEPRINTS = [
     common_bp,
     upload_bp,
     translate_bp,
-    chat_bp,
     browser_bp,
     desktop_bp,
     oauth_bp,
@@ -59,13 +58,13 @@ ALL_BLUEPRINTS = [
     compat_openai_bp,
     compat_anthropic_bp,
     api_docs_bp,
+    api_v4_bp,
     metrics_bp,
-    turns_v2_bp,
-    legacy_redirects_bp,
+    conversation_sync_v3_bp,
 ]
 
 
-def start_registered_background_services(app):
+def start_registered_background_services(app, *, process_role='all'):
     """Start route-owned schedulers/plugin workers once for a serving app.
 
     Blueprint registration is intentionally import-safe.  Tests, desktop
@@ -77,64 +76,110 @@ def start_registered_background_services(app):
     explicitly starts services twice cannot duplicate scheduler threads.
     """
     import logging
+    from lib.process_roles import (
+        CAPABILITY_REQUEST_SERVICES,
+        CAPABILITY_SCHEDULED_JOBS,
+        CAPABILITY_TASK_WORKERS,
+        normalize_process_role,
+        process_role_has,
+    )
+
     _log = logging.getLogger(__name__)
+    process_role = normalize_process_role(process_role)
     extensions = getattr(app, 'extensions', None)
     if extensions is None:
         extensions = {}
         app.extensions = extensions
     marker = 'tofu_registered_background_services'
     if extensions.get(marker):
+        registered_role = extensions.get(
+            'tofu_registered_background_services_role', 'all')
+        if registered_role != process_role:
+            raise RuntimeError(
+                'route background services already belong to process role '
+                f'{registered_role!r}, not {process_role!r}')
         return 0
     # Latch before invoking plugins: a hook can indirectly re-enter app setup.
     extensions[marker] = True
+    extensions['tofu_registered_background_services_role'] = process_role
     started = 0
 
-    # ── Start daily report background scheduler ──
-    try:
-        from lib.daily_report import start_report_scheduler
-        start_report_scheduler()
-        started += 1
-    except Exception as e:
-        _log.warning('Daily report scheduler start deferred (DB unavailable): %s', e)
+    # ── Start the sole durable scheduler (including daily-report backfill) ──
+    if process_role_has(process_role, CAPABILITY_SCHEDULED_JOBS):
+        try:
+            from lib.scheduler.manager import start_scheduler_worker
+            from lib.identity import PERSONAL_USER_ID, PrincipalContext
+            from runtime_guards import load_deployment_configuration
 
-    # ── Start proactive agent / cron scheduler ──
-    try:
-        from lib.scheduler import start_scheduler_worker
-        start_scheduler_worker()
-        started += 1
-    except Exception as e:
-        _log.warning('Scheduler worker start deferred (DB unavailable): %s', e)
+            deployment = load_deployment_configuration()
+            scheduler_principal = PrincipalContext.system(
+                subject_id='scheduler-worker',
+                owner_user_id=(
+                    PERSONAL_USER_ID
+                    if deployment.mode == 'personal'
+                    else None
+                ),
+                scopes={'scheduler:run'},
+            )
+            start_scheduler_worker(principal=scheduler_principal)
+            started += 1
+        except Exception as e:
+            _log.warning(
+                'Scheduler worker start deferred (DB unavailable): %s', e)
 
     # ── Refresh the authenticated Codex `/model` catalogue ──
-    try:
-        from lib.oauth.codex_catalog import start_codex_catalog_refresher
-        start_codex_catalog_refresher()
-        started += 1
-    except Exception as e:
-        _log.warning('Codex model catalogue refresher start deferred: %s', e)
+    if process_role_has(process_role, CAPABILITY_REQUEST_SERVICES):
+        try:
+            from lib.oauth.codex_catalog import start_codex_catalog_refresher
+            from runtime_guards import load_deployment_configuration
+
+            deployment = load_deployment_configuration()
+            if deployment.mode == 'personal':
+                if start_codex_catalog_refresher():
+                    started += 1
+            else:
+                # TODO(enterprise): enumerate account owners through an
+                # owner-scoped OAuth/catalog repository before enabling this
+                # personal-token worker in distributed deployments.
+                _log.info(
+                    'Codex model catalogue refresher disabled in distributed '
+                    'mode: no owner-scoped catalogue authority is configured')
+        except Exception as e:
+            _log.warning(
+                'Codex model catalogue refresher start deferred: %s', e)
 
     # ── Reconcile ordinary API-provider /models catalogues ──
-    try:
-        from lib.llm_dispatch.model_catalog_sync import start_model_catalog_sync
-        start_model_catalog_sync()
-        started += 1
-    except Exception as e:
-        _log.warning('Provider model catalogue sync start deferred: %s', e)
-
-    # ── Resume consented local-knowledge image descriptions ──
-    try:
-        from lib.knowledge.enrichment import start_visual_enrichment
-        if start_visual_enrichment():
+    if process_role_has(process_role, CAPABILITY_REQUEST_SERVICES):
+        try:
+            from lib.llm_dispatch.model_catalog_sync import start_model_catalog_sync
+            start_model_catalog_sync()
             started += 1
-    except Exception as e:
-        _log.warning('Knowledge visual enrichment start deferred: %s', e)
+        except Exception as e:
+            _log.warning(
+                'Provider model catalogue sync start deferred: %s', e)
+
+    # Resume only corpora whose durable owner settings explicitly opted in.
+    if process_role_has(process_role, CAPABILITY_TASK_WORKERS):
+        try:
+            from lib.knowledge.enrichment import resume_visual_enrichment
+            from lib.identity import PrincipalContext
+
+            knowledge_principal = PrincipalContext.system(
+                subject_id='knowledge-enrichment-worker',
+                scopes={'knowledge:maintain'},
+            )
+            started += int(resume_visual_enrichment(
+                principal=knowledge_principal) or 0)
+        except Exception as e:
+            _log.warning('Knowledge visual enrichment start deferred: %s', e)
 
     # ── Plugin startup hooks (tofu.startup entry-point group) ──
-    try:
-        from .plugin_registry import run_startup_hooks
-        started += int(run_startup_hooks(app) or 0)
-    except Exception as e:
-        _log.warning('Plugin startup hooks deferred: %s', e)
+    if process_role_has(process_role, CAPABILITY_TASK_WORKERS):
+        try:
+            from .plugin_registry import run_startup_hooks
+            started += int(run_startup_hooks(app) or 0)
+        except Exception as e:
+            _log.warning('Plugin startup hooks deferred: %s', e)
     return started
 
 
@@ -148,31 +193,45 @@ def stop_registered_background_services(app, *, timeout: float = 2.0) -> int:
     if not extensions.get(marker):
         return 0
 
+    from lib.process_roles import (
+        CAPABILITY_REQUEST_SERVICES,
+        CAPABILITY_SCHEDULED_JOBS,
+        CAPABILITY_TASK_WORKERS,
+        process_role_has,
+    )
+
+    process_role = extensions.get(
+        'tofu_registered_background_services_role', 'all')
     stopped = 0
     all_stopped = True
-    try:
-        # Plugins are started last and may depend on core schedulers/catalogues,
-        # so their teardown runs first.
-        from .plugin_registry import run_shutdown_hooks
-        stopped += int(run_shutdown_hooks(app) or 0)
-    except Exception as exc:
-        all_stopped = False
-        log.warning('Plugin shutdown hooks failed: %s', exc)
+    if process_role_has(process_role, CAPABILITY_TASK_WORKERS):
+        try:
+            # Plugins are started last and may depend on core owners, so their
+            # teardown runs first.
+            from .plugin_registry import run_shutdown_hooks
+            stopped += int(run_shutdown_hooks(app) or 0)
+        except Exception as exc:
+            all_stopped = False
+            log.warning('Plugin shutdown hooks failed: %s', exc)
 
     owners = (
         ('knowledge visual enrichment',
-         'lib.knowledge.enrichment', 'stop_visual_enrichment'),
+         'lib.knowledge.enrichment', 'stop_visual_enrichment',
+         CAPABILITY_TASK_WORKERS),
         ('provider model catalogue',
-         'lib.llm_dispatch.model_catalog_sync', 'stop_model_catalog_sync'),
+         'lib.llm_dispatch.model_catalog_sync', 'stop_model_catalog_sync',
+         CAPABILITY_REQUEST_SERVICES),
         ('Codex model catalogue',
-         'lib.oauth.codex_catalog', 'stop_codex_catalog_refresher'),
+         'lib.oauth.codex_catalog', 'stop_codex_catalog_refresher',
+         CAPABILITY_REQUEST_SERVICES),
         ('proactive scheduler',
-         'lib.scheduler', 'stop_scheduler_worker'),
-        ('daily report scheduler',
-         'lib.daily_report', 'stop_report_scheduler'),
+         'lib.scheduler.manager', 'stop_scheduler_worker',
+         CAPABILITY_SCHEDULED_JOBS),
     )
     import importlib
-    for label, module_name, stop_name in owners:
+    for label, module_name, stop_name, capability in owners:
+        if not process_role_has(process_role, capability):
+            continue
         try:
             module = importlib.import_module(module_name)
             stop = getattr(module, stop_name)
@@ -188,10 +247,12 @@ def stop_registered_background_services(app, *, timeout: float = 2.0) -> int:
     # A timed-out owner remains live. Preserve the latch so a reused app cannot
     # launch duplicate workers on top of it; a clean stop permits restart.
     extensions[marker] = not all_stopped
+    if all_stopped:
+        extensions.pop('tofu_registered_background_services_role', None)
     return stopped
 
 
-def register_all(app, *, start_workers=True):
+def register_all(app, *, start_workers=True, discover_plugins=True):
     """Register all blueprints; optionally start route-owned workers.
 
     ``start_workers=True`` preserves the historical embedder API.  Core's
@@ -209,15 +270,16 @@ def register_all(app, *, start_workers=True):
     # Blueprints here. Discovery is fail-soft and returns [] when no plugin is
     # installed, so this is a no-op for a vanilla core install. The name guard
     # is defensive against a plugin shipping a duplicate blueprint name.
-    from .plugin_registry import discover_blueprint_plugins
-    _already = {bp.name for bp in ALL_BLUEPRINTS}
-    for bp in discover_blueprint_plugins():
-        if bp.name in _already:
-            _log.warning('[BlueprintRegistry] plugin blueprint %r already '
-                         'registered in-tree — skipping', bp.name)
-            continue
-        app.register_blueprint(bp)
-        _already.add(bp.name)
+    if discover_plugins:
+        from .plugin_registry import discover_blueprint_plugins
+        _already = {bp.name for bp in ALL_BLUEPRINTS}
+        for bp in discover_blueprint_plugins():
+            if bp.name in _already:
+                _log.warning('[BlueprintRegistry] plugin blueprint %r already '
+                             'registered in-tree — skipping', bp.name)
+                continue
+            app.register_blueprint(bp)
+            _already.add(bp.name)
 
     if start_workers:
         start_registered_background_services(app)

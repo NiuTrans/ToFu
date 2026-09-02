@@ -37,7 +37,7 @@ def _disable_extended_ttl():
 class TestSystemPromptSections:
     """Verify Claude Code-inspired prompt sections exist and are well-formed."""
 
-    # The system_context._FUNCTION_RESULT_CLEARING_SECTION /
+    # The canonical Function Result Clearing section /
     # _SUMMARIZE_TOOL_RESULTS_SECTION / _TOOL_USAGE_GUIDANCE /
     # _OUTPUT_EFFICIENCY_GUIDANCE constants were removed when Layout B
     # (the legacy chatui guidance block) was retired on 2026-05-07.
@@ -52,7 +52,7 @@ class TestSystemPromptSections:
         assert 'recent' in section.lower()
 
     def test_frc_section_references_hot_tail_count(self):
-        from lib.tasks_pkg.compaction import MICRO_HOT_TAIL
+        from lib.tasks_pkg.compaction._constants import MICRO_HOT_TAIL
         from lib.tasks_pkg.system_prompt_cc import section_function_result_clearing
         assert str(MICRO_HOT_TAIL) in section_function_result_clearing()
 
@@ -84,15 +84,15 @@ class TestSystemPromptSections:
 
     def test_sections_injected_when_tools_present(self):
         """Verify sections are appended to system message when has_real_tools=True."""
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
         messages = [{'role': 'system', 'content': 'You are a helpful assistant.'}]
-        _inject_system_contexts(
+        compose_task_context(
             messages,
+            user_id=0,
             project_path='/tmp/test',
             project_enabled=False,
             memory_enabled=False,
             search_enabled=False,
-            swarm_enabled=False,
             has_real_tools=True,
         )
         system_content = messages[0]['content']
@@ -108,15 +108,15 @@ class TestSystemPromptSections:
 
     def test_sections_not_injected_when_no_tools(self):
         """Without tools, the FRC/summarize sections should NOT be injected."""
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
         messages = [{'role': 'system', 'content': 'You are a helpful assistant.'}]
-        _inject_system_contexts(
+        compose_task_context(
             messages,
+            user_id=0,
             project_path='/tmp/test',
             project_enabled=False,
             memory_enabled=False,
             search_enabled=False,
-            swarm_enabled=False,
             has_real_tools=False,
         )
         system_content = messages[0]['content']
@@ -130,8 +130,7 @@ class TestSystemPromptSections:
 @pytest.mark.unit
 class TestWebSourceCitation:
     """Web-research source-emission fix (2026-07): citation nudge gated on web
-    tools + deterministic Sources footer. Guards against regressing the
-    _CC_STATIC_MARKER used by compaction re-inject / endpoint idempotency."""
+    tools + deterministic Sources footer. Guards the platform URL policy."""
 
     MARKER = "IMPORTANT: You must NEVER generate or guess URLs"
     CITE = "cite each key factual claim"
@@ -188,20 +187,20 @@ class TestWebSourceCitation:
                 == section_tone_and_style(is_code_context=False))
 
     def test_footer_appended_when_web_used_but_uncited(self):
-        from lib.tasks_pkg.orchestrator import _maybe_append_sources_footer
+        from lib.tasks_pkg.orchestrator._finalize import _maybe_append_sources_footer
         t = {'id': 'a' * 8, 'content': 'Python 3.14 GA 2025-10-07.', 'aborted': False}
         srt = ['[1] Py\n    URL: https://www.python.org/downloads/\n    Source: python.org']
         _maybe_append_sources_footer(t, srt)
         assert 'Sources' in t['content'] and 'python.org/downloads' in t['content']
 
     def test_footer_noop_when_already_cited(self):
-        from lib.tasks_pkg.orchestrator import _maybe_append_sources_footer
+        from lib.tasks_pkg.orchestrator._finalize import _maybe_append_sources_footer
         t = {'id': 'b' * 8, 'content': 'See https://www.python.org/downloads/ .', 'aborted': False}
         _maybe_append_sources_footer(t, ['URL: https://www.python.org/downloads/'])
         assert 'Sources**' not in t['content']
 
     def test_footer_noop_no_web_and_aborted_and_caps_five(self):
-        from lib.tasks_pkg.orchestrator import _maybe_append_sources_footer
+        from lib.tasks_pkg.orchestrator._finalize import _maybe_append_sources_footer
         t = {'id': 'c' * 8, 'content': 'reasoning', 'aborted': False}
         _maybe_append_sources_footer(t, [])
         assert 'Sources' not in t['content']
@@ -304,17 +303,17 @@ class TestMessageRoles:
 
     VALID_ROLES = {'system', 'user', 'assistant', 'tool', 'developer'}
 
-    def test_system_context_uses_valid_roles(self):
-        """_inject_system_contexts should only produce messages with valid roles."""
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+    def test_context_composer_uses_valid_roles(self):
+        """compose_task_context should only produce messages with valid roles."""
+        from lib.tasks_pkg.context_composer import compose_task_context
         messages = [{'role': 'system', 'content': 'Base system prompt.'}]
-        _inject_system_contexts(
+        compose_task_context(
             messages,
+            user_id=0,
             project_path='/tmp/test',
             project_enabled=False,
             memory_enabled=False,
             search_enabled=False,
-            swarm_enabled=False,
             has_real_tools=True,
         )
         for msg in messages:
@@ -325,7 +324,7 @@ class TestMessageRoles:
     def test_compaction_summary_uses_valid_roles(self):
         """Force-compact messages should only use valid roles."""
         # The compaction summary injects a synthetic user + tool pair
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.compaction.api import micro_compact
         messages = [
             {'role': 'system', 'content': 'System prompt'},
             {'role': 'user', 'content': 'Hello'},
@@ -390,7 +389,6 @@ class TestAssembleToolListReturnValue:
             code_exec_enabled=False,
             browser_enabled=False,
             desktop_enabled=False,
-            swarm_enabled=False,
             scheduler_enabled=False,
             messages=None,
         )
@@ -411,7 +409,6 @@ class TestAssembleToolListReturnValue:
             code_exec_enabled=False,
             browser_enabled=False,
             desktop_enabled=False,
-            swarm_enabled=False,
             scheduler_enabled=False,
             messages=None,
         )
@@ -457,15 +454,15 @@ class TestFullPipelineIntegration:
         Assert the relevant CC sections appear, in the right relative
         order — not Layout B's old ordering.
         """
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
         messages = [{'role': 'system', 'content': 'Pre-existing.'}]
-        _inject_system_contexts(
+        compose_task_context(
             messages,
+            user_id=0,
             project_path='/tmp/test',
             project_enabled=False,
             memory_enabled=False,
             search_enabled=False,
-            swarm_enabled=False,
             has_real_tools=True,
         )
         content = messages[0]['content']
@@ -494,24 +491,20 @@ class TestFullPipelineIntegration:
 class TestSystemReminderAndBlocks:
     """Verify system-reminder wrapping and multi-block system message."""
 
-    def test_wrap_system_reminder(self):
-        """_wrap_system_reminder produces correct tags."""
-        from lib.tasks_pkg.system_context import _wrap_system_reminder
-        result = _wrap_system_reminder('Hello world')
-        assert result == '<system-reminder>\nHello world\n</system-reminder>'
-
     def test_project_context_wrapped(self):
         """Project context (CLAUDE.md) is now placed in a USER message with
         ``_isMeta: True`` and wrapped in <system-reminder> tags. Mirrors
         Claude Code's ``prependUserContext`` (utils/api.ts:449). The static
         prompt itself stays in the system message."""
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
         messages = [{'role': 'system', 'content': 'Base'},
                     {'role': 'user', 'content': 'hi'}]
         with patch('lib.project_mod.get_context_for_prompt',
                    return_value='Project files: a.py, b.py'):
-            _inject_system_contexts(
-                messages, '/tmp', True, False, False, False,
+            compose_task_context(
+                messages, user_id=0,
+                project_path='/tmp', project_enabled=True,
+                memory_enabled=False, search_enabled=False,
                 has_real_tools=True,
             )
         # Find the prepended user _isMeta message
@@ -543,14 +536,16 @@ class TestSystemReminderAndBlocks:
         into the system message. No listing is injected into the user
         message (on-demand via search_memories tool + memory-prefetch).
         """
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
         messages = [
             {'role': 'system', 'content': 'Base'},
             {'role': 'user', 'content': 'Hello world'},
         ]
         # has_real_tools=False means no memory injection (no tools = no memory)
-        _inject_system_contexts(
-            messages, '/tmp', False, True, False, False,
+        compose_task_context(
+            messages, user_id=0, project_path='/tmp',
+            project_enabled=False, memory_enabled=True,
+            search_enabled=False,
             has_real_tools=False,
         )
         content = messages[0]['content']
@@ -566,10 +561,12 @@ class TestSystemReminderAndBlocks:
             {'role': 'system', 'content': 'Base'},
             {'role': 'user', 'content': 'Hello world'},
         ]
-        with patch('lib.memory.build_memory_context',
+        with patch('lib.memory.injection.build_memory_context',
                    return_value='You have 10 accumulated memories from previous sessions. Use search_memories(query) to find relevant past experience.'):
-            _inject_system_contexts(
-                messages2, '/tmp', False, True, False, False,
+            compose_task_context(
+                messages2, user_id=0, project_path='/tmp',
+                project_enabled=False, memory_enabled=True,
+                search_enabled=False,
                 has_real_tools=True,
             )
         content2 = messages2[0]['content']
@@ -587,11 +584,13 @@ class TestSystemReminderAndBlocks:
         block (when has_real_tools=True AND memory_enabled=True) gets its
         OWN separate cache block so a memory CRUD doesn't invalidate the
         FRC/tools/static prefix."""
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
         messages = [{'role': 'system', 'content': 'Pre-existing prompt'}]
         # memory_enabled=True so the memory_accumulation block is injected
-        _inject_system_contexts(
-            messages, '/tmp', False, True, False, False,
+        compose_task_context(
+            messages, user_id=0, project_path='/tmp',
+            project_enabled=False, memory_enabled=True,
+            search_enabled=False,
             has_real_tools=True,
         )
         content = messages[0]['content']

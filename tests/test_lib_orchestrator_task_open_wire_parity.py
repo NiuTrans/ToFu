@@ -1,5 +1,3 @@
-# Incident anchor: born in commit b34c7ba8 — refactor(orchestrator): pt_03f4cdf1 slice 35 — extract task-open clus...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 35 — extract the task-open
 cluster from _run.py's preamble into
 lib.tasks_pkg.orchestrator._task_open (three helpers):
@@ -18,7 +16,7 @@ lib.tasks_pkg.orchestrator._task_open (three helpers):
         on exit — a transient-error re-run must restore the ORIGINAL
         input first, or it would double-inject system blocks and replay
         a half-finished round. Captured ONCE (never overwritten),
-        skipped for _endpoint_managed tasks.
+        skipped for _flow_managed tasks.
 
     log_task_open(task, tid) -> float
         queue_wait timing log (create→run_task, when _t_created is set)
@@ -34,6 +32,11 @@ from __future__ import annotations
 
 import importlib
 import pathlib
+
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -88,8 +91,8 @@ def test_leaf_carries_kick_snapshot_and_logs():
     src = LEAF_PY.read_text()
     assert '_run_autopilot_kick(task)' in src
     assert "_turn_input_messages" in src
-    assert '_endpoint_managed' in src, (
-        'the snapshot must skip endpoint-managed tasks')
+    assert '_flow_managed' in src, (
+        'the snapshot must skip Flow-managed tasks')
     assert 'queue_wait=' in src
     assert '▶ START' in src, (
         'the START bracket must keep the FULL task id form')
@@ -112,9 +115,9 @@ def test_behaviour_kick_branch(monkeypatch):
     assert calls == ['x'], 'no second kick for a plain task'
 
 
-def test_behaviour_snapshot_once_and_endpoint_skip():
+def test_behaviour_snapshot_once_and_flow_skip():
     """Snapshot captured ONCE (a second call must NOT overwrite), and
-    endpoint-managed tasks are skipped entirely."""
+    Flow-managed tasks are skipped entirely."""
     from lib.tasks_pkg.orchestrator._task_open import snapshot_turn_input
     task = {'messages': [{'role': 'user', 'content': 'hi'}]}
     snapshot_turn_input(task)
@@ -123,25 +126,28 @@ def test_behaviour_snapshot_once_and_endpoint_skip():
     snapshot_turn_input(task)
     assert task['_turn_input_messages'] == [{'role': 'user', 'content': 'hi'}], (
         'the pristine snapshot must survive a second call (retry path)')
-    ep = {'_endpoint_managed': True, 'messages': [{'role': 'user'}]}
-    snapshot_turn_input(ep)
-    assert '_turn_input_messages' not in ep, (
-        'endpoint-managed tasks never get a snapshot')
+    flow_task = {'_flow_managed': True, 'messages': [{'role': 'user'}]}
+    snapshot_turn_input(flow_task)
+    assert '_turn_input_messages' not in flow_task, (
+        'Flow-managed tasks never get a snapshot')
 
 
 def test_behaviour_log_open_bracket_and_timing(caplog):
     """Both log lines fire; queue_wait only when _t_created is set; the
     return value is a float timestamp."""
     import lib.tasks_pkg.orchestrator._task_open as leaf
-    out = leaf.log_task_open(
-        {'id': 'deadbeefcafebabe', 'convId': 'c1', 'messages': [1, 2],
-         '_t_created': 1000.0}, 'deadbeef')
+    with caplog.at_level('INFO'):
+        out = leaf.log_task_open(
+            {'id': 'deadbeefcafebabe', 'convId': 'c1', 'messages': [1, 2],
+             '_t_created': 1000.0}, 'deadbeef')
     assert isinstance(out, float)
     assert any('▶ START' in r.message and 'deadbeefcafebabe' in r.message
                for r in caplog.records), (
         'the START bracket must carry the FULL task id')
     assert any('queue_wait=' in r.message for r in caplog.records)
     caplog.clear()
-    leaf.log_task_open({'id': 'deadbeefcafebabe', 'messages': []}, 'deadbeef')
+    with caplog.at_level('INFO'):
+        leaf.log_task_open(
+            {'id': 'deadbeefcafebabe', 'messages': []}, 'deadbeef')
     assert not any('queue_wait=' in r.message for r in caplog.records), (
         'no _t_created → no queue_wait line')

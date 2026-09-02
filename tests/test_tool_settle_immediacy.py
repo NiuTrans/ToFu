@@ -67,10 +67,12 @@ pytestmark = pytest.mark.unit
 def _mk_task(**over):
     t = {
         'id': 'settle-task-1',
+        '_userId': 1,
         'convId': 'cv-settle-1',
         'status': 'running',
         'aborted': False,
         'model': 'test-model',
+        'config': {'tools': {'resultEnvelope': 'legacy'}},
         'events': [],
         'events_lock': threading.Lock(),
         '_dispatch_heartbeat': 0.0,
@@ -138,8 +140,8 @@ def rec(monkeypatch):
     stream.
     """
     r = _Recorder()
-    from lib.tasks_pkg import tool_dispatch as td_facade
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._heartbeat as td_facade
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     from lib.tasks_pkg.executor import _finalize as exec_finalize
 
     monkeypatch.setattr(_pipeline, 'append_event', r, raising=False)
@@ -174,8 +176,8 @@ def fake_tools(monkeypatch):
 
     # Patch at BOTH the pooled wrapper's resolution site and the executor, so
     # whichever seam the pipeline reaches lands on the fake.
-    from lib.tasks_pkg.tool_dispatch import _heartbeat
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     monkeypatch.setattr(_heartbeat, '_execute_tool_one', _fake_execute_one,
                         raising=False)
     monkeypatch.setattr(_pipeline, '_execute_tool_one', _fake_execute_one,
@@ -184,7 +186,7 @@ def fake_tools(monkeypatch):
 
 
 def _run_pipeline(task, parsed_tcs, messages=None):
-    from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline
+    from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
     messages = messages if messages is not None else []
     execute_tool_pipeline(
         task, parsed_tcs,
@@ -342,7 +344,7 @@ def test_l0_budget_is_applied_before_the_early_complete(rec, fake_tools,
     early event were emitted BEFORE budgeting, the UI would show the full blob
     while the model got a truncated one.
     """
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
 
     def _shrink(fn_name, content, tool_use_id='', conv_id=''):
         if fn_name == 'grep_search' and len(content) > 10:
@@ -385,7 +387,7 @@ def test_aggregate_budget_corrects_via_tool_compacted(rec, fake_tools,
     to already-settled rounds). Delaying the first announcement instead would
     reintroduce exactly the barrier this epic removes.
     """
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
 
     def _aggregate(agg_dict, conv_id=''):
         # Shrink the fast tool's entry, mimicking a real spill.

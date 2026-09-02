@@ -6,6 +6,26 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from evaluations.codex_kimi_proxy.codex_contract import CODEX_VERSION
+from evaluations.long_agent_release.codex_projection import (
+    CodexProjectionError,
+    project_codex_trial,
+)
+from evaluations.long_agent_release.tofu_projection import (
+    TofuProjectionError,
+    project_tofu_trial,
+)
+
+from .codex_kimi_runtime import (
+    CODEX_KIMI_AGENT,
+    CODEX_KIMI_RUNTIME_SCHEMA,
+)
+from .tofu_kimi_runtime import (
+    TOFU_KIMI_AGENT,
+    TOFU_KIMI_RUNTIME_SCHEMA,
+    TofuKimiCandidateSettings,
+)
+from .rootless_qemu import rootless_sandbox_identity
 from .constants import (
     BENCHMARKS,
     DEFAULT_BENCHMARK,
@@ -33,7 +53,13 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 
 def _artifact_checks(run_dir: Path) -> list[AuditCheck]:
-    checks = []
+    checks = [
+        AuditCheck(
+            "artifact_root_private",
+            run_dir.is_dir() and run_dir.stat().st_mode & 0o077 == 0,
+            f"mode={run_dir.stat().st_mode & 0o777:o}" if run_dir.exists() else "missing",
+        )
+    ]
     for name in (".gitignore", ".ignore"):
         path = run_dir / name
         protected = path.is_file() and path.read_text(encoding="utf-8", errors="replace").lstrip().startswith("*")
@@ -41,12 +67,410 @@ def _artifact_checks(run_dir: Path) -> list[AuditCheck]:
     return checks
 
 
+def _contains_bytes(path: Path, needle: bytes) -> bool:
+    if not needle or not path.is_file() or path.is_symlink():
+        return False
+    overlap = b""
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                value = overlap + chunk
+                if needle in value:
+                    return True
+                overlap = value[-max(0, len(needle) - 1):]
+    except OSError:
+        return False
+    return False
+
+
+def _file_sha256(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _codex_kimi_config_checks(
+    run_dir: Path, manifest: dict[str, Any], config: dict[str, Any]
+) -> list[AuditCheck]:
+    """Prove the persisted formal-baseline shape without exposing secrets."""
+
+    formal = manifest.get("agent") == CODEX_KIMI_AGENT
+    runtime = manifest.get("codex_kimi_runtime")
+    if not formal and runtime is None:
+        return []
+    checks: list[AuditCheck] = []
+    runtime_valid = (
+        formal
+        and isinstance(runtime, dict)
+        and runtime.get("schema") == CODEX_KIMI_RUNTIME_SCHEMA
+        and runtime.get("agentImport") == CODEX_KIMI_AGENT
+        and runtime.get("codexVersion") == CODEX_VERSION
+        and runtime.get("providerFace") == manifest.get("provider_face")
+        and runtime.get("providerSlotId") == manifest.get("provider_slot_id")
+        and isinstance(runtime.get("providerFace"), str)
+        and bool(runtime.get("providerFace"))
+        and isinstance(runtime.get("providerSlotId"), str)
+        and bool(runtime.get("providerSlotId"))
+        and isinstance(runtime.get("agentTimeoutSeconds"), int)
+        and 1 <= runtime.get("agentTimeoutSeconds") <= 86_400
+        and runtime.get("listenHost") == "127.0.0.1"
+        and runtime.get("guestHost") == "10.0.2.101"
+        and runtime.get("requireTrialHeader") is True
+        and runtime.get("credentialBoundary") == "launcher-host-only"
+        and isinstance(runtime.get("codexSha256"), str)
+        and len(runtime.get("codexSha256")) == 64
+        and all(
+            character in "0123456789abcdef"
+            for character in runtime.get("codexSha256")
+        )
+    )
+    checks.append(AuditCheck(
+        "codex_kimi_runtime_manifest",
+        runtime_valid,
+        "pinned Codex 0.149.1 + loopback-only required-header proxy",
+    ))
+    if not isinstance(runtime, dict):
+        return checks
+    agents = config.get("agents") or []
+    agent = agents[0] if isinstance(agents, list) and len(agents) == 1 \
+        and isinstance(agents[0], dict) else {}
+    kwargs = agent.get("kwargs") if isinstance(agent, dict) else {}
+    expected_kwargs = {
+        "codex_binary": runtime.get("codexBinary"),
+        "codex_sha256": runtime.get("codexSha256"),
+        "proxy_trial_metrics_dir": runtime.get("trialMetricsDir"),
+        "proxy_service_name": runtime.get("guestServiceName"),
+        "timeout_sec": runtime.get("agentTimeoutSeconds"),
+        "reasoning_effort": manifest.get("reasoning_effort"),
+        "version": CODEX_VERSION,
+    }
+    agent_valid = (
+        agent.get("name") == CODEX_KIMI_AGENT
+        and agent.get("model_name") == "kimi-k3"
+        and kwargs == expected_kwargs
+        and not agent.get("env")
+        and not agent.get("extra_allowed_hosts")
+        and manifest.get("models") == ["kimi-k3"]
+        and manifest.get("secret_env_names") in ([], None)
+    )
+    checks.append(AuditCheck(
+        "codex_kimi_agent_pin",
+        agent_valid,
+        "single kimi-k3 agent with exact binary/schema inputs and no guest env",
+    ))
+    environment = config.get("environment") or {}
+    environment_kwargs = environment.get("kwargs") or {}
+    routes = environment_kwargs.get("loopback_service_forwards") or []
+    route = routes[0] if isinstance(routes, list) and len(routes) == 1 \
+        and isinstance(routes[0], dict) else {}
+    route_valid = (
+        environment.get("import_path")
+        == "rootless_vm.harbor_environment:RootlessQemuEnvironment"
+        and route.get("name") == runtime.get("guestServiceName")
+        and route.get("guest_host") == runtime.get("guestHost")
+        and route.get("guest_port") == runtime.get("guestPort")
+        and route.get("host_port") == runtime.get("listenPort")
+    )
+    checks.append(AuditCheck(
+        "codex_kimi_single_control_route",
+        route_valid,
+        "one fixed guest endpoint relayed to one host-loopback port",
+    ))
+    expected_names = [
+        runtime.get("upstreamBaseUrlEnv"), runtime.get("upstreamApiKeyEnv")
+    ]
+    boundary_valid = (
+        all(isinstance(name, str) and name for name in expected_names)
+        and manifest.get("host_only_secret_env_names") == expected_names
+    )
+    control_files = [
+        run_dir / "manifest.json",
+        run_dir / "job-config.json",
+        run_dir / "command.json",
+        run_dir / "launcher.log",
+    ]
+    leaked_names: list[str] = []
+    scanned_names: list[str] = []
+    if boundary_valid:
+        import os
+
+        for name in expected_names:
+            value = os.environ.get(str(name), "").encode("utf-8")
+            if value:
+                scanned_names.append(str(name))
+                if any(_contains_bytes(path, value) for path in control_files):
+                    leaked_names.append(str(name))
+    checks.append(AuditCheck(
+        "codex_kimi_no_credential_persistence",
+        boundary_valid and not leaked_names,
+        "no guest credential fields; exact-value scans=" + str(scanned_names)
+        if not leaked_names else f"leaked environment names={leaked_names}",
+    ))
+    metrics_root = Path(str(runtime.get("trialMetricsDir") or ""))
+    metrics_owned = (
+        metrics_root == run_dir / "codex-kimi-proxy" / "trials"
+        and metrics_root.is_dir()
+        and not metrics_root.is_symlink()
+        and metrics_root.stat().st_mode & 0o077 == 0
+    )
+    checks.append(AuditCheck(
+        "codex_kimi_private_metrics_repository",
+        metrics_owned,
+        "run-owned owner-only per-trial proxy shards",
+    ))
+    return checks
+
+
+def _codex_kimi_trial_evidence_checks(
+    manifest: dict[str, Any], trial_dirs: list[Path], expected: int
+) -> list[AuditCheck]:
+    if manifest.get("agent") != CODEX_KIMI_AGENT:
+        return []
+    runtime = manifest.get("codex_kimi_runtime") or {}
+    expected_sha = str(runtime.get("codexSha256") or "")
+    valid = 0
+    tokens: set[str] = set()
+    errors: list[str] = []
+    for trial_dir in trial_dirs:
+        agent_dir = trial_dir / "agent"
+        evidence = agent_dir / "codex-kimi-evidence"
+        raw = evidence / "codex-events.jsonl"
+        metrics = evidence / "proxy-metrics.jsonl"
+        trajectory = agent_dir / "trajectory.json"
+        try:
+            projection = project_codex_trial(
+                raw_trajectory=raw,
+                proxy_metrics=metrics,
+            )
+            atif = _load_json(trajectory)
+            atif_agent = atif.get("agent")
+            if not isinstance(atif_agent, dict):
+                raise ValueError("ATIF agent metadata is invalid")
+            extra = atif_agent.get("extra") or {}
+            if not isinstance(extra, dict):
+                raise ValueError("ATIF extra metadata is invalid")
+            if extra.get("binary_sha256") != expected_sha \
+                    or extra.get("trial_token") != projection["trialToken"]:
+                raise ValueError("ATIF pin/token does not match raw evidence")
+            if projection["trialToken"] in tokens:
+                raise ValueError("duplicate trial token")
+            tokens.add(projection["trialToken"])
+            valid += 1
+        except (OSError, ValueError, CodexProjectionError) as exc:
+            if len(errors) < 5:
+                errors.append(f"{trial_dir.name}:{type(exc).__name__}")
+    return [AuditCheck(
+        "codex_kimi_reconciled_trial_evidence",
+        valid == expected and len(tokens) == expected,
+        f"valid={valid}, unique_tokens={len(tokens)}, expected={expected}"
+        + (f", errors={errors}" if errors else ""),
+    )]
+
+
+def _tofu_kimi_config_checks(
+    run_dir: Path, manifest: dict[str, Any], config: dict[str, Any]
+) -> list[AuditCheck]:
+    """Prove the production candidate uses host-only exclusive authority."""
+
+    formal = manifest.get("agent") == TOFU_KIMI_AGENT
+    runtime = manifest.get("tofu_kimi_runtime")
+    if not formal and runtime is None:
+        return []
+    parsed = None
+    try:
+        parsed = TofuKimiCandidateSettings.from_manifest_record(runtime)
+    except (TypeError, ValueError):
+        pass
+    runtime_valid = (
+        formal
+        and parsed is not None
+        and runtime.get("schema") == TOFU_KIMI_RUNTIME_SCHEMA
+        and runtime.get("providerFace") == manifest.get("provider_face")
+        and runtime.get("providerSlotId") == manifest.get("provider_slot_id")
+        and runtime.get("experimentArm") == manifest.get("experiment_arm")
+        and runtime.get("agentVersion") == manifest.get("agent_version")
+        and runtime.get("credentialBoundary") == "harbor-host-only"
+        and runtime.get("guestCredentialValues") is False
+    )
+    checks = [AuditCheck(
+        "tofu_kimi_runtime_manifest",
+        runtime_valid,
+        "production AgentRuntime + frozen config digest + host-only provider",
+    )]
+    if parsed is None:
+        return checks
+    agents = config.get("agents") or []
+    agent = agents[0] if isinstance(agents, list) and len(agents) == 1 \
+        and isinstance(agents[0], dict) else {}
+    expected_kwargs = {
+        "reasoning_effort": manifest.get("reasoning_effort"),
+        "version": parsed.agent_version,
+        **parsed.agent_kwargs(),
+    }
+    agent_valid = (
+        agent.get("name") == TOFU_KIMI_AGENT
+        and agent.get("model_name") == "kimi-k3"
+        and agent.get("kwargs") == expected_kwargs
+        and not agent.get("env")
+        and not agent.get("extra_allowed_hosts")
+        and manifest.get("models") == ["kimi-k3"]
+        and manifest.get("secret_env_names") in ([], None)
+    )
+    checks.append(AuditCheck(
+        "tofu_kimi_production_agent_pin",
+        agent_valid,
+        "one production runtime, exact public config, no guest environment",
+    ))
+    environment = config.get("environment") or {}
+    environment_kwargs = environment.get("kwargs") or {}
+    routes = environment_kwargs.get("loopback_service_forwards") or []
+    checks.append(AuditCheck(
+        "tofu_kimi_no_guest_control_route",
+        environment.get("import_path")
+        == "rootless_vm.harbor_environment:RootlessQemuEnvironment"
+        and routes == [],
+        "guest receives only the Harbor exec channel, never provider routing",
+    ))
+    expected_names = list(parsed.credential_environment_names)
+    boundary_valid = (
+        manifest.get("host_only_secret_env_names") == expected_names
+        and runtime.get("upstreamBaseUrlEnv") == expected_names[0]
+        and runtime.get("upstreamApiKeyEnv") == expected_names[1]
+    )
+    control_files = [
+        run_dir / "manifest.json", run_dir / "job-config.json",
+        run_dir / "command.json", run_dir / "launcher.log",
+    ]
+    leaked: list[str] = []
+    scanned: list[str] = []
+    if boundary_valid:
+        import os
+        for name in expected_names:
+            value = os.environ.get(name, "").encode("utf-8")
+            if value:
+                scanned.append(name)
+                if any(_contains_bytes(path, value) for path in control_files):
+                    leaked.append(name)
+    checks.append(AuditCheck(
+        "tofu_kimi_no_credential_persistence",
+        boundary_valid and not leaked,
+        "host-only exact-value scans=" + str(scanned)
+        if not leaked else f"leaked environment names={leaked}",
+    ))
+    return checks
+
+
+def _tofu_kimi_trial_evidence_checks(
+    manifest: dict[str, Any], trial_dirs: list[Path], expected: int,
+) -> list[AuditCheck]:
+    """Reconcile every formal candidate trial and scan its private boundary."""
+
+    if manifest.get("agent") != TOFU_KIMI_AGENT:
+        return []
+    runtime = manifest.get("tofu_kimi_runtime")
+    try:
+        settings = TofuKimiCandidateSettings.from_manifest_record(runtime)
+    except (TypeError, ValueError):
+        return [AuditCheck(
+            "tofu_kimi_reconciled_trial_evidence", False,
+            "formal runtime manifest is invalid",
+        )]
+    valid = 0
+    task_ids: set[str] = set()
+    errors: list[str] = []
+    leaked_names: set[str] = set()
+    import os
+
+    secret_values = {
+        name: os.environ.get(name, "").encode("utf-8")
+        for name in settings.credential_environment_names
+        if os.environ.get(name, "")
+    }
+    runtime_record = settings.manifest_record()
+    for trial_dir in trial_dirs:
+        agent_dir = trial_dir / "agent"
+        evidence_dir = agent_dir / "tofu-kimi-evidence"
+        native = evidence_dir / "events.jsonl"
+        runtime_evidence = evidence_dir / "runtime-evidence.json"
+        tool_audit = evidence_dir / "tool-audit.json"
+        trajectory = agent_dir / "trajectory.json"
+        artifact_paths = (native, runtime_evidence, tool_audit, trajectory)
+        try:
+            projection = project_tofu_trial(
+                native_events=native,
+                runtime_evidence=runtime_evidence,
+                tool_audit=tool_audit,
+                runtime_config=dict(settings.runtime_config),
+                expected_runtime_config_digest=settings.runtime_config_sha256,
+                expected_prompt_contract_digest=runtime_record[
+                    "promptContractSha256"],
+                expected_tool_schema_digest=runtime_record[
+                    "toolSchemaSha256"],
+            )
+            runtime_value = _load_json(runtime_evidence)
+            task_id = str(runtime_value.get("taskId") or "")
+            if not task_id or task_id in task_ids:
+                raise ValueError("runtime task identity is missing or duplicated")
+            task_ids.add(task_id)
+            atif = _load_json(trajectory)
+            atif_agent = atif.get("agent")
+            extra = atif_agent.get("extra") \
+                if isinstance(atif_agent, dict) else None
+            if not isinstance(atif_agent, dict) \
+                    or atif_agent.get("name") != "tofu-kimi-runtime" \
+                    or atif_agent.get("version") != settings.agent_version \
+                    or atif_agent.get("model_name") != "kimi-k3" \
+                    or not isinstance(extra, dict) \
+                    or extra.get("runtime_config_sha256") \
+                    != settings.runtime_config_sha256 \
+                    or extra.get("prompt_contract_sha256") \
+                    != runtime_record["promptContractSha256"] \
+                    or extra.get("tool_schema_sha256") \
+                    != runtime_record["toolSchemaSha256"]:
+                raise ValueError("ATIF candidate binding drifted")
+            steps = atif.get("steps")
+            if not isinstance(steps, list) or not steps \
+                    or not isinstance(steps[-1], dict) \
+                    or steps[-1].get("message") != projection["finalOutput"]:
+                raise ValueError("ATIF final output drifted")
+            for name, secret in secret_values.items():
+                if any(_contains_bytes(path, secret) for path in artifact_paths):
+                    leaked_names.add(name)
+            valid += 1
+        except (OSError, ValueError, TofuProjectionError) as exc:
+            if len(errors) < 5:
+                errors.append(f"{trial_dir.name}:{type(exc).__name__}")
+    return [
+        AuditCheck(
+            "tofu_kimi_reconciled_trial_evidence",
+            valid == expected and len(task_ids) == expected,
+            f"valid={valid}, unique_tasks={len(task_ids)}, expected={expected}"
+            + (f", errors={errors}" if errors else ""),
+        ),
+        AuditCheck(
+            "tofu_kimi_no_trial_credential_persistence",
+            valid == expected and not leaked_names,
+            "no host credential values in candidate evidence"
+            if not leaked_names else f"leaked environment names={sorted(leaked_names)}",
+        ),
+    ]
+
+
 def _audit_harbor(run_dir: Path, manifest: dict[str, Any], allow_errors: bool) -> list[AuditCheck]:
     checks = _artifact_checks(run_dir)
     config_path = Path(str(manifest.get("job_config") or run_dir / "job-config.json"))
     config = _load_json(config_path)
+    checks.extend(_codex_kimi_config_checks(run_dir, manifest, config))
+    checks.extend(_tofu_kimi_config_checks(run_dir, manifest, config))
     environment = config.get("environment") or {}
+    import_path = environment.get("import_path")
     backend = environment.get("type")
+    if import_path == "rootless_vm.harbor_environment:RootlessQemuEnvironment":
+        backend = "rootless-qemu"
     checks.append(AuditCheck("isolated_backend", backend in ISOLATED_BACKENDS, str(backend)))
     checks.append(AuditCheck("ephemeral_environment", environment.get("delete") is True, f"delete={environment.get('delete')}"))
     checks.append(
@@ -81,6 +505,51 @@ def _audit_harbor(run_dir: Path, manifest: dict[str, Any], allow_errors: bool) -
                 "Singularity shares host networking and lacks strict per-trial cgroups",
             )
         )
+    elif backend == "rootless-qemu":
+        kwargs = environment.get("kwargs") or {}
+        runtime_shape = (
+            isinstance(kwargs, dict)
+            and bool(kwargs.get("base_disk"))
+            and bool(kwargs.get("base_disk_sha256"))
+            and bool(kwargs.get("image_store"))
+            and bool(kwargs.get("state_root"))
+            and bool(kwargs.get("prepared_cache_root"))
+            and bool(kwargs.get("qemu_path"))
+            and bool(kwargs.get("qemu_img_path"))
+        )
+        checks.append(
+            AuditCheck(
+                "rootless_qemu_runtime",
+                runtime_shape,
+                "digest-pinned base + image store + disposable VM state",
+            )
+        )
+        if manifest.get("agent") == CODEX_KIMI_AGENT \
+                or manifest.get("sandbox_identity") is not None:
+            try:
+                expected_sandbox = rootless_sandbox_identity(config)
+            except (OSError, TypeError, ValueError):
+                expected_sandbox = None
+            checks.append(AuditCheck(
+                "rootless_sandbox_identity",
+                expected_sandbox is not None
+                and manifest.get("sandbox_identity") == expected_sandbox,
+                "base/QEMU hashes plus frozen resource and network controls",
+            ))
+        disclosed = (
+            manifest.get("local_execution") is True
+            and manifest.get("network_namespace_isolation") is True
+            and manifest.get("strict_cgroup_isolation") is False
+            and manifest.get("vm_isolation") is True
+            and manifest.get("host_mounts") is False
+        )
+        checks.append(
+            AuditCheck(
+                "local_isolation_disclosed",
+                disclosed,
+                "QEMU/TCG VM + namespaces/seccomp; guest cgroups and host RLIMITs",
+            )
+        )
     benchmark = str(manifest.get("benchmark") or DEFAULT_BENCHMARK)
     definition = BENCHMARKS.get(benchmark)
     checks.append(
@@ -97,6 +566,48 @@ def _audit_harbor(run_dir: Path, manifest: dict[str, Any], allow_errors: bool) -
             str(manifest.get("harbor_source_commit")),
         )
     )
+    formal_identity = manifest.get("agent") in {
+        CODEX_KIMI_AGENT, TOFU_KIMI_AGENT,
+    }
+    if formal_identity or manifest.get("harness_identity") is not None:
+        harbor_binary = Path(str(manifest.get("harbor_binary") or ""))
+        expected_harbor_sha = str(manifest.get("harbor_binary_sha256") or "")
+        harbor_binary_valid = False
+        try:
+            harbor_binary_valid = (
+                not harbor_binary.is_symlink()
+                and harbor_binary.is_file()
+                and len(expected_harbor_sha) == 64
+                and _file_sha256(harbor_binary) == expected_harbor_sha
+            )
+        except OSError:
+            harbor_binary_valid = False
+        checks.append(AuditCheck(
+            "pinned_harbor_binary",
+            harbor_binary_valid,
+            f"path={harbor_binary}, sha256={expected_harbor_sha}",
+        ))
+        expected_harness_identity = {
+            "name": "harbor",
+            "version": manifest.get("harbor_version"),
+            "binarySha256": expected_harbor_sha,
+            "sourceCommit": HARBOR_COMMIT,
+            "runnerFrameworkVersion": manifest.get("framework_version"),
+            "runnerProjectRevision": manifest.get("project_revision"),
+            "runnerProjectDirty": manifest.get("project_dirty"),
+        }
+        checks.append(AuditCheck(
+            "formal_harness_identity",
+            manifest.get("harness_identity") == expected_harness_identity,
+            "version + executable hash + pinned source/runner revision",
+        ))
+    if formal_identity:
+        checks.append(AuditCheck(
+            "formal_clean_runner_revision",
+            manifest.get("project_dirty") is False
+            and manifest.get("project_revision") not in {None, "", "unknown"},
+            "formal release evidence requires a clean pinned runner commit",
+        ))
     checks.append(
         AuditCheck(
             "upload_disabled",
@@ -166,6 +677,12 @@ def _audit_harbor(run_dir: Path, manifest: dict[str, Any], allow_errors: bool) -
         for path in result_path.parent.iterdir()
         if path.is_dir() and (path / "config.json").is_file()
     ]
+    checks.extend(
+        _codex_kimi_trial_evidence_checks(manifest, trial_dirs, expected)
+    )
+    checks.extend(
+        _tofu_kimi_trial_evidence_checks(manifest, trial_dirs, expected)
+    )
     trial_pairs: list[tuple[str, str]] = []
     terminal_bench_task_refs: list[tuple[str, str, str]] = []
     for trial_dir in trial_dirs:

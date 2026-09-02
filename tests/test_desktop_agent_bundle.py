@@ -56,7 +56,10 @@ RESUME side (``lib.desktop_agent._pair.resume_attachment``):
 Run:  pytest tests/test_desktop_agent_bundle.py -q -p no:napari -o addopts=
 """
 
+
 from __future__ import annotations
+
+pytest_plugins = ('tests._credential_sidecar',)
 
 import json
 import os
@@ -65,20 +68,25 @@ import pytest
 
 pytestmark = [pytest.mark.unit, pytest.mark.auth_mode('private')]
 
+OWNER_USER_ID = 17
+
 
 # ── server-side helpers ───────────────────────────────────────────────
 
-def _bearer(user_id='u-bundle'):
+def _bearer(label='bundle'):
     from lib.api_keys import create_key
-    row, token = create_key(name=f'test-{user_id}', scopes=['chat'],
-                            user_id=user_id)
+    _row, token = create_key(
+        owner_user_id=OWNER_USER_ID,
+        name=f'test-{label}',
+        scopes=['chat'],
+    )
     return {'Authorization': f'Bearer {token}'}
 
 
 def _clear_keys():
     from lib import api_keys
-    api_keys._cache.clear()
-    api_keys._cache_loaded = False
+    for row in api_keys.list_keys(owner_user_id=OWNER_USER_ID):
+        api_keys.revoke_key(row['id'], owner_user_id=OWNER_USER_ID)
 
 
 @pytest.fixture
@@ -145,7 +153,7 @@ class TestAgentInstallerRoute:
         from lib.desktop import pairing as pairing_mod
         monkeypatch.setattr(pairing_mod, 'lan_ip', lambda: '10.9.8.7')
         r = flask_client.get('/api/v1/desktop/agent-installer',
-                             headers=_bearer('u-carol'))
+                             headers=_bearer('carol'))
         assert r.status_code == 200, r.get_data(as_text=True)
         cd = r.headers.get('Content-Disposition', '')
         assert 'TofuAgent-Setup-9.9.9-win64.exe' in cd, cd
@@ -159,10 +167,11 @@ class TestAgentInstallerRoute:
         # The token is agents:bridge-scoped AND bound to the downloading
         # user (RWA P4a tenant isolation).
         from lib.api_keys import list_keys
-        row = next(k for k in list_keys() if k.get('scopes')
+        row = next(k for k in list_keys(owner_user_id=OWNER_USER_ID)
+                   if k.get('scopes')
                    and 'agents:bridge' in k['scopes']
                    and k.get('name', '').startswith('agent-attach-'))
-        assert (row.get('user_id') or '') == 'u-carol'
+        assert row['owner_user_id'] == OWNER_USER_ID
         # …and the token actually authorizes a poll as that user.
         poll = flask_client.post(
             '/api/desktop/poll',
@@ -221,10 +230,9 @@ class TestAgentInstallerRoute:
             f.write(b'NOPE')
         assert d._agent_installer_ready(fake_artifact['entry']) is False
 
-    def test_7_mint_failure_still_serves_installer(self, flask_client,
-                                                   fake_artifact, monkeypatch):
+    def test_7_mint_failure_never_serves_an_unusable_installer(
+            self, flask_client, fake_artifact, monkeypatch):
         monkeypatch.setenv('_TOFU_RUNTIME_HOST', '127.0.0.1')
-        monkeypatch.delenv('TOFU_BRIDGE_SECRET', raising=False)
         import lib.api_keys as ak
         auth = _bearer()  # mint BEFORE the keystore goes down
 
@@ -233,21 +241,6 @@ class TestAgentInstallerRoute:
         monkeypatch.setattr(ak, 'create_key', _boom)
         r = flask_client.get('/api/v1/desktop/agent-installer',
                              headers=auth)
-        assert r.status_code == 200
-        attach = _embedded_attach(r)
-        assert attach['token'] == ''
-
-    def test_7a_gated_bridge_never_serves_an_unusable_installer(
-            self, flask_client, fake_artifact, monkeypatch):
-        monkeypatch.setenv('_TOFU_RUNTIME_HOST', '127.0.0.1')
-        monkeypatch.setenv('TOFU_BRIDGE_SECRET', 'global-gate-on')
-        import lib.api_keys as ak
-        auth = _bearer()
-
-        def _boom(*a, **kw):
-            raise RuntimeError('keystore down')
-        monkeypatch.setattr(ak, 'create_key', _boom)
-        r = flask_client.get('/api/v1/desktop/agent-installer', headers=auth)
         assert r.status_code == 503
         assert '.exe' not in r.headers.get('Content-Disposition', '')
 
@@ -260,6 +253,74 @@ class TestAgentInstallerRoute:
             'application/vnd.microsoft.portable-executable')
         assert '.exe' in r.headers.get('Content-Disposition', '')
         assert '.zip' not in r.headers.get('Content-Disposition', '').lower()
+
+
+# ── 7d-7h: the browser-pushed attach bundle route ─────────────────────
+# The macOS/Linux zero-config channel: same payload construction as the
+# .exe trailer, served as JSON to the signed-in page, which relays it to
+# the unattached agent's loopback broker.
+
+class TestAgentAttachBundleRoute:
+    def setup_method(self):
+        _clear_keys()
+
+    def test_7d_requires_auth(self, flask_client):
+        r = flask_client.post('/api/v1/desktop/agent-attach-bundle')
+        assert r.status_code == 401
+
+    def test_7e_mints_the_same_bundle_shape_as_the_exe(
+            self, flask_client, monkeypatch):
+        """One construction, two channels: direct LAN first, the page's
+        own base as the fallback, a fresh user-bound agents:bridge token
+        that actually authorizes a poll."""
+        monkeypatch.setenv('_TOFU_RUNTIME_HOST', '0.0.0.0')
+        monkeypatch.setenv('_TOFU_RUNTIME_PORT', '15000')
+        from lib.desktop import pairing as pairing_mod
+        monkeypatch.setattr(pairing_mod, 'lan_ip', lambda: '10.9.8.7')
+        r = flask_client.post('/api/v1/desktop/agent-attach-bundle',
+                              headers=_bearer('mac'))
+        assert r.status_code == 200, r.get_data(as_text=True)
+        body = r.get_json()
+        assert body['kind'] == 'tofu-agent-attach'
+        assert body['candidates'] == ['http://10.9.8.7:15000']
+        assert body['fallback_candidates'], 'the page base must be present'
+        token = body['token']
+        assert token.startswith('tofu_live_')
+        from lib.api_keys import list_keys
+        row = next(k for k in list_keys(owner_user_id=OWNER_USER_ID)
+                   if 'agents:bridge' in (k.get('scopes') or [])
+                   and k.get('name', '').startswith('agent-attach-'))
+        assert row['owner_user_id'] == OWNER_USER_ID
+        poll = flask_client.post(
+            '/api/desktop/poll',
+            json={'results': [], 'streams': [],
+                  'agent': {'agent_id': 'push-test', 'name': 'mac',
+                            'platform': 'darwin', 'capabilities': {},
+                            'share_roots': []}},
+            headers={'X-Bridge-Secret': token})
+        assert poll.status_code == 200
+
+    def test_7f_base_param_is_host_pinned(self, flask_client, monkeypatch):
+        monkeypatch.setenv('_TOFU_RUNTIME_HOST', '127.0.0.1')
+        monkeypatch.delenv('VSCODE_PROXY_URI', raising=False)
+        r = flask_client.post(
+            '/api/v1/desktop/agent-attach-bundle?base=https://evil.example.com',
+            headers=_bearer())
+        assert r.status_code == 200
+        assert not any('evil.example.com' in u
+                       for u in r.get_json()['fallback_candidates'])
+
+    def test_7g_mint_failure_is_a_503(self, flask_client, monkeypatch):
+        import lib.api_keys as ak
+        auth = _bearer()
+
+        def _boom(*a, **kw):
+            raise RuntimeError('keystore down')
+        monkeypatch.setattr(ak, 'create_key', _boom)
+        r = flask_client.post('/api/v1/desktop/agent-attach-bundle',
+                              headers=auth)
+        assert r.status_code == 503, (
+            'a device package must never ship without a usable credential')
 
 
 # ── 8-13: agent-side import ───────────────────────────────────────────
@@ -481,12 +542,12 @@ class TestClientDiagInbox:
             self, flask_client, diag_log):
         r = flask_client.post('/api/v1/desktop/client-diag',
                               json={'text': 'Tofu Agent diagnostics\nlink: proxy'},
-                              headers=_bearer('u-diag'))
+                              headers=_bearer('diag'))
         assert r.status_code == 200, r.get_data(as_text=True)
         lines = diag_log.read_text(encoding='utf-8').strip().splitlines()
         assert len(lines) == 1
         entry = json.loads(lines[0])
-        assert entry['user_id'] == 'u-diag'
+        assert entry['owner_user_id'] == OWNER_USER_ID
         assert 'link: proxy' in entry['text']
         assert entry['ts'] > 0
 

@@ -18,6 +18,7 @@ Two guarantees:
 
 _AUDIT_SYNTHETIC_REPO_PATHS = {
     'lib/.project_sessions/abc/modifications.json', 'lib/foo.py',
+    'routes/chat.py', 'static/vite/manifest.json',
 }
 
 import os

@@ -1,7 +1,7 @@
 """lib/slides/runtime.py — TaskRuntime for slide-deck jobs.
 
 Rides :class:`lib.production.runtime.ProductionRuntime` exactly like
-longform does (docs/PRODUCTION_PIPELINE_DESIGN.md): dedup index,
+longform does (docs/modules/production.md): dedup index,
 create-with-field-shape, append+touch, stale sweep, id minting.
 
 Events: ``stage`` / ``phase`` / ``page_authored`` / ``final`` / ``done`` /
@@ -35,9 +35,10 @@ def _slides_index_register(key: tuple, task_id: str) -> None:
 
 def _new_slides_task(task_id: str, *, topic: str, workdir: str, lang: str,
                      style: str, max_pages: int, size: tuple,
-                     conv_id: str = '', model: str = ''):
+                     user_id: int, conv_id: str = '', model: str = ''):
     return _production.create_task(
         task_id,
+        user_id=user_id,
         meta={'topic': topic, 'lang': lang, 'style': style,
               'max_pages': max_pages, 'model': model},
         fields={'topic': topic, 'workdir': workdir, 'lang': lang,

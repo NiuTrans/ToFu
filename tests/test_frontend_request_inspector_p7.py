@@ -54,12 +54,14 @@ import shutil
 import subprocess
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
+PROJECT_ROOT = os.path.dirname(HERE)
 
 
 def _node_deps_available() -> bool:
@@ -121,7 +123,7 @@ global.t = win.t = (k, a) => {
 global.activeConvId = win.activeConvId = 'conv-1';
 global.debugVisible = win.debugVisible = false;
 global._featureFlags = win._featureFlags = { debug_mode: true };
-global.conversations = win.conversations = [{ id: 'conv-1', messages: [] }];
+global.conversations = win.conversations = [{ id: 'conv-1', _serverTurnCount: 1 }];
 
 /* Payloads engineered for prefix math: every round shares the SAME leading
  * history (SYS + HIST-u1). Round N's request appends NEW-aN/NEW-tN; a state
@@ -473,11 +475,10 @@ def test_state_inspector_wiring_pins():
         'tool rows lost their debug entry wiring')
     api = open(os.path.join(JS_DIR, 'api.js'), encoding='utf-8').read()
     assert 'getRequestPayload: (taskId, roundNum, turn, kind)' in api
-    i18n = open(os.path.join(JS_DIR, 'i18n.js'), encoding='utf-8').read()
     for key in ("'ri.tabRequest'", "'ri.tabState'", "'ri.stateRowTip'",
                 "'ri.stateEmpty'", "'ri.stateClose'", "'ri.stateKindTip'",
                 "'ri.requestKindTip'"):
-        assert key in i18n, f'{key} missing'
+        assert key in ri, f'{key} call site missing'
     css = open(os.path.join(ROOT, 'static', 'styles.css'), encoding='utf-8').read()
     assert '.ri-state-panel' in css
     assert '.ri-state-chip' not in css, 'the removed chip strip styles crept back'

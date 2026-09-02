@@ -37,7 +37,7 @@ def _make_provider():
     # user/browser before entering worker threads; exercise that production
     # shape here so a test can never normalize a global-client fallback.
     return _ChatuiBrowserProvider(
-        user_id='alice', client_id='test-browser', profile='Test', bound=True)
+        user_id='41', client_id='test-browser', profile='Test', bound=True)
 
 
 def _fake_bridge(monkeypatch, script):
@@ -50,10 +50,13 @@ def _fake_bridge(monkeypatch, script):
     calls = []
     opened = {'id': None, 'url': ''}
 
-    def fake_connected(client_id=None):
-        return True
+    def fake_connected(client_id, *, owner_user_id):
+        return client_id == 'test-browser' and owner_user_id == '41'
 
-    def fake_send(cmd_type, params=None, timeout=30, client_id=None):
+    def fake_send(
+            cmd_type, params=None, timeout=30, client_id=None,
+            owner_user_id=None):
+        assert (client_id, owner_user_id) == ('test-browser', '41')
         calls.append((cmd_type, dict(params or {})))
         if cmd_type == 'list_tabs' and cmd_type not in script:
             return ([{'id': opened['id'], 'url': opened['url'],
@@ -68,8 +71,8 @@ def _fake_bridge(monkeypatch, script):
             opened['url'] = str((params or {}).get('url') or '')
         return outcome, None
 
-    monkeypatch.setattr('lib.browser.is_extension_connected', fake_connected)
-    monkeypatch.setattr('lib.browser.send_browser_command', fake_send)
+    monkeypatch.setattr('lib.browser.queue.is_extension_connected', fake_connected)
+    monkeypatch.setattr('lib.browser.queue.send_browser_command', fake_send)
     return calls
 
 
@@ -153,8 +156,13 @@ def test_create_tab_failure_stops_immediately(monkeypatch):
 
 def test_extension_offline_returns_none_without_commands(monkeypatch):
     calls = []
-    monkeypatch.setattr('lib.browser.is_extension_connected', lambda *a, **k: False)
-    monkeypatch.setattr('lib.browser.send_browser_command',
+
+    def fake_disconnected(client_id, *, owner_user_id):
+        assert (client_id, owner_user_id) == ('test-browser', '41')
+        return False
+
+    monkeypatch.setattr('lib.browser.queue.is_extension_connected', fake_disconnected)
+    monkeypatch.setattr('lib.browser.queue.send_browser_command',
                         lambda *a, **k: calls.append(a) or (None, None))
     out = _make_provider().scrape('https://x.example/', wait_selector='a',
                                   extractor_js='[]')

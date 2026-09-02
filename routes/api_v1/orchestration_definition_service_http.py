@@ -59,7 +59,7 @@ def orchestration_definition_delete_service_response(
     operation: Callable[[], DefinitionDeleteResultPort],
     *,
     endpoint: str,
-    expected_updated_at: int | None = None,
+    expected_updated_at: int,
     on_success: Callable[[], None] | None = None,
 ):
     """Invoke and project one guarded delete through the canonical boundary."""

@@ -43,6 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from lib.mcp.registry import is_opensource_build
+from lib.provider_template_recipes import offering_recipes
 
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
@@ -62,7 +63,7 @@ def test_shipped_provider_templates_have_audio_chat_with_text():
     for path in _template_json_paths():
         with open(path, encoding='utf-8') as f:
             tpl = json.load(f)
-        for m in tpl.get('models') or []:
+        for m in offering_recipes(tpl, allow_legacy=False):
             caps = set(m.get('capabilities') or [])
             if 'audio_chat' not in caps:
                 continue

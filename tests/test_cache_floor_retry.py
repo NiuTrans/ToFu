@@ -41,6 +41,7 @@ sys.modules.setdefault('flask', _quart)
 import pytest  # noqa: E402
 
 pytestmark = pytest.mark.unit
+OWNER = 1
 
 
 _FLOOR_USAGE = {'prompt_tokens': 10, 'cache_read_tokens': 28654,
@@ -52,9 +53,12 @@ _HIT_USAGE = {'prompt_tokens': 10, 'cache_read_tokens': 150000,
 def _seed_wire_fp(conv_id, fp):
     """Seed the cache-tracking state's PREVIOUS-round wire fingerprint so
     wire_prefix_stable(conv_id, usage) can compare against it."""
-    from lib.tasks_pkg.cache_tracking import _cache_lock, _cache_states
+    from lib.tasks_pkg.cache_tracking._state import (
+        _cache_lock,
+        _cache_states,
+    )
     from lib.tasks_pkg.cache_tracking._state import CacheState, _state_key
-    key = _state_key(conv_id)
+    key = _state_key(conv_id, user_id=OWNER)
     with _cache_lock:
         st = _cache_states.get(key)
         if st is None:
@@ -65,6 +69,7 @@ def _seed_wire_fp(conv_id, fp):
 
 def _task(conv_id='cfr1'):
     return {'id': 'task-fr-1', 'convId': conv_id, 'content': '',
+            '_userId': OWNER,
             'thinking': '', 'config': {}, 'events': [],
             'content_lock': _thr.Lock(), 'events_lock': _thr.Lock()}
 
@@ -124,13 +129,17 @@ def test_default_gate_is_OFF_2026_07_23(monkeypatch):
 def test_wire_prefix_stable_true_when_prefix_matches():
     from lib.tasks_pkg import floor_retry as fr
     _seed_wire_fp('cfr-stable', [{'k': 'a'}])
-    assert fr.wire_prefix_stable('cfr-stable', {'_wire_fp': [{'k': 'a'}, {'k': 'b'}]}) is True
+    assert fr.wire_prefix_stable(
+        'cfr-stable', {'_wire_fp': [{'k': 'a'}, {'k': 'b'}]},
+        user_id=OWNER) is True
 
 
 def test_wire_prefix_stable_false_when_prefix_changed():
     from lib.tasks_pkg import floor_retry as fr
     _seed_wire_fp('cfr-changed', [{'k': 'a'}])
-    assert fr.wire_prefix_stable('cfr-changed', {'_wire_fp': [{'k': 'X'}, {'k': 'b'}]}) is False
+    assert fr.wire_prefix_stable(
+        'cfr-changed', {'_wire_fp': [{'k': 'X'}, {'k': 'b'}]},
+        user_id=OWNER) is False
 
 
 # ── Integration: the resend loop in stream_llm_response ─────────────────────
@@ -139,7 +148,7 @@ def _run_stream(monkeypatch, *, enabled, dispatch_seq, conv_id='cfr-int',
                 seed_fp=(({'k': 'a'}),)):
     """Drive stream_llm_response with a scripted dispatch sequence. Returns
     (call_count, final_usage)."""
-    import lib.tasks_pkg.manager as _mgr
+    import lib.tasks_pkg.manager._stream as _mgr
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY', '1' if enabled else '0')
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY_MAX', '2')
     _seed_wire_fp(conv_id, list(seed_fp))
@@ -222,13 +231,14 @@ def test_floorretry_first_attempt_orphan_reconciled(monkeypatch):
     layer (above FloorRetry). NEUTER: skip the reconcile call and tc_A stays
     'searching' (the pre-fix spinning-forever state)."""
     import threading as _thr2
-    import lib.tasks_pkg.manager as _mgr
+    import lib.tasks_pkg.manager._stream as _mgr
     from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY', '1')
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY_MAX', '2')
     conv_id = 'cfr-l3'
     _seed_wire_fp(conv_id, [{'k': 'a'}])
-    task = {'id': 'task-fr-l3', 'convId': conv_id, 'content': '', 'thinking': '',
+    task = {'id': 'task-fr-l3', 'convId': conv_id, '_userId': OWNER,
+            'content': '', 'thinking': '',
             'config': {}, 'events': [], 'toolRounds': [],
             'content_lock': _thr2.Lock(), 'events_lock': _thr2.Lock()}
     acc = StreamingToolAccumulator(task, project_path='/tmp',
@@ -288,7 +298,7 @@ def test_stream_stamps_floor_retry_adopted_marker(monkeypatch):
     reconcile_announced_rounds attribute an orphan to FloorRetry vs a stream
     retry — the mis-attribution that made this symptom un-traceable for
     sessions (app.log proved stream retries=0 while FloorRetry drove 100%)."""
-    import lib.tasks_pkg.manager as _mgr
+    import lib.tasks_pkg.manager._stream as _mgr
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY', '1')
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY_MAX', '2')
 
@@ -406,7 +416,7 @@ def test_resend_does_not_reuse_tool_callback(monkeypatch):
     same non-None object on call #2); GREEN after (call #2's callback is None).
     NEUTER: restore on_tool_call_ready=on_tool_call_ready on the resend and
     this assertion flips red."""
-    import lib.tasks_pkg.manager as _mgr
+    import lib.tasks_pkg.manager._stream as _mgr
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY', '1')
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY_MAX', '2')
     conv_id = 'cfr-cb'
@@ -485,6 +495,51 @@ def test_exhausted_resends_preserve_every_billed_attempt(monkeypatch):
     assert any('resend1' in t for t in tags), f'missing resend1 in {tags}'
 
 
+def test_unusable_resend_is_billed_but_never_adopted(monkeypatch):
+    """A cache hit cannot launder a malformed provider stream into success."""
+    from lib.llm.stream_result import (
+        ProviderStreamResult,
+        ProviderStreamState,
+    )
+    import lib.tasks_pkg.manager._stream as manager_stream
+
+    monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY', '1')
+    monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY_MAX', '2')
+    conv_id = 'cfr-unusable-resend'
+    _seed_wire_fp(conv_id, [{'k': 'a'}])
+    calls = {'n': 0}
+
+    def _fake_dispatch(body, **kwargs):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            if kwargs.get('on_content'):
+                kwargs['on_content']('verified primary')
+            return ({'role': 'assistant', 'content': 'verified primary'},
+                    'stop', dict(_FLOOR_USAGE))
+        return ProviderStreamResult(
+            message={'role': 'assistant', 'content': 'corrupt resend'},
+            compatibility_finish_reason='stop',
+            usage=dict(_HIT_USAGE, _stream_state='malformed_stream',
+                       _malformed_stream=True, _malformed_frames=1),
+            state=ProviderStreamState.MALFORMED_STREAM,
+            malformed_frame_count=1,
+        )
+
+    monkeypatch.setattr(manager_stream, 'dispatch_stream', _fake_dispatch)
+    task = _task(conv_id)
+    result = manager_stream.stream_llm_response(task, _body(), tag='FR')
+    message, _finish, usage = result
+
+    assert calls['n'] == 2
+    assert result.is_verified_complete is True
+    assert message['content'] == 'verified primary'
+    assert task['content'] == 'verified primary'
+    billed = usage.get('_extra_billing_rounds') or []
+    assert len(billed) == 1
+    assert billed[0]['usage']['cache_read_tokens'] == 150000
+    assert 'resend1' in billed[0]['tag']
+
+
 def test_llm_call_with_fallback_bills_discarded_into_api_rounds(monkeypatch):
     """End-to-end: _llm_call_with_fallback must consume `_extra_billing_rounds`
     from the returned usage and append each entry as its own api_rounds row +
@@ -495,8 +550,8 @@ def test_llm_call_with_fallback_bills_discarded_into_api_rounds(monkeypatch):
     Failing-first: without the consumer loop in _call.py, api_rounds has ONE
     entry (the adopted usage). With it, api_rounds has 1 primary + N discarded.
     NEUTER: remove the `for _bill in _extra` loop and only 1 row appears."""
-    import lib.tasks_pkg.manager as _mgr
-    import lib.tasks_pkg.llm_fallback as _fb
+    import lib.tasks_pkg.manager._stream as _mgr
+    import lib.tasks_pkg.llm_fallback._call as _fb
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY', '1')
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY_MAX', '2')
     conv_id = 'cfr-bill-e2e'

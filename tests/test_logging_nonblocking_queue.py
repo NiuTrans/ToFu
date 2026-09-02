@@ -37,7 +37,7 @@ import threading
 import time
 import pytest
 
-from server import _BoundedQueueHandler, _BoundedQueueListener
+from server import _BoundedQueueHandler, _BoundedQueueListener, _QuietPollFilter
 
 pytestmark = pytest.mark.unit
 
@@ -96,6 +96,33 @@ DELAY = 0.01  # 200 records × 10ms = 2s of sink work if synchronous
 
 
 class TestNonBlockingLogging:
+    def test_successful_poll_noise_is_dropped_but_failures_are_evidence(self):
+        filt = _QuietPollFilter()
+
+        def allowed(request, status, method='GET'):
+            record = logging.LogRecord(
+                'hypercorn.access', logging.INFO, __file__, 1,
+                '127.0.0.1 "%s %s 1.1" %s 10 "-" "agent"',
+                (method, request, status), None)
+            return filt.filter(record)
+
+        assert allowed('/api/health', 200) is False
+        assert allowed('/api/browser/poll?cursor=200', 204) is False
+        assert allowed('/api/v3/conversations/conv-a/events', 304) is False
+        assert allowed('/api/v3/conversations/conv-a/turns', 200, 'POST') is True
+        assert allowed('/api/v3/conversations/conv-a/events', 500) is True
+        assert allowed('/api/unrelated?value=200', 500) is True
+        assert allowed('/api/v1/conversations', 200) is True
+
+        # Client-controlled poll failures keep diagnostic checkpoints without
+        # allowing a stale/malicious extension to force one disk write/request.
+        checkpoints = [
+            allowed('/api/browser/poll', 426, 'POST')
+            for _ in range(8)
+        ]
+        assert checkpoints == [True, True, False, True, False, False, False, True]
+        assert allowed('/api/browser/poll', 500, 'POST') is True
+
     def test_queued_caller_returns_before_sink_drains(self):
         """A storm of N logs must return to the caller in far less than the
         N×delay the sink actually needs — proving the caller is decoupled."""
@@ -147,8 +174,77 @@ class TestNonBlockingLogging:
         records = [q.get_nowait(), q.get_nowait()]
         messages = [record.getMessage() for record in records]
         assert 'recovered' in messages
-        assert any('shed 3 record(s)' in msg for msg in messages)
+        assert any('shed 3 physical record(s) / 3 occurrence(s)' in msg
+                   for msg in messages)
         assert qh._dropped_pending == 0
+
+    def test_overload_notice_preserves_coalesced_occurrence_delta(self):
+        q = _queue_mod.Queue(maxsize=2)
+        qh = _BoundedQueueHandler(q)
+        qh.setFormatter(logging.Formatter('%(message)s'))
+        qh.emit(logging.LogRecord(
+            'lib.storm', logging.INFO, __file__, 1, 'occupy', (), None))
+        qh.emit(logging.LogRecord(
+            'lib.storm', logging.INFO, __file__, 1, 'occupy-two', (), None))
+        dropped = logging.LogRecord(
+            'lib.storm', logging.WARNING, __file__, 1, 'flood', (), None)
+        dropped.tofu_occurrence_delta = 64
+        qh.emit(dropped)
+        q.get_nowait(); q.task_done()
+        q.get_nowait(); q.task_done()
+        qh.emit(logging.LogRecord(
+            'lib.storm', logging.INFO, __file__, 1, 'recovered', (), None))
+        recovered = q.get_nowait()
+        q.task_done()
+        assert recovered.getMessage() == 'recovered'
+        notice = q.get_nowait()
+        assert notice.tofu_occurrence_delta == 64
+        assert notice.tofu_event_fields['dropped_occurrences'] == 64
+
+    def test_simultaneous_recovery_claims_shed_summary_exactly_once(self):
+        class _BarrierQueue(_queue_mod.Queue):
+            def __init__(self):
+                super().__init__(maxsize=10)
+                self.recovery_barrier = threading.Barrier(2)
+
+            def put_nowait(self, item):
+                result = super().put_nowait(item)
+                if getattr(item, 'name', '') == 'test.concurrent.recovery':
+                    self.recovery_barrier.wait(timeout=2)
+                return result
+
+        q = _BarrierQueue()
+        qh = _BoundedQueueHandler(q)
+        qh.setFormatter(logging.Formatter('%(message)s'))
+        with qh._drop_lock:
+            qh._dropped_pending = 7
+            qh._dropped_total = 7
+            qh._dropped_occurrences_pending = 11
+            qh._dropped_occurrences_total = 11
+
+        def recover(index):
+            qh.enqueue(logging.LogRecord(
+                'test.concurrent.recovery', logging.INFO, __file__, 1,
+                'recovered %d', (index,), None))
+
+        threads = [threading.Thread(target=recover, args=(index,))
+                   for index in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=3)
+            assert not thread.is_alive()
+
+        records = []
+        while not q.empty():
+            records.append(q.get_nowait())
+        notices = [record for record in records
+                   if record.name == 'server.logging']
+        assert len(notices) == 1
+        assert notices[0].tofu_event_fields['dropped_records'] == 7
+        assert notices[0].tofu_occurrence_delta == 11
+        assert qh._dropped_pending == 0
+        assert qh._dropped_occurrences_pending == 0
 
     def test_queue_is_faster_than_direct_and_neuter(self):
         """Load-bearing comparison + NEUTER.

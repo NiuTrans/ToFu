@@ -4,10 +4,8 @@
 The 2026-07-31 kimi-k3 incident (tasks 93b60577 / 76d686cb, 4,337 wasted
 retries over 4+ hours):
 
-  * A virtual-user (VU) turn whose user row carries ``content=''`` hit the
-    volatile-tail injection seams (``_refresh_tail_block`` /
-    ``_refresh_detail_block`` / ``_append_user_profile_block``), which wrapped
-    the empty string into a
+  * A virtual-user (VU) turn whose user row carried ``content=''`` was wrapped
+    into a
     ``[{'type': 'text', 'text': ''}]`` block and then appended the reminder
     blocks. The R1 wire snapshot (task_events) shows block[0] =
     ``{'text': '', 'type': 'text'}`` followed by 5 reminder blocks.
@@ -49,11 +47,6 @@ from lib.llm_sanitize import (  # noqa: E402
     _fix_empty_user_messages,
     _strip_empty_text_blocks,
 )
-from lib.tasks_pkg.system_context._profile import (  # noqa: E402
-    _append_user_profile_block,
-    _refresh_detail_block,
-)
-from lib.tasks_pkg.system_context._reminders import _refresh_tail_block  # noqa: E402
 
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
@@ -247,43 +240,6 @@ class TestBuildBodyHealsVuShape:
         body = build_body('kimi-k3', messages)
         assert _empty_text_blocks(body['messages']) == 0
 
-
-# ══════════════════════════════════════════════════════════
-#  Layer 1 — producer seams stop fabricating phantom blocks
-# ══════════════════════════════════════════════════════════
-
-@pytest.mark.unit
-class TestProducerGuards:
-
-    def test_refresh_tail_block_on_empty_user(self):
-        msgs = [{'role': 'user', 'content': ''}]
-        action = _refresh_tail_block(
-            msgs, '<system-reminder>\n[PROJECT BOARD] v1\n</system-reminder>',
-            '[PROJECT BOARD]')
-        assert action == 'added'
-        assert _empty_text_blocks(msgs) == 0
-        assert any('PROJECT BOARD' in (b.get('text') or '')
-                   for b in msgs[0]['content'])
-
-    def test_refresh_tail_block_on_nonempty_user_unchanged(self):
-        msgs = [{'role': 'user', 'content': 'real question'}]
-        _refresh_tail_block(
-            msgs, '<system-reminder>\n[PROJECT BOARD] v1\n</system-reminder>',
-            '[PROJECT BOARD]')
-        blocks = msgs[0]['content']
-        assert blocks[0] == {'type': 'text', 'text': 'real question'}
-        assert 'PROJECT BOARD' in blocks[1]['text']
-
-    def test_refresh_detail_block_on_empty_user(self):
-        msgs = [{'role': 'user', 'content': ''}]
-        _refresh_detail_block(msgs, '<system-reminder>\ndetail\n</system-reminder>')
-        assert _empty_text_blocks(msgs) == 0
-
-    def test_append_user_profile_block_on_empty_user(self):
-        msgs = [{'role': 'user', 'content': ''}]
-        ok = _append_user_profile_block(msgs, '[USER PREFERENCE PROFILE]\nx')
-        assert ok is True
-        assert _empty_text_blocks(msgs) == 0
 
 # ══════════════════════════════════════════════════════════
 #  Layer 3 — deterministic vendor 4xx is NOT a transient

@@ -1,7 +1,7 @@
 """Frontend test — composer width floored to the chat reading column (2026-07-08).
 
 The input box width is driven by `.input-inner{max-width:var(--toolbar-w,820px)}`,
-and `_reflowToolbar()` (static/js/main.js) sets `--toolbar-w` to the MEASURED
+and `_reflowToolbar()` (retained `runtime/sections/main.js`) sets `--toolbar-w` to the MEASURED
 natural width of the toolbar content. After the toolbar declutter (buttons
 folded into submenus + a "···" overflow), that content shrank to ~540px, while
 the message column `.chat-inner` stays 820px — so on a wide landscape display

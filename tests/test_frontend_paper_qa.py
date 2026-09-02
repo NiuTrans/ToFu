@@ -38,7 +38,7 @@ from tests._jsdom import JS_DIR, ROOT, run_harness
 pytestmark = pytest.mark.unit
 
 QA_TS = os.path.join(ROOT, 'frontend', 'src', 'features', 'paper', 'qa.ts')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 _BODY = r"""
@@ -171,7 +171,7 @@ def _run_qa_contract(qa_js: str) -> None:
 
 
 @pytest.mark.skipif(not shutil.which('node') or not os.path.isfile(ESBUILD),
-                    reason='node + esbuild dev dependency required')
+                    reason='node + vite test bundler dev dependency required')
 def test_vite_paper_qa_contract(tmp_path):
     built = tmp_path / 'paper-qa.js'
     compiled = subprocess.run(

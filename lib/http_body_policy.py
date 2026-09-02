@@ -11,12 +11,16 @@ from typing import Any
 from quart import request
 
 from lib.api_response import api_payload_too_large
+from runtime_guards import resolve_resource_budget
 
 
 DEFAULT_ROUTE_BODY_CAPS = (
     ('/api/v1/videos/upload', 512 * 1024 * 1024),
     # Base64 expands a 32 MiB image by 4/3; retain JSON/multipart headroom.
     ('/api/images/upload', 46 * 1024 * 1024),
+    # Poll results can carry a bounded full-page screenshot, but they are not
+    # an upload transport and must never inherit the 512 MiB application cap.
+    ('/api/browser/poll', 32 * 1024 * 1024),
 )
 DEFAULT_BODY_CAP = 50 * 1024 * 1024
 DEFAULT_LONG_UPLOAD_PREFIXES = (
@@ -65,11 +69,20 @@ def bounded_http_timeout_env(
 def build_http_body_policy(
     environ: Mapping[str, str] | None = None,
     *,
-    route_caps: tuple[tuple[str, int], ...] = DEFAULT_ROUTE_BODY_CAPS,
+    route_caps: tuple[tuple[str, int], ...] | None = None,
     default_cap: int = DEFAULT_BODY_CAP,
     long_upload_prefixes: tuple[str, ...] = DEFAULT_LONG_UPLOAD_PREFIXES,
 ) -> HttpBodyPolicy:
     """Build one immutable policy snapshot for an application instance."""
+    if route_caps is None:
+        browser_poll_mib = resolve_resource_budget(
+            'TOFU_BROWSER_POLL_BODY_MAX_MIB', environ,
+            minimum=16, maximum=64)
+        route_caps = tuple(
+            (prefix, browser_poll_mib * 1024 * 1024)
+            if prefix == '/api/browser/poll' else (prefix, cap)
+            for prefix, cap in DEFAULT_ROUTE_BODY_CAPS
+        )
     body_timeout = bounded_http_timeout_env(
         'TOFU_HTTP_BODY_TIMEOUT', 300, environ=environ)
     upload_timeout = bounded_http_timeout_env(
@@ -85,21 +98,46 @@ def build_http_body_policy(
 
 
 async def enforce_http_body_policy(policy: HttpBodyPolicy):
-    """Apply timeout and declared Content-Length limits to one request."""
+    """Apply timeout and route-local byte limits before request parsing.
+
+    Quart constructs its body accumulator with the broad application upload
+    ceiling.  Tightening that accumulator here is what also bounds chunked
+    requests whose sender omits ``Content-Length``; the declared-length check
+    remains the fast path that rejects without awaiting any body bytes.
+    """
     if any(request.path.startswith(prefix)
            for prefix in policy.long_upload_prefixes):
         # Quart copies the app default at ASGI-scope creation, then consults
         # this instance attribute during body/form parsing.
         request.body_timeout = policy.upload_body_timeout
 
-    content_length = request.content_length or 0
-    if content_length <= 0:
-        return None
     cap = policy.default_cap
     for prefix, route_cap in policy.route_caps:
         if request.path.startswith(prefix):
             cap = route_cap
             break
+
+    body = getattr(request, 'body', None)
+    if body is not None:
+        current_cap = getattr(body, '_max_content_length', None)
+        if current_cap is None or cap < current_cap:
+            # Quart has no public per-request setter; Body.append() consults
+            # this exact field for every incoming chunk.  Keep the compatibility
+            # seam here, covered by a transport test, instead of duplicating an
+            # ASGI request implementation.
+            body._max_content_length = cap
+        buffered = getattr(body, '_data', None)
+        if buffered is not None and len(buffered) > cap:
+            buffered_bytes = len(buffered)
+            body.clear()
+            logging.getLogger('server').warning(
+                '[BodyCap] %s %s rejected: buffered=%d > cap=%d',
+                request.method, request.path, buffered_bytes, cap)
+            return api_payload_too_large(cap)
+
+    content_length = request.content_length or 0
+    if content_length <= 0:
+        return None
     if content_length <= cap:
         return None
 

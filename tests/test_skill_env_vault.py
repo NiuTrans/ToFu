@@ -217,7 +217,7 @@ def test_exec_env_overlay_enabled_only(isolated):
     assert overlay.get('SOYOUNG_API_KEY') == 'sy-on-0123456789', (
         'the ENABLED skill binding must ride the child env')
     # Flip: enable offskill, disable onskill — the value must follow state.
-    from lib.memory import toggle_memory
+    from lib.memory.storage import toggle_memory
     toggle_memory('onskill', enabled=False, project_path=proj)
     toggle_memory('offskill', enabled=True, project_path=proj)
     overlay = exec_env_overlay(project_path=proj)
@@ -404,7 +404,7 @@ class SkillEnvRoutesTest(unittest.TestCase):
             self.assertEqual(r.status_code, 400)
         _run(go())
         self.assertTrue(os.path.isfile(os.path.join(
-            str(self._data_dir), 'skills', 'global', 'mypkg', 'SKILL.md')))
+            str(self._data_dir), 'skills', 'users', '1', 'mypkg', 'SKILL.md')))
 
 
 if __name__ == '__main__':

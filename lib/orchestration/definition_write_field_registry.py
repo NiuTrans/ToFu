@@ -9,11 +9,11 @@ _DEFINITION_WRITE_CONFLICT_FIELDS = (
     ('operation', 'operation', 'string'),
     (
         'expectedUpdatedAt', 'expectedUpdatedAt',
-        'nullable_non_negative_integer',
+        'non_negative_integer',
     ),
     (
         'currentUpdatedAt', 'currentUpdatedAt',
-        'nullable_non_negative_integer',
+        'non_negative_integer',
     ),
 )
 

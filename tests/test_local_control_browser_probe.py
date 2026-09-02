@@ -13,7 +13,7 @@ logging "no Chrome-family browser found on this machine"):
      "is the user at the server" was ``_remote_is_loopback()`` — a pure IP
      test that, under the standard same-host reverse-proxy / tunnel
      deployment, reports ``127.0.0.1`` for *every public request* (the
-     ProxyFix seam is not wired; see docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md
+     ProxyFix seam is not wired; see docs/modules/integrations_api.md
      §3.2b, which calls this out as a defect written up as a feature). So
      the gate said "you are local" to a user who was three network hops
      away, and the button rendered for them.
@@ -63,9 +63,6 @@ from tests._runtime_sections import runtime_section_path
 LC_JS = Path(runtime_section_path('local-control.js'))
 STYLES = ROOT / "static" / "styles.css"
 
-_ROUTE_TOKEN = '_lc_probe_test_token__'
-
-
 # ══════════════════════════════════════════════════════════
 #  Backend: the probe is the single source of truth
 # ══════════════════════════════════════════════════════════
@@ -79,14 +76,16 @@ def _get_status(flask_client, monkeypatch, client_addr, *, probe):
     otherwise reports ``'<local>'``, which ``auth.py`` treats as loopback and
     which would make every assertion below pass for the wrong reason.
     """
+    from lib.api_keys import create_key
     from routes.api_v1 import browser as browser_routes
 
     monkeypatch.setattr(browser_routes, '_detect_local_browser',
                         lambda: probe)
-    monkeypatch.setenv('TUNNEL_TOKEN', _ROUTE_TOKEN)
+    _row, token = create_key(owner_user_id=1, 
+        name='browser-probe', scopes=['agents:browser'])
     resp = flask_client.get(
         '/api/v1/browser/status',
-        headers={'X-Tunnel-Token': _ROUTE_TOKEN},
+        headers={'Authorization': f'Bearer {token}'},
         scope_base={'client': client_addr})
     return resp.status_code, (resp.get_json(silent=True) or {})
 
@@ -254,10 +253,12 @@ def test_open_extensions_launches_the_probes_own_url(flask_client,
                         lambda argv, **kw: calls.append(argv) or object())
     monkeypatch.setattr(browser_routes, '_detect_local_browser',
                         lambda: _EDGE)
-    monkeypatch.setenv('TUNNEL_TOKEN', _ROUTE_TOKEN)
+    from lib.api_keys import create_key
+    _row, token = create_key(owner_user_id=1, 
+        name='browser-open-extensions', scopes=['agents:browser'])
     resp = flask_client.post(
         '/api/v1/browser/open-extensions',
-        headers={'X-Tunnel-Token': _ROUTE_TOKEN},
+        headers={'Authorization': f'Bearer {token}'},
         scope_base={'client': ('127.0.0.1', 5555)})
     assert resp.status_code == 200, (
         f"Edge launch failed: {resp.status_code} {resp.get_json(silent=True)}")
@@ -318,6 +319,7 @@ _HARNESS = textwrap.dedent(r"""
   const out = {};
   for (const [name, payload] of Object.entries(%(cases)s)) {
     document.getElementById('lcBrowserSetup').innerHTML = '';
+    _lcBrowserUpgradeRequested = payload.forceBrowserUpgrade === true;
     _lcRenderBrowser(payload);
     const el = document.getElementById('lcBrowserSetup');
     out[name] = {
@@ -325,6 +327,7 @@ _HARNESS = textwrap.dedent(r"""
       hasDownloadBtn: !!el.querySelector('#lcExtDownloadBtn'),
       hasPath: el.textContent.includes('/srv/tofu/browser_extension'),
       text: el.textContent.trim(),
+      statusText: document.querySelector('#lcBrowserStatus .lc-status-text').textContent,
       state: _lcBrowserSetupState(payload),
     };
   }
@@ -405,8 +408,79 @@ def test_the_instruction_names_the_detected_browser():
         f"{out['text'][:300]!r}")
 
 
+def test_capability_upgrade_request_keeps_a_download_action_without_version_data():
+    """Legacy protocol clients often report no manifest version.
+
+    Settings already has authoritative evidence that such a client lacks a
+    required adapter capability.  Opening Local Control from that warning must
+    not let the ordinary "connected" branch erase every setup action merely
+    because version comparison has no left-hand value.
+    """
+    out = _render_cases({
+        'capability_upgrade': {
+            'connected': True,
+            'clients': [{
+                'client_id': 'legacy', 'ext_version': '',
+                'protocol_version': 1,
+            }],
+            'servedExtVersion': '2.4.0',
+            'forceBrowserUpgrade': True,
+        },
+    })['capability_upgrade']
+    assert out['hasDownloadBtn'], (
+        f"capability-triggered upgrade opened an actionless connected card: "
+        f"{out['text']!r}")
+    assert '站点适配器所需能力' in out['text']
+
+
+def test_connected_status_line_names_the_extension_version():
+    """The dot's label must say WHICH extension binary is connected.
+
+    "已连接" alone hides the one fact that tells a stale side-load apart at a
+    glance.  The suffix appears only on fleet-wide agreement: mixed versions
+    stay unnamed (the upgrade nudge owns that story), and a legacy client
+    reporting no manifest version adds nothing.
+    """
+    out = _render_cases({
+        'single': {
+            'connected': True, 'secondsAgo': 3.2,
+            'clients': [{'client_id': 'a', 'ext_version': '5.4.1'}],
+            'servedExtVersion': '5.4.1',
+        },
+        'fleet_agreeing': {
+            'connected': True,
+            'clients': [{'client_id': 'a', 'ext_version': '5.4.1'},
+                        {'client_id': 'b', 'ext_version': '5.4.1'}],
+            'servedExtVersion': '5.4.1',
+        },
+        'fleet_mixed': {
+            'connected': True,
+            'clients': [{'client_id': 'a', 'ext_version': '5.4.0'},
+                        {'client_id': 'b', 'ext_version': '5.4.1'}],
+            'servedExtVersion': '5.4.1',
+        },
+        'legacy_versionless': {
+            'connected': True, 'secondsAgo': 2,
+            'clients': [{'client_id': 'a', 'ext_version': ''}],
+            'servedExtVersion': '5.4.1',
+        },
+    })
+    single = out['single']['statusText']
+    assert single == '已连接 · v5.4.1 · 3.2s', (
+        f"connected card never named the extension version: {single!r}")
+    fleet = out['fleet_agreeing']['statusText']
+    assert fleet.endswith(' · v5.4.1'), (
+        f"an agreeing fleet should still name its one version: {fleet!r}")
+    mixed = out['fleet_mixed']['statusText']
+    assert '· v' not in mixed, (
+        f"mixed versions must stay unnamed in the status line: {mixed!r}")
+    legacy = out['legacy_versionless']['statusText']
+    assert legacy == '已连接 · 2s', (
+        f"a versionless legacy client must not invent a suffix: {legacy!r}")
+
+
 # ══════════════════════════════════════════════════════════
-#  CSS: .lc-substep must carry its own typography
+#  CSS rendering: .lc-substep must carry its own typography
 # ══════════════════════════════════════════════════════════
 
 def _decl(selector: str) -> dict:
@@ -697,7 +771,7 @@ def test_no_tracked_doc_teaches_a_script_that_does_not_exist():
                      'install_extension.bat')
     # Only an IMPERATIVE mention counts — "run `./dev_extension.sh`". A doc
     # that NAMES a script in order to report it is missing (as
-    # docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md §2.4 does, auditing exactly this
+    # docs/modules/integrations_api.md §2.4 does, auditing exactly this
     # rot) is doing the right thing, and a guard that punished it would push
     # the repo to delete its own findings. The distinguishing mark is the
     # invocation form: a leading `./` or a shell-prompt `$`.

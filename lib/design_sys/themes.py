@@ -1,6 +1,6 @@
 """lib/design_sys/themes.py — per-scenario themes + design bibles.
 
-What this module is FOR (docs/SLIDES_CAPABILITY_DESIGN.md §3.2): the single
+What this module is FOR (docs/modules/ingest_media.md §3.2): the single
 biggest measured quality gap between our films and a designer deck was not
 rendering — it was that every scene/page invented its own palette and type
 choices, so the artefact had no THEME. Here one film/deck gets one Theme:

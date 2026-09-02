@@ -37,6 +37,11 @@ def test_body_caps_timeouts_and_idempotent_registration():
     async def upload():
         return {'body_timeout': request.body_timeout}
 
+    @app.post('/stream')
+    async def stream():
+        await request.get_data()
+        return {'ok': True}
+
     async def exercise():
         async with app.test_app():
             client = app.test_client()
@@ -46,9 +51,17 @@ def test_body_caps_timeouts_and_idempotent_registration():
                 '/upload', data=b'12345678', headers={'Content-Length': '8'})
             rejected_payload = await rejected.get_json()
             accepted_payload = await accepted.get_json()
-        return rejected, rejected_payload, accepted_payload
+            async with client.request(
+                    '/stream', method='POST',
+                    headers={'Content-Type': 'application/octet-stream'}) as conn:
+                await conn.send(b'123')
+                await conn.send(b'456')
+                await conn.send_complete()
+            streamed = await conn.as_response()
+        return rejected, rejected_payload, accepted_payload, streamed
 
-    rejected, rejected_payload, accepted_payload = asyncio.run(exercise())
+    rejected, rejected_payload, accepted_payload, streamed = asyncio.run(exercise())
     assert rejected.status_code == 413
     assert rejected_payload['ok'] is False
     assert accepted_payload == {'body_timeout': 80}
+    assert streamed.status_code == 413

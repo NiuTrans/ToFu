@@ -29,14 +29,14 @@ def test_turn_start_delta_and_finalize_share_one_task_projection():
         'content': 'old content',
         'thinking': 'old thinking',
         'content_lock': lock,
-        '_endpoint_phase': 'planning',
+        '_flow_phase': 'planning',
     }
     forwarded = []
     sink = OrchestrationChatTaskEventSink(
         task, lambda owner, event: forwarded.append((owner, event)))
 
     start = {
-        'type': 'endpoint_iteration',
+        'type': 'flow_iteration',
         'phase': 'working',
         'iteration': 2,
         'flowProjection': 'flow',
@@ -48,13 +48,13 @@ def test_turn_start_delta_and_finalize_share_one_task_projection():
     sink({'type': 'delta', 'content': 'answer ', 'thinking': 'reason '})
     sink({'type': 'delta', 'content': 42})
     sink({
-        'type': 'endpoint_planner_done',
+        'type': 'flow_planner_done',
         'content': 'final answer',
         'thinking': 'final reason',
     })
 
-    assert task['_endpoint_phase'] == 'working'
-    assert task['_endpoint_iteration'] == 2
+    assert task['_flow_phase'] == 'working'
+    assert task['_flow_iteration'] == 2
     assert task['_flow_current_turn'] == {
         'flowProjection': 'flow',
         'turnRole': 'worker',
@@ -68,7 +68,7 @@ def test_turn_start_delta_and_finalize_share_one_task_projection():
         {'type': 'delta', 'content': 'answer ', 'thinking': 'reason '},
         {'type': 'delta', 'content': 42},
         {
-            'type': 'endpoint_planner_done',
+            'type': 'flow_planner_done',
             'content': 'final answer',
             'thinking': 'final reason',
         },
@@ -82,7 +82,7 @@ def test_discard_unknown_events_and_lockless_final_content_are_safe():
     sink = OrchestrationChatTaskEventSink(
         task, lambda _owner, event: forwarded.append(event))
 
-    sink({'type': 'endpoint_critic_msg', 'discard': True})
+    sink({'type': 'flow_critic_msg', 'discard': True})
     sink({'type': 'future_event', 'payload': 'kept'})
     sink.replace_content('deliverable')
 
@@ -91,8 +91,8 @@ def test_discard_unknown_events_and_lockless_final_content_are_safe():
     assert forwarded[-1] == {'type': 'future_event', 'payload': 'kept'}
 
 
-def test_endpoint_runner_only_assembles_the_chat_event_sink_port():
-    runner = (ROOT / 'lib' / 'orchestration_endpoint_runner.py').read_text()
+def test_flow_runner_only_assembles_the_chat_event_sink_port():
+    runner = (ROOT / 'lib' / 'orchestration_chat_flow_runner.py').read_text()
     runtime = (
         ROOT / 'lib' / 'orchestration_chat_flow_runtime.py').read_text()
     completion = (
@@ -105,5 +105,5 @@ def test_endpoint_runner_only_assembles_the_chat_event_sink_port():
     assert 'task_event_sink=task_event_sink' in runtime
     assert 'append_event=ports.append_event' in runtime
     assert 'self._task_event_sink.replace_content(' in completion
-    assert "ev.get('type') == 'endpoint_iteration'" not in runner + runtime
+    assert "ev.get('type') == 'flow_iteration'" not in runner + runtime
     assert 'class _NullLock' not in runner + runtime

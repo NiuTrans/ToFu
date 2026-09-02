@@ -6,7 +6,7 @@ from lib.orchestration._subflow_contract import MAX_SUBFLOW_DEPTH
 
 
 def chat_projection_for_flow(definition: dict) -> str:
-    """Return ``autopilot``, ``endpoint`` or generic ``flow`` presentation."""
+    """Return ``autopilot``, ``critic`` or generic ``flow`` presentation."""
     roles: set[str] = set()
     seen: set[int] = set()
 
@@ -29,5 +29,5 @@ def chat_projection_for_flow(definition: dict) -> str:
     if 'virtual_user' in roles:
         return 'autopilot'
     if roles.intersection({'planner', 'critic', 'reviewer'}):
-        return 'endpoint'
+        return 'critic'
     return 'flow'

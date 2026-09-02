@@ -5,13 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Callable, Mapping
+import time as _time
+from collections.abc import Mapping
 from typing import Any
 
 from lib.app_lifecycle import add_shutdown_handler, add_startup_handler
-
-
-DeferredProvider = Callable[[], Any]
 
 
 def _create_debug_guard(loop: asyncio.AbstractEventLoop, *, logger, environ):
@@ -81,20 +79,40 @@ def _stop_auto_restart() -> None:
     stop_auto_restart_watch(timeout=2.0)
 
 
-def _run_deferred_dispatch(descriptor: Any, shutdown_requested: Any) -> Any:
-    from lib.tasks_pkg import run_deferred_boot_dispatch
-
-    return run_deferred_boot_dispatch(
-        descriptor,
-        should_continue=lambda: not shutdown_requested.is_set(),
-        stop_event=shutdown_requested,
-    )
-
-
 def _redispatch_orphaned_queue() -> Any:
     from lib.message_queue import redispatch_orphaned_queue_on_startup
 
     return redispatch_orphaned_queue_on_startup()
+
+
+def _turn_recovery_backstop_body(
+        stop_event: Any, gate_open_ms: int, log: logging.Logger) -> None:
+    """Post-serving safety net for restart settlement (2026-08-19 incident).
+
+    Boot recovery (_init_database) is the ONLY other place orphaned
+    'running' attempts get settled, and it runs while the sidecar is still
+    warming up — one transient deadline failure used to leave turns
+    'running' FOREVER, which the frontend renders as a sidebar full of
+    "回答中" plus a topbar badge stuck on "重连中". Re-run the settlement
+    once, shortly after serving starts, with HARD liveness guards so a
+    genuinely-live attempt can never be swept:
+      • created_before_ms — only attempts older than the serving gate;
+      • exclude_task_ids — skip attempts whose task is in the live registry.
+    Idempotent: when boot recovery already did its job this finds nothing.
+    """
+    for _ in range(45):  # let the serving loop settle; abortable on shutdown
+        if stop_event.is_set():
+            return
+        _time.sleep(1)
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    live_task_ids = set(chat_task_runtime.task_ids())
+    from lib.turn_lifecycle import recover_running_attempts
+    settled = recover_running_attempts(
+        created_before_ms=gate_open_ms, exclude_task_ids=live_task_ids)
+    if settled:
+        log.warning(
+            '[Server] post-serving turn-recovery backstop settled %d '
+            'orphaned attempt(s) that boot recovery missed', settled)
 
 
 def register_serving_loop_lifecycle(
@@ -106,7 +124,6 @@ def register_serving_loop_lifecycle(
     hooks: Any = None,
     fault_shm_log: Any = None,
     fault_log: Any = None,
-    deferred_dispatch_provider: DeferredProvider | None = None,
     logger: logging.Logger | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> bool:
@@ -188,22 +205,6 @@ def register_serving_loop_lifecycle(
         except Exception as exc:
             log.warning('[Server] Auto-restart watcher setup failed: %s', exc)
 
-        async def _run_deferred_boot_dispatch() -> None:
-            await gate.wait()
-            if stop_event.is_set() or deferred_dispatch_provider is None:
-                return
-            descriptor = deferred_dispatch_provider()
-            if descriptor is None:
-                return
-            try:
-                await asyncio.to_thread(
-                    _run_deferred_dispatch, descriptor, stop_event)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning(
-                    '[Server] deferred boot dispatch failed: %s', exc)
-
         async def _run_orphan_queue_redispatch() -> None:
             await gate.wait()
             if stop_event.is_set():
@@ -222,16 +223,30 @@ def register_serving_loop_lifecycle(
                 log.warning(
                     '[Server] orphaned-queue redispatch failed: %s', exc)
 
-        # Always schedule after-start work. The recovery descriptor is produced
-        # by database startup, so it must be read only after production sets the
-        # gate rather than sampled before Hypercorn enters the lifespan.
-        runtime.create_task(
-            _run_deferred_boot_dispatch(),
-            name='tofu-deferred-boot-dispatch',
-        )
+        async def _run_turn_recovery_backstop() -> None:
+            await gate.wait()
+            if stop_event.is_set():
+                return
+            # Attempts created before the gate opened cannot belong to this
+            # process's serving era; combined with the live-registry exclusion
+            # inside the backstop body, a live turn can never be swept.
+            gate_open_ms = int(_time.time() * 1000)
+            try:
+                await asyncio.to_thread(
+                    _turn_recovery_backstop_body, stop_event, gate_open_ms, log)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning(
+                    '[Server] turn-recovery backstop failed: %s', exc)
+
         runtime.create_task(
             _run_orphan_queue_redispatch(),
             name='tofu-orphan-queue-redispatch',
+        )
+        runtime.create_task(
+            _run_turn_recovery_backstop(),
+            name='tofu-turn-recovery-backstop',
         )
         state['status'] = 'ready'
 

@@ -26,6 +26,7 @@ builder ring.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -42,9 +43,8 @@ from lib.mcp.registry import is_opensource_build
 
 pytestmark = pytest.mark.unit
 
-# The opensource export ships restart_15000.sh with placeholder paths
-# (PROJ="/path/to/your/project"), so the live-script e2e tests below cannot
-# run there — they self-skip on a public build.
+# The destructive A/B fault-injection cases remain in the internal lifecycle
+# lane; portable source behavior is covered by the non-destructive contracts.
 _OPENSOURCE = is_opensource_build()
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -223,9 +223,14 @@ def _allow_isolated_lifecycle_test(text: str) -> str:
     """Opt a retargeted/defanged script copy into lifecycle test execution."""
     marker = '#!/usr/bin/env bash\n'
     assert text.startswith(marker), 'restart script shebang changed?'
+    test_environment = (
+        'export TOFU_ALLOW_LIFECYCLE_TEST=1\n'
+        f'export TOFU_PROJECT_ROOT={shlex.quote(ROOT)}\n'
+        f'export TOFU_RUNTIME_PYTHON={shlex.quote(sys.executable)}\n'
+    )
     return text.replace(
         marker,
-        marker + 'export TOFU_ALLOW_LIFECYCLE_TEST=1\n', 1)
+        marker + test_environment, 1)
 
 
 def _run_orphaned(script_path: str, timeout: int = 120) -> tuple:
@@ -277,7 +282,7 @@ def _run_orphaned(script_path: str, timeout: int = 120) -> tuple:
     return rc, output
 
 
-@pytest.mark.ci_serial
+@pytest.mark.serial
 class TestRealScriptGate:
     """Real shell-process tests share one fixed listener and restart lock.
 
@@ -297,7 +302,7 @@ class TestRealScriptGate:
         assert 'PYTEST_CURRENT_TEST' in text
         assert 'TOFU_ALLOW_LIFECYCLE_TEST' in text
 
-    @pytest.mark.skipif(_OPENSOURCE, reason='opensource restart_15000.sh carries placeholder paths — live e2e is internal-only')
+    @pytest.mark.skipif(_OPENSOURCE, reason='legacy live-process fault injection is internal-only')
     def test_noninteractive_run_refuses_and_server_survives(self):
         """A detached non-interactive run must refuse on an isolated listener.
 
@@ -348,7 +353,7 @@ class TestRealScriptGate:
                 dummy.wait(timeout=5)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    @pytest.mark.skipif(_OPENSOURCE, reason='opensource restart_15000.sh carries placeholder paths — live e2e is internal-only')
+    @pytest.mark.skipif(_OPENSOURCE, reason='legacy live-process fault injection is internal-only')
     def test_neutered_gate_kills_dummy_on_test_port(self):
         """NEUTER A/B: strip the [pre/5c] block and retarget to a test port —
         the SAME script now kills the dummy listener, proving the gate is
@@ -425,7 +430,7 @@ class TestRealScriptGate:
 
 # ── restart-lock fd-9 inheritance (pt_2a05e161b9814bc2) ─────────────
 
-@pytest.mark.ci_serial
+@pytest.mark.serial
 class TestRestartLockInheritance:
     """The relaunched server must NOT inherit the [pre/5b] restart-lock fd.
 
@@ -455,7 +460,7 @@ class TestRestartLockInheritance:
         ported = _defang_pgrep_fallback(ported)
         ported = _allow_isolated_lifecycle_test(ported)
         # Each pytest process gets its own serialization and instance locks.
-        # ``ci_serial`` only serializes workers inside one invocation; a fixed
+        # ``serial`` only isolates workers inside one invocation; a fixed
         # project lock made independent test invocations contaminate this fd
         # inheritance probe.
         restart_lock = os.path.join(tmpdir, '.restart.lock')
@@ -477,8 +482,13 @@ class TestRestartLockInheritance:
         with open(stub, 'w') as f:
             # `exec` so the stub process IS the sleep (no bash wrapper whose
             # orphaned sleep child would keep holding fd 9 after pkill of the
-            # wrapper — that leak blocked the whole suite for 60s once).
-            f.write('#!/bin/bash\nexec sleep 297\n')
+            # wrapper — that leak blocked the whole suite for 60s once). The
+            # portable launcher now probes its interpreter version with stdin;
+            # acknowledge only that probe before preserving the long-lived
+            # worker behavior this test needs.
+            f.write('#!/bin/bash\n'
+                    '[ "${1:-}" = "-" ] && exit 0\n'
+                    'exec sleep 297\n')
         os.chmod(stub, 0o755)
         py_line = nogate.index('PY="')
         py_end = nogate.index('\n', py_line)
@@ -526,7 +536,7 @@ class TestRestartLockInheritance:
             except OSError:
                 pass
 
-    @pytest.mark.skipif(_OPENSOURCE, reason='opensource restart_15000.sh carries placeholder paths — live e2e is internal-only')
+    @pytest.mark.skipif(_OPENSOURCE, reason='legacy live-process fault injection is internal-only')
     def test_relaunched_child_does_not_hold_restart_lock(self):
         if _real_store_has_fireable_restart_token():
             pytest.skip('fireable approved restart token in the real store')
@@ -579,11 +589,11 @@ class TestRestartLockInheritance:
 class TestRecoveryNote:
 
     def _build(self, messages, exclude_last):
-        import lib.tasks_pkg.conv_message_builder as facade
+        import lib.tasks_pkg.conv_message_builder._load as facade
         from unittest.mock import patch
         with patch.object(facade, '_load_messages_from_db', return_value=messages):
             return facade.build_api_messages_from_db(
-                'convTest', {}, exclude_last=exclude_last)
+                'convTest', {}, exclude_last=exclude_last, user_id=1)
 
     _RESTART_TAIL = {
         'role': 'assistant', 'content': 'partial',

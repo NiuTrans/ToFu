@@ -58,7 +58,7 @@ def finalize_unavailable_orchestration_chat_flow(
         detail=f'Could not resolve selected flow {selected}.',
         model=config.get('model', ''),
         context='orchestration-flow-selection',
-        source='lib.orchestration_endpoint_runner',
+        source='lib.orchestration_chat_flow_runner',
         retryable=False,
         hint=('请重新打开“编排流程”选择器并选择一个仍然存在的流程。\n'
               'Reopen the orchestration picker and select an available flow.'),
@@ -73,7 +73,7 @@ def finalize_unavailable_orchestration_chat_flow(
         flow=selected,
     )
     ports.finalize_error(
-        task, error, endpoint_reason='definition_unavailable')
+        task, error, flow_reason='definition_unavailable')
     return error
 
 
@@ -100,10 +100,10 @@ def finalize_orchestration_chat_flow_exception(
         error,
         model=(task.get('config') or {}).get('model', ''),
         context='orchestration-flow-fatal',
-        source='lib.orchestration_endpoint_runner',
+        source='lib.orchestration_chat_flow_runner',
         kind='internal',
     )
-    ports.finalize_error(task, envelope, endpoint_reason='fatal')
+    ports.finalize_error(task, envelope, flow_reason='fatal')
     return envelope
 
 

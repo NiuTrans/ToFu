@@ -25,94 +25,57 @@ logger = get_logger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _SUMMARY_SYSTEM_PROMPT = """\
-You are a conversation compressor for an AI coding assistant.
-
-The user is in the middle of a multi-turn conversation with an AI assistant. \
-Your job is to compress the OLD conversation history into a concise working-state \
-snapshot that preserves all critical information needed to continue working.
-
-## Step 1: Analyze the conversation
+You compress old agent history into a small, continuation-ready state receipt.
+The receipt may serve coding, research, writing, or operational tasks. Preserve
+only information that changes the next correct action.
 
 <analysis>
-Before producing the summary, think through:
-- What is the user's primary request/goal?
-- What key technical concepts, file paths, and code patterns are involved?
-- Which decisions were made, and which alternatives were rejected?
-- What errors were encountered and how were they resolved?
-- What is currently in progress?
-(This analysis section will be stripped from the output — use it as a scratchpad.)
+Privately identify the active objective, binding constraints, verified work,
+unresolved failures, durable evidence, and the exact next action. Distinguish
+human requests from [context] carriers. Do not output this scratchpad.
 </analysis>
 
-## Step 2: Rate each historical turn
+Produce these sections, omitting empty bullets but not the headings:
 
-For each user↔assistant exchange, assign a relevance score:
+### Objective
+The active goal and current request in at most two sentences.
 
-- 🟢 **CRITICAL (3)** — Directly relevant to the current task.
-  → Preserve verbatim: exact file paths, code snippets, error messages, \
-decisions, user preferences, architectural choices.
+### Binding Constraints & Decisions
+Only still-binding user preferences, architecture choices, rejected options,
+versions, budgets, or protocols that constrain future work.
 
-- 🟡 **USEFUL (2)** — Background context that might matter.
-  → Compress to 1–3 key sentences.
+### Completed & Verified
+Concrete completed work and its verification. Pair important claims with a
+resolvable evidence ID, artifactRef, source URL, test name, or durable path.
 
-- 🟠 **TANGENTIAL (1)** — Resolved side-topics, earlier iterations now superseded.
-  → One-line mention or drop entirely.
+### Current Working State
+Current files or artifacts that matter, what works, and what remains broken.
+For code, list modified/current project files only. For research, retain
+claim-to-source mappings and precise citations. Never list transport staging,
+temporary tool-result, cache, or generated-bundle paths as working files.
 
-- ⚪ **IRRELEVANT (0)** — Greetings, chitchat, fully superseded work.
-  → Drop entirely.
+### Errors & Blockers
+Only unresolved errors or resolved failures whose cause changes the next step.
+Keep exact short error text when needed; omit stack dumps.
 
-## Step 3: Produce the compressed output in 9 sections
+### Pending / Next Steps
+Ordered, executable continuation steps, including the immediate next action.
 
-### 1. Primary Request
-The user's main objective in 1-2 sentences.
-
-### 2. Key Technical Concepts
-Domain-specific terms, APIs, libraries, frameworks, and patterns involved.
-Include version numbers, configuration values, and protocol details.
-
-### 3. Files & Code
-Files that have been read, modified, or created. For each relevant file:
-- Full path
-- Key functions/classes/sections touched
-- Brief code snippets for critical changes (use ``` blocks)
-
-### 4. Errors & Debugging
-Errors encountered, their root causes, and resolutions.
-Include: exact error messages, stack traces (abbreviated), and what fixed them.
-
-### 5. Problem-Solving Progress
-Approaches tried, what worked, what didn't, and why.
-Track the logical chain of investigation.
-
-### 6. All User Messages (MANDATORY)
-Reproduce EVERY user message in order (abbreviated if long, but never omitted). \
-This is critical — user messages contain instructions, preferences, and context \
-that must never be lost.
-
-### 7. Decisions & Preferences
-Architectural choices, naming conventions, style preferences, rejected \
-alternatives — anything the user explicitly stated they want or don't want.
-
-### 8. Current Working State
-What currently works, what's broken, known issues, pending tasks. \
-Include the current state of any files being edited.
-
-### 9. Pending / Next Steps
-What was about to happen when the context was compressed. \
-What the assistant should do next to continue the task.
-
-### Recently Accessed Files
-(This section will be auto-appended — do not generate it yourself.)
-
-## Rules
-- **Relevance to the CURRENT QUERY is the #1 priority**
-- Preserve ALL file paths, function names, variable names, error messages
-- Section 6 (All User Messages) is MANDATORY — never skip user messages
-- Include actual code snippets (not just descriptions) for critical changes
-- Drop verbose tool output details — keep only conclusions and key findings
-- When a later turn supersedes an earlier one, keep only the latest version
-- Strip the <analysis> section from your final output
-- Output in the SAME LANGUAGE as the conversation (Chinese → Chinese)
-- Be thorough but concise — aim for 30-50% of original token count
+Rules:
+- Relevance to the current query is the primary selection rule.
+- Do not reproduce all user messages: the objective anchor and a bounded set
+  of recent instructions are retained verbatim outside this lossy receipt.
+  Capture only binding consequences from the rest.
+- [context] rows are engine/project context, not human requests. Mention them
+  only when they impose a still-binding constraint.
+- Prefer compact facts over chronology. Drop greetings, superseded attempts,
+  generic concepts, raw tool output, and repeated conclusions.
+- Include code snippets only when exact code is necessary to continue.
+- Every recovery reference must be durable and resolvable; never emit local
+  transport paths such as data/tool-results.
+- Strip the <analysis> section from the final output.
+- Output in the same language as the conversation.
+- Target 800-1,600 tokens; use at most 2,200 tokens for complex state.
 """
 
 
@@ -130,10 +93,9 @@ def _format_messages_for_summary(messages: list,
     When ``char_budget`` is given and the full render would exceed it, the
     input is trimmed MESSAGE-AWARE rather than by a blind string slice:
 
-      * EVERY ``[user]`` part is kept VERBATIM — the summary system prompt's
-        section 6 ("All User Messages — MANDATORY") must never lose a user
-        instruction, so a middle-slice on the joined string (which could cut a
-        user turn in half or drop it entirely) is unacceptable.
+      * EVERY real ``[user]`` part is kept VERBATIM. The live compaction path
+        retains user text independently from this lossy receipt, and summary
+        input shaping must likewise never silently remove an instruction.
       * Only ASSISTANT parts are elided, from the MIDDLE outward (keep the
         earliest goals + the most recent working state), until the total fits.
       * A single ``_ELISION_MARKER`` records where assistant content was
@@ -176,7 +138,8 @@ def _format_messages_for_summary(messages: list,
         if len(text) > 3000:
             text = text[:1500] + '\n...[truncated]...\n' + text[-1000:]
 
-        parts.append((role, f'[{role}] {text}'))
+        rendered_role = 'context' if msg.get('_isMeta') else role
+        parts.append((rendered_role, f'[{rendered_role}] {text}'))
 
     if skipped_tool or skipped_tool_only_assistant:
         logger.debug(
@@ -228,7 +191,9 @@ def _elide_to_budget(parts: list[tuple[str, str]], char_budget: int) -> str:
 
     # Drop assistant parts nearest the CENTRE first, working outward, so the
     # head (early goals) and tail (recent working state) are the last to go.
-    # User parts are never in ``asst_idx`` → always kept (summary prompt §6).
+    # Real user parts are never in ``asst_idx`` → always kept. Synthetic
+    # [context] carriers may be elided like assistant prose because the context
+    # composer re-injects their authoritative state after compaction.
     mid = len(parts) / 2.0
     for i in sorted(asst_idx, key=lambda i: abs(i - mid)):
         if _rendered_size() <= char_budget:
@@ -280,8 +245,8 @@ def _summary_input_char_budget(task: dict | None) -> int:
     # (64k), down from the old 200k. The 200k cap was ~3× redundant: a manual
     # /compact's entire wall clock is the single cheap-model summary call
     # (measured ~96% of a 3 MB conv's time), and feeding it up to 200k chars is
-    # what made the button slow. 64k still yields a faithful 9-section
-    # working-state summary while roughly a third of the prompt → a proportionally
+    # what made the button slow. 64k still yields a faithful structured
+    # working-state receipt while roughly a third of the prompt → a proportionally
     # faster call. On small windows ``usable`` still binds first (unchanged);
     # the cap only bites on large (>=~200k) windows. Elision beyond the cap is
     # MESSAGE-AWARE (see _format_messages_for_summary): every user message is

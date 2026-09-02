@@ -30,6 +30,8 @@ WHAT IS ASSERTED (results, not implementation — charter discipline)
     "one letter per line" modified-files incident, conv mr4e8pnxbv440z).
 """
 
+import json
+
 import pytest
 
 from lib.tasks_pkg.compaction._layer2._anchor import (
@@ -44,6 +46,8 @@ from lib.tasks_pkg.compaction._layer2._anchor import (
 )
 
 pytestmark = pytest.mark.unit
+
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/real.py'}
 
 
 def _u(text, **extra):
@@ -244,6 +248,29 @@ def test_split_cold_rounds_is_index_space_agnostic():
     assert _split_cold_rounds(spans, 1)[1] == [(4, 6)]
 
 
+def test_intra_turn_hot_tail_obeys_token_budget_without_splitting_rounds():
+    recent = [_u('current task')]
+    for index in range(4):
+        call_id = f'tc-{index}'
+        recent.extend([
+            _a('', tool_calls=[{'id': call_id}]),
+            {'role': 'tool', 'tool_call_id': call_id,
+             'content': f'result-{index}-' + ('x' * 5_000)},
+        ])
+
+    kept, cold = _fold_recent_intra_turn(
+        recent, hot_rounds=8, hot_budget_tokens=1)
+
+    assert kept[0] == recent[0]
+    assert [m.get('tool_call_id') for m in kept if m.get('role') == 'tool'] == [
+        'tc-3'
+    ]
+    assert len(cold) == 6
+    assert [m.get('tool_call_id') for m in cold if m.get('role') == 'tool'] == [
+        'tc-0', 'tc-1', 'tc-2'
+    ]
+
+
 # ───────────────────── api-form round grouping ─────────────────────
 
 def test_apiform_rounds_group_assistant_with_its_tool_results():
@@ -398,3 +425,114 @@ def test_recent_files_never_emits_single_characters():
     msgs = [_call('read_files', '{"reads": "[{\\"path\\": \\"a.py\\"]"}')]
     for p in _extract_recently_accessed_files(msgs):
         assert len(p) > 1
+
+
+def test_recent_files_hard_caps_one_large_batch():
+    reads = [{"path": f"src/file_{index}.py"} for index in range(20)]
+    msgs = [_call('read_files', json.dumps({'reads': reads}))]
+    assert _extract_recently_accessed_files(msgs, max_files=8) == [
+        f'src/file_{index}.py' for index in range(8)
+    ]
+
+
+def test_recent_files_hard_caps_across_multiple_messages():
+    msgs = [_call('write_file', json.dumps({'path': f'src/{index}.py'}))
+            for index in range(20)]
+    files = _extract_recently_accessed_files(msgs, max_files=8)
+    assert len(files) == 8
+    assert files == [f'src/{index}.py' for index in range(19, 11, -1)]
+
+
+def test_recent_files_excludes_reconstructible_tool_result_artifacts():
+    msgs = [_call('read_files', json.dumps({'reads': [
+        {'path': 'lib/real.py'},
+        {'path': 'data/tool-results/conv/result.txt'},
+        {'path': '/workspace/data/tool-results/conv/remote.txt'},
+    ]}))]
+    assert _extract_recently_accessed_files(msgs) == ['lib/real.py']
+
+
+def test_recent_files_requires_success_for_modern_identified_calls():
+    def identified(call_id, path):
+        return _a('', tool_calls=[{
+            'id': call_id,
+            'function': {
+                'name': 'read_files',
+                'arguments': json.dumps({'reads': [{'path': path}]}),
+            },
+        }])
+
+    msgs = [
+        identified('ok', 'src/ok.py'),
+        {'role': 'tool', 'name': 'read_files', 'tool_call_id': 'ok',
+         'content': 'src/ok.py: 1 line'},
+        identified('failed', 'src/missing.py'),
+        {'role': 'tool', 'name': 'read_files', 'tool_call_id': 'failed',
+         'content': 'Error: File not found'},
+        identified('unsettled', 'src/not-run.py'),
+    ]
+    assert _extract_recently_accessed_files(msgs) == ['src/ok.py']
+
+
+def test_recent_files_recognizes_failed_results_without_repeated_tool_name():
+    def identified(call_id, name, path):
+        return _a('', tool_calls=[{
+            'id': call_id,
+            'function': {
+                'name': name,
+                'arguments': json.dumps({'path': path}),
+            },
+        }])
+
+    msgs = [
+        identified('write-ok', 'write_file', 'src/created.py'),
+        {'role': 'tool', 'tool_call_id': 'write-ok',
+         'content': 'File created successfully'},
+        identified('write-failed', 'write_file', 'src/not-created.py'),
+        {'role': 'tool', 'tool_call_id': 'write-failed',
+         'content': 'Write failed: permission denied'},
+        identified('json-failed', 'read_file', 'src/missing.py'),
+        {'role': 'tool', 'tool_call_id': 'json-failed',
+         'content': '{"status":"error","summary":"not found"}'},
+    ]
+    assert _extract_recently_accessed_files(msgs) == ['src/created.py']
+
+
+def test_recent_files_uses_only_latest_recycled_call_id():
+    def read_call(path):
+        return _a('', tool_calls=[{
+            'id': 'recycled',
+            'function': {
+                'name': 'read_file',
+                'arguments': json.dumps({'path': path}),
+            },
+        }])
+
+    msgs = [
+        read_call('src/old-success.py'),
+        {'role': 'tool', 'tool_call_id': 'recycled',
+         'content': 'file contents'},
+        read_call('src/latest-failed.py'),
+        {'role': 'tool', 'tool_call_id': 'recycled',
+         'content': 'Error: File not found'},
+    ]
+    assert _extract_recently_accessed_files(msgs) == []
+
+
+def test_recent_files_recycled_latest_call_must_itself_be_settled():
+    def read_call(path):
+        return _a('', tool_calls=[{
+            'id': 'recycled',
+            'function': {
+                'name': 'read_file',
+                'arguments': json.dumps({'path': path}),
+            },
+        }])
+
+    msgs = [
+        read_call('src/old-success.py'),
+        {'role': 'tool', 'tool_call_id': 'recycled',
+         'content': 'file contents'},
+        read_call('src/latest-unsettled.py'),
+    ]
+    assert _extract_recently_accessed_files(msgs) == []

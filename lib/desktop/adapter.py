@@ -5,7 +5,7 @@ desktop agent as an ordinary OpenAI-compatible provider whose base_url
 happens to be loopback-ON-THE-AGENT — every request rides the bridge's
 ``target='loopback'`` relay (lib/desktop/egress.py), so the subscription
 tokens and the cloaking arms race both stay at the edge
-(docs/SUBSCRIPTION_RELAY_SCENARIOS_DESIGN.md §4.4).
+(docs/modules/remote_execution.md).
 
 This module owns:
   * the policy store (``data/config/subscription_adapter.json``): per-agent

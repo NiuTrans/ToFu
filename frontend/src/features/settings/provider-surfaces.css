@@ -1,0 +1,254 @@
+/* Settings-only local-engine and provider wire-face presentation.
+
+   Loaded with the settings feature chunk; these rules no longer tax the
+   application shell before Settings is opened. */
+
+/* ══════════════════════════════════════
+   Local Engine Preset chooser + per-endpoint model chips
+   (local-deployment rework 2026-07-25)
+   ══════════════════════════════════════ */
+.stg-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+.stg-preset-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 14px;
+  background: var(--s-white, #fff);
+  border: 1.5px dashed var(--s-ink, #2a2a2a);
+  border-radius: var(--s-radius, 10px);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  transition: transform .12s ease, box-shadow .12s ease, background .12s ease;
+}
+.stg-preset-tile:hover {
+  background: var(--s-cream, #faf6ee);
+  transform: translateY(-1px);
+  box-shadow: 0 3px 0 var(--s-ink, #2a2a2a);
+}
+.stg-preset-tile:focus-visible {
+  outline: 2px solid var(--s-gold, #b98a2f);
+  outline-offset: 2px;
+}
+.stg-preset-tile .stg-preset-icon { display: inline-flex; }
+.stg-preset-tile .stg-preset-icon svg { display: block; }
+.stg-preset-name { font-weight: 800; font-size: 14px; color: var(--s-ink, #2a2a2a); }
+.stg-preset-desc { font-size: 11.5px; line-height: 1.45; color: var(--s-ink-soft, #6b6250); }
+@media (max-width: 520px) {
+  .stg-preset-grid { grid-template-columns: 1fr; }
+}
+
+/* Per-endpoint served-model chips (auto-detected on blur / probe) */
+.stg-ep-models {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.stg-ep-model-chip {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--s-cream, #faf6ee);
+  border: 1px solid var(--s-line, #d8d0bd);
+  color: var(--s-ink-soft, #6b6250);
+  font-family: ui-monospace, monospace;
+}
+.stg-ep-model-chip.more { font-weight: 800; }
+
+/* Model card — "via <endpoint>" placement chip */
+.stg-mcard-via { font-family: ui-monospace, monospace; }
+
+/* ══ Model card — wire-face chip ════════════════════════════════════════════
+   Which protocol line a model dispatches over. Rendered ONLY from a landed
+   backend resolution (POST /api/v1/providers/resolve-faces), never from a
+   client-side guess — see static/js/settings/provider_faces.js.
+
+   Three states, deliberately distinct: `anthropic` is tinted (it is the state
+   that carries thinking-block signatures, i.e. the one worth spotting at a
+   glance), `pinned` adds a dashed border because a manual override beat the
+   automatic family rule, and `refused` is amber because that model is NOT in
+   the picker at all. */
+.stg-face-chip{
+  display:inline-flex;
+  align-items:center;
+  gap:3px;
+  margin-left:7px;
+  padding:1px 6px;
+  border-radius:999px;
+  border:1px solid var(--s-border,rgba(0,0,0,0.14));
+  background:var(--s-bg-subtle,rgba(0,0,0,0.04));
+  color:var(--s-text-muted,#6b7280);
+  font-family:'JetBrains Mono',ui-monospace,monospace;
+  font-size:9.5px;
+  font-weight:700;
+  letter-spacing:0.02em;
+  text-transform:lowercase;
+  vertical-align:middle;
+  cursor:help;
+}
+.stg-face-chip.anthropic{
+  border-color:rgba(198,120,72,0.5);
+  background:rgba(198,120,72,0.12);
+  color:#a8552b;
+}
+.stg-face-chip.responses{
+  border-color:rgba(14,116,144,0.5);
+  background:rgba(14,116,144,0.12);
+  color:#0e7490;
+}
+.stg-face-chip.pinned{
+  border-style:dashed;
+  border-width:1.5px;
+}
+.stg-face-chip.refused{
+  border-color:rgba(217,119,6,0.5);
+  background:rgba(245,158,11,0.14);
+  color:#92400e;
+}
+[data-theme="dark"] .stg-face-chip,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-chip{
+  border-color:rgba(255,255,255,0.16);
+  background:rgba(255,255,255,0.06);
+  color:#9ca3af;
+}
+[data-theme="dark"] .stg-face-chip.anthropic,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-chip.anthropic{
+  border-color:rgba(214,150,110,0.55);
+  background:rgba(214,150,110,0.16);
+  color:#e0a882;
+}
+[data-theme="dark"] .stg-face-chip.responses,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-chip.responses{
+  border-color:rgba(94,196,220,0.5);
+  background:rgba(94,196,220,0.15);
+  color:#7fd4e8;
+}
+[data-theme="dark"] .stg-face-chip.refused,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-chip.refused{
+  border-color:rgba(251,191,36,0.5);
+  background:rgba(251,191,36,0.14);
+  color:#fbbf24;
+}
+
+/* ══ Model edit form — wire-face pin warning ════════════════════════════════
+   Pinning is LEGAL but consequential (a Claude model on a non-Anthropic face
+   silently loses thinking signatures). The backend logs the override; this is
+   the same fact at the moment of choosing. */
+.stg-face-warn{
+  margin-top:6px;
+  padding:6px 9px;
+  border-radius:var(--s-radius,6px);
+  border-left:3px solid #d97706;
+  background:rgba(245,158,11,0.10);
+  color:#92400e;
+  font-size:11px;
+  line-height:1.5;
+}
+.stg-face-warn-ic{ margin-right:3px; }
+.stg-face-warn-ic svg{ vertical-align:-0.15em; }
+[data-theme="dark"] .stg-face-warn,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-warn{
+  background:rgba(251,191,36,0.10);
+  color:#e5c07b;
+}
+
+/* ══ Provider card — alternate wire-faces editor ════════════════════════════
+   One row per declared face: protocol select + base_url + delete. The face
+   NAME is a hidden auto-derived handle (protocol + collision suffix), never
+   a text box — owner review 2026-08-06: a 118px '面名' input was both
+   unreadable and unanswerable. */
+.stg-faces-header{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-bottom:6px;
+}
+.stg-faces-list{display:flex;flex-direction:column;gap:6px}
+.stg-face-row{display:flex;align-items:center;gap:6px}
+.stg-face-row .stg-face-proto{flex:0 0 124px}
+.stg-face-row .stg-face-url{flex:1 1 auto;min-width:0}
+.stg-faces-btn{
+  flex:0 0 auto;
+  padding:4px 8px;
+  border-radius:var(--s-radius,6px);
+  border:1px solid var(--s-border,rgba(0,0,0,0.14));
+  background:transparent;
+  color:var(--s-text-muted,#6b7280);
+  cursor:pointer;
+  font-size:12px;
+  line-height:1;
+}
+.stg-faces-btn.danger:hover{
+  border-color:rgba(220,38,38,0.5);
+  background:rgba(220,38,38,0.08);
+  color:#dc2626;
+}
+.stg-faces-empty{
+  padding:7px 10px;
+  border-radius:var(--s-radius,6px);
+  background:var(--s-bg-subtle,rgba(0,0,0,0.03));
+  color:var(--s-text-muted,#6b7280);
+  font-size:11.5px;
+}
+[data-theme="dark"] .stg-faces-empty,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-faces-empty{
+  background:rgba(255,255,255,0.04);
+  color:#9ca3af;
+}
+
+/* ══ Provider card — wire-face refusal banner ═══════════════════════════════
+   The dispatcher REFUSES to register a model whose wire face can't be resolved
+   safely (a Claude model on a dual-face gateway whose provider declares no
+   faces.anthropic — dispatching it would silently drop thinking signatures).
+   Without this banner that model is simply ABSENT from the picker with no
+   explanation, which is the same silent-failure class the refusal exists to
+   prevent. Amber = "needs one action", not red = "broken": the fix is a single
+   click on 从模板同步. */
+.stg-face-refusal{
+  margin:0 14px 10px;
+  padding:9px 12px;
+  border:1.5px solid rgba(217,119,6,0.45);
+  border-left:3px solid #d97706;
+  border-radius:var(--s-radius,6px);
+  background:rgba(245,158,11,0.09);
+}
+.stg-face-refusal-title{
+  font-size:11.5px;
+  font-weight:800;
+  color:#92400e;
+  letter-spacing:0.01em;
+}
+.stg-face-refusal-models{
+  margin-top:4px;
+  font-family:'JetBrains Mono',ui-monospace,monospace;
+  font-size:11px;
+  font-weight:600;
+  color:#7c2d12;
+  word-break:break-word;
+}
+.stg-face-refusal-hint{
+  margin-top:5px;
+  font-size:11px;
+  line-height:1.55;
+  color:#78350f;
+}
+[data-theme="dark"] .stg-face-refusal,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-refusal{
+  border-color:rgba(245,158,11,0.4);
+  background:rgba(245,158,11,0.10);
+}
+[data-theme="dark"] .stg-face-refusal-title,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-refusal-title{color:#fbbf24}
+[data-theme="dark"] .stg-face-refusal-models,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-refusal-models{color:#fcd34d}
+[data-theme="dark"] .stg-face-refusal-hint,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-refusal-hint{color:#e5c07b}

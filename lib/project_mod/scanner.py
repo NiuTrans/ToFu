@@ -1,7 +1,8 @@
 """Project path registration and utility functions.
 
-Background scanning has been removed — the LLM relies entirely on tools
-(list_dir, grep_search, find_files, read_files) to explore projects.
+Background scanning has been removed — the LLM relies entirely on
+grep_search, find_files, read_files, and bounded ``ls`` routing through
+run_command to explore projects.
 """
 import os
 import time
@@ -21,6 +22,24 @@ from lib.project_mod.modifications import _start_new_session
 
 logger = get_logger(__name__)
 
+
+def _warm_tree_indexes(*paths):
+    """Kick background tree-index builds for freshly registered roots.
+
+    The persistent file index (lib/project_mod/tree_index.py) is what keeps
+    grep_search / find_files off the live directory walk on FUSE / cross-DC
+    mounts.  Warming here means the index usually exists before the model's
+    first search query lands.  Non-blocking and best-effort.
+    """
+    try:
+        from lib.project_mod import tree_index
+        for p in paths:
+            if p:
+                tree_index.warm(p)
+    except Exception as e:
+        logger.debug('[Project] tree-index warm skipped: %s', e)
+
+
 def ensure_project_state(path_str, extra_paths=None, conv_id=None, readonly_paths=None):
     """Ensure the server's project state matches the given path(s).
 
@@ -28,7 +47,7 @@ def ensure_project_state(path_str, extra_paths=None, conv_id=None, readonly_path
     If the server's _state already matches (primary + extras), this is a no-op.
     Otherwise calls set_project_paths() or set_project() to register.
 
-    ★ 2026-05-05 — ``conv_id`` parameter.  When provided, this ALSO
+    2026-05-05 — ``conv_id`` parameter.  When provided, this ALSO
     writes a per-conversation root registry via :func:`set_conv_roots`.
     The per-conv registry is immune to the global ``_roots.clear()``
     that happens when another task calls ``set_project`` with a
@@ -58,7 +77,7 @@ def ensure_project_state(path_str, extra_paths=None, conv_id=None, readonly_path
             if os.path.isdir(aep) and aep != abs_path and aep not in abs_extras:
                 abs_extras.append(aep)
 
-    # ★ Always register the per-conv scope up front (cheap; no disk I/O).
+    # Always register the per-conv scope up front (cheap; no disk I/O).
     #   Do this BEFORE touching the global registry so even if the
     #   subsequent set_project* call is delayed, the conv's tool calls
     #   can still resolve via the conv registry.
@@ -71,7 +90,7 @@ def ensure_project_state(path_str, extra_paths=None, conv_id=None, readonly_path
         except Exception as e:
             logger.warning('[Project] set_conv_roots failed conv=%s: %s',
                            conv_id[:12] if conv_id else '?', e)
-        # ★ 2026-06-22 — STOP here for task-context calls.  The global
+        # 2026-06-22 — STOP here for task-context calls.  The global
         #   _state/_roots singleton is the UI-facing "active project" the
         #   project bar reflects (via get_state() / /api/v1/project/status).
         #   A background run_task MUST NOT mutate it: both consumers a task
@@ -86,6 +105,7 @@ def ensure_project_state(path_str, extra_paths=None, conv_id=None, readonly_path
         #   lock vanishing. The conv scope is authoritative for the task; the
         #   global is owned solely by explicit UI actions (/api/project/set,
         #   /api/project/paths — which call set_project*() with no conv_id).
+        _warm_tree_indexes(abs_path, *abs_extras)
         return True
 
     with _lock:
@@ -106,6 +126,7 @@ def ensure_project_state(path_str, extra_paths=None, conv_id=None, readonly_path
         else:
             set_project(abs_path, readonly_paths=readonly_paths)
             logger.info('[Project] ensure_project_state: set %s', abs_path)
+        _warm_tree_indexes(abs_path, *abs_extras)
         return True
     except Exception as e:
         logger.warning('[Project] ensure_project_state failed for %s (+%d extras): %s',
@@ -117,7 +138,7 @@ def set_project(path_str, readonly_paths=None):
     """Validate path and register it as the active project.
 
     No background scan is performed — the LLM relies entirely on tools
-    (list_dir, grep_search, find_files, read_files) to explore the project.
+    (grep_search, find_files, read_files, and run_command) to explore the project.
 
     ``readonly_paths`` (optional): abspath'd set of roots to mark read-only;
     if the primary is in it, its root_state gets ``access='ro'``.
@@ -135,11 +156,11 @@ def set_project(path_str, readonly_paths=None):
     with _lock:
         old_path = _state.get('path')
         old_roots = list(_roots.keys())
-        # ★ Idempotence guard: if the primary is unchanged, preserve the
+        # Idempotence guard: if the primary is unchanged, preserve the
         # existing root set.  Without this guard every set_project call
         # (including frontend auto-restore on page load or repeated
         # /api/project/set from the same conv) would wipe any extra roots
-        # registered mid-conversation via tool_create_project — the model's
+        # registered mid-conversation by absolute-path writes — the model's
         # newly-scaffolded project would silently disappear, and subsequent
         # 'name:path' prefixes would fail to resolve, routing writes to the
         # primary root instead.  See create_project_frontend_sync_bug memo.
@@ -150,7 +171,7 @@ def set_project(path_str, readonly_paths=None):
             'languages': {}, 'scannedAt': int(time.time() * 1000),
             'scanning': False, 'scanProgress': '', 'scanDetail': '',
         })
-        # ★ Also register as primary root in multi-root workspace
+        # Also register as primary root in multi-root workspace
         name = os.path.basename(abs_path) or 'root'
         if not same_primary:
             _roots.clear()  # switching primary clears all extra roots
@@ -168,7 +189,7 @@ def set_project(path_str, readonly_paths=None):
                 'new_roots=%s)', old_path, abs_path, same_primary, old_roots,
                 list(_roots.keys()))
 
-    # ★ Cross-DC latency check — log warning if project is on a remote cluster.
+    # Cross-DC latency check — log warning if project is on a remote cluster.
     #   This is non-blocking: if benchmark hasn't finished yet, latency_class
     #   will be 'unknown' and we skip the warning.  The benchmark result will
     #   be available for subsequent tool calls (timeout adjustment, etc.).
@@ -184,6 +205,7 @@ def set_project(path_str, readonly_paths=None):
     except Exception as e:
         logger.debug('[Project] Cross-DC check skipped: %s', e)
 
+    _warm_tree_indexes(abs_path)
     return get_state()
 
 
@@ -221,7 +243,7 @@ def set_project_paths(paths, readonly_paths=None):
     # 1) Set (or re-set) the primary project.
     #    NOTE: set_project() preserves existing extra roots when the primary
     #    is unchanged (the `same_primary` idempotence guard, needed so
-    #    mid-conversation tool_create_project roots survive repeated
+    #    mid-conversation auto-registered roots survive repeated
     #    /api/project/set calls). This means we must explicitly prune any
     #    extras not in the new list below — otherwise the modal's "remove
     #    folder" action would silently no-op when the primary is untouched.
@@ -289,6 +311,7 @@ def add_project_root(path_str, name=None, access='rw'):
         _roots[rname]['scannedAt'] = int(time.time() * 1000)
 
     logger.info('[Project] add_project_root: [%s] %s', rname, abs_path)
+    _warm_tree_indexes(abs_path)
     return _get_roots_info()
 
 
@@ -358,7 +381,7 @@ def rescan():
 
 
 # ═══════════════════════════════════════════════════════
-#  ★ Fast scanning with os.scandir + progress callback
+#  Fast scanning with os.scandir + progress callback
 # ═══════════════════════════════════════════════════════
 
 def _should_ignore(filename):
@@ -445,4 +468,3 @@ def _safe_path(base, rel):
     if resolved != base and not resolved.startswith(base + os.sep):
         raise ValueError(f'Path traversal blocked: {rel}')
     return resolved
-

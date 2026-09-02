@@ -1,28 +1,29 @@
-"""Grounding (the anti-hallucination gate — same guarantee as recommend).
+"""Ground cited papers and reject self-referential insight connections.
 
-Every paper the insight name-drops is verified against arXiv through THIS
-package's ``search_arxiv`` / ``fetch_arxiv_title`` (re-exported on the facade so
-tests monkeypatch ONE namespace). An ungrounded ref is stripped to ``None`` (the
-prose survives, the fake link dies). A connection that bridges the paper back to
-ITSELF is dropped entirely (the foundational-paper backfire).
-
-The arXiv seams (``search_arxiv`` / ``fetch_arxiv_title``) are resolved THROUGH
-the package facade at call time (``import lib.paper.insight_engine as _pkg``) so
-a test patching ``ie.search_arxiv`` bites here exactly as it did in the original
-single-module layout.
+Every named paper is verified through arXiv.  Ungrounded links are removed while
+their surrounding prose survives; circular bridges back to the source paper are
+removed entirely.
 """
 
 import re
 
 from lib.log import get_logger
 
-from ..arxiv import _extract_arxiv_id
-from ..recommend_engine import _norm_id, _title_grounded
+from ..arxiv import _extract_arxiv_id, fetch_arxiv_title, search_arxiv
+from ..library_repository import PaperLibraryRepository
+from ..recommend_engine._ground import _norm_id, _title_grounded
 
 logger = get_logger(__name__)
 
 
-def _self_identity(phash, report_md, self_arxiv_id=None, self_title=None):
+def _self_identity(
+    phash,
+    report_md,
+    self_arxiv_id=None,
+    self_title=None,
+    *,
+    user_id: int,
+):
     """Resolve the identity (arxiv_id, title) of the paper UNDER ANALYSIS.
 
     Needed by the self-reference guard: a "connection" whose target IS this
@@ -38,14 +39,12 @@ def _self_identity(phash, report_md, self_arxiv_id=None, self_title=None):
 
     if phash and (not aid or not title):
         try:
-            from lib.storage import get_storage_client
-            row = get_storage_client().query(
-                'paper.library.identity', {'paper_hash': phash})
-            if row:
+            identity = PaperLibraryRepository(user_id).identity(phash)
+            if identity:
                 if not title:
-                    title = (row['title'] or '').strip()
-                if not aid and row['arxiv_id']:
-                    aid = _extract_arxiv_id(str(row['arxiv_id']))
+                    title = identity.title.strip()
+                if not aid and identity.arxiv_id:
+                    aid = _extract_arxiv_id(identity.arxiv_id)
         except Exception as e:
             logger.debug('[Paper:Insight] self-identity lookup failed: %s', e)
 
@@ -90,9 +89,8 @@ def _is_self_reference(ref, conn_text, self_aid, self_title):
 def _ground_ref(ref):
     """Verify a ``{title, arxiv_id}`` ref against arXiv; return a card or None.
 
-    Reuses the recommend engine's pure matching helpers but drives the search
-    through THIS package's ``search_arxiv`` / ``fetch_arxiv_title`` (so tests
-    patch one namespace). A ref that cannot be grounded is dropped (logged) —
+    Reuses the recommend engine's pure matching helpers. A ref that cannot be
+    grounded is dropped (logged) —
     the prose that mentioned it survives, but the clickable/verifiable link does
     not, so a hallucinated paper never reaches the reader as fact.
     """
@@ -103,12 +101,6 @@ def _ground_ref(ref):
     claimed_id = _extract_arxiv_id(str(raw_id)) if raw_id else None
     if not title and not claimed_id:
         return None
-
-    # Resolve the arXiv seams through the facade so ``ie.search_arxiv`` /
-    # ``ie.fetch_arxiv_title`` monkeypatches bite exactly as in the flat module.
-    import lib.paper.insight_engine as _pkg
-    search_arxiv = _pkg.search_arxiv
-    fetch_arxiv_title = _pkg.fetch_arxiv_title
 
     results = search_arxiv(title, max_results=5) if title else []
     if claimed_id:

@@ -300,7 +300,7 @@ class SurfaceWiringRatchetTest(unittest.TestCase):
         self.assertIn("desktop.comp.%s.size", src,
                       'the component card size hint is not keyed')
         theme = _theme()
-        for comp in ('chromium', 'postgresql'):
+        for comp in ('chromium',):
             key = 'desktop.comp.%s.size' % comp
             pair = theme.STRINGS.get(key)
             self.assertIsNotNone(pair, '%s missing' % key)

@@ -295,7 +295,8 @@ CATALOG: list[CatalogEntry] = [
         'command': 'npx',
         'args': ['-y', '@anthropic/mcp-server-slack'],
         'env_specs': [
-            {'key': 'SLACK_BOT_TOKEN', 'label': 'Bot Token', 'hint': 'xoxb-xxxxxxxxxxxx', 'required': True},
+            {'key': 'SLACK_BOT_TOKEN', 'label': 'Bot Token',
+             'hint': 'Paste the bot token from Slack', 'required': True, 'secret': True},
             {'key': 'SLACK_TEAM_ID', 'label': 'Team ID', 'hint': 'T01234567', 'required': False},
         ],
         'url': 'https://github.com/modelcontextprotocol/servers-archived/tree/main/src/slack',
@@ -908,7 +909,7 @@ CATALOG: list[CatalogEntry] = [
     #     business review. There is no consumer-side MCP surface at all.
     #
     # RESOLVED 2026-07-27 — the owner decided NOT to pursue corporate
-    # onboarding for either vendor (option C on ticket pt_6dcdc44482de4fe7,
+    # onboarding for either vendor (option C on ticket ,
     # now CLOSED). Rationale on the record: the shipped set below already
     # covers routing / hotels / flights / trains / tickets / cruises /
     # packages, and every one of those is obtainable by an individual

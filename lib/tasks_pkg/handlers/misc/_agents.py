@@ -1,38 +1,34 @@
 # HOT_PATH
-"""Automation / sub-agent misc handlers: ``scheduler``, ``desktop`` and
-``swarm`` tool families (plus their small executor + badge helpers).
-
-``append_event`` is resolved THROUGH the package facade
-(``lib.tasks_pkg.handlers.misc``) at call time so a test patching
-``lib.tasks_pkg.handlers.misc.append_event`` steers these handlers exactly as
-before the package split.
-"""
+"""Automation handlers for scheduler, desktop and swarm tool families."""
 
 from __future__ import annotations
 
 from lib.desktop_tools import DESKTOP_TOOL_NAMES
 from lib.log import get_logger
-from lib.scheduler import SCHEDULER_TOOL_NAMES, execute_scheduler_tool
+from lib.scheduler.executor import execute_scheduler_tool
+from lib.scheduler.tool_defs import SCHEDULER_TOOL_NAMES
 from lib.swarm.tools import SWARM_TOOL_NAMES
 from lib.tasks_pkg.executor import tool_registry
 from lib.tasks_pkg.handlers._adapter import simple_call
+from lib.tasks_pkg.manager import append_event
 
 logger = get_logger(__name__)
-
-
-def _append_event(task, ev):
-    """Route append_event through the package facade so monkeypatching
-    ``lib.tasks_pkg.handlers.misc.append_event`` remains effective."""
-    from lib.tasks_pkg.handlers import misc as _facade
-    return _facade.append_event(task, ev)
 
 
 @tool_registry.tool_set(SCHEDULER_TOOL_NAMES, category='scheduler',
                         description='Schedule reminders and recurring tasks')
 def _handle_scheduler_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
+    from lib.tasks_pkg.manager._registry import task_user_id
+
     fn_args['_source_conv_id'] = task.get('convId', '')
     fn_args['_source_task_id'] = task.get('id', '')
+    fn_args['_user_id'] = task_user_id(task)
     fn_args['_tool_call_id'] = tc_id
+    if fn_name == 'timer_create':
+        # Creation returns immediately, but the completed tool round keeps one
+        # durable hand-off marker that links to the background watcher.
+        fn_args['_parent_task'] = task
+        fn_args['_tool_round_num'] = rn
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
         executor=execute_scheduler_tool,
@@ -91,7 +87,7 @@ def _handle_swarm_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
         from lib.swarm.integration import execute_swarm_tool
         return execute_swarm_tool(
             _fn_name, _fn_args, task,
-            on_event=lambda ev: _append_event(task, ev),
+            on_event=lambda ev: append_event(task, ev),
             project_path=project_path,
             project_enabled=project_enabled,
             model=cfg.get('model'),

@@ -28,8 +28,7 @@ def maybe_run_memory_prefetch(*, task: dict[str, Any], cfg: dict[str, Any],
     # Interactive turns learn explicit durable facts even when memory search is
     # off; headless surfaces have already stamped preferencesEnabled=False.
     from lib.agent_core.personal_scope import resolve_preferences_enabled
-    task['_profileConsolidateEligible'] = resolve_preferences_enabled(
-        cfg, memory_enabled=memory_enabled)
+    task['_profileConsolidateEligible'] = resolve_preferences_enabled(cfg)
     if not (memory_enabled and has_real_tools and not injected_tool_calls):
         task['_prefetchedMemories'] = []
         return

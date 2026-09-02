@@ -76,12 +76,19 @@ def compact_tool_results(ctx: CompactionContext) -> int:
     _c = ctx.constants
     messages = ctx.messages
     conv_id = ctx.conv_id
-    try:
-        from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
-        tokens_before = _estimate_total_tokens(messages)
-    except Exception as exc:
-        logger.debug('[L1] pre-compaction token estimate unavailable: %s', exc)
-        tokens_before = 0
+    tokens_before: int | None = None
+
+    def capture_tokens_before_mutation() -> None:
+        """Pay the conversation-sized telemetry count only on a write pass."""
+        nonlocal tokens_before
+        if tokens_before is not None:
+            return
+        try:
+            from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
+            tokens_before = _estimate_total_tokens(messages)
+        except Exception as exc:
+            logger.debug('[L1] pre-compaction token estimate unavailable: %s', exc)
+            tokens_before = 0
 
     paired_assistant_indices: set[int] = ctx.scratch.setdefault(
         'paired_assistant_indices', set())
@@ -130,6 +137,7 @@ def compact_tool_results(ctx: CompactionContext) -> int:
             if image_count > 0:
                 _before_chars = text_len + image_chars
                 text_preview = ' '.join(text_parts).strip()[:200]
+                capture_tokens_before_mutation()
                 archived = _archive_message_if_enabled(
                     ctx, msg, content, tool_name)
                 msg['content'] = archived or (
@@ -146,6 +154,7 @@ def compact_tool_results(ctx: CompactionContext) -> int:
                 skipped_short += 1
             else:
                 _before_chars = text_len
+                capture_tokens_before_mutation()
                 archived = _archive_message_if_enabled(
                     ctx, msg, content, tool_name)
                 msg['content'] = archived or (
@@ -165,6 +174,7 @@ def compact_tool_results(ctx: CompactionContext) -> int:
                 skipped_already += 1
             elif tool_name == 'load_skill' and content.startswith('Skill loaded:'):
                 old_len = len(content)
+                capture_tokens_before_mutation()
                 skill_id = ''
                 content_hash = ''
                 for line in content.splitlines()[:8]:
@@ -188,6 +198,7 @@ def compact_tool_results(ctx: CompactionContext) -> int:
                 skipped_short += 1
             else:
                 old_len = len(content)
+                capture_tokens_before_mutation()
                 first_two = '\n'.join(content.split('\n')[:2])
                 if len(first_two) > 120:
                     first_two = first_two[:120] + '…'
@@ -208,19 +219,22 @@ def compact_tool_results(ctx: CompactionContext) -> int:
             if paired_idx is not None and not ctx.is_in_cache_prefix(paired_idx):
                 paired_assistant_indices.add(paired_idx)
 
-    logger.info('[L1] conv=%s  cold=%d  compacted=%d  '
-                'skipped_short=%d  skipped_already=%d  '
-                '~%d tokens saved',
-                _log_id(conv_id),
-                len(cold_indices), compacted_count,
-                skipped_short, skipped_already, tool_tokens_saved)
+    # A no-op is the overwhelmingly common steady-state outcome. Keep it
+    # available for diagnosis without emitting one INFO record per model round.
+    _log_pass = logger.info if compacted_count else logger.debug
+    _log_pass('[L1] conv=%s  cold=%d  compacted=%d  '
+              'skipped_short=%d  skipped_already=%d  '
+              '~%d tokens saved',
+              _log_id(conv_id),
+              len(cold_indices), compacted_count,
+              skipped_short, skipped_already, tool_tokens_saved)
     if compacted_count and isinstance(ctx.task, dict):
         try:
             from lib.context_telemetry import record_compaction_event
             from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
             record_compaction_event(
                 ctx.task, trigger='l1', reason='cold_tool_results',
-                tokens_before=tokens_before,
+                tokens_before=int(tokens_before or 0),
                 tokens_after=_estimate_total_tokens(messages))
         except Exception as exc:
             logger.debug('[L1] context telemetry failed: %s', exc)

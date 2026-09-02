@@ -55,7 +55,7 @@ def _assemble(cfg, **kw):
         search_enabled=cfg.get('searchMode', 'multi') in ('single', 'multi'),
         fetch_enabled=cfg.get('fetchEnabled', True),
         code_exec_enabled=cfg.get('codeExecEnabled', False),
-        browser_enabled=False, desktop_enabled=False, swarm_enabled=False,
+        browser_enabled=False, desktop_enabled=False,
         messages=[],
     )
     base.update(kw)
@@ -144,7 +144,7 @@ class TestLeanGate(unittest.TestCase):
         # Scheduler remains task-authorized but is routed through Tool Search
         # under the default native-exposure experiment, so it need not spend
         # tokens on the initial wire surface.
-        from lib.tools import all_specs
+        from lib.tools.registry import all_specs
         scheduler = next(spec for spec in all_specs() if spec.key == 'scheduler')
         self.assertIn('schedule_create', scheduler.provides)
         self.assertEqual(scheduler.discovery_policy, 'searchable')

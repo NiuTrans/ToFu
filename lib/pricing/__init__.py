@@ -6,7 +6,7 @@ to keep all pricing data and logic in one place.
 
 This module is a pure re-export facade. Implementations live in sub-modules:
 
-    ._tables    — DEFAULT_USD_CNY_RATE, MODEL_PRICING, QWEN_PRICING_CNY
+    ._tables    — default USD display rates + model pricing tables
     ._provider  — PROVIDER_PRICING registry + set/clear/lookup/snapshot
     ._refresh   — live pricing state + online refresh / exchange-rate fetchers
 
@@ -15,6 +15,8 @@ Public API (also re-exported by lib/__init__ for back-compat):
     QWEN_PRICING_CNY         — {model_id: {input: [(threshold, cny_price)], output: [...]}}
     PROVIDER_PRICING         — {provider_id: {model_id: {input, output, ...}}} per-provider override
     DEFAULT_USD_CNY_RATE     — float
+    DEFAULT_USD_DISPLAY_RATES — bounded Settings presentation pivots
+    get_model_price_display_policy() — browser-safe rates + freshness metadata
     get_pricing_data()       — thread-safe copy of live pricing state
     lookup_pricing(model, provider_id=None) — provider-scoped pricing resolution
     set_provider_pricing(provider_id, model_id, info) — register one override
@@ -26,6 +28,7 @@ Public API (also re-exported by lib/__init__ for back-compat):
 # ── Static pricing tables ──
 from lib.pricing._tables import (  # noqa: E402,F401
     DEFAULT_USD_CNY_RATE,
+    DEFAULT_USD_DISPLAY_RATES,
     MODEL_PRICING,
     QWEN_PRICING_CNY,
 )
@@ -49,11 +52,13 @@ from lib.pricing._peak import peak_multiplier  # noqa: E402,F401
 from lib.pricing._refresh import (  # noqa: E402,F401
     _do_update_pricing,
     _fetch_exchange_rate,
+    _fetch_exchange_rates,
     _fetch_model_pricing_online,
     _pricing_data,
     _pricing_lock,
     _refresh_lock,
     _update_pricing_locked,
+    get_model_price_display_policy,
     get_pricing_data,
     refresh_pricing_async,
     stop_pricing_refresh,
@@ -62,6 +67,7 @@ from lib.pricing._refresh import (  # noqa: E402,F401
 __all__ = [
     # tables
     'DEFAULT_USD_CNY_RATE',
+    'DEFAULT_USD_DISPLAY_RATES',
     'MODEL_PRICING',
     'QWEN_PRICING_CNY',
     # provider registry
@@ -75,6 +81,7 @@ __all__ = [
     # peak schedules
     'peak_multiplier',
     # refresh
+    'get_model_price_display_policy',
     'get_pricing_data',
     'refresh_pricing_async',
     'stop_pricing_refresh',

@@ -4,6 +4,7 @@ healthcheck.py — Automated project diagnostics for tofu.
 
 Run:  python3 healthcheck.py            — dev lint (source-tree checks)
       python3 healthcheck.py --runtime [--port N] [--wait SEC]
+                                    [--require-browser]
                                         — probe a RUNNING server (post-install
                                           self-check: reachable? DB? index page?
                                           LLM key? browser engine?)
@@ -13,7 +14,7 @@ Checks:
   1. Python syntax          — All .py files compile
   2. Top-level imports      — Server + all blueprints load
   3. Lazy imports           — Every `from X import Y` inside route functions resolves
-  4. Database schema        — Required tables exist in init_db()
+  4. Storage schema         — Required Sidecar tables are declared
   5. Static vendor files    — All local JS/CSS deps exist and are non-trivial
   6. HTML references        — Every src/href in HTML points to a real file
   7. CDN leak detection     — No external CDN URLs remain in served files
@@ -21,6 +22,7 @@ Checks:
 """
 
 import ast
+import argparse
 import importlib
 import importlib.util
 import logging
@@ -29,6 +31,66 @@ import py_compile
 import re
 import sys
 from pathlib import Path
+
+from tofu_dotenv import read_dotenv_values
+
+
+def _cli_port(value: str) -> int:
+    """Parse a TCP port without silently turning typos into port 15000."""
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError('must be an integer from 1 to 65535') from exc
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError('must be an integer from 1 to 65535')
+    return port
+
+
+def _cli_wait(value: str) -> float:
+    """Parse a bounded, non-negative runtime-probe wait."""
+    try:
+        wait = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError('must be a non-negative number of seconds') from exc
+    if wait < 0 or wait > 3600:
+        raise argparse.ArgumentTypeError('must be between 0 and 3600 seconds')
+    return wait
+
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog='healthcheck.py',
+        description=(
+            'Check Tofu. With no flags, audit a source checkout; with '
+            '--runtime, probe an already-running installation.'),
+        epilog=(
+            'Lifecycle and port diagnostics: python serverctl.py doctor. '
+            'Managed logs: python serverctl.py logs.'),
+    )
+    parser.add_argument(
+        '--runtime', action='store_true',
+        help='probe the running server instead of auditing source files')
+    parser.add_argument(
+        '--port', type=_cli_port, metavar='N',
+        help='runtime server port (default: PORT, project .env, or 15000)')
+    parser.add_argument(
+        '--wait', type=_cli_wait, metavar='SECONDS',
+        help='wait up to this long for runtime startup (default: 0)')
+    parser.add_argument(
+        '--require-browser', action='store_true',
+        help='treat an unavailable browser engine as a runtime failure')
+    return parser
+
+
+# Parse before changing directories, loading project modules, or running any
+# checks. `--help` and invalid arguments are therefore fast and side-effect
+# free, which matters for both humans and automation that probe a CLI first.
+_CLI_PARSER = _build_cli_parser()
+_CLI_ARGS = _CLI_PARSER.parse_args()
+if not _CLI_ARGS.runtime and (
+        _CLI_ARGS.port is not None or _CLI_ARGS.wait is not None
+        or _CLI_ARGS.require_browser):
+    _CLI_PARSER.error('--port, --wait, and --require-browser require --runtime')
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -51,12 +113,16 @@ except Exception as e:
     logger.debug('PyMuPDF classic policy unavailable: %s', e)
 
 # ─── Helpers ─────────────────────────────────────────────────────────
+_USE_COLOR = bool(getattr(sys.stdout, 'isatty', lambda: False)()) \
+    and 'NO_COLOR' not in os.environ
+
+
 class C:
-    OK   = '\033[92m✓\033[0m'
-    FAIL = '\033[91m✗\033[0m'
-    WARN = '\033[93m⚠\033[0m'
-    BOLD = '\033[1m'
-    END  = '\033[0m'
+    OK   = '\033[92m✓\033[0m' if _USE_COLOR else '✓'
+    FAIL = '\033[91m✗\033[0m' if _USE_COLOR else '✗'
+    WARN = '\033[93m⚠\033[0m' if _USE_COLOR else '⚠'
+    BOLD = '\033[1m' if _USE_COLOR else ''
+    END  = '\033[0m' if _USE_COLOR else ''
 
 errors = []
 warnings = []
@@ -93,47 +159,71 @@ def warn(msg):
 # ═══════════════════════════════════════════════════════════════════════
 if '--runtime' in sys.argv:
     import json as _json
+    import ssl as _ssl
     import time as _time
     import urllib.request as _urlreq
 
-    def _arg(flag, default=None):
-        if flag in sys.argv:
-            i = sys.argv.index(flag)
-            if i + 1 < len(sys.argv):
-                return sys.argv[i + 1]
-        return default
+    try:
+        _project_dotenv = read_dotenv_values(ROOT / '.env')
+    except OSError as _dotenv_error:
+        _project_dotenv = {}
+        warn(f"project .env could not be read: {_dotenv_error}")
 
-    try:
-        _port = int(_arg('--port', os.environ.get('PORT', '')) or 15000)
-    except (TypeError, ValueError):
-        _port = 15000
-    try:
-        _wait = float(_arg('--wait', '0') or 0)
-    except (TypeError, ValueError):
-        _wait = 0.0
-    _base = f'http://127.0.0.1:{_port}'
+    if _CLI_ARGS.port is not None:
+        _port = _CLI_ARGS.port
+    else:
+        _raw_port = os.environ.get('PORT', '') \
+            or _project_dotenv.get('PORT', '') or '15000'
+        try:
+            _port = _cli_port(_raw_port)
+        except argparse.ArgumentTypeError as _exc:
+            _CLI_PARSER.error(f'invalid PORT={_raw_port!r}: {_exc}')
+    _wait = _CLI_ARGS.wait if _CLI_ARGS.wait is not None else 0.0
+    _raw_tls = (os.environ.get('TOFU_TLS') if 'TOFU_TLS' in os.environ
+                else _project_dotenv.get('TOFU_TLS', ''))
+    _prefer_tls = str(_raw_tls).strip().lower() in {'1', 'true', 'yes', 'on'}
+    _schemes = ('https', 'http') if _prefer_tls else ('http', 'https')
+    _candidate_bases = [f'{scheme}://127.0.0.1:{_port}' for scheme in _schemes]
+    _base = _candidate_bases[0]
+
+    # Tofu's direct HTTPS mode commonly uses its generated local certificate.
+    # This context is used only for the fixed loopback target above; runtime
+    # diagnostics never disable verification for an external request.
+    _loopback_tls_context = _ssl.create_default_context()
+    _loopback_tls_context.check_hostname = False
+    _loopback_tls_context.verify_mode = _ssl.CERT_NONE
 
     section(f"Runtime Probe — server on port {_port}")
 
-    def _get(path, timeout=4):
+    def _get_from(base, path, timeout=4):
         try:
-            with _urlreq.urlopen(_base + path, timeout=timeout) as r:
+            kwargs = {'context': _loopback_tls_context} \
+                if base.startswith('https://') else {}
+            with _urlreq.urlopen(base + path, timeout=timeout, **kwargs) as r:
                 return r.status, r.read()
         except Exception:
             return None, None
+
+    def _get(path, timeout=4):
+        return _get_from(_base, path, timeout=timeout)
 
     # 1. /api/health — optionally polling until the server finishes booting
     #    (imports + DB init + first bundle build take a few seconds).
     _deadline = _time.monotonic() + _wait
     _status = _body = None
     while True:
-        _status, _body = _get('/api/health')
+        for _candidate_base in _candidate_bases:
+            _status, _body = _get_from(_candidate_base, '/api/health')
+            if _status == 200:
+                _base = _candidate_base
+                break
         if _status == 200 or _time.monotonic() >= _deadline:
             break
         _time.sleep(2)
 
     if _status != 200:
-        fail(f"server not answering {_base}/api/health"
+        _targets = ' or '.join(base + '/api/health' for base in _candidate_bases)
+        fail(f"server not answering {_targets}"
              + (f" after {_wait:.0f}s wait" if _wait else ""))
         print(f"\n{C.BOLD}  RESULT: {C.FAIL} server unreachable{C.END}")
         sys.exit(1)
@@ -144,31 +234,21 @@ if '--runtime' in sys.argv:
     except Exception as e:
         fail(f"/api/health returned non-JSON: {e}")
 
-    ok(f"server reachable (version {_health.get('version', '?')}, "
+    ok(f"server reachable at {_base} (version {_health.get('version', '?')}, "
        f"bootId {str(_health.get('bootId', '?'))[:8]})")
 
-    # 2. Database
-    if _health.get('db_responsive'):
-        ok(f"database responsive ({_health.get('db_engine', '?')})")
-    else:
-        fail(f"database NOT responsive ({_health.get('db_engine', '?')}): "
-             f"{_health.get('db_error', 'unknown')}")
-
-    # 3. Required storage sidecar.  Older servers did not expose this field, so
-    # keep their runtime probe compatible while making the new production
-    # contract fail loudly whenever the sidecar is fenced or restarting.
-    if 'storage_ready' not in _health:
-        warn('server does not report storage sidecar readiness (legacy build)')
-    elif _health.get('storage_ready'):
-        _storage = _health.get('storage') or {}
+    # 2. Required storage authority.  The nested snapshot is the sole health
+    # contract: accepting historical top-level database projections could let
+    # an old/stale field mask a fenced or restarting Sidecar.
+    _storage = _health.get('storage') or {}
+    if _storage.get('ready') is True:
         ok(f"storage sidecar ready ({_storage.get('backend', '?')}, "
            f"pid {_storage.get('pid', '?')})")
     else:
-        _storage = _health.get('storage') or {}
         fail(f"storage sidecar NOT ready (state={_storage.get('state', '?')}): "
              f"{_storage.get('last_error', 'unknown') or 'unknown'}")
 
-    # 4. Index page actually serves HTML (bundle injection / static serving)
+    # 3. Index page actually serves HTML (bundle injection / static serving)
     _s2, _b2 = _get('/')
     if _s2 == 200 and _b2 and b'<html' in _b2[:2000].lower():
         ok("index page serves HTML")
@@ -179,18 +259,9 @@ if '--runtime' in sys.argv:
     #    env vars → .env → server_config providers (api_keys or oauth slot).
     _has_key = bool(os.environ.get('LLM_API_KEY') or os.environ.get('LLM_API_KEYS'))
     if not _has_key:
-        try:
-            with open(ROOT / '.env', encoding='utf-8', errors='ignore') as _f:
-                for _line in _f:
-                    _ls = _line.strip()
-                    if _ls.startswith('#'):
-                        continue
-                    if _ls.startswith(('LLM_API_KEYS=', 'LLM_API_KEY=')) \
-                            and _ls.split('=', 1)[1].strip().strip('"\''):
-                        _has_key = True
-                        break
-        except OSError:
-            pass
+        _has_key = bool(
+            _project_dotenv.get('LLM_API_KEY')
+            or _project_dotenv.get('LLM_API_KEYS'))
     if not _has_key:
         try:
             with open(ROOT / 'data/config/server_config.json', encoding='utf-8') as _f:
@@ -222,10 +293,12 @@ if '--runtime' in sys.argv:
     # instantly), and ALSO when Chromium launches but has zero fonts, which
     # renders every glyph as nothing so screenshots come back blank-but-styled.
     # Both were live defects here. Actually launch it and measure a glyph.
+    _browser_issue = fail if _CLI_ARGS.require_browser else warn
     try:
         import playwright  # noqa: F401
     except ImportError:
-        warn("playwright not importable — JS-rendered page fetching disabled (optional)")
+        _browser_issue(
+            "playwright not importable — JS-rendered page fetching disabled")
     else:
         try:
             from playwright.sync_api import sync_playwright
@@ -272,18 +345,21 @@ if '--runtime' in sys.argv:
                 if _exe:
                     print(f"      binary: {_exe}")
             else:
-                fail("Chromium launches but renders NO text (zero fonts) — "
-                     "screenshots will come back blank-but-styled. Install "
-                     "fontconfig + a font family into the env "
-                     "(conda install -c conda-forge fontconfig font-ttf-dejavu-sans-mono)")
+                _browser_issue(
+                    "Chromium launches but renders NO text (zero fonts) — "
+                    "screenshots will come back blank-but-styled. Install "
+                    "fontconfig + a font family into the env "
+                    "(conda install -c conda-forge "
+                    "fontconfig font-ttf-dejavu-sans-mono)")
         except Exception as _e:
             _msg = str(_e).replace('\n', ' ')[:200]
             # Report the RESOLVED cause when we know it, not just the symptom:
             # "cannot launch" alone sends people hunting the wrong thing.
             _hint = '; '.join((_diag or {}).get('issues') or [])
-            fail(f"playwright imports but Chromium cannot launch — browser "
-                 f"screenshots unavailable: {_msg}"
-                 + (f" [diagnosis: {_hint}]" if _hint else ""))
+            _browser_issue(
+                f"playwright imports but Chromium cannot launch — browser "
+                f"screenshots unavailable: {_msg}"
+                + (f" [diagnosis: {_hint}]" if _hint else ""))
 
     print(f"\n{C.BOLD}{'═'*60}{C.END}")
     if errors:
@@ -362,22 +438,23 @@ else:
 section("2. Top-Level Imports")
 
 tl_checks = [
-    ("lib.database",      ["get_db", "close_db", "init_db"]),
+    ("lib.storage",       ["get_storage_client", "start_storage", "stop_storage"]),
     ("lib",               ["LLM_MODEL", "LLM_API_KEY", "LLM_BASE_URL"]),
     ("lib.llm",           ["chat", "build_body", "stream_chat"]),
-    ("lib.memory",        ["list_memories", "create_memory", "update_memory", "delete_memory", "toggle_memory"]),
-    ("lib.browser",       ["wait_for_commands", "mark_poll", "resolve_batch",
+    ("lib.memory.storage", ["list_memories", "create_memory", "update_memory", "delete_memory", "toggle_memory"]),
+    ("lib.browser.queue", ["wait_for_commands", "mark_poll", "resolve_batch",
                            "resolve_command", "is_extension_connected", "send_browser_command"]),
     # search/fetch were extracted into the standalone tofu_search package
     # (consumed via lib/search_bridge.py); the public entrypoint lives there.
     ("tofu_search",       ["perform_web_search"]),
     ("lib.pricing",       ["get_pricing_data"]),
-    ("lib.tasks_pkg",     ["tasks", "tasks_lock", "create_task", "cleanup_old_tasks", "run_task"]),
+    ("lib.tasks_pkg.manager", ["chat_task_runtime", "create_task", "cleanup_old_tasks"]),
+    ("lib.tasks_pkg.orchestrator.api", ["run_task"]),
+    ("lib.tasks_pkg.spawn", ["spawn_task", "set_agent_executor", "set_serving_loop"]),
     ("lib.project_mod",   ["set_project", "clear_project", "get_state", "get_project_path",
                            "get_recent_projects", "save_recent_project", "clear_recent_projects",
                            "tool_list_dir", "tool_read_files", "tool_grep", "tool_find_files",
                            "tool_write_file", "tool_apply_diff", "tool_run_command",
-                           "tool_create_project",
                            "execute_tool", "browse_directory",
                            "get_context_for_prompt",
                            "get_modifications", "undo_conv_modifications"]),
@@ -481,36 +558,30 @@ if lazy_errors == 0:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 4. Database Schema Check
+# 4. Storage Schema Contract
 # ═══════════════════════════════════════════════════════════════════════
-section("4. Database Schema")
+section("4. Storage Schema")
 
 required_tables = [
-    'users', 'conversations', 'task_results', 'pricing_cache',
-    'recent_projects',
+    'storage_command_receipts', 'storage_events', 'storage_conversations',
+    'storage_conversation_turns', 'tenant_users',
+    'storage_knowledge_documents',
 ]
 
-# Core tables are now declared ONCE, declaratively, on lib/database/_core_schema.py's
-# private SQLAlchemy MetaData (define_table → ddl_for compiles the per-backend
-# CREATE TABLE at install time). The old per-backend literal DDL strings in
-# _schema_{pg,sqlite}.py are gone, so check the declarative registry — the real
-# source of truth — instead of grepping for "CREATE TABLE IF NOT EXISTS <name>".
-# Optional-domain tables (e.g. trading_*) live in their plugin package now and
-# are intentionally NOT required here.
 try:
-    from lib.database import _core_schema
-    _defined_tables = set(_core_schema.metadata.tables.keys())
+    from lib.storage_sidecar.schema import declared_table_names
+    _defined_tables = declared_table_names()
 except Exception as e:
-    logger.warning('Failed to load _core_schema: %s', e, exc_info=True)
-    fail(f"Cannot import lib.database._core_schema: {e}")
+    logger.warning('Failed to load Sidecar schema catalogue: %s', e, exc_info=True)
+    fail(f"Cannot import Sidecar schema catalogue: {e}")
     _defined_tables = None
 
 if _defined_tables is not None:
     for table in required_tables:
         if table in _defined_tables:
-            ok(f"Table '{table}' defined in _core_schema")
+            ok(f"Table '{table}' declared by the Sidecar schema")
         else:
-            fail(f"Table '{table}' NOT defined in _core_schema metadata")
+            fail(f"Table '{table}' NOT declared by the Sidecar schema")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -518,16 +589,14 @@ if _defined_tables is not None:
 # ═══════════════════════════════════════════════════════════════════════
 section("5. Static Vendor Files")
 
+# marked/purify/highlight/html2canvas/pdfjs, the code-highlight theme and the
+# @font-face stack all ship inside the content-hashed Vite graph now
+# (frontend/src → static/vite/, guarded by lib/vite_assets.validate_vite_artifact).
+# Only the KaTeX pair remains a hand-vendored file because the standalone
+# artifact export view (routes/artifacts.py) loads it directly.
 vendor_files = {
-    'static/vendor/marked.min.js':         30000,
-    'static/vendor/purify.min.js':         15000,
-    'static/vendor/highlight.min.js':      50000,
-    'static/vendor/github-dark.min.css':   500,
     'static/vendor/katex/katex.min.js':    100000,
     'static/vendor/katex/katex.min.css':   10000,
-    'static/vendor/pdf.min.js':            100000,
-    'static/vendor/pdf.worker.min.js':     100000,
-    'static/vendor/google-fonts-local.css': 500,
 }
 
 for path, min_size in vendor_files.items():
@@ -664,7 +733,7 @@ else:
     core_js = '\n'.join(core_js_parts)
     checks = {
         "Marked imported as ESM": r"from\s+['\"]marked['\"]",
-        "Highlight.js imported as ESM": r"from\s+['\"]highlight\.js/lib/common['\"]",
+        "Highlight.js imported as ESM": r"from\s+['\"]highlight\.js/lib/core['\"]",
         "DOMPurify imported as ESM": r"from\s+['\"]dompurify['\"]",
         "KaTeX remains a lazy import": r"import\(['\"]katex['\"]\)",
         "PDF.js remains a lazy import": r"import\(['\"]pdfjs-dist/legacy/build/pdf\.mjs['\"]\)",

@@ -58,6 +58,16 @@ UserPromptSubmitHook = Callable[[str, dict], Optional[str]]
 # snapshotting, audit trail.  Inspired by Claude Agent SDK's PreCompact.
 PreCompactHook = Callable[[list, dict], None]
 
+# PostCompact hook: (info, task) → None
+# Fires AFTER a successful compaction replaced the transcript.  ``info``
+# is a read-only summary dict (layer / trigger / tokens_before /
+# tokens_after / messages_before / messages_after / round) — hooks never
+# see the mutated message list itself, so a hook cannot corrupt the
+# freshly compacted transcript.  Mirrors the post-compact lifecycle hook
+# in Codex's compact.rs.  Use cases: analytics, cache-invalidation,
+# downstream UI notification.
+PostCompactHook = Callable[[dict, dict], None]
+
 
 class HookResult:
     """Result from a pre-tool hook."""
@@ -80,6 +90,7 @@ _pre_hooks: list[PreToolHook] = []
 _post_hooks: list[PostToolHook] = []
 _user_prompt_hooks: list[UserPromptSubmitHook] = []
 _pre_compact_hooks: list[PreCompactHook] = []
+_post_compact_hooks: list[PostCompactHook] = []
 
 
 def register_pre_hook(hook: PreToolHook):
@@ -104,6 +115,11 @@ def register_pre_compact_hook(hook: PreCompactHook):
     """Register a PreCompact hook (fires before compaction modifies messages)."""
     _pre_compact_hooks.append(hook)
     logger.debug('[Hooks] Registered pre-compact hook: %s', hook.__name__)
+
+def register_post_compact_hook(hook: PostCompactHook):
+    """Register a PostCompact hook (fires after a successful compaction)."""
+    _post_compact_hooks.append(hook)
+    logger.debug('[Hooks] Registered post-compact hook: %s', hook.__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -200,6 +216,23 @@ def run_pre_compact_hooks(messages: list, task: dict) -> None:
             hook(messages, task)
         except Exception as e:
             logger.warning('[Hooks] PreCompact %s failed: %s',
+                           hook.__name__, e, exc_info=True)
+
+
+def run_post_compact_hooks(info: dict, task: dict) -> None:
+    """Run all PostCompact hooks AFTER compaction replaced the transcript.
+
+    ``info`` is the compaction summary dict built by the pipeline.  Hooks
+    must treat it as read-only.  Exceptions are logged and swallowed so a
+    buggy observer can never break the agent loop mid-turn.
+    """
+    if not _post_compact_hooks:
+        return
+    for hook in _post_compact_hooks:
+        try:
+            hook(info, task)
+        except Exception as e:
+            logger.warning('[Hooks] PostCompact %s failed: %s',
                            hook.__name__, e, exc_info=True)
 
 
@@ -310,9 +343,11 @@ register_pre_hook(_run_command_safety_hook)
 __all__ = [
     'HookResult',
     'PreToolHook', 'PostToolHook',
-    'UserPromptSubmitHook', 'PreCompactHook',
+    'UserPromptSubmitHook', 'PreCompactHook', 'PostCompactHook',
     'register_pre_hook', 'register_post_hook',
     'register_user_prompt_hook', 'register_pre_compact_hook',
+    'register_post_compact_hook',
     'run_pre_hooks', 'run_post_hooks',
     'run_user_prompt_hooks', 'run_pre_compact_hooks',
+    'run_post_compact_hooks',
 ]

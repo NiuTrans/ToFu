@@ -169,6 +169,16 @@ def test_settings_tabs_open_without_js_errors(page):
                          ids=[p[0] for p in _MODAL_PANELS])
 def test_modal_panel_opens_without_js_errors(page, label, opener, selector):
     """Each modal panel opens cleanly AND actually appears in the DOM."""
+    if label == 'orchestration':
+        page.route(
+            '**/api/v1/features',
+            lambda route: route.fulfill(
+                status=200,
+                content_type='application/json',
+                body='{"debug_mode":true}',
+            ),
+        )
+        page.reload()
     _wait_ready(page)
     _drain(page)
     _invoke_action(page, opener)
@@ -211,17 +221,20 @@ def test_paper_reading_mode_opens_without_js_errors(page):
 
 
 def test_auto_research_entry_is_reachable_without_a_paper(page):
-    """The auto-research entry lives on the landing screen, NOT in a paper tab.
+    """Auto-research is its own top-level mode, NOT a pane inside Paper mode.
 
     Its input is a research DIRECTION, which exists before any paper is open,
-    so it deliberately does not sit with the six paper-hash-scoped sub-tabs —
-    putting it there would force the user to open an unrelated document first
-    just to start a study about something else. This test pins that shape: it
-    opens reading mode and drives the entry with NO paper loaded.
+    so it sits on the topbar next to Paper — putting it inside the paper
+    reader would force the user to open an unrelated document first just to
+    start a study about something else, and the paper chrome (library, PDF
+    toolbar, six paper-hash-scoped tabs) is dead weight around the research
+    console. This test pins that shape: it opens RESEARCH mode and drives the
+    entry with NO paper loaded.
 
     Asserts three outcomes, not one:
-      1. the button is really rendered on the landing screen (not just defined
-         somewhere) — a function nothing calls is not an entry point;
+      1. the entry (direction input + start button) is really rendered on the
+         research landing (not just defined somewhere) — a function nothing
+         calls is not an entry point;
       2. driving it raises no HARD JS error;
       3. the research console actually replaces the viewer body, so a silently
          no-op handler cannot pass on "no errors" alone.
@@ -233,38 +246,51 @@ def test_auto_research_entry_is_reachable_without_a_paper(page):
     """
     _wait_ready(page)
     _drain(page)
-    _invoke_action(page, 'togglePaperMode')
+    _invoke_action(page, 'toggleResearchMode')
     page.wait_for_timeout(1500)
 
-    # 1. The production entry point is rendered, and the shared describe box
-    #    it reads from exists. Both come from paper-reader.js's landing screen.
+    errs = _hard_errors(page)
+    assert not errs, (
+        'entering research mode raised JavaScript error(s):\n  '
+        + '\n  '.join(errs[:8]))
+    shown = page.evaluate(
+        "() => { const el = document.getElementById('researchModeContainer');"
+        "  return !!el && getComputedStyle(el).display !== 'none'; }")
+    assert shown, (
+        'toggleResearchMode() raised no error but #researchModeContainer is '
+        'not displayed — research mode did not actually open')
+
+    # 1. The production entry point is rendered: the research landing has
+    #    its OWN direction input (nothing shared with the paper reader) and a
+    #    button calling _submitResearchDirection. Both come from
+    #    research-view.ts's showResearchLanding.
     wired = page.evaluate("""() => {
         const btn = document.querySelector(
-            '[data-tofu-action*="_startResearchFromDescribe"]');
+            '[data-tofu-action*="_submitResearchDirection"]');
         return {
             button: !!btn,
             label: btn ? (btn.textContent || '').trim() : '',
-            input: !!document.getElementById('paperDescribeInput'),
+            input: !!document.getElementById('paperResearchInput'),
             fn: typeof window.TofuModules.resolveAction(
-                '_startResearchFromDescribe') === 'function',
+                '_submitResearchDirection') === 'function',
         };
     }""")
     assert wired['fn'], (
-        '_startResearchFromDescribe is not defined in the shipped bundle — '
+        '_submitResearchDirection is not defined in the shipped bundle — '
         'native Paper research owner did not load')
     assert wired['button'], (
-        'no landing-screen button calls _startResearchFromDescribe() — the '
+        'no landing-screen button calls _submitResearchDirection() — the '
         'auto-research capability has no user-reachable entry point')
     assert wired['input'], (
-        '#paperDescribeInput is missing — research reuses the landing screen '
-        "describe box, so without it the entry reads nothing")
+        '#paperResearchInput is missing — the auto-research card reads its '
+        'own direction input, so without it the entry reads nothing')
 
     # 2 + 3. Drive the real entry point with a direction and no paper open.
     _drain(page)
     page.evaluate("""() => {
-        document.getElementById('paperDescribeInput').value =
+        document.getElementById('paperResearchInput').value =
             'long-context KV cache compression';
-        window.TofuModules.resolveAction('_startResearchFromDescribe')();
+        window.TofuModules.resolveAction('_submitResearchDirection')();
     }""")
     page.wait_for_timeout(1500)
 
@@ -276,7 +302,7 @@ def test_auto_research_entry_is_reachable_without_a_paper(page):
     shell = page.evaluate(
         "() => !!document.querySelector('[data-research-shell]')")
     assert shell, (
-        '_startResearchFromDescribe() raised no error but the research console '
+        '_submitResearchDirection() raised no error but the research console '
         '([data-research-shell]) never rendered — the entry silently did '
         'nothing, which "no errors" alone cannot catch')
     print(f'\n  auto-research entry reachable pre-paper; label={wired["label"]!r}')

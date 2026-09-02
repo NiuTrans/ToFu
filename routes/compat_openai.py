@@ -25,21 +25,26 @@ from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found,
     sse_response,
 )
-from lib.byo_resolve import resolve_model_and_provider
+from lib.byo_resolve import dispose_ephemeral_slot, resolve_model_and_provider
 from lib.compat.openai import (
     build_openai_response, models_payload, stream_openai_chunks,
     translate_openai_request,
 )
+from lib.compat._common import CompatTerminalFailure
 from lib.idempotency import idempotent_post
 from lib.ids import short_id
-from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.rate_limit_api import record_tokens
 from lib.usage_tracker import record as record_usage
 from lib.request_parser import async_parse_body, parse_body
 
-from routes.api_v1.auth import current_auth, guard_model_relay_or_dispose, require_scope
+from routes.api_v1.auth import (
+    current_auth,
+    guard_model_relay_or_dispose,
+    request_user_id,
+    require_scope,
+)
 
 logger = get_logger(__name__)
 
@@ -79,7 +84,8 @@ async def chat_completions():
         return api_bad_request('messages is empty', field='messages')
 
     auth = current_auth()
-    owner = (auth.key_id if auth else '') or 'anonymous'
+    if auth is None or auth.owner_user_id is None:
+        return api_bad_request('caller has no repository owner identity')
 
     # ── BYO model resolution ──
     # Resolve ``model="name@prov_xxx"`` (and an inline ``provider``
@@ -91,7 +97,12 @@ async def chat_completions():
     _model_in = cfg.get('model') or ''
     if _model_in:
         _model_id, _byo_handle, _byo_prov, _err, _status = (
-            resolve_model_and_provider(_model_in, body.get('provider'), owner))
+            resolve_model_and_provider(
+                _model_in,
+                body.get('provider'),
+                auth.owner_user_id,
+                tenant_id=auth.tenant_id,
+            ))
         if _err:
             return (api_not_found(_err) if _status == 404
                     else api_bad_request(_err, field='model'))
@@ -109,9 +120,12 @@ async def chat_completions():
               model=cfg.get('model', '?'),
               n_messages=len(messages), stream=options['stream'])
 
-    from lib.tasks_pkg import create_task, spawn_task
+    from lib.tasks_pkg.manager import create_task
+    from lib.tasks_pkg.spawn import spawn_task
     conv_id = short_id('compat-openai-', 12)
-    task = create_task(conv_id, messages, cfg)
+    task = create_task(
+        conv_id, messages, cfg, user_id=int(request_user_id())
+    )
     task['_inline_messages'] = True
     task['_compat_openai'] = True
     if auth and auth.key_id:
@@ -126,7 +140,7 @@ async def chat_completions():
             dispose_ephemeral_slot(_byo_handle)
         logger.warning('[compat:openai] admission refused (in_flight=%d/%d) '
                        'key=%s model=%s', controller.in_flight,
-                       controller.capacity, owner, cfg.get('model', '?'))
+                       controller.capacity, auth.key_id, cfg.get('model', '?'))
         return api_error('Server at capacity; retry shortly.', status=503,
                          error_kind='overloaded', retry_after=5)
 
@@ -179,7 +193,16 @@ async def chat_completions():
     finally:
         unregister_waiter(task['id'])
 
-    out = build_openai_response(task, model=model, requested_id=requested_id)
+    try:
+        out = build_openai_response(
+            task, model=model, requested_id=requested_id)
+    except CompatTerminalFailure as exc:
+        logger.warning('[compat:openai] refusing false-success task=%s cause=%s',
+                       task['id'][:8], exc.verdict.cause)
+        return api_internal_error(
+            str(exc), context='compat:openai', log_traceback=False,
+            error_kind=exc.verdict.cause,
+        )
     out['task_id'] = task['id']  # extension; OpenAI SDKs ignore unknown fields
     try:
         if auth and auth.key_id:
@@ -207,8 +230,10 @@ async def chat_completions():
 def models():
     from quart import jsonify
     auth = current_auth()
-    owner = (auth.key_id if auth else '') or ''
-    return jsonify(models_payload(owner_key_id=owner))
+    return jsonify(models_payload(
+        owner_user_id=(auth.owner_user_id if auth else None),
+        tenant_id=(auth.tenant_id if auth else None),
+    ))
 
 
 @compat_openai_bp.route('/v1/embeddings', methods=['POST'])

@@ -14,14 +14,15 @@ frontend masked this with a keep-longer belt (``_snapshotLonger`` at the 5
 state-snapshot sites) — a legitimate transport merge, but one that keeps a
 second source of truth alive in the client.
 
-The elegant root fix: the ``task_events`` table ALREADY persists every delta on
-arrival (``event_log.append_persistent_event`` — no coalescing since 2026-05),
-so the server holds a LOSSLESS record of exactly what the client saw. Folding
-that log reconstructs the authoritative live text with NO added write cost (the
-per-delta write is already paid) and only a single bounded read per cold
-reconnect (benchmarked at <=5ms for typical turns, off the event loop). Once the
-cold state snapshot is folded, the server's replayable state never trails the
-client → the keep-longer belt becomes a provable no-op for cold replay.
+The elegant root fix: the ``task_events`` table persists every client-visible
+delta before delivery. Provider microchunks may be losslessly merged before
+sequence assignment (first chunk immediate, then <=100 ms / 256 characters),
+but the durable log still contains exactly the bytes the client saw in exactly
+the same event order. Folding that log reconstructs authoritative live text
+with no additional write and only one bounded read per cold reconnect
+(benchmarked at <=5ms for typical turns, off the event loop). Once folded, the
+server's replayable state never trails the client, so the keep-longer belt is a
+provable no-op for cold replay.
 
 The fold mirrors the frontend's own accumulation semantics EXACTLY:
   * ``delta``       → append ``content`` / ``thinking`` deltas.

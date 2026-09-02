@@ -10,6 +10,7 @@ import pytest
 from quart import Response
 
 import lib.http_compression as compression
+from lib.app_assembly import configure_application
 from lib.app_factory import create_base_app
 
 
@@ -28,6 +29,13 @@ def _test_app():
     @app.get('/large')
     async def large():
         return Response(b'x' * 4096, mimetype='application/json')
+
+    @app.get('/very-large')
+    async def very_large():
+        return Response(
+            b'z' * (compression.LARGE_DYNAMIC_RESPONSE_BYTES + 1),
+            mimetype='application/json',
+        )
 
     @app.get('/partial')
     async def partial():
@@ -65,6 +73,57 @@ def test_large_body_is_gzipped_off_the_serving_loop(monkeypatch):
     assert all(thread_id != loop_thread for thread_id in compression_threads)
 
 
+def test_large_personal_dynamic_body_uses_low_cpu_gzip_off_loop(monkeypatch):
+    app = _test_app()
+    observed = []
+    real_compress = compression.compress_bytes
+
+    def record_quality(data, encoding, quality):
+        observed.append((threading.get_ident(), encoding, quality))
+        return real_compress(data, encoding, quality)
+
+    monkeypatch.setattr(compression, 'compress_bytes', record_quality)
+    monkeypatch.setenv('TOFU_DEPLOYMENT_MODE', 'personal')
+
+    async def exercise():
+        loop_thread = threading.get_ident()
+        async with app.test_app():
+            response = await app.test_client().get(
+                '/very-large', headers={'Accept-Encoding': 'gzip'})
+            return loop_thread, response, await response.get_data()
+
+    loop_thread, response, body = _run(exercise())
+    assert gzip.decompress(body) == (
+        b'z' * (compression.LARGE_DYNAMIC_RESPONSE_BYTES + 1)
+    )
+    assert observed == [(
+        observed[0][0],
+        'gzip',
+        compression.GZIP_LEVEL_PERSONAL_LARGE,
+    )]
+    assert observed[0][0] != loop_thread
+
+
+def test_compression_quality_preserves_distributed_and_cached_bandwidth_policy():
+    threshold = compression.LARGE_DYNAMIC_RESPONSE_BYTES
+    for encoding, live, personal_large, cached in (
+        ('br', 4, 2, 9),
+        ('gzip', 6, 1, 6),
+    ):
+        assert compression.compression_quality(
+            encoding, threshold - 1, cached=False, deployment_mode='personal'
+        ) == live
+        assert compression.compression_quality(
+            encoding, threshold, cached=False, deployment_mode='personal'
+        ) == personal_large
+        assert compression.compression_quality(
+            encoding, threshold, cached=False, deployment_mode='distributed'
+        ) == live
+        assert compression.compression_quality(
+            encoding, threshold, cached=True, deployment_mode='personal'
+        ) == cached
+
+
 def test_partial_response_is_never_compressed():
     app = _test_app()
 
@@ -79,15 +138,30 @@ def test_partial_response_is_never_compressed():
     assert response.headers['Content-Range'] == 'bytes 0-1023/4096'
 
 
-def test_server_assembly_registers_extracted_compression_boundary():
-    from pathlib import Path
+def test_application_assembly_serves_compressed_responses(
+        monkeypatch, tmp_path):
+    import logging
+    import routes
 
-    source = (Path(__file__).resolve().parents[1] / 'server.py').read_text()
-    assembly = (Path(__file__).resolve().parents[1]
-                / 'lib/app_assembly.py').read_text()
-    assert 'from lib.http_compression import' not in source
-    assert 'from lib.http_compression import register_http_compression' \
-        in assembly
-    assert 'configure_application(' in source
-    assert 'register_http_compression(app)' in assembly
-    assert 'async def _compress_response' not in source
+    monkeypatch.setattr(routes, 'register_all', lambda *_args, **_kwargs: None)
+    app = create_base_app('assembled-compression-test', {'TESTING': True})
+    assert configure_application(
+        app,
+        static_dir=str(tmp_path),
+        logger=logging.getLogger('test.assembled-compression'),
+        secret_key='test-secret',
+    ) is True
+
+    @app.get('/assembled-large')
+    async def assembled_large():
+        return Response(b'y' * 4096, mimetype='application/json')
+
+    async def exercise():
+        async with app.test_app():
+            response = await app.test_client().get(
+                '/assembled-large', headers={'Accept-Encoding': 'gzip'})
+            return response, await response.get_data()
+
+    response, body = _run(exercise())
+    assert response.headers['Content-Encoding'] == 'gzip'
+    assert gzip.decompress(body) == b'y' * 4096

@@ -24,7 +24,8 @@ from unittest import mock
 
 import pytest
 
-from lib.feishu import commands, events
+import lib.feishu.commands as commands
+import lib.feishu.events as events
 
 pytestmark = pytest.mark.unit
 

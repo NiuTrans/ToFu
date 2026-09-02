@@ -9,6 +9,7 @@ import json
 import os
 import threading
 import time
+from dataclasses import dataclass
 
 from lib.log import get_logger
 from lib.model_info.capability_taxonomy import DISPATCHER_NON_CHAT_CAPS
@@ -37,12 +38,30 @@ __all__ = [
 ]
 
 
+@dataclass(frozen=True)
+class _SharedContentionProbeState:
+    """Process-local admission state for one shared provider/model project."""
+
+    strikes: int
+    last_strike_at: float
+    next_probe_at: float
+    recovery_successes: int = 0
+
+
+@dataclass(frozen=True)
+class _SharedContentionAdmission:
+    """One bounded wait slice and whether it owns the following probe."""
+
+    delay_s: float
+    admitted: bool
+
+
 def _oauth_wire_protocol(provider: dict) -> str:
     """The wire protocol a subscription backend ACTUALLY speaks.
 
     The Codex backend accepts ONLY the Responses API, so an oauth='codex'
     provider's effective protocol is 'responses' regardless of what a
-    stored config says (entries written before epic pt_b7a29ea7 carry
+    stored config says (entries written before  carry
     'openai', a lie the old URL-sniff gate papered over). Returns '' for
     non-codex providers — no coercion.
     """
@@ -65,9 +84,11 @@ class LLMDispatcher:
         # _build_logical_index during slot build.
         self._logical_index: dict[str, str] = {}
         self._direct_models: set = set()
-        # (provider_id, model) → (strikes, cooled_until) for shared-project
-        # contention (see note_shared_contention).
-        self._contention_strikes: dict = {}
+        # Shared-project retry admission is scoped to provider + model because
+        # rotating API keys inside one upstream project cannot create TPM.
+        self._contention_strikes: dict[
+            tuple[str, str], _SharedContentionProbeState
+        ] = {}
         # Model entries REFUSED at slot-build time because their wire face
         # could not be resolved safely (e.g. a Claude model on a dual-face
         # gateway whose provider declares no anthropic face). Surfaced to the
@@ -120,7 +141,7 @@ class LLMDispatcher:
                            'BYO ephemeral slots can serve requests')
             return
 
-        # ★ Always re-read config from disk — the module-level
+        # Always re-read config from disk — the module-level
         #   _SAVED_CONFIG is a stale snapshot from server startup that
         #   misses providers added via the Settings UI.
         from lib import _load_server_config
@@ -137,7 +158,7 @@ class LLMDispatcher:
             self._migrate_duplicate_account_faces(saved_providers)
             self._build_slots_from_providers(saved_providers)
         else:
-            # ★ Non-default endpoint → auto-discover models from /v1/models
+            # Non-default endpoint → auto-discover models from /v1/models
             #   instead of using hardcoded model names that may not be available
             from lib import LLM_API_KEY, LLM_BASE_URL
             is_default = (LLM_BASE_URL == self._DEFAULT_BASE_URL)
@@ -534,6 +555,13 @@ class LLMDispatcher:
 
                 # Merge with DEFAULT_SLOT_CONFIGS for any missing fields
                 default_cfg = DEFAULT_SLOT_CONFIGS.get(model_id, {})
+                # ``stream_only`` is part of the provider model-entry
+                # contract (managed Codex writes it on every model).  The old
+                # slot builder consulted only DEFAULT_SLOT_CONFIGS, silently
+                # dropping the persisted value and making each non-streaming
+                # summary learn the same fact again via an upstream HTTP 400.
+                model_stream_only = model_entry.get(
+                    'stream_only', default_cfg.get('stream_only', False))
                 from lib.model_registration import routing_cost_per_1k
                 cost = routing_cost_per_1k(
                     model_entry, provider_id=prov_id,
@@ -572,6 +600,8 @@ class LLMDispatcher:
                     cell_caps = cell.get('capabilities')
                     cell_rpm = cell.get('rpm', rpm)
                     cell_cost = cell.get('cost', cost)
+                    cell_stream_only = cell.get(
+                        'stream_only', model_stream_only)
 
                     # ── Wire-id pool for this (entry, key) ──
                     # The ids actually sent as the ``"model"`` field. One slot
@@ -617,10 +647,15 @@ class LLMDispatcher:
                             slot_caps -= (MANAGED_TIER_TAGS - tiers)
                             slot_caps |= tiers
 
-                        # Check stream_only flag from default config
-                        slot_stream_only = alias_cfg.get('stream_only', default_cfg.get('stream_only', False))
+                        # Precedence mirrors every other per-slot field:
+                        # concrete wire alias > key/model cell > model entry >
+                        # shipped default.  This keeps an explicit provider
+                        # capability intact all the way to dispatch_chat's
+                        # pre-exclusion gate.
+                        slot_stream_only = alias_cfg.get(
+                            'stream_only', cell_stream_only)
 
-                        # ★ One slot per (endpoint × key). For non-local providers
+                        # One slot per (endpoint × key). For non-local providers
                         #   ep_pool collapses to a single entry, preserving
                         #   the historical N-key-only behavior.
                         slot_endpoints = ep_pool
@@ -1075,7 +1110,7 @@ class LLMDispatcher:
             for slot in self.slots:
                 if capability not in slot.capabilities:
                     continue
-                # ★ Guard: never dispatch embedding/image_gen-only slots
+                # Guard: never dispatch embedding/image_gen-only slots
                 #   for chat operations (safety net against capability leaks).
                 #   Skip the guard when the caller explicitly asks for a
                 #   non-chat capability (image_gen, embedding).
@@ -1096,13 +1131,13 @@ class LLMDispatcher:
                 candidates.append(slot)
 
             if not candidates:
-                # ★ Pinned-provider isolation: a pinned task whose own slot
+                # Pinned-provider isolation: a pinned task whose own slot
                 #   is momentarily unavailable (cooldown/excluded) must WAIT,
                 #   never widen onto an operator key. Return None so the
                 #   dispatch retry loop keeps cycling within the provider.
                 if _pinned_provider:
                     return None
-                # ★ strict_model: if the user chose a specific model and all
+                # strict_model: if the user chose a specific model and all
                 #   its slots are in cooldown, return None immediately so the
                 #   retry loop waits — do NOT fall back to another model.
                 if strict_model and prefer_model:
@@ -1134,7 +1169,9 @@ class LLMDispatcher:
             # not among the eligible candidates (cooled down / excluded /
             # disabled), we fall through to score-based selection and rebind.
             _sticky = (sticky_routing_enabled() and get_conv_affinity()) or None
-            _sticky_key = get_preferred_key(_sticky) if _sticky else None
+            _sticky_route_key = str(prefer_model or f'cap:{capability}')
+            _sticky_key = (get_preferred_key(
+                _sticky, route_key=_sticky_route_key) if _sticky else None)
 
             def _select(pool):
                 """Pick the best slot in *pool*, honoring the sticky key when eligible."""
@@ -1156,7 +1193,7 @@ class LLMDispatcher:
                 if preferred:
                     chosen = _select(preferred)
                 elif strict_model:
-                    # ★ User explicitly chose this model — all its slots are
+                    # User explicitly chose this model — all its slots are
                     #   in candidates but none match the logical id (shouldn't
                     #   happen normally, but guard against it).  Return None.
                     return None
@@ -1165,7 +1202,7 @@ class LLMDispatcher:
             else:
                 chosen = _select(candidates)
 
-            # ★ strict_model: if the best candidate has score=inf it means
+            # strict_model: if the best candidate has score=inf it means
             #   all matching slots are in cooldown.  Return None so the
             #   retry loop waits — don't silently dispatch a cooldown'd slot
             #   or fall back to a different model.
@@ -1200,7 +1237,8 @@ class LLMDispatcher:
                         fell_back=_fell_back)
                 except Exception as _pd_err:
                     logger.debug('[Dispatch] pick-decision record failed: %s', _pd_err)
-                record_conv_key(_sticky, chosen.key_name)
+                record_conv_key(_sticky, chosen.key_name,
+                                route_key=_sticky_route_key)
 
             # ── Isolation observability ──
             # One line per pick so a provider leak is a single grep:
@@ -1377,41 +1415,141 @@ class LLMDispatcher:
 
     # ── Shared-project contention (external saturation) ──
     # A 429 naming a PROJECT-level limit (RateLimitError.is_shared_contention)
-    # means the gateway account's shared pipe is saturated by OTHER tenants.
-    # Owner directive 2026-08-03: a 429 gets NO backoff — the dispatch loop
-    # retries IMMEDIATELY. The escalating 2s→60s family parking introduced
-    # 2026-07-28 (pt_1a72b708098d446f) is RETIRED: it idled requests up to a
-    # minute per strike while the window doubled, and grabbing the rate-limit
-    # window the instant it resets favours aggressive polling. The slot's own
-    # 0.5s steering cooldown (Slot.record_error) is the whole answer. This
-    # hook is now PURE TELEMETRY: a per-(provider, model) streak counter plus
-    # a throttled log line, so a contention storm stays visible in app.log
-    # without per-cycle flooding.
+    # means rotating our own API keys cannot create capacity. Never park slots
+    # or feed health: serialize only request admission from this process. The
+    # first strike arms the existing 0.3s retry; later callers (including other
+    # tasks) reserve one provider/model probe per second before network I/O.
+    # A caller rechecks after bounded 3s wait slices, so a deep queue never
+    # collapses into a same-time probe herd. This replaces both the retired
+    # 2s→60s family parking and the 0.3s retry herd without reviving either.
     _CONTENTION_RESET_GRACE_S = 30.0  # quiet window → streak resets
+    _CONTENTION_BASE_RETRY_S = 0.3
+    _CONTENTION_PROBE_SPACING_S = 1.0
+    _CONTENTION_MAX_WAIT_SLICE_S = 3.0
+    _CONTENTION_RECOVERY_SUCCESSES = 2
+    _CONTENTION_MAX_FAMILIES = 256
+
+    def _expire_shared_contention_locked(self, now: float) -> None:
+        """Drop quiet family gates while ``self._lock`` is held."""
+        expired_keys = [
+            family_key
+            for family_key, state in self._contention_strikes.items()
+            if now >= state.last_strike_at + self._CONTENTION_RESET_GRACE_S
+        ]
+        for expired_key in expired_keys:
+            self._contention_strikes.pop(expired_key, None)
 
     def note_shared_contention(self, slot) -> float:
-        """Record one shared-project contention strike; NEVER parks slots.
-
-        Always returns 0.0 (no backoff — owner directive 2026-08-03: retry
-        immediately). The streak resets after a quiet window + grace. Log
-        throttle: strikes 1-3 + every 100th at INFO, the rest at DEBUG —
-        a sustained storm costs ~1 line/30s instead of ~3 lines/s.
-        """
+        """Arm a pre-request family gate; never park or penalize slots."""
         key = (slot.provider_id, slot.model)
-        now = time.time()
+        now = time.monotonic()
         with self._lock:
-            strikes, last = self._contention_strikes.get(key, (0, 0.0))
-            strikes = (strikes + 1
-                       if now < last + self._CONTENTION_RESET_GRACE_S else 1)
-            self._contention_strikes[key] = (strikes, now)
+            self._expire_shared_contention_locked(now)
+            previous = self._contention_strikes.get(key)
+            if previous is None:
+                if len(self._contention_strikes) >= self._CONTENTION_MAX_FAMILIES:
+                    oldest_key = min(
+                        self._contention_strikes,
+                        key=lambda candidate: self._contention_strikes[
+                            candidate
+                        ].last_strike_at,
+                    )
+                    self._contention_strikes.pop(oldest_key, None)
+                strikes = 1
+                next_probe_at = now + self._CONTENTION_BASE_RETRY_S
+            else:
+                strikes = previous.strikes + 1
+                next_probe_at = max(
+                    now + self._CONTENTION_BASE_RETRY_S,
+                    previous.next_probe_at,
+                )
+            retry_delay = min(
+                self._CONTENTION_MAX_WAIT_SLICE_S,
+                max(self._CONTENTION_BASE_RETRY_S, next_probe_at - now),
+            )
+            self._contention_strikes[key] = _SharedContentionProbeState(
+                strikes=strikes,
+                last_strike_at=now,
+                next_probe_at=next_probe_at,
+                recovery_successes=0,
+            )
         if strikes <= 3 or strikes % 100 == 0:
             logger.info('[Dispatch] shared-project contention on %s:%s — '
-                        'retrying immediately, no family backoff (streak %d)',
-                        slot.provider_id, slot.model, strikes)
+                        'next probe no sooner than %.2fs (streak %d)',
+                        slot.provider_id, slot.model, retry_delay, strikes)
         else:
             logger.debug('[Dispatch] shared-project contention on %s:%s '
-                         '(streak %d)', slot.provider_id, slot.model, strikes)
-        return 0.0
+                         '(next probe %.2fs, streak %d)',
+                         slot.provider_id, slot.model, retry_delay, strikes)
+        return retry_delay
+
+    def reserve_shared_contention_probe(
+            self, slot) -> _SharedContentionAdmission:
+        """Reserve this family's next probe, or return one bounded wait slice.
+
+        No state means normal admission. If the queue is deeper than one wait
+        slice, the caller sleeps and rechecks without reserving; this prevents
+        every caller beyond the three-second horizon from waking together.
+        """
+        key = (slot.provider_id, slot.model)
+        now = time.monotonic()
+        with self._lock:
+            self._expire_shared_contention_locked(now)
+            previous = self._contention_strikes.get(key)
+            if previous is None:
+                return _SharedContentionAdmission(delay_s=0.0, admitted=True)
+            delay_s = max(0.0, previous.next_probe_at - now)
+            if delay_s > self._CONTENTION_MAX_WAIT_SLICE_S:
+                return _SharedContentionAdmission(
+                    delay_s=self._CONTENTION_MAX_WAIT_SLICE_S,
+                    admitted=False,
+                )
+            probe_at = now + delay_s
+            self._contention_strikes[key] = _SharedContentionProbeState(
+                strikes=previous.strikes,
+                last_strike_at=previous.last_strike_at,
+                next_probe_at=(
+                    probe_at + self._CONTENTION_PROBE_SPACING_S
+                ),
+                recovery_successes=previous.recovery_successes,
+            )
+            return _SharedContentionAdmission(
+                delay_s=delay_s,
+                admitted=True,
+            )
+
+    def note_shared_success(self, slot) -> bool:
+        """Clear a family gate only after sustained, drained recovery.
+
+        A single lucky admission can coexist with an exhausted shared TPM
+        window. Two consecutive successes are required, and reservations that
+        were already spaced ahead are allowed to drain before the gate clears.
+        """
+        key = (slot.provider_id, slot.model)
+        now = time.monotonic()
+        with self._lock:
+            self._expire_shared_contention_locked(now)
+            previous = self._contention_strikes.get(key)
+            if previous is None:
+                return False
+            recovery_successes = previous.recovery_successes + 1
+            reservations_drained = now >= (
+                previous.next_probe_at - self._CONTENTION_PROBE_SPACING_S
+            )
+            if (recovery_successes >= self._CONTENTION_RECOVERY_SUCCESSES
+                    and reservations_drained):
+                self._contention_strikes.pop(key, None)
+                return True
+            self._contention_strikes[key] = _SharedContentionProbeState(
+                strikes=previous.strikes,
+                last_strike_at=previous.last_strike_at,
+                next_probe_at=previous.next_probe_at,
+                recovery_successes=min(
+                    recovery_successes,
+                    self._CONTENTION_RECOVERY_SUCCESSES,
+                ),
+            )
+            return False
 
     def cooling_cause_summary(self, capability: str = 'text',
                               exclude_models=None, exclude_keys=None,
@@ -1476,7 +1614,8 @@ class LLMDispatcher:
         """
         if not conv_id:
             return None
-        sticky_key = get_preferred_key(conv_id)
+        sticky_key = get_preferred_key(
+            conv_id, route_key=str(prefer_model or 'cap:text'))
         if not sticky_key:
             return None
         ex_keys = exclude_keys or set()

@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contract": "tofu.frontend-conversation-architecture/v1",
+  "responsibility": "Machine-readable ownership and shrinking legacy-debt limits for the browser conversation surface.",
+  "invariants": [
+    "Conversation Sync v3 snapshots and ordered events are the only inputs that mutate durable browser turn state.",
+    "TurnStore is the only normalized browser conversation state authority.",
+    "ConversationSurface is the only content-derived writer of the conversation DOM.",
+    "ConversationSurface owns the bounded DOM window, scroll anchor, and follow suspension without truncating TurnStore.",
+    "turnId is the only durable rendered identity and blockId is the only identity below a turn.",
+    "Conversation shells contain catalog and settings metadata only; settings persistence never depends on Turn presence.",
+    "Durable document state, live session state, and local interaction state never share an owner.",
+    "Diagnostics observe ConversationTurnRead and the active Surface without fetching or parsing another transcript.",
+    "Retained runtime debt may only shrink until its target is zero."
+  ],
+  "owners": {
+    "wireContract": "contracts/conversation_sync_v3.yaml",
+    "generatedBrowserContract": "frontend/src/api/conversation-sync.generated.ts",
+    "transportAndRecovery": "frontend/src/core/conversation-sync.ts",
+    "requestIdempotency": "frontend/src/api/transport.ts",
+    "normalizedTurnState": "frontend/src/conversation/domain/turn-store.ts",
+    "turnCommands": "frontend/src/core/turn-command.ts",
+    "viewModelProjection": "frontend/src/conversation/presentation/conversation-view-model.ts",
+    "terminalPresentation": "frontend/src/conversation/presentation/turn-finish.ts",
+    "conversationComposition": "frontend/src/core/turn-runtime.ts",
+    "conversationDom": "frontend/src/conversation/ui/conversation-surface.ts",
+    "surfaceController": "frontend/src/conversation/application/conversation-surface-controller.ts",
+    "catalogAndSettingsPersistence": "frontend/src/runtime/sections/core/conversation_catalog.js",
+    "composerSettingsCapture": "frontend/src/runtime/sections/main.js",
+    "diagnosticsProjection": "frontend/src/features/diagnostics.ts",
+    "scrollPresentation": "frontend/src/conversation/ui/conversation-surface.ts",
+    "resourceLifecycle": "frontend/src/lifecycle.ts"
+  },
+  "targetLayers": [
+    {
+      "id": "contract",
+      "root": "frontend/src/api",
+      "mayDependOn": []
+    },
+    {
+      "id": "domain",
+      "root": "frontend/src/conversation/domain",
+      "mayDependOn": ["contract"]
+    },
+    {
+      "id": "application",
+      "root": "frontend/src/conversation/application",
+      "mayDependOn": ["contract", "domain"]
+    },
+    {
+      "id": "presentation",
+      "root": "frontend/src/conversation/presentation",
+      "mayDependOn": ["contract", "domain"]
+    },
+    {
+      "id": "ui",
+      "root": "frontend/src/conversation/ui",
+      "mayDependOn": ["contract", "application", "presentation"]
+    },
+    {
+      "id": "composition",
+      "root": "frontend/src/conversation/index.ts",
+      "mayDependOn": ["contract", "domain", "application", "presentation", "ui"]
+    }
+  ],
+  "legacyDebt": [
+    {
+      "id": "retained-runtime-sections",
+      "metric": "file_count",
+      "roots": ["frontend/src/runtime/sections"],
+      "suffixes": [".js"],
+      "maximum": 210,
+      "target": 0,
+      "remedy": "Move an owner into frontend/src/conversation or another typed feature and remove its manifest entry."
+    },
+    {
+      "id": "retained-runtime-bytes",
+      "metric": "byte_count",
+      "roots": ["frontend/src/runtime/sections"],
+      "suffixes": [".js"],
+      "maximum": 3652967,
+      "target": 0,
+      "remedy": "Delete retained JavaScript as typed owners replace it; do not move debt between sections."
+    },
+    {
+      "id": "mutable-message-document-writes",
+      "metric": "regex_count",
+      "roots": ["frontend/src/runtime/sections"],
+      "suffixes": [".js"],
+      "pattern": "\\b(?:conv|conversation|activeConversation|targetConversation)\\.messages\\s*(?:=|\\.(?:push|splice|pop|shift|unshift)\\s*\\()",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Dispatch a turn command or event and derive the document from TurnStore."
+    },
+    {
+      "id": "conversation-shell-transcript-access",
+      "metric": "regex_count",
+      "roots": [
+        "frontend/src/runtime/sections",
+        "frontend/src/conversation",
+        "frontend/src/core",
+        "frontend/src/features"
+      ],
+      "suffixes": [".js", ".ts"],
+      "pattern": "\\b(?:conv|conversation|activeConversation|targetConversation)\\.messages\\b",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Read ordered Turns through ConversationTurnRead; conversation shells are metadata only."
+    },
+    {
+      "id": "retired-conversation-settings-paths",
+      "metric": "regex_count",
+      "roots": ["frontend/src"],
+      "suffixes": [".js", ".ts"],
+      "pattern": "(?:_saveConvToolState|_syncToolStateDebounced|_restoreConvToolState|patchToolState|/chat/tool-state)",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Capture composer settings once and persist them through persistConversationSettings, independent of Turn content."
+    },
+    {
+      "id": "retired-conversation-render-owner",
+      "metric": "regex_count",
+      "roots": ["frontend/src"],
+      "suffixes": [".js", ".ts"],
+      "pattern": "\\bConvView\\b",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Use ConversationSurface and stable Turn/block identity; do not recreate a parallel DOM owner."
+    },
+    {
+      "id": "retired-conversation-shell-field-names",
+      "metric": "regex_count",
+      "roots": [
+        "frontend/src/runtime/sections",
+        "frontend/src/conversation",
+        "frontend/src/core",
+        "frontend/src/features"
+      ],
+      "suffixes": [".js", ".ts"],
+      "pattern": "(?:_needsLoad|_serverMsgCount|_catalogMessageCount)",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Name catalog metadata by its Turn meaning: _turnSnapshotRequired, _serverTurnCount, and _catalogTurnCount."
+    },
+    {
+      "id": "whole-conversation-repaints",
+      "metric": "regex_count",
+      "roots": ["frontend/src/runtime/sections"],
+      "suffixes": [".js"],
+      "pattern": "\\b(?:runtimeScope\\.)?ConvView\\??\\.replaceAll\\s*\\(",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Let ConversationSurface reconcile the affected turn by stable identity."
+    },
+    {
+      "id": "legacy-message-dom-applies",
+      "metric": "regex_count",
+      "roots": ["frontend/src/runtime/sections"],
+      "suffixes": [".js"],
+      "pattern": "\\b(?:runtimeScope\\.)?ConvView\\??\\.apply\\s*\\(",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Dispatch a UI intent or store action; ConversationSurface owns the DOM application."
+    },
+    {
+      "id": "positional-message-identities",
+      "metric": "regex_count",
+      "roots": ["frontend/src/runtime/sections"],
+      "suffixes": [".js"],
+      "pattern": "(?:getElementById\\s*\\(\\s*['\\\"]msg-|id=['\\\"]msg-\\$\\{|\\b_editingMsgIdx\\b)",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Resolve and reconcile nodes by turnId or blockId, never by array position."
+    },
+    {
+      "id": "special-streaming-node-identities",
+      "metric": "regex_count",
+      "roots": ["frontend/src/runtime/sections"],
+      "suffixes": [".js"],
+      "pattern": "(?:getElementById\\s*\\(\\s*['\\\"]streaming-msg['\\\"]|id=['\\\"]streaming-msg['\\\"])",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Render running and terminal revisions into the same turnId-keyed node."
+    },
+    {
+      "id": "ambient-active-stream-state",
+      "metric": "regex_count",
+      "roots": ["frontend/src/runtime/sections"],
+      "suffixes": [".js"],
+      "pattern": "\\bactiveStreams\\b",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Read live attempt state from the conversation session store."
+    },
+    {
+      "id": "legacy-message-fingerprints",
+      "metric": "regex_count",
+      "roots": ["frontend/src/runtime/sections"],
+      "suffixes": [".js"],
+      "pattern": "\\b_msgFingerprint\\b",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Use projectionRevision and stable block revisions instead of content heuristics."
+    },
+    {
+      "id": "legacy-message-projection-commit",
+      "metric": "regex_count",
+      "roots": ["frontend/src/core/turn-projection.ts"],
+      "suffixes": [".ts"],
+      "pattern": "conversation\\.messages\\s*=",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Retire the projected messages document after all block renderers and action intents use TurnStore directly."
+    },
+    {
+      "id": "whole-turn-compatibility-renderer",
+      "metric": "regex_count",
+      "roots": ["frontend/src/conversation"],
+      "suffixes": [".ts"],
+      "pattern": "\\brenderCompatibilityTurn\\b",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Replace retained renderMessage parity one content block at a time, then delete the compatibility port and adapter."
+    },
+    {
+      "id": "legacy-conversation-renderer-state",
+      "metric": "regex_count",
+      "roots": ["frontend/src/runtime/sections"],
+      "suffixes": [".js"],
+      "pattern": "\\b(?:_explicitBottomLatch|_openScrollConvId|_initialSwitchLoad)\\b",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Keep scroll and loading presentation in the lifecycle-scoped ConversationSurface host, never on the conversation shell."
+    },
+    {
+      "id": "legacy-scroll-host-adapter",
+      "metric": "regex_count",
+      "roots": ["frontend/src/runtime/sections/main/conversation_turn_store.js"],
+      "suffixes": [".js"],
+      "pattern": "\\b(?:captureScroll|restoreScroll)\\s*\\(",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Inject the scroll viewport only; ConversationSurface owns capture, restore, follow suspension, and disposal."
+    },
+    {
+      "id": "legacy-diagnostic-transcript-probe",
+      "metric": "regex_count",
+      "roots": [
+        "frontend/src/features/diagnostics.ts",
+        "frontend/src/runtime/sections/diag_collect.js"
+      ],
+      "suffixes": [".ts", ".js"],
+      "pattern": "\\b(?:convWindowParam|liveGetProbe|messagesReturned|windowConfig)\\b",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Observe ConversationTurnRead and the active Surface; diagnostics must not fetch or parse a second transcript document."
+    },
+    {
+      "id": "pre-segment-projection-fallback",
+      "metric": "regex_count",
+      "roots": ["frontend/src/conversation/presentation/conversation-view-model.ts"],
+      "suffixes": [".ts"],
+      "pattern": "\\blegacyProjectionBlocks\\b",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "Backfill stable segment blocks for archived turns and remove content/thinking/toolRounds fallback projection."
+    }
+  ]
+}

@@ -35,6 +35,11 @@ import ast
 import os
 import unittest
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The full cache-channel alias universe known to lib/cost.py

@@ -312,7 +312,7 @@ def _apply_updates_locked(changes: dict) -> dict:
     return result
 
 
-def status_payload() -> dict:
+def status_payload(*, owner_user_id: int | str) -> dict:
     """Live backend state for the Settings UI status strip.
 
     Everything here answers "what will the backend ACTUALLY do on the next
@@ -320,8 +320,12 @@ def status_payload() -> dict:
     values, leaving the frontend/backend relationship opaque).
     """
     payload = {'ok': False}
+    owner_user_id = str(owner_user_id or '').strip()
+    if not owner_user_id.isdigit() or int(owner_user_id) < 1:
+        raise ValueError('owner_user_id must be a positive integer')
     try:
-        import tofu_search
+        from lib.search_runtime import ensure_search_runtime
+        tofu_search = ensure_search_runtime()
         cfg = tofu_search.get_config()
         payload.update({
             'ok': True,
@@ -344,8 +348,9 @@ def status_payload() -> dict:
             e, context='status-probe', source='search-settings').get(
                 'message', str(e))
     try:
-        from lib.browser import is_extension_connected
-        payload['extension_connected'] = bool(is_extension_connected())
+        from lib.browser.queue import get_connected_clients
+        payload['extension_connected'] = bool(
+            get_connected_clients(owner_user_id=owner_user_id))
     except Exception as e:
         logger.debug('[SearchSettings] extension probe failed: %s', e)
         payload['extension_connected'] = False

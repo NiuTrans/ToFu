@@ -13,11 +13,15 @@ the manual ``/compact`` path:
 """
 
 import json
+import posixpath
 
 from lib.log import get_logger
 from lib.tasks_pkg.compaction._constants import (
     _INTRA_TURN_HOT_ROUNDS,
     _MAX_PRESERVE_TURNS,
+    _PERSIST_DIR_BASE,
+    _USER_VERBATIM_BUDGET_TOKENS,
+    _USER_VERBATIM_MAX_MESSAGES,
 )
 from lib.tasks_pkg.compaction._tokens import _estimate_msg_tokens
 
@@ -105,6 +109,75 @@ def _extract_current_query(messages: list) -> str:
     return ''
 
 
+def _user_message_text(msg: dict) -> str:
+    """Plain-text content of a user message ('' when it carries no text)."""
+    content = msg.get('content', '')
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = [b.get('text', '') for b in content
+                 if isinstance(b, dict) and b.get('type') == 'text']
+        return '\n'.join(p for p in parts if p).strip()
+    return ''
+
+
+def _collect_user_verbatim(
+    old_messages: list,
+    *,
+    budget_tokens: int = _USER_VERBATIM_BUDGET_TOKENS,
+    max_messages: int = _USER_VERBATIM_MAX_MESSAGES,
+) -> list[str]:
+    """Select real user-message texts from the to-be-summarized OLD region
+    for VERBATIM retention across an L2 summary.
+
+    Codex-inspired (codex-rs ``compact.rs`` keeps user messages intact): the
+    lossy summary must not be the only place the user's literal instructions
+    survive. Selection is NEWEST-first under ``budget_tokens`` /
+    ``max_messages`` (the most recent instructions are the ones most likely
+    to still bind the current work), returned in chronological order.
+
+    Skips: synthetic ``_isMeta`` carriers (incl. a previous retention
+    wrapper — no feedback duplication), every engine/agent-initiated turn as
+    resolved by the canonical turn-initiator vocabulary, empty/non-text
+    content, and exact duplicates. Human operator guidance and a swarm inbox
+    carrier that contains a human steer remain eligible. The objective anchor
+    is already removed from ``old_messages`` by the caller, so it is never
+    duplicated here.
+    """
+    picked: list[str] = []
+    seen: set[str] = set()
+    spent = 0
+    from lib.turn_initiation import (
+        INITIATOR_OPERATOR,
+        is_auto_initiated,
+        resolve_initiator,
+    )
+    for msg in reversed(old_messages):
+        if len(picked) >= max_messages:
+            break
+        if not isinstance(msg, dict) or msg.get('role') != 'user':
+            continue
+        if msg.get('_isMeta') or msg.get('_isVuDirective'):
+            continue
+        human_steer = bool(msg.get('_containsHumanSteer'))
+        human_operator = resolve_initiator(msg) == INITIATOR_OPERATOR
+        if is_auto_initiated(msg) and not (human_steer or human_operator):
+            continue
+        if msg.get('_isInboxInject') and not human_steer:
+            continue
+        text = _user_message_text(msg)
+        if not text or text in seen:
+            continue
+        cost = _estimate_msg_tokens(msg)
+        if picked and spent + cost > budget_tokens:
+            continue
+        picked.append(text)
+        seen.add(text)
+        spent += cost
+    picked.reverse()
+    return picked
+
+
 def _find_turn_boundary(
     messages: list,
     *,
@@ -124,7 +197,15 @@ def _find_turn_boundary(
       • REFUSE         — if no ``user`` message exists, returns
         ``len(messages)`` so the caller short-circuits.
     """
-    user_idx = [i for i, m in enumerate(messages) if m.get('role') == 'user']
+    # ``_isMeta`` carriers (CLAUDE.md context block, token-budget reminder,
+    # preference profile) are synthetic context transports, not human turns —
+    # they must be transparent to the turn structure, exactly as
+    # ``_extract_current_query`` / ``_objective_anchor_index`` already treat
+    # them. Without this skip a trailing meta reminder would split the
+    # in-flight turn at the boundary and the real current turn would lose its
+    # "always preserved whole" invariant.
+    user_idx = [i for i, m in enumerate(messages)
+                if m.get('role') == 'user' and not m.get('_isMeta')]
     if not user_idx:
         return len(messages)
 
@@ -172,15 +253,23 @@ def _find_turn_boundary(
 #  between the two compaction paths.
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _split_cold_rounds(rounds: list, hot_rounds: int = _INTRA_TURN_HOT_ROUNDS):
+def _split_cold_rounds(
+    rounds: list,
+    hot_rounds: int = _INTRA_TURN_HOT_ROUNDS,
+    *,
+    hot_budget_tokens: int | None = None,
+    base_tokens: int = 0,
+    token_cost=None,
+):
     """Split a round sequence into ``(cold, hot)`` at the intra-turn fold line.
 
     ``rounds`` is any ordered sequence of round descriptors (RAW ``toolRounds``
-    dicts for the manual path, api-form ``(start, end)`` spans for the automatic
-    path — the policy is agnostic to the element type).  Keeps the last
-    ``hot_rounds`` as HOT (verbatim) and returns everything older as COLD (to
-    summarize + drop).  Returns ``([], list(rounds))`` when there is nothing to
-    fold (``len(rounds) <= hot_rounds``), so callers can cheaply no-op.
+    descriptors for the manual path, api-form ``(start, end)`` spans for the
+    automatic path — the policy is agnostic to the element type). Without a
+    token budget, keeps the last ``hot_rounds`` as HOT (verbatim). With a token
+    budget, that count becomes a maximum: keep the newest contiguous suffix
+    whose cost plus ``base_tokens`` fits. The newest complete round is always
+    retained even if it alone exceeds the budget.
 
     HARD CONSTRAINT (both paths): the fold unit is a WHOLE round — a
     self-contained ``toolCallId``/``toolContent`` (raw) or a complete
@@ -188,9 +277,25 @@ def _split_cold_rounds(rounds: list, hot_rounds: int = _INTRA_TURN_HOT_ROUNDS):
     therefore never orphan a ``tool`` message nor split a tool_call/result pair.
     """
     hot_rounds = max(1, int(hot_rounds))
-    if len(rounds) <= hot_rounds:
-        return [], list(rounds)
-    return list(rounds[:-hot_rounds]), list(rounds[-hot_rounds:])
+    if hot_budget_tokens is None:
+        if len(rounds) <= hot_rounds:
+            return [], list(rounds)
+        return list(rounds[:-hot_rounds]), list(rounds[-hot_rounds:])
+
+    if not rounds:
+        return [], []
+    if not callable(token_cost):
+        raise TypeError('token_cost must be callable with hot_budget_tokens')
+    budget = max(1, int(hot_budget_tokens))
+    spent = max(0, int(base_tokens))
+    keep_count = 0
+    for round_descriptor in reversed(rounds[-hot_rounds:]):
+        round_tokens = max(0, int(token_cost(round_descriptor)))
+        if keep_count > 0 and spent + round_tokens > budget:
+            break
+        spent += round_tokens
+        keep_count += 1
+    return (list(rounds[:-keep_count]), list(rounds[-keep_count:]))
 
 
 def _apiform_tool_rounds(messages: list) -> list:
@@ -221,27 +326,52 @@ def _apiform_tool_rounds(messages: list) -> list:
     return rounds
 
 
-def _fold_recent_intra_turn(recent_messages: list,
-                            hot_rounds: int = _INTRA_TURN_HOT_ROUNDS):
+def _fold_recent_intra_turn(
+    recent_messages: list,
+    hot_rounds: int = _INTRA_TURN_HOT_ROUNDS,
+    hot_budget_tokens: int | None = None,
+):
     """Fold COLD tool-call rounds out of an api-form PRESERVED region.
 
     Used by the automatic L2 path (``execute_compact_tool``) so an in-flight
     giant turn preserved whole by ``_find_turn_boundary`` can still be shrunk.
     Keeps the leading ``user`` message(s), any plain assistant prose, and the
-    most-recent ``hot_rounds`` tool-call rounds VERBATIM; the older (cold) round
-    SPANS are removed as WHOLE units (no orphan tool — see ``_split_cold_rounds``).
+    most-recent ``hot_rounds`` tool-call rounds VERBATIM, subject to the
+    optional token budget; older (cold) round SPANS are removed as WHOLE units
+    (no orphan tool — see ``_split_cold_rounds``). The newest complete tool
+    round is always kept even when it alone exceeds the budget.
 
     Returns ``(kept_messages, cold_round_messages)``:
       * ``kept_messages``       — the folded preserved region (hot tail intact).
       * ``cold_round_messages`` — the removed cold-round messages, IN ORDER, to
         feed the summarizer (they are NEVER re-inserted verbatim).
 
-    A no-op (``recent_messages`` returned unchanged, ``[]``) when the region has
-    ``<= hot_rounds`` tool-call rounds — so a normal multi-turn chat near the
-    window is byte-identical to the pre-fold behaviour.
+    Without ``hot_budget_tokens``, a region with ``<= hot_rounds`` tool-call
+    rounds is a byte-identical no-op. With a budget, even a short but enormous
+    hot tail is folded until its newest contiguous whole-round suffix fits.
     """
     rounds = _apiform_tool_rounds(recent_messages)
-    cold_spans, _hot_spans = _split_cold_rounds(rounds, hot_rounds)
+    if hot_budget_tokens is None:
+        cold_spans, _hot_spans = _split_cold_rounds(rounds, hot_rounds)
+    else:
+        round_indices = {
+            index for start, end in rounds for index in range(start, end)
+        }
+        base_tokens = sum(
+            _estimate_msg_tokens(message)
+            for index, message in enumerate(recent_messages)
+            if index not in round_indices
+        )
+        cold_spans, _hot_spans = _split_cold_rounds(
+            rounds,
+            hot_rounds,
+            hot_budget_tokens=hot_budget_tokens,
+            base_tokens=base_tokens,
+            token_cost=lambda span: sum(
+                _estimate_msg_tokens(message)
+                for message in recent_messages[span[0]:span[1]]
+            ),
+        )
     if not cold_spans:
         return list(recent_messages), []
 
@@ -282,20 +412,161 @@ def _coerce_spec_list(value) -> list:
     return []
 
 
+def _normalise_recent_file_path(value) -> str:
+    """Return one stable model-visible path or ``''`` for transport artifacts.
+
+    Oversized legacy tool results are staged below ``_PERSIST_DIR_BASE`` so a
+    model can selectively read them during the live turn.  They are
+    reconstructible transport data, not project working state, and must not be
+    promoted into a compaction summary's durable "recent files" reminder.
+    """
+    if not isinstance(value, str):
+        return ''
+    raw = value.strip().replace('\\', '/')
+    if not raw:
+        return ''
+    normalised = posixpath.normpath(raw)
+    if normalised in ('', '.'):
+        return ''
+    persist_root = str(_PERSIST_DIR_BASE).strip().replace('\\', '/').strip('/')
+    path_with_edges = f'/{normalised.lstrip("/")}/'
+    persist_parts = [part for part in persist_root.split('/') if part]
+    persist_markers = {persist_root}
+    if len(persist_parts) >= 2:
+        persist_markers.add('/'.join(persist_parts[-2:]))
+    if any(marker and f'/{marker}/' in path_with_edges
+           for marker in persist_markers):
+        return ''
+    return normalised
+
+
+def _successful_file_tool_call_ids(messages: list) -> tuple[set[str], set[str]]:
+    """Return ``(successful, settled)`` ids for file-tool result messages.
+
+    Old imported transcripts sometimes omit tool-call ids entirely; callers
+    keep those compatible.  A modern call with an id is included only after a
+    matching successful result, so failed/nonexistent reads do not become
+    misleading recovery instructions after compaction.
+    """
+    successful: set[str] = set()
+    settled: set[str] = set()
+    tool_names_by_id: dict[str, str] = {}
+    latest_call_index: dict[str, int] = {}
+    latest_result_index: dict[str, int] = {}
+    for message_index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        for tool_call in message.get('tool_calls') or []:
+            if not isinstance(tool_call, dict):
+                continue
+            call_id = str(tool_call.get('id') or '').strip()
+            function = tool_call.get('function') or {}
+            if call_id and isinstance(function, dict):
+                tool_names_by_id[call_id] = str(
+                    function.get('name') or '').strip()
+                latest_call_index[call_id] = message_index
+    for message_index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get('role') != 'tool':
+            continue
+        call_id = str(message.get('tool_call_id') or '').strip()
+        if not call_id:
+            continue
+        settled.add(call_id)
+        latest_result_index[call_id] = message_index
+        # Some providers recycle positional call IDs in later rounds. The most
+        # recent settlement is authoritative for the most recent matching call.
+        successful.discard(call_id)
+        if (message.get('isError') or message.get('is_error')
+                or str(message.get('status') or '').lower()
+                in {'error', 'failed', 'failure', 'rejected'}):
+            continue
+        content = message.get('content')
+        if isinstance(content, dict):
+            if (content.get('isError') or content.get('is_error')
+                    or content.get('ok') is False
+                    or str(content.get('status') or '').lower()
+                    in {'error', 'failed', 'failure', 'rejected'}):
+                continue
+            content = json.dumps(content, ensure_ascii=False, default=str)
+        elif isinstance(content, list):
+            content = json.dumps(content, ensure_ascii=False, default=str)
+        if not isinstance(content, str):
+            continue
+        stripped = content.lstrip()
+        if stripped.startswith('{'):
+            try:
+                envelope = json.loads(content)
+            except (TypeError, ValueError):
+                envelope = None
+            if isinstance(envelope, dict) and (
+                envelope.get('isError') or envelope.get('is_error')
+                or envelope.get('ok') is False
+                or str(envelope.get('status') or '').lower()
+                in {'error', 'failed', 'failure', 'rejected'}
+            ):
+                continue
+        try:
+            from lib.tasks_pkg.handlers._read_gate import (
+                _result_indicates_success,
+            )
+            tool_name = (str(message.get('name') or '').strip()
+                         or tool_names_by_id.get(call_id, ''))
+            if _result_indicates_success(tool_name, content):
+                successful.add(call_id)
+        except Exception:
+            # Keep the extraction helper total even in minimal/exported builds.
+            if content and not content.lstrip().startswith((
+                'Error:', 'ERROR:', 'Write failed', 'Diff failed',
+                'Insert failed', 'Failed',
+            )):
+                successful.add(call_id)
+    for call_id, call_index in latest_call_index.items():
+        if latest_result_index.get(call_id, -1) <= call_index:
+            settled.discard(call_id)
+            successful.discard(call_id)
+    return successful, settled
+
+
 def _extract_recently_accessed_files(messages: list,
                                      max_files: int = 8) -> list[str]:
-    """Scan messages newest-first for file paths from read/write tools."""
+    """Scan newest-first for successful, durable read/write file paths."""
+    max_files = max(0, int(max_files or 0))
+    if max_files == 0:
+        return []
     files_seen: list[str] = []
     files_set: set[str] = set()
+    observed_call_ids: set[str] = set()
+    successful_ids, settled_ids = _successful_file_tool_call_ids(messages)
+
+    def _add_path(value) -> None:
+        if len(files_seen) >= max_files:
+            return
+        path = _normalise_recent_file_path(value)
+        if path and path not in files_set:
+            files_seen.append(path)
+            files_set.add(path)
 
     for msg in reversed(messages):
+        if len(files_seen) >= max_files:
+            break
         for tc in msg.get('tool_calls', []):
+            if len(files_seen) >= max_files:
+                break
             fn = tc.get('function', {})
             fn_name = fn.get('name', '')
+            call_id = str(tc.get('id') or '').strip()
+            if call_id:
+                if call_id in observed_call_ids:
+                    continue
+                observed_call_ids.add(call_id)
 
             if fn_name not in ('read_files', 'read_file',
                                'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                                'insert_content', 'insert_contents'):
+                continue
+
+            if call_id and (call_id not in settled_ids
+                            or call_id not in successful_ids):
                 continue
 
             try:
@@ -316,6 +587,8 @@ def _extract_recently_accessed_files(messages: list,
                 # Claude-Opus shape: reads=["a.py","b.py"]) — NOT a stray char
                 # from iterating a string container. Keep both element shapes.
                 for spec in _coerce_spec_list(args.get('reads')):
+                    if len(files_seen) >= max_files:
+                        break
                     if isinstance(spec, dict):
                         p = spec.get('path', '')
                     elif isinstance(spec, str):
@@ -324,31 +597,21 @@ def _extract_recently_accessed_files(messages: list,
                         logger.debug('[Compact] Skipping non-dict/str read spec type=%s',
                                      type(spec).__name__)
                         continue
-                    if p and p not in files_set:
-                        files_seen.append(p)
-                        files_set.add(p)
+                    _add_path(p)
             elif fn_name in ('edit_file', 'apply_diff', 'apply_diffs') and args.get('edits'):
                 for edit in _coerce_spec_list(args.get('edits')):
+                    if len(files_seen) >= max_files:
+                        break
                     if isinstance(edit, dict):
-                        p = edit.get('path', '')
-                        if p and p not in files_set:
-                            files_seen.append(p)
-                            files_set.add(p)
+                        _add_path(edit.get('path', ''))
             elif fn_name in ('insert_content', 'insert_contents') and args.get('edits'):
                 for edit in _coerce_spec_list(args.get('edits')):
+                    if len(files_seen) >= max_files:
+                        break
                     if isinstance(edit, dict):
-                        p = edit.get('path', '')
-                        if p and p not in files_set:
-                            files_seen.append(p)
-                            files_set.add(p)
+                        _add_path(edit.get('path', ''))
             else:
-                p = args.get('path', '') if isinstance(args, dict) else ''
-                if p and p not in files_set:
-                    files_seen.append(p)
-                    files_set.add(p)
-
-            if len(files_seen) >= max_files:
-                break
+                _add_path(args.get('path', '') if isinstance(args, dict) else '')
 
     if files_seen:
         logger.debug('[Compact] Found %d recently-accessed files: %s',

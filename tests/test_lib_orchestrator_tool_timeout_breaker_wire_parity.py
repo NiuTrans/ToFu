@@ -1,11 +1,12 @@
-# Incident anchor: born in commit 03421771 — refactor(orchestrator): pt_03f4cdf1 slice 21 — extract consecutive-to...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 21 wire-parity: _tool_timeout_breaker.py extraction from _run.py."""
 
 import inspect
 from types import SimpleNamespace
 
-from lib.tasks_pkg.orchestrator import _tool_timeout_breaker
+import pytest
+
+import lib.tasks_pkg.orchestrator._tool_timeout_breaker as _tool_timeout_breaker
+pytestmark = pytest.mark.unit
 
 
 class TestToolTimeoutBreakerWireParity:
@@ -58,18 +59,14 @@ class TestToolTimeoutBreakerWireParity:
             _tool_timeout_breaker.handle_tool_timeout_circuit_breaker)
         assert "consecutive_tool_timeouts_" in src
 
-    def test_docstring_mentions_extraction(self):
-        assert "pt_03f4cdf1" in (_tool_timeout_breaker.__doc__ or "")
-
-
 class TestRunTaskDelegation:
     def test_run_task_delegates_to_helper(self):
-        from lib.tasks_pkg.orchestrator import _run
-        src = inspect.getsource(_run.run_task)
+        import lib.tasks_pkg.orchestrator._root_agent_loop as _root_agent_loop
+        src = inspect.getsource(_root_agent_loop)
         assert "handle_tool_timeout_circuit_breaker(" in src
 
     def test_run_task_no_longer_carries_block_inline(self):
-        from lib.tasks_pkg.orchestrator import _run
+        import lib.tasks_pkg.orchestrator._run as _run
         src = inspect.getsource(_run.run_task)
         assert "consecutive_tool_timeouts_" not in src
         assert "FORCE STOP" not in src

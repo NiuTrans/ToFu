@@ -9,10 +9,14 @@ import subprocess
 
 import pytest
 
+from tests._runtime_sections import runtime_section, runtime_section_path
+
 pytestmark = pytest.mark.unit
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
-SOURCE = os.path.join(ROOT, 'static', 'js', 'ui', 'tool_rounds.js')
+# Materialized migrated section (scope prelude included — the harness evals
+# it whole under jsdom, and the migrated source reads runtimeScope).
+SOURCE = runtime_section_path('ui/tool_rounds.js')
 
 
 def _node_deps_available() -> bool:
@@ -123,10 +127,13 @@ def test_tool_search_result_cards():
 
 
 def test_gateway_adapter_is_filtered_from_live_and_history_projections():
-    core = open(os.path.join(ROOT, 'static', 'js', 'core.js'),
-                encoding='utf-8').read()
-    streaming = open(os.path.join(ROOT, 'static', 'js', 'ui',
-                                  'streaming_ui.js'),
-                     encoding='utf-8').read()
+    core = runtime_section('core.js', scope_prelude=False)
+    presentation = open(
+        os.path.join(
+            ROOT, 'frontend/src/conversation/presentation',
+            'conversation-view-model.ts',
+        ),
+        encoding='utf-8',
+    ).read()
     assert 'r.toolName === "execute_tools"' in core
-    assert 'r.toolName === "execute_tools"' in streaming
+    assert "segment.name === 'execute_tools'" in presentation

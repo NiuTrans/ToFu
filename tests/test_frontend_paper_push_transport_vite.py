@@ -17,7 +17,7 @@ SOURCE = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'push-transport.ts')
 CLASSIC_SOURCE = os.path.join(
     ROOT, 'static', 'js', 'paper', 'push_transport.js')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 _HARNESS = r"""
@@ -113,7 +113,7 @@ console.log(out.join('\n'));
 
 
 @pytest.mark.skipif(not shutil.which('node') or not os.path.isfile(ESBUILD),
-                    reason='node + esbuild dev-deps not installed')
+                    reason='node + vite test bundler dev-deps not installed')
 def test_native_push_transport_contract(tmp_path):
     assert not os.path.exists(CLASSIC_SOURCE)
     built = tmp_path / 'push-transport.js'

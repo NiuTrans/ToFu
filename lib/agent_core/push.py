@@ -19,11 +19,9 @@ Channels in use:
   - ``translate``  — translation status (running, done, error)
   - ``notify``     — server notifications (config change, health, etc.)
   - ``timer``      — timer-list invalidations (created/progress/terminal)
-  - ``chat``       — chat task lifecycle (kept as a future hook;
-                     browser sessions still receive chat via SSE
-                     ``/api/chat/stream/<task_id>`` for Last-Event-ID
-                     resume support, but headless API/webhook clients
-                     can subscribe here).
+  - ``chat``       — chat task lifecycle for headless API/webhook clients.
+                     Native conversation state uses Conversation Sync v3;
+                     task-event SSE replay uses ``/api/v1/tasks/<task_id>/stream``.
 """
 
 import asyncio
@@ -48,6 +46,10 @@ class PushHub:
         self._clients: WeakSet = WeakSet()
         self._subscriptions: dict[str, dict[str, set]] = defaultdict(lambda: defaultdict(set))
         self._listeners: list = []  # in-process observers; see add_listener
+        # Replica-local observers for frames *received* from the fan-out bus.
+        # Unlike publication listeners, these run on every replica and let a
+        # durable domain stream use push solely as a low-latency wakeup hint.
+        self._delivery_listeners: list = []
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         # Cross-replica fan-out transport (Epic B). Under the default
@@ -129,6 +131,19 @@ class PushHub:
                 self._listeners.remove(fn)
             except ValueError as _e_audit:
                 logger.debug('[push] remove_listener caught %s: %s', type(_e_audit).__name__, _e_audit)
+                pass
+
+    def add_delivery_listener(self, fn) -> None:
+        """Observe bus-delivered frames on this replica (idempotent)."""
+        with self._lock:
+            if fn not in self._delivery_listeners:
+                self._delivery_listeners.append(fn)
+
+    def remove_delivery_listener(self, fn) -> None:
+        with self._lock:
+            try:
+                self._delivery_listeners.remove(fn)
+            except ValueError:
                 pass
 
     def register(self, client: 'PushClient'):
@@ -248,7 +263,14 @@ class PushHub:
         if emptied:
             self._deregister_subscription(channel, task_id)
 
-    def push_event(self, channel: str, task_id: str, payload: dict):
+    def push_event(
+        self,
+        channel: str,
+        task_id: str,
+        payload: dict,
+        *,
+        user_id: int | str,
+    ):
         """Publish an event to every subscriber of this channel+task across
         the FLEET, and fire in-process listeners exactly once.
 
@@ -259,7 +281,14 @@ class PushHub:
         to the pre-Epic-B path). Webhook/in-process listeners run HERE, on the
         publishing replica, so they fire once fleet-wide, not once per replica.
         """
-        frame = {'channel': channel, 'taskId': task_id, **payload}
+        owner_user_id = _require_owner_user_id(user_id)
+        frame = {
+            'channel': channel,
+            'taskId': task_id,
+            **payload,
+            '_ownerUserId': owner_user_id,
+        }
+        payload = {**payload, '_ownerUserId': owner_user_id}
         with self._lock:
             listeners = list(self._listeners)
         for fn in listeners:
@@ -277,27 +306,43 @@ class PushHub:
         """Deliver a frame (received from the bus, or local) to THIS replica's
         matching local subscribers. Runs on every replica's subscriber loop.
 
-        A broadcast frame carries ``_bcast=True`` and goes to all local
-        clients; otherwise the channel+taskId subscription lookup selects the
-        local targets (same semantics as before, now applied per-replica).
+        The channel+taskId subscription lookup selects local targets, then the
+        mandatory owner marker narrows delivery to that owner's sockets.
+        Frames without an owner are rejected before observers or clients can
+        see them; the bus is never an authorization boundary.
         """
         channel = frame.get('channel', '')
         task_id = frame.get('taskId', '*')
+        owner_user_id = str(frame.get('_ownerUserId') or '').strip()
+        if not owner_user_id:
+            logger.error(
+                '[Push] rejected ownerless frame channel=%s task=%s type=%s',
+                channel, task_id, frame.get('type'))
+            return
         with self._lock:
-            target_socket = frame.get('_socketReqId', '')
-            if target_socket:
-                targets = {c for c in self._clients
-                           if getattr(c, 'req_id', '') == target_socket}
-            elif frame.get('_bcast'):
-                targets = set(self._clients)
-            else:
-                targets = set()
-                targets.update(self._subscriptions[channel].get(task_id, set()))
-                targets.update(self._subscriptions[channel].get('*', set()))
-        # Never ship the internal routing marker to the client.
-        if '_bcast' in frame or '_socketReqId' in frame:
-            frame = {k: v for k, v in frame.items()
-                     if k not in ('_bcast', '_socketReqId')}
+            delivery_listeners = tuple(self._delivery_listeners)
+            targets = set()
+            channel_subscriptions = self._subscriptions.get(channel)
+            if channel_subscriptions:
+                targets.update(channel_subscriptions.get(task_id, set()))
+                targets.update(channel_subscriptions.get('*', set()))
+            targets = {
+                client
+                for client in targets
+                if client.user_id == owner_user_id
+            }
+        for fn in delivery_listeners:
+            try:
+                fn(frame)
+            except Exception as e:
+                logger.warning('[Push] delivery listener %r failed: %s', fn, e)
+        # Never ship internal routing markers to the client.
+        if '_ownerUserId' in frame:
+            frame = {
+                key: value
+                for key, value in frame.items()
+                if key != '_ownerUserId'
+            }
         if not targets:
             logger.debug('[Push] no local subscriber for channel=%s task=%s type=%s',
                          channel, task_id, frame.get('type'))
@@ -313,68 +358,6 @@ class PushHub:
         for client in targets:
             client.enqueue(frame)
 
-    def deliver_to_socket(self, req_id: str, frame: dict) -> bool:
-        """Deliver a frame to ONE socket, identified by its ``req_id``.
-
-        The repair channel for the sync-drift probe (pt_cadaa70ffa6b468d). The
-        probe knows exactly WHICH client is stalled — it is the one that just
-        POSTed a frozen digest — so the correction must reach that socket and
-        no other.
-
-        WHY NOT ``broadcast`` / ``push_event``: both fan out to every
-        subscriber. A conv_state_snapshot is per-tenant scoped and rev-gated,
-        so a stray copy is harmless in itself, but fanning a repair to N tabs
-        because ONE is stalled turns a targeted correction into fleet-wide
-        traffic on a 60s cadence — and it would mask the very condition being
-        repaired, since a healthy tab absorbing the frame looks identical to a
-        stalled tab being fixed.
-
-        Returns True when a matching local socket was enqueued OR a healthy
-        Redis fan-out bus accepted the targeted frame for fleet delivery. This
-        closes the HTTP/WS affinity gap: the digest POST need not land on the
-        same replica as the browser socket. Other replicas receive the internal
-        marker but discard it unless they own that exact ``req_id``.
-        """
-        if not req_id:
-            return False
-        with self._lock:
-            targets = [c for c in self._clients
-                       if getattr(c, 'req_id', '') == req_id]
-        if not targets:
-            bus = self._get_bus()
-            health = getattr(bus, 'health', None)
-            if not callable(health):
-                return False  # inproc: there is nowhere else to look
-            targeted = dict(frame)
-            targeted['_socketReqId'] = req_id
-            try:
-                bus.publish(targeted)
-                state = health()
-                return bool(state.get('publisher_available'))
-            except Exception as e:
-                logger.warning('[Push] targeted fleet delivery failed: %s', e)
-                return False
-        loop = self._loop
-        if loop and loop.is_running():
-            loop.call_soon_threadsafe(self._deliver, set(targets), frame)
-        else:
-            for client in targets:
-                client.enqueue(frame)
-        return True
-
-    def broadcast(self, channel: str, payload: dict):
-        """Broadcast to ALL connected clients across the fleet.
-
-        Published to the bus with a ``_bcast`` marker so every replica delivers
-        to all of ITS local clients; the marker is stripped before enqueue.
-        """
-        frame = {'channel': channel, 'taskId': '*', '_bcast': True, **payload}
-        try:
-            self._get_bus().publish(frame)
-        except Exception as e:
-            logger.warning('[Push] bus broadcast failed (%s) - delivering local', e)
-            self._deliver_frame(frame)
-
     @property
     def client_count(self) -> int:
         return len(self._clients)
@@ -384,14 +367,11 @@ class PushClient:
     """Represents a single WebSocket connection to the push channel.
 
     ``user_id`` is the resolved owner of the WebSocket (from
-    ``AuthContext.user_id`` at handshake — see routes/push.py::push_ws).
+    ``AuthContext.owner_user_id`` at handshake — see routes/push.py::push_ws).
     Stashed for the connection lifetime so every subsequent frame handler
-    can consult it without re-doing auth. Empty string means "no
-    resolved user" — the single-user / personal-install / pre-auth
-    default, and also what open-mode requests without a bearer token
-    produce (see :func:`lib.api_keys.local_admin_context`). Downstream
-    readers (``build_conv_state_snapshot``, ``snapshot_running_by_conv``)
-    treat empty as "unscoped, all-registry".
+    can consult it without re-doing auth. Ownerless sockets are invalid: the
+    handshake maps personal mode to its declared owner and multi-user mode
+    rejects an unbound principal.
 
     ``req_id`` is this socket's correlation id, resolved at handshake from
     the client's ``_rid`` query param (see routes/push.py::push_ws). It is
@@ -404,9 +384,9 @@ class PushClient:
     it.
     """
 
-    def __init__(self, user_id: str = '', req_id: str = ''):
+    def __init__(self, *, user_id: int | str, req_id: str = ''):
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
-        # ── Control lane (pt_afbaf3d7) ──────────────────────────────────
+        # ── Control lane () ──────────────────────────────────
         # Pongs (and future control frames) must JUMP the data backlog: under
         # event-loop congestion (e.g. a 176 MB HTTP response being serialized
         # on the same loop) a pong queued behind MBs of event frames arrives
@@ -415,9 +395,16 @@ class PushClient:
         # redundant by design, so silently discarding the oldest past the cap
         # is the correct degradation.
         self._ctl: deque = deque(maxlen=64)
+        # Correlated RPC results are neither lossy event data nor redundant
+        # liveness frames.  They get a separate reliable lane: saturation
+        # disconnects the slow client so every pending caller fails visibly
+        # and can use its declared HTTP fallback. Silent oldest-frame eviction
+        # would strand one Promise forever.
+        self._rpc: deque = deque()
+        self._rpc_capacity = 64
         self._ctl_waiter: asyncio.Future | None = None
         self._connected = True
-        self.user_id: str = str(user_id or '')
+        self.user_id = _require_owner_user_id(user_id)
         self.req_id: str = str(req_id or '')
 
     def enqueue(self, frame: dict):
@@ -447,20 +434,42 @@ class PushClient:
         if waiter is not None and not waiter.done():
             waiter.set_result(None)
 
+    def enqueue_rpc(self, frame: dict) -> bool:
+        """Reliably enqueue one correlated response or close on saturation.
+
+        LOOP-THREAD ONLY. Returning ``False`` tells the RPC session that this
+        socket can no longer promise delivery; ``disconnect`` wakes the sole
+        sender so the socket lifecycle closes promptly.
+        """
+        if not self._connected:
+            return False
+        if len(self._rpc) >= self._rpc_capacity:
+            logger.warning(
+                '[Push] RPC response queue full — disconnecting slow client')
+            self.disconnect()
+            return False
+        self._rpc.append(frame)
+        waiter = self._ctl_waiter
+        if waiter is not None and not waiter.done():
+            waiter.set_result(None)
+        return True
+
     async def drain(self) -> dict | None:
         """Wait for and return the next frame, or None if disconnected.
 
-        The control lane is checked FIRST: a pending pong goes out before any
-        queued data frame. A data frame already dequeued by the await below
+        The liveness lane is checked first, then reliable RPC responses, then
+        lossy event data. A data frame already dequeued by the await below
         when a control frame lands is returned first (one-frame delay — the
         ``_sender`` loop calls drain again immediately and picks up the
         control frame next).
         """
-        if not self._connected:
-            return None
         while True:
+            if not self._connected:
+                return None
             if self._ctl:
                 return self._ctl.popleft()
+            if self._rpc:
+                return self._rpc.popleft()
             get_fut = asyncio.ensure_future(self._queue.get())
             waiter = asyncio.get_running_loop().create_future()
             self._ctl_waiter = waiter
@@ -495,97 +504,36 @@ class PushClient:
 
     def disconnect(self):
         self._connected = False
+        waiter = self._ctl_waiter
+        if waiter is not None and not waiter.done():
+            waiter.set_result(None)
 
 
 # Singleton hub
 hub = PushHub()
 
 
-def build_conv_state_snapshot(user_id='') -> dict:
-    """Build the ``conv_state_snapshot`` frame for a client that just
-    subscribed to ``notify:*``.
+def _require_owner_user_id(user_id: int | str) -> str:
+    """Return one explicit owner identifier or reject the publication.
 
-    ``user_id`` is required (empty string = pre-auth / single-user
-    default) and is BOTH the scope key for the registry projection AND
-    the value stamped into the outbound frame's ``userId`` field so the
-    client's cross-user gate (``_frameIsOurs``) accepts it. Historically
-    this was hardcoded to ``1`` — that latent multi-tenant leak is what
-    pt_ab42421158214591 filed and this commit closes.
-
-    Content sourced from ONE call to
-    ``lib.tasks_pkg.manager._registry.snapshot_running_by_conv`` — the SSOT
-    for "which convs have live tasks" (carrier / aborted / empty-convId
-    filter shared with the notify_conv_changed seam so client sidebar and
-    connect-snapshot cannot disagree by construction). The registry read is
-    scoped by ``user_id`` so a snapshot built for user B never leaks user
-    A's tasks (multi-tenant SSOT invariant).
-
-    Each conv's entry independently carries a fresh
-    ``[monotonic_ns, replica_id]`` rev tuple (owner mandate: per-conv rev,
-    NOT a single frame-wide rev — a stale ``conv_changed`` for one conv
-    must not be able to override the snapshot's state for OTHER convs).
-
-    Best-effort: a registry snapshot failure returns an empty ``convs``
-    dict — the client still receives the frame and treats it as "no live
-    tasks", which is the safe default (a false negative extinguishes a
-    busy dot; a real notify frame within seconds re-lights it).
+    Owner identity is routing authority, not optional metadata. Keeping this
+    validator at both the publisher and socket boundaries prevents a future
+    caller from reviving fleet-wide delivery by omission.
     """
-    try:
-        # Late import — the manager package is not always importable at
-        # push module load time (e.g. tests that only exercise the hub).
-        from lib.tasks_pkg.manager._registry import snapshot_running_by_conv
-        # pt_ab42421158214591: pass user_id through so the projection is
-        # scoped to this connection's owner. Cast to str: the registry
-        # stores AuthContext.user_id (a str), while some legacy callers
-        # still pass DEFAULT_USER_ID=1 (int) — str() coerces both to a
-        # comparable form; empty string ('' == '' == unscoped) is the
-        # explicit "no filter" signal.
-        raw = snapshot_running_by_conv(user_id=str(user_id or ''))
-    except Exception as _e:
-        logger.debug('[Push] snapshot_running_by_conv failed (%s); '
-                     'sending empty snapshot', _e)
-        raw = {}
-    try:
-        from lib.agent_core.rev_clock import _running_task_ids_rev
-    except Exception as _ie:
-        logger.debug('[Push] _running_task_ids_rev import failed (%s); '
-                     'sending snapshot without per-conv rev', _ie)
-        _running_task_ids_rev = lambda: [0, '']  # noqa: E731
-    convs: dict[str, dict] = {}
-    for conv_id, tids in raw.items():
-        convs[conv_id] = {
-            'runningTaskIds': list(tids),
-            'runningTaskIdsRev': _running_task_ids_rev(),
-        }
-    return {
-        'channel': 'notify',
-        'taskId': '*',
-        'type': 'conv_state_snapshot',
-        'userId': user_id,
-        'convs': convs,
-        # ── pt_781ae072d6ee4e84: frame-level rev for the CLEAR branch ──
-        # A conv ABSENT from this snapshot must have its local busy state
-        # extinguished, and the client must advance that conv's rev so a
-        # reordered older notify cannot un-clear the dot. The client used to
-        # SYNTHESIZE that value from its own wall clock — a different clock
-        # domain from the server's rev, which poisoned the strict-greater gate
-        # and left the conv permanently deaf on both transports.
-        #
-        # Shipping the rev HERE is what makes client-side minting unnecessary
-        # (and therefore forbiddable): the clear is stamped with an
-        # authoritative value on the same timeline as every other rev, so
-        # "cleared" and "busy" are totally ordered against each other.
-        # Minted AFTER the per-conv revs above so it dominates them — the
-        # snapshot is by construction the newest view of the registry.
-        'rev': _running_task_ids_rev(),
-    }
+    if isinstance(user_id, bool) or user_id is None:
+        raise ValueError('push user_id is required')
+    value = str(user_id).strip()
+    if not value or (isinstance(user_id, int) and user_id < 1):
+        raise ValueError('push user_id must identify a positive owner')
+    return value
 
 
-def push_event(channel: str, task_id: str, payload: dict):
+def push_event(
+    channel: str,
+    task_id: str,
+    payload: dict,
+    *,
+    user_id: int | str,
+):
     """Convenience function — push an event via the global hub."""
-    hub.push_event(channel, task_id, payload)
-
-
-def broadcast(channel: str, payload: dict):
-    """Convenience function — broadcast to all clients."""
-    hub.broadcast(channel, payload)
+    hub.push_event(channel, task_id, payload, user_id=user_id)

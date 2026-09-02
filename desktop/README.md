@@ -2,7 +2,7 @@
 
 Standalone installers for Windows, macOS, and Linux — no Python, no conda, no terminal needed.
 
-**Two components (2026-08-02, docs/DESKTOP_AGENT_DIST_DESIGN.md):** this
+**Two components (docs/modules/remote_execution.md):** this
 directory builds BOTH the full desktop app (`tofu.spec` → `Tofu-Setup-*`,
 server + client + tray, ~153 MB) and the agent-only controlled endpoint
 (`tofu-agent.spec` → `TofuAgent-Setup-*`, no server, no UI, ~53 MB).
@@ -31,9 +31,8 @@ pyinstaller tofu.spec
 
 The installer bundles:
 - Python 3.12 runtime
-- Flask + all backend dependencies
-- PostgreSQL support (psycopg2 driver — PG server bootstraps on first launch)
-- SQLite as automatic fallback when PG is unavailable
+- Quart + the personal application dependencies
+- The local SQLite Storage Sidecar (the only desktop storage authority)
 - Playwright Python package (browser binary downloaded separately)
 - Frontend (HTML/CSS/JS — no build step)
 - Startup **role window** (bilingual zh/en): declares "this computer runs your Tofu
@@ -53,7 +52,7 @@ address it answers to. The window IS the control panel: computer-control
 toggle, permission tiers, connect-to-remote, start-with-Windows, all the
 controls that used to be tray-only. Unchecking "Show this window at startup"
 sends future launches straight to the tray, which keeps a **Control panel…**
-item as the way back. Design: `docs/DESKTOP_STARTUP_ROLE_UX_DESIGN.md`.
+item as the way back. Contract: `docs/modules/remote_execution.md`.
 
 **Tray-first (2026-08-04).** On Windows the tray icon starts BEFORE the role
 window can ever hide: pystray's `icon.run()` owns the main thread from second
@@ -96,8 +95,11 @@ bitmaps and the DMG window art alongside the icons).
 
 | Component | Size | Default | Purpose |
 |---|---|---|---|
-| **PostgreSQL Database** | ~50 MB | ✅ Recommended | Auto-bootstraps a local PG instance for full concurrency + JSONB + FTS |
 | **Browser Engine (Chromium)** | ~150 MB | ✅ Recommended | Enables JS-rendered page fetching and browser automation |
+
+The desktop application always uses the local SQLite Sidecar. Distributed
+deployments connect the Sidecar to platform-managed PostgreSQL through server
+configuration; a desktop component installer never owns database provisioning.
 
 When frozen, the Chromium download relaunches `Tofu.exe` with
 `TOFU_PLAYWRIGHT_INSTALL=1` (handled in `desktop/launcher.py`), which drives the
@@ -112,8 +114,8 @@ If both are skipped, the app still works — it uses SQLite for storage and skip
 
 The Windows installer installs **per-user** to
 `%LOCALAPPDATA%\Programs\Tofu` (`PrivilegesRequired=lowest`, no UAC/admin
-prompt). This matters: the app keeps its `data/` (config, SQLite DB, PostgreSQL
-data dir) and `logs/` **next to the executable**, so the install dir must be
+prompt). This matters: the app keeps its `data/` (config and SQLite DB) and
+`logs/` **next to the executable**, so the install dir must be
 user-writable. A `Program Files` install under `lowest` privileges is NOT
 writable and used to crash the app on first launch. If the exe dir ever ends up
 read-only anyway, the backend falls back to a per-user data dir
@@ -127,23 +129,21 @@ dist/Tofu/
 ├── _internal/        ← Frozen Python + all packages + app code
 │   ├── static/       ← Frontend assets
 │   ├── index.html
-│   ├── lib/          ← Backend logic (incl. database dual-backend)
-│   ├── routes/       ← Flask blueprints
+│   ├── lib/          ← Backend logic and Storage Sidecar client
+│   ├── routes/       ← Quart blueprints
 │   └── ...
 └── data/             ← User data (created on first run, portable)
     ├── config/       ← Server config, API keys
-    ├── pgdata/       ← PostgreSQL data directory (auto-created)
-    └── tofu.db       ← SQLite fallback (only if PG unavailable)
+    └── tofu.db       ← Local SQLite authority
 ```
 
 ## Database Strategy
 
-The desktop build uses the same dual-backend architecture as the server deployment:
-
-1. **Primary: PostgreSQL** — auto-bootstrapped as a local userspace process (no admin/sudo needed). The PG server binary is either downloaded on first launch or discovered from the system PATH.
-2. **Fallback: SQLite** — if PG bootstrap fails (no binary, no network), the app seamlessly falls back to SQLite. Fully functional for single-user use.
-
-Users never need to think about databases — it Just Works.
+The desktop build always uses its local SQLite Storage Sidecar. It neither
+downloads nor starts PostgreSQL and it never silently switches authorities.
+Enterprise deployments connect server-side Sidecars to platform-managed,
+TLS-verified PostgreSQL/Redis; the desktop package remains a client and does
+not provision those services.
 
 ## CI / Automated Builds
 

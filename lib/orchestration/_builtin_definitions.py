@@ -15,7 +15,6 @@ from lib.orchestration._role_personas import role_persona
 from lib.orchestration._role_axes import DEFAULT_ROLE_TIER
 from lib.orchestration.loop_policy import (
     DEFAULT_EXECUTOR_MAX_ITERATIONS,
-    DEFAULT_MAX_ITERATIONS,
 )
 
 
@@ -30,51 +29,6 @@ def _role_params(role: str, **overrides: Any) -> dict:
 def build_blank_definition(*, name: str = 'Untitled Flow') -> dict:
     """Build an empty Studio draft through the server-owned interface."""
     return {'schema': SCHEMA_ID, 'name': name, 'nodes': [], 'edges': []}
-
-
-def build_endpoint_definition(*, name: str = 'Endpoint Loop',
-                              max_iterations: int = DEFAULT_MAX_ITERATIONS,
-                              verifier: str = 'critic') -> dict:
-    """Build the canonical Planner → Worker/Verifier endpoint loop."""
-    definition = {
-        'schema': SCHEMA_ID,
-        'name': name,
-        'nodes': [
-            {'id': 'start', 'type': 'control', 'kind': 'start'},
-            {'id': 'planner', 'type': 'role', 'role': 'planner',
-             'params': _role_params(
-                 'planner', objective='Rewrite the request into a structured '
-                 'brief + checklist for the worker.',
-             )},
-            {'id': 'loop', 'type': 'control', 'kind': 'loop',
-             'params': control_node_params(
-                 'loop', max_iterations=int(max_iterations), verifier=verifier,
-             )},
-            {'id': 'worker', 'type': 'role', 'role': 'worker',
-             'params': _role_params(
-                 'worker', isolation='shared-context',
-                 objective='Execute the plan. Your first tool call MUST be '
-                 'state-changing — act, do not just analyze.',
-             )},
-            {'id': 'critic', 'type': 'role', 'role': verifier,
-             'params': _role_params(
-                 verifier, objective='Review the worker output against the '
-                 'checklist. End with [VERDICT: STOP] or '
-                 '[VERDICT: CONTINUE_WORKER].',
-             )},
-            {'id': 'stop', 'type': 'control', 'kind': 'stop'},
-        ],
-        'edges': [
-            {'from': 'start', 'to': 'planner'},
-            {'from': 'planner', 'to': 'loop'},
-            {'from': 'loop', 'to': 'worker'},
-            {'from': 'worker', 'to': 'critic'},
-            {'from': 'critic', 'to': 'loop'},
-            {'from': 'loop', 'to': 'stop'},
-        ],
-    }
-    layout_definition(definition)
-    return definition
 
 
 def build_autopilot_definition(*, name: str = 'Autopilot',
@@ -201,7 +155,6 @@ def build_adversarial_definition(*, name: str = 'Adversarial Verify') -> dict:
 
 __all__ = [
     'build_blank_definition',
-    'build_endpoint_definition',
     'build_autopilot_definition',
     'build_fanout_definition',
     'build_adversarial_definition',

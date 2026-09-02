@@ -6,8 +6,7 @@ bootstrap.py's ``_CONDA_PYTHON_DEPS``, and requirements.txt — and they drift.
 install.sh has its own drift guard; bootstrap.py's did not, and its conda list
 had already fallen behind: it shipped only transitive ``flask`` (never the
 actual ``quart``/``hypercorn`` ASGI stack the server runs on), and lacked
-``orjson`` (REQUIRED for the SSE snapshot) and ``sqlalchemy`` (imported
-unconditionally in the chat hot-path). On a CentOS-7-class host where the conda
+``orjson`` (REQUIRED for the SSE snapshot). On a CentOS-7-class host where the conda
 repair path is the ONLY one that works (pip manylinux wheels crash on glibc
 2.17), that meant the server could never boot after a dep repair.
 
@@ -29,7 +28,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-pytest.importorskip('bootstrap', reason='bootstrap.py is the launcher; import-only guard')
+# The launcher facade intentionally performs environment re-exec at import
+# time. Dependency declarations are owned by this side-effect-free leaf.
+from bootstrap_pkg import install as bootstrap  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -84,7 +85,6 @@ def _requirements_names() -> set[str]:
 class BootstrapCondaDepsCoverageTest(unittest.TestCase):
 
     def test_conda_list_covers_boot_critical_packages(self):
-        import bootstrap
         conda_bare = {_bare(s) for s in bootstrap._CONDA_PYTHON_DEPS}
         for pkg in bootstrap._CRITICAL_BOOT_PACKAGES:
             self.assertIn(
@@ -93,7 +93,6 @@ class BootstrapCondaDepsCoverageTest(unittest.TestCase):
                 f'— the conda repair path would install a non-bootable env')
 
     def test_boot_critical_packages_are_declared_in_requirements(self):
-        import bootstrap
         req = _requirements_names()
         for pkg in bootstrap._CRITICAL_BOOT_PACKAGES:
             self.assertIn(
@@ -104,7 +103,6 @@ class BootstrapCondaDepsCoverageTest(unittest.TestCase):
     def test_the_asgi_stack_is_present(self):
         """Explicit regression assertion for the exact drift that was found:
         quart + hypercorn (NOT just transitive flask) must be in the conda list."""
-        import bootstrap
         conda_bare = {_bare(s) for s in bootstrap._CONDA_PYTHON_DEPS}
         self.assertIn('quart', conda_bare)
         self.assertIn('hypercorn', conda_bare)
@@ -140,7 +138,6 @@ class BootstrapCondaDepsCoverageTest(unittest.TestCase):
 
     def _shared_specs(self):
         """{pkg: (conda_spec, req_spec)} for packages present in BOTH lists."""
-        import bootstrap
         conda = {_bare(s): _spec(s) for s in bootstrap._CONDA_PYTHON_DEPS}
         req = _requirements_specs()
         return {p: (conda[p], req[p]) for p in (set(conda) & set(req))}
@@ -195,7 +192,6 @@ class BootstrapCondaDepsCoverageTest(unittest.TestCase):
         ``_CRITICAL_BOOT_PACKAGES``: the server boots fine without MCP, and
         claiming otherwise would make that list dishonest.
         """
-        import bootstrap
         specs = {_bare(s): _spec(s) for s in bootstrap._CONDA_PYTHON_DEPS}
         self.assertIn('mcp', specs,
                       'mcp vanished from _CONDA_PYTHON_DEPS — if that is '

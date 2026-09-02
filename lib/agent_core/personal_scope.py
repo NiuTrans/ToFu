@@ -41,12 +41,12 @@ The mechanism
    function is ``setdefault``-based, so an explicit caller value ALWAYS wins —
    it only fills the gap a caller left, with the *fail-closed* headless default
    instead of the UI default.
-3. The prompt-assembly side (``lib/tasks_pkg/system_context.py``) reads the SAME
+3. The prompt-assembly side (``lib/tasks_pkg/context_composer``) reads the SAME
    flags to decide whether to inject (and therefore *describe*) each capability,
    so a capability that wasn't provided is never advertised to the model.
 
 Adding a new personal capability later = ONE entry here + gate its injection on
-the flag in ``system_context.py``. Every headless surface inherits the
+the flag in the Context Composer. Every headless surface inherits the
 fail-closed default automatically; the ratchet test
 (``tests/test_personal_scope_headless.py``) fails if a new entry is added
 without the headless surfaces honouring it.
@@ -94,7 +94,7 @@ class PersonalCapability:
             capabilities endpoint explain the asymmetry).
         summary:          One-line human description.
         prompt_block:     The marker / name of the prompt section this flag
-            gates in ``system_context.py`` (documentation + test cross-check).
+            gates in the Context Composer (documentation + test cross-check).
     """
 
     cfg_key: str
@@ -170,11 +170,9 @@ PERSONAL_CAPABILITIES: dict[str, PersonalCapability] = {
             'state on its own (that half is gated separately by '
             'paperInsightPersonalContext), but it SILENTLY BILLS extra LLM '
             'calls per generated report, so it must fail closed on '
-            'headless / BYO surfaces unless the caller opts in. ON by '
-            'default for the interactive reader (owner decision '
-            '2026-08-02, docs/PAPER_READING_EXPERIENCE_DESIGN.md §3.4); '
-            'the interactive resolution chain (env → default ON; the '
-            'Settings toggle was retired 2026-08-06) lives in '
+            'headless / BYO surfaces unless the caller opts in. It is ON by '
+            'default for the interactive reader; the interactive resolution '
+            'chain (environment override → default ON) lives in '
             'insight_engine._config.insight_enabled — '
             'this registry entry only guarantees the headless fail-closed '
             'stamp. Its own engine gates it, so prompt_block is empty.'),
@@ -189,8 +187,7 @@ PERSONAL_CAPABILITIES: dict[str, PersonalCapability] = {
             'self-test flip cards (active recall). Injects no operator '
             'state, but SILENTLY BILLS an LLM call per report, so it must '
             'fail closed on headless / BYO surfaces unless the caller opts '
-            'in. ON by default for the interactive reader (owner decision '
-            '2026-08-02, docs/PAPER_READING_EXPERIENCE_DESIGN.md P2); the '
+            'in. It is ON by default for the interactive reader; the '
             'interactive chain lives in '
             'checkpoint_engine.checkpoints_enabled. Its own engine gates '
             'it, so prompt_block is empty.'),
@@ -238,8 +235,7 @@ def apply_headless_personal_defaults(cfg: dict) -> dict:
     return cfg
 
 
-def resolve_preferences_enabled(cfg: dict | None, *,
-                                memory_enabled: bool) -> bool:
+def resolve_preferences_enabled(cfg: dict | None) -> bool:
     """Decide whether durable My Context may be injected.
 
     The preference profile is a DISTINCT personal capability from the memory
@@ -250,11 +246,6 @@ def resolve_preferences_enabled(cfg: dict | None, *,
       * Otherwise this is the interactive UI, where My Context is always on.
         Headless builders stamp an explicit fail-closed value before reaching
         this function.
-
-    Args:
-        cfg: The task config dict (``task['config']``); may be ``None``.
-        memory_enabled: Retained for call compatibility. Experience-memory
-            retrieval is deliberately independent of My Context.
 
     Returns:
         True when the preference profile may be injected this turn.

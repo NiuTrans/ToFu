@@ -1,9 +1,10 @@
-"""Unit tests for package façade imports.
+"""Unit tests for package boundaries and explicit owner imports.
 
-Migrated from debug/test_refactoring.py. Validates that all decomposed
-packages (lib/search/, lib/browser/, lib/pdf_parser/, lib/memory/) expose
-their public APIs correctly through __init__.py façades, that all consumer
-import sites work, and that Flask route registration is complete.
+``tofu_search`` intentionally keeps its public façade. Browser, PDF and
+memory capabilities instead keep aggregation-free package roots so importing a
+namespace cannot eagerly probe optional capabilities or hide its real owner.
+These tests pin both sides of that contract and keep the concrete consumer
+imports plus Flask route registration executable.
 """
 
 _AUDIT_SYNTHETIC_REPO_PATHS = {
@@ -73,14 +74,14 @@ class TestSearchFacade:
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
-class TestBrowserFacade:
+class TestBrowserNamespace:
     def test_package_import(self):
         import lib.browser
         assert lib.browser.__name__ == 'lib.browser'
-        assert isinstance(lib.browser.__all__, list)
+        assert lib.browser.__all__ == ()
 
     def test_queue_api(self):
-        from lib.browser import (
+        from lib.browser.queue import (
             get_connected_clients,
             get_pending_commands,
             is_extension_connected,
@@ -94,35 +95,43 @@ class TestBrowserFacade:
         assert callable(is_extension_connected)
 
     def test_dispatch(self):
-        from lib.browser import BROWSER_HANDLERS, execute_browser_tool
+        from lib.browser.dispatch import BROWSER_HANDLERS, execute_browser_tool
         assert callable(execute_browser_tool)
         assert isinstance(BROWSER_HANDLERS, dict)
-        assert len(BROWSER_HANDLERS) >= 16
+        assert {
+            'browser_list_tabs', 'browser_read_page',
+            'browser_menu_click', 'browser_fill_form',
+            'browser_preview_page',
+        } <= BROWSER_HANDLERS.keys()
+        assert all(callable(handler) for handler in BROWSER_HANDLERS.values())
 
     def test_display(self):
-        from lib.browser import browser_tool_display
+        from lib.browser.display import browser_tool_display
         assert callable(browser_tool_display)
         r = browser_tool_display('browser_list_tabs', {})
         assert isinstance(r, str) and 'tab' in r.lower()
 
     def test_fetch(self):
-        from lib.browser import fetch_url_via_browser
+        from lib.browser.fetch import fetch_url_via_browser
         assert callable(fetch_url_via_browser)
 
     def test_advanced(self):
-        from lib.browser import ADVANCED_BROWSER_TOOL_NAMES, ADVANCED_BROWSER_TOOLS
+        from lib.browser.advanced import (
+            ADVANCED_BROWSER_TOOL_NAMES,
+            ADVANCED_BROWSER_TOOLS,
+        )
         assert isinstance(ADVANCED_BROWSER_TOOLS, list)
         # v2 (pt_869e5648403e4745): hover_and_click + right_click_menu merged
         # into browser_menu_click → shipped set is menu_click + fill_form.
         assert len(ADVANCED_BROWSER_TOOLS) == 2
         assert isinstance(ADVANCED_BROWSER_TOOL_NAMES, set)
 
-    def test_all_completeness(self):
+    def test_root_does_not_reaggregate_concrete_owners(self):
         import lib.browser
         for name in ['send_browser_command', 'execute_browser_tool',
                      'browser_tool_display', 'fetch_url_via_browser',
                      'BROWSER_HANDLERS', 'ADVANCED_BROWSER_TOOLS']:
-            assert name in lib.browser.__all__, f'{name} not in __all__'
+            assert not hasattr(lib.browser, name), f'{name} leaked onto package root'
 
 
 # ═══════════════════════════════════════════════════════════
@@ -130,27 +139,28 @@ class TestBrowserFacade:
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
-class TestPdfParserFacade:
+class TestPdfParserNamespace:
     def test_package_import(self):
         import lib.pdf_parser
         assert lib.pdf_parser.__name__ == 'lib.pdf_parser'
-        assert 'parse_pdf' in lib.pdf_parser.__all__
+        assert lib.pdf_parser.__all__ == ()
 
     def test_core(self):
-        from lib.pdf_parser import extract_pdf_text, parse_pdf
+        from lib.pdf_parser.core import parse_pdf
+        from lib.pdf_parser.text import extract_pdf_text
         assert callable(parse_pdf)
         assert callable(extract_pdf_text)
 
     def test_vlm(self):
-        from lib.pdf_parser import get_vlm_task, start_vlm_task, vlm_parse_pdf
+        from lib.pdf_parser.vlm import get_vlm_task, start_vlm_task, vlm_parse_pdf
         assert callable(start_vlm_task)
 
     def test_images(self):
-        from lib.pdf_parser import detect_and_clip_figures, render_pdf_pages
+        from lib.pdf_parser.images import detect_and_clip_figures, render_pdf_pages
         assert callable(render_pdf_pages)
 
     def test_math(self):
-        from lib.pdf_parser import postprocess_math_blocks
+        from lib.pdf_parser.math import postprocess_math_blocks
         assert callable(postprocess_math_blocks)
 
     def test_common(self):
@@ -158,10 +168,10 @@ class TestPdfParserFacade:
         assert isinstance(MAX_PDF_BYTES, int)
         assert isinstance(HAS_PYMUPDF4LLM, bool)
 
-    def test_all_completeness(self):
+    def test_root_does_not_reaggregate_concrete_owners(self):
         import lib.pdf_parser
         for name in ['parse_pdf', 'extract_pdf_text']:
-            assert name in lib.pdf_parser.__all__
+            assert not hasattr(lib.pdf_parser, name)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -169,14 +179,14 @@ class TestPdfParserFacade:
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
-class TestSkillsFacade:
+class TestMemoryNamespace:
     def test_package_import(self):
         import lib.memory
         assert lib.memory.__name__ == 'lib.memory'
-        assert 'list_memories' in lib.memory.__all__
+        assert lib.memory.__all__ == ()
 
     def test_storage_crud(self):
-        from lib.memory import (
+        from lib.memory.storage import (
             create_memory,
             delete_memory,
             get_eligible_memories,
@@ -192,13 +202,16 @@ class TestSkillsFacade:
         assert callable(list_all_memories)
 
     def test_injection(self):
-        from lib.memory import MEMORY_ACCUMULATION_INSTRUCTIONS, build_memory_context
+        from lib.memory.injection import (
+            MEMORY_ACCUMULATION_INSTRUCTIONS,
+            build_memory_context,
+        )
         assert callable(build_memory_context)
         assert isinstance(MEMORY_ACCUMULATION_INSTRUCTIONS, str)
         assert len(MEMORY_ACCUMULATION_INSTRUCTIONS) > 100
 
     def test_tools(self):
-        from lib.memory import ALL_MEMORY_TOOLS, MEMORY_TOOL_NAMES
+        from lib.memory.tools import ALL_MEMORY_TOOLS, MEMORY_TOOL_NAMES
         assert isinstance(ALL_MEMORY_TOOLS, list)
         assert len(ALL_MEMORY_TOOLS) == 5
         assert 'create_memory' in MEMORY_TOOL_NAMES
@@ -206,17 +219,21 @@ class TestSkillsFacade:
         assert 'search_memories' in MEMORY_TOOL_NAMES
 
     def test_constants(self):
-        from lib.memory import GLOBAL_MEMORY_SUBDIR, MIN_DESCRIPTION_LENGTH, PROJECT_MEMORY_SUBDIR
+        from lib.memory.storage import (
+            GLOBAL_MEMORY_SUBDIR,
+            MIN_DESCRIPTION_LENGTH,
+            PROJECT_MEMORY_SUBDIR,
+        )
         assert isinstance(GLOBAL_MEMORY_SUBDIR, str)
         assert isinstance(MIN_DESCRIPTION_LENGTH, int)
 
-    def test_all_completeness(self):
+    def test_root_does_not_reaggregate_concrete_owners(self):
         import lib.memory
         for name in ['create_memory', 'update_memory', 'delete_memory', 'merge_memories',
                      'search_memories', 'SEARCH_MEMORIES_TOOL',
                      'ALL_MEMORY_TOOLS', 'MEMORY_TOOL_NAMES', 'build_memory_context',
                      'MEMORY_ACCUMULATION_INSTRUCTIONS']:
-            assert name in lib.memory.__all__
+            assert not hasattr(lib.memory, name)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -234,19 +251,22 @@ class TestConsumerImports:
         assert callable(format_search_for_tool_response)
 
     def test_executor_browser(self):
-        from lib.browser import execute_browser_tool
+        from lib.browser.dispatch import execute_browser_tool
         assert callable(execute_browser_tool)
 
     def test_model_config_browser(self):
-        from lib.browser import ADVANCED_BROWSER_TOOL_NAMES, ADVANCED_BROWSER_TOOLS
+        from lib.browser.advanced import (
+            ADVANCED_BROWSER_TOOL_NAMES,
+            ADVANCED_BROWSER_TOOLS,
+        )
         assert isinstance(ADVANCED_BROWSER_TOOLS, list)
 
     def test_tool_display_browser(self):
-        from lib.browser import browser_tool_display
+        from lib.browser.display import browser_tool_display
         assert callable(browser_tool_display)
 
     def test_routes_browser(self):
-        from lib.browser import (
+        from lib.browser.queue import (
             get_connected_clients,
             get_pending_commands,
             is_extension_connected,
@@ -257,27 +277,34 @@ class TestConsumerImports:
         assert callable(mark_poll)
 
     def test_browser_fetch(self):
-        from lib.browser import fetch_url_via_browser, is_extension_connected
+        from lib.browser.fetch import fetch_url_via_browser
+        from lib.browser.queue import is_extension_connected
         assert callable(fetch_url_via_browser)
 
     def test_pdf_upload(self):
-        from lib.pdf_parser import get_vlm_task, parse_pdf, start_vlm_task
+        from lib.pdf_parser.core import parse_pdf
+        from lib.pdf_parser.vlm import get_vlm_task, start_vlm_task
         assert callable(parse_pdf)
 
     def test_pdf_fetch(self):
-        from lib.pdf_parser import extract_pdf_text
+        from lib.pdf_parser.text import extract_pdf_text
         assert callable(extract_pdf_text)
 
     def test_skills_executor(self):
-        from lib.memory import create_memory, delete_memory, merge_memories, update_memory
+        from lib.memory.storage import (
+            create_memory,
+            delete_memory,
+            merge_memories,
+            update_memory,
+        )
         assert callable(create_memory)
 
     def test_skills_model_config(self):
-        from lib.memory import ALL_MEMORY_TOOLS, MEMORY_TOOL_NAMES
+        from lib.memory.tools import ALL_MEMORY_TOOLS, MEMORY_TOOL_NAMES
         assert isinstance(ALL_MEMORY_TOOLS, list)
 
     def test_skills_injection(self):
-        from lib.memory import build_memory_context
+        from lib.memory.injection import build_memory_context
         assert callable(build_memory_context)
 
 

@@ -12,10 +12,51 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+ALICE = '101'
+BOB = '202'
+OTHER = '303'
+
+
+def _register(client_id, owner_user_id=ALICE, *, capabilities=None,
+              profile=''):
+    from lib.browser.protocol import ALL_CAPABILITIES
+    from lib.browser.queue import mark_poll
+    mark_poll(
+        client_id,
+        owner_user_id=owner_user_id,
+        protocol_version=2,
+        capabilities=(sorted(ALL_CAPABILITIES)
+                      if capabilities is None else capabilities),
+        profile=profile,
+    )
+
+
+def test_browser_runtime_requires_explicit_owner_and_protocol_handshake():
+    from lib.browser.access import browser_tool_access
+    from lib.browser.dispatch import execute_browser_tool
+    from lib.browser.queue import get_connected_clients, mark_poll
+    from lib.browser.sessions import lease_status
+
+    with pytest.raises(TypeError):
+        get_connected_clients()
+    with pytest.raises(TypeError):
+        lease_status()
+    with pytest.raises(TypeError):
+        execute_browser_tool('browser_list_tabs', {})
+    with pytest.raises(TypeError):
+        browser_tool_access('browser_list_tabs', {})
+    with pytest.raises(TypeError):
+        mark_poll(
+            'missing-owner', protocol_version=2, capabilities=[])
+    with pytest.raises(TypeError):
+        mark_poll('missing-handshake', owner_user_id=ALICE)
+
 
 @pytest.fixture(autouse=True)
 def _isolated_browser_runtime(tmp_path, monkeypatch):
-    from lib.browser import access, adapters, sessions
+    import lib.browser.access as access
+    import lib.browser.adapters as adapters
+    import lib.browser.sessions as sessions
     from lib.browser.queue import _state
 
     monkeypatch.setattr(access, '_STORE_PATH', str(tmp_path / 'browser_access.json'))
@@ -38,26 +79,35 @@ def _isolated_browser_runtime(tmp_path, monkeypatch):
         sessions._leases.clear()
 
 
-def test_capability_negotiation_preserves_legacy_but_gates_new_adapters():
-    from lib.browser import (
-        ALL_CAPABILITIES, BrowserCapability, BrowserUpgradeRequired, mark_poll,
+def test_capability_negotiation_rejects_old_protocol_and_gates_adapters():
+    from lib.browser.protocol import (
+        ALL_CAPABILITIES, BrowserCapability, BrowserProtocolRejected,
+        BrowserUpgradeRequired,
     )
     from lib.browser.adapters import adapter_health, get_adapter
     from lib.browser.protocol import client_protocol, require_capabilities
+    from lib.browser.queue import mark_poll
 
-    mark_poll('legacy', user_id='u1')
-    assert BrowserCapability.READ.value in client_protocol('legacy')['capabilities']
+    with pytest.raises(BrowserProtocolRejected):
+        mark_poll(
+            'old-protocol', owner_user_id=ALICE, protocol_version=1,
+            capabilities=[])
+    assert client_protocol('old-protocol')['client_id'] == ''
+
+    _register(
+        'limited', capabilities=[BrowserCapability.READ.value])
     with pytest.raises(BrowserUpgradeRequired) as exc:
-        require_capabilities('legacy', [BrowserCapability.SNAPSHOT])
+        require_capabilities('limited', [BrowserCapability.SNAPSHOT])
     assert exc.value.missing == ('snapshot',)
-    assert adapter_health(get_adapter('xiaohongshu'), client_id='legacy')['status'] \
+    assert adapter_health(get_adapter('xiaohongshu'), client_id='limited')['status'] \
         == 'upgrade_required'
 
-    mark_poll('modern', user_id='u1', protocol_version=2,
+    mark_poll('modern', owner_user_id=ALICE, protocol_version=2,
               capabilities=sorted(ALL_CAPABILITIES), profile='Work')
-    # The queue records one long poll twice; an omitted handshake must not
-    # silently downgrade the already-negotiated client.
-    mark_poll('modern', user_id='u1')
+    with pytest.raises(BrowserProtocolRejected):
+        mark_poll(
+            'modern', owner_user_id=ALICE, protocol_version=1,
+            capabilities=[])
     info = require_capabilities('modern', ['snapshot'])
     assert info['protocol_version'] == 2
     assert info['profile'] == 'Work'
@@ -96,21 +146,20 @@ def test_browser_access_defaults_readable_and_isolates_denials_and_grants():
 
 
 def test_page_write_requires_one_domain_grant_and_read_adapter_can_click():
-    from lib.browser import ALL_CAPABILITIES, BrowserPage, mark_poll
     from lib.browser.access import BrowserWriteAuthorizationRequired, grant_write
+    from lib.browser.page import BrowserPage
     from lib.browser.sessions import acquire_browser_lease
 
-    mark_poll('c1', user_id='alice', protocol_version=2,
-              capabilities=sorted(ALL_CAPABILITIES), profile='Work')
+    _register('c1', profile='Work')
     calls = []
 
-    def sender(command, params, *, timeout, client_id):
-        calls.append((command, params, client_id))
+    def sender(command, params, *, timeout, client_id, owner_user_id):
+        calls.append((command, params, client_id, owner_user_id))
         if command == 'page_state':
             return {'tabId': 7, 'url': 'https://app.example.com/form'}, None
         return {'done': True}, None
 
-    lease = acquire_browser_lease(user_id='alice', client_id='c1',
+    lease = acquire_browser_lease(owner_user_id=ALICE, client_id='c1',
                                   session='persistent', tab_id=7)
     page = BrowserPage(lease, sender=sender)
     page._url = 'https://app.example.com/form'
@@ -118,7 +167,7 @@ def test_page_write_requires_one_domain_grant_and_read_adapter_can_click():
         page.click(selector='#submit')
     assert [row[0] for row in calls] == ['page_state']
 
-    grant_write('alice', 'app.example.com', client_id='c1', profile='Work')
+    grant_write(ALICE, 'app.example.com', client_id='c1', profile='Work')
     assert page.click(selector='#submit')['ok'] is True
     click = next(row for row in calls if row[0] == 'page_click')
     assert click[1]['expectedDomain'] == 'app.example.com'
@@ -128,22 +177,21 @@ def test_page_write_requires_one_domain_grant_and_read_adapter_can_click():
 
 
 def test_page_redirect_cannot_inherit_previous_domains_write_grant():
-    from lib.browser import ALL_CAPABILITIES, BrowserPage, mark_poll
     from lib.browser.access import BrowserWriteAuthorizationRequired, grant_write
+    from lib.browser.page import BrowserPage
     from lib.browser.sessions import acquire_browser_lease
 
-    mark_poll('c1', user_id='alice', protocol_version=2,
-              capabilities=sorted(ALL_CAPABILITIES), profile='Work')
-    grant_write('alice', 'shop.example.com', client_id='c1', profile='Work')
+    _register('c1', profile='Work')
+    grant_write(ALICE, 'shop.example.com', client_id='c1', profile='Work')
     calls = []
 
-    def sender(command, params, *, timeout, client_id):
+    def sender(command, params, *, timeout, client_id, owner_user_id):
         calls.append(command)
         if command == 'page_state':
             return {'tabId': 7, 'url': 'https://pay.example.net/confirm'}, None
         return {'done': True}, None
 
-    lease = acquire_browser_lease(user_id='alice', client_id='c1',
+    lease = acquire_browser_lease(owner_user_id=ALICE, client_id='c1',
                                   session='persistent', tab_id=7)
     page = BrowserPage(lease, sender=sender)
     page._url = 'https://shop.example.com/cart'
@@ -158,18 +206,16 @@ def test_page_redirect_cannot_inherit_previous_domains_write_grant():
 ])
 def test_lease_release_always_stops_capture_and_only_closes_ephemeral_tab(
         session, should_close):
-    from lib.browser import ALL_CAPABILITIES, mark_poll
     from lib.browser.sessions import acquire_browser_lease, release_browser_lease
 
-    mark_poll('c1', user_id='alice', protocol_version=2,
-              capabilities=sorted(ALL_CAPABILITIES))
-    lease = acquire_browser_lease(user_id='alice', client_id='c1',
+    _register('c1')
+    lease = acquire_browser_lease(owner_user_id=ALICE, client_id='c1',
                                   session=session, tab_id=9)
     lease.network_captures.add('capture-1')
     commands = []
 
-    def sender(command, params, *, timeout, client_id):
-        commands.append((command, params, client_id))
+    def sender(command, params, *, timeout, client_id, owner_user_id):
+        commands.append((command, params, client_id, owner_user_id))
         return {'ok': True}, None
 
     release_browser_lease(lease, reason='cancelled', sender=sender)
@@ -199,7 +245,6 @@ def test_adapter_schema_validation_and_audit_redaction():
 
 
 def test_adapter_invalid_output_fails_with_structured_error():
-    from lib.browser import ALL_CAPABILITIES, mark_poll
     from lib.browser.adapters import (
         AdapterCommand,
         AdapterExecutionError,
@@ -209,8 +254,7 @@ def test_adapter_invalid_output_fails_with_structured_error():
         unregister_adapter,
     )
 
-    mark_poll('c1', user_id='alice', protocol_version=2,
-              capabilities=sorted(ALL_CAPABILITIES))
+    _register('c1')
     adapter = SiteAdapter(
         id='bad-output', name='Bad output', domains=('example.com',),
         commands=(AdapterCommand(
@@ -219,7 +263,8 @@ def test_adapter_invalid_output_fails_with_structured_error():
     register_adapter(adapter)
     try:
         with pytest.raises(AdapterExecutionError) as exc:
-            invoke_adapter('bad-output', 'search', {}, user_id='alice',
+            invoke_adapter(
+                'bad-output', 'search', {}, owner_user_id=ALICE,
                            client_id='c1')
         assert exc.value.code == 'invalid_output'
         assert exc.value.retryable is False
@@ -233,24 +278,25 @@ def test_adapter_detail_url_cannot_escape_manifest_domains():
     with pytest.raises(AdapterValidationError, match='outside adapter domains'):
         invoke_adapter(
             'xiaohongshu', 'detail',
-            {'url': 'https://attacker.example/steal'}, user_id='alice')
+            {'url': 'https://attacker.example/steal'},
+            owner_user_id=ALICE)
 
 
-def test_adapter_upgrade_failure_releases_lease_before_any_page_command():
-    from lib.browser import BrowserUpgradeRequired, mark_poll
+def test_adapter_capability_failure_releases_lease_before_page_command():
     from lib.browser.adapters import invoke_adapter
+    from lib.browser.protocol import BrowserUpgradeRequired
     from lib.browser.sessions import lease_status
 
-    mark_poll('legacy', user_id='alice')
+    _register('limited', capabilities=['tabs'])
     with pytest.raises(BrowserUpgradeRequired):
         invoke_adapter(
             'xiaohongshu', 'search', {'query': 'tofu'},
-            user_id='alice', client_id='legacy')
-    assert lease_status(user_id='alice') == []
+            owner_user_id=ALICE, client_id='limited')
+    assert lease_status(owner_user_id=ALICE) == []
 
 
 def test_read_search_health_does_not_depend_on_future_write_capabilities():
-    from lib.browser import mark_poll
+    from lib.browser.queue import mark_poll
     from lib.browser.adapters import (
         AdapterCommand, SiteAdapter, adapter_health,
     )
@@ -263,8 +309,7 @@ def test_read_search_health_does_not_depend_on_future_write_capabilities():
             AdapterCommand('publish', 'future write', access='write',
                            required_capabilities=('upload',)),
         ))
-    mark_poll('read-only-v2', user_id='alice', protocol_version=2,
-              capabilities=['tabs'])
+    _register('read-only-v2', capabilities=['tabs'])
 
     assert adapter_health(
         adapter, client_id='read-only-v2', command_name='search')['healthy']
@@ -274,43 +319,38 @@ def test_read_search_health_does_not_depend_on_future_write_capabilities():
 
 
 def test_chatui_site_provider_binds_the_request_users_browser(monkeypatch):
-    from lib.browser import ALL_CAPABILITIES, mark_poll
-    import lib.browser as browser
+    import lib.browser.adapters as browser_adapters
     from lib.search_bridge import _ChatuiSiteSearchProvider
     from routes.api_v1 import auth as auth_routes
 
-    mark_poll('alice-browser', user_id='alice', protocol_version=2,
-              capabilities=sorted(ALL_CAPABILITIES), profile='Alice Work')
-    mark_poll('bob-browser', user_id='bob', protocol_version=2,
-              capabilities=sorted(ALL_CAPABILITIES), profile='Bob Work')
+    _register('alice-browser', ALICE, profile='Alice Work')
+    _register('bob-browser', BOB, profile='Bob Work')
     monkeypatch.setattr(
         auth_routes, 'current_auth',
-        lambda: SimpleNamespace(user_id='alice'))
+        lambda: SimpleNamespace(owner_user_id=ALICE))
     captured = {}
 
     def invoke(adapter_id, command, params, **kwargs):
         captured.update(kwargs)
         return {'ok': True, 'result': []}
 
-    monkeypatch.setattr(browser, 'invoke_adapter', invoke)
+    monkeypatch.setattr(browser_adapters, 'invoke_adapter', invoke)
     provider = _ChatuiSiteSearchProvider().bind()
     assert provider.client_id == 'alice-browser'
     assert provider.profile == 'Alice Work'
     assert provider.list_sources()
     assert provider.search('modelplaza', 'embedding') == []
-    assert captured['user_id'] == 'alice'
+    assert captured['owner_user_id'] == ALICE
     assert captured['client_id'] == 'alice-browser'
 
 
 def test_chatui_site_provider_never_uses_a_global_unbound_browser(monkeypatch):
-    from lib.browser import ALL_CAPABILITIES, mark_poll
-    import lib.browser as browser
+    import lib.browser.adapters as browser_adapters
     from lib.search_bridge import _ChatuiSiteSearchProvider
 
-    mark_poll('somebody-elses-browser', user_id='other-user',
-              protocol_version=2, capabilities=sorted(ALL_CAPABILITIES))
+    _register('somebody-elses-browser', OTHER)
     monkeypatch.setattr(
-        browser, 'invoke_adapter',
+        browser_adapters, 'invoke_adapter',
         lambda *args, **kwargs: pytest.fail('unbound provider executed'))
 
     provider = _ChatuiSiteSearchProvider()
@@ -320,14 +360,12 @@ def test_chatui_site_provider_never_uses_a_global_unbound_browser(monkeypatch):
 
 def test_chatui_browser_provider_never_uses_a_global_unbound_browser(
         monkeypatch):
-    from lib.browser import ALL_CAPABILITIES, mark_poll
-    import lib.browser as browser
+    import lib.browser.fetch as browser_fetch
     from lib.search_bridge import _ChatuiBrowserProvider
 
-    mark_poll('somebody-elses-browser', user_id='other-user',
-              protocol_version=2, capabilities=sorted(ALL_CAPABILITIES))
+    _register('somebody-elses-browser', OTHER)
     monkeypatch.setattr(
-        browser, 'fetch_url_via_browser',
+        browser_fetch, 'fetch_url_via_browser',
         lambda *args, **kwargs: pytest.fail('unbound provider fetched'))
 
     provider = _ChatuiBrowserProvider()
@@ -337,7 +375,7 @@ def test_chatui_browser_provider_never_uses_a_global_unbound_browser(
 
 def test_approved_browser_write_is_promoted_to_a_durable_domain_grant(
         monkeypatch):
-    from lib.tasks_pkg.tool_dispatch import _approval
+    import lib.tasks_pkg.tool_dispatch._approval as _approval
     import lib.browser.access as access
 
     calls = []
@@ -350,7 +388,7 @@ def test_approved_browser_write_is_promoted_to_a_durable_domain_grant(
             (fn_name, fn_args, kwargs)))
 
     approved, rejected = _approval._handle_approval(
-        {'id': 'task-browser-grant', '_userId': 'alice'},
+        {'id': 'task-browser-grant', '_userId': ALICE},
         'browser_click', {'tab_id': 7, 'selector': '#save'},
         1, {'toolCallId': 'call-1'}, None, 1, 'test-model',
         cfg={'browserClientId': 'alice-browser'})
@@ -358,7 +396,7 @@ def test_approved_browser_write_is_promoted_to_a_durable_domain_grant(
     assert approved is True and rejected is None
     assert calls == [(
         'browser_click', {'tab_id': 7, 'selector': '#save'},
-        {'user_id': 'alice', 'client_id': 'alice-browser',
+        {'owner_user_id': ALICE, 'client_id': 'alice-browser',
          'grant_on_success': True},
     )]
 
@@ -381,6 +419,7 @@ def test_extension_v2_advertises_and_implements_native_page_contract():
         'page_state', 'page_snapshot', 'page_click', 'page_fill',
         'page_press', 'page_select', 'page_execute', 'page_upload',
         'network_capture_start', 'network_capture_stop', 'wait_download',
+        'fetch_file_to_server',
     ):
         assert f"case '{command}'" in source
     assert 'frameIds = [Number(params.frameId)]' in source
@@ -389,71 +428,123 @@ def test_extension_v2_advertises_and_implements_native_page_contract():
 
 
 def test_generic_browser_dispatch_rejects_cross_tenant_client_before_enqueue():
-    from lib.browser import execute_browser_tool, mark_poll
+    from lib.browser.dispatch import execute_browser_tool
     from lib.browser.queue import _state
 
-    mark_poll('alice-browser', user_id='alice')
-    mark_poll('bob-browser', user_id='bob')
+    _register('alice-browser', ALICE)
+    _register('bob-browser', BOB)
     result = execute_browser_tool(
-        'browser_list_tabs', {}, client_id='bob-browser', user_id='alice')
+        'browser_list_tabs', {}, client_id='bob-browser',
+        owner_user_id=ALICE)
     assert result == 'Error: Browser client is not connected for this user'
     with _state._commands_lock:
         assert _state._commands == {}
 
 
+def test_dispatch_authorizes_and_executes_the_same_remembered_tab(monkeypatch):
+    import lib.browser.access as access
+    import lib.browser.dispatch as dispatch
+    from lib.browser.dispatch import execute_browser_tool
+    from lib.browser._resolve import forget_work_tab, remember_work_tab
+    from lib.browser.tool_runtime import BrowserToolRuntime
+
+    _register('alice-browser', ALICE)
+    remember_work_tab((ALICE, 'alice-browser'), 77)
+    seen = {}
+
+    def sender(command, params=None, timeout=30, **route):
+        raise AssertionError(
+            f'unexpected bridge call: {command} {params} {timeout} {route}')
+
+    def runtime_factory(*, owner_user_id, client_id):
+        return BrowserToolRuntime(
+            owner_user_id=owner_user_id,
+            client_id=client_id,
+            sender=sender,
+        )
+
+    def authorize(fn_name, fn_args, *, owner_user_id, client_id):
+        seen['access'] = (
+            fn_name, dict(fn_args), owner_user_id, client_id)
+
+    def handler(fn_args, runtime):
+        seen['handler'] = (dict(fn_args), runtime.route_key)
+        return 'handled'
+
+    monkeypatch.setattr(dispatch, 'BrowserToolRuntime', runtime_factory)
+    monkeypatch.setattr(access, 'browser_tool_access', authorize)
+    monkeypatch.setitem(dispatch.BROWSER_HANDLERS, 'browser_click', handler)
+
+    assert execute_browser_tool(
+        'browser_click', {'selector': '#submit'},
+        client_id='alice-browser', owner_user_id=ALICE,
+    ) == 'handled'
+    assert seen['access'] == (
+        'browser_click', {'selector': '#submit', 'tabId': 77},
+        ALICE, 'alice-browser',
+    )
+    assert seen['handler'] == (
+        {'selector': '#submit', 'tabId': 77},
+        (ALICE, 'alice-browser'),
+    )
+    forget_work_tab((ALICE, 'alice-browser'), 77)
+
+
 def test_browser_access_implicitly_selects_only_the_request_users_client(
         monkeypatch):
-    from lib.browser import mark_poll
-    from lib.browser import access
+    from lib.browser.queue import mark_poll
+    import lib.browser.access as access
 
-    mark_poll('alice-browser', user_id='alice', profile='Alice Work')
+    _register('alice-browser', ALICE, profile='Alice Work')
     # Bob polls last, so a global "freshest client" fallback would pick him.
-    mark_poll('bob-browser', user_id='bob', profile='Bob Work')
+    _register('bob-browser', BOB, profile='Bob Work')
     selected = {}
 
-    def domain(_name, _args, *, client_id=''):
+    def domain(_name, _args, *, client_id, owner_user_id):
         selected['client_id'] = client_id
+        selected['owner_user_id'] = owner_user_id
         return ''
 
     monkeypatch.setattr(access, 'browser_tool_domain', domain)
-    access.browser_tool_access('browser_list_tabs', {}, user_id='alice')
+    access.browser_tool_access(
+        'browser_list_tabs', {}, owner_user_id=ALICE)
     # list_tabs is authorized without reading any cross-page domain.
     assert selected == {}
 
     access.browser_tool_access('browser_navigate', {
-        'url': 'https://example.com/'}, user_id='alice')
+        'url': 'https://example.com/'}, owner_user_id=ALICE)
     assert selected['client_id'] == 'alice-browser'
+    assert selected['owner_user_id'] == ALICE
 
 
 def test_user_scoped_lease_ignores_another_users_global_active_client():
-    from lib.browser import mark_poll
+    from lib.browser.queue import mark_poll
     from lib.browser.sessions import acquire_browser_lease
 
-    mark_poll('alice-browser', user_id='alice', profile='Alice Work')
-    mark_poll('bob-browser', user_id='bob', profile='Bob Work')
-    lease = acquire_browser_lease(user_id='alice', session='persistent')
+    _register('alice-browser', ALICE, profile='Alice Work')
+    _register('bob-browser', BOB, profile='Bob Work')
+    lease = acquire_browser_lease(
+        owner_user_id=ALICE, session='persistent')
     assert lease.client_id == 'alice-browser'
     assert lease.profile == 'Alice Work'
 
 
 def test_expired_lease_fails_before_page_action_and_cleans_ephemeral_tab():
-    from lib.browser import (
-        ALL_CAPABILITIES, BrowserCommandError, BrowserPage, mark_poll,
-    )
+    from lib.browser.page import BrowserCommandError, BrowserPage
     from lib.browser.sessions import acquire_browser_lease
 
-    mark_poll('alice-browser', user_id='alice', protocol_version=2,
-              capabilities=sorted(ALL_CAPABILITIES))
+    _register('alice-browser', ALICE)
     calls = []
 
-    def sender(command, params, *, timeout, client_id):
-        calls.append((command, params, client_id))
+    def sender(command, params, *, timeout, client_id, owner_user_id):
+        calls.append((command, params, client_id, owner_user_id))
         return {'ok': True}, None
 
     lease = acquire_browser_lease(
-        user_id='alice', client_id='alice-browser', tab_id=12,
+        owner_user_id=ALICE, client_id='alice-browser', tab_id=12,
         session='ephemeral')
     lease.expires_at = 1
     with pytest.raises(BrowserCommandError, match='expired'):
         BrowserPage(lease, sender=sender).snapshot()
-    assert calls == [('close_tab', {'tabId': 12}, 'alice-browser')]
+    assert calls == [(
+        'close_tab', {'tabId': 12}, 'alice-browser', ALICE)]

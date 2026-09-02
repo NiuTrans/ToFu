@@ -47,10 +47,10 @@ def _send_and_wait_done(page, text, expected_replies=1, timeout=30000):
 
 
 def _wait_conversation_persisted(page, conversation_id, text, timeout=10000):
-    """Wait for the authoritative V2 turn projection before a hard reload."""
+    """Wait for the authoritative conversation snapshot before a hard reload."""
     endpoint = (
-        f"{page.url.rstrip('/')}/api/v2/conversations/"
-        f"{conversation_id}/turns"
+        f"{page.url.rstrip('/')}/api/v3/conversations/"
+        f"{conversation_id}/sync"
     )
     deadline = time.monotonic() + timeout / 1000
     while time.monotonic() < deadline:
@@ -62,6 +62,18 @@ def _wait_conversation_persisted(page, conversation_id, text, timeout=10000):
                 return
         page.wait_for_timeout(100)
     pytest.fail(f'conversation {conversation_id} was not durable before reload')
+
+
+def _wait_conversation_catalog_ready(page, conversation_id, timeout=30000):
+    """Wait for post-reload catalog hydration, not only the application shell."""
+    page.wait_for_function(
+        """(conversationId) => Array.isArray(window.conversations) &&
+          window.conversations.some((conversation) =>
+            conversation.id === conversationId &&
+            Number(conversation._serverTurnCount || 0) > 0)""",
+        arg=conversation_id,
+        timeout=timeout,
+    )
 
 
 def test_abort_halts_stream_and_keeps_partial(page, assert_no_js_errors):
@@ -101,8 +113,9 @@ def test_reload_restores_active_conversation(page, assert_no_js_errors):
     _wait_conversation_persisted(page, conversation_id, 'Hello reload E2E')
     page.reload()
     _wait_app_ready(page)
+    _wait_conversation_catalog_ready(page, conversation_id)
     item = page.locator(f'.conv-item[data-conv-id="{conversation_id}"]')
-    item.wait_for(state='attached', timeout=15000)
+    item.wait_for(state='attached', timeout=5000)
     item.click(position={'x': 12, 'y': 12})
     page.wait_for_function(
         "document.querySelector('#chatInner').innerText.includes('Hello reload E2E')",
@@ -162,6 +175,15 @@ def test_settings_actions_and_theme_persist(page, assert_no_js_errors):
 
 
 def test_paper_and_orchestration_domains_boot(page, assert_no_js_errors):
+    page.route(
+        '**/api/v1/features',
+        lambda route: route.fulfill(
+            status=200,
+            content_type='application/json',
+            body='{"debug_mode":true}',
+        ),
+    )
+    page.reload()
     _wait_app_ready(page)
     page.locator('#paperModeBtn').click()
     page.wait_for_selector('#paperModeContainer', state='visible', timeout=15000)

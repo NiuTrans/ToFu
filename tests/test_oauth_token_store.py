@@ -15,7 +15,7 @@ from unittest import mock
 
 import pytest
 
-from lib.oauth import token_store
+import lib.oauth.token_store as token_store
 
 pytestmark = pytest.mark.unit
 
@@ -100,7 +100,7 @@ import sys
 import time
 
 sys.path.insert(0, sys.argv[1])
-from lib.oauth import token_store
+import lib.oauth.token_store as token_store
 
 store_root, ready_path, start_path, result_path, counter_path = sys.argv[2:]
 token_store._config_path = lambda relative: os.path.join(store_root, relative)
@@ -266,9 +266,14 @@ def test_browser_exchange_reports_persistence_failure(private_store):
 def test_logout_does_not_claim_success_when_token_delete_fails():
     from lib.oauth.manager import _exchange
 
-    with mock.patch('lib.oauth.token_store.delete_token', return_value=False), \
+    with mock.patch('lib.oauth.token_store.load_token', return_value={}), \
+            mock.patch('lib.oauth.token_store.delete_token', return_value=False), \
             mock.patch(
                 'lib.oauth.outbound.deprovision_oauth_provider'), \
+            mock.patch(
+                'lib.subscription_quota.clear_subscription_quota'), \
+            mock.patch(
+                'lib.oauth.codex_usage.clear_codex_usage_reset_cache'), \
             mock.patch.object(_exchange, 'audit_log') as audit:
         result = _exchange.logout_oauth('codex')
 

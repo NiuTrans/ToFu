@@ -1,0 +1,505 @@
+/* ══════════════════════════════════════
+   Dropdown Visibility — tofu list
+   ══════════════════════════════════════ */
+.stg-dropdown-visibility {
+  max-height: 360px;
+  overflow-y: auto;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  padding: 6px;
+  background: #fff;
+}
+/* ══════════════════════════════════════
+   Access Matrix — per-(key × model) grid
+   Same neo-brutalist house style as .stg-mcard: solid 1.5px ink borders,
+   hard shadows, JetBrains Mono ids. Cells are clickable access toggles.
+   ══════════════════════════════════════ */
+.stg-matrix-toggle.active {
+  background: var(--s-ink);
+  color: var(--s-white);
+}
+.stg-matrix { margin-top: 8px; }
+.stg-matrix-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.stg-matrix-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* Uniform control height so the probe button, apply button, attempts
+   selector and clear button all sit on a single baseline. */
+.stg-matrix-tools > .stg-btn-add,
+.stg-matrix-tools > .stg-mx-attempts {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  margin: 0;
+}
+.stg-mx-status {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--s-ink-soft);
+}
+.stg-mx-status.running { color: #2563eb; }
+.stg-mx-status.error { color: #b91c1c; }
+.stg-mx-status.running::before {
+  content: '';
+  display: inline-block;
+  width: 9px; height: 9px;
+  margin-right: 5px;
+  border: 2px solid #2563eb;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: stg-mx-spin 0.7s linear infinite;
+  vertical-align: -1px;
+}
+.stg-mx-probe.running { opacity: 0.6; cursor: progress; }
+.stg-mx-apply {
+  background: #16a34a !important;
+  color: var(--s-white) !important;
+  border: 2px solid #16a34a !important;
+  border-radius: var(--s-radius);
+  font-weight: 800;
+  box-shadow: var(--s-shadow-xs);
+}
+.stg-mx-apply:hover { background: #15923f !important; border-color: #15923f !important; filter: none; }
+.stg-matrix-legend {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--s-ink-soft);
+}
+.stg-mx-leg { display: inline-flex; align-items: center; gap: 5px; }
+.stg-mx-leg .stg-mx-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 1.5px solid var(--s-ink); display: inline-block;
+}
+.stg-mx-leg.on .stg-mx-dot { background: #16a34a; border-color: #16a34a; }
+.stg-mx-leg.off .stg-mx-dot { background: var(--s-cream); }
+.stg-mx-leg.ov .stg-mx-pip {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; font-size: 11px; font-weight: 900;
+  border: 1.5px solid #c2410c; color: #c2410c; border-radius: 3px;
+}
+.stg-matrix-scroll {
+  overflow-x: auto;
+  border: 1.5px solid var(--s-ink);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  /* Scroll shadows (Lea-Verou technique): an edge shadow appears ONLY on
+     sides that can still scroll — the 'local' cover gradients hide the
+     'scroll' shadow gradients at the extremes. Cues that more key columns
+     exist off-screen even where the OS hides scrollbars. */
+  background:
+    linear-gradient(to right, var(--s-white) 30%, rgba(250, 248, 243, 0)),
+    linear-gradient(to right, rgba(250, 248, 243, 0), var(--s-white) 70%) 0 100%,
+    radial-gradient(farthest-side at 0 50%, rgba(26, 24, 20, 0.22), rgba(26, 24, 20, 0)),
+    radial-gradient(farthest-side at 100% 50%, rgba(26, 24, 20, 0.22), rgba(26, 24, 20, 0)) 0 100%;
+  background-repeat: no-repeat;
+  background-color: var(--s-white);
+  background-size: 40px 100%, 40px 100%, 12px 100%, 12px 100%;
+  background-attachment: local, local, scroll, scroll;
+  /* Always-visible horizontal scrollbar (custom scrollbars are exempt from
+     macOS 'show only while scrolling' auto-hiding) — the primary cue that
+     the grid scrolls horizontally. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--s-ink) var(--s-cream);
+}
+.stg-matrix-scroll::-webkit-scrollbar { height: 10px; }
+.stg-matrix-scroll::-webkit-scrollbar-track {
+  background: var(--s-cream);
+  border-top: 1.5px solid var(--s-ink);
+  border-radius: 0 0 4px 4px;
+}
+.stg-matrix-scroll::-webkit-scrollbar-thumb {
+  background: var(--s-ink);
+  border: 2px solid var(--s-cream);
+  border-radius: 6px;
+}
+.stg-matrix-scroll::-webkit-scrollbar-thumb:hover { background: var(--s-gold); }
+
+/* Panel auto-widen: JS (_fitMatrixPanelWidth) adds .stg-matrix-wide when an
+   open matrix overflows the default 860px panel, giving 3–4 key columns a
+   chance to fit without scrolling. Desktop only — mobile keeps its own
+   full-width rule in styles.css. Guard: tests/test_frontend_matrix_scoped_probe.py */
+.settings-panel { transition: width 0.18s ease; }
+@media (min-width: 769px) {
+  .settings-panel.stg-matrix-wide { width: min(1240px, 96vw); }
+}
+.stg-matrix-table { border-collapse: collapse; width: 100%; }
+.stg-matrix-table th,
+.stg-matrix-table td {
+  border: 1px solid var(--s-line, rgba(0,0,0,0.12));
+  padding: 0;
+}
+.stg-mx-corner {
+  background: var(--s-cream);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--s-ink-soft);
+  padding: 8px 10px !important;
+  text-align: left;
+  position: sticky; left: 0; z-index: 3;
+}
+.stg-mx-keyhead {
+  background: var(--s-cream);
+  /* right padding reserves a dedicated lane for the column probe button so
+     it never overlaps the full-width key-name input (mirrors the 28px lane
+     .stg-mx-model reserves for the row probe button) */
+  padding: 6px 26px 6px 8px !important;
+  min-width: 92px;
+  vertical-align: bottom;
+  position: relative;
+}
+.stg-mx-keyname {
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--s-ink);
+  padding: 2px 4px;
+  border-radius: 4px;
+  text-align: center;
+}
+.stg-mx-keyname:hover { border-color: var(--s-ink); background: var(--s-white); }
+.stg-mx-keyname:focus { outline: none; border-color: var(--s-ink); background: var(--s-white); }
+.stg-mx-keytail {
+  display: block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  color: var(--s-ink-soft);
+  opacity: 0.7;
+  text-align: center;
+  margin-top: 2px;
+}
+.stg-mx-model {
+  background: var(--s-white);
+  /* right padding reserves room for the row-scope probe button */
+  padding: 6px 28px 6px 10px !important;
+  position: sticky; left: 0; z-index: 2;
+  white-space: nowrap;
+}
+.stg-mx-model .stg-mx-gtoggle {
+  --stg-toggle-width: 30px;
+  --stg-toggle-height: 18px;
+  --stg-toggle-thumb-size: 12px;
+  --stg-toggle-thumb-gap: 2px;
+  --stg-toggle-travel: 14px;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+.stg-mx-brand { vertical-align: middle; margin-right: 5px; display: inline-flex; }
+.stg-mx-mid {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--s-ink);
+  vertical-align: middle;
+  /* Long gateway ids (yuju-claude-opus-4.7-evaDaily…) would otherwise eat
+     the width the key columns need. Cap + ellipsis; the full id remains one
+     hover away via the title tooltip. */
+  display: inline-block;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stg-mx-mid.alias-id { max-width: 220px; }
+.stg-mx-row.model-off { opacity: 0.5; }
+.stg-mx-row.model-off .stg-mx-mid { text-decoration: line-through; }
+/* ── Model groups: a root model + its aliases (each a distinct upstream) ──
+   A model that HAS aliases is bracketed with a left accent rail so the root
+   and its alias rows read as one unit; the last alias closes the bracket. */
+.stg-mx-row.grouped .stg-mx-model { position: relative; }
+.stg-mx-row.grouped.is-root .stg-mx-model::before,
+.stg-mx-row.grouped.is-alias .stg-mx-model::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--s-ink);
+}
+.stg-mx-row.grouped.is-root .stg-mx-model::before { top: 50%; border-top-left-radius: 2px; }
+.stg-mx-row.grouped.group-end .stg-mx-model::before { bottom: 50%; border-bottom-left-radius: 2px; }
+.stg-mx-row.is-root .stg-mx-aliascount {
+  margin-left: 8px;
+  font-size: 9px; font-weight: 800; line-height: 1;
+  text-transform: uppercase; letter-spacing: 0.03em;
+  padding: 2px 7px; border-radius: 999px;
+  border: 1.5px solid var(--s-ink); background: var(--s-cream); color: var(--s-ink);
+  vertical-align: 1px;
+}
+/* ── Logical header row (model-identity contract): the preset-facing model_id
+   of an explicit request_ids pool. It is never a wire id, so its per-key
+   cells are intentionally empty (nothing to grant/deny/probe). ── */
+.stg-mx-row.is-logical .stg-mx-model.root {
+  background: linear-gradient(90deg, rgba(0,0,0,0.035), transparent 55%);
+}
+.stg-mx-cell.logical {
+  background: rgba(0,0,0,0.03);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04);
+}
+/* ── Not-routed cell: the row's wire id exists (some key routes it) but THIS
+   key's pool doesn't — the dispatcher can never send that pair. No toggle,
+   no probe; a faint hollow dot keeps the grid aligned. ── */
+.stg-mx-cell.noroute {
+  background: repeating-linear-gradient(45deg, transparent, transparent 6px, rgba(0,0,0,0.025) 6px, rgba(0,0,0,0.025) 12px);
+}
+.stg-mx-cell.noroute::after {
+  content: '';
+  display: inline-block;
+  width: 8px; height: 8px; border-radius: 50%;
+  border: 1.5px dashed var(--s-ink-soft);
+  opacity: 0.45;
+}
+.stg-mx-preset {
+  margin-left: 6px;
+  font-size: 8px; font-weight: 800; line-height: 1;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 1px 5px; border-radius: 3px;
+  border: 1.5px dashed var(--s-ink-soft); color: var(--s-ink-soft);
+  background: none;
+  vertical-align: 1px;
+}
+/* ── Alias rows: a concrete id mapping to a distinct upstream model ── */
+.stg-mx-row.is-alias .stg-mx-model.alias {
+  padding-left: 14px !important;
+  background: linear-gradient(90deg,
+    hsla(var(--alias-hue, 265), 70%, 55%, 0.10), transparent 55%);
+}
+.stg-mx-tree {
+  display: inline-block; width: 14px;
+  color: var(--s-ink-soft); font-weight: 700;
+  font-family: 'JetBrains Mono', monospace; margin-right: 2px;
+}
+.stg-mx-aliasidx {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 16px; padding: 0 4px; margin-right: 6px;
+  font-size: 9px; font-weight: 900; line-height: 1;
+  font-family: 'JetBrains Mono', monospace;
+  border-radius: 4px;
+  color: hsl(var(--alias-hue, 265), 65%, 40%);
+  background: hsla(var(--alias-hue, 265), 70%, 55%, 0.16);
+  border: 1.5px solid hsl(var(--alias-hue, 265), 60%, 55%);
+}
+.stg-mx-mid.alias-id { font-weight: 600; font-size: 10.5px; }
+.stg-mx-row.is-alias .stg-mx-brand { opacity: 0.85; }
+/* ── Attempts selector (false-429 filter) ── */
+.stg-mx-attempts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px; font-weight: 700; color: var(--s-ink-soft);
+  line-height: 1;
+  padding: 0 8px;
+  border: 2px dashed var(--s-ink-soft);
+  border-radius: var(--s-radius);
+  background: none;
+  white-space: nowrap;
+}
+.stg-mx-attempts select {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 800;
+  height: 22px;
+  margin: 0;
+  padding: 0 4px;
+  border: 1.5px solid var(--s-ink);
+  border-radius: 4px;
+  background: var(--s-white); color: var(--s-ink);
+  cursor: pointer;
+  box-sizing: border-box;
+  vertical-align: middle;
+  line-height: 1;
+  box-shadow: none;
+}
+.stg-mx-attempts select:focus {
+  box-shadow: none;
+  transform: none;
+}
+/* ── Cells ── */
+.stg-mx-cell {
+  position: relative;
+  text-align: center;
+  vertical-align: middle;
+  height: 44px;
+  min-width: 92px;
+  transition: background 0.12s;
+}
+.stg-mx-cell.on { background: rgba(74, 222, 128, 0.10); }
+.stg-mx-cell.off { background: repeating-linear-gradient(45deg, var(--s-cream), var(--s-cream) 5px, rgba(0,0,0,0.04) 5px, rgba(0,0,0,0.04) 10px); }
+.stg-mx-cell.overridden { box-shadow: inset 0 0 0 2px #c2410c; }
+.stg-mx-toggle {
+  border: none; background: none; cursor: pointer;
+  padding: 4px; display: inline-flex; align-items: center; justify-content: center;
+}
+.stg-mx-cell .stg-mx-dot {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 1.5px solid var(--s-ink);
+  transition: transform 0.1s, background 0.12s;
+}
+.stg-mx-cell.on .stg-mx-dot { background: #16a34a; border-color: #16a34a; box-shadow: 0 0 0 3px rgba(74,222,128,0.25); }
+.stg-mx-cell.off .stg-mx-dot { background: var(--s-white); }
+.stg-mx-toggle:hover .stg-mx-dot { transform: scale(1.18); }
+.stg-mx-badges {
+  position: absolute; top: 2px; left: 3px;
+  display: flex; gap: 2px; flex-wrap: wrap; max-width: 70%;
+}
+.stg-mx-badge {
+  font-size: 8px; font-weight: 800; line-height: 1;
+  padding: 1px 3px; border-radius: 3px;
+  border: 1px solid currentColor;
+  font-family: 'JetBrains Mono', monospace;
+}
+.stg-mx-badge.rpm { color: #2563eb; background: rgba(96,165,250,0.12); }
+.stg-mx-badge.alias { color: #7c3aed; background: rgba(167,139,250,0.12); }
+.stg-mx-badge.caps { color: #0d9488; background: rgba(45,212,191,0.12); }
+/* Probe-status health pip (top-right of a cell, set by Probe & Recommend) */
+.stg-mx-probe-pip {
+  position: absolute; top: 2px; right: 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 15px; height: 15px; padding: 0 3px;
+  font-size: 9px; font-weight: 900; line-height: 1;
+  border-radius: 4px;
+  border: 1.5px solid currentColor;
+  font-family: 'JetBrains Mono', monospace;
+  pointer-events: auto;
+}
+.stg-mx-probe-pip.ok     { color: #16a34a; background: rgba(74,222,128,0.18); }
+.stg-mx-probe-pip.rate   { color: #c2410c; background: rgba(251,146,60,0.20); }
+.stg-mx-probe-pip.unauth { color: #b91c1c; background: rgba(248,113,113,0.20); }
+.stg-mx-probe-pip.nf     { color: #6b7280; background: rgba(156,163,175,0.20); }
+.stg-mx-probe-pip.skip   { color: #6b7280; background: rgba(156,163,175,0.20); }
+.stg-mx-probe-pip.down   { color: #a16207; background: rgba(250,204,21,0.20); }
+.stg-mx-probe-pip.err    { color: #b91c1c; background: rgba(248,113,113,0.20); }
+/* When a cell is flagged (non-ok pip) but still enabled, nudge attention. */
+.stg-mx-cell:has(.stg-mx-probe-pip.rate) .stg-mx-dot,
+.stg-mx-cell:has(.stg-mx-probe-pip.unauth) .stg-mx-dot,
+.stg-mx-cell:has(.stg-mx-probe-pip.down) .stg-mx-dot { box-shadow: 0 0 0 2px rgba(194,65,12,0.25); }
+.stg-mx-edit {
+  position: absolute; bottom: 2px; right: 3px;
+  border: none; background: none; cursor: pointer;
+  font-size: 11px; color: var(--s-ink-soft); opacity: 0;
+  transition: opacity 0.12s;
+  padding: 1px 3px; line-height: 1;
+}
+.stg-mx-cell:hover .stg-mx-edit { opacity: 0.85; }
+.stg-mx-edit:hover { opacity: 1 !important; color: var(--s-ink); transform: scale(1.15); }
+
+/* ── Scoped probe triggers (row / column / cell) — one shared mini bolt
+   button in the matrix's hover-reveal language (mirrors .stg-mx-edit) ── */
+.stg-mx-zap {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; padding: 0;
+  border: 1.5px solid var(--s-ink); border-radius: 4px;
+  background: var(--s-white); color: var(--s-ink);
+  cursor: pointer;
+  transition: opacity 0.12s, transform 0.1s, background 0.12s;
+  box-sizing: border-box;
+}
+.stg-mx-zap svg { width: 10px; height: 10px; display: block; }
+.stg-mx-zap:hover { background: var(--s-gold); transform: scale(1.12); }
+.stg-mx-zap:disabled { opacity: 0.3; cursor: default; transform: none; background: var(--s-cream); }
+.stg-mx-zap.probing { pointer-events: none; opacity: 1; background: var(--s-gold); }
+.stg-mx-zap.probing svg { animation: stg-mx-spin 0.7s linear infinite; }
+/* Column scope: vertically centered in the key header's reserved right
+   lane (same centering recipe as .stg-mx-zap.row), subtle until hovered. */
+.stg-mx-zap.col { position: absolute; top: 50%; right: 4px; margin-top: -9px; opacity: 0.4; }
+.stg-mx-keyhead:hover .stg-mx-zap.col { opacity: 1; }
+/* Row scope: right edge of the (sticky) model label cell, hover-revealed. */
+.stg-mx-zap.row { position: absolute; top: 50%; right: 4px; margin-top: -9px; opacity: 0; }
+.stg-mx-model:hover .stg-mx-zap.row { opacity: 0.9; }
+.stg-mx-zap.row.probing { opacity: 1; }
+/* Cell scope: bottom-left corner, hover-revealed (only when no pip yet —
+   once a verdict exists the pip itself is the re-probe trigger). */
+.stg-mx-zap.cell { position: absolute; bottom: 2px; left: 3px; opacity: 0; }
+.stg-mx-cell:hover .stg-mx-zap.cell { opacity: 0.9; }
+.stg-mx-zap.cell.probing { opacity: 1; }
+/* The verdict pip doubles as the re-probe trigger for its own cell. */
+.stg-mx-probe-pip.clickable { cursor: pointer; transition: transform 0.1s; }
+.stg-mx-probe-pip.clickable:hover { transform: scale(1.2); }
+.stg-matrix-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  border: 1.5px dashed var(--s-ink);
+  border-radius: var(--s-radius);
+  margin-top: 8px;
+}
+/* ── Inline per-cell override editor (reuses .stg-edit-form base) ── */
+.stg-mx-editor { margin-top: 10px; }
+.stg-mx-editor-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--s-ink);
+  margin-bottom: 4px;
+  padding-bottom: 6px;
+  border-bottom: 1.5px solid var(--s-ink);
+}
+.stg-mx-editor-sub {
+  font-size: 11px;
+  color: var(--s-ink-soft);
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+.stg-mxe-ovrow {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 8px;
+}
+.stg-mxe-ovrow.caps { align-items: flex-start; flex-direction: column; }
+.stg-mxe-chk {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 700; color: var(--s-ink);
+  cursor: pointer; min-width: 130px;
+}
+.stg-mxe-ovrow input[type="number"],
+.stg-mxe-ovrow input[type="text"] {
+  flex: 1; min-width: 120px;
+  padding: 5px 8px;
+  border: 1.5px solid var(--s-ink);
+  border-radius: var(--s-radius);
+  font-size: 12px;
+}
+.stg-mxe-ovrow input:disabled { opacity: 0.4; background: var(--s-cream); }
+.stg-cap-btn.stg-mxe-cap.locked { opacity: 0.35; cursor: not-allowed; }
+/* ── Cascade repair (2026-07-24): the settings shell is `.modal.settings-panel`
+   (index.html:942), so two legacy generic-modal rules in styles.css reach
+   this editor and out-specify its single-class rules:
+     .modal label{display:block;…margin-bottom:6px}        (styles.css:2959)
+     .modal input,.modal select{width:100%;padding:10px 12px;
+        margin-bottom:16px;…}                               (styles.css:2959)
+   Effect: `.stg-mxe-chk` loses inline-flex, and the checkbox input stretches
+   to width:100% of the label — Blink paints the ~13px checkbox square
+   centered in that full-width box while the label text wraps to the next
+   line, so each checkbox appears ABOVE its own label with a tall empty gap;
+   the RPM number input also picks up margin-bottom:16px and inflates its
+   row. Re-assert the editor layout at higher specificity (settings.css also
+   wins ties by load order). Guard: tests/test_frontend_matrix_editor_cascade.py */
+.settings-panel .stg-mx-editor .stg-mxe-chk {
+  display: inline-flex;
+  margin-bottom: 0;
+  font-size: 11px; font-weight: 700; color: var(--s-ink);
+  text-transform: none; letter-spacing: normal;
+}
+.settings-panel .stg-mx-editor .stg-mxe-chk input[type="checkbox"] {
+  width: auto; padding: 0; margin: 0;
+}
+.settings-panel .stg-mx-editor .stg-mxe-ovrow input[type="number"] {
+  margin-bottom: 0;
+}
+@media (max-width: 640px) {
+  .stg-mx-keyhead, .stg-mx-cell { min-width: 76px; }
+  .stg-mxe-chk { min-width: 100%; }
+}
+

@@ -8,9 +8,11 @@ import json
 import os
 import shlex
 import subprocess
+import tarfile
+import tempfile
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 from .qemu import QemuRuntime, _isolated_subprocess_env
@@ -20,6 +22,7 @@ from .session import NetworkMode, SandboxSession, SandboxSpec
 _SCHEMA = 4
 _MARKER = "prepared-image.json"
 _DISK = "prepared.qcow2"
+_MAX_BUILD_CONTEXT_BYTES = 1024**3
 
 
 def sha256_file(path: Path) -> str:
@@ -70,6 +73,42 @@ def _normalized_sha256(value: str | None, actual: str, label: str) -> str:
     return expected
 
 
+def _build_context_digest(path: Path) -> tuple[str, int]:
+    """Hash a Docker build context without following host symlinks.
+
+    The relative path, file mode and bytes are part of the identity.  This is
+    deliberately stricter than Docker's default context traversal: benchmark
+    task definitions are untrusted input and may not use a symlink to smuggle
+    an arbitrary host file into the guest-side build.
+    """
+
+    root = path.expanduser().resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError(f"build_context must be a directory: {root}")
+    if not (root / "Dockerfile").is_file():
+        raise ValueError(f"build_context has no Dockerfile: {root}")
+    digest = hashlib.sha256()
+    total = 0
+    for item in sorted(root.rglob("*"), key=lambda value: value.relative_to(root).as_posix()):
+        relative = item.relative_to(root).as_posix()
+        if item.is_symlink():
+            raise ValueError(f"build_context must not contain symlinks: {relative}")
+        if item.is_dir():
+            digest.update(f"d\0{relative}\0{item.stat().st_mode & 0o7777:o}\0".encode())
+            continue
+        if not item.is_file():
+            raise ValueError(f"build_context contains a non-regular file: {relative}")
+        size = item.stat().st_size
+        total += size
+        if total > _MAX_BUILD_CONTEXT_BYTES:
+            raise ValueError("build_context exceeds the 1 GiB safety limit")
+        digest.update(f"f\0{relative}\0{item.stat().st_mode & 0o7777:o}\0{size}\0".encode())
+        with item.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest(), total
+
+
 @dataclass(frozen=True)
 class PreparedImageRecipe:
     schema: int
@@ -77,12 +116,29 @@ class PreparedImageRecipe:
     payload_iso_sha256: str
     task_image: str
     python_runtime_image: str | None
+    build_context_sha256: str | None = None
     runtime_backend: str = "runc"
+
+    def to_dict(self) -> dict[str, object]:
+        # Preserve schema-4 identities byte-for-byte for prebuilt images.  The
+        # Terminal-Bench cache must not be invalidated merely because schema 5
+        # adds optional Dockerfile support for SWE-bench.
+        value: dict[str, object] = {
+            "schema": self.schema,
+            "base_disk_sha256": self.base_disk_sha256,
+            "payload_iso_sha256": self.payload_iso_sha256,
+            "task_image": self.task_image,
+            "python_runtime_image": self.python_runtime_image,
+            "runtime_backend": self.runtime_backend,
+        }
+        if self.build_context_sha256 is not None:
+            value["build_context_sha256"] = self.build_context_sha256
+        return value
 
     @property
     def digest(self) -> str:
         encoded = json.dumps(
-            asdict(self), sort_keys=True, separators=(",", ":")
+            self.to_dict(), sort_keys=True, separators=(",", ":")
         ).encode()
         return hashlib.sha256(encoded).hexdigest()
 
@@ -112,6 +168,7 @@ class PreparedImageSpec:
     payload_iso: Path
     task_image: str
     python_runtime_image: str | None = None
+    build_context: Path | None = None
     expected_base_disk_sha256: str | None = None
     expected_payload_iso_sha256: str | None = None
     memory_mib: int = 2048
@@ -144,12 +201,21 @@ class PreparedImageCache:
             sha256_file(self.payload_iso),
             "payload_iso",
         )
+        self.build_context = (
+            spec.build_context.expanduser().resolve(strict=True)
+            if spec.build_context is not None
+            else None
+        )
+        build_context_sha = None
+        if self.build_context is not None:
+            build_context_sha, _ = _build_context_digest(self.build_context)
         self.recipe = PreparedImageRecipe(
-            schema=_SCHEMA,
+            schema=5 if build_context_sha is not None else _SCHEMA,
             base_disk_sha256=base_sha,
             payload_iso_sha256=iso_sha,
             task_image=spec.task_image,
             python_runtime_image=spec.python_runtime_image,
+            build_context_sha256=build_context_sha,
         )
         self.entry = self.cache_root / self.recipe.digest
         self.disk = self.entry / _DISK
@@ -169,8 +235,8 @@ class PreparedImageCache:
         image_config: dict[str, object],
     ) -> dict[str, object]:
         return {
-            "schema": _SCHEMA,
-            "recipe": asdict(self.recipe),
+            "schema": self.recipe.schema,
+            "recipe": self.recipe.to_dict(),
             "recipe_digest": self.recipe.digest,
             "disk_sha256": disk_sha256,
             "image_reference": self.recipe.prepared_image_reference,
@@ -223,6 +289,18 @@ class PreparedImageCache:
 
     def _prepare_guest(self, session: SandboxSession) -> dict[str, object]:
         prepare_timeout = self.spec.prepare_timeout_sec
+        # qemu-guest-agent and Docker are both default-runlevel services.  On a
+        # fast boot the guest agent can accept commands before dockerd has
+        # created its socket, so make Docker readiness an explicit boundary
+        # instead of relying on OpenRC service ordering.
+        self._checked_exec(
+            session,
+            "rc-service docker start >/dev/null 2>&1 || true; "
+            "timeout 180 sh -c 'until docker info >/dev/null 2>&1; "
+            "do sleep 1; done' || "
+            "{ rc-service docker status || true; exit 1; }",
+            210.0,
+        )
         self._checked_exec(
             session,
             " && ".join(
@@ -244,7 +322,56 @@ class PreparedImageCache:
             60.0,
         )
         prepared_ref = shlex.quote(self.recipe.prepared_image_reference)
-        if self.spec.python_runtime_image:
+        if self.build_context is not None:
+            if session.egress_proxy is None or not session.egress_proxy.is_alive():
+                raise RuntimeError("Dockerfile preparation requires the restricted egress proxy")
+            self._checked_exec(
+                session,
+                "ip link set lo up && iface=; for path in /sys/class/net/*; do "
+                "candidate=${path##*/}; [ \"$candidate\" = lo ] || "
+                "{ iface=$candidate; break; }; done; test -n \"$iface\" && "
+                "ip link set \"$iface\" up && "
+                "ip address replace 10.0.2.15/24 dev \"$iface\" && "
+                "ip route replace default via 10.0.2.2 dev \"$iface\"",
+                30.0,
+            )
+            guest_context = f"/var/tmp/rootless-build-{uuid.uuid4().hex}"
+            guest_tar = f"{guest_context}.tar"
+            current_digest, _ = _build_context_digest(self.build_context)
+            if current_digest != self.recipe.build_context_sha256:
+                raise RuntimeError("build_context changed after cache identity was computed")
+            with tempfile.TemporaryDirectory(prefix="rootless-build-context-") as temp:
+                archive_path = Path(temp) / "context.tar"
+                with tarfile.open(archive_path, "w") as archive:
+                    for child in sorted(
+                        self.build_context.iterdir(), key=lambda value: value.name
+                    ):
+                        archive.add(child, arcname=child.name, recursive=True)
+                session.guest_agent.upload(archive_path, guest_tar)
+            proxy_url = session.egress_proxy.proxy_url
+            proxy = shlex.quote(proxy_url)
+            try:
+                self._checked_exec(
+                    session,
+                    " && ".join(
+                        [
+                            f"mkdir -p {shlex.quote(guest_context)}",
+                            f"tar -xf {shlex.quote(guest_tar)} -C {shlex.quote(guest_context)}",
+                            "DOCKER_BUILDKIT=0 docker build --pull=false --network=host "
+                            f"--build-arg HTTP_PROXY={proxy} --build-arg HTTPS_PROXY={proxy} "
+                            f"--build-arg http_proxy={proxy} --build-arg https_proxy={proxy} "
+                            f"-t {prepared_ref} {shlex.quote(guest_context)}",
+                        ]
+                    ),
+                    prepare_timeout,
+                )
+            finally:
+                self._checked_exec(
+                    session,
+                    f"rm -rf {shlex.quote(guest_context)} {shlex.quote(guest_tar)}",
+                    60.0,
+                )
+        elif self.spec.python_runtime_image:
             runtime_ref = shlex.quote(self.spec.python_runtime_image)
             self._checked_exec(
                 session,
@@ -301,9 +428,21 @@ class PreparedImageCache:
             ),
             prepare_timeout,
         )
+        if self.build_context is not None:
+            # Docker build metadata can contain the short-lived authenticated
+            # proxy URL.  Runtime uses the exported runc rootfs, so remove the
+            # entire builder graph before publishing the immutable cache disk.
+            self._checked_exec(
+                session,
+                "rc-service docker stop >/dev/null 2>&1 || true; "
+                "rm -rf /var/lib/docker /var/lib/containerd /root/.docker "
+                "/var/tmp/rootless-build-*",
+                300.0,
+            )
         self._checked_exec(
             session,
-            f"docker image inspect {prepared_ref} >/dev/null && sync",
+            (f"docker image inspect {prepared_ref} >/dev/null && " if self.build_context is None else "")
+            + "sync",
             120.0,
         )
         return {"env": image_env, "workdir": image_workdir}
@@ -320,7 +459,11 @@ class PreparedImageCache:
                 memory_mib=self.spec.memory_mib,
                 cpus=self.spec.cpus,
                 read_only_images=(self.payload_iso,),
-                network=NetworkMode.NONE,
+                network=(
+                    NetworkMode.PUBLIC
+                    if self.build_context is not None
+                    else NetworkMode.NONE
+                ),
             )
         )
         try:

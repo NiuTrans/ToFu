@@ -14,8 +14,9 @@ Add-ons — same package, near-identical policies. Where Edge is stricter
 **Policy:** "Including executable code (e.g., by calling its own server to
 retrieve code) is not allowed." The Web Store wants all logic in the package.
 
-**How we trip it:** the `browser_execute_js` command runs JS the Tofu server
-sends. Functionally that is "retrieve code and run it."
+**How we trip it:** `browser_execute_js` and DevTools expression/call-frame
+evaluation run JS the Tofu server sends. Functionally that is "retrieve code
+and run it."
 
 **Mitigation / argument:**
 - The code comes from the **user's own** server that the user runs and
@@ -28,7 +29,8 @@ sends. Functionally that is "retrieve code and run it."
   does not download additional extension logic to extend itself.
 
 **If still rejected:** the realistic fallback is to ship a Chrome build that
-**omits `browser_execute_js`** (and any other "run arbitrary JS" command) and
+**omits `browser_execute_js` and `browser_devtools`** (and any other "run
+arbitrary JS" command) and
 keeps only structured commands (read text, click selector, fill form,
 screenshot). The structured commands cover most real tasks. Keep the full
 power version as the "load unpacked" / Firefox build. This is a code change,
@@ -39,19 +41,23 @@ not a doc change — decide before investing in resubmission.
 **Policy:** extensions using `debugger` get heightened manual scrutiny and are
 frequently rejected for consumer distribution.
 
-**Mitigation:** it is used for exactly one thing — full-page screenshots via
-`Page.captureScreenshot` — and the justification says so precisely. If the
-reviewer balks, the screenshot feature can fall back to `captureVisibleTab`
-(viewport-only) and `debugger` can be dropped entirely. That is a small code
-change in `background.js` (the `fullPage=false` path already exists).
+**Mitigation:** one reference-counted per-tab attachment supports full-page
+screenshots, textual API/WebSocket capture, trusted input, and explicitly
+requested console/object/JavaScript debugging. Debugging is capped at two tabs,
+expires within 120 seconds, auto-resumes a pause within 30 seconds, rejects
+cross-origin child targets, and bounds every console/object/source buffer. The
+network body path excludes static/binary resources and has per-response and
+total ceilings. If a reviewer rejects `debugger`, screenshots can
+fall back to `captureVisibleTab` and dynamic sites fall back to DOM text plus
+URL-only response metadata; dropping it now narrows both features.
 
 ## Risk 3 — Broad permissions vs. minimum-permissions policy
 
 **Policy:** request the narrowest permissions that work.
 
 **Mitigation already applied:** `manifest.store.json` drops every permission
-the code cannot justify — `webNavigation`, `clipboardRead`, `clipboardWrite`,
-`declarativeNetRequest`, `management`, `offscreen` (all zero-call), plus
+the code cannot justify — `clipboardRead`, `clipboardWrite`,
+`declarativeNetRequest`, `management`, `offscreen`, plus
 `activeTab` (which is gesture-granted and can never be granted here, since
 every command arrives from the server long-poll rather than a user click).
 `management` in particular is a classic rejection trigger, and it was pure
@@ -94,7 +100,7 @@ in the other. See `EDGE_ADDONS.md`.
 1. **Best case:** accepted after a manual review round, possibly after one
    clarifying reply about remote code. One-click install achieved.
 2. **Middle case:** accepted only after shipping the **no-`browser_execute_js`,
-   no-`debugger`** reduced build (Risk 1 + 2 fallbacks). Slightly less
+   no-`browser_devtools`, no-`debugger`** reduced build (Risk 1 + 2 fallbacks). Slightly less
    powerful, but a real store listing with one-click install.
 3. **If Chrome rejects on remote code — next stop is Edge Add-ons, not
    Firefox.** Same zip, **no registration fee**, individual accounts
@@ -102,7 +108,7 @@ in the other. See `EDGE_ADDONS.md`.
    marginal cost is close to zero. Be honest about the odds though: Edge's MV3
    rule on remote code is worded MORE absolutely than Chrome's (see
    `EDGE_ADDONS.md`), so this is most likely to succeed with the reduced build
-   from rung 2 — not as a way to keep `browser_execute_js`.
+   from rung 2 — not as a way to keep remote evaluation/debugging.
 4. **Worst case:** rejected by both Chromium stores. Firefox AMO is the next
    option (signed, self-hostable `.xpi`, one-click, historically tolerant of
    these permissions) but it is the MOST expensive path, not the fallback of
@@ -117,9 +123,9 @@ in the other. See `EDGE_ADDONS.md`.
 ## Decision to make NOW
 
 Before you spend review cycles: are you willing to ship the **reduced** build
-(no remote JS, no debugger) if asked? If yes, the odds of an eventual
+(no remote JS/DevTools Bridge, no debugger) if asked? If yes, the odds of an eventual
 acceptance on a Chromium store are decent, and you get two shots at it for one
-package — Chrome and Edge Add-ons. If no (you need full `browser_execute_js`
+package — Chrome and Edge Add-ons. If no (you need full remote evaluation
 in the store build), the honest expectation is rejection from BOTH Chromium
 stores, and the question becomes whether the Firefox port + AMO signing
 pipeline is worth building.

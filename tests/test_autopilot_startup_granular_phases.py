@@ -3,7 +3,8 @@
 
 Large conversations can spend many seconds in pre-LLM preparation.  The
 orchestrator therefore emits one canonical ``working`` phase at each real
-boundary: configuration, tools, history, and context.  The same events serve
+boundary: configuration, tools, and context.  Turn history is reconstructed
+before task creation and has no second in-process startup boundary. The events serve
 ordinary tasks and are transformed into the synthetic-user bubble for VU
 subtasks.
 """
@@ -28,8 +29,6 @@ _STARTUP_PHASES = [
      'stream.phase.startupConfig'),
     ('tools', 'Preparing tools and workspace…',
      'stream.phase.startupTools'),
-    ('history', 'Restoring conversation and tool history…',
-     'stream.phase.startupHistory'),
     ('context', 'Loading project context and relevant memory…',
      'stream.phase.startupContext'),
 ]
@@ -87,7 +86,7 @@ def test_startup_phase_emit_never_raises_into_the_run(monkeypatch):
     run._emit_startup_phase({'id': 'worker-task'}, 'tools')
 
 
-def test_all_four_startup_steps_are_wired_in_execution_order():
+def test_all_startup_steps_are_wired_in_execution_order():
     import lib.tasks_pkg.orchestrator._run as run
 
     src = inspect.getsource(run.run_task)
@@ -125,8 +124,8 @@ def test_vu_context_injection_reports_real_boundaries(monkeypatch):
     def _capture_phase(detail, **fields):
         trace.append(('phase', detail, fields))
 
-    monkeypatch.setattr(context_inject, '_inject_system_contexts', _fake_inject)
-    task = {'id': 'vu-context', 'convId': 'c1'}
+    monkeypatch.setattr(context_inject, 'compose_task_context', _fake_inject)
+    task = {'id': 'vu-context', 'convId': 'c1', '_userId': 1}
     context_inject.inject_context_and_emit_chips(
         task=task,
         messages=[],
@@ -135,7 +134,6 @@ def test_vu_context_injection_reports_real_boundaries(monkeypatch):
         project_enabled=False,
         memory_enabled=False,
         search_enabled=False,
-        swarm_enabled=False,
         has_real_tools=False,
         model='test-model',
         tool_list=[],

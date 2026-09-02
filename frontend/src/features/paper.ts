@@ -53,6 +53,7 @@ const nativeReady = (async () => {
   import('./paper/video-runtime'),
   import('./paper/report-runtime'),
     import('./paper/session'),
+    import('./paper/research-session'),
   ]);
 })();
 

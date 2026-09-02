@@ -110,7 +110,7 @@ def test_lib_wrapper_keeps_list_only_contract(monkeypatch):
 
 
 def _patch_route(monkeypatch, implementation):
-    import routes.paper as paper_routes
+    import routes.paper_pkg._recommend as paper_routes
 
     monkeypatch.setattr(
         paper_routes,
@@ -154,10 +154,10 @@ def test_route_upstream_failure_preserves_reason(flask_client, monkeypatch):
 
 
 def test_route_syntax_failure_is_400(flask_client, monkeypatch):
-    import routes.paper as paper_routes
+    from lib.paper.arxiv import ArxivQuerySyntaxError
 
     def reject(query, count):
-        raise paper_routes.ArxivQuerySyntaxError('built syntax rejected')
+        raise ArxivQuerySyntaxError('built syntax rejected')
 
     _patch_route(monkeypatch, reject)
     response = flask_client.post(

@@ -34,12 +34,18 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from typing import Any, Iterator, Optional
 
 import requests
 
+from .api_v4_generated import (
+    ApiMetaResponse,
+    require_desktop_api_compatibility,
+)
 
-__version__ = '1.0.0'
+
+__version__ = '0.17.0'
 
 
 class TofuError(RuntimeError):
@@ -48,28 +54,41 @@ class TofuError(RuntimeError):
         super().__init__(f'Tofu API error {status}: {body!r}')
         self.status = status
         self.body = body
+        payload = body if isinstance(body, dict) else {}
+        error = payload.get('error') if isinstance(payload, dict) else None
+        self.kind = str((
+            (error or {}).get('kind') if isinstance(error, dict)
+            else payload.get('error_kind')) or '')
+        self.retryable = status == 429 or status >= 500
+        try:
+            self.retry_after = float(
+                payload.get('retry_after') or 0) or None
+        except (TypeError, ValueError):
+            self.retry_after = None
 
 
 class Tofu:
     """Synchronous Tofu API client."""
 
-    def __init__(self, *, base_url: str, api_key: str,
+    def __init__(self, *, base_url: str, api_key: str = '',
                  timeout: float = 600.0, verify: bool = True,
+                 max_retries: int = 3, backoff_base: float = 0.5,
                  user_agent: str = f'tofu-sdk-python/{__version__}'):
         if not base_url:
             raise ValueError('base_url required')
-        if not api_key:
-            raise ValueError('api_key required')
         self.base_url = base_url.rstrip('/')
-        self.api_key = api_key
+        self.api_key = str(api_key or '')
         self.timeout = timeout
         self.verify = verify
+        self.max_retries = max(0, int(max_retries))
+        self.backoff_base = max(0.05, float(backoff_base))
         self._session = requests.Session()
         self._session.headers.update({
-            'Authorization': f'Bearer {api_key}',
             'User-Agent': user_agent,
             'Accept': 'application/json',
         })
+        if self.api_key:
+            self._session.headers['Authorization'] = f'Bearer {self.api_key}'
         self.tasks = _TasksAPI(self)
         self.agents = _AgentsAPI(self)
         self.keys = _KeysAPI(self)
@@ -85,15 +104,35 @@ class Tofu:
     def _request(self, method: str, path: str, *,
                   json_body: Any = None, params: Optional[dict] = None,
                   headers: Optional[dict] = None,
-                  stream: bool = False, timeout: Optional[float] = None):
+                  stream: bool = False, timeout: Optional[float] = None,
+                  retryable: bool = False):
         h = dict(headers or {})
-        resp = self._session.request(
-            method, self._url(path),
-            json=json_body, params=params, headers=h,
-            stream=stream, timeout=timeout or self.timeout,
-            verify=self.verify,
-        )
-        return resp
+        for attempt in range(self.max_retries + 1):
+            try:
+                resp = self._session.request(
+                    method, self._url(path),
+                    json=json_body, params=params, headers=h,
+                    stream=stream, timeout=timeout or self.timeout,
+                    verify=self.verify,
+                )
+            except requests.RequestException:
+                if not retryable or attempt >= self.max_retries:
+                    raise
+                time.sleep(min(self.backoff_base * (2 ** attempt), 10.0))
+                continue
+            if (retryable and (resp.status_code == 429
+                               or resp.status_code >= 500)
+                    and attempt < self.max_retries):
+                try:
+                    retry_after = float(resp.headers.get('Retry-After') or 0)
+                except (TypeError, ValueError):
+                    retry_after = 0
+                resp.close()
+                time.sleep(min(max(
+                    retry_after, self.backoff_base * (2 ** attempt)), 30.0))
+                continue
+            return resp
+        raise RuntimeError('unreachable retry loop')
 
     def _json(self, method: str, path: str, **kwargs):
         resp = self._request(method, path, **kwargs)
@@ -112,6 +151,13 @@ class Tofu:
     def capabilities(self) -> dict:
         """``GET /api/v1/capabilities`` — runtime registry."""
         return self._json('GET', '/api/v1/capabilities')
+
+    def api_meta(self) -> ApiMetaResponse:
+        """``GET /api/v4/meta`` — reject an incompatible SDK build."""
+        return require_desktop_api_compatibility(
+            self._json('GET', '/api/v4/meta'),
+            __version__,
+        )
 
     # ── Chat ─────────────────────────────────────────────────────
 
@@ -227,7 +273,8 @@ class _TasksAPI:
         yield from self.stream(task_id)
 
     def get(self, task_id: str) -> dict:
-        return self._c._json('GET', f'/api/v1/tasks/{task_id}')
+        return self._c._json(
+            'GET', f'/api/v1/tasks/{task_id}', retryable=True)
 
     def list(self, *, kind: str = '', status: str = '',
               limit: int = 50) -> dict:
@@ -243,17 +290,67 @@ class _TasksAPI:
             'GET', f'/api/v1/tasks/{task_id}/events',
             params={'cursor': cursor})
 
-    def stream(self, task_id: str, *, cursor: int = 0) -> Iterator[dict]:
-        resp = self._c._request('GET', f'/api/v1/tasks/{task_id}/stream',
-                                  params={'cursor': cursor},
-                                  stream=True,
-                                  headers={'Accept': 'text/event-stream'})
-        if not (200 <= resp.status_code < 300):
-            raise TofuError(resp.status_code, resp.text)
-        yield from _parse_sse(resp)
+    def stream(self, task_id: str, *, cursor: int = 0,
+               reconnect: bool = True,
+               max_reconnects: Optional[int] = None) -> Iterator[dict]:
+        """Stream task events and resume from the last absolute sequence.
+
+        A transport drop never re-submits the agent run. The SDK reconnects to
+        the task stream with ``cursor=last_seq+1``, preventing duplicate tool
+        effects while preserving every retained event.
+        """
+        next_cursor = max(0, int(cursor))
+        attempts = 0
+        limit = (self._c.max_retries if max_reconnects is None
+                 else max(0, int(max_reconnects)))
+        while True:
+            terminal = False
+            try:
+                resp = self._c._request(
+                    'GET', f'/api/v1/tasks/{task_id}/stream',
+                    params={'cursor': next_cursor}, stream=True,
+                    headers={'Accept': 'text/event-stream'}, retryable=True)
+                if not (200 <= resp.status_code < 300):
+                    try:
+                        body = resp.json()
+                    except Exception:
+                        body = resp.text
+                    raise TofuError(resp.status_code, body)
+                for event in _parse_sse(resp):
+                    attempts = 0
+                    if isinstance(event, dict):
+                        try:
+                            sequence = int(event.get('seq'))
+                        except (TypeError, ValueError):
+                            sequence = next_cursor
+                        next_cursor = max(next_cursor, sequence + 1)
+                    yield event
+                    if isinstance(event, dict) and (
+                            event.get('type') in ('done', 'error', 'aborted')):
+                        terminal = True
+                        return
+                if terminal:
+                    return
+                state = self.get(task_id)
+                if state.get('status') in ('done', 'error', 'aborted'):
+                    return
+            except TofuError as exc:
+                if not reconnect or not exc.retryable:
+                    raise
+            except requests.RequestException:
+                if not reconnect:
+                    raise
+            attempts += 1
+            if not reconnect or attempts > limit:
+                raise TofuError(
+                    599, {'error': {'kind': 'stream_disconnected',
+                                    'message': 'task stream reconnect limit exceeded'},
+                          'task_id': task_id, 'cursor': next_cursor})
+            time.sleep(min(self._c.backoff_base * (2 ** (attempts - 1)), 5.0))
 
     def abort(self, task_id: str) -> dict:
-        return self._c._json('POST', f'/api/v1/tasks/{task_id}/abort')
+        return self._c._json(
+            'POST', f'/api/v1/tasks/{task_id}/abort', retryable=True)
 
     def wait(self, task_id: str, *, poll_interval: float = 1.0,
               timeout: float = 600.0) -> dict:
@@ -271,6 +368,94 @@ class _TasksAPI:
 class _AgentsAPI:
     def __init__(self, client: Tofu):
         self._c = client
+
+    @staticmethod
+    def _run_body(*, messages: list, model: str = '',
+                  provider: Optional[dict] = None,
+                  config: Optional[dict] = None,
+                  capabilities: Optional[dict] = None,
+                  tools: Optional[list] = None,
+                  trajectory: str = '', timeout_s: float = 600.0,
+                  request_id: str = '', **extra) -> dict:
+        body: dict = {
+            'messages': messages,
+            'timeout_s': timeout_s,
+        }
+        if model:
+            body['model'] = model
+        if provider:
+            body['provider'] = provider
+        if config:
+            body['config'] = config
+        if capabilities:
+            body['capabilities'] = capabilities
+        if tools:
+            body['tools'] = tools
+        if trajectory:
+            body['trajectory'] = trajectory
+        if request_id:
+            body['id'] = request_id
+        body.update(extra)
+        return body
+
+    def run(self, *, messages: list, model: str = '',
+            provider: Optional[dict] = None,
+            config: Optional[dict] = None,
+            capabilities: Optional[dict] = None,
+            tools: Optional[list] = None,
+            trajectory: str = '', timeout_s: float = 600.0,
+            idempotency_key: str = '', request_id: str = '',
+            **extra) -> dict:
+        """Run ``POST /api/v1/agent/run`` with safe automatic retries.
+
+        ``model`` may be omitted when the server has a managed default. An
+        inline provider only needs ``base_url``/``api_key``/``model``. The
+        generated Idempotency-Key stays stable across ambiguous network retries.
+        """
+        body = self._run_body(
+            messages=messages, model=model, provider=provider, config=config,
+            capabilities=capabilities, tools=tools, trajectory=trajectory,
+            timeout_s=timeout_s, request_id=request_id, stream=False, **extra)
+        key = idempotency_key or uuid.uuid4().hex
+        return self._c._json(
+            'POST', '/api/v1/agent/run', json_body=body,
+            headers={'Idempotency-Key': key}, retryable=True,
+            timeout=max(self._c.timeout, timeout_s + 10),
+        )
+
+    def start(self, *, messages: list, model: str = '',
+              provider: Optional[dict] = None,
+              config: Optional[dict] = None,
+              capabilities: Optional[dict] = None,
+              tools: Optional[list] = None,
+              trajectory: str = '', timeout_s: float = 600.0,
+              idempotency_key: str = '', request_id: str = '',
+              **extra) -> dict:
+        """Start an agent run and return its task handle (HTTP 202)."""
+        body = self._run_body(
+            messages=messages, model=model, provider=provider, config=config,
+            capabilities=capabilities, tools=tools, trajectory=trajectory,
+            timeout_s=timeout_s, request_id=request_id, **extra)
+        body['async'] = True
+        key = idempotency_key or uuid.uuid4().hex
+        return self._c._json(
+            'POST', '/api/v1/agent/run', json_body=body,
+            headers={'Idempotency-Key': key, 'Prefer': 'respond-async'},
+            retryable=True,
+        )
+
+    def stream(self, *, cursor: int = 0, reconnect: bool = True,
+               **run_params) -> Iterator[dict]:
+        """Start a run, then stream native events with cursor resume."""
+        started = self.start(**run_params)
+        task_id = started.get('task_id') or started.get('taskId')
+        if not task_id:
+            raise ValueError(
+                f'agent.run did not return task_id (got {started!r})')
+        yield from self._c.tasks.stream(
+            str(task_id), cursor=cursor, reconnect=reconnect)
+
+    run_stream = stream
 
     def paper_report(self, **params) -> dict:
         return self._c._json('POST', '/api/v1/agents/paper/report',
@@ -502,6 +687,7 @@ def _parse_sse(resp) -> Iterator[dict]:
     JS SDK's lenient behaviour.
     """
     pending_event = ''
+    pending_id: Optional[int] = None
     for raw in resp.iter_lines(decode_unicode=True):
         if raw is None:
             continue
@@ -516,7 +702,10 @@ def _parse_sse(resp) -> Iterator[dict]:
             pending_event = line[len('event:'):].strip()
             continue
         if line.startswith('id:'):
-            # We don't surface ids — the parsed payload carries `seq`.
+            try:
+                pending_id = int(line[len('id:'):].strip())
+            except (TypeError, ValueError):
+                pending_id = None
             continue
         if not line.startswith('data:'):
             continue
@@ -531,7 +720,10 @@ def _parse_sse(resp) -> Iterator[dict]:
             continue
         if pending_event and isinstance(payload, dict):
             payload.setdefault('event', pending_event)
+        if pending_id is not None and isinstance(payload, dict):
+            payload.setdefault('seq', pending_id)
         yield payload
+        pending_id = None
         # Auto-terminate on terminal task events so callers using
         # ``client.tasks.stream(id)`` don't hang on a still-open
         # connection if the server forgot to close it.
@@ -543,4 +735,10 @@ def _parse_sse(resp) -> Iterator[dict]:
                 return
 
 
-__all__ = ['Tofu', 'TofuError', '__version__']
+from .async_client import AsyncTofu, TofuAsync
+
+
+__all__ = [
+    'ApiMetaResponse', 'AsyncTofu', 'Tofu', 'TofuAsync', 'TofuError',
+    '__version__',
+]

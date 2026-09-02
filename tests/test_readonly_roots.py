@@ -4,7 +4,6 @@ Covers the multi-root "read-only" feature:
   * config.is_readonly_path resolves against per-conv + global registries
   * write_file / apply_diff / insert_content refuse RO targets (relative,
     absolute, and rootname: forms all funnel through _resolve_write_path)
-  * create_project refuses an RO destination
   * a writable sibling root in the same workspace is unaffected
   * single-root / all-writable behaviour is unchanged (no regression)
 """
@@ -17,7 +16,7 @@ import unittest
 from lib.project_mod import config as cfg
 from lib.project_mod.scanner import clear_project, set_project_paths
 from lib.project_mod.write_tools import (
-    tool_apply_diff, tool_create_project, tool_insert_content, tool_write_file,
+    tool_apply_diff, tool_insert_content, tool_write_file,
 )
 
 
@@ -102,12 +101,6 @@ class WriteEnforcementTest(_TmpWorkspace):
                                   'hello ro', '\nINJECTED')
         self.assertFalse(res['ok'])
         self.assertIn('READ-ONLY', res['error'])
-
-    def test_create_project_blocked_in_ro(self):
-        res = tool_create_project(os.path.join(self.ro, 'subproj'))
-        self.assertFalse(res['ok'])
-        self.assertIn('READ-ONLY', res['error'])
-
 
 class AllWritableRegressionTest(_TmpWorkspace):
 

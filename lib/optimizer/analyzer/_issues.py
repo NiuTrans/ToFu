@@ -15,7 +15,7 @@ from lib.log import get_logger
 
 from lib.optimizer import analyzer as _facade
 from ._logs import _safe_tail_lines, _parse_app_log_ts
-from ._audit import _parse_audit_line, _audit_ts_aware
+from ._audit import _audit_ts_aware, _entry_matches_owner, _parse_audit_line
 
 logger = get_logger(__name__)
 
@@ -47,7 +47,10 @@ def _classify_error_signature(line: str) -> str:
 
 def _collect_recurring_issues(cutoff_local: datetime,
                               cutoff_utc: datetime,
-                              min_count: int = 2) -> list[dict]:
+                              min_count: int = 2,
+                              *,
+                              owner_user_id: int,
+                              allow_unowned: bool) -> list[dict]:
     """Cluster failures into recurring-issue groups.
 
     Two independent sources are merged into one fingerprint → stats map:
@@ -87,6 +90,11 @@ def _collect_recurring_issues(cutoff_local: datetime,
         entry = _parse_audit_line(line)
         if not entry or entry.get('event') != 'tool_error':
             continue
+        if not _entry_matches_owner(
+                entry,
+                owner_user_id=owner_user_id,
+                allow_unowned=allow_unowned):
+            continue
         ts = _audit_ts_aware(entry)
         if ts is None or ts < cutoff_utc:
             continue
@@ -96,14 +104,17 @@ def _collect_recurring_issues(cutoff_local: datetime,
               tool=entry.get('tool', '?'), exc_type=entry.get('exc_type', ''))
 
     # ── Source 2: error.log signature clustering ──
-    for line in _safe_tail_lines(_facade.ERROR_LOG, max_bytes=2 * 1024 * 1024):
-        ts = _parse_app_log_ts(line)
-        if ts is not None and ts < cutoff_local:
-            continue
-        label = _classify_error_signature(line)
-        if not label:
-            continue
-        _bump(f'errorlog::{label}', source='error_log', ts=ts, example=line)
+    if allow_unowned:
+        for line in _safe_tail_lines(
+                _facade.ERROR_LOG, max_bytes=2 * 1024 * 1024):
+            ts = _parse_app_log_ts(line)
+            if ts is not None and ts < cutoff_local:
+                continue
+            label = _classify_error_signature(line)
+            if not label:
+                continue
+            _bump(
+                f'errorlog::{label}', source='error_log', ts=ts, example=line)
 
     recurring = [c for c in clusters.values() if c['count'] >= min_count]
     recurring.sort(key=lambda c: c['count'], reverse=True)

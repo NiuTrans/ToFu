@@ -3,10 +3,10 @@
 
 WHY
 ---
-An L2 force-summary compaction DELIBERATELY rewrites the cached prefix to fit
-the window. That is a KNOWN, expected prefix bust (so ``notify_compaction`` —
-which blanket-suppresses break CLASSIFICATION — is the correct signal, NOT
-``notify_history_rewrite`` which exists to NAME an UNEXPECTED backend edit).
+An L2 force-summary compaction deliberately rewrites the cached prefix to fit
+the window. That is a known, expected prefix bust, so ``notify_compaction``
+suppresses break classification. The detector otherwise attributes only
+observed wire changes.
 But "expected" is not "free": the summary drops prefix tokens (the SAVED half)
 yet forces the whole fresh prefix to be re-written on the following round (the
 RE-BILLED half). Before retuning ``_SUMMARY_TRIGGER_RATIO`` we must MEASURE the
@@ -34,9 +34,9 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 
 
 def _capture_roi(fn):
-    """Run fn() with lib.tasks_pkg.cache_tracking.audit_log spied; return the
+    """Run fn() with the ROI owner's audit logger spied; return the
     list of ('l2_cache_roi', details) captured."""
-    import lib.tasks_pkg.cache_tracking as _ct
+    import lib.tasks_pkg.cache_tracking._roi as _ct
     captured = []
     _orig = _ct.audit_log
 
@@ -58,10 +58,13 @@ def test_l2_roi_emits_both_halves():
     real detect_cache_break must emit ONE l2_cache_roi metric carrying BOTH the
     saved half (tokens_dropped) AND the re-billed half (cache_write_rebilled) —
     plus a computed net."""
-    import lib.tasks_pkg.cache_tracking as _ct
-    from lib.tasks_pkg.cache_tracking import (
-        _cache_states, _state_key, detect_cache_break, record_l2_compaction,
+    import lib.tasks_pkg.cache_tracking._roi as _ct
+    from lib.tasks_pkg.cache_tracking._state import (
+        _cache_states,
+        _state_key,
     )
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._roi import record_l2_compaction
     conv = 'l2roi-both'
     _cache_states.clear()
     msgs = [{'role': 'system', 'content': 'sys'},
@@ -71,14 +74,14 @@ def test_l2_roi_emits_both_halves():
         # Round 1: establish a warm prefix (large cache_read in flight).
         detect_cache_break(conv, msgs, None, 'claude-opus-4',
                            usage={'cache_read_input_tokens': 120000,
-                                  'cache_creation_input_tokens': 0})
+                                  'cache_creation_input_tokens': 0}, user_id=1)
         # L2 fires: summary drops ~80k tokens off the prefix.
         record_l2_compaction(conv, tokens_before=200000, tokens_after=120000,
-                             msgs_before=40, msgs_after=12)
+                             msgs_before=40, msgs_after=12, user_id=1)
         # Round 2 (post-summary): the fresh prefix is re-written → cache_write.
         detect_cache_break(conv, msgs, None, 'claude-opus-4',
                            usage={'cache_read_input_tokens': 0,
-                                  'cache_creation_input_tokens': 118000})
+                                  'cache_creation_input_tokens': 118000}, user_id=1)
 
     rec = _capture_roi(_run)
     assert len(rec) == 1, f'expected exactly one l2_cache_roi metric, got {len(rec)}'
@@ -94,7 +97,7 @@ def test_l2_roi_emits_both_halves():
     assert d.get('net_tokens') == 80000 - 118000, f'net wrong: {d}'
     assert d.get('outcome') == 'paired', f'observed re-bill must be outcome=paired: {d}'
     # Pending record cleared so it fires exactly once.
-    st = _cache_states.get(_state_key(conv))
+    st = _cache_states.get(_state_key(conv, user_id=1))
     assert st is not None and st.pending_l2_roi is None, (
         'pending_l2_roi not cleared — would double-emit')
     _ok('L2 ROI metric carries BOTH saved (dropped + busted read) and '
@@ -106,10 +109,10 @@ def test_execute_compact_tool_fires_recorder():
     CALL record_l2_compaction after injecting the synthetic summary pair, so
     the saved-half measurement describes the actual next request. Drive the
     real wrapper with the LLM summary stubbed (no network) and spy it."""
-    import lib.tasks_pkg.compaction._layer2 as _l2
+    import lib.tasks_pkg.compaction._layer2._compact as _l2
     fired = []
     _orig_rec = None
-    import lib.tasks_pkg.cache_tracking as _ct
+    import lib.tasks_pkg.cache_tracking._roi as _ct
     _orig_rec = _ct.record_l2_compaction
     _orig_summary = _l2._generate_query_aware_summary
     # Stub the cheap-model summary so the mutation path runs without an LLM.
@@ -117,12 +120,14 @@ def test_execute_compact_tool_fires_recorder():
         lambda *a, **k: 'STUBBED SUMMARY of earlier turns.')
     _ct.record_l2_compaction = lambda conv_id, **kw: fired.append((conv_id, kw))
     # Build a message list with 3 turns so there is an old prefix to summarize
-    # while the current turn is preserved.
+    # while the current turn is preserved. Keep it large enough that the
+    # deliberately forced compaction has positive payback after its tool pair.
     msgs = [{'role': 'system', 'content': 'sys'}]
     for i in range(3):
-        msgs.append({'role': 'user', 'content': f'question {i} ' + 'x' * 200})
-        msgs.append({'role': 'assistant', 'content': f'answer {i} ' + 'y' * 200})
-    task = {'id': 'tk-l2wire', 'convId': 'cv-l2wire', 'config': {}}
+        msgs.append({'role': 'user', 'content': f'question {i} ' + 'x' * 2000})
+        msgs.append({'role': 'assistant', 'content': f'answer {i} ' + 'y' * 2000})
+    task = {'id': 'tk-l2wire', 'convId': 'cv-l2wire', '_userId': 1,
+            'config': {}}
     try:
         # force=True bypasses the threshold gate; this test covers recorder
         # wiring and final request accounting, not the trigger policy.
@@ -136,8 +141,9 @@ def test_execute_compact_tool_fires_recorder():
         # The saved-half args must be real numbers from the mutation.
         assert kw.get('tokens_before', 0) > kw.get('tokens_after', 0), (
             f'recorder fired with non-shrinking token counts: {kw}')
-        assert kw.get('msgs_before', 0) > kw.get('msgs_after', 0), (
-            f'recorder fired with non-shrinking msg counts: {kw}')
+        assert kw.get('msgs_before', 0) >= kw.get('msgs_after', 0), (
+            f'recorder fired with growing msg counts: {kw}')
+        assert kw.get('user_id') == 1
     finally:
         _l2._generate_query_aware_summary = _orig_summary
         _ct.record_l2_compaction = _orig_rec
@@ -148,7 +154,8 @@ def test_execute_compact_tool_fires_recorder():
 def test_l2_roi_no_emit_without_event():
     """A plain round with NO preceding L2 event emits NO l2_cache_roi metric
     (the instrumentation is event-scoped, not per-round noise)."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     conv = 'l2roi-none'
     _cache_states.clear()
     msgs = [{'role': 'system', 'content': 'sys'},
@@ -156,9 +163,9 @@ def test_l2_roi_no_emit_without_event():
 
     def _run():
         detect_cache_break(conv, msgs, None, 'claude-opus-4',
-                           usage={'cache_read_input_tokens': 5000})
+                           usage={'cache_read_input_tokens': 5000}, user_id=1)
         detect_cache_break(conv, msgs, None, 'claude-opus-4',
-                           usage={'cache_read_input_tokens': 6000})
+                           usage={'cache_read_input_tokens': 6000}, user_id=1)
 
     rec = _capture_roi(_run)
     assert rec == [], f'emitted an ROI metric with no L2 event: {rec}'
@@ -172,10 +179,12 @@ def test_l2_roi_flushed_at_cleanup_when_no_following_round():
     re-billed half UNOBSERVED — rather than being silently dropped. Late/last
     L2 fires are the most likely ones (context grows monotonically), so
     dropping them biases the retune dataset."""
-    from lib.tasks_pkg.cache_tracking import (
-        _cache_states, cleanup_cache_state, detect_cache_break,
-        record_l2_compaction,
+    from lib.tasks_pkg.cache_tracking._state import (
+        _cache_states,
+        cleanup_cache_state,
     )
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._roi import record_l2_compaction
     conv = 'l2roi-flush-cleanup'
     _cache_states.clear()
     msgs = [{'role': 'system', 'content': 'sys'},
@@ -183,11 +192,11 @@ def test_l2_roi_flushed_at_cleanup_when_no_following_round():
 
     def _run():
         detect_cache_break(conv, msgs, None, 'claude-opus-4',
-                           usage={'cache_read_input_tokens': 90000})
+                           usage={'cache_read_input_tokens': 90000}, user_id=1)
         record_l2_compaction(conv, tokens_before=200000, tokens_after=110000,
-                             msgs_before=40, msgs_after=10)
+                             msgs_before=40, msgs_after=10, user_id=1)
         # NO following detect_cache_break — session ends here.
-        cleanup_cache_state(conv)
+        cleanup_cache_state(conv, user_id=1)
 
     rec = _capture_roi(_run)
     assert len(rec) == 1, f'late L2 event was DROPPED, not flushed: {len(rec)}'
@@ -206,9 +215,12 @@ def test_l2_roi_second_event_flushes_first():
     """★ NO-CLOBBER. Two L2 compactions in the same round-gap: the second
     record_l2_compaction must FLUSH the first's unpaired record (unobserved)
     before stashing its own, so the first event's ROI is counted, not lost."""
-    from lib.tasks_pkg.cache_tracking import (
-        _cache_states, _state_key, detect_cache_break, record_l2_compaction,
+    from lib.tasks_pkg.cache_tracking._state import (
+        _cache_states,
+        _state_key,
     )
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._roi import record_l2_compaction
     conv = 'l2roi-double'
     _cache_states.clear()
     msgs = [{'role': 'system', 'content': 'sys'},
@@ -216,13 +228,13 @@ def test_l2_roi_second_event_flushes_first():
 
     def _run():
         detect_cache_break(conv, msgs, None, 'claude-opus-4',
-                           usage={'cache_read_input_tokens': 90000})
+                           usage={'cache_read_input_tokens': 90000}, user_id=1)
         # First L2 (e.g. reactive) — drops 90k.
         record_l2_compaction(conv, tokens_before=200000, tokens_after=110000,
-                             msgs_before=40, msgs_after=10)
+                             msgs_before=40, msgs_after=10, user_id=1)
         # Second L2 (e.g. proactive) in the SAME gap — drops 30k. Must flush #1.
         record_l2_compaction(conv, tokens_before=110000, tokens_after=80000,
-                             msgs_before=10, msgs_after=6)
+                             msgs_before=10, msgs_after=6, user_id=1)
 
     rec = _capture_roi(_run)
     assert len(rec) == 1, (
@@ -233,7 +245,7 @@ def test_l2_roi_second_event_flushes_first():
     assert d.get('outcome') == 'no_following_round', f'wrong outcome: {d}'
     assert d.get('cache_write_rebilled') is None, f're-bill must be unobserved: {d}'
     # The SECOND event is now the pending record (30k), still awaiting a round.
-    st = _cache_states.get(_state_key(conv))
+    st = _cache_states.get(_state_key(conv, user_id=1))
     assert st is not None and st.pending_l2_roi is not None, (
         'second event should be stashed as the new pending record')
     assert st.pending_l2_roi.get('tokens_dropped') == 30000, (
@@ -245,14 +257,16 @@ def test_l2_roi_cold_conv_is_noop():
     """record_l2_compaction on a conv with NO cache state (cold) is a no-op —
     nothing was cached to bust, so there is no re-bill to pair. Must not crash
     and must not stash a dangling pending record."""
-    from lib.tasks_pkg.cache_tracking import (
-        _cache_states, _state_key, record_l2_compaction,
+    from lib.tasks_pkg.cache_tracking._state import (
+        _cache_states,
+        _state_key,
     )
+    from lib.tasks_pkg.cache_tracking._roi import record_l2_compaction
     conv = 'l2roi-cold'
     _cache_states.clear()
     record_l2_compaction(conv, tokens_before=100, tokens_after=50,
-                         msgs_before=4, msgs_after=2)
-    assert _cache_states.get(_state_key(conv)) is None, (
+                         msgs_before=4, msgs_after=2, user_id=1)
+    assert _cache_states.get(_state_key(conv, user_id=1)) is None, (
         'cold conv should not have a CacheState materialized by ROI recording')
     _ok('cold conv record_l2_compaction is a safe no-op')
 

@@ -1,366 +1,220 @@
-# Module Design Doc — Unit 3: Tools & Execution (`tools/`, `handlers/`, `project_mod/`, `browser/`, search/fetch)
+# Tools and execution
 
-> Part of the per-module design-doc set (see `docs/ARCHITECTURE.md`). This unit
-> is Layer ⑥ (Tools): the **definition → dispatch → handler → implementation**
-> chain for every tool the LLM can call.
->
-> **Grounding:** every line count is `wc -l` on disk 2026-07-11. `list_dir`
-> overcounts this tree too — all numbers are `wc -l`. Every MISCUT/BIG verdict
-> cites competing responsibilities or line ranges; size alone is never the argument.
->
-> **Scope boundary vs Unit 1:** Unit 1 already documented `tool_dispatch.py`,
-> `executor.py`, `executor_image.py`, `streaming_tool_executor.py`, and the
-> `handlers/` package *from the task-engine side* (their size/status verdicts
-> live there). This doc does NOT re-litigate those size verdicts. Its job is the
-> **seam question** (§2): is the definition/dispatch/handler/implementation
-> boundary clean and single-directional across the packages, or are there
-> back-edges and duplicated responsibility?
+This domain defines which tools a task may see, how schemas reach a model, how calls are validated/dispatched, and how results become model context and UI events.
+MCP and plugin setup live in [`../TOOL_PLUGINS.md`](../TOOL_PLUGINS.md) and [`../TOOL_SEARCH_EXECUTION_GATEWAY.md`](../TOOL_SEARCH_EXECUTION_GATEWAY.md).
 
----
+## Ownership
 
-## 1. The four-layer tool chain (what lives where)
+| Concern | Owner |
+|---|---|
+| Built-in tool specifications | `lib/tools/*.py` |
+| Compiled tool contract and result envelope | `lib/tools/contracts.py`, `lib/tools/result_envelope.py` |
+| Registry construction and collision policy | `lib/tools/registry/` |
+| Per-request visibility and environment | `lib/tools/tool_env.py` |
+| Unified execution gateway | `lib/tools/gateway.py` |
+| Task/runtime adapters | `lib/tasks_pkg/handlers/` |
+| Project file operations and bounded shared tree index | `lib/project_mod/` |
+| MCP lifecycle and transport | `lib/mcp/` |
+| Browser bridge | `lib/browser/`, browser handler |
+| Lazy web-search runtime and host providers | `lib/search_runtime.py`, `lib/search_bridge.py` |
+| Tool event vocabulary | [`../EVENTS.md`](../EVENTS.md) and event registry |
+| Generated inventory | [`../TOOL_INVENTORY.md`](../TOOL_INVENTORY.md) |
 
-A tool call travels through four distinct layers, each owned by a different
-package. This separation is the whole point of the unit:
+## Execution flow
 
-```
-  ① SCHEMA (what the LLM sees)          lib/tools/*.py  — pure dicts, zero logic
-        │  assemble_tool_list(ctx)
-        ▼
-  ② REGISTRY / DISPATCH (routing)       lib/tools/registry.py  (ToolSpec + assembly)
-        │                                lib/tasks_pkg/tool_dispatch.py  (parse→gate→exec)
-        │                                lib/tasks_pkg/executor.py  (tool_registry singleton)
-        ▼
-  ③ HANDLER (per-tool glue)             lib/tasks_pkg/handlers/*.py  — log→exec→meta→finalize
-        │
-        ▼
-  ④ IMPLEMENTATION (does the work)      lib/project_mod/  (file ops, run_command)
-                                         tofu_search  (web search + fetch — EXTRACTED, §4)
-                                         lib/browser/  (extension automation)
-                                         lib/mcp/, lib/memory/, lib/scheduler/ (other impls)
-```
+1. The task policy resolves an explicit visibility allow-list.
+2. The registry builds schemas for only those tools and rejects name collisions.
+3. The model returns a call with a stable call ID and JSON arguments.
+4. The gateway validates the name, visibility, arguments, and capability.
+5. A focused handler executes with the authenticated request environment.
+6. The gateway normalizes success/failure and timestamps.
+7. Settlement emits the canonical tool result and adds exactly one matching model-context result.
 
-- **Schema** (`lib/tools/`) is *declarative* — `PROJECT_TOOL_WRITE_FILE` etc.
-  are literal JSON-schema dicts. `registry.py` wraps them in `ToolSpec`s and
-  `assemble_tool_list(ctx)` emits the cache-stable ordered list. Confirmed: read
-  of `lib/tools/project.py` shows it is 100% dict definitions + the multi-root
-  hint helper — no execution logic.
-- **Dispatch** is split between `registry.py` (which specs are active +
-  cache-stable order) and `tasks_pkg/tool_dispatch.py`+`executor.py` (parse the
-  LLM's tool call, gate it, run the handler). The registry's `handler=` field
-  wires a spec to its handler so schema+gate+handler ship from ONE package.
-- **Handler** (`tasks_pkg/handlers/`) is the thin glue — most bodies collapse to
-  `simple_call(...)` (the `_adapter.py` DRY primitive). The handler owns the
-  `task` dict, emits meta, calls the implementation.
-- **Implementation** is where the actual work happens, and it lives in
-  *different packages* — this is exactly where a segmentation problem would hide.
+Tool schemas describe capability; handlers implement it. A handler may depend on a
+domain service, but schemas stay free of task runtime/HTTP and search activates on first valid use.
 
----
+`ToolContractV2` is the single definition for execution parameters, validation,
+model/search metadata, detailed help, permission, idempotency, typed errors, and
+programmatic eligibility. Its projections feed provider schemas, discovery, and
+execution validation; detailed help and parameters are paid only after discovery.
 
-## 2. The analytical payload: is the seam clean and single-directional?
+Registry assembly must produce one v2 document per executable name. Argument
+ingestion may apply bounded, auditable syntax/shape repairs, then checks the
+result against that request-owned document before dispatch. A present epoch
+fails closed on a missing/malformed document. The same final check covers root,
+nested `execute_tools`/ToolScript, swarm, and read-only SSE pre-execution calls;
+a contract rejection remains `rejected`, never `done`.
 
-**Verdict: the seam is clean and downward-directional, with ONE structural
-oddity (`tool_env.py`) and TWO trivial, deliberately-lazy back-edges.** The
-"incorrect segmentation" failure mode for tools — a handler re-implementing
-schema knowledge, or an implementation package reaching back up into the task
-engine — is **largely absent**. Evidence from tracing every cross-package import:
+Stable gateway schemas are added after registry/model-config assembly, which
+also freezes their `ToolContractV2` documents. A request never advertises
+`search_tools`/`execute_tools` without its execution document. Names use the
+provider-safe ASCII set, preserving `mcp__server-name__tool-name` while rejecting
+whitespace, path separators, dots, and Unicode lookalikes. Assembly/compilation
+failure clears tool authority and continues text-only. Paper report/Q&A epochs
+stamp `degradedReason`: side effects fail closed without aborting main generation.
 
-### 2a. Direction ① — schema is imported DOWN by handlers (correct)
+`None` is an explicit read-compatible adapter state for standalone legacy
+callers outside a production-owned tool epoch. It is not equivalent to an
+empty map: an empty v2 map rejects every call. Production timer polls and
+research-only paper runners validate against the exact post-policy schemas sent
+to the model. Full report/QA/deepen runners freeze a two-layer epoch once per
+run: bounded wire visibility plus a larger server-owned executable catalog.
+Both layers and the gateway documents come from one registry snapshot; a search
+hit cannot drift to a different schema or permission epoch. Contract compilation
+failure removes the unattended tool surface, and rejection remains `rejected`,
+never `done`.
 
-Handlers import schema *names* from `lib/tools/`, never the reverse:
-- `handlers/project.py:23` → `from lib.tools import PROJECT_TOOL_NAMES, build_project_tool_meta`
-- `handlers/misc.py:16` → `from lib.tools import (…)`
-- `handlers/browser.py:13` → `from lib.tools import BROWSER_TOOL_NAMES, IMAGE_GEN_TOOL_NAMES`
+`tools.schemaBudgetTokens` defaults to `0` (uncapped) for every model; names
+never install hidden budgets. A positive value is a model-neutral local Tool
+Search target, fitted once after programmatic calling, MCP, and multi-agent
+shaping. The code floor (`read_files`, `grep_search`, `find_files`, `edit_file`,
+`run_command`) and exact `tool_choice` retain full schemas even if the target is
+exceeded. Other schemas fit deterministically; any omission keeps
+`search_tools` + `execute_tools` live so hidden capabilities remain discoverable.
+When local multi-agent routing is active, its control lifecycle is one required
+unit: `spawn_agents`, `await_agents`, and `get_agent_result` all survive the budget.
+A budget may not advertise launch while hiding settlement or retrieval.
 
-The schema package (`lib/tools/`) does NOT import handlers — the only
-`handlers`/`tasks_pkg` strings inside `lib/tools/*.py` are **doc comments**
-(`registry.py:559`, `project.py:441-444`, `todo.py:10-23`), not code imports.
-So a handler never re-declares a schema and the schema never knows its handler
-exists (they're wired by the `ToolSpec.handler=` field at registration). **This
-is the clean version of the definition↔handler boundary.**
+The gateway pair targets 500 tokens; neither target may fail a request. For a
+fixed tier, programmatic activation cannot change its bytes: eligible names stay
+in the task-owned latch, serial-chain observations stay in telemetry, and
+`execute_tools` plus local `spawn_agents` use fixed conditional guidance.
+Policy remains task-owned. Compaction removes stable hints and annotations while
+preserving JSON-Schema property names and validation. Final preflight isolates
+malformed schemas as bounded `tool_schema_rejected` diagnostics; it removes dangling
+`tools`/`tool_choice` if none survive. Budget omission is not a broken tool, and
+execution always rechecks current visibility and authority after discovery.
 
-### 2b. Direction ② — `project_mod/` does NOT structurally reach back into `tasks_pkg/`
+Bounded `tool_wire_projection` evidence records ordered final names, tokens, and an
+opaque fingerprint without full schemas; names or token counts do not prove byte stability.
 
-The critical back-edge test ("does the implementation package reach up into the
-task engine?"). Result: **essentially no.** Across all 13 `project_mod/` files
-there is exactly **ONE runtime code edge**:
-- `project_mod/config.py:410` — `from lib.tasks_pkg.manager import _chat_runtime,
-  _latest_task_for_conv`, and it is a **lazy in-function import inside a
-  try/except that fails OPEN** (a "is this conv still live?" probe used to bound
-  the `_conv_roots` eviction cache). The docstring explicitly says it fails open
-  so an import cycle never blocks eviction. This is a deliberate, guarded probe,
-  not a structural dependency.
+`list_dir` is absent from new epochs; its bounded historical reader backs `run_command`
+fast paths. Filesystem `grep` segments keep pipeline placement;
+directory-only relative `ls` scans 10,000 entries, returns 1,000,
+and formats at most 64 KiB. `find <dir> -type f` plus at most one quoted
+`-name`/`-iname` uses `fd` then a depth/time/250,000-entry bounded walk and
+returns at most 500 paths, including hidden/ignored files. Other operands,
+executables, expansions, recursion, expressions, mutation, and pipelines keep
+shell semantics. Direct real-`find` segments are planned with a 40-second,
+host-compatible timeout before the ancestor/FUSE resource verdict, so that
+guard judges the command that actually executes instead of falsely rejecting
+its own bounded plan. Other recursive scanners still require a narrow target
+or an explicit timeout.
+Kill switches are `TOFU_RUN_LS_FASTPATH=0` and `TOFU_RUN_FIND_FASTPATH=0`. A plain Python script/`-m` workload on a network workspace keeps a real child process but may receive an owner/workspace/interpreter-scoped host-local `PYTHONPYCACHEPREFIX`; local/unknown source mounts, non-local cache roots, missing owners, `-c`/isolated/no-site modes, low disk, and existing bytecode policy stay unchanged.
+The reconstructible cache is capped by `TOFU_RUN_PYTHON_CACHE_MAX_MIB` plus 100,000 filesystem entries, 64 namespaces, seven-day TTL and 256 MiB free-space reserve. Default `auto` seeds a repeat-heavy module only after it repeats and reuses warm namespaces, avoiding the measured cold-prefix cost for one-shot work; `TOFU_RUN_PYTHON_CACHE=1` forces the experiment and `=0` disables it.
 
-The only other `tasks_pkg` mentions in `project_mod/` are **doc-comment
-references** (`indexer.py:17,202` and `write_tools.py:85` describe which layer
-owns the `task` dict). So `project_mod` is a genuinely standalone file-ops
-library that the task engine calls *down* into — the correct direction. It's
-reached via `from lib.project_mod import execute_tool` in `handlers/project.py`.
+## Visibility and authority
 
-### 2c. Direction ③ — the ONE structural oddity: `lib/tools/tool_env.py`
+Tool availability is per request. Installed does not mean visible. Multi-user
+deployments default to an explicit allow-list; a dedicated operator may expose
+more tools through declared configuration. Plugins, MCP servers, request-level
+custom tools, and built-ins all cross the same name/visibility gate.
 
-`tool_env.py` (536 lines) is the exception that proves the rule. It lives in the
-*schema* package (`lib/tools/`) but is NOT schema — it's the per-request custom-tool
-runtime for headless `/api/v1/agent/run` (mint/dispose a `ToolEnvironment`
-carrying caller-supplied schemas AND handlers, scoped to one task). Because it
-executes tools, it reaches DOWN into the execution layer:
-- `tool_env.py:231` → `from lib.tasks_pkg.executor import _finalize_tool_round`
-- `tool_env.py:286` → `from lib.tasks_pkg.manager import append_event`
-- `tool_env.py:335` → `from lib.project_mod import execute_standalone_command`
+Project and filesystem tools receive a resolved workspace/root capability.
+They do not infer authority from the process working directory. Write tools use
+the shared path validation, freshness, atomic write, and write-set attribution
+boundaries. Read results never grant a subsequent write automatically.
 
-These are all lazy in-function imports, but the placement is the smell: a file
-in the *definition* package (`lib/tools/`) imports from the *dispatch* and
-*implementation* packages. That's a **layering inversion** — `tool_env.py` is
-architecturally a sibling of `handlers/` or `ephemeral.py` (its own docstring
-says it "mirrors `lib/llm_dispatch/ephemeral.py`"), not of the schema dicts it
-sits next to. Split candidate (§7).
+Plan Mode is a stricter request policy layered over this boundary. Initial
+wire exposure and the Tool Search catalog remove mutating or unproven schemas;
+the final dispatch check independently requires the exact call to be proven
+read-only. Unknown and caller-defined tools fail closed, MCP tools require an
+explicit `readOnlyHint: true`, and mixed desktop tools expose and accept only
+their read branches. This also applies to caller-supplied `tools=[...]`;
+unknown schemas are removed and the framework-owned canonical `ask_human`
+schema is present so within-turn clarification cannot be disabled accidentally.
+The policy owner is `lib/tasks_pkg/plan_mode.py`.
 
-### 2d. Seam summary
+## Side effects and settlement
 
-| Edge | Direction | Verdict |
+A tool call is settled exactly once, including cancellation and failure. The
+runtime distinguishes transport failure, invalid arguments, unavailable tool,
+permission denial, handler failure, and user abort. Repair is limited to
+syntax/shape problems and cannot silently change the requested capability.
+
+Retries of side-effecting tools require an idempotency contract. The generic
+LLM retry loop must not replay a completed write, webhook, browser action, or
+human-guidance resolution.
+
+`execute_tools` receipts key call ID together with canonical arguments, model
+round, and world version because Kimi may recycle a positional call ID on later
+messages. Exact same-round frames deduplicate, changed calls execute, and a
+cached failure replays its failure verdict rather than becoming `done`. The
+task-local receipt table evicts oldest entries beyond 256.
+
+The gateway remains protocol-only in durable activity. Its terminal envelope
+is decoded from the canonical `toolContent` event field: pre-dispatch validation
+failures project as warning-level skipped rows for the attempted child, while an
+executed child's own lifecycle row owns its typed V2 code, message, and next
+action. The wrapper is removed rather than counted or rendered twice. Legacy
+`tool_result` now also carries `toolName`, so live folding can identify protocol
+rows before the named `tool_complete` frame arrives.
+
+Large/binary outputs become artifacts or bounded references. They are not
+dumped wholesale into the next model request or logs.
+
+`edit_file` inserts always resolve one unique anchor. A supplied `replace_all`
+flag is ignored for a unique-anchor insert rather than rejecting it; it never
+enables multi-site insertion. Only `replace` gives `replace_all=true` batch semantics.
+
+`tools.resultEnvelope` now ships as `v2`. `ToolResultEnvelopeV2` exposes stable
+status, a short summary, at most 64 structured items, cursor, truncation, byte
+counts, freshness/evidence ID, and a typed retry hint. The model
+sees at most 8,000 tokens for one result and 24,000 tokens for all results in a
+round. Overflow is stored through the owner-scoped content-addressed artifact
+repository and resumed with range, search, or cursor operations; `read_files` has no exemption. Batched producers supply bounded per-file projection items, and settlement preserves every requested path/status before sharing preview space fairly or removing previews under aggregate pressure.
+The request-local sidecar crosses streaming/dedup caches only as bounded metadata and is discarded after envelope materialization; complete legacy text remains only in the owner-scoped artifact. Reconstructible overflow expires after 24 hours by default
+(seven-day hard TTL ceiling) and is reclaimed in bounded background batches.
+If artifact storage fails, the envelope returns a short honest preview plus a
+narrower-rerun hint and no artifact reference or cursor; an inaccessible
+reference is never presented as recoverable evidence. Legacy text/file-staging
+semantics remain only as an explicit rollback or experiment control. Paper
+adapters default to V2; an explicit legacy arm is fingerprint-isolated from
+other live tasks and cannot read or write the canonical paper-result cache.
+
+## MCP boundary
+
+MCP lifecycle, discovery, health, and transport live under `lib/mcp/`. The
+registry sees normalized tool specifications and the gateway sees normalized
+calls; neither depends on an MCP SDK payload. Progressive discovery may defer
+schemas, but execution still checks current visibility and server health.
+
+Remote content is untrusted tool output. Resource links, text, images, and
+audio preserve their declared types and size bounds.
+
+## Invariants
+
+- One registry for names and schemas; one gateway for execution verdicts.
+- Visibility is request-scoped and default-deny.
+- Tool call IDs and result pairing survive streaming and continuation.
+- Every call settles once on success, failure, timeout, cancellation, or abort.
+- Writes use explicit root authority, freshness checks, and atomic operations.
+- Handler exceptions become typed tool failures, not successful text.
+- Tool results are bounded before model context and logging.
+- Artifact references are owner-scoped, expiring, content-addressed, and never
+  reveal a database or filesystem path.
+- MCP/plugin/custom-tool adapters cannot bypass visibility or egress policy.
+- Generated inventory derives from the live registry.
+
+## Change routing
+
+| Change | Start here | Verify |
 |---|---|---|
-| handlers → `lib/tools` schema | down (import names) | ✅ clean |
-| `lib/tools` schema → handlers | none (doc comments only) | ✅ clean |
-| handlers → `project_mod` impl | down (`execute_tool`) | ✅ clean |
-| `project_mod` → `tasks_pkg` | 1 lazy fail-open probe (`config.py:410`) | ✅ acceptable |
-| `tool_env.py` (in `lib/tools/`) → executor/manager/project_mod | down, but from the wrong package | ⚠️ layering inversion |
-| registry `ToolSpec.handler=` → handler | declarative wiring | ✅ clean (the seam's keystone) |
+| Built-in schema | focused `lib/tools/<domain>.py` | registry and inventory generation |
+| Tool contract/result budget | `contracts.py`, `result_envelope.py`, compaction budget | schema compiler, typed error, 8k/24k, cursor tests |
+| Handler behavior | focused `lib/tasks_pkg/handlers/` module | gateway settlement and events |
+| Tool visibility | `tool_env.py`, registry plugin owner | owner/request isolation |
+| Project write/index | `lib/project_mod/` and write gates | root attribution, freshness, rollback, shared resource ceilings |
+| MCP server/transport | `lib/mcp/` | lifecycle, health, normalized result |
+| Browser action | browser bridge + handler | user scope, queue TTL, auth |
 
-**The seam is single-directional except `tool_env.py`.** No handler
-re-implements schema; no implementation package structurally depends on the task
-engine. The registry's `handler=` field is the keystone that keeps
-schema+gate+handler co-located without coupling the packages.
+## Test map
 
----
-
-## 3. A correction to the CLAUDE.md map: `search/` and `fetch/` are GONE (extracted)
-
-CLAUDE.md §1 lists `lib/fetch/` and `lib/search/` as in-tree packages. **They do
-not exist on disk** (`find lib/fetch lib/search` → "No such file or directory").
-They were **extracted to a standalone `tofu_search` package** — the same
-extraction pattern as `tofu-trading`. Evidence:
-- `handlers/search.py:14` → `from tofu_search import fetch_page_content,
-  looks_like_text_asset, perform_web_search`
-- `lib/search_bridge.py` (327 lines) is the **host-side bridge**: it installs
-  chatui's `dispatch_chat` (LLM filter seam), `lib.browser` (browser fallback
-  seam), and `lib.auth_sources` (authenticated-fetch seam) into `tofu_search`
-  via `tofu_search.configure()` + `register_*_provider()`.
-
-This is a **clean extraction with a seam**: `tofu_search` is host-agnostic and
-`search_bridge.py` fills its three provider seams — architecturally identical to
-how `llm_dispatch` fills `tofu_search`'s LLM seam. So the search/fetch
-"segmentation" is not miscut; it's been promoted out of the tree entirely. **Any
-doc doc that says otherwise (including the CLAUDE.md §1 map) is stale.**
-
----
-
-## 4. Module inventory (real `wc -l`, size verdict, status, tests)
-
-### 4.1 `lib/tools/` — schema definitions + registry (4525 LOC, 13 files)
-
-| Module | LOC | Verdict | Status | Tests |
-|---|--:|---|---|---|
-| `registry.py` | 1218 | **BIG** | HOT | `test_tool_registry`, `test_schema_registry`, `test_core_tool_isolation`, `test_explicit_tools_passthrough` |
-| `project.py` | 607 | OK (schema dicts) | HOT | `test_project_tools`, `test_tool_root_pill` |
-| `tool_env.py` | 536 | **MISPLACED** | live (headless) | `test_custom_tool_isolation` |
-| `conversation.py` | 516 | OK (schema dicts) | HOT | `test_project_feed_read_tool` |
-| `browser.py` | 516 | OK (schema dicts) | HOT | via browser e2e |
-| `meta.py` | 382 | OK | HOT | `test_tool_registry` |
-| `search.py` | 193 | OK (schema dicts) | HOT | via search e2e |
-| `todo.py` | 174 | OK | HOT | `test_frontend_tool_completion` |
-| `image_gen.py` | 108 | leaf | HOT | — |
-| `image_edit.py` | 98 | leaf | HOT | — |
-| `human_guidance.py` | 77 | leaf | HOT | — |
-| `__init__.py` | 73 | OK (facade) | — | — |
-| `code_exec.py` | 27 | leaf | HOT | — |
-
-`registry.py` — **BIG.** It contains the `ToolSpec`/`ToolContext` dataclasses,
-`assemble_tool_list`, built-in spec registrations and plugin discovery. The
-only conversation-scoped state retained by the registry is the multi-root path
-hint: once emitted, it stays on path-taking schemas so those descriptions do
-not flap. Tool availability itself is rebuilt from the current request.
-Classified BIG; see §7.
-
-`project.py`/`conversation.py`/`browser.py`/`search.py` — all OK. These are
-pure schema-dict files (verified: `project.py` is entirely `PROJECT_TOOL_*`
-dicts + the `with_multiroot_hint` helper). Large because tool descriptions are
-verbose prose, NOT because of logic. Do not split.
-
-`tool_env.py` — **MISPLACED (see §2c).** Not miscut internally (it's cohesive:
-mint/dispose a per-request tool env), but it's in the wrong package.
-
-### 4.2 `lib/tasks_pkg/handlers/` — the glue layer (3085 LOC, 10 files)
-
-Size verdicts for these live in Unit 1 (task_engine.md §3.8); recap: `misc.py`
-(716, BIG — hosts the Project-Brain coordination handlers + legacy misc, split
-candidate → `handlers/coordination.py`), `search.py` (671), `project.py` (476),
-all others OK. `_adapter.py` (195) is the shared `simple_call`/`run_batch_concurrent`
-DRY primitive — the reason most handler bodies are one line. `_read_gate.py`
-(352) owns the read-before-edit policy (`check_read_before_edit`,
-`partition_batch_edits`). **Seam note:** every handler here imports its schema
-NAMES from `lib/tools/` (§2a) and its implementation from the impl packages —
-it re-declares neither. Correct glue layer.
-
-### 4.3 `lib/project_mod/` — file-ops implementation (9327 LOC, 13 files)
-
-| Module | LOC | Verdict | Status | Tests |
-|---|--:|---|---|---|
-| `write_tools.py` | 1482 | **BIG** | HOT | `test_write_tools_root_attribution`, `test_tool_changes` |
-| `run_command.py` | 1375 | **BIG** | HOT | `test_run_command_sticky_cwd`, `test_run_command_danger_quoted`, `test_run_command_not_run_meta` |
-| `read_tools.py` | 1316 | **BIG** | HOT | `test_project_tools`, `test_recently_accessed_files_string_reads` |
-| `tools.py` | 1080 | OK (dispatch façade) | HOT | `test_project_tools` |
-| `command_analysis.py` | 874 | OK | live | `test_command_analysis_extraction` |
-| `config.py` | 761 | OK | HOT | via project e2e |
-| `modifications.py` | 709 | OK | HOT | `test_tool_changes` |
-| `scanner.py` | 447 | OK | HOT | via indexer e2e |
-| `indexer.py` | 433 | OK | live | via project e2e |
-| `gitignore_suggest.py` | 294 | OK | live | — |
-| `portable_sandbox.py` | 254 | OK | live | — |
-| `config` `__init__.py` | 152 | OK (facade) | — | — |
-| `abs_path_guard.py` | 150 | OK | HOT | `test_abs_path_guard` |
-
-`tools.py` — OK. It is now a **pure dispatch façade** (its own docstring says the
-tool groups were extracted to `read_tools`/`write_tools`/`run_command` and it
-"retains `browse_directory` + `execute_tool` + re-exports"). This is a
-*successful* prior split — 80+ lines of it (verified) are `# backward compat`
-re-exports, exactly the facade pattern `compaction/__init__` uses. The remaining
-logic is `execute_tool` (the `_EXEC_HANDLERS` name→impl registry) + `browse_directory`.
-
-`write_tools.py` / `read_tools.py` / `run_command.py` — **BIG but each is one
-cohesive tool family.** `run_command.py` is the largest single concern
-(shell exec + process-tree kill + snapshot/diff + destructive-command guards);
-`command_analysis.py` (the command classifier) is already extracted from it.
-`write_tools.py` bundles write_file/apply_diff/insert_content + the closest-match
-fuzzy finder + workspace-root auto-registration. These are BIG-but-right: each
-file is one tool family, not multiple unrelated jobs. A finer split (e.g.
-`run_command` → exec + guards + snapshot) is possible but low-value; classified
-BIG, defer.
-
-### 4.4 `lib/browser/` — extension automation (1756 LOC, 7 files)
-
-| Module | LOC | Verdict | Status | Tests |
-|---|--:|---|---|---|
-| `handlers.py` | 560 | OK | live | `test_browser_read_payload`, `test_browser_pdf_download_guard` |
-| `queue.py` | 415 | OK | live | `test_browser_queue_ttl`, `test_browser_async_poll` |
-| `advanced.py` | 354 | OK | live | via browser e2e |
-| `display.py` | 166 | OK | live | — |
-| `dispatch.py` | 157 | OK | live | — |
-| `fetch.py` | 61 | leaf | live | — |
-| `__init__.py` | 43 | OK (facade) | — | — |
-
-All OK — this package is well-bounded. It's reached two ways: directly by
-`handlers/browser.py` (the browser tool) and indirectly by `search_bridge.py`'s
-`_ChatuiBrowserProvider` (the fetch fallback seam). No back-edges into `tasks_pkg`.
-
-### 4.5 The extracted / bridged implementations (not in-tree)
-
-| Unit | Where | LOC (bridge) | Tests |
-|---|---|--:|---|
-| web search + fetch | `tofu_search` (external pkg) + `lib/search_bridge.py` | 327 (bridge) | `test_search_bridge_config`, `test_streaming_websearch_delegation`, `test_streaming_fetch_url_delegation`, `test_search_marginalia_deepen` |
-| tool-arg repair | `lib/tool_input_repair.py` | 1526 | `test_tool_input_repair`, `test_malformed_tool_args`, `test_paper_tool_args_repair` |
-
-`lib/tool_input_repair.py` (1526) — **BIG**, sits between dispatch and handler:
-6 value-repair patterns + a param-key alias layer + structural transforms
-(`MultiEdit`→`apply_diffs`, `AskUserQuestion`→`ask_human`). Cohesive (all
-schema-driven arg repair) but large; it's the one place tool *schema knowledge*
-is legitimately duplicated (it must know param names to alias them) — but that's
-its whole purpose, not a leak. Classified BIG, defer.
-
----
-
-## 5. Invariants (must not be broken by a refactor)
-
-1. **Tool ordering in `assemble_tool_list` is prompt-cache-critical.** The
-   registration order (search→fetch→read_files→project|code_exec→browser→
-   desktop→image_gen→conv_ref→human_guidance→⟨boundary⟩→memory→scheduler→
-   swarm→mcp) is A/B-validated and reproduces the cached prefix byte-for-byte.
-2. **Tool availability is request-live.** Composer toggles, MCP changes and
-   project attachment may change the tools array on the next turn. Prompt-cache
-   optimization must never mask those current capabilities.
-3. **Plugin visibility is fail-closed + per-request.** `assemble_tool_list`
-   evaluates a plugin spec only when its `plugin_name` is in the request's
-   `enabled_plugins` allow-list (default: no third-party plugins). Guarded by
-   `test_core_tool_isolation`.
-4. **`ToolSpec.handler=` co-locates schema+gate+handler.** The executor calls
-   `sync_spec_handlers(tool_registry)` at startup; late plugins self-sync. Do
-   not re-introduce the hardcoded `if feature:` ladder this replaced.
-5. **`tool_env` mint/dispose leaves `tool_registry` byte-identical.** Custom
-   tool names must match `custom__<ident>` and never collide with a built-in;
-   `test_custom_tool_isolation` pins it.
-6. **`project_mod/config.py`'s live-task probe fails OPEN.** The one back-edge
-   into `tasks_pkg.manager` must never block `_conv_roots` eviction on an import
-   cycle — an unbounded cache is worse than a rare mis-eviction.
-7. **Read-before-edit gate** (`handlers/_read_gate.py`): apply_diff/insert_content
-   are refused unless the target was read earlier; batch variants gate per-path.
-8. **Remote callers are absolute-path-restricted** (`abs_path_guard`): agents:run
-   / chat-key / compat callers can't read/write outside a registered root.
-
----
-
-## 6. Known debt (grounded)
-
-- **`tool_env.py` is in the wrong package** (§2c) — the one genuine layering
-  inversion in the unit.
-- **`registry.py` (1218) bundles the assembly engine with the cache-latch
-  machinery** (§4.1) — a clean internal seam.
-- **CLAUDE.md §1 lists `lib/fetch/`+`lib/search/` that no longer exist** (§3) —
-  a doc-drift bug; they're `tofu_search` + `search_bridge.py` now.
-- The `handlers/misc.py` Project-Brain split (from Unit 1) also lands in this
-  unit's scope.
-- `write_tools`/`read_tools`/`run_command` (each >1300) are BIG-but-cohesive;
-  finer splits are low-value.
-
----
-
-## 7. Segmentation verdict (this unit)
-
-**Correctly bounded — leave as-is:**
-All schema-dict files (`tools/project`, `conversation`, `browser`, `search`,
-`meta`, `todo`, `image_gen`, `image_edit`, `human_guidance`, `code_exec`);
-`project_mod/tools` (a *successful* prior facade split), `command_analysis`,
-`config`, `modifications`, `scanner`, `indexer`, `gitignore_suggest`,
-`portable_sandbox`, `abs_path_guard`; all of `browser/`; `handlers/_adapter`,
-`_read_gate`, and the small handlers; `search_bridge.py` (a clean host-seam bridge).
-
-**Miscut / misplaced — should move or split (priority order):**
-
-1. **Relocate `lib/tools/tool_env.py` → `lib/tasks_pkg/tool_env.py`** (or a new
-   `lib/agent_core/` sibling). It is the per-request custom-tool *runtime*, not a
-   schema; it imports DOWN into `executor`/`manager`/`project_mod` from the
-   *definition* package (§2c). Its own docstring says it mirrors
-   `llm_dispatch/ephemeral.py` — put it next to the execution layer it belongs
-   to. Low risk (lazy imports already; `test_custom_tool_isolation` guards it).
-2. **`handlers/misc.py` → `handlers/coordination.py`** (carried from Unit 1 —
-   the charter/board/peer Project-Brain handlers).
-
-**Big but optional (defer unless touched):**
-`project_mod/write_tools` (1482), `run_command` (1375), `read_tools` (1316) —
-each one cohesive tool family; `tool_input_repair.py` (1526).
-
-**Do NOT split:** the schema-dict files (large only because descriptions are
-prose), `project_mod/tools.py` (already the right facade shape).
-
----
-
-## 8. Comparison to Units 1–2 (the running thesis)
-
-- **The tool seam is the cleanest cross-package boundary documented so far.**
-  Unlike Unit 2's `cache_tracking` back-edge (LLM layer → task layer), the
-  tools chain flows strictly downward: schema ← handler ← impl, wired by the
-  declarative `ToolSpec.handler=` field. The registry pattern (a tool author
-  registers a spec once, zero core edits) is *why* the seam stayed clean as
-  tools multiplied — it's the structural opposite of the `if feature:` ladder it
-  replaced.
-- **Extraction-to-external-package is a third split outcome** (beyond
-  `compaction/`-clean and `orchestrator`-incomplete): `tofu_search` +
-  `search_bridge.py` shows a whole subsystem promoted out of the tree with a
-  provider-seam bridge. That's the *most* decoupled outcome and a template for
-  future extractions.
-- **The one real finding is a misplacement, not a miscut:** `tool_env.py` is
-  cohesive but lives in the wrong package. That's a different defect class than
-  the `manager.py`/`api.py` "one file, many jobs" miscuts — worth distinguishing
-  in the eventual refactor plan.
-
----
-
-*Next unit: Unit 4 (Orchestration / DAG — `orchestration*.py`, `swarm/`).*
+```bash
+pytest -q tests/test_tool_registry.py tests/test_tool_registry_builtin_name_protection.py
+pytest -q tests/test_unified_tool_gateway.py tests/test_tool_settle_all_lanes.py tests/test_tool_call_wire_shape.py
+pytest -q tests/test_core_tool_isolation.py tests/test_custom_tool_isolation.py
+pytest -q tests/test_write_tools_atomic.py tests/test_write_tools_root_attribution.py
+pytest -q tests/test_mcp_v2_protocol.py tests/test_mcp_liveness_probe.py
+pytest -q tests/test_long_agent_v2_contracts.py -k 'tool_contract or tool_result or tool_artifact or tool_search'
+```

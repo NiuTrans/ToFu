@@ -22,6 +22,7 @@ malformed head — so this net can NEVER itself produce a 400.
 import json
 
 from lib.log import audit_log, get_logger
+from lib.tasks_pkg.compaction._layer2._anchor import _objective_anchor_index
 from lib.tasks_pkg.compaction._reactive._measure import _estimate_wire_bytes
 from lib.tasks_pkg.compaction._tokens import (
     _estimate_msg_tokens,
@@ -107,14 +108,12 @@ def _head_truncate(messages: list, task: dict | None = None,
         else:
             break
 
-    # ★ OBJECTIVE ANCHOR — the first real user message (the north-star goal)
+    # OBJECTIVE ANCHOR — the first real user message (the north-star goal)
     #   must survive even a last-resort head-truncate.  Compute the drop
     #   position that SKIPS it: normally we pop the oldest non-system message
     #   (``system_end``); if that is the anchor, pop the one AFTER it instead so
     #   the goal is never discarded.  A tiny helper keeps both trim loops
     #   (byte-target and token-target) honouring the anchor identically.
-    from lib.tasks_pkg.compaction._layer2 import _objective_anchor_index
-
     def _drop_pos() -> int:
         anchor = _objective_anchor_index(messages)
         if anchor == system_end and len(messages) > system_end + 1:

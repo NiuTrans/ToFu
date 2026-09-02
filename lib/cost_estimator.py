@@ -46,12 +46,12 @@ def _split_tokens(usage: dict | None) -> tuple[int, int, int, int]:
 
     The returned ``uncached_input`` is the count we pay full input price for.
 
-    ★ The convention decision is DELEGATED to ``lib.cost.split_input_tokens``,
+    The convention decision is DELEGATED to ``lib.cost.split_input_tokens``,
       the single chokepoint that already owns it. This module used to carry a
       third independent copy — the magnitude heuristic
       ``if cw + cr > 0 and inp_raw > cw + cr`` — which
       ``usage_cache_convention``'s docstring names a "latent 10x BILLING BUG"
-      and which pt_28375442 removed from the display and wallet paths.
+      and which  removed from the display and wallet paths.
 
       Why it mattered most here: this function feeds ``estimate_usage_cost`` →
       ``check_budget`` → the orchestrator's per-round budget gate, and the

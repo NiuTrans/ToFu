@@ -9,7 +9,10 @@ This is the highest-fidelity confirmation that the SDK contract holds:
 real network, real HTTP/1.1, real bytes-on-the-wire SSE.
 """
 
+
 from __future__ import annotations
+
+pytest_plugins = ('tests._credential_sidecar',)
 
 import asyncio
 import os
@@ -43,20 +46,15 @@ def _boot_real_server():
     # its OWN Hypercorn — it bypasses conftest's live_server fixture, so it
     # must call the keystone DB guard itself. Refuse to boot the real app
     # against a non-test DB (the incident was a live server on production PG).
-    from tests.conftest import _assert_test_database
-    _assert_test_database('test_sdk_e2e._boot_real_server')
+    from tests.conftest import _assert_isolated_storage
+    _assert_isolated_storage('test_sdk_e2e._boot_real_server')
     _STATE['tmp'] = tempfile.TemporaryDirectory()
     tmp = _STATE['tmp'].name
 
     from lib import api_keys, usage_tracker
-    api_keys._STORE_PATH = os.path.join(tmp, 'api_keys.json')
-    api_keys._cache.clear()
-    api_keys._cache_loaded = False
     usage_tracker._STORE_PATH = os.path.join(tmp, 'usage.json')
     usage_tracker._state.clear()
     usage_tracker._loaded = False
-    os.environ['TUNNEL_TOKEN'] = ''
-
     import importlib.util
     spec = importlib.util.spec_from_file_location('server_sdk_e2e', 'server.py')
     mod = importlib.util.module_from_spec(spec)
@@ -64,7 +62,7 @@ def _boot_real_server():
     _STATE['app'] = mod.app
 
     # Stub spawn_task (no real LLM).
-    import lib.tasks_pkg as pkg
+    import lib.tasks_pkg.spawn as pkg
     from lib.tasks_pkg.manager import append_event
 
     def _fake_spawn(task):
@@ -88,9 +86,9 @@ def _boot_real_server():
     pkg.spawn_task = _fake_spawn
 
     from lib.api_keys import create_key
-    _row, _STATE['admin_token'] = create_key(
+    _row, _STATE['admin_token'] = create_key(owner_user_id=1, 
         name='sdk-admin', scopes=[], admin=True)
-    _row, _STATE['user_token'] = create_key(
+    _row, _STATE['user_token'] = create_key(owner_user_id=1, 
         name='sdk-user',
         scopes=['chat', 'tasks', 'capabilities', 'usage'],
         rate_limit_rpm=120)
@@ -158,7 +156,7 @@ def _shutdown_real_server():
     # stub → KeyError 'events_lock' on its minimal fake task — CI-only,
     # because co-scheduling differs from a local run).
     if _STATE.get('orig_spawn') is not None:
-        import lib.tasks_pkg as _pkg
+        import lib.tasks_pkg.spawn as _pkg
         _pkg.spawn_task = _STATE['orig_spawn']
         _STATE['orig_spawn'] = None
     if _STATE['tmp'] is not None:

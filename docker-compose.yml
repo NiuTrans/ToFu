@@ -5,8 +5,9 @@
 #  Quick start:
 #    docker compose up -d
 #
-#  With API key pre-configured:
-#    LLM_API_KEYS=sk-xxx docker compose up -d
+#  With a provider pre-configured for unattended use:
+#    put LLM_API_KEYS in a chmod-0600 .env file, then run the same command.
+#    Interactive users can configure Settings → Providers after startup.
 #
 #  View logs:
 #    docker compose logs -f tofu
@@ -14,49 +15,85 @@
 #  Stop:
 #    docker compose down
 #
-#  Upgrade:
-#    docker compose pull && docker compose up -d
+#  Upgrade this source-built deployment:
+#    git pull --ff-only && docker compose up -d --build
 #
 # ═══════════════════════════════════════════════════════════════
 
 services:
   tofu:
-    build: .
+    build:
+      context: .
+      target: worker
     # image: ghcr.io/rangehow/tofu:latest  # uncomment after publishing
-    container_name: tofu
     restart: unless-stopped
     # PID 1 reaps MCP/browser children; bounded resources make failure local
     # and let the in-process soft/hard RSS guards act before the kernel does.
     init: true
-    mem_limit: ${TOFU_MEMORY_LIMIT:-8g}
-    mem_reservation: ${TOFU_MEMORY_RESERVATION:-2g}
-    pids_limit: ${TOFU_PIDS_LIMIT:-1024}
+    mem_limit: ${TOFU_MEMORY_LIMIT:-4g}
+    mem_reservation: ${TOFU_MEMORY_RESERVATION:-512m}
+    pids_limit: ${TOFU_PIDS_LIMIT:-512}
     stop_grace_period: 45s
     ports:
-      - "${PORT:-15000}:15000"
+      # Publish only on the host loopback. Docker bridge NAT makes host-browser
+      # requests appear non-loopback inside the container, so the paired
+      # TOFU_OPEN_MODE_ALLOW_REMOTE setting below is safe only with this bind.
+      - "127.0.0.1:${PORT:-15000}:15000"
     volumes:
       # Persistent data — database, configs, uploads survive restarts
       - tofu-data:/app/data
       - tofu-logs:/app/logs
       - tofu-uploads:/app/uploads
       # Optional distinct volume, still mounted at the mandated project-local
-      # data/backups path.
+      # data/backups path. The source may be a named volume or an absolute
+      # host/NAS directory.
       - "${TOFU_BACKUP_VOLUME:-tofu-backups}:/app/data/backups"
     environment:
       - PORT=15000
       - BIND_HOST=0.0.0.0
+      # Let the default open-mode UI cross Docker's bridge while the host port
+      # remains loopback-only. For LAN/proxy exposure, switch to private auth
+      # before deliberately changing the published host address.
+      - TOFU_OPEN_MODE_ALLOW_REMOTE=1
+      - TOFU_AUTH_MODE=${TOFU_AUTH_MODE:-}
+      # Used only by explicit operator-facing URL helpers inside the container.
+      - TOFU_PUBLISHED_PORT=${PORT:-15000}
       # Earlier pressure gates for a dedicated, memory-bounded container.
       - TOFU_CGROUP_RELIEF_PCT=${TOFU_CGROUP_RELIEF_PCT:-85}
       - TOFU_CGROUP_REQUEST_PCT=${TOFU_CGROUP_REQUEST_PCT:-90}
       - TOFU_ADMISSION_CGROUP_PCT=${TOFU_ADMISSION_CGROUP_PCT:-90}
       - TOFU_PROCESS_RSS_RELIEF_MB=${TOFU_PROCESS_RSS_RELIEF_MB:-}
       - TOFU_PROCESS_RSS_RECYCLE_MB=${TOFU_PROCESS_RSS_RECYCLE_MB:-}
+      # Empty means: derive one bounded personal budget from the container's
+      # CPU quota, cgroup memory/headroom, and persistent-volume free space.
+      # Any explicit operator value still wins.
+      - TOFU_MAX_INFLIGHT_TASKS=${TOFU_MAX_INFLIGHT_TASKS:-}
+      - TOFU_TASK_MAX_API_ROUNDS=${TOFU_TASK_MAX_API_ROUNDS:-}
+      - TOFU_SYNC_WORKERS=${TOFU_SYNC_WORKERS:-}
+      - TOFU_AGENT_WORKERS=${TOFU_AGENT_WORKERS:-}
+      - TOOL_MAX_PARALLEL_WORKERS=${TOOL_MAX_PARALLEL_WORKERS:-}
+      - TOFU_NUMERIC_THREADS=${TOFU_NUMERIC_THREADS:-}
+      # glibc reads this before Python can probe. Two is the safe container
+      # fallback; source/desktop launchers resolve it from the early probe.
+      - MALLOC_ARENA_MAX=${TOFU_MALLOC_ARENA_MAX:-2}
+      - TOFU_STORAGE_SQLITE_READ_POOL=${TOFU_STORAGE_SQLITE_READ_POOL:-}
+      - TOFU_STORAGE_RPC_CAPACITY=${TOFU_STORAGE_RPC_CAPACITY:-}
+      - TOFU_STORAGE_MIN_FREE_BYTES=${TOFU_STORAGE_MIN_FREE_BYTES:-}
+      - TOFU_ATTEMPT_EVENT_TTL_DAYS=${TOFU_ATTEMPT_EVENT_TTL_DAYS:-}
+      - TOFU_LOG_TOTAL_BUDGET_MB=${TOFU_LOG_TOTAL_BUDGET_MB:-}
+      - TOFU_RUN_PYTHON_CACHE=${TOFU_RUN_PYTHON_CACHE:-}
+      - TOFU_RUN_PYTHON_CACHE_MAX_MIB=${TOFU_RUN_PYTHON_CACHE_MAX_MIB:-}
       # ── LLM API (optional — can also configure via Settings UI) ──
       - LLM_API_KEYS=${LLM_API_KEYS:-}
       - LLM_BASE_URL=${LLM_BASE_URL:-}
       - LLM_MODEL=${LLM_MODEL:-}
-      # ── Storage Sidecar backend (exact selector; no fallback) ──
-      - TOFU_DB_BACKEND=${TOFU_DB_BACKEND:-sqlite}
+      # Docker Compose is the low-cost personal topology. Distributed roles
+      # and external PostgreSQL/Redis are delivered by the Kubernetes chart.
+      - TOFU_DEPLOYMENT_MODE=personal
+      - TOFU_PROCESS_ROLE=all
+      # Keep verified SQLite snapshots on the distinct backup mount above,
+      # not beside the live DB in tofu-data.
+      - TOFU_SQLITE_SNAPSHOT_DIR=/app/data/backups
       # ── Proxy (if needed) ──
       - HTTP_PROXY=${HTTP_PROXY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
@@ -67,7 +104,7 @@ services:
       # ── Trading (disabled by default) ──
       - TRADING_ENABLED=${TRADING_ENABLED:-0}
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:15000/api/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:15000/health/live"]
       interval: 30s
       timeout: 5s
       start_period: 30s

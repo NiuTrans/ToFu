@@ -8,7 +8,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_oversized_upload_leaves_no_final_or_partial(monkeypatch, tmp_path):
-    import routes.paper as paper
+    import routes.paper_pkg._common as paper
 
     monkeypatch.setattr(paper, '_paper_pdf_limit', lambda: 8)
     final = tmp_path / 'paper.pdf'
@@ -20,12 +20,12 @@ def test_oversized_upload_leaves_no_final_or_partial(monkeypatch, tmp_path):
 
 
 def test_invalid_upload_cannot_replace_existing_file(monkeypatch, tmp_path):
-    import lib.pdf_parser
-    import routes.paper as paper
+    import lib.pdf_parser.text as pdf_text
+    import routes.paper_pkg._common as paper
 
     monkeypatch.setattr(paper, '_paper_pdf_limit', lambda: 1024)
     monkeypatch.setattr(
-        lib.pdf_parser, 'validate_pdf_bytes',
+        pdf_text, 'validate_pdf_bytes',
         lambda _body: (False, 0, 'test rejection'),
     )
     final = tmp_path / 'paper.pdf'
@@ -39,13 +39,13 @@ def test_invalid_upload_cannot_replace_existing_file(monkeypatch, tmp_path):
 
 
 def test_valid_upload_is_atomically_published(monkeypatch, tmp_path):
-    import lib.pdf_parser
-    import routes.paper as paper
+    import lib.pdf_parser.text as pdf_text
+    import routes.paper_pkg._common as paper
 
     body = b'%PDF-valid-test-body'
     monkeypatch.setattr(paper, '_paper_pdf_limit', lambda: 1024)
     monkeypatch.setattr(
-        lib.pdf_parser, 'validate_pdf_bytes',
+        pdf_text, 'validate_pdf_bytes',
         lambda candidate: (candidate == body, 1, ''),
     )
     final = tmp_path / 'paper.pdf'

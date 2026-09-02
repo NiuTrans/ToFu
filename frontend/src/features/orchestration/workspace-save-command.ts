@@ -4,10 +4,8 @@ import { record } from './contracts';
 import { orchestrationResultError } from './result';
 import { type WorkspacePersistenceContext } from './workspace-command-types';
 
-type WorkspaceSaveWindow = Window & {
-  createOrchestrationWorkspaceSaveCommand?:
-    typeof createOrchestrationWorkspaceSaveCommand;
-};
+type WorkspaceSaveWindow = Window & { createOrchestrationWorkspaceSaveCommand?:
+  typeof createOrchestrationWorkspaceSaveCommand };
 
 /** Validation, CAS and editor-ownership fence for one save operation. */
 export function createOrchestrationWorkspaceSaveCommand(
@@ -29,14 +27,19 @@ export function createOrchestrationWorkspaceSaveCommand(
     const session = context.workspaceSession;
     const persistedId = session.currentId();
     const expectedUpdatedAt = session.currentVersion();
+    if (persistedId && (!Number.isSafeInteger(expectedUpdatedAt)
+        || Number(expectedUpdatedAt) < 0)) {
+      context.toast(context.translate('orch.save.conflict'), true);
+      if (context.has('refreshStore')) await context.call('refreshStore');
+      return null;
+    }
     if (!context.definitions.canSave(persistedId)) {
       context.toast(context.translate('orch.api.unavailable'), true);
       return null;
     }
     const lifecycle = context.lifecycle;
-    const inspection = typeof lifecycle?.requireValid === 'function'
-      ? await lifecycle.requireValid(context.translate('orch.doc.saveAction'))
-      : null;
+    const inspection = typeof lifecycle?.requireValid === 'function' ? await
+      lifecycle.requireValid(context.translate('orch.doc.saveAction')) : null;
     if (!inspection) return null;
     const definition = context.call('rootDefinition');
     const saveCheckpoint = lifecycle.createSaveCheckpoint();

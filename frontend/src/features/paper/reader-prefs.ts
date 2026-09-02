@@ -1,24 +1,19 @@
 import { registerAction } from '../../action-registry';
-import { t } from '../../i18n';
+import { t, type I18nKey } from '../../i18n';
 
 export interface ReaderPreferences {
   scaleIdx: number;
   widthIdx: number;
 }
 
-interface ReaderWidth {
-  measure: string;
-  label: string;
-}
-
 const PREFS_KEY = 'paper_reader_prefs';
 const FONT_SCALES = [0.85, 0.925, 1.0, 1.1, 1.2, 1.3] as const;
 const DEFAULT_SCALE_INDEX = 2;
-const WIDTHS: readonly ReaderWidth[] = [
+const WIDTHS = [
   { measure: '60ch', label: 'paper.readerWidthNarrow' },
   { measure: '68ch', label: 'paper.readerWidthComfortable' },
   { measure: '78ch', label: 'paper.readerWidthWide' },
-];
+] as const satisfies readonly { measure: string; label: I18nKey }[];
 const DEFAULT_WIDTH_INDEX = 1;
 
 function clampIndex(value: unknown, maximum: number, fallback: number): number {

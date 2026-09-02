@@ -13,22 +13,17 @@
 <meta name="theme-color" content="#F5F3ED">
 <link rel="manifest" href="static/manifest.json" crossorigin="use-credentials">
 <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'><defs><linearGradient id='t' x1='0' y1='0' x2='.5' y2='1'><stop offset='0%25' stop-color='%23fef8ec'/><stop offset='100%25' stop-color='%23fdf2d7'/></linearGradient><linearGradient id='f' x1='0' y1='0' x2='.2' y2='1'><stop offset='0%25' stop-color='%23fdf4dc'/><stop offset='100%25' stop-color='%23f5e8c8'/></linearGradient><linearGradient id='r' x1='0' y1='0' x2='1' y2='.7'><stop offset='0%25' stop-color='%23ecdcc0'/><stop offset='100%25' stop-color='%23dcc8a4'/></linearGradient></defs><path d='M86 26 L36 54 L91 90 L147 59Z' fill='url(%23t)'/><path d='M36 54 L34 119 L97 153 L91 90Z' fill='url(%23f)'/><path d='M91 90 L97 153 L145 125 L147 59Z' fill='url(%23r)'/><path d='M86 26 L36 54 L34 119 L97 153 L145 125 L147 59Z' stroke='%231a1520' stroke-width='3.2' stroke-linejoin='round' fill='none'/><path d='M53 38 L74 31 L80 34 L59 41Z' fill='white' opacity='.5'/><rect x='44' y='80' width='15' height='19' rx='1' fill='%231a1520'/><rect x='52' y='81' width='5' height='7' rx='1' fill='white' opacity='.92'/><rect x='45' y='89' width='3' height='4' rx='.5' fill='white' opacity='.45'/><rect x='73' y='93' width='15' height='21' rx='1' fill='%231a1520'/><rect x='81' y='94' width='5' height='7' rx='1' fill='white' opacity='.92'/><rect x='74' y='104' width='3' height='5' rx='.5' fill='white' opacity='.45'/><path d='M57 113 Q68 121 78 113' stroke='%231a1520' stroke-width='1.5' fill='none' stroke-linecap='round' opacity='.45'/><ellipse cx='45' cy='103' rx='5.5' ry='4' fill='%23ffaaa2' opacity='.5'/><ellipse cx='84' cy='120' rx='6' ry='4' fill='%23feaca5' opacity='.5'/></svg>">
-<link rel="icon" type="image/svg+xml" href="static/icons/tofu-welcome.svg?v=0.16.0">
-<!-- Preload the Plus Jakarta Sans weights the toolbar/controls actually use
-     (400/600/700). font-display:swap otherwise lays out first-paint with
-     system-fallback metrics, then re-snaps toolbar width when the .ttf lands
-     (the "settle" reflow). crossorigin is REQUIRED so the preload and the
-     @font-face fetch share one cache entry. Only these 3 weights — not 300/500,
-     JetBrains Mono, or Pixelify — to keep first paint fast. -->
-<link rel="preload" as="font" type="font/ttf" crossorigin href="static/vendor/fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_qU7NSg.ttf">
-<link rel="preload" as="font" type="font/ttf" crossorigin href="static/vendor/fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_d0nNSg.ttf">
-<link rel="preload" as="font" type="font/ttf" crossorigin href="static/vendor/fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_TknNSg.ttf">
-<link rel="stylesheet" href="static/vendor/google-fonts-local.css">
-<link rel="stylesheet" href="static/vendor/github-dark.min.css">
-<link rel="stylesheet" href="static/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="static/styles.css?v=0.16.0">
+<link rel="icon" type="image/svg+xml" href="static/icons/tofu-welcome.svg?v=0.17.0">
+<!-- Fonts, the highlight theme and KaTeX styles now ship inside the Vite
+     module graph (see frontend/src/styles/fonts.css and vendor-runtime.ts).
+     The shell still preloads the three critical Plus Jakarta Sans UI weights —
+     rendered by routes/common.py from the Vite manifest so the content hashes
+     track every build. crossorigin is REQUIRED so the preload and the
+     @font-face fetch share one cache entry. -->
+<link rel="stylesheet" href="static/styles.css?v=0.17.0">
+<link rel="stylesheet" href="static/request-inspector-trace.css?v=0.17.0">
 <link rel="stylesheet" href="static/settings.css">
-<link rel="stylesheet" href="static/project-integration.css?v=0.16.0">
+<link rel="stylesheet" href="static/project-integration.css?v=0.17.0">
 <script>
   // Prevent flash of wrong theme — apply before render (default: tofu)
   (function(){var t=localStorage.getItem('claude_ui_theme')||'tofu';document.documentElement.setAttribute('data-theme',t);})();
@@ -161,6 +156,19 @@
     event.preventDefault();
     var error = event.payload || event.detail || new Error('dynamic import failed');
     var asset = errorAsset(error);
+    /* Once the app is READY a lazy-chunk failure must never reload the page:
+     * the boot bundle is healthy by definition, and `tofu:app-ready` clears
+     * the one-shot retry key below — so a permanently-broken lazy chunk (e.g.
+     * a module-eval ReferenceError) would otherwise reload→boot→ready→fail
+     * forever (2026-08-20 infinite-refresh incident). The build-watch in the
+     * runtime covers the "deploy swapped chunks under an old tab" case with
+     * an idle-gated, loop-guarded reload; here we only log. */
+    if (ready) {
+      if (window.console && console.error) {
+        console.error('[boot] lazy chunk failed after app-ready — not reloading:', error);
+      }
+      return;
+    }
     if (!sessionStorage.getItem(retryKey)) {
       sessionStorage.setItem(retryKey, '1');
       location.reload();
@@ -199,7 +207,7 @@
 <body>
 <aside class="sidebar" id="sidebar">
   <div class="sidebar-header">
-    <h1><img class="sidebar-tofu-icon" src="static/icons/tofu-welcome.svg?v=0.16.0" data-brand-logo="1" alt="Tofu" width="22" height="22"><span class="sidebar-brand"><span class="sidebar-brand-t">T</span><span class="sidebar-brand-o">o</span><span class="sidebar-brand-f">f</span><span class="sidebar-brand-u">u</span></span></h1>
+    <h1><img class="sidebar-tofu-icon" src="static/icons/tofu-welcome.svg?v=0.17.0" data-brand-logo="1" alt="Tofu" width="22" height="22"><span class="sidebar-brand"><span class="sidebar-brand-t">T</span><span class="sidebar-brand-o">o</span><span class="sidebar-brand-f">f</span><span class="sidebar-brand-u">u</span></span></h1>
     <div class="sidebar-header-actions">
       <!-- Feature launchers (Paper / My Day / Trading / Studio) live in the
            topbar as labeled buttons. Search, Settings and debug toggle live
@@ -218,7 +226,7 @@
   <div class="sidebar-action-row">
     <button class="new-chat-btn" data-tofu-action="newChat()">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-      <span>New Chat</span>
+      <span data-i18n="chat.newConversation">New Chat</span>
     </button>
   </div>
   <div class="sidebar-search-wrapper" id="sidebarSearchWrapper" style="display:none">
@@ -270,13 +278,17 @@
     <button class="toggle-sidebar-btn" data-tofu-action="toggleSidebar()" aria-label="Toggle sidebar">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
-    <span class="topbar-title" id="topbarTitle">New Chat</span>
+    <span class="topbar-title" id="topbarTitle" data-i18n="chat.newConversation" data-i18n-once>New Chat</span>
     <!-- ── Feature launchers (relocated from the sidebar header) ──
          Labeled icon+text buttons so each tool's purpose is self-evident. -->
     <div class="topbar-tools" id="topbarTools">
       <button class="topbar-tool-btn" id="paperModeBtn" data-tofu-action="togglePaperMode()" title="Paper Reader — read & chat with PDFs">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
         <span class="topbar-tool-label" data-i18n="topbar.paper">Paper</span>
+      </button>
+      <button class="topbar-tool-btn" id="researchModeBtn" data-tofu-action="toggleResearchMode()" title="Auto-research — direction in, reviewed ideas out">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></svg>
+        <span class="topbar-tool-label" data-i18n="topbar.research">Research</span>
       </button>
       <button class="topbar-tool-btn" id="knowledgeTopbarBtn" data-tofu-action="openKnowledgeBase()" title="本地知识库" data-i18n-title="knowledge.openTitle">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h7M9 11h7M9 15h4"/></svg>
@@ -645,6 +657,14 @@
       </div>
     </div>
   </div>
+  <!-- ═══ Research Mode — full-page auto-research studio ═══
+       Direction-scoped (no paper needed): the landing takes a research
+       direction, the console (pm-console, painted by research-view.ts) shows
+       the running/finished pipeline. Mutually exclusive with Paper/ImageGen
+       mode — the session owners exit each other. -->
+  <div class="research-mode-container" id="researchModeContainer" style="display:none">
+    <div class="research-body" id="researchViewer"></div>
+  </div>
   <!-- Project Collaboration Bar — a slim line under the top bar (project mode
        only, shown only when there's collaborative state to surface). Populated
        by presence.js from the 'presence' + 'project' push channels; clicking
@@ -725,7 +745,7 @@
             <span class="pb-tab-label" data-i18n="projectBrain.status">Status &amp; Watch</span>
           </button>
           <button type="button" class="pb-tab" data-pb-tab="integration" role="tab" aria-selected="false">
-            <span class="pb-tab-label">Integration</span>
+            <span class="pb-tab-label" data-i18n="projectBrain.integration">Integration</span>
             <span class="pb-tab-count" id="pbTabCountIntegration" hidden></span>
           </button>
         </div>
@@ -788,7 +808,7 @@
                identity are visible instead of hidden behind automation. -->
           <div class="project-brain-col project-brain-col-integration pb-tab-panel" data-pb-panel="integration">
             <div class="project-brain-col-body" id="projectBrainIntegrationBody">
-              <div class="pbi-empty">Integration status has not loaded yet</div>
+              <div class="pbi-empty" data-i18n="projectBrain.integrationEmpty">Integration status has not loaded yet</div>
             </div>
           </div>
         </div>
@@ -797,7 +817,7 @@
     <div class="chat-container" id="chatContainer">
       <div class="chat-inner" id="chatInner">
         <div class="welcome" id="welcome">
-          <div class="welcome-icon"><img src="static/icons/tofu-welcome.svg?v=0.16.0" data-brand-logo="1" alt="Tofu" width="64" height="64"></div>
+          <div class="welcome-icon"><img src="static/icons/tofu-welcome.svg?v=0.17.0" data-brand-logo="1" alt="Tofu" width="64" height="64"></div>
           <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
           <div class="feature-pills"><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="M12 18V5"/><path d="M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4"/><path d="M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5"/><path d="M17.997 5.125a4 4 0 0 1 2.526 5.77"/><path d="M18 18a4 4 0 0 0 2-7.464"/><path d="M19.967 17.483A4 4 0 1 1 12 18a4 4 0 1 1-7.967-.517"/><path d="M6 18a4 4 0 0 1-2-7.464"/><path d="M6.003 5.125a4 4 0 0 0-2.526 5.77"/></svg><span data-i18n="welcome.extendedThinking">深度思考</span></span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg><span data-i18n="welcome.search">搜索</span></span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg><span data-i18n="welcome.urlFetch">URL 抓取</span></span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg><span data-i18n="welcome.imageInput">图片输入</span></span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg><span data-i18n="welcome.coPilot">副驾驶</span></span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z"/><circle cx="12" cy="12" r="10"/></svg><span data-i18n="welcome.browser">浏览器</span></span></div>
         </div>
@@ -847,9 +867,9 @@
           <span class="project-bar-icon" data-tofu-action="openProjectModal()" style="cursor:pointer" title="Manage folders"></span>
           <span class="project-bar-folders" id="projectBarFolders" data-tofu-action="openProjectModal()" style="cursor:pointer" title="Click to manage folders"></span>
           <span class="project-bar-stats" id="projectBarStats"></span>
-          <button class="project-autoapply-toggle" id="autoApplyToggle" data-tofu-action="toggleAutoApply()" title="Writes need confirmation (click for auto)">
+          <button class="project-autoapply-toggle auto-mode" id="autoApplyToggle" data-tofu-action="toggleAutoApply()" title="Writes auto-apply (click for manual)">
             <span class="autoapply-dot"></span>
-            <span class="autoapply-label">Manual</span>
+            <span class="autoapply-label">Auto</span>
           </button>
           <button class="project-bar-btn scene-switch-btn icon-box" id="sceneSwitchBtn" data-tofu-action="TofuPet.cycleDecor()" title="Scene: Meadow · click to change">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2 20h20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3 20l5-8 3.5 5L15 11l6 9" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="17.5" cy="6.5" r="2.5" stroke="currentColor" stroke-width="2"/></svg>
@@ -883,7 +903,7 @@
         <input type="file" id="fileInput" accept="image/*,video/*,.pdf,application/pdf,.docx,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,.ppt,application/vnd.ms-powerpoint,.txt,.md,.csv,.json,.xml,.html,.yaml,.yml,.toml,.py,.js,.ts,.java,.c,.cpp,.go,.rs,.rb,.sh,.sql,.tex,.log,.rst,.ini,.cfg" multiple data-tofu-action-change="handleFileUpload(event)" style="display:none">
         <div class="input-box">
           <div class="input-row">
-            <textarea id="userInput" placeholder="Type your message..." rows="1" data-tofu-action-keydown="handleKeyDown(event)"></textarea>
+            <textarea id="userInput" placeholder="Type your message..." data-i18n-placeholder="chat.messagePlaceholder" rows="1" data-tofu-action-keydown="handleKeyDown(event)"></textarea>
           </div>
           <div class="input-actions">
             <!-- ★ Attach files — leftmost toolbar affordance (the conventional "+"
@@ -902,6 +922,13 @@
                   <span class="ps-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
                 </div>
                 <div class="preset-dropdown" id="presetDropdown">
+                  <!-- ★ Model search — lives OUTSIDE #presetDropdownList so it survives
+                       list rebuilds; shown by _populateModelDropdown() only when the
+                       visible model count passes the long-list threshold. -->
+                  <div class="ps-dd-search" id="presetDropdownSearch" style="display:none">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+                    <input type="text" id="presetDropdownSearchInput" data-i18n-placeholder="toolbar.searchModels" placeholder="搜索模型…" autocomplete="off" spellcheck="false">
+                  </div>
                   <!-- ★ Model list — populated dynamically by _populateModelDropdown() from /api/server-config -->
                   <div class="preset-dropdown-list" id="presetDropdownList">
                     <div class="ps-dd-loading" data-i18n="toolbar.loadingModels">正在加载模型…</div>
@@ -952,6 +979,7 @@
                   </div>
                 </div>
               </div>
+              <!-- APPLICATION_SHELL_FRAGMENT:agent_mode_toolbar -->
               <!-- ★ Extras drawer — orthogonal capabilities that a tier switch
                    must NOT clobber. Tool-family switches control schema exposure;
                    physical connection / model availability remains a hard gate. -->
@@ -990,27 +1018,6 @@
                     <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.aiDrawing">AI 绘图</span><span class="submenu-item-desc" data-i18n="toolbar.aiDrawingDesc">让 AI 更容易主动生成图片</span></span>
                     <span class="submenu-item-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
                   </div>
-                  <!-- B-axis: model-composition strategy (orthogonal to the tier). -->
-                  <div class="submenu-divider" role="separator"></div>
-                  <div class="submenu-section-label" data-i18n="toolbar.execSection">执行策略</div>
-                  <div class="submenu-item" id="swarmToggle" data-tofu-action="toggleSwarm();updateSubmenuCounts()" title="Agent Swarm">
-                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="3"/><circle cx="5" cy="17" r="3"/><circle cx="19" cy="17" r="3"/><line x1="12" y1="10" x2="5" y2="14"/><line x1="12" y1="10" x2="19" y2="14"/></svg></span>
-                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.swarmAgents">蜂群代理</span><span class="submenu-item-desc" data-i18n="toolbar.swarmAgentsDesc">让 AI 更容易主动拆分并行任务</span></span>
-                    <span class="submenu-item-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
-                    <span class="tool-badge" id="swarmBadge" style="display:none"></span>
-                  </div>
-                  <div class="submenu-item" id="endpointToggle" data-tofu-action="toggleEndpoint();updateSubmenuCounts()" title="Endpoint Mode">
-                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="4"/></svg></span>
-                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.autonomousMode">自主模式</span><span class="submenu-item-desc" data-i18n="toolbar.autonomousModeDesc">自主执行+自我审查循环</span></span>
-                    <span class="submenu-item-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
-                    <span class="tool-badge" id="endpointBadge" style="display:none"></span>
-                  </div>
-                  <div class="submenu-item" id="autopilotToggle" data-tofu-action="toggleAutopilot();updateSubmenuCounts()" title="Autopilot — virtual user auto-replies">
-                    <span class="submenu-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 10v6m11-11h-6m-10 0H1m17.66-6.34l-4.24 4.24m-5.66 5.66l-4.24 4.24m12.14 0l-4.24-4.24m-5.66-5.66L4.34 4.34"/></svg></span>
-                    <span class="submenu-item-text"><span class="submenu-item-name" data-i18n="toolbar.autopilot">自动驾驶</span><span class="submenu-item-desc" data-i18n="toolbar.autopilotDesc">虚拟用户自动回复，直到任务完成</span></span>
-                    <span class="submenu-item-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
-                    <span class="tool-badge" id="autopilotBadge" style="display:none"></span>
-                  </div>
                   <!-- One-shot launcher — creative image canvas. -->
                   <div class="submenu-divider" role="separator"></div>
                   <div class="submenu-item" id="imageGenModeBtn" data-tofu-action="toggleSubmenu('submenuExtras');enterImageGenMode()" title="Creative image canvas">
@@ -1019,25 +1026,6 @@
                   </div>
                   <!-- Hidden badges for JS compatibility -->
                   <span class="tool-badge" id="translateBadge" style="display:none">译</span>
-                </div>
-              </div>
-              <!-- ★ Orchestration Flow — its own box.  Runs the whole
-                   conversation on a Studio-authored flow (or a built-in);
-                   mutually exclusive with the Mode toggles (the flow IS the
-                   execution mode).  Uses toggleFlowMenu() (its own popup),
-                   NOT toggleSubmenu(). -->
-              <div class="toolbar-submenu" id="submenuFlow" style="display:none">
-                <div class="submenu-flow-row" id="flowMenuWrapper">
-                  <button type="button" class="submenu-trigger" id="flowToggle" data-tofu-action="toggleFlowMenu(event)" data-tofu-action-keydown="handleFlowMenuTriggerKey(event)" aria-haspopup="listbox" aria-controls="flowMenuList" aria-expanded="false" title="Orchestration Flow">
-                    <span class="submenu-label" data-i18n="toolbar.flow">编排流程</span>
-                    <span class="flow-active-pill" id="flowActiveLabel"></span>
-                    <span class="submenu-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
-                    <span class="tool-badge" id="flowBadge" style="display:none"></span>
-                  </button>
-                  <div class="flow-menu" id="flowMenu">
-                    <div class="flow-catalog-notice" id="flowMenuStatus" role="status" aria-live="polite" aria-atomic="true" hidden></div>
-                    <div class="flow-menu-list" id="flowMenuList" role="listbox" aria-labelledby="flowToggle"></div>
-                  </div>
                 </div>
               </div>
             </div>
@@ -1133,6 +1121,10 @@
         </button>
 
         <div class="settings-tab-group" data-i18n="settings.groupModels">模型接入</div>
+        <button class="settings-tab" data-tab="models" data-tofu-action="switchSettingsTab('models')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+          <span data-i18n="settings.tabModels">模型</span>
+        </button>
         <button class="settings-tab" data-tab="api" data-tofu-action="switchSettingsTab('api')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
           <span data-i18n="settings.tabProviders">服务商</span>
@@ -1192,6 +1184,13 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
           <span data-i18n="settings.tabAdvanced">高级</span>
         </button>
+        <!-- Maintainer-only tab: stripped at render time in opensource builds
+             (lib/settings_panels.MAINTAINER_ONLY_TABS); fragment excluded from
+             the opensource export (export.py). -->
+        <button class="settings-tab" data-tab="experiments" data-tofu-action="switchSettingsTab('experiments')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v6L4.5 18a2 2 0 0 0 1.8 3h11.4a2 2 0 0 0 1.8-3L14 8V2"/><line x1="8.5" y1="2" x2="15.5" y2="2"/><line x1="7" y1="15" x2="17" y2="15"/></svg>
+          <span data-i18n="settings.tabExperiments">实验</span>
+        </button>
       </nav>
 
       <!-- Tab Content Panels -->
@@ -1202,6 +1201,12 @@
              static/settings_panels/general.html; spliced in at render time
              by routes/common.py via lib/settings_panels.inject_panels) -->
         <!-- SETTINGS_PANEL:general -->
+
+        <!-- ═══ Models Tab — centralized model-first catalog ═══ -->
+        <!-- ═══ Models Tab ═══ (panel markup extracted to
+             static/settings_panels/models.html; spliced in at render time
+             by routes/common.py via lib/settings_panels.inject_panels) -->
+        <!-- SETTINGS_PANEL:models -->
 
         <!-- ═══ Providers Tab — providers with nested models ═══ -->
         <!-- ═══ API Providers & Models Tab ═══ (panel markup extracted to
@@ -1375,6 +1380,12 @@
              static/settings_panels/advanced.html; spliced in at render time
              by routes/common.py via lib/settings_panels.inject_panels) -->
         <!-- SETTINGS_PANEL:advanced -->
+
+        <!-- ═══ Experiments Tab — MAINTAINER-ONLY (stripped at render time in
+             opensource builds; fragment excluded from the opensource export) ═══
+             (panel markup in static/settings_panels/experiments.html; spliced
+             in at render time by routes/common.py via lib/settings_panels.inject_panels) -->
+        <!-- SETTINGS_PANEL:experiments -->
 
       </div><!-- /settings-content -->
     </div><!-- /settings-body -->
@@ -2039,14 +2050,6 @@
       </span>
       <span class="mobile-sheet-item-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
     </div>
-    <div class="mobile-sheet-item" id="mobileSwarm" data-tofu-action="toggleSwarm();updateMobileSheet()">
-      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="7" r="3"/><circle cx="5" cy="17" r="3"/><circle cx="19" cy="17" r="3"/><line x1="12" y1="10" x2="5" y2="14"/><line x1="12" y1="10" x2="19" y2="14"/></svg></span>
-      <span class="mobile-sheet-item-text">
-        <span class="mobile-sheet-item-name" data-i18n="toolbar.swarmAgents">蜂群代理</span>
-        <span class="mobile-sheet-item-desc" data-i18n="mobile.parallelAgents">并行子代理</span>
-      </span>
-      <span class="mobile-sheet-item-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
-    </div>
   </div>
   <!-- Tools section -->
   <div class="mobile-sheet-section">
@@ -2095,23 +2098,8 @@
   </div>
   <!-- Mode section -->
   <div class="mobile-sheet-section">
-    <div class="mobile-sheet-section-title" data-i18n="mobile.modes">模式</div>
-    <div class="mobile-sheet-item" id="mobileEndpoint" data-tofu-action="toggleEndpoint();updateMobileSheet()">
-      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/></svg></span>
-      <span class="mobile-sheet-item-text">
-        <span class="mobile-sheet-item-name" data-i18n="toolbar.autonomousMode">自主模式</span>
-        <span class="mobile-sheet-item-desc" data-i18n="mobile.autoExecLoop">自主执行循环</span>
-      </span>
-      <span class="mobile-sheet-item-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
-    </div>
-    <div class="mobile-sheet-item" id="mobileAutopilot" data-tofu-action="toggleAutopilot();updateMobileSheet()">
-      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 10v6m11-11h-6m-10 0H1m17.66-6.34l-4.24 4.24m-5.66 5.66l-4.24 4.24m12.14 0l-4.24-4.24m-5.66-5.66L4.34 4.34"/></svg></span>
-      <span class="mobile-sheet-item-text">
-        <span class="mobile-sheet-item-name" data-i18n="toolbar.autopilot">自动驾驶</span>
-        <span class="mobile-sheet-item-desc" data-i18n="toolbar.autopilotDesc">虚拟用户自动回复，直到任务完成</span>
-      </span>
-      <span class="mobile-sheet-item-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
-    </div>
+    <div class="mobile-sheet-section-title" data-i18n="toolbar.agentMode">智能体模式</div>
+    <!-- APPLICATION_SHELL_FRAGMENT:agent_mode_mobile -->
     <div class="mobile-sheet-item" id="mobilePaperMode" data-tofu-action="closeMobileSheet();togglePaperMode()">
       <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
       <span class="mobile-sheet-item-text">
@@ -2119,19 +2107,6 @@
         <span class="mobile-sheet-item-desc" data-i18n="mobile.paperReaderDesc">PDF阅读 + 问答 + 报告</span>
       </span>
       <span class="mobile-sheet-item-check icon-box" style="opacity:0"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
-    </div>
-  </div>
-  <!-- Orchestration Flow — its own section, mirroring the standalone
-       #submenuFlow box on desktop (distinct from the Mode toggles). -->
-  <div class="mobile-sheet-section" id="mobileFlowSection" style="display:none">
-    <div class="mobile-sheet-section-title" data-i18n="toolbar.flow">编排流程</div>
-    <div class="mobile-sheet-item" id="mobileFlow" data-tofu-action="openMobileFlowPicker()">
-      <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h4a2 2 0 0 1 2 2V14"/></svg></span>
-      <span class="mobile-sheet-item-text">
-        <span class="mobile-sheet-item-name" data-i18n="toolbar.flow">编排流程</span>
-        <span class="mobile-sheet-item-desc" id="mobileFlowLabel" data-i18n="mobile.flowDesc">选择编排流程</span>
-      </span>
-      <span class="mobile-sheet-item-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
     </div>
   </div>
   <!-- Monitoring section: panels that live in hidden topbar badges on mobile,
@@ -2168,6 +2143,6 @@
 
 <!-- TOFU_APP_ASSETS -->
 
-<div id="toastContainer" class="toast-container"></div>
+<div id="toastContainer" class="toast-container" aria-live="polite" aria-relevant="additions"></div>
 </body>
 </html>

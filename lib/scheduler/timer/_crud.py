@@ -7,7 +7,6 @@ env-tunable resume guardrail helpers (``_resume_max_age_seconds`` /
 
 from __future__ import annotations
 
-import json
 import os as _os
 import uuid
 from datetime import datetime
@@ -18,6 +17,11 @@ from lib.log import get_logger
 from ._state import _active_timers, _cmd_outputs_lock, _last_cmd_outputs, _timers_lock
 
 logger = get_logger(__name__)
+
+
+def _timer_client(*, write: bool = False):
+    from lib.storage import get_storage_client
+    return get_storage_client(write=write)
 
 
 # ── Boot-time resume guardrails (env-tunable) ───────────────────────────────
@@ -64,7 +68,8 @@ def _resume_concurrency_cap() -> int:
 #  CRUD
 # ═════════════════════════════════════════════════════════════════════════════
 
-def create_timer(conv_id: str,
+def create_timer(*, user_id: int,
+                 conv_id: str,
                  check_instruction: str,
                  continuation_message: str,
                  poll_interval: int = 60,
@@ -73,8 +78,7 @@ def create_timer(conv_id: str,
                  tools_config: dict | None = None,
                  source_task_id: str = '',
                  condition_command: str = '',
-                 condition_regex: str = '',
-                 origin: str = 'inline') -> dict[str, Any]:
+                 condition_regex: str = '') -> dict[str, Any]:
     """Create a timer watcher and persist to DB.
 
     Args:
@@ -93,17 +97,9 @@ def create_timer(conv_id: str,
             not caller-specified: see ``derive_condition_kind``.
         condition_regex: Optional regex over the predicate's stdout; empty →
             use the exit code (0=ready) per the Unix contract.
-        origin: Provenance marker — 'inline' (the timer_create tool, which
-            BLOCKS its parent task and polls inline; the only path today) or
-            'background' (a self-driving injector). The resume-on-restart path
-            uses this to retire an orphaned inline timer whose parent task died
-            with the process, instead of silently injecting a follow-up turn
-            into an abandoned conversation.
-
     Returns:
         Timer record dict.
     """
-    from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, pooled_db
     from lib.scheduler._shared import derive_condition_kind
 
     timer_id = 'tmr_' + str(uuid.uuid4())[:8]
@@ -125,24 +121,22 @@ def create_timer(conv_id: str,
 
     poll_interval = max(poll_interval, 10)  # floor at 10s
 
-    with pooled_db(DOMAIN_SYSTEM) as db:
-        db_execute_with_retry(
-            db,
-            '''INSERT INTO timer_watchers
-               (id, conv_id, source_task_id, check_instruction, check_command,
-                continuation_message, poll_interval, max_polls, status,
-                tools_config, created_at, updated_at,
-                condition_kind, condition_command, condition_regex, origin)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)''',
-            [timer_id, conv_id, source_task_id, check_instruction, check_command,
-             continuation_message, poll_interval, max_polls,
-             json.dumps(tools_config or {}, ensure_ascii=False), now, now,
-             condition_kind, condition_command, condition_regex, origin]
-        )
-
-    timer = _get_timer_row(timer_id)
+    payload = {
+        'timer_id': timer_id, 'user_id': int(user_id), 'conv_id': conv_id,
+        'source_task_id': source_task_id,
+        'check_instruction': check_instruction,
+        'check_command': check_command,
+        'continuation_message': continuation_message,
+        'poll_interval': poll_interval, 'max_polls': max_polls,
+        'tools_config': tools_config or {}, 'created_at': now,
+        'updated_at': now, 'condition_kind': condition_kind,
+        'condition_command': condition_command,
+        'condition_regex': condition_regex, 'origin': 'background',
+    }
+    timer = _timer_client(write=True).command(
+        'timer.create', payload, timer_id)['timer']
     from ._notify import notify_timer_changed
-    notify_timer_changed('created')
+    notify_timer_changed('created', user_id=user_id)
     logger.info('[Timer:%s] Created — conv=%s poll_interval=%ds max_polls=%d kind=%s check_cmd=%s pred=%s',
                 timer_id, conv_id[:12], poll_interval, max_polls, condition_kind,
                 (check_command[:80] + '…') if len(check_command) > 80 else check_command or '(none)',
@@ -150,18 +144,13 @@ def create_timer(conv_id: str,
     return timer
 
 
-def cancel_timer(timer_id: str) -> bool:
+def cancel_timer(timer_id: str, *, user_id: int) -> bool:
     """Cancel an active timer."""
-    from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, pooled_db
-
     now = datetime.now().isoformat()
-    with pooled_db(DOMAIN_SYSTEM) as db:
-        cursor = db_execute_with_retry(
-            db,
-            "UPDATE timer_watchers SET status='cancelled', cancelled_at=?, updated_at=? WHERE id=? AND status='active'",
-            [now, now, timer_id], return_cursor=True,
-        )
-        changed = cursor.rowcount > 0
+    changed = bool(_timer_client(write=True).command(
+        'timer.cancel', {
+            'timer_id': timer_id, 'user_id': int(user_id), 'now': now},
+        f'timer.cancel:{timer_id}:{now}').get('changed'))
 
     # Signal the background thread to stop
     with _timers_lock:
@@ -174,12 +163,12 @@ def cancel_timer(timer_id: str) -> bool:
 
     if changed:
         from ._notify import notify_timer_changed
-        notify_timer_changed('cancelled')
+        notify_timer_changed('cancelled', user_id=user_id)
         logger.info('[Timer:%s] Cancelled', timer_id)
     return changed
 
 
-def force_trigger_timer(timer_id: str) -> str | None:
+def force_trigger_timer(timer_id: str, *, user_id: int) -> str | None:
     """Force-trigger a timer, skipping the poll.
 
     Returns:
@@ -187,7 +176,7 @@ def force_trigger_timer(timer_id: str) -> str | None:
     """
     from ._loop import _execute_continuation
 
-    timer = get_timer(timer_id)
+    timer = get_timer(timer_id, user_id=user_id)
     if not timer:
         return None
     if timer['status'] != 'active':
@@ -197,55 +186,39 @@ def force_trigger_timer(timer_id: str) -> str | None:
     return _execute_continuation(timer)
 
 
-def get_timer(timer_id: str) -> dict[str, Any] | None:
+def get_timer(timer_id: str, *, user_id: int) -> dict[str, Any] | None:
     """Get a single timer by ID."""
-    return _get_timer_row(timer_id)
+    return _get_timer_row(timer_id, user_id=user_id)
 
 
-def list_active_timers() -> list[dict[str, Any]]:
+def list_active_timers(*, user_id: int) -> list[dict[str, Any]]:
     """Return all timers (active first, then recent triggered/cancelled)."""
-    from lib.database import DOMAIN_SYSTEM, pooled_db
-    with pooled_db(DOMAIN_SYSTEM) as db:
-        rows = db.execute(
-            '''SELECT * FROM timer_watchers
-               ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END,
-                        created_at DESC
-               LIMIT 50'''
-        ).fetchall()
-    return [dict(r) for r in rows]
+    return _timer_client().query(
+        'timer.list', {'user_id': int(user_id), 'limit': 50})
 
 
-def has_timer_history() -> bool:
+def has_timer_history(*, user_id: int) -> bool:
     """Whether the timer panel has any durable row to surface.
 
     The closed badge needs only this bit plus the in-memory active count.  Do
     not materialize up to 50 wide watcher rows on every push-disconnected
     fallback poll merely to evaluate ``timers.length > 0`` in the browser.
     """
-    from lib.database import DOMAIN_SYSTEM, pooled_db
-    with pooled_db(DOMAIN_SYSTEM) as db:
-        row = db.execute('SELECT 1 AS present FROM timer_watchers LIMIT 1').fetchone()
-    return row is not None
+    return bool(_timer_client().query(
+        'timer.history', {'user_id': int(user_id)}))
 
 
-def get_timer_poll_log(timer_id: str, limit: int = 30) -> list[dict]:
+def get_timer_poll_log(
+    timer_id: str, *, user_id: int, limit: int = 30,
+) -> list[dict]:
     """Retrieve recent poll log entries for a timer."""
-    from lib.database import DOMAIN_SYSTEM, pooled_db
-    try:
-        with pooled_db(DOMAIN_SYSTEM) as db:
-            rows = db.execute(
-                'SELECT * FROM timer_poll_log WHERE timer_id=? ORDER BY poll_time DESC LIMIT ?',
-                [timer_id, limit]
-            ).fetchall()
-        return [dict(r) for r in rows]
-    except Exception as e:
-        logger.warning('[Timer] Failed to get poll log for %s: %s', timer_id, e, exc_info=True)
-        return []
+    return _timer_client().query(
+        'timer.poll.log', {
+            'timer_id': timer_id, 'user_id': int(user_id),
+            'limit': limit})
 
 
-def _get_timer_row(timer_id: str) -> dict[str, Any] | None:
-    """Fetch a timer record from DB."""
-    from lib.database import DOMAIN_SYSTEM, pooled_db
-    with pooled_db(DOMAIN_SYSTEM) as db:
-        row = db.execute('SELECT * FROM timer_watchers WHERE id=?', [timer_id]).fetchone()
-    return dict(row) if row else None
+def _get_timer_row(timer_id: str, *, user_id: int) -> dict[str, Any] | None:
+    """Fetch an owner-scoped timer record from the storage authority."""
+    return _timer_client().query(
+        'timer.get', {'timer_id': timer_id, 'user_id': int(user_id)})

@@ -12,13 +12,21 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture
 def context_data_dir(tmp_path, monkeypatch):
-    from lib.memory import storage
+    import lib.memory.storage as storage
+    import lib.memory.storage._dirs as storage_dirs
+
     monkeypatch.setattr(storage, '_server_data_dir', lambda: str(tmp_path))
-    return tmp_path
+    monkeypatch.setattr(
+        storage_dirs, '_server_data_dir', lambda: str(tmp_path))
+    storage_dirs._migrated_roots.clear()
+    storage_dirs._server_store_migrated = False
+    yield tmp_path
+    storage_dirs._migrated_roots.clear()
+    storage_dirs._server_store_migrated = False
 
 
 def test_legacy_profile_migrates_to_three_type_store(context_data_dir):
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     path = up.profile_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', encoding='utf-8') as handle:
@@ -35,7 +43,7 @@ def test_legacy_profile_migrates_to_three_type_store(context_data_dir):
 
 
 def test_work_rule_roundtrip_and_hard_cap(context_data_dir):
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     result = up.create_context_item({
         'type': 'work_rule',
         'condition': 'submitting a job on our cluster',
@@ -53,7 +61,7 @@ def test_work_rule_roundtrip_and_hard_cap(context_data_dir):
 
 
 def test_assistant_change_can_be_undone_and_conflicts_are_safe(context_data_dir):
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     added = up.create_context_item(
         {'type': 'identity', 'text': 'Works at Meituan'},
         source='assistant', record_change=True)
@@ -70,33 +78,33 @@ def test_assistant_change_can_be_undone_and_conflicts_are_safe(context_data_dir)
 
 
 def test_all_context_categories_are_injected_for_unrelated_query(context_data_dir):
-    from lib.memory import user_profile as up
+    import lib.memory.user_profile as up
     up.save_context_items([
         {'type': 'identity', 'text': 'Works at Meituan'},
         {'type': 'response_preference', 'text': 'Reply in Chinese'},
         {'type': 'work_rule', 'condition': 'using internal documentation',
          'action': 'use the xuecheng MCP'},
     ])
-    core, detail = up.render_profile_tiers(query='unrelated CSS question')
-    assert detail is None
-    assert '[USER CONTEXT]' in core
-    assert 'Works at Meituan' in core
-    assert 'Reply in Chinese' in core
-    assert 'using internal documentation' in core
-    assert 'use the xuecheng MCP' in core
-    assert 'ask before using an alternative' in core
+    block = up.render_profile_block()
+    assert block is not None
+    assert '[USER CONTEXT]' in block
+    assert 'Works at Meituan' in block
+    assert 'Reply in Chinese' in block
+    assert 'using internal documentation' in block
+    assert 'use the xuecheng MCP' in block
+    assert 'ask before using an alternative' in block
 
 
 def test_consolidation_adds_structured_rule_with_undo(context_data_dir,
                                                        monkeypatch):
-    from lib.memory import profile_consolidate as pc
-    from lib.memory import user_profile as up
+    import lib.memory.profile_consolidate as pc
+    import lib.memory.user_profile as up
 
     response = {'actions': [{
         'kind': 'new', 'type': 'work_rule',
         'condition': 'submitting jobs on our cluster',
         'action': 'use hope MCP',
-        'evidence': 'the user explicitly said so',
+        'evidence': 'On our cluster, always use hope MCP when submitting jobs.',
     }]}
     monkeypatch.setattr(
         'lib.llm_dispatch.dispatch_chat',
@@ -116,9 +124,122 @@ def test_consolidation_adds_structured_rule_with_undo(context_data_dir,
     assert up.undo_context_change(learned[0]['change_id'])['undone']
 
 
+def test_short_explicit_preference_is_reviewed_and_grounded(context_data_dir,
+                                                            monkeypatch):
+    """Useful context is not required to be padded past the old 200-char gate."""
+    import lib.memory.profile_consolidate as pc
+    import lib.memory.user_profile as up
+
+    user_text = '我偏好简洁的中文回答。'
+    response = {'actions': [{
+        'kind': 'new',
+        'type': 'response_preference',
+        'text': '默认使用简洁的中文回答',
+        'evidence': user_text,
+    }]}
+    calls = []
+
+    def fake_dispatch(*args, **kwargs):
+        calls.append((args, kwargs))
+        return json.dumps(response), {}
+
+    monkeypatch.setattr('lib.llm_dispatch.dispatch_chat', fake_dispatch)
+
+    learned = pc.run_profile_consolidation([
+        {'role': 'user', 'content': user_text},
+    ])
+
+    assert len(calls) == 1
+    assert learned and learned[0]['type'] == 'response_preference'
+    assert up.load_context()['items'][0]['text'] == '默认使用简洁的中文回答'
+
+
+def test_latest_explicit_fact_survives_a_large_historical_turn(context_data_dir,
+                                                               monkeypatch):
+    """The bounded learner surface must spend its budget on the current turn."""
+    import lib.memory.profile_consolidate as pc
+    import lib.memory.user_profile as up
+
+    latest = '我在美团担任后端工程师。'
+    response = {'actions': [{
+        'kind': 'new', 'type': 'identity', 'text': '在美团担任后端工程师',
+        'evidence': latest,
+    }]}
+    monkeypatch.setattr(
+        'lib.llm_dispatch.dispatch_chat',
+        lambda *args, **kwargs: (json.dumps(response), {}),
+    )
+
+    learned = pc.run_profile_consolidation([
+        {'role': 'user', 'content': 'x' * 7000},
+        {'role': 'assistant', 'content': 'done'},
+        {'role': 'user', 'content': latest},
+    ])
+
+    assert learned and learned[0]['type'] == 'identity'
+    assert up.load_context()['items'][0]['text'] == '在美团担任后端工程师'
+
+
+def test_short_one_off_request_does_not_call_learner(context_data_dir,
+                                                     monkeypatch):
+    """The short-turn signal gate avoids cost and accidental one-off learning."""
+    import lib.memory.profile_consolidate as pc
+
+    calls = []
+    monkeypatch.setattr(
+        'lib.llm_dispatch.dispatch_chat',
+        lambda *args, **kwargs: calls.append(1) or ('{}', {}),
+    )
+
+    assert pc.run_profile_consolidation([
+        {'role': 'user', 'content': '请把这个按钮改成蓝色。'},
+    ]) == []
+    assert calls == []
+
+
+def test_consolidation_rejects_ungrounded_or_fluffy_output(context_data_dir,
+                                                           monkeypatch):
+    """A model cannot invent evidence or save conversational framing."""
+    import lib.memory.profile_consolidate as pc
+    import lib.memory.user_profile as up
+
+    user_text = (
+        'I prefer concise answers in every conversation. This is an explicit '
+        'long-term response preference that should remain useful in future '
+        'conversations rather than applying only to this task.'
+    )
+    responses = iter((
+        {'actions': [{
+            'kind': 'new', 'type': 'response_preference',
+            'text': 'Use lots of decorative headings',
+            'evidence': 'I always ask for decorative headings',
+        }]},
+        {'actions': [{
+            'kind': 'new', 'type': 'response_preference',
+            'text': 'The user said they prefer concise answers because it is efficient',
+            'evidence': 'I prefer concise answers in every conversation.',
+        }]},
+        {'actions': [{
+            'kind': 'new', 'type': 'response_preference',
+            'text': 'Use decorative headings in every answer',
+            'evidence': 'I prefer concise answers in every conversation.',
+        }]},
+    ))
+    monkeypatch.setattr(
+        'lib.llm_dispatch.dispatch_chat',
+        lambda *args, **kwargs: (json.dumps(next(responses)), {}),
+    )
+
+    messages = [{'role': 'user', 'content': user_text}]
+    assert pc.run_profile_consolidation(messages) == []
+    assert pc.run_profile_consolidation(messages) == []
+    assert pc.run_profile_consolidation(messages) == []
+    assert up.load_context()['items'] == []
+
+
 def test_consolidation_input_excludes_assistant_reasoning(context_data_dir,
                                                            monkeypatch):
-    from lib.memory import profile_consolidate as pc
+    import lib.memory.profile_consolidate as pc
 
     captured = {}
 
@@ -147,8 +268,8 @@ def test_consolidation_input_excludes_assistant_reasoning(context_data_dir,
 
 def test_clear_memories_preserves_context_and_skill_packages(context_data_dir,
                                                               tmp_path):
-    from lib.memory import clear_memories, create_memory
-    from lib.memory import user_profile as up
+    from lib.memory.storage import clear_memories, create_memory
+    import lib.memory.user_profile as up
 
     project = tmp_path / 'project'
     project.mkdir()

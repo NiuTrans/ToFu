@@ -52,8 +52,9 @@ export function createOrchestrationDocumentView(
     element.title = status.conflict
       ? translate('orch.save.conflict')
       : detail || translate('orch.doc.statusTip');
-    const save = doc.getElementById('orchSaveBtn') as HTMLButtonElement | null;
-    if (save) {
+    for (const id of ['orchSaveBtn', 'orchSaveUseBtn']) {
+      const save = doc.getElementById(id) as HTMLButtonElement | null;
+      if (!save) continue;
       save.disabled = Boolean(state.saveBusy)
         || state.validation === 'checking';
       save.setAttribute('aria-busy', state.saveBusy ? 'true' : 'false');

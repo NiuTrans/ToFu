@@ -49,10 +49,16 @@ def _route():
 async def _call(monkeypatch, *, live, engine_result, body=None):
     """Drive the real compact_conversation view with collaborators stubbed."""
     mod = _route()
-    monkeypatch.setattr(mod, '_conv_has_live_task', lambda cid: live)
+    monkeypatch.setattr(
+        mod, '_conv_has_live_task', lambda cid, *, user_id: live)
 
-    def _fake_engine(conv_id, *, config=None, task=None, keep_recent_turns=None):
-        _fake_engine.seen = {'conv_id': conv_id, 'keep': keep_recent_turns}
+    def _fake_engine(
+            conv_id, *, user_id, config=None, task=None,
+            keep_recent_turns=None):
+        _fake_engine.seen = {
+            'conv_id': conv_id, 'user_id': user_id,
+            'keep': keep_recent_turns,
+        }
         return engine_result
     _fake_engine.seen = None
     monkeypatch.setattr(mod,
@@ -68,6 +74,9 @@ async def _call(monkeypatch, *, live, engine_result, body=None):
     async with app.test_request_context(
             '/api/v1/conversations/c1/compact', method='POST',
             data=data, headers={'Content-Type': 'application/json'}):
+        from quart import g
+        from lib.api_keys import local_admin_context
+        g.auth_ctx = local_admin_context()
         result = await mod.compact_conversation('c1')
     return (await _resolve(result)), _fake_engine.seen
 
@@ -117,6 +126,7 @@ def test_route_error_code_status_mapping(monkeypatch):
         'nothing_to_compact': 422,
         'stale':              409,
         'summary_failed':     503,
+        'turn_protocol_unsupported': 409,
         'some_unknown_error': 500,
     }
 

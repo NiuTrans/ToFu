@@ -8,16 +8,15 @@ is not "the user sees them" — the frontend must, on entering a folder, FETCH
 those members and INCREMENTALLY merge them into the in-memory ``conversations``
 array so the folder view renders them.
 
-This test drives the REAL shipped ``mergeServerConvShells`` (core/conversations.js)
+This test drives the REAL shipped ``mergeConversationCatalogRows``
 and ``setActiveFolderId`` / ``loadFolderMembers`` (core/folders.js) under node,
 with an in-memory ``conversations`` array that models the top-500 window and
 DELIBERATELY does NOT contain the folder's members. It asserts:
 
   1. entering the folder issued the ``?folderId=`` query;
-  2. members were merged in as shells that PASS the sidebar visibility gate
-     (``messages.length>0 || _serverMsgCount>0 || _needsLoad``);
-  3. an already-present, LIVE conv (streaming / loaded messages) had its
-     ``messages`` / ``_serverRev`` / ``activeTaskId`` / ``_needsLoad`` LEFT
+  2. members were merged in as metadata-only shells that pass the sidebar gate;
+  3. an already-present, LIVE conversation had its
+     ``_serverRev`` / ``activeTaskId`` / ``_turnSnapshotRequired`` / local sentinel LEFT
      UNTOUCHED (incremental upsert, never clobber);
   4. the auto-migrated "⭐ 置顶" star folder behaves identically.
 
@@ -56,16 +55,15 @@ global.window = global;
 
 // ── Seed: an in-memory sidebar window (top-500 model) that does NOT contain
 //    the folder's members. It DOES contain one LIVE conv already in the folder
-//    (streaming, messages loaded) so we can prove the merge never clobbers it.
+//    (streaming) so we can prove the merge never clobbers it.
 global.conversations = [
   // A decoy top-window conv (unfoldered).
-  { id: 'decoy-1', title: 'decoy', messages: [], _serverMsgCount: 3,
-    _needsLoad: true, folderId: null, updatedAt: 9000 },
-  // A LIVE member already present: streaming, messages loaded, has a rev + task.
+  { id: 'decoy-1', title: 'decoy', _serverTurnCount: 3,
+    _turnSnapshotRequired: true, folderId: null, updatedAt: 9000 },
+  // A LIVE member already present: has a rev, task, and local-only sentinel.
   { id: 'fmem-live', title: 'live member (local)', folderId: 'FLD',
-    messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'yo' }],
-    _serverMsgCount: 2, _serverRev: 7, activeTaskId: 'task-xyz', _needsLoad: false,
-    updatedAt: 9500 },
+    _serverTurnCount: 2, _serverRev: 7, activeTaskId: 'task-xyz', _turnSnapshotRequired: false,
+    localSentinel: 'keep-me', updatedAt: 9500 },
 ];
 global.activeConvId = null;
 global.activeStreams = new Map();
@@ -86,9 +84,9 @@ global.Api = {
       folderQueryArgs = folderId;
       if (folderId === 'FLD') {
         return {
-          conversations: [
+          items: [
             // Two OLD members past the window — NOT in memory. Sidebar meta
-            // shape uses messageCount; include it so _serverConvCount reads it.
+            // shape uses messageCount; the shared catalog normalizer reads it.
             { id: 'fmem-old-1', title: 'old member 1', messageCount: 5,
               createdAt: 100, updatedAt: 200, settings: { folderId: 'FLD' } },
             { id: 'fmem-old-2', title: 'old member 2', messageCount: 2,
@@ -103,29 +101,25 @@ global.Api = {
       }
       if (folderId === 'STAR') {
         return {
-          conversations: [
+          items: [
             { id: 'star-old-1', title: 'star member 1', messageCount: 4,
               createdAt: 130, updatedAt: 230, settings: { folderId: 'STAR' } },
           ],
           hasMore: false, totalCount: 1,
         };
       }
-      return { conversations: [], hasMore: false, totalCount: 0 };
+      return { items: [], hasMore: false, totalCount: 0 };
     },
   },
 };
 
-// Load the REAL merge helper — post slice-7 it lives in the leaf
-// core/conv_merge_shells.js (`_serverConvCount` + `mergeServerConvShells`
-// extracted contiguously from conversations.js). Surgical extract keeps the
-// harness independent of the rest of the leaf's future companions.
+// Load the real metadata-only catalog merge helper.
 const convSrc = fs.readFileSync(process.argv[2], 'utf8');
-// _serverConvCount + mergeServerConvShells are contiguous; grab from the first
-// to the end of the second.
-const scStart = convSrc.indexOf('function _serverConvCount(');
-const mergeStart = convSrc.indexOf('function mergeServerConvShells(');
+// The shell schema, revision merge, and public merge are contiguous.
+const scStart = convSrc.indexOf('function _catalogRevision(');
+const mergeStart = convSrc.indexOf('function mergeConversationCatalogRows(');
 if (scStart < 0 || mergeStart < 0) { console.log('FAIL extract merge helper not found'); process.exit(0); }
-// End of mergeServerConvShells: find its closing brace by scanning braces.
+// End of mergeConversationCatalogRows: find its closing brace by scanning braces.
 let i = convSrc.indexOf('{', mergeStart), depth = 0, end = -1;
 for (; i < convSrc.length; i++) {
   if (convSrc[i] === '{') depth++;
@@ -141,7 +135,7 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 (async () => {
   check('fn_setActiveFolderId', typeof setActiveFolderId === 'function');
-  check('fn_mergeServerConvShells', typeof mergeServerConvShells === 'function');
+  check('fn_mergeConversationCatalogRows', typeof mergeConversationCatalogRows === 'function');
 
   // Enter the folder.
   setActiveFolderId('FLD');
@@ -152,23 +146,24 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
   const byId = (id) => conversations.find(c => c.id === id);
 
-  // (2) Old members merged in as visibility-gate-passing shells.
-  const gate = (c) => !!c && (c.messages.length > 0 || (c._serverMsgCount || 0) > 0 || c._needsLoad);
+  // (2) Old members merged in as metadata-only visibility shells.
+  const gate = (c) => !!c && ((c._serverTurnCount || 0) > 0 || c._turnSnapshotRequired);
   const old1 = byId('fmem-old-1'), old2 = byId('fmem-old-2');
   check('old_member_1_merged', !!old1);
   check('old_member_2_merged', !!old2);
   check('old_member_1_passes_visibility_gate', gate(old1));
   check('old_member_2_passes_visibility_gate', gate(old2));
-  check('old_member_1_shell_needsLoad', old1 && old1._needsLoad === true);
-  check('old_member_1_shell_serverMsgCount', old1 && old1._serverMsgCount === 5);
+  check('old_member_1_shell_turnSnapshotRequired', old1 && old1._turnSnapshotRequired === true);
+  check('old_member_1_shell_serverTurnCount', old1 && old1._serverTurnCount === 5);
   check('old_member_1_folderId_adopted', old1 && old1.folderId === 'FLD');
+  check('old_member_1_has_no_messages', old1 && !Object.prototype.hasOwnProperty.call(old1, 'messages'));
 
-  // (3) The LIVE member's heavy/live fields were NOT clobbered.
+  // (3) The LIVE member's lifecycle fields were NOT clobbered.
   const live = byId('fmem-live');
-  check('live_member_messages_untouched', live && live.messages.length === 2);
+  check('live_member_sentinel_untouched', live && live.localSentinel === 'keep-me');
   check('live_member_serverRev_untouched', live && live._serverRev === 7);
   check('live_member_activeTaskId_untouched', live && live.activeTaskId === 'task-xyz');
-  check('live_member_needsLoad_untouched', live && live._needsLoad === false);
+  check('live_member_turnSnapshotRequired_untouched', live && live._turnSnapshotRequired === false);
 
   // Only ONE copy of each id (no duplicate shell created for the live member).
   const liveCount = conversations.filter(c => c.id === 'fmem-live').length;
@@ -207,7 +202,7 @@ def _run(conv_js: str, folders_js: str):
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_folder_members_load_and_merge():
-    conv_js = os.path.join(JS_DIR, 'core', 'conv_merge_shells.js')
+    conv_js = os.path.join(JS_DIR, 'core', 'conversation_catalog.js')
     folders_js = os.path.join(JS_DIR, 'core', 'folders.js')
     proc = _run(conv_js, folders_js)
     output = proc.stdout.strip()
@@ -217,7 +212,7 @@ def test_folder_members_load_and_merge():
     # Sanity: the key assertions actually ran.
     for must in ('PASS folder_query_issued',
                  'PASS old_member_1_passes_visibility_gate',
-                 'PASS live_member_messages_untouched',
+                 'PASS live_member_sentinel_untouched',
                  'PASS live_member_serverRev_untouched',
                  'PASS all_three_members_visible',
                  'PASS star_member_merged'):
@@ -229,7 +224,7 @@ def test_NC_without_member_fetch_members_stay_invisible(tmp_path):
     """NEUTER: strip the loadFolderMembers fetch call from setActiveFolderId in a
     COPY of folders.js and prove the folder's older members are then NEVER
     merged — i.e. the fetch is load-bearing and the test discriminates it."""
-    conv_js = os.path.join(JS_DIR, 'core', 'conv_merge_shells.js')
+    conv_js = os.path.join(JS_DIR, 'core', 'conversation_catalog.js')
     folders_js = os.path.join(JS_DIR, 'core', 'folders.js')
     with open(folders_js, encoding='utf-8') as f:
         src = f.read()

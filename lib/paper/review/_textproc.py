@@ -347,25 +347,11 @@ def finalize_review_body(text: str, ui_lang: str) -> str:
 
         masked = _PROTECT_RE.sub(_mask, target)
 
-        # Peel off the scorecard BEFORE table-strip so a pipe-formatted
-        # scorecard is relocated, not deleted.
-        #
-        # Resolve the two cleanup helpers through the facade package
-        # (``lib.paper.review``) rather than the bare module globals, so a
-        # caller (or test) that monkeypatches ``lib.paper.review._strip_md_tables``
-        # still overrides the step exactly as it did when everything lived in
-        # the single ``review.py`` module. Fall back to the local defs.
-        try:
-            import lib.paper.review as _facade
-            _strip = getattr(_facade, '_strip_md_tables', _strip_md_tables)
-            _collapse = getattr(_facade, '_collapse_dangling_emphasis',
-                                _collapse_dangling_emphasis)
-        except Exception as e:
-            logger.debug('[Paper:Review] facade resolve failed, using local defs: %s', e)
-            _strip, _collapse = _strip_md_tables, _collapse_dangling_emphasis
+        # Peel off the scorecard before table stripping so a pipe-formatted
+        # scorecard is relocated rather than deleted.
         body, scorecard = _split_scorecard(masked)
-        body = _strip(body)
-        body = _collapse(body)
+        body = _strip_md_tables(body)
+        body = _collapse_dangling_emphasis(body)
 
         def _unmask(s):
             return _re.sub(r'\x00(\d+)\x00', lambda m: protected[int(m.group(1))], s)
@@ -538,15 +524,7 @@ def finalize_rebuttal_body(text: str, ui_lang: str) -> str:
             return f'\x00{len(protected) - 1}\x00'
 
         masked = _PROTECT_RE.sub(_mask, reply)
-        try:
-            import lib.paper.review as _facade
-            _strip = getattr(_facade, '_strip_md_tables', _strip_md_tables)
-            _collapse = getattr(_facade, '_collapse_dangling_emphasis',
-                                _collapse_dangling_emphasis)
-        except Exception as e:
-            logger.debug('[Paper:Review] facade resolve failed, using local defs: %s', e)
-            _strip, _collapse = _strip_md_tables, _collapse_dangling_emphasis
-        cleaned = _collapse(_strip(masked))
+        cleaned = _collapse_dangling_emphasis(_strip_md_tables(masked))
 
         def _unmask(s):
             return _re.sub(r'\x00(\d+)\x00', lambda m: protected[int(m.group(1))], s)
@@ -559,4 +537,3 @@ def finalize_rebuttal_body(text: str, ui_lang: str) -> str:
         logger.warning('[Paper:Review] finalize_rebuttal_body failed (returning original): %s',
                        e, exc_info=True)
         return text
-

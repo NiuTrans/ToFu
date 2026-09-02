@@ -7,11 +7,12 @@ conversation) and its formatting helpers (``_extract_text``,
 
 import json
 
-from lib.conv_ref._query import DEFAULT_USER_ID, _get_db
+from lib.identity import require_user_id
 from lib.log import get_logger
 from lib.utils import safe_json
 
 logger = get_logger(__name__)
+
 
 # Cap on the total rendered output so a huge conversation can't flood the
 # model's context window. Applies to both the prose transcript and the raw dump.
@@ -23,55 +24,6 @@ MAX_CHARS = 80000
 #: read still ends on a whole message instead of mid-token.
 TRANSCRIPT_HEAD = 3
 TRANSCRIPT_TAIL = 60
-
-
-def row_window_usable(db, conversation_id, blob_count):
-    """Whether the ``conversation_messages`` row store can serve this conv.
-
-    Guard for the row-store read cutover recorded in the project charter. The
-    charter calls the cutover a "pure swap" of :func:`_select_message_window`
-    for ``lib.database.messages_rows.load_message_window`` — true on the same
-    data, but NOT true across the whole table:
-
-    the row store's backfill is incomplete (measured 2026-07-26: 3,696 of
-    4,160 convs). For the remainder it answers ``totalCount=0``, which is
-    indistinguishable from "this conversation is empty" — so a naive swap
-    would silently render a 6-message conversation as empty and look correct
-    doing it. A PARTIAL backfill is worse still: the window looks plausible
-    while quietly dropping the oldest history.
-
-    ``routes/conversations.py`` already keeps a migration-flag-independent
-    blob tail-slice for exactly this reason. This helper gives conv_ref the
-    same posture — comparing the row count against the authoritative blob's
-    and refusing the row store unless it is at least as complete.
-
-    Fails CLOSED toward the blob: any error returns False, because the blob is
-    always complete and always authoritative.
-
-    Args:
-        db: DB wrapper.
-        conversation_id: conv to check.
-        blob_count: number of messages in the authoritative ``messages`` array.
-
-    Returns:
-        True iff the row store holds exactly ``blob_count`` rows.  Extra rows
-        are stale tail data after a failed truncation mirror and are just as
-        unsafe as missing rows.
-    """
-    try:
-        from lib.database.messages_rows import mirror_is_current
-        ok = mirror_is_current(
-            db, conversation_id, expected_count=int(blob_count or 0))
-    except Exception as e:
-        logger.debug('[conv_ref] row-store marker probe failed conv=%s: %s '
-                     '— falling back to the authoritative blob',
-                     (conversation_id or '')[:12], e)
-        return False
-    if not ok:
-        logger.debug('[conv_ref] row store is incomplete, stale, or not '
-                     'revision-marked for conv=%s — using the blob',
-                     (conversation_id or '')[:12])
-    return ok
 
 
 def _select_message_window(messages, head, tail, before=None):
@@ -179,24 +131,21 @@ def _msg_fallback_text(msg):
 
 
 def _coerce_json(value, default, label=''):
-    """Parse a JSON column value regardless of DB backend.
-
-    On SQLite the ``messages`` / ``settings`` columns come back as TEXT, and on
-    PostgreSQL the JSONB columns are stringified by the driver's
-    ``_jsonb_as_string`` type-caster (``lib/database/_core.py``) — so both
-    normally arrive as ``str`` and go through :func:`safe_json`. This helper
-    additionally tolerates a driver returning an already-decoded ``dict`` /
-    ``list`` (the fallback path), mirroring the defensive pattern in
-    ``lib/conversations/project_peer.py``.
-    """
+    """Accept semantic-protocol JSON values and reject malformed fallbacks."""
     if isinstance(value, (dict, list)):
         return value
     return safe_json(value, default=default, label=label)
 
 
-def get_conversation(conversation_id, include_tool_details=True,
-                     current_conv_id=None, raw=False, user_id=None,
-                     limit=None, before=None):
+def _read_conversation_snapshot(conversation_id, *, user_id):
+    """Dependency seam for the owner-scoped conversation authority."""
+    from lib.conversations.repository import get_conversation
+    return get_conversation(conversation_id, user_id=user_id)
+
+
+def get_conversation(conversation_id, *, user_id,
+                     include_tool_details=True, current_conv_id=None,
+                     raw=False, limit=None, before=None):
     """Retrieve and format the content of a conversation.
 
     Selection is MESSAGE-level (head + tail), not a character cut: a long
@@ -212,8 +161,8 @@ def get_conversation(conversation_id, include_tool_details=True,
         raw: when True, return the DB record as structured JSON for debugging.
             The record is WINDOWED before serialization (never cut mid-token),
             so the dump always parses.
-        user_id: the OWNING principal. ``None`` falls back to
-            :data:`DEFAULT_USER_ID` (single-user install behaves identically).
+        user_id: the owning principal; it is required and validated before the
+            repository is read.
         limit: how many recent messages to render (default
             :data:`TRANSCRIPT_TAIL`).
         before: cursor — render the window ENDING just before this 1-based
@@ -225,47 +174,22 @@ def get_conversation(conversation_id, include_tool_details=True,
     if current_conv_id and conversation_id == current_conv_id:
         return "Error: Cannot reference the current conversation — you are already in it. Use list_conversations to find other conversations."
 
-    db = _get_db()
-    owner_id = DEFAULT_USER_ID if user_id is None else user_id
-
-    def _blob_row():
-        from lib.database.conversation_repository import load_conversation
-        return load_conversation(
-            db, conversation_id, user_id=owner_id,
-            metadata_columns=(
-                'title', 'created_at', 'updated_at', 'settings'))
-
-    row = None
-    row_backed = False
-    if not raw:
-        try:
-            from lib.database.messages_rows import rows_read_enabled
-            if rows_read_enabled():
-                candidate = db.execute(
-                    'SELECT id, user_id, title, created_at, updated_at, '
-                    'settings, msg_count, rev FROM conversations '
-                    'WHERE id=? AND user_id=?',
-                    (conversation_id, owner_id),
-                ).fetchone()
-                if candidate and row_window_usable(
-                        db, conversation_id,
-                        int(candidate['msg_count'] or 0)):
-                    row = candidate
-                    row_backed = True
-        except Exception as e:
-            logger.debug('[conv_ref] metadata-only row gate failed conv=%s: %s',
-                         (conversation_id or '')[:12], e)
+    owner_id = require_user_id(user_id, context='get conversation reference')
+    try:
+        row = _read_conversation_snapshot(
+            conversation_id, user_id=int(owner_id))
+    except Exception as exc:
+        logger.debug('[conv_ref] conversation read failed conv=%s: %s',
+                     (conversation_id or '')[:12], exc)
+        row = None
     if row is None:
-        row = _blob_row()
-
-    if not row:
         return f"Error: Conversation '{conversation_id}' not found. Use list_conversations to find valid conversation IDs."
 
     if raw:
         return _render_raw_conversation(row, conversation_id,
                                         limit=limit, before=before)
 
-    # ★ Layer 2 trigger: PAUSED. The sidebar conversation-summary feature is
+    # Layer 2 trigger: PAUSED. The sidebar conversation-summary feature is
     #   unstable (render location + timing issues), so we no longer REQUEST
     #   generation here. The engine (lib/conversations/project_summary) is left
     #   intact for a later revival; the post-reply trigger in
@@ -277,36 +201,12 @@ def get_conversation(conversation_id, include_tool_details=True,
     settings = _coerce_json(row['settings'], default={},
                             label='conv-ref-settings')
 
-    kept = None
-    if row_backed:
-        try:
-            from lib.database.messages_rows import load_message_selection
-            selected = load_message_selection(
-                db, conversation_id, TRANSCRIPT_HEAD, _tail,
-                before_seq=_before, known_total=int(row['msg_count'] or 0))
-            kept = selected['kept']
-            omitted = selected['omitted']
-            total = selected['totalCount']
-        except Exception as e:
-            logger.debug('[conv_ref] row selection failed conv=%s: %s — '
-                         'falling back to the authoritative blob',
-                         (conversation_id or '')[:12], e)
-            row = _blob_row()
-            row_backed = False
-            if row is None:
-                return (f"Error: Conversation '{conversation_id}' not found. "
-                        'Use list_conversations to find valid conversation IDs.')
-
-    if not row_backed:
-        messages = row.messages
-        if not messages:
-            return (f"Conversation '{title}' [{conversation_id}] exists but "
-                    'has no messages.')
-        kept, omitted, total = _select_message_window(
-            messages, TRANSCRIPT_HEAD, _tail, before=_before)
-    elif not kept:
+    messages = row['messages']
+    if not messages:
         return (f"Conversation '{title}' [{conversation_id}] exists but "
                 'has no messages.')
+    kept, omitted, total = _select_message_window(
+        messages, TRANSCRIPT_HEAD, _tail, before=_before)
 
     # Build formatted output
     parts = []
@@ -405,9 +305,9 @@ def get_conversation(conversation_id, include_tool_details=True,
     return result
 
 
-def build_conversation_digest(conversation_id, current_conv_id=None,
-                              head=DIGEST_HEAD, tail=DIGEST_TAIL, raw=False,
-                              user_id=None):
+def build_conversation_digest(conversation_id, *, user_id,
+                              current_conv_id=None, head=DIGEST_HEAD,
+                              tail=DIGEST_TAIL, raw=False):
     """Build a STRUCTURED digest of a conversation for the human-view card.
 
     This is the display sibling of :func:`get_conversation` (which returns the
@@ -435,26 +335,29 @@ def build_conversation_digest(conversation_id, current_conv_id=None,
         tail: most-recent messages kept.
         raw: when True, mark the digest ``raw: true`` + carry the row-level
             ``rev``, and attach per-message low-level metadata
-            (``model`` / ``usage`` / ``finishReason`` / ``msgId``) so the human
+            (``model`` / ``usage`` / ``finishReason`` / ``turnId``) so the human
             card visibly reflects the debug read. Non-raw omits all of these.
 
     Returns:
         A dict ``{convId, title, preset, msgCount, createdAt, updatedAt,
         messages: [...], truncated, omitted}`` or ``None`` when the
-        conversation can't be read (self-ref / missing / empty) so the caller
-        falls back to the prose dump. Each message row is either a content row
-        (``role``/``text``/``full``/``ts``/``tools``/…) or an omission marker
-        (``{omitted: X}``).
+        conversation can't be read (self-ref / missing / corrupt) so the
+        caller falls back to the prose dump. An existing-but-EMPTY
+        conversation still returns a digest (``messages: []``,
+        ``msgCount: 0``) — the frontend has a designed empty state for it,
+        and withholding the digest here used to dump the raw ``═══`` header +
+        JSON skeleton into the transcript as Markdown. Each message row is
+        either a content row (``role``/``text``/``full``/``ts``/``tools``/…)
+        or an omission marker (``{omitted: X}``).
     """
     if current_conv_id and conversation_id == current_conv_id:
         return None
+    owner_id = require_user_id(user_id, context='build conversation digest')
     try:
-        db = _get_db()
-        from lib.database.conversation_repository import load_conversation
-        row = load_conversation(
-            db, conversation_id,
-            user_id=DEFAULT_USER_ID if user_id is None else user_id,
-            metadata_columns=('title', 'settings', 'created_at', 'updated_at'))
+        row = _read_conversation_snapshot(
+            conversation_id,
+            user_id=owner_id,
+        )
     except Exception as e:
         logger.debug('[conv_ref] digest DB read failed for %s: %s',
                      conversation_id, e)
@@ -462,8 +365,11 @@ def build_conversation_digest(conversation_id, current_conv_id=None,
     if not row:
         return None
 
-    messages = row.messages
-    if not isinstance(messages, list) or not messages:
+    messages = row['messages']
+    # Only a CORRUPT row (non-list messages) forfeits the card. An empty list
+    # is a valid digest: the selection logic below degenerates cleanly to
+    # messages: [] and the frontend renders its designed empty state.
+    if not isinstance(messages, list):
         return None
     settings = _coerce_json(row['settings'], default={}, label='conv-digest-settings')
 
@@ -566,11 +472,15 @@ def build_conversation_digest(conversation_id, current_conv_id=None,
             if isinstance(mdl, str) and mdl.strip():
                 entry['model'] = mdl.strip()
             fr = msg.get('finishReason')
+            if not isinstance(fr, str) or not fr.strip():
+                settlement = msg.get('_turnSettlement')
+                if isinstance(settlement, dict):
+                    fr = settlement.get('providerFinishReason')
             if isinstance(fr, str) and fr.strip():
                 entry['finishReason'] = fr.strip()
-            mid = msg.get('_msgId')
-            if isinstance(mid, str) and mid.strip():
-                entry['msgId'] = mid.strip()
+            turn_id = msg.get('_turnId')
+            if isinstance(turn_id, str) and turn_id.strip():
+                entry['turnId'] = turn_id.strip()
             usage = msg.get('usage')
             if isinstance(usage, dict):
                 inp = usage.get('input_tokens')
@@ -666,7 +576,7 @@ def _render_raw_conversation(row, conversation_id, limit=None, before=None):
     """Render the DB record of a conversation as a structured JSON dump.
 
     Used for debugging: preserves every field of every RENDERED message
-    (``_msgId``, ``timestamp``, ``finishReason``, ``usage``, ``model``,
+    (``_turnId``, ``timestamp``, ``finishReason``, ``usage``, ``model``,
     ``modifiedFileList``, the complete ``toolRounds``, …) plus the row-level
     metadata columns and the raw ``settings``.
 
@@ -691,6 +601,20 @@ def _render_raw_conversation(row, conversation_id, limit=None, before=None):
 
     all_msgs = messages if isinstance(messages, list) else []
     total = len(all_msgs)
+
+    if total == 0:
+        # An empty record's JSON skeleton carries NO information beyond "this
+        # conversation exists and has no messages" — answer in one line
+        # instead of the ═══ header + fenced dump. The caller learns every
+        # fact worth having (title, id, msg_count, rev) and nothing needs
+        # paging. This is also the string the frontend falls back to when no
+        # digest card is attached, so it must stay short and bar-free.
+        title = row['title'] or '(untitled)'
+        return (f"Conversation \"{title}\" [{conversation_id}] exists but "
+                f"has no messages (msg_count column: {row['msg_count']}, "
+                f"rev: {row['rev']}). The record is empty — nothing to "
+                f"page or dump.")
+
     _before = None if before is None else max(0, min(int(before) - 1, total))
     end = total if _before is None else _before
 

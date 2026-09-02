@@ -1,6 +1,6 @@
 """lib/slides/export_pptx.py — PPTD → PPTX native writer (python-pptx).
 
-The deliverable path (docs/SLIDES_CAPABILITY_DESIGN.md §4.4): every element
+The deliverable path (docs/modules/ingest_media.md §4.4): every element
 becomes REAL OOXML — text boxes keep their runs, shapes stay shapes, tables
 stay tables — so the deck opens editable in PowerPoint / WPS. What v1
 deliberately rasterises: icons (SVG glyph → transparent PNG via headless
@@ -1264,7 +1264,7 @@ def _font_file_for_embedding(font_id: str, weight: int) -> tuple:
     (PowerPoint rejects CFF fntdata on several versions — a skip is honest,
     a corrupted file is not).
     """
-    from lib.design_sys import fonts as _fonts
+    import lib.design_sys.fonts as _fonts
     path = _fonts.ensure_font(font_id, weight)
     if not path:
         return b'', False, False
@@ -1362,7 +1362,7 @@ def _embed_fonts(pptx_path: str, deck: Deck) -> dict:
     after ``<p:notesSz>`` (CT_Presentation child order — PowerPoint ignores
     a misplaced list the same way it ignores a misplaced transition).
     """
-    from lib.design_sys import fonts as _fonts
+    import lib.design_sys.fonts as _fonts
     usage = _collect_font_usage(deck)
     by_family = {}
     for face in _fonts.FONT_REGISTRY:

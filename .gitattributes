@@ -27,6 +27,12 @@
 *.toml   text eol=lf
 *.sh     text eol=lf
 
+# Delivery artifact composed from frontend/src/runtime/sections/manifest.json.
+# Review and edit the named source section, never the 5 MiB concatenation.
+frontend/src/runtime/app-runtime.js linguist-generated=true
+static/styles.css linguist-generated=true
+static/settings.css linguist-generated=true
+
 # Shell scripts must stay LF even on Windows or they break under bash.
 install.sh text eol=lf
 

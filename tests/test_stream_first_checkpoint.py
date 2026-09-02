@@ -33,6 +33,7 @@ def _make_task():
         'toolRounds': [],
         'aborted': False,
         'status': 'running',
+        '_userId': 1,
         'created_at': time.time(),
         'content_lock': threading.Lock(),
         'events': [],
@@ -52,9 +53,8 @@ def test_first_delta_checkpoints_immediately(monkeypatch):
     #   only the facade's re-export, NOT ``_stream``'s binding, so the stub
     #   never installs (the pre-split monolith made these patchable on the
     #   facade; the split moved the true binding site). Patch ``_stream``.
-    #   ``dispatch_stream`` is the exception: ``_stream`` deliberately resolves
-    #   it THROUGH the facade at call time (getattr(_mgr_facade, ...)), so it
-    #   stays patched on the facade — mirroring the pre-split contract.
+    #   ``dispatch_stream`` is also owned by ``_stream`` as an imported
+    #   dependency, so patch the same concrete binding.
     monkeypatch.setattr(st, 'checkpoint_task_partial', lambda task: calls.append(time.time()))
     # Don't actually persist events to DB during the test.
     monkeypatch.setattr(st, 'append_event', lambda task, ev: task['events'].append(ev))
@@ -66,7 +66,7 @@ def test_first_delta_checkpoints_immediately(monkeypatch):
         # dispatch_stream returns (message_dict, finish_reason, usage).
         return {'content': 'hello world', 'tool_calls': []}, 'stop', {'completion_tokens': 2}
 
-    monkeypatch.setattr(m, 'dispatch_stream', _fake_dispatch_stream)
+    monkeypatch.setattr(st, 'dispatch_stream', _fake_dispatch_stream)
 
     task = _make_task()
     msg, finish, usage = m.stream_llm_response(task, {'model': 'test-model'})
@@ -86,7 +86,7 @@ def test_checkpoint_throttled_after_first(monkeypatch):
 
     calls = []
     # See test_first_delta_checkpoints_immediately for why these patch _stream
-    # (real binding site) while dispatch_stream stays on the facade.
+    # (real binding site), including its dispatcher dependency.
     monkeypatch.setattr(st, 'checkpoint_task_partial', lambda task: calls.append(time.time()))
     monkeypatch.setattr(st, 'append_event', lambda task, ev: task['events'].append(ev))
 
@@ -95,7 +95,7 @@ def test_checkpoint_throttled_after_first(monkeypatch):
             on_content('x')   # 10 rapid deltas, all within the same <5s window
         return {'content': 'x' * 10, 'tool_calls': []}, 'stop', {}
 
-    monkeypatch.setattr(m, 'dispatch_stream', _fake_dispatch_stream)
+    monkeypatch.setattr(st, 'dispatch_stream', _fake_dispatch_stream)
 
     task = _make_task()
     m.stream_llm_response(task, {'model': 'test-model'})

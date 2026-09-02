@@ -82,11 +82,24 @@
             <div class="oauth-provider-info" id="oauthCodexInfo" style="display:none">
               <span class="oauth-email" id="oauthCodexEmail"></span>
             </div>
-            <div class="oauth-quota" id="oauthCodexQuota" style="display:none"></div>
+            <div class="oauth-quota" id="oauthCodexQuota" aria-live="polite" style="display:none"></div>
+            <div class="oauth-reset-offer" id="oauthCodexResetOffer" aria-live="polite" style="display:none"></div>
             <div class="oauth-egress-line" id="oauthCodexEgress" style="display:none"></div>
             <div class="oauth-provider-actions">
               <button class="btn-small btn-primary" id="oauthCodexLoginBtn" data-tofu-action="_oauthLogin('codex')" data-i18n="settings.loginChatGPT">连接 ChatGPT</button>
+              <button class="btn-small" id="oauthCodexDeviceBtn" data-tofu-action="_oauthDeviceLogin('codex')" data-i18n="settings.oauthDeviceLogin">设备码登录</button>
               <button class="btn-small btn-danger" id="oauthCodexLogoutBtn" data-tofu-action="_oauthLogout('codex')" style="display:none" data-i18n="settings.oauthDisconnect">断开连接</button>
+            </div>
+            <div class="oauth-manual-fallback" id="oauthCodexDevice" style="display:none">
+              <p class="oauth-manual-hint" data-i18n="settings.oauthDeviceHint">远程服务器推荐：在任意设备（含手机）的浏览器打开授权页，输入下面的码完成连接，15 分钟内有效：</p>
+              <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+                <code id="oauthCodexDeviceCode" style="font-size:20px;letter-spacing:2px;font-weight:600;padding:6px 14px;border-radius:6px;background:var(--code-bg,#1a1a2e);border:1px solid var(--border-color,#333)"></code>
+                <button class="btn-small" data-tofu-action="_oauthCopyDeviceCode(this)" data-i18n="settings.oauthCopyCode">复制</button>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <a href="https://auth.openai.com/codex/device" id="oauthCodexDeviceLink" target="_blank" rel="noopener" class="btn-small btn-primary" style="text-decoration:none" data-i18n="settings.oauthDeviceOpenPage">打开授权页</a>
+                <span class="oauth-manual-hint" data-i18n="settings.oauthDeviceWaiting">等待授权中，完成后会自动连接…</span>
+              </div>
             </div>
             <div class="oauth-manual-fallback" id="oauthCodexManual" style="display:none">
               <p class="oauth-manual-hint" data-i18n="settings.oauthManualAction">需要你继续操作：打开下面的官方授权页。</p>
@@ -94,9 +107,9 @@
                 <input type="text" class="oauth-manual-input" id="oauthCodexAuthUrl" readonly style="color:#888;font-size:12px">
                 <button class="btn-small" data-tofu-action="_oauthCopyAuthLink(this,'codex')" style="white-space:nowrap" data-i18n="settings.oauthCopyLink">复制链接</button>
               </div>
-              <p class="oauth-manual-hint" data-i18n="settings.oauthCodexCbHint">完成官方授权后，将浏览器显示的授权结果粘贴到下方：</p>
+              <p class="oauth-manual-hint" data-i18n="settings.oauthCodexCbHint">完成授权后，若浏览器停在 localhost:1455，请复制地址栏中的完整网址并粘贴到下方：</p>
               <div style="display:flex;gap:8px">
-                <input type="text" class="oauth-manual-input" id="oauthCodexManualUrl" placeholder="粘贴授权结果" data-i18n-placeholder="settings.oauthCodexPh">
+                <input type="text" class="oauth-manual-input" id="oauthCodexManualUrl" placeholder="粘贴完整的 localhost:1455 回调网址" data-i18n-placeholder="settings.oauthCodexPh">
                 <button class="btn-small btn-primary" data-tofu-action="_oauthManualSubmit('codex')" data-i18n="settings.oauthSubmit">继续</button>
               </div>
             </div>

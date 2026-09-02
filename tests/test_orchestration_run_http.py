@@ -138,7 +138,6 @@ def test_run_start_response_fields_are_shared_and_detached(monkeypatch):
         prepared, 'task-1', kind='ephemeral')
 
     assert fields == {
-        'task_id': 'task-1',
         'start': {
             'format': 'tofu.orchestration.runtime-start/v1',
             'kind': 'ephemeral',
@@ -156,8 +155,9 @@ def test_run_start_response_fields_are_shared_and_detached(monkeypatch):
 
     durable = run_http.run_start_response_fields(
         prepared, 'run-1', kind='durable')
-    assert durable['run_id'] == 'run-1'
-    assert 'task_id' not in durable
+    assert set(durable) == {
+        'start', 'definitionSource', 'inspection', 'warnings', 'contract',
+    }
     assert durable['start'] == {
         'format': 'tofu.orchestration.runtime-start/v1',
         'kind': 'durable',
@@ -184,6 +184,7 @@ def test_runtime_start_request_uses_one_service_and_projection_seam(monkeypatch)
         orchestration_id='flow-1',
     )
     starts = []
+    monkeypatch.setattr(start_http, 'request_user_id', lambda: 41)
 
     class RuntimeStarts:
         def start(self, kind, definition, **options):
@@ -239,11 +240,13 @@ def test_runtime_start_request_uses_one_service_and_projection_seam(monkeypatch)
     })
     assert starts == [
         ('ephemeral', prepared.definition, {
+            'owner_user_id': 41,
             'input_text': 'go',
             'orchestration_id': 'flow-1',
             'created_by': '',
         }),
         ('durable', prepared.definition, {
+            'owner_user_id': 41,
             'input_text': 'go',
             'orchestration_id': 'flow-1',
             'created_by': 'key-1',
@@ -294,8 +297,8 @@ def test_run_start_openapi_schema_uses_the_same_identity_contract():
         owned_run_start_response_schema
     assert 'def run_start_response_schema' not in open(
         run_openapi.__file__, encoding='utf-8').read()
-    assert 'task_id' in ephemeral['required']
-    assert 'run_id' in durable['required']
+    assert 'task_id' not in ephemeral['properties']
+    assert 'run_id' not in durable['properties']
     responses = run_openapi.run_start_responses('ephemeral')
     assert responses['200'] == {
         'description': 'Ephemeral orchestration run started',
@@ -312,9 +315,8 @@ def test_run_start_openapi_schema_uses_the_same_identity_contract():
         '$ref': '#/components/schemas/ErrorEnvelope',
     }
     assert durable_error['allOf'][0] == ephemeral_error
-    assert durable_error['allOf'][1]['properties']['run_id'] == {
-        'type': 'string', 'minLength': 1,
-    }
+    assert durable_error['allOf'][1]['properties']['start'] == \
+        runtime_start_identity_schema('durable')
     with pytest.raises(ValueError, match='unknown runtime start kind'):
         run_openapi.run_start_response_schema('future')
     with pytest.raises(ValueError, match='unknown runtime start kind'):

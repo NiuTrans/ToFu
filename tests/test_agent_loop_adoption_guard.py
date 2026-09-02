@@ -20,26 +20,21 @@ This suite is the RATCHET, in three parts:
    (b) DELEGATED: a ``while`` loop whose body hand-checks abort
        (``task['aborted']`` / ``task.get('aborted')`` / ``abort_check()``)
        AND obtains its LLM turn from a helper call (name containing
-       ``turn`` / ``dispatch`` / ``llm``) — the endpoint driver shape,
+       ``turn`` / ``dispatch`` / ``llm``) — the delegated driver shape,
        where the LLM call itself hides inside a helper and shape (a)
        is blind to it.
    Finding either in any tracked file outside the grandfathered set
    fails the build.
-2. Grandfather signatures — the REMAINING pre-decision private loops
-   (chat orchestrator, endpoint driver) are pinned by a file-specific
-   code token PLUS the absence of a ``run_agent_loop`` import. Migrating
-   one onto the chassis breaks its pin and turns this test red until the
-   entry is removed — the list only shrinks. (swarm was the first
-   grandfather to migrate out, 2026-07-27.)
+2. Detector self-test — synthetic direct and delegated loop shapes prove the
+   AST heuristic still fires without requiring a forbidden production loop to
+   remain in the repository as its own test fixture.
 3. Adoption ratchet — the number of files importing ``run_agent_loop`` must
-   never decrease (currently 9: paper report/qa/survey/insight/ideate/
-   recommend, scheduler timer, motion-video scene author, swarm agent).
+   never decrease (currently 12, including the migrated root orchestrator).
 
 NEUTER evidence (manual):
   * a probe file under lib/ containing ``while True: … dispatch_stream(…)``
     + ``msg['tool_calls']`` handling turns test 1 red naming the file:line;
-  * adding ``from lib.agent_loop import run_agent_loop`` to a grandfathered
-    file turns test 2 red (import detected) until the entry is removed.
+  * removing either synthetic detector shape turns test 2 red.
 """
 
 from __future__ import annotations
@@ -67,30 +62,10 @@ _LLM_CALL_NAMES = frozenset({
 # Tokens that count as "tool-call handling" inside the same loop body.
 _TOOL_TOKENS = ('tool_calls', 'execute_tool', 'tool_call_id')
 
-# Grandfathered private agent loops, each verified by audit (2026-07-27):
-#   * orchestrator/_run.py — run_task's naturally completing while loop;
-#     migration blocked on pt_03f4cdf1 (~30 cross-iteration locals).
-#   * endpoint/_run.py:220      — Planner→Worker→Critic driver while; its
-#     worker turn delegates to _run_single_turn (nested run_task), so the
-#     DIRECT heuristic cannot see it — the DELEGATED shape catches it, and
-#     this signature pins it too.
-# (REMOVED 2026-07-27: 'lib/swarm/agent.py' — migrated onto the chassis;
-# its abort_check callback shape rode AbortSignal.from_callback as
-# predicted. See tests/test_swarm_agent_loop_chassis.py.)
-# Each entry: relpath -> a code token that uniquely identifies the private
-# loop. When the loop migrates onto run_agent_loop, the token disappears /
-# the import appears and the pin goes red — remove the entry then.
-_GRANDFATHERED = {
-    'lib/tasks_pkg/orchestrator/_run.py':
-        'while not _prep_aborted:',
-    'lib/tasks_pkg/endpoint/_run.py':
-        '_run_single_turn(task,',
-}
-
-# Files allowed to trip the heuristic besides the grandfathered set: the
-# chassis itself and low-level LLM/dispatcher internals (their loops are
+# Files allowed to trip the heuristic: the chassis itself and low-level
+# LLM/dispatcher internals (their loops are
 # retry/stream plumbing, not agent loops).
-_HEURISTIC_EXEMPT = frozenset(_GRANDFATHERED) | frozenset({
+_HEURISTIC_EXEMPT = frozenset({
     'lib/agent_loop.py',
     'lib/llm/stream.py',
     'lib/llm/astream.py',
@@ -103,20 +78,21 @@ _HEURISTIC_EXEMPT = frozenset(_GRANDFATHERED) | frozenset({
 # Minimum number of tracked files that must import run_agent_loop. Only
 # grows — a removal means an adopter was reverted to a private loop (or the
 # file was deleted), both of which need a conscious test edit.
-_MIN_LOOP_IMPORTERS = 9
+_MIN_LOOP_IMPORTERS = 12
 
 
 def _py_files():
     """Tracked, present Python files under lib/ + routes/.
 
-    Enumerated via ``git ls-files`` (the repo index), NOT os.walk: walking
-    the tree stats every untracked artefact on this FUSE mount and takes
-    minutes, while the index answers in milliseconds and covers exactly the
-    files the ratchet must police (anything committable).
+    Enumerated via ``git ls-files`` (index + non-ignored untracked files), NOT
+    os.walk: walking the tree stats every artefact on this FUSE mount and takes
+    minutes. Including new files is important during a pre-commit migration:
+    otherwise the new adopter is invisible until somebody stages it.
     """
     import subprocess
     out = subprocess.check_output(
-        ['git', 'ls-files', 'lib/*.py', 'routes/*.py'],
+        ['git', 'ls-files', '--cached', '--others', '--exclude-standard',
+         'lib/*.py', 'routes/*.py'],
         cwd=ROOT, text=True)
     # ``git ls-files`` retains index entries for unstaged deletions.  Those
     # files are absent from the current executable tree and must not turn a
@@ -241,42 +217,33 @@ class TestPrivateAgentLoopRatchet(unittest.TestCase):
                 '(charter 2026-07-27); see docs/AGENT_CAPABILITY_GUIDE.md')
         self.assertEqual(violations, [], '\n'.join(violations))
 
-    def test_heuristic_actually_finds_a_loop(self):
-        """Guard against a silently empty scan (AST heuristic drift): the
-        endpoint DELEGATED loop MUST be detected."""
-        found = set(rel for rel, _ in _iter_agent_loops())
-        # NOTE: the orchestrator's while loop survived the deliberate slice
-        # refactors only as a SHELL — the LLM turn and tool handling moved
-        # into helpers, so the DIRECT heuristic can no longer see it (its
-        # grandfather pin in _GRANDFATHERED still guards the shell token).
-        # The endpoint driver loop is the only heuristic-detectable private
-        # loop left; losing it means the scan silently sees nothing.
-        self.assertIn(
-            'lib/tasks_pkg/endpoint/_run.py', found,
-            'endpoint driver loop no longer detected — the DELEGATED '
-            'heuristic (abort hand-check + turn-helper) may be broken '
-            '(or endpoint was migrated: then relax this pin deliberately)')
+    def test_heuristic_recognizes_direct_and_delegated_shapes(self):
+        """The detector stays live without preserving a production violation."""
+        direct = ast.parse('''
+def run():
+    while True:
+        message = dispatch_stream()
+        if message["tool_calls"]:
+            execute_tool(message)
+''')
+        delegated = ast.parse('''
+def run(task):
+    while not task.get("aborted"):
+        run_single_turn()
+''')
+        harmless = ast.parse('''
+def run(items):
+    while items:
+        items.pop()
+''')
 
-    def test_grandfathered_loops_still_pinned(self):
-        stale = []
-        for rel, token in _GRANDFATHERED.items():
-            path = os.path.join(ROOT, rel)
-            if not os.path.exists(path):
-                stale.append(f'{rel}: file gone — remove its entry')
-                continue
-            with open(path, encoding='utf-8') as f:
-                src = f.read()
-            if _imports_run_agent_loop(src):
-                stale.append(
-                    f'{rel}: now imports run_agent_loop — migration '
-                    'landed, REMOVE its _GRANDFATHERED entry (the list '
-                    'only shrinks)')
-            elif token not in src:
-                stale.append(
-                    f'{rel}: private-loop signature {token!r} gone but no '
-                    'run_agent_loop import — the loop changed shape; '
-                    're-audit and update or remove the pin deliberately')
-        self.assertEqual(stale, [], '\n'.join(stale))
+        for tree in (direct, delegated):
+            loop = next(node for node in ast.walk(tree)
+                        if isinstance(node, ast.While))
+            self.assertTrue(_while_is_agent_loop(loop))
+        harmless_loop = next(node for node in ast.walk(harmless)
+                             if isinstance(node, ast.While))
+        self.assertFalse(_while_is_agent_loop(harmless_loop))
 
     def test_loop_adoption_never_regresses(self):
         importers = _loop_importer_files()

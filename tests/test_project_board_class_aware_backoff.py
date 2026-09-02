@@ -22,44 +22,23 @@ import os
 
 import pytest
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.usefixtures('chat_sidecar')]
+pytest_plugins = ('tests._chat_sidecar',)
+
+TEST_OWNER_USER_ID = 1
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
-
-
-@pytest.fixture(autouse=True)
-def _clean(flask_app):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_tasks')
-        db.execute('DELETE FROM project_events')
-        db.execute('DELETE FROM message_queue')
-        db.commit()
-    yield
-
-
 @pytest.fixture(autouse=True)
 def _stub_push(monkeypatch):
     monkeypatch.setattr('lib.agent_core.push.push_event', lambda *a, **k: None)
 
 
 def _row(flask_app, project_path, task_id):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        r = db.execute(
-            'SELECT blocked_until, block_count, block_reason, status '
-            'FROM project_tasks WHERE id=? AND project_path=?',
-            (task_id, project_path)).fetchone()
-    return dict(r) if r else None
+    from lib.conversations.project_board import read_board
+    return next((task for task in read_board(
+        project_path, user_id=TEST_OWNER_USER_ID)['tasks']
+        if task['id'] == task_id), None)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -109,10 +88,10 @@ def test_sibling_block_does_not_escalate(flask_app):
         SIBLING_BLOCK_COOLDOWN_MS, _now_ms, block_task, post_task,
     )
     with flask_app.app_context():
-        tid = post_task('/caw/1', 'cA', 'epic blocked by a sibling')['id']
-        block_task('/caw/1', 'cA', tid, '[sibling] path=lib/x.py waiting on commit')
+        tid = post_task('/caw/1', 'cA', 'epic blocked by a sibling', user_id=TEST_OWNER_USER_ID)['id']
+        block_task('/caw/1', 'cA', tid, '[sibling] path=lib/x.py waiting on commit', user_id=TEST_OWNER_USER_ID)
         before2 = _now_ms()
-        block_task('/caw/1', 'cA', tid, '[sibling] path=lib/x.py still waiting')
+        block_task('/caw/1', 'cA', tid, '[sibling] path=lib/x.py still waiting', user_id=TEST_OWNER_USER_ID)
     row = _row(flask_app, '/caw/1', tid)
     # 2nd sibling block still schedules a retry ~one lease clock out, NOT escalated
     assert row['block_count'] == 2
@@ -125,10 +104,10 @@ def test_human_gated_block_still_escalates(flask_app):
         SIBLING_BLOCK_COOLDOWN_MS, _now_ms, block_task, post_task,
     )
     with flask_app.app_context():
-        tid = post_task('/caw/2', 'cA', 'human-gated epic')['id']
-        block_task('/caw/2', 'cA', tid, '[human-gated] §10 sign-off 1')
+        tid = post_task('/caw/2', 'cA', 'human-gated epic', user_id=TEST_OWNER_USER_ID)['id']
+        block_task('/caw/2', 'cA', tid, '[human-gated] §10 sign-off 1', user_id=TEST_OWNER_USER_ID)
         before2 = _now_ms()
-        block_task('/caw/2', 'cA', tid, '[human-gated] §10 sign-off 2')
+        block_task('/caw/2', 'cA', tid, '[human-gated] §10 sign-off 2', user_id=TEST_OWNER_USER_ID)
     row = _row(flask_app, '/caw/2', tid)
     assert row['block_count'] == 2
     # the 2nd human block escalates well past the flat sibling clock
@@ -143,9 +122,9 @@ def test_untagged_block_treated_as_human(flask_app):
         SIBLING_BLOCK_COOLDOWN_MS, _now_ms, block_task, post_task,
     )
     with flask_app.app_context():
-        tid = post_task('/caw/3', 'cA', 'untagged block')['id']
-        block_task('/caw/3', 'cA', tid, 'gate 1')
+        tid = post_task('/caw/3', 'cA', 'untagged block', user_id=TEST_OWNER_USER_ID)['id']
+        block_task('/caw/3', 'cA', tid, 'gate 1', user_id=TEST_OWNER_USER_ID)
         before2 = _now_ms()
-        block_task('/caw/3', 'cA', tid, 'gate 2')
+        block_task('/caw/3', 'cA', tid, 'gate 2', user_id=TEST_OWNER_USER_ID)
     row = _row(flask_app, '/caw/3', tid)
     assert row['blocked_until'] > before2 + SIBLING_BLOCK_COOLDOWN_MS

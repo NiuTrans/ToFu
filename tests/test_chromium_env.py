@@ -320,7 +320,7 @@ def test_all_entry_points_use_the_shared_module():
 
     consumers = {
         'server.py': 'boots the app',
-        'bootstrap.py': 'smart launcher',
+        'bootstrap_pkg/env_reexec.py': 'smart launcher environment owner',
         'tests/conftest.py': 'visual E2E browser fixture',
         'lib/motion_video/_env.py': 'video render chain',
     }

@@ -75,7 +75,7 @@ def test_smoke_runs_full_round_trip():
 def test_smoke_script_has_no_raw_driver_or_runtime_ddl():
     """Installer must not become a second connection/schema implementation."""
     block = _smoke_block(_install_sh())
-    for forbidden in ('sqlite3.connect', 'psycopg2.connect',
+    for forbidden in ('sqlite3.connect', 'psycopg.connect', 'psycopg2.connect',
                       'CREATE TABLE', 'DROP TABLE', '.commit()'):
         assert forbidden not in block, f'installer bypasses data layer: {forbidden}'
     _ok('installer owns no driver connections, DDL, or transaction boundary')
@@ -122,25 +122,15 @@ def test_smoke_failure_aborts_install():
     _ok('a failed smoke test aborts the install via fail (not warn)')
 
 
-def test_smoke_backend_hint_does_not_misdirect():
-    """Backend is derived from DB_BACKEND_CHOICE/PG_INSTALLED_MAJOR, and the
-    failure hint must not tell a failed-PG user to switch to PG (or a failed-
-    SQLite user to switch to SQLite)."""
+def test_smoke_is_fixed_to_the_personal_sqlite_contract():
+    """Standalone verification cannot select or fall back to another backend."""
     block = _smoke_block(_install_sh())
-    # Backend derivation uses the decision already persisted to .env.
-    assert '_SMOKE_BACKEND="$DB_BACKEND_CHOICE"' in block, \
-        'smoke backend does not use the selected install backend'
-    # Both backend branches exist in the failure hint.
-    assert re.search(r'if \[\[ "\$_SMOKE_BACKEND" == "sqlite" \]\]; then', block), \
-        'failure hint does not branch on the backend'
-    # Each failure describes its own backend and refuses an implicit fallback.
+    assert '_SMOKE_BACKEND="sqlite"' in block
+    assert 'TOFU_DEPLOYMENT_MODE=personal TOFU_PROCESS_ROLE=all' in block
     sqlite_hint = re.search(r'SQLite backend failed.*?"', block, re.S)
-    pg_hint = re.search(r'PostgreSQL backend failed.*?"', block, re.S)
     assert sqlite_hint and 'disk space/write permissions' in sqlite_hint.group(0)
-    assert pg_hint and 'storage-postgresql.log' in pg_hint.group(0)
-    assert 'Refusing backend fallback' in sqlite_hint.group(0)
-    assert 'Refusing backend fallback' in pg_hint.group(0)
-    _ok('selected backend is preserved; failure hints never silently redirect')
+    assert 'PostgreSQL backend failed' not in block
+    _ok('personal-mode smoke cannot select or fall back to PostgreSQL')
 
 
 def test_smoke_uses_env_python():
@@ -148,7 +138,7 @@ def test_smoke_uses_env_python():
     and conda paths set — so it verifies the environment that was installed."""
     block = _smoke_block(_install_sh())
     assert '"$ENV_PYTHON"' in block, 'smoke test does not run via $ENV_PYTHON'
-    # And it runs from the install dir so `import lib.database` resolves.
+    # And it runs from the install dir so the Sidecar packages resolve.
     assert 'cd "$INSTALL_DIR"' in block, 'smoke test does not cd into INSTALL_DIR'
     _ok('smoke test runs via $ENV_PYTHON from the install dir')
 
@@ -162,7 +152,7 @@ def main():
         test_smoke_runs_full_round_trip,
         test_smoke_script_has_no_raw_driver_or_runtime_ddl,
         test_smoke_failure_aborts_install,
-        test_smoke_backend_hint_does_not_misdirect,
+        test_smoke_is_fixed_to_the_personal_sqlite_contract,
         test_smoke_uses_env_python,
     ]
     for fn in tests:
@@ -180,6 +170,6 @@ def main():
 
 
 if __name__ == '__main__':
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_install_db_smoke.standalone')
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_install_db_smoke.standalone')
     main()

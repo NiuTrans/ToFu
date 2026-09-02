@@ -11,7 +11,6 @@ import {
   orchestrationRequiredResponseFieldsMatch,
   orchestrationResultData,
   orchestrationResultError,
-  orchestrationResultOk,
 } from './result';
 import {
   malformedMutation,
@@ -38,22 +37,9 @@ export interface NormalizedMutation {
 }
 
 type MutationWindow = Window & {
-  _orchestrationMutationLegacyValue?: typeof orchestrationMutationLegacyValue;
   normalizeOrchestrationMutation?: typeof normalizeOrchestrationMutation;
   orchestrationMutationMessage?: typeof orchestrationMutationMessage;
 };
-
-export function orchestrationMutationLegacyValue(
-  body: ContractRecord,
-  fields: unknown,
-): string {
-  const names = Array.isArray(fields) ? fields : [];
-  for (const field of names) {
-    const value = body[String(field)];
-    if (value != null && value !== '') return String(value);
-  }
-  return '';
-}
 
 export function normalizeOrchestrationMutation(
   value: unknown,
@@ -92,9 +78,8 @@ export function normalizeOrchestrationMutation(
   const reasonField = mutationPayloadField(contract, 'reason', 'reason');
   const retryableField = mutationPayloadField(
     contract, 'retryable', 'retryable');
-  const ok = typeof source[okField] === 'boolean'
-    ? source[okField] : orchestrationResultOk(root);
-  let reason = String(source[reasonField] || body.mutation_reason || '');
+  const ok = source[okField] === true;
+  let reason = String(source[reasonField] || '');
   if (!reason) {
     reason = ok ? 'accepted'
       : httpStatus === 0 ? transportFailureReason
@@ -130,21 +115,15 @@ export function normalizeOrchestrationMutation(
     contract, 'targetId', 'target_id');
   const resourceStatusField = mutationPayloadField(
     contract, 'resourceStatus', 'resource_status');
-  const targetId = String(source[targetIdField] || '')
-    || orchestrationMutationLegacyValue(
-      body, Array.isArray(contract.legacyTargetFields)
-        ? contract.legacyTargetFields : defaults.legacyTargetFields);
-  const resourceStatus = String(source[resourceStatusField] || '')
-    || orchestrationMutationLegacyValue(
-      body, Array.isArray(contract.legacyStatusFields)
-        ? contract.legacyStatusFields : defaults.legacyStatusFields);
+  const targetId = String(source[targetIdField] || '');
+  const resourceStatus = String(source[resourceStatusField] || '');
   return {
     format: String(source.format || ''),
     canonical: wire.present && wire.supported,
     unsupportedFormat: !wire.supported,
     expectedFormat: wire.expected,
     ok: Boolean(ok),
-    action: String(source[actionField] || body.action || ''),
+    action: String(source[actionField] || ''),
     reason,
     targetId,
     resourceStatus,
@@ -178,6 +157,5 @@ export function orchestrationMutationMessage(
 }
 
 const bridge = orchestrationRegistry as unknown as MutationWindow;
-bridge._orchestrationMutationLegacyValue = orchestrationMutationLegacyValue;
 bridge.normalizeOrchestrationMutation = normalizeOrchestrationMutation;
 bridge.orchestrationMutationMessage = orchestrationMutationMessage;

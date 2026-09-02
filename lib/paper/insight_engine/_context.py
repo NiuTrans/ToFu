@@ -7,6 +7,7 @@ best-effort: any failure degrades to an empty block, never an exception.
 """
 
 from lib.log import get_logger
+from lib.paper.library_repository import PaperLibraryRepository
 
 from ._config import _CTX_LIBRARY_MAX, _CTX_MEMORY_MAX
 
@@ -21,17 +22,15 @@ def _context_query(report_md: str, paper_text: str) -> str:
     return head
 
 
-def _library_context(phash: str, query: str):
+def _library_context(phash: str, query: str, *, user_id: int):
     """Recent OTHER papers the reader has in their library, ranked by relevance.
 
     Returns a list of ``{'title', 'arxiv_id'}`` dicts (best-effort; empty on any
     failure — the pass still runs without a library).
     """
     try:
-        from lib.storage import get_storage_client
-        rows = get_storage_client().query('paper.library.recent', {
-            'exclude_paper_hash': phash or '', 'limit': 40,
-        })
+        rows = PaperLibraryRepository(user_id).recent(
+            exclude_paper_hash=phash or '', limit=40)
     except Exception as e:
         logger.debug('[Paper:Insight] Library context unavailable: %s', e)
         return []
@@ -88,14 +87,22 @@ def _memory_context(query: str, project_path=None):
     return out
 
 
-def _build_reader_context(phash, report_md, paper_text, ui_lang, project_path=None):
+def _build_reader_context(
+    phash,
+    report_md,
+    paper_text,
+    ui_lang,
+    *,
+    user_id: int,
+    project_path=None,
+):
     """Assemble the "reader context" block injected into the insight prompt.
 
     Empty string when the reader has no library / memories — the prompt tells
     the model to be honest about that rather than manufacture a link.
     """
     query = _context_query(report_md, paper_text)
-    library = _library_context(phash, query)
+    library = _library_context(phash, query, user_id=user_id)
     memories = _memory_context(query, project_path)
     if not library and not memories:
         return ''

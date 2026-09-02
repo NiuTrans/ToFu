@@ -21,6 +21,7 @@ on this module, not the reverse.
 
 import os
 import re
+import shlex
 from collections import Counter, namedtuple
 
 from lib.log import get_logger
@@ -34,7 +35,7 @@ _re = re
 
 
 # ═══════════════════════════════════════════════════════
-#  ★ Command output cleanup for LLM consumption
+#  Command output cleanup for LLM consumption
 # ═══════════════════════════════════════════════════════
 
 # ANSI escape codes: SGR (colors), cursor movement, OSC (window titles)
@@ -46,7 +47,7 @@ _PROGRESS_RE = re.compile(
     r'^(.*?)\s*\d+%\|[^|]*\|\s*\d+/\d+\s*\[[^\]]*\](.*)$'
 )
 
-# ★ Pre-compiled regex for run_command
+# Pre-compiled regex for run_command
 _FS_HEAVY_RE = re.compile(r'\b(du|find|locate|tree|wc\s+-|cloc|sloccount|ncdu|fd)\b')
 _DANGEROUS_RE = re.compile('|'.join(f'(?:{p})' for p in DANGEROUS_PATTERNS))
 
@@ -138,7 +139,7 @@ _DEVICE_RE = re.compile(
     r'(?:cuda|gpu|device|rank|worker)[\s:_]*(\d+)', re.IGNORECASE
 )
 
-# ★ Only these words are EVIDENCE of a real compute accelerator, and only
+# Only these words are EVIDENCE of a real compute accelerator, and only
 # they may licence a ``cuda:`` prefix in the fold marker. ``worker``/``rank``
 # deliberately excluded: real ``ps aux`` output contains lines like
 # "postgres: io worker 0/1/2", which the old union regex turned into
@@ -337,7 +338,7 @@ def _clean_command_output(output):
                 pcts = [(_extract_progress_pct(g), g) for g in group]
                 valid = [(p, g) for p, g in pcts if p is not None]
 
-                # ★ How many lines share a percentage tells us the output is
+                # How many lines share a percentage tells us the output is
                 # CONCURRENT — it does NOT tell us what the workers are. The
                 # old code called every such group "×N devices", so four tqdm
                 # bars from a single-process data loader were reported as four
@@ -401,7 +402,7 @@ def _clean_command_output(output):
                 result.extend(group)
             else:
                 result.append(group[0])
-                # ★ Attribution is gated on EVIDENCE, not on "some word had a
+                # Attribution is gated on EVIDENCE, not on "some word had a
                 # number after it". Three tiers, narrowest first:
                 #   1. explicit accelerator word → may say cuda:N-M
                 #   2. plain numbered variant (worker/rank/…) → count only
@@ -435,7 +436,7 @@ def _clean_command_output(output):
         i += 1
 
     cleaned = '\n'.join(result)
-    # ★ The fold total must reach the MODEL, not just the log. Without it a
+    # The fold total must reach the MODEL, not just the log. Without it a
     # reader cannot tell whether they are looking at the whole output or a
     # fraction of it — each marker states its own group, but nothing states
     # the aggregate. Only emitted when folding actually happened, so
@@ -455,7 +456,7 @@ def _clean_command_output(output):
 
 
 # ═══════════════════════════════════════════════════════
-#  ★ Command destructiveness / write-target analysis
+#  Command destructiveness / write-target analysis
 # ═══════════════════════════════════════════════════════
 
 # Provably read-only shell utilities that NEVER modify the filesystem.
@@ -472,9 +473,14 @@ _READONLY_COMMANDS = frozenset({
     # ── Find / locate ──
     'find', 'fd', 'fdfind', 'locate', 'which', 'whereis', 'type',
     # ── Text processing (pure filters — no in-place flag) ──
-    # Note: sed is here because plain sed is a stdout filter; sed -i is
-    # caught separately by _SED_INPLACE before the whitelist check.
-    'wc', 'sort', 'uniq', 'cut', 'tr', 'sed', 'awk', 'column',
+    # Note: sed/awk are here because plain invocations are stdout filters;
+    # sed -i and gawk's `-i inplace` extension are caught separately by
+    # _SED_INPLACE / _AWK_INPLACE before the whitelist check.  The awk
+    # variants share awk's semantics — including its pre-existing blind
+    # spot for writes from inside the program text (print > "file" is
+    # caught by the redirect probe; system("...") is not, same as awk).
+    'wc', 'sort', 'uniq', 'cut', 'tr', 'sed', 'column',
+    'awk', 'gawk', 'mawk', 'nawk', 'goawk',
     # ── Compare / hash ──
     'diff', 'cmp', 'comm', 'md5sum', 'sha256sum', 'sha1sum',
     # ── Shell builtins / info ──
@@ -515,6 +521,16 @@ _REDIRECT_PATTERN = _re.compile(r'[12]?>>?(?!&)')
 
 # sed with in-place flag
 _SED_INPLACE = _re.compile(r'\bsed\b.*\s-i')
+
+# awk-family in-place editing via gawk's bundled ``inplace`` extension:
+# ``gawk -i inplace '{...}' file`` (also ``-iinplace``, ``--include inplace``
+# and ``--include=inplace``; goawk accepts the same flags).  Like
+# _SED_INPLACE this is a loose whole-command probe: it may cross pipeline
+# separators and match ``-i inplace`` inside a quoted program — a false
+# positive only costs one extra snapshot (~5 ms), while a false negative
+# silently loses undo coverage.  Exact operand parsing happens per segment
+# in _extract_write_targets via _awk_inplace_operands.
+_AWK_INPLACE = _re.compile(r'\b\w*awk\b.*?\s(?:-i|--include)[\s=]*\S*inplace')
 
 
 _ShellWord = namedtuple(
@@ -671,6 +687,75 @@ _WRITE_TARGET_COMMANDS = {
 }
 
 
+# awk option letters that consume a value (glued or separate): -F sep,
+# -v var=val, -f file, -i ext, -e text, -E file, -l ext, -W compat.
+# NOTE: gawk's -o is deliberately absent — modern gawk treats it as
+# argless, so consuming a following word here would misalign operands.
+_AWK_VALUE_OPTS = frozenset('FvfieElW')
+
+# awk options whose presence means the PROGRAM came from an option, so
+# every operand is a VAR=val assignment or a file (never program text).
+_AWK_PROGRAM_OPTS = frozenset('feE')
+
+
+def _awk_inplace_operands(args):
+    """File operands of an awk argv that loads the ``inplace`` extension.
+
+    ``args`` are the words after the awk command word (naive whitespace
+    split, mirroring the sed -i block's trade-off: a quoted multi-token
+    program leaves junk tokens in the operand list — the safe
+    over-inclusion direction, since a junk target only widens the diff
+    filter).  Returns a list of file targets when ``-i inplace`` /
+    ``--include[=] inplace`` is present, else None.  Under-inclusion is
+    not possible: without ``-e``/``-f``/``-E`` the FIRST operand is always
+    the program text, and real file operands can never precede it.
+    """
+    inplace = False
+    program_via_option = False
+    operands = []
+    i, n = 0, len(args)
+    while i < n:
+        word = args[i]
+        if word == '--':
+            operands.extend(args[i + 1:])
+            break
+        if word.startswith('--'):
+            name, eq, val = word[2:].partition('=')
+            if name in ('include', 'load', 'assign', 'field-separator',
+                        'file', 'exec', 'source'):
+                if not eq:
+                    i += 1
+                    val = args[i] if i < n else ''
+                if name == 'include' and 'inplace' in val.split('/')[-1]:
+                    inplace = True
+                if name in ('file', 'exec', 'source'):
+                    program_via_option = True
+            i += 1
+            continue
+        if word.startswith('-') and word != '-':
+            letter, val = word[1:2], word[2:]
+            if letter in _AWK_VALUE_OPTS:
+                if not val:
+                    i += 1
+                    val = args[i] if i < n else ''
+                if letter == 'i' and 'inplace' in val.split('/')[-1]:
+                    inplace = True
+                if letter in _AWK_PROGRAM_OPTS:
+                    program_via_option = True
+            i += 1
+            continue
+        operands.append(word)
+        i += 1
+    if not inplace:
+        return None
+    if operands and not program_via_option:
+        operands = operands[1:]  # the first operand is the program text
+    # VAR=val operands are assignments, not files.  A real file whose name
+    # contains '=' must be addressed as ./name (awk's own rule too), which
+    # does not match this pattern.
+    return [w for w in operands if not _re.match(r'^\w+=', w)]
+
+
 def _extract_write_targets(command, cwd=''):
     """Parse a shell command and return the set of file paths it WRITES to.
 
@@ -730,6 +815,23 @@ def _extract_write_targets(command, cwd=''):
                     continue
                 # Everything after the expression is a file target
                 targets.add(arg)
+
+    # ── awk -i inplace targets ──
+    # gawk/goawk in-place editing:  awk -i inplace 'prog' file1 file2 ...
+    # Mirrors the sed -i block above, with operand parsing factored into
+    # _awk_inplace_operands.
+    if _AWK_INPLACE.search(cmd):
+        for seg in _split_pipeline(cmd):
+            seg = seg.strip()
+            if not seg:
+                continue
+            parts = seg.split()
+            base_cmd = parts[0].split('/')[-1] if parts else ''
+            if not base_cmd.endswith('awk'):
+                continue
+            files = _awk_inplace_operands(parts[1:])
+            if files:
+                targets.update(files)
 
     # ── Per-segment analysis ──
     segments = _split_pipeline(cmd)
@@ -883,6 +985,10 @@ def _is_destructive_command(command):
 
     # sed -i (in-place edit) → destructive even though sed itself is a filter
     if _SED_INPLACE.search(cmd):
+        return True
+
+    # gawk/goawk -i inplace → destructive for the same reason as sed -i
+    if _AWK_INPLACE.search(cmd):
         return True
 
     # Split pipeline into individual commands and check each segment
@@ -1045,7 +1151,7 @@ def _is_catastrophic_delete(command, cwd=None):
             depth = len([c for c in expanded.split('/') if c])
             if depth < _MIN_DELETE_DEPTH:
                 return arg
-            # ★ Rule 2: restricted callers may only delete inside the workspace.
+            # Rule 2: restricted callers may only delete inside the workspace.
             if ws_real:
                 tgt_real = os.path.realpath(expanded)
                 if not (tgt_real == ws_real
@@ -1054,7 +1160,7 @@ def _is_catastrophic_delete(command, cwd=None):
     return None
 
 
-# ── Unbounded recursive-scan guard (pt_8524e0ec B2) ─────────────────
+# ── Unbounded recursive-scan guard ( B2) ─────────────────
 # Measured incident (2026-07-31, task 96c56840): the model ended a long
 # verification script with ``grep -rn "mcp>=1.0.0" ../ --include=pyproject.toml``
 # — a recursive scan of the workspace PARENT, a FUSE mount holding 8GB+ of
@@ -1160,7 +1266,7 @@ def _scan_binary_word_index(words):
     return i
 
 
-def _bound_scan_segments(command, timeout_binary, seconds):
+def _bound_scan_segments(command, timeout_binary, seconds, timeout_args=None):
     """Wrap direct recursive scanner segments with a native timeout.
 
     The rewrite is span-based and leaves the rest of the shell program
@@ -1176,6 +1282,13 @@ def _bound_scan_segments(command, timeout_binary, seconds):
         return command, 0
     if not command or not timeout_binary:
         return command, 0
+    if timeout_args is None:
+        timeout_args = ('--signal=TERM', '--kill-after=2s')
+    quoted_prefix = ' '.join([
+        shlex.quote(str(timeout_binary)),
+        *(shlex.quote(str(arg)) for arg in timeout_args),
+        shlex.quote(f'{seconds}s'),
+    ])
     insertions = []
     for start, end in _split_pipeline_spans(command):
         segment = command[start:end]
@@ -1187,9 +1300,7 @@ def _bound_scan_segments(command, timeout_binary, seconds):
         if base not in _BOUNDED_SCAN_BINARIES:
             continue
         insertion_at = start + words[index].start
-        timeout_prefix = (
-            f'{timeout_binary} --verbose --signal=TERM '
-            f'--kill-after=2s {seconds}s ')
+        timeout_prefix = f'{quoted_prefix} '
         insertions.append((insertion_at, timeout_prefix))
     rewritten = command
     for at, text in sorted(insertions, reverse=True):

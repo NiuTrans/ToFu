@@ -55,6 +55,19 @@ MCP_MAX_RESULT_CHARS = 200_000  # truncate tool results beyond this
 MCP_KEEPALIVE_INTERVAL = int(os.environ.get('TOFU_MCP_KEEPALIVE_INTERVAL', '45'))
 MCP_PING_TIMEOUT = int(os.environ.get('TOFU_MCP_PING_TIMEOUT', '10'))
 
+# Local stdio servers can be expensive process trees (npm/uv launcher + the
+# actual Node/Python server) even when no task uses them.  Startup still
+# discovers the authoritative tool catalog once; after this idle window the
+# bridge closes only the transport and transparently reconnects on the next
+# call.  Remote transports are excluded.  Zero explicitly disables parking;
+# malformed values fall back lean and all overrides have a one-day ceiling.
+try:
+    _mcp_stdio_idle_raw = int(
+        os.environ.get('TOFU_MCP_STDIO_IDLE_SECONDS', '300'))
+except (TypeError, ValueError, OverflowError):
+    _mcp_stdio_idle_raw = 300
+MCP_STDIO_IDLE_SECONDS = max(0, min(24 * 60 * 60, _mcp_stdio_idle_raw))
+
 # ── Circuit breaker (stop hammering a permanently-broken server) ──
 # Backoff applies only AFTER a reconnect attempt fails, so a transient drop
 # still heals on the very next keepalive sweep. Once reconnects keep failing,
@@ -75,7 +88,7 @@ MCP_BREAKER_MAX_BACKOFF = int(os.environ.get('TOFU_MCP_BREAKER_MAX_BACKOFF', '60
 # fast-fails with an actionable error instead of blocking for the full timeout
 # again. Any single successful call resets the streak. Set to 0 to disable.
 #
-# ★ SCOPE (since MCP_CALL_TIMEOUT became None): a call timeout can now only
+# SCOPE (since MCP_CALL_TIMEOUT became None): a call timeout can now only
 #   arise for a server that declares its OWN ``"timeout"`` in
 #   mcp_servers.json. With no per-server budget there is no deadline, so no
 #   timeout, so this gate never trips — which is correct, not dead code: the

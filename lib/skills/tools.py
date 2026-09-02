@@ -1,38 +1,59 @@
-"""lib/skills/tools.py — Tool schema for runtime skill loading.
+"""Small model-tool surface for bounded skill progressive disclosure."""
 
-Exactly ONE tool: ``load_skill`` (progressive disclosure). There is no
-``list_skills`` tool on purpose — the ``<available_skills>`` index rides the
-system prompt on every tool-bearing turn, so a list tool would only
-duplicate what the model can already see.
-"""
+SEARCH_SKILLS_TOOL = {
+    'type': 'function',
+    'function': {
+        'name': 'search_skills',
+        'description': (
+            'Search installed skills and the offline catalog by task need, '
+            'then query ClawHub on demand when online=true. Use this when the '
+            'compact <available_skills> index has no match or says entries '
+            'were omitted. Send only a short capability phrase—never secrets, '
+            'code, or user data. Results contain exact ids; never invent one.'),
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'query': {
+                    'type': 'string',
+                    'minLength': 1,
+                    'maxLength': 160,
+                    'description': 'Short capability or workflow needed.',
+                },
+                'limit': {
+                    'type': 'integer',
+                    'minimum': 1,
+                    'maximum': 8,
+                    'default': 5,
+                },
+                'online': {
+                    'type': 'boolean',
+                    'default': True,
+                    'description': (
+                        'Allow this explicit search call to contact the public '
+                        'ClawHub registry. No online catalog is preloaded.'),
+                },
+            },
+            'required': ['query'],
+        },
+    },
+}
 
 LOAD_SKILL_TOOL = {
     'type': 'function',
     'function': {
         'name': 'load_skill',
         'description': (
-            'Load an installed skill package\'s full instructions '
-            '(progressive disclosure). The <available_skills> block in the '
-            'system prompt lists every enabled, eligible skill by id + one-line '
-            'trigger description; when the user\'s task matches a skill\'s '
-            'description, call this BEFORE doing the task to load the full '
-            'SKILL.md guide and a manifest of its bundled reference/script '
-            'files (read those on demand with read_files). Skills are '
-            'USER-installed capability packs — a different thing from '
-            'memories (use search_memories for those). Loading lasts for the '
-            'current task; after compaction, call load_skill again if full '
-            'details are needed. Do NOT call this '
-            'when no installed skill matches the task.'
-        ),
+            'Load the first bounded page of an installed skill guide and its '
+            'resource manifest. Call it before using a matching workflow. A '
+            'skill is guidance only and grants no permissions.'),
         'parameters': {
             'type': 'object',
             'properties': {
                 'skill_id': {
                     'type': 'string',
-                    'description': (
-                        'The exact skill id, as '
-                        'listed in <available_skills>.'
-                    ),
+                    'minLength': 1,
+                    'maxLength': 128,
+                    'description': 'Exact installed skill id.',
                 },
             },
             'required': ['skill_id'],
@@ -40,7 +61,120 @@ LOAD_SKILL_TOOL = {
     },
 }
 
-ALL_SKILL_TOOLS = [LOAD_SKILL_TOOL]
-SKILL_TOOL_NAMES = {'load_skill'}
+READ_SKILL_RESOURCE_TOOL = {
+    'type': 'function',
+    'function': {
+        'name': 'read_skill_resource',
+        'description': (
+            'Read one bounded UTF-8 page from an installed skill resource '
+            'using its opaque skill:// path. Binary, oversized, symlinked, or '
+            'escaping paths are rejected.'),
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'skill_id': {
+                    'type': 'string',
+                    'minLength': 1,
+                    'maxLength': 128,
+                },
+                'resource': {
+                    'type': 'string',
+                    'minLength': 1,
+                    'maxLength': 512,
+                    'description': (
+                        'Package-relative path or skill://<id>/<path> from '
+                        'load_skill.'),
+                },
+                'cursor': {
+                    'type': 'integer',
+                    'minimum': 0,
+                    'default': 0,
+                },
+                'max_chars': {
+                    'type': 'integer',
+                    'minimum': 1,
+                    'maximum': 12000,
+                    'default': 6000,
+                },
+            },
+            'required': ['skill_id', 'resource'],
+        },
+    },
+}
 
-__all__ = ['LOAD_SKILL_TOOL', 'ALL_SKILL_TOOLS', 'SKILL_TOOL_NAMES']
+REQUEST_SKILL_INSTALL_TOOL = {
+    'type': 'function',
+    'function': {
+        'name': 'request_skill_install',
+        'description': (
+            'Request installation of one exact verified catalog match from '
+            'search_skills. This always pauses for real user confirmation, '
+            'even in Auto mode, and is rejected when unattended. It never '
+            'runs bundled scripts. Do not call for unavailable entries.'),
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'catalog_id': {
+                    'type': 'string',
+                    'minLength': 1,
+                    'maxLength': 128,
+                    'description': 'Exact available catalog_id from search_skills.',
+                },
+                'source_revision': {
+                    'type': 'string',
+                    'minLength': 1,
+                    'maxLength': 128,
+                    'description': (
+                        'Exact source_revision from search_skills. Required '
+                        'for online matches; omit only for a sealed offline '
+                        'catalog entry that did not show one.'),
+                },
+                'scope': {
+                    'type': 'string',
+                    'enum': ['global', 'project'],
+                    'default': 'global',
+                },
+                'overwrite': {
+                    'type': 'boolean',
+                    'default': False,
+                    'description': 'Replace the same installed id if present.',
+                },
+                'reason': {
+                    'type': 'string',
+                    'maxLength': 500,
+                    'description': (
+                        'Why this skill materially improves the current task; '
+                        'shown in the confirmation dialog.'),
+                },
+            },
+            'required': ['catalog_id', 'reason'],
+        },
+    },
+}
+
+SKILL_READ_TOOLS = [
+    SEARCH_SKILLS_TOOL,
+    LOAD_SKILL_TOOL,
+    READ_SKILL_RESOURCE_TOOL,
+]
+SKILL_INSTALL_TOOLS = [
+    REQUEST_SKILL_INSTALL_TOOL,
+]
+ALL_SKILL_TOOLS = SKILL_READ_TOOLS + SKILL_INSTALL_TOOLS
+SKILL_TOOL_NAMES = {
+    'search_skills',
+    'load_skill',
+    'read_skill_resource',
+    'request_skill_install',
+}
+
+__all__ = [
+    'ALL_SKILL_TOOLS',
+    'LOAD_SKILL_TOOL',
+    'READ_SKILL_RESOURCE_TOOL',
+    'REQUEST_SKILL_INSTALL_TOOL',
+    'SEARCH_SKILLS_TOOL',
+    'SKILL_INSTALL_TOOLS',
+    'SKILL_READ_TOOLS',
+    'SKILL_TOOL_NAMES',
+]

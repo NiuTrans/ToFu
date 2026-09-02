@@ -1,7 +1,7 @@
 """lib/paper/podcast_engine/_validate.py — the podcast script quality gates.
 
 Zero-LLM deterministic validators that a generated script must pass BEFORE it
-reaches the TTS stage (docs/PAPER_PODCAST_DESIGN.md §3.5). They exist because
+reaches the TTS stage (docs/modules/ingest_media.md). They exist because
 the prompt's "MUST NOT" rules are advisory to an LLM; these functions are the
 enforcement. Every gate returns a list of human-readable issue strings —
 an empty list means pass. ``validate_script`` aggregates them all.

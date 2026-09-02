@@ -1,7 +1,7 @@
 """lib/paper/harvest.py — batch crawl + parse-once ingest primitive (R1).
 
 The FIRST of the auto-research recipe's two new primitives
-(docs/AUTO_RESEARCH_SYSTEM_DESIGN.md §3 阶段 2 ``harvest``): given a list of
+(docs/modules/ingest_media.md §3 阶段 2 ``harvest``): given a list of
 arXiv IDs, download + parse each paper ONCE and land it in the shared
 ``paper_library`` bookshelf, so every later stage (survey / ideate / typeset)
 and the reading-mode UI reuse a single parsed copy instead of re-parsing.
@@ -22,7 +22,7 @@ it computes the phash through the EXACT same two functions reading-mode ingest
 uses —
 
     text  = lib.pdf_parser.parse_pdf(pdf_bytes)['text']   # same parser, same mode
-    phash = lib.paper.hashing._paper_hash(text)           # sole canonicalization
+    phash = lib.paper_identity._paper_hash(text)          # sole canonicalization
 
 ``_paper_hash`` is the single, already-tested canonicalization point (it
 ``strip()``s before ``sha256`` — see tests/test_paper_hash_canonical.py and the
@@ -53,10 +53,10 @@ die on paper #7. This mirrors the reading-mode ingest's own fail-open posture.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import time
+import uuid
 from typing import Callable, Iterable, Optional
 
 from lib.log import get_logger
@@ -139,7 +139,7 @@ def _paper_hash(text: str) -> str:
     """The SOLE canonicalization point — reused verbatim from reading-mode
     ingest so a harvested paper's identity is byte-identical. Do NOT wrap this
     in any normalization here (that is the parse-once-breaking bug)."""
-    from lib.paper.hashing import _paper_hash as _ph
+    from lib.paper_identity import _paper_hash as _ph
     return _ph(text)
 
 
@@ -147,7 +147,7 @@ def parse_pdf(pdf_bytes: bytes, **kw) -> dict:
     """The SAME parser reading-mode ingest calls. Defaults mirror the arXiv
     ingest path (``text_mode='rich'``); ``max_images=0`` because figure
     extraction is a separate, phash-keyed concern handled after the row lands."""
-    from lib.pdf_parser import parse_pdf as _pp
+    from lib.pdf_parser.core import parse_pdf as _pp
     return _pp(pdf_bytes, max_text_chars=0, max_images=0, text_mode='rich', **kw)
 
 
@@ -158,7 +158,7 @@ def _download_pdf_bytes(arxiv_id: str, *, timeout: int = 60) -> bytes:
     ``validate_pdf_bytes`` gate so a truncated download is rejected rather than
     parsed into garbage (which would mint a garbage phash)."""
     from lib.http_client import http_get
-    from lib.pdf_parser import validate_pdf_bytes
+    from lib.pdf_parser.text import validate_pdf_bytes
 
     pdf_url = f'https://arxiv.org/pdf/{arxiv_id}.pdf'
     resp = http_get(pdf_url, timeout=timeout, stream=True,
@@ -178,111 +178,110 @@ def _download_pdf_bytes(arxiv_id: str, *, timeout: int = 60) -> bytes:
 # ── Library lookup / persist (reuse the ingest write contract) ────────────
 
 def _existing_row_for_arxiv(arxiv_id: str, user_id: int) -> Optional[dict]:
-    """Return an existing library row for ``arxiv_id`` that already has parsed
-    text, else None. This is the pre-download cache probe.
-
-    A row with a matching arxiv_id but EMPTY parsed_text (e.g. a saved
-    describe-to-recommend card) is deliberately NOT a hit — we still want to
-    download+parse it to fill in the text. Only a row with real parsed_text
-    lets us skip the work.
-
-    PARSE-ONCE CONTRACT (owner R1 fix, 2026-07-27): the row's
-    ``parser_version`` must ALSO equal ``expected_parser_version()`` — the
-    version a fresh parse would write today. Rows written by an older parser
-    stack, by the raw-fallback path, or before the version column existed
-    (legacy '') are NOT hits: they are re-parsed so a parser upgrade or a
-    healed extractor naturally re-parses instead of serving degraded text
-    for the life of the library. """
+    """Return a current-parser bookshelf hit without downloading the PDF."""
     if not arxiv_id:
         return None
+    from lib.paper.library_repository import PaperLibraryRepository
+    from lib.pdf_parser._common import expected_parser_version
+
     try:
-        from lib.database import DOMAIN_CHAT, pooled_db
-        from lib.pdf_parser._common import expected_parser_version
-        with pooled_db(DOMAIN_CHAT) as db:
-            row = db.execute(
-                'SELECT id, paper_hash, title, parsed_text, page_count '
-                'FROM paper_library WHERE arxiv_id=? AND user_id=? '
-                "AND parsed_text != '' AND parser_version = ? "
-                'ORDER BY updated_at DESC LIMIT 1',
-                (arxiv_id, user_id, expected_parser_version()),
-            ).fetchone()
-    except Exception as e:
-        logger.warning('[Paper:Harvest] cache probe failed for %s: %s', arxiv_id, e)
+        entries = PaperLibraryRepository(user_id).list_entries()
+    except Exception as error:
+        logger.warning(
+            '[Paper:Harvest] cache probe failed for %s: %s', arxiv_id, error)
         return None
-    if not row:
+    entry = next(
+        (
+            item for item in entries
+            if item.arxiv_id == arxiv_id
+            and item.parsed_text
+            and item.parser_version == expected_parser_version()
+        ),
+        None,
+    )
+    if entry is None:
         return None
     return {
-        'id': row['id'], 'paper_hash': row['paper_hash'] or '',
-        'title': row['title'] or '', 'parsed_text': row['parsed_text'] or '',
-        'page_count': int(row['page_count'] or 0),
+        'id': entry.paper_id,
+        'paper_hash': entry.paper_hash,
+        'title': entry.title,
+        'parsed_text': entry.parsed_text,
+        'page_count': entry.page_count,
     }
 
 
-def _persist_row(paper_id: str, *, title: str, arxiv_id: str, phash: str,
-                 parsed_text: str, page_count: int, images, folder_id: str,
-                 user_id: int, parser_version: str = '') -> bool:
-    """Upsert a harvested paper into ``paper_library``.
+def _persist_row(
+    paper_id: str,
+    *,
+    title: str,
+    arxiv_id: str,
+    phash: str,
+    parsed_text: str,
+    page_count: int,
+    images,
+    folder_id: str,
+    user_id: int,
+    parser_version: str = '',
+) -> bool:
+    """Upsert one harvested paper through the owner-scoped repository."""
+    from lib.paper.library import (
+        _LIB_IMAGES_CAP,
+        _LIB_PARSED_TEXT_CAP,
+        _LIB_TITLE_CAP,
+    )
+    from lib.paper.library_repository import (
+        PaperLibraryEntry,
+        PaperLibraryRepository,
+    )
 
-    Uses the SAME partial-upsert contract as reading-mode ingest
-    (``routes.paper._persist_ingested_library_row``): preserve an existing
-    row's created_at / qa_history / babel_cache, take column DEFAULTs for
-    unwritten columns, and — unlike ingest — DO write ``folder_id`` (harvest
-    files papers into the research task's folder by design; a re-harvest into
-    the same id keeps that folder because we pass it every time).
-
-    Best-effort: logs and returns False on failure, never raises.
-    """
-    from lib.paper.library import (_LIB_IMAGES_CAP, _LIB_PARSED_TEXT_CAP,
-                                    _LIB_TITLE_CAP)
     now_ms = int(time.time() * 1000)
     try:
-        from lib.database import DOMAIN_CHAT, pooled_db
-        from lib.database._core_schema import PAPER_LIBRARY, upsert
-        with pooled_db(DOMAIN_CHAT) as db:
-            existing = db.execute(
-                'SELECT created_at, qa_history, babel_cache FROM paper_library '
-                'WHERE id=? AND user_id=?', (paper_id, user_id),
-            ).fetchone()
-            created_at = (int(existing['created_at'])
-                          if (existing and existing['created_at']) else now_ms)
-            qa_history = (existing['qa_history'] if existing else '[]') or '[]'
-            babel_cache = (existing['babel_cache'] if existing else '{}') or '{}'
-            imgs = images[:_LIB_IMAGES_CAP] if isinstance(images, list) else []
-            filename = f'arxiv_{re.sub(r"/", "_", arxiv_id)}.pdf' if arxiv_id else ''
-            upsert(db, PAPER_LIBRARY, {
-                'id': paper_id, 'user_id': user_id,
-                'title': (title or '')[:_LIB_TITLE_CAP],
-                'pdf_url': (f'/api/paper/pdf/{filename}' if filename else ''),
-                'pdf_filename': filename[:500],
-                'arxiv_id': (arxiv_id or '')[:64],
-                'paper_hash': (phash or '')[:64],
-                'parsed_text': (parsed_text or '')[:_LIB_PARSED_TEXT_CAP],
-                'parser_version': (parser_version or '')[:128],
-                'qa_history': qa_history,
-                'images': json.dumps(imgs, ensure_ascii=False),
-                'babel_cache': babel_cache,
-                'page_count': int(page_count or 0),
-                'folder_id': (folder_id or '')[:128],
-                'created_at': created_at, 'updated_at': now_ms,
-            }, insert_cols=(
-                'id', 'user_id', 'title', 'pdf_url', 'pdf_filename',
-                'arxiv_id', 'paper_hash', 'parsed_text', 'parser_version',
-                'qa_history',
-                'images', 'babel_cache', 'page_count', 'folder_id',
-                'created_at', 'updated_at',
-            ), retry=True)
-            logger.info('[Paper:Harvest] persisted row %s — arxiv=%s hash=%s pages=%d',
-                        paper_id[:24], arxiv_id, (phash or '')[:12], page_count)
-            return True
-    except Exception as e:
-        logger.error('[Paper:Harvest] persist failed for %s: %s',
-                     paper_id[:24], e, exc_info=True)
+        repository = PaperLibraryRepository(user_id)
+        existing = repository.get(paper_id)
+        filename = (
+            f'arxiv_{re.sub(r"/", "_", arxiv_id)}.pdf' if arxiv_id else '')
+        entry = PaperLibraryEntry(
+            paper_id=paper_id,
+            title=(title or '')[:_LIB_TITLE_CAP],
+            pdf_url=f'/api/paper/pdf/{filename}' if filename else '',
+            pdf_filename=filename[:500],
+            arxiv_id=(arxiv_id or '')[:64],
+            paper_hash=(phash or '')[:64],
+            parsed_text=(parsed_text or '')[:_LIB_PARSED_TEXT_CAP],
+            parser_version=(parser_version or '')[:128],
+            qa_history=list(existing.qa_history) if existing else [],
+            images=(
+                images[:_LIB_IMAGES_CAP] if isinstance(images, list) else []),
+            babel_cache=dict(existing.babel_cache) if existing else {},
+            page_count=int(page_count or 0),
+            folder_id=(folder_id or '')[:128],
+            created_at=existing.created_at if existing else now_ms,
+            updated_at=now_ms,
+            has_report=existing.has_report if existing else False,
+        )
+        saved = repository.put(
+            entry,
+            command_id=(
+                f'paper-harvest:{user_id}:{paper_id}:{uuid.uuid4().hex}'
+            ),
+        )
+        if saved:
+            logger.info(
+                '[Paper:Harvest] persisted row %s — arxiv=%s hash=%s pages=%d',
+                paper_id[:24], arxiv_id, (phash or '')[:12], page_count,
+            )
+        return saved
+    except Exception as error:
+        logger.error(
+            '[Paper:Harvest] persist failed for %s: %s',
+            paper_id[:24], error, exc_info=True,
+        )
         return False
 
 
 # ── Public API ────────────────────────────────────────────────────────────
 
-def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int = 1,
+def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int,
                      extract_figures: bool = False,
                      force_reparse: bool = False) -> HarvestResult:
     """Harvest ONE arXiv paper into the library, parse-once.
@@ -292,7 +291,7 @@ def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int = 1,
             without a version suffix.
         folder_id: bookshelf folder to file the paper under (the research task's
             dedicated folder). Empty = the default shelf.
-        user_id: owner scope (defaults to the single-user id 1).
+        user_id: explicit positive owner scope.
         extract_figures: when True, also run the phash-keyed figure extractor
             after a fresh parse (default False — R1 is about text; figures are
             a later stage's concern).
@@ -307,6 +306,9 @@ def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int = 1,
         was downloaded+parsed this run; ``'error'`` carries the reason.
     """
     import lib.paper.harvest as _self  # resolve seams through the module
+    from lib.identity import require_user_id
+
+    user_id = require_user_id(user_id, context='paper harvest')
 
     arxiv_id = (arxiv_id or '').strip()
     if not arxiv_id:
@@ -378,8 +380,8 @@ def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int = 1,
     images = []
     if extract_figures and phash:
         try:
-            from lib.paper.hashing import PAPER_DIR
-            from lib.paper.images import _extract_paper_figures
+            from lib.paper_identity import PAPER_DIR
+            from lib.paper.images.figures import extract_paper_figures
             # Persist the PDF so the figure extractor (which reads a filepath)
             # and the reading-mode PDF viewer can both find it.
             filename = f'arxiv_{re.sub(r"/", "_", arxiv_id)}.pdf'
@@ -388,7 +390,7 @@ def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int = 1,
             if not (os.path.exists(filepath) and os.path.getsize(filepath) > 1000):
                 with open(filepath, 'wb') as f:
                     f.write(pdf_bytes)
-            images = _extract_paper_figures(filepath, phash) or []
+            images = extract_paper_figures(filepath, phash) or []
         except Exception as e:
             logger.warning('[Paper:Harvest] figure extraction failed for %s: %s',
                            arxiv_id, e)
@@ -435,7 +437,7 @@ def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int = 1,
 
 
 def harvest_arxiv_batch(arxiv_ids: Iterable[str], *, folder_id: str = '',
-                        user_id: int = 1, extract_figures: bool = False,
+                        user_id: int, extract_figures: bool = False,
                         on_progress: Optional[Callable[[dict], None]] = None,
                         abort_check: Optional[Callable[[], bool]] = None) -> dict:
     """Harvest a batch of arXiv papers into the library, parse-once each.
@@ -466,6 +468,9 @@ def harvest_arxiv_batch(arxiv_ids: Iterable[str], *, folder_id: str = '',
           'aborted': bool,
         }
     """
+    from lib.identity import require_user_id
+
+    user_id = require_user_id(user_id, context='paper harvest batch')
     # Dedup while preserving order.
     seen: set = set()
     ids = []

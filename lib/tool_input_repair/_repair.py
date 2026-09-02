@@ -331,7 +331,7 @@ def parse_and_repair_tool_args(
     downstream consumers (the "507 punctuation searches" report bug). The
     ``bare_string_to_array`` repair turns it into a single-element array.
 
-    The main chat dispatcher (``lib/tasks_pkg/tool_dispatch.py``) keeps its own
+    The main chat dispatcher (``lib/tasks_pkg/tool_dispatch/_pipeline.py``) keeps its own
     richer inline path because it additionally tracks malformed-JSON recovery
     for a UI "auto-fixed" badge and builds a model-facing retry message; this
     helper is the simpler ``(dict, log)`` contract its secondary callers need.

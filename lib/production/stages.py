@@ -1,9 +1,4 @@
-"""lib/motion_video/_stages.py — Stage-graph contract for long productions.
-
-The thin shell every "one sentence → finished product" recipe is built from
-(docs/PRODUCTION_PIPELINE_DESIGN.md §2.1 ``stages.py``). It deliberately
-knows NOTHING about video, audio or LLMs so P6 can MOVE it verbatim into
-``lib/production/`` — that step must be a relocation, not a rewrite.
+"""Checkpointed, capability-neutral stage graphs for long productions.
 
 A stage is a 7-tuple:
 
@@ -22,12 +17,10 @@ A stage is a 7-tuple:
   * ``checkpoint_version``       optional semantic revision. A mismatch also
                                  invalidates that stage and its whole suffix.
 
-**Crash-resume is a correctness contract, not a cost optimization** (owner
-directive, 2026-07-25): each stage's artifact is committed to the state file
-as soon as its gate passes, so a process killed mid-graph resumes at the
-first unfinished or contract-invalid stage and never redoes a reusable
-checkpoint. The state file is the checkpoint; there is no in-memory-only
-progress.
+Each passing artifact is committed before the next stage begins. A restart
+resumes at the first unfinished, stale, or contract-invalid stage. Invalidating
+one stage invalidates its dependent suffix. See
+``docs/modules/production.md``.
 """
 
 from __future__ import annotations

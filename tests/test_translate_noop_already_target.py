@@ -10,7 +10,12 @@ These tests patch the LLM dispatch + MT provider + cache so they run
 offline and deterministically.
 """
 
+import pytest
+
 import lib.translate.engine as engine
+
+
+pytestmark = pytest.mark.unit
 
 
 _CHINESE = '我是 Kimi，由月之暗面（Moonshot AI）开发的人工智能助手。有什么我可以帮你的吗？'

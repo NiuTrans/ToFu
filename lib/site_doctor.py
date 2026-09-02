@@ -2,7 +2,7 @@
 
 Trigger: tofu-search emits a site-drift signal — the page demonstrably
 rendered note anchors yet the configured selectors extracted ZERO cards
-(docs/SITE_KNOWLEDGE_LAYER_DESIGN.md §6). ``on_site_drift`` (registered as
+(docs/modules/browser_automation.md). ``on_site_drift`` (registered as
 the library's drift listener by lib/search_bridge at install) guards and
 spawns ONE bounded agent loop that re-cons the live page through the user's
 own browser, verifies candidate selectors by actually extracting with them,
@@ -210,6 +210,8 @@ def _shape_errors(items) -> str:
 
 def _scrape(url, *, wait_selector='', extractor_js, scrolls=0):
     """Run one verification scrape through the registered browser provider."""
+    from lib.search_runtime import ensure_search_runtime
+    ensure_search_runtime()
     from tofu_search.providers import get_browser_provider
     provider = get_browser_provider()
     if provider is None:
@@ -224,6 +226,8 @@ def _builtin_reference(site: str) -> str:
     if site != 'xiaohongshu.com':
         return ''
     try:
+        from lib.search_runtime import prepare_search_dependency_import
+        prepare_search_dependency_import()
         from tofu_search.search.engines import xhs
         return (f'wait_selector: {xhs._WAIT_SELECTOR}\n'
                 f'extractor_js:\n{xhs._CARD_EXTRACT_JS}')

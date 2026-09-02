@@ -350,7 +350,7 @@ class TestTransportIntegration(unittest.TestCase):
         meta = json.dumps({'status': status, 'headers': {}})
         frames = [(1, 'meta', meta)]
         for i, ln in enumerate(lines, start=2):
-            frames.append((i, 'body', _b64((ln + '\n').encode())))
+            frames.append((i, 'body', _b64((ln + '\n\n').encode())))
         script = [(frames, True)]
         calls = {'i': 0}
 
@@ -368,6 +368,31 @@ class TestTransportIntegration(unittest.TestCase):
         self.addCleanup(patcher.stop)
         reader = egress.EgressStreamReader('cmd-x', 'agent-1')
         # open_stream's contract: headers are consumed before returning.
+        reader.wait_headers(timeout=2)
+        return reader
+
+    def _raw_sse_reader(self, wire, cuts, status=200):
+        meta = json.dumps({'status': status, 'headers': {}})
+        frames = [(1, 'meta', meta)]
+        offset = 0
+        for seq, size in enumerate(cuts, start=2):
+            frames.append((seq, 'body', _b64(wire[offset:offset + size])))
+            offset += size
+        if offset < len(wire):
+            frames.append((len(frames) + 1, 'body', _b64(wire[offset:])))
+        calls = {'i': 0}
+
+        def fake_get_frames(cmd_id, since_seq=0):
+            if calls['i']:
+                return ([], True)
+            calls['i'] += 1
+            return (frames, True)
+
+        patcher = mock.patch(
+            'lib.desktop.get_frames', side_effect=fake_get_frames)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        reader = egress.EgressStreamReader('cmd-raw', 'agent-1')
         reader.wait_headers(timeout=2)
         return reader
 
@@ -391,6 +416,34 @@ class TestTransportIntegration(unittest.TestCase):
         self.assertEqual(msg['content'], 'Hello')
         self.assertEqual(msg.get('role'), 'assistant')
         self.assertEqual(finish, 'stop')
+
+    def test_raw_desktop_chunks_share_utf8_and_crlf_framing(self):
+        from lib.llm.stream import _stream_chat_once
+        from lib.llm.stream_result import ProviderStreamState
+
+        wire = (
+            '\ufeff: desktop keep-alive\r\n'
+            'data: {"choices":[{"delta":{"content":"你"}}]}\r\n\r\n'
+            'data: {"choices":[{"delta":{"content":"好"}}]}\n\n'
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\r\r'
+            'data: [DONE]\n\n'
+        ).encode('utf-8')
+        reader = self._raw_sse_reader(wire, [1] * len(wire))
+        db.register_agent('agent-1', {'capabilities': {'egress': True}})
+        self.addCleanup(lambda: db._agents.pop('agent-1', None))
+
+        with mock.patch(
+                'lib.desktop.egress.route_request', return_value='agent-1'), \
+             mock.patch(
+                 'lib.desktop.egress.open_stream', return_value=reader):
+            result = _stream_chat_once(
+                {'model': 'gpt-x',
+                 'messages': [{'role': 'user', 'content': 'hi'}],
+                 'stream': True},
+                api_key='k', base_url='https://api.anthropic.com/v1')
+
+        self.assertEqual(result.message['content'], '你好')
+        self.assertIs(result.state, ProviderStreamState.PROVIDER_FINISHED)
 
     def test_midstream_egress_failure_maps_to_unreachable(self):
         from lib.llm.stream import _stream_chat_once

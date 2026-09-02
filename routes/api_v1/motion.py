@@ -43,7 +43,7 @@ from lib.openapi import api_meta
 from lib.request_parser import async_parse_body
 from routes._task_routes import register_task_routes
 
-from .auth import require_auth
+from .auth import request_user_id, require_auth
 
 logger = get_logger(__name__)
 
@@ -135,6 +135,7 @@ async def start_motion_task():
     from lib.motion_video._env import motion_root
     from lib.motion_video.engine import run_motion_task
 
+    owner_user_id = int(request_user_id())
     body = await async_parse_body()
     srt_text = (body.get('srt') or '').strip()
     srt_path_in = (body.get('srt_path') or '').strip()
@@ -252,7 +253,7 @@ async def start_motion_task():
         audio_material = ''
     audio_sha = hashlib.sha256(
         audio_material.encode('utf-8')).hexdigest()[:12]
-    key = (srt_sha, voice, alignment, aspect, narration, quality, burn_in,
+    key = (owner_user_id, srt_sha, voice, alignment, aspect, narration, quality, burn_in,
            model, audio_sha)
     existing = _motion_index_get(key)
     if existing:
@@ -278,7 +279,7 @@ async def start_motion_task():
         task_id, srt_path=srt_path, workdir=workdir, voice=voice,
         speed=speed, alignment=alignment, narration=narration,
         quality=quality, parallel=parallel, width=width, height=height,
-        scenes_path=scenes_path)
+        scenes_path=scenes_path, user_id=owner_user_id)
     task['burn_in'] = burn_in
     task['burn_in_fontsdir'] = burn_in_fontsdir
     if scene_author is not None:
@@ -319,7 +320,8 @@ def serve_motion_file(task_id):
     Path safety: we serve exactly the path recorded in the task result —
     never client-supplied path material.
     """
-    task = _motion_runtime.get(task_id)
+    owner_user_id = int(request_user_id())
+    task = _motion_runtime.get_owned(task_id, user_id=owner_user_id)
     from quart import request as _req
     part = (_req.args.get('part') or 'mp4').strip()
     part_files = {
@@ -341,7 +343,7 @@ def serve_motion_file(task_id):
     else:
         # P-UX4: task gone from memory (restart / TTL) — serve from the
         # on-disk job dir so a finished video stays playable.
-        workdir = _disk_job_workdir(task_id)
+        workdir = _disk_job_workdir(task_id, user_id=owner_user_id)
         if not workdir:
             return api_not_found('not_found')
         path = os.path.join(workdir, part_files[part][0])
@@ -358,8 +360,8 @@ def _job_workdir(task) -> str:
     return result.get('workdir') or task.get('workdir') or ''
 
 
-def _disk_job_workdir(task_id: str) -> str:
-    """Workdir of a job whose task is no longer live in the runtime (P-UX4).
+def _disk_job_workdir(task_id: str, *, user_id: int) -> str:
+    """Owner-visible workdir for a job no longer live in the runtime.
 
     A finished video must stay playable after a server restart: the
     manifest at ``<motion_root>/jobs/<task_id>/job.json`` is the disk
@@ -372,7 +374,9 @@ def _disk_job_workdir(task_id: str) -> str:
     from lib.motion_video._env import motion_root
     from lib.production.jobs import read_manifest
     workdir = os.path.join(motion_root(), 'jobs', task_id)
-    if not read_manifest(workdir):
+    manifest = read_manifest(workdir)
+    if (not manifest
+            or int(manifest.get('user_id') or 0) != int(user_id)):
         return ''
     return workdir
 
@@ -387,13 +391,14 @@ def _disk_job_workdir(task_id: str) -> str:
 async def list_motion_scenes(task_id):
     import json as _json
 
-    task = _motion_runtime.get(task_id)
+    owner_user_id = int(request_user_id())
+    task = _motion_runtime.get_owned(task_id, user_id=owner_user_id)
     if task:
         workdir = _job_workdir(task)
         status = task['status']
     else:
         # P-UX4 disk fallback (finished job after a restart).
-        workdir = _disk_job_workdir(task_id)
+        workdir = _disk_job_workdir(task_id, user_id=owner_user_id)
         if not workdir:
             return api_not_found('not_found')
         status = 'done'
@@ -444,12 +449,13 @@ def serve_scene_file(task_id, scene_id):
 
     if not _re.fullmatch(r'[A-Za-z0-9_-]{1,64}', scene_id or ''):
         return api_not_found('not_found')
-    task = _motion_runtime.get(task_id)
+    owner_user_id = int(request_user_id())
+    task = _motion_runtime.get_owned(task_id, user_id=owner_user_id)
     if task:
         workdir = _job_workdir(task)
     else:
         # P-UX4 disk fallback (finished job after a restart).
-        workdir = _disk_job_workdir(task_id)
+        workdir = _disk_job_workdir(task_id, user_id=owner_user_id)
         if not workdir:
             return api_not_found('not_found')
     path = os.path.join(workdir, 'scenes', scene_id, f'{scene_id}.mp4')
@@ -479,8 +485,9 @@ async def regen_scene(task_id, scene_id):
     )
     from lib.motion_video.engine import run_scene_regen_task
 
+    owner_user_id = int(request_user_id())
     task = _motion_runtime.get(task_id)
-    if not task:
+    if not task or int(task.get('_userId') or 0) != owner_user_id:
         return api_not_found('not_found')
     if task['status'] not in ('done',):
         return api_bad_request('job must be done before re-rendering a scene',
@@ -496,7 +503,8 @@ async def regen_scene(task_id, scene_id):
         alignment=task.get('alignment') or 'loose',
         narration=bool(task.get('narration')),
         quality=task.get('quality') or 'standard',
-        parallel=1, width=task['width'], height=task['height'])
+        parallel=1, width=task['width'], height=task['height'],
+        user_id=owner_user_id)
     sub['scene_id'] = scene_id
     sub['regen_of'] = task_id
     sub['burn_in'] = bool(task.get('burn_in'))

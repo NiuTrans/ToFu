@@ -10,7 +10,7 @@ from lib.orchestration.durable_projection import (
     DurableProjectionError,
     DurableRunProjection,
 )
-from lib.orchestration_mutation import (
+from lib.orchestration.mutation_result import (
     MUTATION_CONFLICT,
     MUTATION_PERSISTENCE_FAILED,
 )

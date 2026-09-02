@@ -40,6 +40,14 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _authenticated_owner(monkeypatch):
+    """Drive the unwrapped route body with its authenticated owner resolved."""
+    import routes.api_v1.project as proj
+
+    monkeypatch.setattr(proj, '_project_user_id', lambda: 1)
+
+
 def _find_block_route():
     """Return the board/block handler with its decorators peeled off.
 
@@ -184,10 +192,10 @@ def test_route_source_reads_question_from_the_body():
     start = text.index('def project_board_block()')
     body = text[start:start + 1800]
 
-    assert "data.get('question'" in body, (
+    assert 'data.get("question"' in body, (
         'the board/block handler never reads `question` from the request body '
         '— the structured human gate is unreachable over HTTP')
-    assert "data.get('options'" in body, (
+    assert 'data.get("options"' in body, (
         'the board/block handler never reads `options` from the request body')
     assert 'question=' in body, (
         'the handler must forward question= to block_task as a keyword')

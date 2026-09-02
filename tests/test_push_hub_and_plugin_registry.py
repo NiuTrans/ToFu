@@ -31,15 +31,34 @@ from lib.agent_core.push import PushClient, PushHub
 
 @pytest.mark.unit
 class TestPushHub:
+    def test_owner_is_required_at_publication_and_socket_boundaries(self):
+        hub = PushHub()
+        with pytest.raises(TypeError):
+            hub.push_event('chat', 'task-1', {'type': 'delta'})
+        with pytest.raises(TypeError):
+            PushClient()
+
+    def test_ownerless_bus_frame_is_rejected_without_registry_tombstone(self):
+        hub = PushHub()
+        client = PushClient(user_id=1)
+        hub.subscribe(client, 'chat', 'task-1')
+
+        hub._deliver_frame({
+            'channel': 'chat', 'taskId': 'task-1', 'type': 'delta'})
+
+        assert client._queue.empty()
+        assert set(hub._subscriptions) == {'chat'}
+
     def test_push_routes_to_exact_task_subscriber(self):
         hub = PushHub()
-        client = PushClient()
+        client = PushClient(user_id=1)
         hub.register(client)
         hub.subscribe(client, 'chat', 'task-1')
 
         # No event loop set → hub.push_event enqueues directly (the
         # synchronous fallback path used outside an async server).
-        hub.push_event('chat', 'task-1', {'type': 'delta', 'content': 'hi'})
+        hub.push_event(
+            'chat', 'task-1', {'type': 'delta', 'content': 'hi'}, user_id=1)
 
         frame = asyncio.run(client.drain())
         assert frame == {'channel': 'chat', 'taskId': 'task-1',
@@ -47,11 +66,12 @@ class TestPushHub:
 
     def test_wildcard_subscriber_receives_all_tasks_on_channel(self):
         hub = PushHub()
-        client = PushClient()
+        client = PushClient(user_id=1)
         hub.register(client)
         hub.subscribe(client, 'paper', '*')
 
-        hub.push_event('paper', 'whatever-task', {'type': 'progress'})
+        hub.push_event(
+            'paper', 'whatever-task', {'type': 'progress'}, user_id=1)
         frame = asyncio.run(client.drain())
         assert frame['channel'] == 'paper'
         assert frame['taskId'] == 'whatever-task'
@@ -59,12 +79,12 @@ class TestPushHub:
 
     def test_non_subscriber_gets_nothing(self):
         hub = PushHub()
-        client = PushClient()
+        client = PushClient(user_id=1)
         hub.register(client)
         hub.subscribe(client, 'chat', 'task-1')
 
         # Event on a task this client did NOT subscribe to.
-        hub.push_event('chat', 'other-task', {'type': 'delta'})
+        hub.push_event('chat', 'other-task', {'type': 'delta'}, user_id=1)
 
         # drain() times out after 30s waiting for a frame; instead assert the
         # queue is empty without blocking.
@@ -72,12 +92,12 @@ class TestPushHub:
 
     def test_unsubscribe_stops_delivery(self):
         hub = PushHub()
-        client = PushClient()
+        client = PushClient(user_id=1)
         hub.register(client)
         hub.subscribe(client, 'chat', 'task-1')
         hub.unsubscribe(client, 'chat', 'task-1')
 
-        hub.push_event('chat', 'task-1', {'type': 'delta'})
+        hub.push_event('chat', 'task-1', {'type': 'delta'}, user_id=1)
         assert client._queue.empty()
 
     def test_listener_receives_event_and_exception_is_isolated(self):
@@ -96,9 +116,13 @@ class TestPushHub:
         hub.add_listener(good_listener)
 
         # No subscribers → no client fan-out, but listeners still fire.
-        hub.push_event('notify', 'sys', {'type': 'config_change'})
+        hub.push_event(
+            'notify', 'sys', {'type': 'config_change'}, user_id=1)
 
-        assert seen == [('notify', 'sys', {'type': 'config_change'})]
+        assert seen == [(
+            'notify', 'sys',
+            {'type': 'config_change', '_ownerUserId': '1'},
+        )]
 
     def test_add_listener_is_idempotent(self):
         hub = PushHub()
@@ -106,7 +130,7 @@ class TestPushHub:
         fn = lambda c, t, p: calls.append(1)  # noqa: E731
         hub.add_listener(fn)
         hub.add_listener(fn)  # second registration must be a no-op
-        hub.push_event('notify', 'sys', {'type': 'x'})
+        hub.push_event('notify', 'sys', {'type': 'x'}, user_id=1)
         assert calls == [1]
 
     def test_remove_listener_missing_is_safe(self):
@@ -117,33 +141,36 @@ class TestPushHub:
         assert result is None
         assert hub._listeners == []
 
-    def test_broadcast_reaches_all_registered_clients(self):
+    def test_channel_wildcard_remains_owner_scoped(self):
         hub = PushHub()
-        c1, c2 = PushClient(), PushClient()
+        c1 = PushClient(user_id=1)
+        c2 = PushClient(user_id=2)
         hub.register(c1)
         hub.register(c2)
+        hub.subscribe(c1, 'notify', '*')
+        hub.subscribe(c2, 'notify', '*')
 
-        hub.broadcast('notify', {'type': 'ping'})
+        hub.push_event(
+            'notify', '*', {'type': 'config_change'}, user_id=1)
 
         f1 = asyncio.run(c1.drain())
-        f2 = asyncio.run(c2.drain())
-        assert f1['type'] == 'ping' and f1['taskId'] == '*'
-        assert f2['type'] == 'ping' and f2['taskId'] == '*'
+        assert f1['type'] == 'config_change' and f1['taskId'] == '*'
+        assert c2._queue.empty()
 
     def test_unregister_removes_client_from_subscriptions(self):
         hub = PushHub()
-        client = PushClient()
+        client = PushClient(user_id=1)
         hub.register(client)
         hub.subscribe(client, 'chat', 'task-1')
         hub.unregister(client)
 
         assert hub.client_count == 0
-        hub.push_event('chat', 'task-1', {'type': 'delta'})
+        hub.push_event('chat', 'task-1', {'type': 'delta'}, user_id=1)
         assert client._queue.empty()
 
     def test_last_unsubscribe_prunes_task_and_channel_tombstones(self):
         hub = PushHub()
-        client = PushClient()
+        client = PushClient(user_id=1)
         hub.subscribe(client, 'paper', 'task-once')
         hub.unsubscribe(client, 'paper', 'task-once')
 
@@ -151,13 +178,14 @@ class TestPushHub:
 
     def test_unknown_unsubscribe_does_not_create_registry_entry(self):
         hub = PushHub()
-        hub.unsubscribe(PushClient(), 'never-seen', 'missing-task')
+        hub.unsubscribe(
+            PushClient(user_id=1), 'never-seen', 'missing-task')
 
         assert dict(hub._subscriptions) == {}
 
     def test_unregister_prunes_all_last_owned_subscription_buckets(self):
         hub = PushHub()
-        client = PushClient()
+        client = PushClient(user_id=1)
         hub.register(client)
         hub.subscribe(client, 'paper', 'p1')
         hub.subscribe(client, 'paper', 'p2')
@@ -171,7 +199,7 @@ class TestPushHub:
 @pytest.mark.unit
 class TestPushClientQueue:
     def test_queue_full_drops_oldest_and_keeps_newest(self):
-        client = PushClient()
+        client = PushClient(user_id=1)
         # Shrink the queue so we can saturate it cheaply.
         client._queue = asyncio.Queue(maxsize=2)
         client.enqueue({'n': 1})
@@ -184,13 +212,13 @@ class TestPushClientQueue:
         assert ns == [2, 3], f'expected oldest dropped, got {ns}'
 
     def test_disconnected_client_ignores_enqueue(self):
-        client = PushClient()
+        client = PushClient(user_id=1)
         client.disconnect()
         client.enqueue({'type': 'delta'})
         assert client._queue.empty()
 
     def test_drain_after_disconnect_returns_none(self):
-        client = PushClient()
+        client = PushClient(user_id=1)
         client.disconnect()
         assert asyncio.run(client.drain()) is None
 

@@ -25,7 +25,7 @@ logger = get_logger(__name__)
 # Legacy per-project global location (still READ for back-compat + migrated).
 GLOBAL_MEMORY_SUBDIR = os.path.join('.tofu', 'skills', 'global')
 
-# Memory/skill physical split (2026-07, board epic pt_229606ca): memories and
+# Memory/skill physical split (2026-07, board ): memories and
 # skill packages are TWO DIFFERENT NOUNS and no longer share one tree.
 #   • Flat memories      → <project>/.tofu/memories/*.md   (PROJECT_MEMORY_SUBDIR)
 #   • Skill packages     → <project>/.tofu/skills/<id>/SKILL.md (PROJECT_SKILLS_SUBDIR)
@@ -42,8 +42,8 @@ MIN_DESCRIPTION_LENGTH = 20
 # (injection.py references it for the path template)
 GLOBAL_MEMORY_DIR = None  # Set dynamically; see _get_global_memory_dir()
 
-# Project root = three levels up from lib/memory/storage/_dirs.py (mirrors the
-# BASE_DIR computation in lib/config_dir.py + lib/database.py).
+# Project root = three levels up from lib/memory/storage/_dirs.py, matching
+# the source-root convention in ``lib.config_dir``.
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 

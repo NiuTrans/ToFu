@@ -27,7 +27,10 @@ consumed tokens. A task that genuinely never terminates falls to the
 admission-slot TTL + the billing janitor (the crash backstop).
 """
 
+
 from __future__ import annotations
+
+pytest_plugins = ('tests._credential_sidecar',)
 
 import asyncio
 import os
@@ -46,18 +49,13 @@ def _new_loop_run(coro):
 
 class _TerminalSettleBase(unittest.TestCase):
 
-    USER_ID = 'usr_billtest'
+    USER_ID = ''
 
     @classmethod
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory()
 
-        # Fresh SQLite DB with the full schema (incl. billing_ledger).
-        from lib.database import reset_sqlite_for_tests
-        cls._db_snapshot = reset_sqlite_for_tests(
-            os.path.join(cls._tmp.name, 'tofu.db'))
-
-        # Isolate pricing.json + api_keys / byo stores.
+        # Isolate pricing.json; credentials, accounts, and wallets use Sidecar.
         from unittest.mock import patch
         cls._pricing_path = os.path.join(cls._tmp.name, 'pricing.json')
         cls._pricing_patch = patch('lib.billing.pricing._PRICING_PATH',
@@ -66,17 +64,6 @@ class _TerminalSettleBase(unittest.TestCase):
         from lib.billing import pricing as _p
         _p.reload_pricing()
 
-        from lib import api_keys, byo_providers
-        cls._orig_keys = api_keys._STORE_PATH
-        cls._orig_byo = byo_providers._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(cls._tmp.name, 'api_keys.json')
-        byo_providers._STORE_PATH = os.path.join(cls._tmp.name, 'byo.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        byo_providers._cache.clear()
-        byo_providers._cache_loaded = False
-
-        os.environ['TUNNEL_TOKEN'] = 'test-no-real'
         # Turn billing ON for these tests (env wins over relay.json).
         cls._orig_billing = os.environ.get('TOFU_RELAY_BILLING')
         os.environ['TOFU_RELAY_BILLING'] = '1'
@@ -97,12 +84,21 @@ class _TerminalSettleBase(unittest.TestCase):
         cls.app.register_blueprint(api_v1_agent_run_bp)
         cls.app.register_blueprint(api_v1_chat_bp)
 
-        # A key bound to a billing user (so auth.user_id is populated →
-        # the reserve/settle path is live rather than a personal no-op).
+        # A real tenant account owns a distinct repository principal. Billing
+        # continues to use the opaque account subject; repositories use the
+        # numeric owner carried by the same credential.
+        from lib.billing.users import create_user
+        account = create_user(
+            f'billing-{cls.__name__.lower()}@example.test',
+            password='terminal-settle-test',
+        )
+        cls.USER_ID = account.id
         from lib.api_keys import create_key
         _row, cls.token = create_key(
+            owner_user_id=account.owner_user_id,
+            account_user_id=account.id,
             name='bill-bot', scopes=['agents:run', 'chat'],
-            user_id=cls.USER_ID)
+        )
 
         # Fund the wallet generously so reserve() never 402s.
         from lib.billing import deposit
@@ -110,16 +106,7 @@ class _TerminalSettleBase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        from lib import api_keys, byo_providers
-        api_keys._STORE_PATH = cls._orig_keys
-        byo_providers._STORE_PATH = cls._orig_byo
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        byo_providers._cache.clear()
-        byo_providers._cache_loaded = False
         cls._pricing_patch.stop()
-        from lib.database import restore_db_state
-        restore_db_state(getattr(cls, '_db_snapshot', None))
         for name, val in (('TOFU_RELAY_BILLING', cls._orig_billing),
                           ('TOFU_EPHEMERAL_PREFLIGHT', cls._orig_preflight)):
             if val is None:
@@ -145,9 +132,9 @@ class _TerminalSettleBase(unittest.TestCase):
         matching ``reserve_release`` / ``debit`` — the exact leak the
         janitor sweeps. A large cutoff makes every reserve age-eligible so
         the query reflects settle-state, not wall-clock."""
-        from lib.billing.janitor import _stale_reservations
+        from lib.billing.wallet_janitor import find_stale_reserves
         cutoff = int(time.time()) + 3600
-        return any(r[1] == ref_id for r in _stale_reservations(cutoff))
+        return any(r[1] == ref_id for r in find_stale_reserves(cutoff))
 
     def _wait_balanced(self, ref_id: str, timeout: float = 5.0) -> bool:
         deadline = time.time() + timeout
@@ -164,7 +151,7 @@ class BlockingTimeoutSettleTest(_TerminalSettleBase):
 
     def _run_late_finish(self, path: str, model: str):
         import threading
-        import lib.tasks_pkg as pkg
+        import lib.tasks_pkg.spawn as pkg
         from lib.tasks_pkg.manager import append_event
 
         captured = {}
@@ -230,7 +217,7 @@ class StreamDisconnectSettleTest(_TerminalSettleBase):
 
     def _run_disconnect(self, path: str, model: str):
         import threading
-        import lib.tasks_pkg as pkg
+        import lib.tasks_pkg.spawn as pkg
         from lib.tasks_pkg.manager import append_event
 
         captured = {}
@@ -303,13 +290,13 @@ class SettleIdempotencyTest(_TerminalSettleBase):
     happy-path route settle can both fire) — the wallet is debited once."""
 
     def test_double_settle_debits_once(self):
-        from lib.tasks_pkg import create_task
+        from lib.tasks_pkg.manager import create_task
         from lib.billing import get_balance
         from lib.billing.request_flow import reserve_for_task, settle_task
 
         task = create_task('conv-idem',
                            [{'role': 'user', 'content': 'hi'}],
-                           {'model': 'gpt-4o-mini'})
+                           {'model': 'gpt-4o-mini'}, user_id=1)
         reserve_for_task(task, user_id=self.USER_ID, model='gpt-4o-mini',
                          prompt_tokens=100, max_completion_tokens=100)
         task['usage'] = {'input_tokens': 100, 'output_tokens': 50,
@@ -337,7 +324,7 @@ class ReaperSettleTest(_TerminalSettleBase):
 
     def test_reaped_task_settles_via_terminal_callback(self):
         import threading
-        import lib.tasks_pkg as pkg
+        import lib.tasks_pkg.spawn as pkg
 
         captured = {}
         block = threading.Event()
@@ -369,8 +356,8 @@ class ReaperSettleTest(_TerminalSettleBase):
                             'precondition: reservation open while wedged')
 
             # Now force the reaper's finalize on the wedged task.
-            from lib.tasks_pkg import tasks, tasks_lock
-            from lib.tasks_pkg.manager import _finalize_reaped_stuck_task
+            from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+            from lib.tasks_pkg.manager._maintenance import _finalize_reaped_stuck_task
             with tasks_lock:
                 t = tasks.get(ref_id)
             self.assertIsNotNone(t)
@@ -399,7 +386,7 @@ class BaseExceptionEmitsTerminalTest(unittest.TestCase):
 
     def test_base_exception_fires_terminal_then_reraises(self):
         import threading
-        import lib.tasks_pkg.orchestrator as orch
+        import lib.tasks_pkg.orchestrator.api as orch
         from lib.tasks_pkg.manager import create_task
         from lib.agent_core.admission import (
             on_terminal, fire_terminal_callbacks,
@@ -420,7 +407,7 @@ class BaseExceptionEmitsTerminalTest(unittest.TestCase):
 
         task = create_task('conv-be',
                            [{'role': 'user', 'content': 'hi'}],
-                           {'model': 'test-model'})
+                           {'model': 'test-model'}, user_id=1)
         fired = {'terminal': False}
         # Mirror the route: register a terminal callback; append_event on the
         # DONE event should fire it.
@@ -445,4 +432,6 @@ class BaseExceptionEmitsTerminalTest(unittest.TestCase):
 
 
 if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_api_billing_terminal_settle.__main__')
     unittest.main()

@@ -18,7 +18,8 @@ from lib.http_compat_middleware import (
 pytestmark = pytest.mark.unit
 
 
-def test_method_override_and_double_encoded_json_are_preserved():
+def test_query_method_override_is_retired_but_double_encoded_json_is_unwrapped():
+    """The proxy-body repair stays; ``?_method=`` no longer mutates verbs."""
     app = create_base_app('compat-test', {'TESTING': True})
     assert register_method_override(app) is True
     assert register_method_override(app) is False
@@ -37,7 +38,7 @@ def test_method_override_and_double_encoded_json_are_preserved():
             return await response.get_json()
 
     assert asyncio.run(exercise()) == {
-        'method': 'PATCH', 'body': {'value': 42},
+        'method': 'POST', 'body': {'value': 42},
     }
 
 

@@ -40,6 +40,8 @@ import os
 from collections.abc import Mapping
 from typing import Any, Optional
 
+from werkzeug.exceptions import HTTPException
+
 # Encoded tokens that betray a still-percent-encoded value: a path separator
 # (%2f '/', %5c '\') or a bare percent (%25) that a proxy left behind.
 _ENCODED_MARKERS = ('%2f', '%5c', '%25')
@@ -144,6 +146,11 @@ def parse_body(*, force: bool = False) -> dict:
     from lib.log import get_logger
     try:
         data = request_json(force=force, silent=True)
+    except HTTPException:
+        # Size/time policy exceptions are HTTP boundary decisions, not
+        # malformed optional JSON.  Swallowing them turns an intentional 413
+        # into a misleading empty-body 400 and lets callers retry harder.
+        raise
     except Exception as e:
         # Outside-request-context, malformed Content-Type, etc. Don't
         # silently swallow — log so misuse is debuggable. We still return
@@ -174,6 +181,8 @@ async def async_parse_body(*, force: bool = False) -> dict:
     from lib.log import get_logger
     try:
         data = await request.get_json(force=force, silent=True)
+    except HTTPException:
+        raise
     except Exception as e:
         get_logger(__name__).debug(
             '[request_parser] async_parse_body get_json raised %s: %s',

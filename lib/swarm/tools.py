@@ -396,71 +396,7 @@ MASTER_TOOLS = [
 #: Strictly the artifact tools — sub-agents have no swarm-control surface.
 SUB_AGENT_TOOLS = list(ARTIFACT_TOOLS)
 
-#: The three MASTER swarm-control tools, as a list — the follow-up surface a
-#: turn needs to COLLECT results from an already-launched swarm
-#: (await_agents / get_agent_result) plus the ability to launch more.
-MASTER_CONTROL_TOOLS = [SPAWN_AGENTS_TOOL, AWAIT_AGENTS_TOOL, GET_AGENT_RESULT_TOOL]
 
-
-def augment_with_swarm_tools(tool_list):
-    """Append any MISSING master swarm-control tools to *tool_list*.
-
-    Pure — no DB / session / inbox lookup. The caller decides WHEN to call
-    this (see :func:`resolve_turn_swarm_tools`). Idempotent: a list that
-    already carries all three names is returned unchanged (same object) with
-    an empty ``added`` list, so a turn that legitimately has swarm enabled
-    incurs no churn.
-
-    Args:
-        tool_list: The turn's assembled tool list (list of OpenAI-style tool
-            dicts), or ``None``.
-
-    Returns:
-        ``(new_list, added_names)`` — ``new_list`` is the original object when
-        nothing was added, else a NEW list with the missing tools appended;
-        ``added_names`` is the list of tool names that were injected.
-    """
-    existing: set[str] = set()
-    for t in (tool_list or []):
-        if isinstance(t, dict):
-            n = (t.get('function') or {}).get('name')
-            if n:
-                existing.add(n)
-    to_add = [tool for tool in MASTER_CONTROL_TOOLS
-              if tool['function']['name'] not in existing]
-    if not to_add:
-        return tool_list, []
-    merged = list(tool_list or [])
-    merged.extend(to_add)
-    return merged, [tool['function']['name'] for tool in to_add]
-
-
-def resolve_turn_swarm_tools(tool_list, *, swarm_enabled: bool,
-                             has_pending_or_live: bool):
-    """Decide a turn's tool list w.r.t. the swarm follow-up tools.
-
-    Root fix for the "swarm-update told me to call get_agent_result but that
-    tool isn't in my schema → rejected as hallucinated" desync (conv
-    ``mr2ysg473scxv8``): the swarm inbox drain is UNGATED and will inject a
-    ``<swarm-update>`` instructing the model to call
-    ``await_agents`` / ``get_agent_result`` even on a turn whose
-    ``swarmEnabled`` is false. If a swarm is live-or-pending for the
-    conversation, those tools MUST be real for this turn.
-
-    Pure and fully injectable — ``has_pending_or_live`` is the caller's
-    resolved answer to "is there a live session OR a pending inbox for this
-    conversation?" (see ``lib.swarm.integration.has_live_or_pending_swarm``).
-
-    Returns ``(tool_list, forced_names)``:
-      * ``swarm_enabled`` true (assembly already added them) → unchanged, ``[]``.
-      * ``swarm_enabled`` false AND ``has_pending_or_live`` → force the three
-        master tools in because pending work remains actionable even when the
-        composer toggle is currently off.
-      * otherwise → unchanged, ``[]``.
-    """
-    if swarm_enabled or not has_pending_or_live:
-        return tool_list, []
-    return augment_with_swarm_tools(tool_list or [])
 
 
 # ═══════════════════════════════════════════════════════════

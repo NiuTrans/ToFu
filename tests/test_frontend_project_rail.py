@@ -4,8 +4,8 @@ WHY
 ---
 The old wrapping pill tab-bar (`.folder-tabs-scroll` flex-wrap) was replaced by
 a vertical project RAIL: a left column of full-width project rows in
-`static/js/ui/conversation_list.js` (`_renderFolderTabsInner`) plus the
-collapse/drag interactions in `static/js/main/main_folders_mobile.js`
+`runtime/sections/ui/conversation_list.js` (`_renderFolderTabsInner`) plus the
+collapse/drag interactions in `runtime/sections/main/main_folders_mobile.js`
 (`_initFolderTabs` / `_toggleProjectRail`).
 
 Both REAL shipped files are eval'd under jsdom (indirect eval → window-scope
@@ -37,11 +37,12 @@ import shutil
 import subprocess
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 _CONV = os.path.join(JS_DIR, 'ui', 'conversation_list.js')
 _FOLDERS = os.path.join(JS_DIR, 'main', 'main_folders_mobile.js')
@@ -151,10 +152,10 @@ _FOLDERS_STATE = [
 ];
 _ACTIVE_FOLDER = null;
 global.conversations = window.conversations = [
-  { id: 'c1', title: 'A', messages: [{role:'user'}], updatedAt: 100, folderId: 'f1' },
-  { id: 'c2', title: 'B', messages: [{role:'user'}], updatedAt: 200, folderId: 'f1' },
-  { id: 'c3', title: 'C', messages: [{role:'user'}], updatedAt: 300, folderId: 'f2' },
-  { id: 'c4', title: 'D', messages: [{role:'user'}], updatedAt: 400 },   // uncategorized
+  { id: 'c1', title: 'A', _serverTurnCount: 1, updatedAt: 100, folderId: 'f1' },
+  { id: 'c2', title: 'B', _serverTurnCount: 1, updatedAt: 200, folderId: 'f1' },
+  { id: 'c3', title: 'C', _serverTurnCount: 1, updatedAt: 300, folderId: 'f2' },
+  { id: 'c4', title: 'D', _serverTurnCount: 1, updatedAt: 400 },   // uncategorized
 ];
 window._lastConvListHash = '';
 renderConversationList();

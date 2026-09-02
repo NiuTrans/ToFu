@@ -99,7 +99,7 @@ def _default_description() -> str:
         '`base_url` at this server.\n'
         '* `/v1/messages` — Anthropic Messages API adapter. Use the '
         'Anthropic SDK by pointing `base_url` at this server.\n\n'
-        'Auth: `Authorization: Bearer tofu_live_…` for headless callers, '
-        'or `X-Tunnel-Token` / cookie for the browser UI. See '
+        'Auth: `Authorization: Bearer tofu_live_…` for headless callers; '
+        'the browser UI uses the same key through an HttpOnly cookie. See '
         '[`docs/HEADLESS_API.md`](/docs/HEADLESS_API.md) for the full guide.'
     )

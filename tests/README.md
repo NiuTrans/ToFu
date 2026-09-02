@@ -31,13 +31,17 @@ tests/
 | **Unit** | `@pytest.mark.unit` | `make test-unit` | No | No |
 | **API** | `@pytest.mark.api` | `make test-api` | Test server | No |
 | **Visual** | `@pytest.mark.visual` | `make test-visual` | Live server | Chromium |
-| **Slow** | `@pytest.mark.slow` | (opt-in) | Varies | Varies |
+| **Slow** | `@pytest.mark.slow` | `make test-slow` | Varies | Varies |
 
 ## Running Tests
 
 ```bash
 # Quick: unit tests only (fast, no dependencies)
 make test-unit
+
+# Resource-aware xdist by default; explicit worker and serial overrides
+make test-unit JOBS=8
+make test-unit JOBS=0
 
 # Full CI pipeline (lint + unit + api + healthcheck)
 make ci

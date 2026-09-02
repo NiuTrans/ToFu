@@ -805,7 +805,7 @@ def _font_face_css(families: set) -> str:
     Families not in the design_sys registry are left to the host — the QA
     pass sees the result either way, and the renderer never blocks on a font.
     """
-    from lib.design_sys import fonts as _fonts
+    import lib.design_sys.fonts as _fonts
     by_family = {}
     for f in _fonts.FONT_REGISTRY:
         by_family[f.family] = f

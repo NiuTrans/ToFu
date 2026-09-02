@@ -1,0 +1,1864 @@
+/* ═══════════════════════════════════════════
+   ★ File Changes Tracker Bar
+   ═══════════════════════════════════════════ */
+.file-changes-bar{margin-top:10px;border:1px solid rgba(52,211,153,0.2);border-radius:var(--radius-sm);background:rgba(52,211,153,0.04);overflow:hidden;transition:border-color .3s;user-select:none}
+.file-changes-bar:hover{border-color:rgba(52,211,153,0.35)}
+.file-changes-bar.fc-pulse{border-color:rgba(52,211,153,0.3);animation:fcPulse 2s ease-in-out infinite}
+@keyframes fcPulse{0%,100%{border-color:rgba(52,211,153,0.2);box-shadow:0 0 0 0 rgba(52,211,153,0)}50%{border-color:rgba(52,211,153,0.45);box-shadow:0 0 8px 0 rgba(52,211,153,0.08)}}
+.fc-summary{display:flex;align-items:center;gap:6px;padding:6px 10px;cursor:pointer;transition:background .15s}
+.fc-summary:hover{background:rgba(52,211,153,0.06)}
+.fc-summary-icon{font-size:13px;flex-shrink:0}
+.fc-summary-text{font-size:11px;font-weight:600;font-family:'JetBrains Mono',monospace;color:rgba(52,211,153,0.9);letter-spacing:.02em}
+.fc-chevron{font-size:14px;color:var(--text-tertiary);transition:transform .2s;font-weight:700;line-height:1;flex-shrink:0}
+.file-changes-bar.fc-expanded .fc-chevron{transform:rotate(90deg)}
+.fc-details{max-height:0;overflow:hidden;transition:max-height .25s ease,padding .25s ease;padding:0 10px}
+.file-changes-bar.fc-expanded .fc-details{max-height:400px;padding:4px 10px 8px}
+.fc-file{display:flex;align-items:flex-start;gap:6px;padding:3px 0;font-size:11px;font-family:'JetBrains Mono',monospace;line-height:1.4;border-bottom:1px solid rgba(255,255,255,0.03)}
+.fc-file:last-child{border-bottom:none}
+.fc-file-err{opacity:0.7}
+.fc-path{min-width:0;flex:1;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.fc-dir{color:var(--text-tertiary);opacity:0.6}
+.fc-fname{color:var(--text-secondary);font-weight:600}
+.fc-root{display:inline-block;padding:0 4px;margin-right:4px;border-radius:3px;background:rgba(96,165,250,0.15);color:#60a5fa;font-weight:600;font-size:0.9em}
+.fc-action{font-size:9px;color:var(--text-tertiary);white-space:nowrap;flex-shrink:0;text-transform:uppercase;letter-spacing:.04em}
+.fc-count{font-size:9px;color:rgba(167,139,250,0.8);font-weight:600}
+.fc-file-pending{opacity:0.5}
+/* ── File Changes: Undo actions bar ── */
+.fc-actions{display:flex;align-items:center;gap:4px;margin-left:auto}
+.fc-undo-btn,.fc-undo-all-btn,.fc-redo-btn{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border:1px solid transparent;border-radius:6px;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace;letter-spacing:.02em;cursor:pointer;transition:all .2s ease;line-height:1.3;white-space:nowrap;background:transparent}
+.fc-undo-btn{color:rgba(96,165,250,0.85);border-color:rgba(96,165,250,0.25)}
+.fc-undo-btn:hover{color:#60a5fa;background:rgba(96,165,250,0.1);border-color:rgba(96,165,250,0.45);box-shadow:0 0 8px rgba(96,165,250,0.12)}
+.fc-undo-all-btn{color:rgba(248,113,113,0.75);border-color:rgba(248,113,113,0.2)}
+.fc-undo-all-btn:hover{color:#f87171;background:rgba(248,113,113,0.08);border-color:rgba(248,113,113,0.4);box-shadow:0 0 8px rgba(248,113,113,0.1)}
+.fc-redo-btn{color:rgba(52,211,153,0.85);border-color:rgba(52,211,153,0.25)}
+.fc-redo-btn:hover{color:#34d399;background:rgba(52,211,153,0.1);border-color:rgba(52,211,153,0.45);box-shadow:0 0 8px rgba(52,211,153,0.12)}
+.fc-undo-btn svg,.fc-undo-all-btn svg,.fc-redo-btn svg{flex-shrink:0;opacity:0.85}
+.fc-undo-btn:hover svg,.fc-undo-all-btn:hover svg,.fc-redo-btn:hover svg{opacity:1}
+.fc-undo-btn:active,.fc-undo-all-btn:active,.fc-redo-btn:active{transform:scale(0.96)}
+/* Undone round: dim the bar to read as reverted, Redo restores it. */
+.file-changes-bar.fc-undone{opacity:0.6}
+.file-changes-bar.fc-undone .fc-summary-text{text-decoration:line-through;text-decoration-thickness:1px}
+/* ── File Changes: animate new entries during streaming ── */
+.fc-pulse .fc-file{animation:fcFileIn .3s ease}
+@keyframes fcFileIn{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:translateX(0)}}
+.img-preview.pdf-text-card{width:auto;min-width:64px;max-width:180px;height:64px;display:flex;align-items:center;position:relative;background:var(--thinking-bg);border-color:var(--thinking-border);padding:0 8px}.img-preview.pdf-text-card:hover{border-color:var(--accent)}.pdf-text-card-inner{display:flex;align-items:center;gap:6px;overflow:hidden;width:100%}.pdf-text-icon{font-size:22px;flex-shrink:0}.pdf-text-info{overflow:hidden;min-width:0}.pdf-text-name{font-size:11px;font-weight:600;color:var(--thinking-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pdf-text-meta{font-size:9px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pdf-attachments-indicator{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}.pdf-attach-badge{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--thinking-bg);border:1px solid var(--thinking-border);border-radius:var(--radius-sm);max-width:320px;cursor:pointer;transition:border-color .2s,background .2s}.pdf-attach-badge:hover{border-color:var(--accent);background:rgba(207,167,56,0.1)}.pdf-attach-icon{font-size:20px;flex-shrink:0}.pdf-attach-info{overflow:hidden;min-width:0}.pdf-attach-name{display:block;font-size:12px;font-weight:600;color:var(--thinking-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pdf-attach-meta{display:block;font-size:10px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pdf-vlm-badge{font-size:9px;padding:1px 5px;border-radius:6px;margin-top:2px;display:inline-block;font-weight:600;line-height:1.4}.pdf-vlm-badge.parsing{background:rgba(59,130,246,0.15);color:#3b82f6;animation:vlmPulse 1.5s ease-in-out infinite}.pdf-vlm-badge.done{background:rgba(34,197,94,0.15);color:#22c55e}.pdf-vlm-badge.failed{background:rgba(239,68,68,0.15);color:#ef4444}@keyframes vlmPulse{0%,100%{opacity:1}50%{opacity:.5}}
+/* ═══════════════════════════════════════════
+   ★ Settings — Neo-Brutalist Tofu Block
+   (mirrors My Day design system)
+   ═══════════════════════════════════════════ */
+
+/* ── Design tokens (inherit from myday, fallback for when myday CSS isn't loaded) ── */
+.settings-panel {
+  --s-white:     #faf8f3;
+  --s-cream:     #f2ecda;
+  --s-skin:      #e4d6bf;
+  --s-board:     #35302a;
+  --s-board-lit: #443c32;
+  --s-gold:      #c9993f;
+  --s-gold-dim:  #a87d2e;
+  --s-gold-glow: rgba(201,153,63,0.18);
+  --s-ink:       #1a1814;
+  --s-ink-soft:  #3d362c;
+  --s-done:      #4ade80;
+  --s-blocked:   #f87171;
+  --s-accent:    #6366f1;
+  --s-shadow:    5px 5px 0 var(--s-ink);
+  --s-shadow-sm: 3px 3px 0 var(--s-ink);
+  --s-shadow-xs: 2px 2px 0 var(--s-ink);
+  --s-border:    2px solid var(--s-ink);
+  --s-border-sm: 1.5px solid var(--s-ink);
+  --s-radius:    0px;
+}
+
+/* ── Modal shell — the tofu block ── */
+.settings-panel {
+  width: 860px;
+  max-width: 96vw;
+  max-height: 90vh;
+  max-height: calc(var(--vh100,100vh)*0.90);
+  padding: 0 !important;
+  display: flex;
+  flex-direction: column;
+  background: var(--s-white);
+  border: 3px solid var(--s-ink);
+  border-radius: var(--s-radius);
+  box-shadow: 8px 8px 0 var(--s-ink);
+  color: var(--s-ink);
+  font-family: 'Inter', 'SF Pro', -apple-system, system-ui, sans-serif;
+  animation: tofuSlam 0.25s cubic-bezier(0.2, 1.2, 0.4, 1) both;
+  overflow: hidden;
+}
+.settings-panel * { box-sizing: border-box; }
+
+/* ── Header — thick bottom border like a tofu slice line ── */
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 24px 14px;
+  border-bottom: 3px solid var(--s-ink);
+  background: var(--s-cream);
+  flex-shrink: 0;
+  position: relative;
+}
+/* Gold kintsugi line under header */
+.settings-header::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    var(--s-gold) 15%,
+    var(--s-gold) 50%,
+    var(--s-gold-dim) 85%,
+    transparent 100%);
+  opacity: 0.55;
+}
+.settings-header h3 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+  color: var(--s-ink);
+}
+
+/* Close button — tofu block */
+.settings-close-btn {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--s-white);
+  border: var(--s-border);
+  box-shadow: var(--s-shadow-xs);
+  cursor: pointer;
+  color: var(--s-ink);
+  padding: 0;
+  border-radius: var(--s-radius);
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+}
+.settings-close-btn:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+  background: var(--s-blocked);
+  color: var(--s-white);
+}
+.settings-close-btn:active {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 var(--s-ink);
+}
+.settings-close-btn svg { stroke: currentColor; }
+
+/* ── Body — flex: sidebar + content ── */
+.settings-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ══════════════════════════════════════
+   Tab Navigation — tofu index sidebar
+   (cream chrome frame around the white content;
+    stamped group labels + hard-shadow active block)
+   ══════════════════════════════════════ */
+.settings-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 14px 12px 16px 10px;
+  width: 178px;
+  min-width: 178px;
+  background: var(--s-cream);
+  border-right: 3px solid var(--s-ink);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--s-skin) transparent;
+}
+/* Group labels — stamped dividers, echo .settings-section-title */
+.settings-tab-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 12px 5px;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(26, 24, 20, 0.42);
+  user-select: none;
+}
+.settings-tab-group::after {
+  content: '';
+  flex: 1;
+  height: 1.5px;
+  background: rgba(26, 24, 20, 0.14);
+}
+.settings-tab {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 12px;
+  border: 2px solid transparent;
+  background: transparent;
+  color: var(--s-ink-soft);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease,
+              transform 0.1s ease, box-shadow 0.1s ease;
+  text-align: left;
+  white-space: nowrap;
+  position: relative;
+}
+.settings-tab:hover {
+  background: var(--s-skin);
+  color: var(--s-ink);
+}
+.settings-tab:focus-visible {
+  outline: 2px solid var(--s-gold-dim);
+  outline-offset: 1px;
+}
+/* Active = white block that merges with the content surface,
+   gold kintsugi strip inlaid on the left edge */
+.settings-tab.active {
+  background: var(--s-white);
+  border: 2px solid var(--s-ink);
+  color: var(--s-ink);
+  box-shadow: inset 4px 0 0 var(--s-gold), 2px 2px 0 var(--s-ink);
+  font-weight: 800;
+}
+.settings-tab.active:active {
+  transform: translate(1px, 1px);
+  box-shadow: inset 4px 0 0 var(--s-gold), 1px 1px 0 var(--s-ink);
+}
+.settings-tab svg {
+  flex-shrink: 0;
+  opacity: 0.7;
+  stroke: currentColor;
+  transition: opacity 0.15s ease, stroke 0.15s ease;
+}
+/* Brand logos (Feishu) are fill-based — never stroke them */
+.settings-tab svg.tab-logo,
+.settings-tab.active svg.tab-logo {
+  stroke: none;
+}
+.settings-tab:hover svg {
+  opacity: 1;
+}
+.settings-tab.active svg {
+  opacity: 1;
+  stroke: var(--s-gold-dim);
+}
+
+/* ══════════════════════════════════════
+   Tab Content Area
+   ══════════════════════════════════════ */
+.settings-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 22px 26px 26px;
+  min-width: 0;
+  background: var(--s-white);
+  scrollbar-width: thin;
+  scrollbar-color: var(--s-skin) transparent;
+}
+.settings-tab-panel { display: none; }
+.settings-tab-panel.active { display: block; }
+
+/* ── Section titles — stamped like My Day section labels ── */
+.settings-section-title {
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--s-ink);
+  padding: 0 2px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── Description text ── */
+.settings-desc {
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  margin-bottom: 14px;
+  line-height: 1.6;
+  font-weight: 500;
+}
+
+/* ── Textarea — tofu block with hard shadow ── */
+.settings-textarea {
+  width: 100%;
+  min-height: 80px;
+  padding: 12px 14px;
+  background: #fff;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  color: var(--s-ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  outline: none;
+  resize: vertical;
+  margin-bottom: 10px;
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+}
+.settings-textarea:focus {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+  background: #fffef5;
+}
+input.settings-mono {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+}
+.stg-btn-balance:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ── Divider — thick line like My Day section border ── */
+.settings-divider {
+  height: 2px;
+  background: var(--s-ink);
+  margin: 18px 0 20px;
+  opacity: 0.12;
+}
+
+/* ── Machine Translation provider styles moved to static/settings.css
+      (translate settings page decoupling, 2026-07-18). ── */
+
+/* ── Settings groups & rows ── */
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.settings-group label { margin-bottom: 4px; }
+.settings-row {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+.settings-field {
+  display: flex;
+  flex-direction: column;
+}
+.settings-field label {
+  display: block;
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--s-ink-soft);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.settings-panel .settings-field input,
+.settings-panel .settings-field select {
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  background: #fff;
+  border: 2px solid var(--s-ink);
+  border-radius: 0;
+  box-shadow: 2px 2px 0 var(--s-ink);
+  color: var(--s-ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  outline: none;
+  margin-bottom: 10px;
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+}
+.settings-panel .settings-field input:focus,
+.settings-panel .settings-field select:focus {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+  background: #fffef5;
+}
+
+/* ── Toggle rows — card-style like My Day todo items ── */
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  gap: 16px;
+  background: var(--s-white);
+  border: 1.5px solid var(--s-ink);
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.settings-toggle-row:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--s-ink);
+}
+.settings-toggle-label {
+  font-size: 13px;
+  color: var(--s-ink);
+  font-weight: 700;
+}
+.settings-toggle-desc {
+  font-size: 11px;
+  color: var(--s-ink-soft);
+  margin-top: 3px;
+  font-weight: 500;
+}
+
+/* ── Hint banner — gold accent ── */
+.settings-hint-banner {
+  padding: 8px 12px;
+  margin-top: 6px;
+  border: 1.5px solid var(--s-gold);
+  background: rgba(212, 168, 80, 0.1);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--s-gold-dim);
+  border-radius: var(--s-radius);
+}
+
+/* ══════════════════════════════════════
+   About & Updates card (Settings › General)
+   The update entry point moved here from the topbar — checking for updates
+   is a rare, deliberate action. Built from the same primitives as
+   .settings-toggle-row (white card, hard ink border, offset shadow, lift on
+   hover) so it reads as a peer of the toggle rows rather than a new idiom.
+   ══════════════════════════════════════ */
+.stg-update-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  background: var(--s-white);
+  border: 1.5px solid var(--s-ink);
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.stg-update-row:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--s-ink);
+}
+.stg-update-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  min-width: 0;
+}
+.stg-update-icon {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--s-ink);
+  background: var(--s-skin);
+  border: 1.5px solid var(--s-ink);
+  border-radius: var(--s-radius);
+}
+.stg-update-text { min-width: 0; }
+/* Version sits on its own line so a long description never collides with it. */
+.stg-update-version {
+  display: block;
+  margin-top: 2px;
+  font-weight: 700;
+  color: var(--s-ink);
+  opacity: 0.75;
+}
+.stg-update-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  height: 34px;
+  padding: 0 16px;
+  font-size: 11px;
+  font-weight: 900;
+  font-family: inherit;
+  color: var(--s-ink);
+  background: var(--s-gold);
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.stg-update-btn:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--s-ink);
+}
+.stg-update-btn:active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+}
+/* "New" pill — shown only when update.js found a newer release. */
+.stg-update-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--s-ink);
+  color: var(--s-white);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+/* Narrow panes: stack so the button keeps its full label instead of
+   squeezing the description to a sliver. */
+@media (max-width: 560px) {
+  .stg-update-row { flex-direction: column; align-items: stretch; }
+  .stg-update-btn { justify-content: center; }
+}
+
+/* ══════════════════════════════════════
+   Toggle Switch — quiet, tactile status control
+   ══════════════════════════════════════ */
+.stg-toggle {
+  --stg-toggle-width: 40px;
+  --stg-toggle-height: 22px;
+  --stg-toggle-thumb-size: 16px;
+  --stg-toggle-thumb-gap: 3px;
+  --stg-toggle-travel: 18px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 3px 2px;
+  border-radius: 999px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.stg-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  opacity: 0;
+  clip-path: inset(50%);
+  pointer-events: none;
+}
+.stg-toggle-track {
+  position: relative;
+  display: inline-block;
+  box-sizing: border-box;
+  width: var(--stg-toggle-width);
+  height: var(--stg-toggle-height);
+  overflow: hidden;
+  border: 1px solid rgba(61, 54, 44, 0.34);
+  border-radius: 999px;
+  background: rgba(61, 54, 44, 0.13);
+  box-shadow: inset 0 1px 2px rgba(26, 24, 20, 0.1);
+  transition: background-color 160ms ease, border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+.stg-toggle-thumb {
+  position: absolute;
+  top: 50%;
+  left: var(--stg-toggle-thumb-gap);
+  box-sizing: border-box;
+  width: var(--stg-toggle-thumb-size);
+  height: var(--stg-toggle-thumb-size);
+  border: 0;
+  border-radius: 50%;
+  background: var(--s-white);
+  box-shadow: 0 1px 3px rgba(26, 24, 20, 0.3), 0 0 0 1px rgba(26, 24, 20, 0.08);
+  transform: translateY(-50%);
+  transition: transform 180ms cubic-bezier(.2, .75, .25, 1), box-shadow 160ms ease;
+}
+.stg-toggle input:checked ~ .stg-toggle-track {
+  border-color: #28764f;
+  background: #3b9b68;
+  box-shadow: inset 0 1px 2px rgba(18, 75, 48, 0.2);
+}
+.stg-toggle input:checked ~ .stg-toggle-track .stg-toggle-thumb {
+  background: var(--s-white);
+  transform: translate(var(--stg-toggle-travel), -50%);
+}
+.stg-toggle:hover input:not(:disabled) ~ .stg-toggle-track {
+  border-color: rgba(61, 54, 44, 0.58);
+  background: rgba(61, 54, 44, 0.18);
+}
+.stg-toggle:hover input:checked:not(:disabled) ~ .stg-toggle-track {
+  border-color: #1f6742;
+  background: #338a5c;
+}
+.stg-toggle:active input:not(:disabled) ~ .stg-toggle-track .stg-toggle-thumb {
+  transform: translateY(-50%) scale(.9);
+}
+.stg-toggle:active input:checked:not(:disabled) ~ .stg-toggle-track .stg-toggle-thumb {
+  transform: translate(var(--stg-toggle-travel), -50%) scale(.9);
+}
+.stg-toggle input:focus-visible ~ .stg-toggle-track {
+  border-color: var(--s-gold-dim);
+  outline: 3px solid var(--s-gold-glow);
+  outline-offset: 2px;
+}
+.stg-toggle input:disabled ~ .stg-toggle-track {
+  opacity: .48;
+  cursor: not-allowed;
+  filter: saturate(.45);
+}
+@media (prefers-reduced-motion: reduce) {
+  .stg-toggle-track,
+  .stg-toggle-thumb { transition: none; }
+}
+
+/* ── Shared settings chrome that was USED but never DEFINED ──
+ *
+ * `.stg-section` / `.stg-desc` / `.stg-row` / `.stg-dim` / `.stg-table` and the
+ * BARE `.stg-btn` were each measured at ZERO rules in styles.css AND zero in
+ * settings.css, while the Devices settings panel shipped markup relying on all
+ * of them. The page therefore rendered with browser defaults: a bare `<table>`
+ * with no padding, a system `<button>`, `<p>` carrying nothing but default
+ * margin, and two sections running together with no separation. That is why it
+ * looked broken — not a design that aged badly, but the ABSENCE of one.
+ *
+ * `.stg-btn` is the sharpest case: `.stg-btn-danger` / `-add` / `-icon` /
+ * `-balance` / `-link` all existed, so the name LOOKED defined and no reader
+ * would suspect it. The Devices page uses the bare class for its two primary
+ * buttons (mint / copy), and no bare rule was ever written. Variants that set
+ * their own background/border still win on source order (equal specificity,
+ * defined later in this file), so `.stg-btn.stg-btn-danger` keeps its red.
+ *
+ * `.stg-section` had exactly ONE consumer (this panel) — which is precisely
+ * why nobody noticed: a class with a single caller has no second page to look
+ * wrong on.
+ *
+ * These live here rather than in settings.css because they are shared chrome,
+ * not page-specific: tests/test_settings_panels_parity.py reserves settings.css
+ * for per-page prefixes and keeps `.stg-*` here.
+ */
+.stg-section {
+  margin-bottom: 22px;
+}
+.stg-section:last-child { margin-bottom: 0; }
+.stg-desc {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--s-ink-soft);
+  margin: 0 0 10px;
+  font-weight: 600;
+}
+.stg-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* Secondary/metadata text inside a row or cell (ids, platforms, dates).
+ * Sets `color` rather than `opacity` so a chip nested inside keeps a crisp
+ * border — opacity would fade the border too. */
+.stg-dim {
+  color: var(--s-ink-soft);
+  font-weight: 600;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+}
+/* Brutalist data table: hard 2px outer border + hard shadow instead of the
+ * browser's hairline default. */
+.stg-table {
+  width: 100%;
+  border-collapse: collapse;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  background: var(--s-white);
+  font-size: 12px;
+  overflow: hidden;
+}
+.stg-table thead th {
+  text-align: left;
+  padding: 8px 11px;
+  background: var(--s-cream);
+  border-bottom: var(--s-border-sm);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--s-ink-soft);
+  white-space: nowrap;
+}
+.stg-table tbody td {
+  padding: 9px 11px;
+  border-bottom: 1px solid rgba(26, 24, 20, 0.10);
+  color: var(--s-ink);
+  vertical-align: middle;
+}
+.stg-table tbody tr:last-child td { border-bottom: none; }
+.stg-table tbody tr:hover { background: rgba(201, 153, 63, 0.05); }
+.stg-btn {
+  padding: 7px 15px;
+  font-size: 12px;
+  font-weight: 700;
+  font-family: inherit;
+  line-height: 1;
+  color: var(--s-ink);
+  background: var(--s-white);
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+}
+.stg-btn:hover:not(:disabled) {
+  background: var(--s-cream);
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--s-ink);
+}
+.stg-btn:active:not(:disabled) {
+  transform: translate(1px, 1px);
+  box-shadow: none;
+}
+.stg-btn:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
+
+/* ── Section head with title + action buttons ── */
+.stg-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.stg-section-head .settings-section-title { margin-bottom: 0; }
+
+/* ── Brutalist buttons — shared base ── */
+.btn-xs {
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  color: var(--s-ink);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+}
+.btn-xs:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+  background: var(--s-cream);
+}
+.btn-xs:active {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 var(--s-ink);
+}
+
+/* ── Section Actions (button group in section header) ── */
+.stg-section-actions { display: flex; gap: 6px; align-items: center; }
+
+/* ── Brand Icon (inline) ── */
+.stg-brand-icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.stg-brand-icon svg { width: 100%; height: 100%; fill: currentColor; }
+
+/* ══════════════════════════════════════
+   Provider Template Menu (dropdown)
+   ══════════════════════════════════════ */
+.stg-template-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 200;
+  min-width: 360px;
+  max-width: 460px;
+  max-height: 480px;
+  overflow-y: auto;
+  background: var(--s-white);
+  border: var(--s-border);
+  box-shadow: var(--s-shadow);
+  padding: 6px 0;
+  margin-top: 4px;
+  border-radius: var(--s-radius);
+}
+
+/* ── Section header ── */
+.stg-template-section {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px 4px;
+  user-select: none;
+}
+.stg-template-section:not(:first-child) {
+  margin-top: 2px;
+  border-top: 1.5px dashed var(--s-skin);
+  padding-top: 10px;
+}
+.stg-template-section-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+.stg-template-section-icon svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+}
+.stg-template-section-label {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--s-ink);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.stg-template-section-desc {
+  font-size: 10px;
+  color: var(--s-ink-soft);
+  opacity: 0.7;
+  margin-left: auto;
+}
+
+/* ── Items grid (2-column for compact layout) ── */
+.stg-template-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  padding: 2px 6px 4px;
+}
+
+/* ── Individual item ── */
+.stg-template-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  cursor: pointer;
+  transition: background 0.1s, box-shadow 0.1s;
+  border-radius: 4px;
+  border: 1.5px solid transparent;
+}
+.stg-template-item:hover {
+  background: var(--s-cream);
+  border-color: var(--s-skin);
+}
+.stg-template-item:active {
+  box-shadow: 1px 1px 0 var(--s-ink);
+}
+.stg-template-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.stg-template-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--s-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stg-template-models {
+  font-size: 10px;
+  color: var(--s-ink-soft);
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+/* ══════════════════════════════════════
+   Provider Cards — tofu blocks with accordion
+   ══════════════════════════════════════ */
+.stg-provider-card {
+  background: var(--s-white);
+  border: var(--s-border);
+  box-shadow: var(--s-shadow-sm);
+  border-radius: var(--s-radius);
+  overflow: hidden;
+  margin-bottom: 12px;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.stg-provider-card:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 6px 6px 0 var(--s-ink);
+}
+.stg-provider-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.1s;
+}
+.stg-provider-head:hover { background: var(--s-cream); }
+.stg-provider-icon {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.stg-provider-info { flex: 1; min-width: 0; }
+.stg-provider-name { font-size: 13px; font-weight: 800; color: var(--s-ink); }
+.stg-provider-url {
+  font-size: 11px;
+  color: var(--s-ink-soft);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', monospace;
+}
+.stg-provider-badges {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.stg-badge {
+  font-size: 10px;
+  padding: 2px 7px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1.5px solid var(--s-ink);
+  background: rgba(99, 102, 241, 0.1);
+  color: #6366f1;
+  border-radius: var(--s-radius);
+}
+.stg-badge:nth-child(2) { background: rgba(74, 222, 128, 0.12); color: #16a34a; }
+.stg-badge.off { background: rgba(248, 113, 113, 0.1); color: var(--s-blocked); }
+/* Managed subscription (OAuth) badge — amber, distinct from key/model chips. */
+.stg-badge.stg-badge-oauth {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+  border-color: rgba(245, 158, 11, 0.45);
+}
+.stg-badge.stg-badge-oauth > svg { display: block; }
+/* Collapsed-card sync summary: calm status tint + a readable last-run time. */
+.stg-catalog-summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  gap: 5px;
+  border: 1px solid rgba(47, 126, 82, .24);
+  border-radius: 999px;
+  background: rgba(59, 155, 104, .09);
+  color: #256443;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1;
+  letter-spacing: .01em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.stg-catalog-summary-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #3b9b68;
+  box-shadow: 0 0 0 2px rgba(59, 155, 104, .14);
+}
+.stg-catalog-summary-time {
+  padding-left: 5px;
+  border-left: 1px solid currentColor;
+  color: var(--s-ink-soft);
+  opacity: .72;
+}
+.stg-catalog-summary.is-waiting,
+.stg-catalog-summary.is-running {
+  border-color: rgba(168, 125, 46, .28);
+  background: rgba(201, 153, 63, .1);
+  color: #84621f;
+}
+.stg-catalog-summary.is-waiting .stg-catalog-summary-dot,
+.stg-catalog-summary.is-running .stg-catalog-summary-dot {
+  background: var(--s-gold);
+  box-shadow: 0 0 0 2px rgba(201, 153, 63, .15);
+}
+.stg-catalog-summary.is-error {
+  border-color: rgba(190, 64, 64, .25);
+  background: rgba(190, 64, 64, .08);
+  color: #a23f3f;
+}
+.stg-catalog-summary.is-error .stg-catalog-summary-dot {
+  background: #c45252;
+  box-shadow: 0 0 0 2px rgba(196, 82, 82, .13);
+}
+.stg-catalog-summary.is-manual {
+  border-color: rgba(61, 54, 44, .18);
+  background: rgba(61, 54, 44, .06);
+  color: var(--s-ink-soft);
+}
+.stg-catalog-summary.is-manual .stg-catalog-summary-dot {
+  background: #8b847a;
+  box-shadow: 0 0 0 2px rgba(61, 54, 44, .1);
+}
+@media (max-width: 640px) {
+  .stg-provider-head { flex-wrap: wrap; }
+  .stg-provider-badges {
+    order: 2;
+    flex: 0 0 calc(100% - 38px);
+    justify-content: flex-start;
+    margin-left: 38px;
+  }
+}
+/* Explanatory banner inside a managed-subscription provider card. */
+.stg-oauth-note {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1.5px solid rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.08);
+  border-radius: var(--s-radius);
+}
+.stg-oauth-note-icon { flex-shrink: 0; color: #b45309; margin-top: 1px; }
+.stg-oauth-note-icon > svg { display: block; }
+.stg-oauth-note-title { font-size: 12px; font-weight: 800; color: var(--s-ink); margin-bottom: 3px; }
+.stg-oauth-note-desc { font-size: 11.5px; line-height: 1.5; color: var(--s-ink-soft); }
+/* Balance badge — colored by remaining amount */
+.stg-badge-balance { font-size: 11px; font-variant-numeric: tabular-nums; }
+@keyframes stg-bal-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.stg-chevron {
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  transition: transform 0.2s;
+  font-weight: 900;
+}
+.stg-provider-card.expanded .stg-chevron { transform: rotate(180deg); }
+.stg-provider-body {
+  display: none;
+  padding: 0 14px 14px;
+  border-top: 2px solid var(--s-ink);
+}
+.stg-provider-card.expanded .stg-provider-body {
+  display: block;
+  padding-top: 14px;
+}
+
+/* ── Provider fields ── */
+.stg-field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.stg-field { margin-bottom: 12px; }
+.stg-field label {
+  display: block;
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--s-ink-soft);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.stg-field .stg-hint { font-weight: 500; text-transform: none; letter-spacing: 0; opacity: 0.65; }
+.stg-field input,
+.stg-field textarea,
+.stg-field select {
+  width: 100%;
+  padding: 9px 12px;
+  background: #fff;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  color: var(--s-ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  outline: none;
+  resize: vertical;
+  box-sizing: border-box;
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+}
+.stg-field input:focus,
+.stg-field textarea:focus,
+.stg-field select:focus {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+  background: #fffef5;
+}
+.stg-field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+}
+.stg-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  font-weight: 600;
+}
+.stg-dv-group { margin-bottom: 6px; }
+.stg-dv-group:last-child { margin-bottom: 0; }
+.stg-dv-brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--s-ink-soft);
+  user-select: none;
+  position: sticky;
+  top: -6px;
+  background: var(--s-cream);
+  z-index: 1;
+  border-bottom: 1.5px solid var(--s-ink);
+}
+.stg-dv-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px 5px 24px;
+  border-radius: var(--s-radius);
+  transition: background 0.1s;
+}
+.stg-dv-item:hover { background: var(--s-cream); }
+.stg-dv-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--s-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.stg-dv-toggle {
+  --stg-toggle-width: 34px;
+  --stg-toggle-height: 20px;
+  --stg-toggle-thumb-size: 14px;
+  --stg-toggle-thumb-gap: 2px;
+  --stg-toggle-travel: 16px;
+  flex-shrink: 0;
+}
+
+/* Health-dot legend under the Model Dropdown section description — the dot
+ * colours mean nothing until they are spelled out once. */
+.stg-dv-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 0 8px 8px;
+  font-size: 10px;
+  color: var(--s-ink-soft);
+  user-select: none;
+}
+.stg-dv-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* Providers-tab family fold — "还有 N 个版本" under the primary model card.
+ * Older versions render as full cards inside the collapsed sub-container. */
+.stg-mcard-fold {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 12px;
+  font-size: 10px;
+  color: var(--s-ink);
+  opacity: 0.65;
+  cursor: pointer;
+  user-select: none;
+}
+.stg-mcard-fold:hover { opacity: 1; }
+.stg-mcard-fold svg { transition: transform 0.15s; }
+.stg-mcard-fold.open svg { transform: rotate(180deg); }
+.stg-mcard-fold-sub { display: none; }
+.stg-mcard-fold-sub.open { display: block; }
+/* ── Delete / add buttons ── */
+.stg-btn-danger {
+  background: none;
+  border: 1.5px solid var(--s-blocked);
+  color: var(--s-blocked);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 12px;
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+}
+.stg-btn-danger:hover {
+  background: var(--s-blocked);
+  color: var(--s-white);
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+}
+
+/* ══════════════════════════════════════
+   Balance URL — joined input + button (aligned)
+   ══════════════════════════════════════ */
+.stg-balance-row {
+  display: flex;
+  align-items: stretch;
+}
+.stg-balance-row input {
+  flex: 1;
+  border: var(--s-border);
+  border-right: none;
+  border-radius: var(--s-radius);
+  background: #fff;
+  padding: 0 12px;
+  height: 38px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--s-ink);
+  outline: none;
+  box-shadow: none;
+  margin-bottom: 0;
+  transition: background 0.1s;
+}
+.stg-balance-row input:focus {
+  background: #fffef5;
+  transform: none;
+  box-shadow: none;
+}
+.stg-btn-balance {
+  white-space: nowrap;
+  background: var(--s-gold);
+  border: var(--s-border);
+  color: var(--s-ink);
+  font-size: 11px;
+  font-weight: 900;
+  padding: 0 18px;
+  height: 38px;
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  line-height: 38px;
+}
+.stg-btn-balance:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--s-ink);
+  background: var(--s-gold-dim);
+}
+.stg-btn-balance:active {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 var(--s-ink);
+}
+
+/* ══════════════════════════════════════
+   Local Endpoint Rows — structured per-URL list
+   with status light + inline test/delete actions
+   ══════════════════════════════════════ */
+.stg-ep-field { margin-bottom: 14px; }
+.stg-ep-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.stg-ep-toolbar {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.stg-btn-add.stg-ep-tb {
+  padding: 4px 10px;
+  font-size: 11px;
+  height: 28px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+.stg-btn-add.stg-ep-tb.danger {
+  border-color: rgba(176, 76, 76, 0.4);
+  color: #b04c4c;
+}
+.stg-btn-add.stg-ep-tb.danger:hover {
+  background: rgba(176, 76, 76, 0.08);
+  border-color: #b04c4c;
+}
+
+.stg-ep-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--s-cream);
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  padding: 8px;
+  margin-bottom: 6px;
+}
+.stg-ep-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.stg-ep-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.stg-ep-status {
+  margin-left: 22px;
+  font-size: 11px;
+  line-height: 1.4;
+  min-height: 14px;
+}
+.stg-ep-row > input[data-local-endpoint] {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, 'JetBrains Mono', monospace;
+  font-size: 12px;
+  height: 32px;
+  padding: 0 10px;
+  margin-bottom: 0;
+  border: var(--s-border);
+  background: var(--s-white);
+  border-radius: 4px;
+  color: var(--s-ink);
+  outline: none;
+}
+.stg-ep-row > input[data-local-endpoint]:focus {
+  background: #fffef5;
+  box-shadow: none;
+  transform: none;
+  border-color: var(--s-gold);
+}
+.stg-ep-btn {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border: var(--s-border);
+  background: var(--s-white);
+  color: var(--s-ink);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s, transform 0.1s;
+}
+.stg-ep-btn:hover {
+  background: var(--s-cream);
+  transform: translate(-1px, -1px);
+}
+.stg-ep-btn:active {
+  transform: translate(1px, 1px);
+}
+.stg-ep-btn.danger { color: #b04c4c; }
+.stg-ep-btn.danger:hover {
+  background: rgba(176, 76, 76, 0.08);
+  border-color: #b04c4c;
+}
+
+/* Status light — small circular indicator at the start of a row */
+.stg-ep-light {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: #c9c4ba;
+  box-shadow: inset 0 0 2px rgba(255, 255, 255, 0.5);
+}
+.stg-ep-light.ok {
+  background: #4ea84e;
+  box-shadow: 0 0 4px rgba(78, 168, 78, 0.6),
+              inset 0 0 2px rgba(255, 255, 255, 0.4);
+}
+.stg-ep-light.error {
+  background: #d04848;
+  box-shadow: 0 0 4px rgba(208, 72, 72, 0.55),
+              inset 0 0 2px rgba(255, 255, 255, 0.4);
+}
+.stg-ep-light.pending {
+  background: #d4a52a;
+  box-shadow: 0 0 4px rgba(212, 165, 42, 0.55),
+              inset 0 0 2px rgba(255, 255, 255, 0.4);
+  animation: stg-ep-pulse 1.1s ease-in-out infinite;
+}
+.stg-ep-light.unknown { background: #c9c4ba; }
+@keyframes stg-ep-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
+/* Inline status text under a row */
+.stg-ep-status-text { font-weight: 600; }
+.stg-ep-status-text.ok  { color: #3d8b3d; }
+.stg-ep-status-text.err { color: #b04c4c; }
+.stg-ep-status-text.muted { color: var(--s-ink-soft); font-weight: 500; }
+.stg-ep-status-when {
+  color: var(--s-ink-soft);
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+/* Header badge dot for aggregated endpoint status */
+.stg-badge.stg-ep-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.stg-ep-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #c9c4ba;
+}
+.stg-ep-dot.ok      { background: #4ea84e; box-shadow: 0 0 3px rgba(78, 168, 78, 0.6); }
+.stg-ep-dot.error   { background: #d04848; box-shadow: 0 0 3px rgba(208, 72, 72, 0.55); }
+.stg-ep-dot.mixed   { background: #d4a52a; box-shadow: 0 0 3px rgba(212, 165, 42, 0.55); }
+.stg-ep-dot.unknown { background: #c9c4ba; }
+
+/* ══════════════════════════════════════
+   API Keys — structured one-key-per-row editor
+   (per-provider api_keys editor; replaces the old textarea)
+   ══════════════════════════════════════ */
+.stg-keys-field { margin-bottom: 14px; }
+.stg-keys-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.stg-btn-add.stg-keys-tb {
+  padding: 4px 10px;
+  font-size: 11px;
+  height: 28px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+.stg-keys-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ── Merged API-key card: editor row + today's runtime stats row ──
+   Matches the neo-brutalist house style of .stg-mcard / .stg-provider-card:
+   square corners, solid ink border, hard offset shadow, and a solid
+   colored accent bar on the left that encodes the key's health state. */
+.stg-key-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--s-white);
+  border: 1.5px solid var(--s-ink);
+  box-shadow: var(--s-shadow-xs);
+  border-radius: var(--s-radius);
+  padding: 9px 11px 9px 14px;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.stg-key-card:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--s-ink);
+}
+/* Solid left accent bar — recolored per state below. */
+.stg-key-card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--s-skin);
+}
+.stg-key-card-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.stg-key-card-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  font-size: 12px;
+  /* Align metrics under the input, past the #N column (26px chip + 8px gap). */
+  padding-left: 34px;
+  padding-top: 8px;
+  border-top: 1.5px dashed rgba(26, 24, 20, 0.14);
+}
+.stg-key-card--blank .stg-key-card-stats { display: none; }
+/* Square "i" info chip — mirrors .stg-cap / .stg-badge brutalist chips. */
+.stg-keys-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  margin-left: 5px;
+  border: 1.5px solid var(--s-ink);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  color: var(--s-ink);
+  font-family: Georgia, 'Times New Roman', serif;
+  font-style: italic;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+  vertical-align: middle;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.stg-keys-info:hover, .stg-keys-info:focus {
+  background: var(--s-gold);
+  color: var(--s-white);
+  outline: none;
+}
+.stg-keys-empty {
+  background: var(--s-cream);
+  border: 1.5px dashed var(--s-ink);
+  border-radius: var(--s-radius);
+  padding: 11px 12px;
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  font-style: italic;
+}
+.stg-keys-idx {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  font-family: ui-monospace, 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--s-ink-soft);
+  background: var(--s-cream);
+  border: 1.5px solid var(--s-skin);
+  border-radius: var(--s-radius);
+  user-select: none;
+}
+.stg-key-card-edit > input.stg-keys-input {
+  flex: 1 1 0;
+  min-width: 0;
+  font-family: ui-monospace, 'JetBrains Mono', monospace;
+  font-size: 12px;
+  height: 32px;
+  padding: 0 10px;
+  margin-bottom: 0;
+  border: 1.5px solid var(--s-ink);
+  background: var(--s-cream);
+  border-radius: var(--s-radius);
+  color: var(--s-ink);
+  outline: none;
+  letter-spacing: 0.02em;
+  transition: background 0.1s, border-color 0.1s;
+}
+.stg-key-card-edit > input.stg-keys-input:focus {
+  background: var(--s-white);
+  box-shadow: inset 2px 2px 0 var(--s-gold-glow);
+  transform: none;
+  border-color: var(--s-gold);
+}
+.stg-keys-btn {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border: 1.5px solid var(--s-ink);
+  background: var(--s-white);
+  color: var(--s-ink);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s, transform 0.1s, box-shadow 0.1s;
+}
+.stg-keys-btn:hover {
+  background: var(--s-cream);
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--s-ink);
+}
+.stg-keys-btn:active { transform: translate(1px, 1px); box-shadow: 1px 1px 0 var(--s-ink); }
+.stg-keys-btn.danger:hover {
+  background: rgba(248, 113, 113, 0.14);
+  border-color: var(--s-blocked);
+  color: #c0392b;
+}
+
+/* ══════════════════════════════════════
+   Custom Headers — structured key/value rows
+   (per-provider extra_headers editor)
+   ══════════════════════════════════════ */
+.stg-hdr-field { margin-bottom: 14px; }
+.stg-hdr-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.stg-btn-add.stg-hdr-tb {
+  padding: 4px 10px;
+  font-size: 11px;
+  height: 28px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+.stg-hdr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--s-cream);
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  padding: 8px;
+}
+.stg-hdr-empty {
+  background: var(--s-cream);
+  border: 1px dashed rgba(0, 0, 0, 0.18);
+  border-radius: var(--s-radius);
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  font-style: italic;
+}
+.stg-hdr-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.stg-hdr-row > input.stg-hdr-name,
+.stg-hdr-row > input.stg-hdr-value {
+  flex: 1 1 0;
+  min-width: 0;
+  font-family: ui-monospace, 'JetBrains Mono', monospace;
+  font-size: 12px;
+  height: 32px;
+  padding: 0 10px;
+  margin-bottom: 0;
+  border: var(--s-border);
+  background: var(--s-white);
+  border-radius: 4px;
+  color: var(--s-ink);
+  outline: none;
+}
+.stg-hdr-row > input.stg-hdr-name { flex-basis: 38%; font-weight: 600; }
+.stg-hdr-row > input.stg-hdr-name:focus,
+.stg-hdr-row > input.stg-hdr-value:focus {
+  background: #fffef5;
+  box-shadow: none;
+  transform: none;
+  border-color: var(--s-gold);
+}
+.stg-hdr-sep {
+  color: var(--s-ink-soft);
+  font-weight: 700;
+  font-family: ui-monospace, monospace;
+  user-select: none;
+}
+.stg-hdr-btn {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border: var(--s-border);
+  background: var(--s-white);
+  color: var(--s-ink);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s, transform 0.1s;
+}
+.stg-hdr-btn:hover {
+  background: var(--s-cream);
+  transform: translate(-1px, -1px);
+}
+.stg-hdr-btn:active { transform: translate(1px, 1px); }
+.stg-hdr-btn.danger { color: #b04c4c; }
+.stg-hdr-btn.danger:hover {
+  background: rgba(176, 76, 76, 0.08);
+  border-color: #b04c4c;
+}
+
+/* Balance result card */
+.stg-balance-result { margin-top: 10px; font-size: 12px; }
+.stg-balance-loading {
+  color: var(--s-gold);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+}
+.stg-balance-err { color: var(--s-blocked); font-weight: 800; }
+
+/* ── Per-key Daily Success Stats (Settings > Providers) ─────────────────
+   Rendered as the second row of every .stg-key-card. Metrics are grouped
+   in .stg-keystat-metrics; status flags use the same square, solid-bordered
+   chip language as .stg-cap on the model cards. */
+.stg-keystat-metrics {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.stg-keystat-rate {
+  font-weight: 800;
+  min-width: 34px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+.stg-keystat-count {
+  color: var(--s-ink-soft);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.stg-keystat-fail {
+  color: #c0392b;
+  font-weight: 800;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.stg-keystat-429 {
+  color: #9a3412;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  background: rgba(234, 88, 12, 0.12);
+  border: 1px solid #c2410c;
+  border-radius: var(--s-radius);
+}
+.stg-keystat-gateway {
+  color: #475569;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  background: rgba(100, 116, 139, 0.12);
+  border: 1px solid #64748b;
+  border-radius: var(--s-radius);
+}
+.stg-keystat-err {
+  color: #c0392b;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  text-decoration: underline dotted;
+  cursor: help;
+}
+/* Status chips — same brutalist footprint as .stg-cap (square, solid border). */
+.stg-keystat-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: var(--s-radius);
+  border: 1px solid var(--s-ink);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.stg-keystat-badge.on   { background: rgba(74, 222, 128, 0.16); color: #15803d; border-color: #16a34a; }
+.stg-keystat-badge.off  { background: rgba(107, 114, 128, 0.16); color: #4b5563; border-color: #6b7280; }
+.stg-keystat-badge.warn { background: rgba(251, 146, 60, 0.16); color: #9a3412; border-color: #c2410c; }
+.stg-keystat-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+/* Compact per-key toggle. */
+.stg-key-toggle {
+  --stg-toggle-width: 34px;
+  --stg-toggle-height: 20px;
+  --stg-toggle-thumb-size: 14px;
+  --stg-toggle-thumb-gap: 2px;
+  --stg-toggle-travel: 16px;
+}
+.stg-btn-link {
+  background: none;
+  border: none;
+  color: var(--s-gold-dim);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  padding: 2px 2px;
+  text-decoration: underline;
+}
+.stg-btn-link:hover { color: var(--s-ink); }
+
+/* State accent bar (the ::before strip) + numeric accent per health state. */
+.stg-key-card.stg-keystat-good::before { background: #16a34a; }
+.stg-key-card.stg-keystat-good .stg-keystat-rate { color: #15803d; }
+.stg-key-card.stg-keystat-ok::before   { background: var(--s-gold); }
+.stg-key-card.stg-keystat-ok   .stg-keystat-rate { color: var(--s-ink); }
+.stg-key-card.stg-keystat-warn::before { background: #c2410c; }
+.stg-key-card.stg-keystat-warn .stg-keystat-rate { color: #9a3412; }
+.stg-key-card.stg-keystat-disabled {
+  opacity: 0.65;
+  background: var(--s-cream);
+}
+.stg-key-card.stg-keystat-disabled::before { background: #6b7280; }
+.stg-key-card.stg-keystat-disabled .stg-keystat-rate { color: #6b7280; }
+.stg-key-card.stg-keystat-idle::before { background: var(--s-skin); }
+.stg-key-card.stg-keystat-idle .stg-keystat-rate { color: var(--s-ink-soft); }
+.stg-key-card.stg-keystat-exhausted {
+  background: rgba(220, 38, 38, 0.06);
+}
+.stg-key-card.stg-keystat-exhausted::before { background: #dc2626; }
+.stg-key-card.stg-keystat-exhausted .stg-keystat-rate { color: #b91c1c; }
+

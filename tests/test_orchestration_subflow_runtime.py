@@ -8,7 +8,7 @@ import pytest
 from lib.orchestration_budget import OrchestrationAgentBudget
 from lib.orchestration_dataflow import OrchestrationDataflow
 from lib.orchestration_graph import FlowExecutionError
-from lib.orchestration_outcome import OrchestrationOutcomeLedger
+from lib.orchestration.outcome_ledger import OrchestrationOutcomeLedger
 from lib.orchestration_subflow_runtime import (
     OrchestrationSubflowAborted,
     OrchestrationSubflowRuntime,

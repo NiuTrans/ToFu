@@ -24,6 +24,8 @@ from lib import motion_video as mv
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+
 SRT = """1
 00:00:01,000 --> 00:00:03,000
 第一句话。
@@ -289,7 +291,7 @@ def _scenes_only_task(tmp_path, scenes, **over):
               quality='draft', parallel=2, width=1080, height=1440,
               scenes_path=str(scenes_path))
     kw.update(over)
-    return _new_motion_task(_motion_task_id(), **kw)
+    return _new_motion_task(_motion_task_id(), **kw, user_id=TEST_OWNER_USER_ID)
 
 
 def _fake_media(monkeypatch):
@@ -465,7 +467,7 @@ def test_scene_regen_happy(monkeypatch, tmp_path):
     task = _new_motion_task(_motion_task_id(), srt_path='', workdir=str(job),
                             voice='', speed=None, alignment='loose',
                             narration=True, quality='draft', parallel=1,
-                            width=1080, height=1440)
+                            width=1080, height=1440, user_id=TEST_OWNER_USER_ID)
     task['scene_id'] = 'scene-002'
     task['regen_of'] = 'motion_original'
     task['narration'] = True
@@ -485,7 +487,7 @@ def test_scene_regen_missing_scene_errors(monkeypatch, tmp_path):
     task = _new_motion_task(_motion_task_id(), srt_path='', workdir=str(job),
                             voice='', speed=None, alignment='loose',
                             narration=False, quality='draft', parallel=1,
-                            width=1080, height=1440)
+                            width=1080, height=1440, user_id=TEST_OWNER_USER_ID)
     task['scene_id'] = 'scene-999'
     run_scene_regen_task(task)
     assert task['status'] == 'error'
@@ -614,6 +616,7 @@ def _insert_report(phash, lang='zh'):
     import uuid
     from lib.storage import get_storage_client
     get_storage_client(write=True).command('paper.report.upsert', {
+        'user_id': TEST_OWNER_USER_ID,
         'paper_hash': phash,
         'lang': lang,
         'report': REPORT,
@@ -654,7 +657,7 @@ def test_paper_video_model_threaded_and_deduped(flask_client, monkeypatch,
     task, and it rides the dedup key: same model joins the in-flight task,
     a different model starts a NEW one (cache-key-skew family)."""
     import uuid
-    from lib.paper import video_abstract as VA
+    import lib.paper.video_abstract as VA
 
     phash = uuid.uuid4().hex[:16]
     _insert_report(phash)
@@ -713,7 +716,7 @@ def test_job_manifest_carries_model(tmp_path):
                             workdir=str(tmp_path), voice='', speed=None,
                             alignment='loose', narration=False,
                             quality='draft', parallel=1, width=1080,
-                            height=1440)
+                            height=1440, user_id=TEST_OWNER_USER_ID)
     task['model'] = 'm-alpha'
     write_job_manifest(task, kind='paper', state='running')
     m = read_manifest(str(tmp_path))
@@ -761,7 +764,7 @@ def test_paper_video_lookup(flask_client):
     task = _new_motion_task('motion_lookup1', srt_path='', workdir='/x',
                             voice='', speed=None, alignment='loose',
                             narration=False, quality='draft', parallel=1,
-                            width=1080, height=1440)
+                            width=1080, height=1440, user_id=TEST_OWNER_USER_ID)
     task['paper_hash'] = phash
     _motion_runtime.finish('motion_lookup1',
                            result={'final_path': '/x/final.mp4',

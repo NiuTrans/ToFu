@@ -76,11 +76,9 @@ def run_start_response_fields(
     *,
     kind: str,
 ) -> dict:
-    """Project one canonical start envelope plus rolling identity alias."""
+    """Project one canonical start envelope."""
     start = project_runtime_start(runtime_id, kind)
-    legacy_field = runtime_start_contract()['legacyIdFields'][kind]
     return {
-        legacy_field: runtime_id,
         'start': start,
         'definitionSource': prepared.definition_source,
         **inspection_response_fields(prepared.inspection),

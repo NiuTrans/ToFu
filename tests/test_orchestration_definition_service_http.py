@@ -86,15 +86,19 @@ def test_definition_delete_service_only_runs_hook_after_delete(monkeypatch):
     assert successes == ['deleted']
 
 
-@pytest.mark.parametrize(('adapter', 'endpoint'), [
+@pytest.mark.parametrize(('adapter', 'endpoint', 'adapter_kwargs'), [
     (service_http.orchestration_definition_write_service_response,
-     'definition-read'),
+     'definition-read', {}),
     (service_http.orchestration_definition_delete_service_response,
-     'definition-create'),
+     'definition-create', {'expected_updated_at': 42}),
 ])
 def test_definition_service_rejects_endpoint_with_wrong_write_semantics(
     adapter,
     endpoint,
+    adapter_kwargs,
 ):
     with pytest.raises(ValueError, match='is not a definition'):
-        adapter('api.test.invalid', lambda: None, endpoint=endpoint)
+        adapter(
+            'api.test.invalid', lambda: None,
+            endpoint=endpoint, **adapter_kwargs,
+        )

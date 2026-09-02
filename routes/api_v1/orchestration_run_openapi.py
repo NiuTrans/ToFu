@@ -5,6 +5,7 @@ from __future__ import annotations
 from lib.orchestration.runtime_wire_contracts import (
     run_start_response_schema,
     runtime_start_contract,
+    runtime_start_identity_schema,
 )
 
 from .orchestration_openapi import (
@@ -14,20 +15,19 @@ from .orchestration_openapi import (
 )
 
 
-def _run_start_error_response(kind: str, contract: dict) -> dict:
+def _run_start_error_response(kind: str) -> dict:
     """Document the durable identity retained after worker-start failure."""
     response = orchestration_error_response(500)
     if kind != 'durable':
         return response
     error_schema = response['content']['application/json']['schema']
-    legacy_id = contract['legacyIdFields'][kind]
     response['content']['application/json']['schema'] = {
         'allOf': [
             error_schema,
             {
                 'type': 'object',
                 'properties': {
-                    legacy_id: {'type': 'string', 'minLength': 1},
+                    'start': runtime_start_identity_schema('durable'),
                 },
             },
         ],
@@ -47,7 +47,7 @@ def run_start_responses(kind: str) -> dict:
             run_start_response_schema(kind),
         ),
     }, 400, 401, 403)
-    responses['500'] = _run_start_error_response(kind, contract)
+    responses['500'] = _run_start_error_response(kind)
     return responses
 
 

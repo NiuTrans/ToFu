@@ -208,7 +208,7 @@ def _assistant_blocks(msg: dict) -> list:
             'name': fn.get('name', ''),
             'input': args,
         })
-    # ★ Carry a cache breakpoint onto the LAST emitted block. When an
+    # Carry a cache breakpoint onto the LAST emitted block. When an
     #   assistant turn is the conversation tail (e.g. a prefill-resume round),
     #   add_cache_breakpoints stamps the marker on its content; it must ride
     #   the last Anthropic block (tool_use / text) so the tail breakpoint is
@@ -280,7 +280,7 @@ def openai_body_to_anthropic(body: dict) -> dict:
         elif role == 'tool':
             _tool_content = (msg.get('content') if isinstance(msg.get('content'), str)
                              else (_convert_content_blocks(msg.get('content')) or ''))
-            # ★ Carry the cache breakpoint onto the tool_result block itself.
+            # Carry the cache breakpoint onto the tool_result block itself.
             #   add_cache_breakpoints stamps the tail marker on the (wrapped)
             #   tool message content; Anthropic reads cache_control on the
             #   tool_result block, NOT on a text block nested inside it. Without

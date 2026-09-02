@@ -44,7 +44,7 @@ from lib.model_info import (
     model_requires_thought_signature_on_tool_calls,
     model_supports_assistant_prefill,
 )
-from lib.tasks_pkg.conv_message_builder import _reconstruct_tool_call_messages
+from lib.tasks_pkg.conv_message_builder._toolcalls import _reconstruct_tool_call_messages
 from lib.tasks_pkg.message_builder import inject_tool_history
 
 pytestmark = pytest.mark.unit
@@ -807,7 +807,7 @@ class TestSegmentContinueGroundTruth:
                 '_checkpointToolRounds': ckpt, 'toolRounds': cur}
 
     def test_continue_segment_rebuild_matches_toolrounds(self):
-        from lib.tasks_pkg.manager import _merge_tool_rounds
+        from lib.tasks_pkg.manager._persist import _merge_tool_rounds
         task = self._mk_continue_task()
         merged = _merge_tool_rounds(task)
         # Segment path: assemble over the merged rounds → reconstruct.
@@ -821,7 +821,7 @@ class TestSegmentContinueGroundTruth:
         """Segment merge uses checkpoint+current ordering exactly ONCE — the
         merged list has 2 rounds, and the segment path yields exactly 2
         tool_use → 2 assistant(tool_calls) messages (not 3-4 from double-count)."""
-        from lib.tasks_pkg.manager import _merge_tool_rounds
+        from lib.tasks_pkg.manager._persist import _merge_tool_rounds
         task = self._mk_continue_task()
         merged = _merge_tool_rounds(task)
         assert len(merged) == 2  # checkpoint(1) + current(1), no double-count
@@ -849,7 +849,7 @@ class TestSegmentContinueGroundTruth:
         (Claude would reject) → the parity assertion against the signed
         toolRounds path FAILS. Proves the signature carry is load-bearing."""
         from lib.tasks_pkg.segments import SEG_THINKING
-        from lib.tasks_pkg.manager import _merge_tool_rounds
+        from lib.tasks_pkg.manager._persist import _merge_tool_rounds
         task = self._mk_continue_task()
         merged = _merge_tool_rounds(task)
         segs = assemble_segments(task, merged=merged)

@@ -5,8 +5,8 @@
 loop and bridges its on-loop ``on_content``/``on_thinking`` callbacks into an
 asyncio.Queue that an async generator drains into OpenAI ``chat.completion.chunk``
 SSE frames. These tests inject a stub ``dispatch_fn`` (no LLM/network) that
-fires the callbacks then returns ``(msg, finish_reason, usage)`` — exactly the
-``async_dispatch_stream`` contract — and assert the emitted SSE frame sequence.
+fires the callbacks then returns the typed provider result (or an explicit
+legacy tuple at the compatibility seam) and asserts the emitted sequence.
 
 Per the async-test convention: drain the async generator with
 ``[f async for f in gen]`` inside ``run_until_complete``.
@@ -112,12 +112,33 @@ def test_dispatch_error_emits_envelope_and_done():
         raise RuntimeError('all slots exhausted')
 
     objs = _frames_to_objs(_run(_drain(_make_core(_dispatch))))
-    # Even on immediate error: a role frame, then a terminal frame with the
-    # tofu_error envelope, then [DONE]. No crash.
+    # An immediate error uses the error channel, never an empty assistant turn
+    # with a fabricated finish_reason=stop.
     assert objs[-1] == '[DONE]'
     final = objs[-2]
     assert 'tofu_error' in final
-    assert final['choices'][0]['finish_reason'] == 'stop'
+    assert final['error']['code'] == 'generation_error'
+    assert 'choices' not in final
+
+
+def test_malformed_typed_result_emits_error_not_fake_stop():
+    from lib.llm.stream_result import ProviderStreamResult, ProviderStreamState
+
+    async def _dispatch(messages, *, on_content=None, on_thinking=None, **kw):
+        on_content('safe prefix')
+        return ProviderStreamResult(
+            message={'role': 'assistant', 'content': 'safe prefix'},
+            compatibility_finish_reason='stop',
+            usage={'completion_tokens': 2},
+            state=ProviderStreamState.MALFORMED_STREAM,
+            malformed_frame_count=1,
+        )
+
+    objs = _frames_to_objs(_run(_drain(_make_core(_dispatch))))
+    error = objs[-2]
+    assert error['error']['code'] == 'provider_stream_error'
+    assert 'choices' not in error
+    assert objs[-1] == '[DONE]'
 
 
 def test_zero_delta_still_well_formed():

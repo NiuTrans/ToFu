@@ -6,7 +6,7 @@ consistent notion of "who is this request" to key their state on. This module
 is that single source of truth so the caps agree on the identity.
 
 Resolution order (most-specific → least):
-  1. ``user_id``  — the owning user in multi-user mode (survives key rotation).
+  1. ``owner_user_id`` — the repository owner (survives key rotation).
   2. ``key_id``   — the API key in private mode.
   3. client IP    — the direct socket peer, for the open-mode synthetic
                     context (no real credential). NOT ``X-Forwarded-For``
@@ -54,9 +54,9 @@ def principal_key(auth_ctx=None) -> str:
     as an IP). Callers use the returned string as a dict key.
     """
     if auth_ctx is not None:
-        uid = getattr(auth_ctx, 'user_id', '') or ''
-        if uid:
-            return f'user:{uid}'
+        owner_user_id = getattr(auth_ctx, 'owner_user_id', None)
+        if owner_user_id is not None:
+            return f'owner:{owner_user_id}'
         kid = getattr(auth_ctx, 'key_id', '') or ''
         if kid:
             return f'key:{kid}'

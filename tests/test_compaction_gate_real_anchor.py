@@ -100,7 +100,6 @@ def test_record_usage_stores_total_not_residual():
     UNCACHED residual; the real prompt is 1809+73472=75281. The usage_cache
     entry must hold 75281, else every warm Anthropic-convention conversation's
     gate reads ~2K and proactive compaction silently never fires."""
-    import lib.tasks_pkg.manager as mgr
     import lib.tasks_pkg.manager._stream as strm
     from lib.token_counter.usage_cache import _lookup, invalidate
 
@@ -108,7 +107,7 @@ def test_record_usage_stores_total_not_residual():
     invalidate(conv)
     mp = pytest.MonkeyPatch()
     try:
-        mp.setattr(mgr, 'dispatch_stream',
+        mp.setattr(strm, 'dispatch_stream',
                    lambda body, **kw: (
                        {'content': 'ok', 'reasoning_content': '',
                         'tool_calls': []},
@@ -118,7 +117,7 @@ def test_record_usage_stores_total_not_residual():
                         'cache_creation_input_tokens': 0,
                         'output_tokens': 10}),
                    raising=True)
-        mp.setattr(mgr, 'make_task_abort_check', None, raising=False)
+        mp.setattr(strm, 'make_task_abort_check', lambda _task: None)
         mp.setattr(strm, 'append_event', lambda *a, **kw: None, raising=True)
         mp.setattr(strm, 'checkpoint_task_partial', lambda *a, **kw: None,
                    raising=True)
@@ -144,7 +143,6 @@ def test_record_usage_stores_total_not_residual():
 def test_record_usage_openai_convention_unchanged():
     """Guard: OpenAI-convention (prompt_tokens already includes cache) must be
     byte-identical before/after — total == prompt_tokens either way."""
-    import lib.tasks_pkg.manager as mgr
     import lib.tasks_pkg.manager._stream as strm
     from lib.token_counter.usage_cache import _lookup, invalidate
 
@@ -152,7 +150,7 @@ def test_record_usage_openai_convention_unchanged():
     invalidate(conv)
     mp = pytest.MonkeyPatch()
     try:
-        mp.setattr(mgr, 'dispatch_stream',
+        mp.setattr(strm, 'dispatch_stream',
                    lambda body, **kw: (
                        {'content': 'ok', 'reasoning_content': '',
                         'tool_calls': []},
@@ -161,7 +159,7 @@ def test_record_usage_openai_convention_unchanged():
                         'prompt_tokens_details': {'cached_tokens': 73472},
                         'completion_tokens': 10}),
                    raising=True)
-        mp.setattr(mgr, 'make_task_abort_check', None, raising=False)
+        mp.setattr(strm, 'make_task_abort_check', lambda _task: None)
         mp.setattr(strm, 'append_event', lambda *a, **kw: None, raising=True)
         mp.setattr(strm, 'checkpoint_task_partial', lambda *a, **kw: None,
                    raising=True)
@@ -325,17 +323,21 @@ def test_real_anchor_source_preference():
         mp.setattr(uc, '_lookup', lambda conv_id: _UsageEntry(
             prompt_tokens=300_000, model='kimi-k3', ts=time.time(),
             message_count=40, tail_signature='s'), raising=True)
-        mp.setattr(per, 'read_last_turn_cache_read', lambda _c: 215_552,
+        mp.setattr(per, 'read_last_turn_cache_read',
+                   lambda _c, *, user_id: 215_552,
                    raising=True)
-        assert ra.real_prompt_anchor('c1') == (300_000, 'usage_cache')
+        task = {'_userId': 1}
+        assert ra.real_prompt_anchor('c1', task) == (300_000, 'usage_cache')
 
         # durable fallback when memory is cold
         mp.setattr(uc, '_lookup', lambda conv_id: None, raising=True)
-        assert ra.real_prompt_anchor('c1') == (215_552, 'durable:lastTurnCacheRead')
+        assert ra.real_prompt_anchor(
+            'c1', task) == (215_552, 'durable:lastTurnCacheRead')
 
         # nothing known
-        mp.setattr(per, 'read_last_turn_cache_read', lambda _c: 0, raising=True)
-        assert ra.real_prompt_anchor('c1') == (0, 'none')
+        mp.setattr(per, 'read_last_turn_cache_read',
+                   lambda _c, *, user_id: 0, raising=True)
+        assert ra.real_prompt_anchor('c1', task) == (0, 'none')
 
         # empty conv id never touches the stores
         assert ra.real_prompt_anchor('') == (0, 'none')
@@ -348,7 +350,7 @@ def test_real_anchor_source_preference():
 # ═══════════════════════════════════════════════════════════════════════════
 
 def test_floor_ratio_reader_env_override():
-    from lib.tasks_pkg.compaction import _constants as C
+    import lib.tasks_pkg.compaction._constants as C
 
     mp = pytest.MonkeyPatch()
     try:
@@ -367,7 +369,7 @@ def test_floor_ratio_reader_env_override():
 
 
 def test_anchor_slack_reader_env_override():
-    from lib.tasks_pkg.compaction import _constants as C
+    import lib.tasks_pkg.compaction._constants as C
 
     mp = pytest.MonkeyPatch()
     try:

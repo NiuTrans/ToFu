@@ -1,5 +1,3 @@
-# Incident anchor: born in commit 3e2c444b — fetch_url: stop laundering soft-blocked HTML into bogus "file asset" ...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Guards for the fetch_url soft-failure → bogus-"file asset" retry loop.
 
 Symptom this pins (2026-07-25): a geo-blocked doc host answers **HTTP 200,
@@ -37,7 +35,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.tasks_pkg.handlers.search import _core  # noqa: E402
+import lib.tasks_pkg.handlers.search._core as _core  # noqa: E402
 
 
 #: The real geo-block shell, as extracted by fetch_page_content from the live
@@ -200,7 +198,7 @@ class TestSoftBlockDetection(unittest.TestCase):
 
     def test_soft_block_names_the_host_and_forbids_retry(self):
         """The model tried 3 host variants — the message must kill the HOST."""
-        with patch.object(_core._facade_mod(), 'fetch_page_content',
+        with patch.object(_core, 'fetch_page_content',
                           return_value=GEO_BLOCK_TEXT):
             with patch.object(_core, '_stage_binary_asset') as m_stage:
                 item = _core._fetch_url_one(GEO_URL, 'prompt caching', 'read docs')
@@ -224,7 +222,7 @@ class TestTypedReasonGatesAssetStaging(unittest.TestCase):
 
     def test_irrelevant_does_not_stage_an_asset(self):
         from tofu_search.fetch.content_filter import IRRELEVANT_SENTINEL
-        with patch.object(_core._facade_mod(), 'fetch_page_content',
+        with patch.object(_core, 'fetch_page_content',
                           return_value='some genuinely off-topic prose ' * 40):
             with patch.object(_core, 'filter_web_content',
                               return_value=IRRELEVANT_SENTINEL):
@@ -241,7 +239,7 @@ class TestTypedReasonGatesAssetStaging(unittest.TestCase):
         self.assertIn('irrelevant', (item['error_msg'] or '').lower())
 
     def test_genuine_extraction_failure_still_stages(self):
-        with patch.object(_core._facade_mod(), 'fetch_page_content',
+        with patch.object(_core, 'fetch_page_content',
                           return_value=None):
             with patch.object(_core, '_stage_binary_asset',
                               return_value={'page_content': 'note',
@@ -256,7 +254,7 @@ class TestTypedReasonGatesAssetStaging(unittest.TestCase):
         self.assertEqual(item['reason'], 'asset')
 
     def test_success_carries_extracted_ok(self):
-        with patch.object(_core._facade_mod(), 'fetch_page_content',
+        with patch.object(_core, 'fetch_page_content',
                           return_value='real page text ' * 50):
             with patch.object(_core, 'filter_web_content',
                               side_effect=lambda txt, **kw: txt):

@@ -47,14 +47,14 @@ def _mk_grep_msg(tcid: str, n_matches: int = 5) -> list:
 
 @pytest.mark.unit
 def test_m1_registered():
-    from lib.tasks_pkg.compaction import list_steps
+    from lib.tasks_pkg.compaction.api import list_steps
     assert 'latest_state_dedup' in list_steps()
     assert 'fold_observations' in list_steps()
 
 
 @pytest.mark.unit
 def test_m1_supersedes_stale_reads_keeps_latest():
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
 
     msgs = [{'role': 'user', 'content': 'go'}]
     # Pad with 60 unrelated tool results so the file reads fall outside the
@@ -92,7 +92,7 @@ def test_m1_supersedes_stale_reads_keeps_latest():
 
 @pytest.mark.unit
 def test_m1_does_not_supersede_distinct_paths():
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
 
     msgs = [{'role': 'user', 'content': 'go'}]
     for i in range(60):
@@ -118,7 +118,7 @@ def test_m1_does_not_supersede_distinct_paths():
 
 @pytest.mark.unit
 def test_m2_folds_grep_to_structured_fact():
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
 
     msgs = [{'role': 'user', 'content': 'go'}]
     msgs += _mk_grep_msg('g1', n_matches=7)  # oldest → cold
@@ -141,7 +141,7 @@ def test_m2_folds_grep_to_structured_fact():
 
 @pytest.mark.unit
 def test_m2_respects_hot_tail():
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
 
     # Only one grep result, within the default hot tail → untouched.
     msgs = [{'role': 'user', 'content': 'go'}] + _mk_grep_msg('g1', n_matches=5)

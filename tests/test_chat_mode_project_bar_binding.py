@@ -6,14 +6,14 @@ path because the two projections were restored by two INDEPENDENT code paths
 with different gating (frontend/src/runtime/app-runtime.js):
 
   * the project bar  — ``_restoreConvProject`` ran UNCONDITIONALLY, and
-  * the tier dial    — ``_restoreConvToolState`` was wrapped in a
+  * the tier dial    — ``restoreConversationSettingsToComposer`` was wrapped in a
                        ``!hasInput`` gate, so any draft in the input box (it is
                        only cleared on send, so it survives a switch) left the
                        dial painted on the OUTGOING conv's tier.
 
 Net effect (the reported bug): switch Studio→plain with a draft → "Studio dial
 + no project bar". The divergence also survived into persistence: the next
-``_saveConvToolState`` laundered ``chatMode:'studio'`` into the project-less
+``captureActiveConversationSettings`` laundered ``chatMode:'studio'`` into the project-less
 conv's stored settings.
 
 Two sibling holes in ``_restoreConvProject`` made it flaky rather than merely
@@ -45,12 +45,22 @@ import subprocess
 import tempfile
 
 import pytest
+from tests._runtime_sections import runtime_section
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-RUNTIME = os.path.join(ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
+
+
+def _retained_runtime_source() -> str:
+    """Compose only the model-readable owners exercised by this harness."""
+    return '\n'.join(runtime_section(name, scope_prelude=False) for name in (
+        'main.js',
+        'main/main_conv_lifecycle.js',
+        'main/main_toolbar_ui.js',
+        'project_state.js',
+    ))
 
 # The post-await stale-switch guard (exact source text, reused by poisons).
 _GUARD_LINE = (
@@ -62,11 +72,6 @@ _CATCH_GUARD = (
     " && conversations.some(x => x && x.id === conv.id)\n"
     "        && typeof onProjectCleared === 'function') {"
 )
-
-
-def _read(path: str) -> str:
-    with open(path, encoding='utf-8') as f:
-        return f.read()
 
 
 def _brace_match(src: str, open_pos: int) -> int:
@@ -102,7 +107,7 @@ def _extract_chat_mode_defaults(src: str) -> str:
 _PRELUDE = r'''
 // ── module-level state the extracted runtime fns read/write ──
 var runtimeScope = globalThis;
-runtimeScope.ConvView = { replaceAll: function () {}, apply: function () {} };
+runtimeScope.requestAuthoritativeConversationRender = function () {};
 var conversations = [];
 var activeConvId = null;
 var chatMode = 'chat';
@@ -112,9 +117,12 @@ var _scanPollTimer = null;
 var pendingImages = [], pendingPdfTexts = [], pendingVideos = [];
 var searchMode = 'multi', fetchEnabled = true, codeExecEnabled = true;
 var browserEnabled = false, desktopEnabled = false, memoryEnabled = true;
-var schedulerEnabled = false, swarmEnabled = false, endpointEnabled = false;
+var schedulerEnabled = false;
 var autopilotEnabled = false, activeFlow = '', imageGenEnabled = false;
 var imageGenMode = false, humanGuidanceEnabled = false, autoTranslate = false;
+var planMode = false;
+
+var autoApplyWrites = true;
 var _igSelectedModel = null, _igSelectedCount = 1;
 var _igSelectedAspect = '1:1', _igSelectedResolution = '1K';
 var config = { model: null, thinkingDepth: null, _modelIsProvisional: true,
@@ -134,7 +142,7 @@ var __deferredResolve = null;
 var __deferred = new Promise(function (r) { __deferredResolve = r; });
 
 function mk(id, extra) {
-  var c = { id: id, title: id, messages: [], chatMode: 'chat' };
+  var c = { id: id, title: id, chatMode: 'chat' };
   for (var k in extra) c[k] = extra[k];
   return c;
 }
@@ -182,15 +190,17 @@ var document = {
 _el('projectBar').style.display = 'none';
 
 // ── stubs for runtime deps the extracted fns call ──
-// The REAL _saveConvToolState console.logs on empty-messages convs; that would
-// prefix the JSON stdout channel and break parsing. Silence it.
+// Keep the harness output JSON-only even if diagnostics are added later.
 console.log = function () {};
 function debugLog() {}
 function escapeHtml(s) { return String(s == null ? '' : s); }
 function t(key) { return key; }
+function _conversationDisplayTitle(title, fallback) {
+  return String(title || fallback || '');
+}
 function saveConversations() { __saves.push(Array.from(arguments)); }
-function syncConversationToServer() {}
-function _syncToolStateDebounced() {}
+function persistConversationSettings() {}
+function scheduleConversationSettingsPersist() {}
 function getActiveConv() {
   return conversations.find(function (c) { return c.id === activeConvId; }) || null;
 }
@@ -200,10 +210,9 @@ function renderConversationList() {}
 function renderPendingQueueUI() {}
 function _refreshServerQueue() {}
 function updateSendButton() {}
-function _reconnectServerTaskIfIdle() { return false; }
 function _resumePendingTranslations() {}
 function showStreamingUIForConv() {}
-async function loadConversationMessages() {}
+async function hydrateConversationRuntime() {}
 function _applyRemoteProjectState() {}
 function _applyModelUI() {}
 function _applySearchModeUI() {}
@@ -212,14 +221,20 @@ function _applyCodeExecUI() {}
 function _applyBrowserUI() {}
 function _applyDesktopUI() {}
 function _applyMemoryUI() {}
-function _applySwarmUI() {}
-function _applyEndpointUI() {}
-function _applyAutopilotUI() {}
+function normalizeConversationInteractionModes() {
+  return { agentMode: 'standard', activeFlow: '' };
+}
+function _applyAgentModeUI(mode) {
+  planMode = mode === 'plan';
+  autopilotEnabled = mode === 'autopilot';
+}
 function _applyFlowUI() {}
 function _applyImageGenToolUI() {}
 function _applyImageGenUI() {}
 function _applyHumanGuidanceUI() {}
 function _applyAutoTranslateUI() {}
+
+function _updateAutoApplyUI() {}
 function convAutoTranslate() { return false; }
 function _scheduleReflow() {}
 function updateSubmenuCounts() {}
@@ -250,8 +265,8 @@ var Api = {
 _WRAPPER = r'''
 var __restoredCalls = 0;
 (function () {
-  var orig = _restoreConvToolState;
-  _restoreConvToolState = function (c) { __restoredCalls++; return orig(c); };
+  var orig = restoreConversationSettingsToComposer;
+  restoreConversationSettingsToComposer = function (c) { __restoredCalls++; return orig(c); };
 })();
 '''
 
@@ -270,7 +285,7 @@ _el('userInput').value = 'half-typed draft';
 loadConversation('convB');
 var dialAfterSwitch = chatMode;
 var barAfterSwitch = _el('projectBar').style.display;
-_saveConvToolState();
+captureActiveConversationSettings();
 process.stdout.write(JSON.stringify({
   dial: dialAfterSwitch, bar: barAfterSwitch,
   persisted: convB.chatMode, restored: __restoredCalls,
@@ -434,20 +449,20 @@ def _run(scenario: str, *, poison: str = '',
     if not node:
         pytest.skip('node not available for extraction-and-eval')
 
-    src = _read(RUNTIME)
+    src = _retained_runtime_source()
     fns = {name: _extract_fn(src, name) for name in (
         '_getConvProjectPath', '_isRemotePath', '_stopScanPoll',
         '_updateProjectUI', '_clearProjectStateLocal', '_applyProjectData',
         '_restoreConvProject', 'onProjectCleared', '_applyChatModeUI',
-        '_deriveChatModeFromFlags', '_restoreConvToolState',
-        '_saveConvToolState', 'loadConversation', 'loadProjectStatus',
+        '_deriveChatModeFromFlags', 'restoreConversationSettingsToComposer',
+        'captureActiveConversationSettings', 'loadConversation', 'loadProjectStatus',
     )}
 
     if poison == 'draft_gate':
-        old = 'if (!c._needsLoad) _restoreConvToolState(c);'
-        new = ('if (!c._needsLoad && !(document.getElementById("userInput")'
+        old = 'if (!c._turnSnapshotRequired) restoreConversationSettingsToComposer(c);'
+        new = ('if (!c._turnSnapshotRequired && !(document.getElementById("userInput")'
                ' && document.getElementById("userInput").value.trim()))'
-               ' _restoreConvToolState(c);')
+               ' restoreConversationSettingsToComposer(c);')
         assert old in fns['loadConversation'], 'poison did not apply'
         fns['loadConversation'] = fns['loadConversation'].replace(old, new)
     elif poison == 'no_demote':
@@ -504,7 +519,7 @@ def _run(scenario: str, *, poison: str = '',
 def test_switch_with_draft_restores_dial_and_bar():
     """THE reported bug: switch Studio→plain with a draft in the input. The
     dial must follow the incoming conv (chat) and the bar must hide — and the
-    next _saveConvToolState must persist 'chat', not launder 'studio'."""
+    next captureActiveConversationSettings must persist 'chat', not launder 'studio'."""
     r = _run('switch_plain_with_draft')
     assert r['dial'] == 'chat', 'dial kept the outgoing conv\'s Studio tier'
     assert r['bar'] == 'none', 'project bar visible on a project-less conv'
@@ -683,14 +698,14 @@ def test_boot_status_failure_demotes_and_retains_path():
 def test_source_pinned_invariants():
     from tests._source_scan import strip_comments
 
-    src = _read(RUNTIME)
+    src = _retained_runtime_source()
     load_conv = _extract_fn(src, 'loadConversation')
     # The draft gate is gone from the switch path's EXECUTABLE code (the fix's
     # own explanatory comment legitimately mentions the old gate); the
-    # _needsLoad gate stays.
+    # _turnSnapshotRequired gate stays.
     assert 'hasInput' not in strip_comments(load_conv, lang='js', inline=True)
     assert '_restoreConvProject(c);' in load_conv
-    assert re.search(r'if \(!c\._needsLoad\) _restoreConvToolState\(c\);',
+    assert re.search(r'if \(!c\._turnSnapshotRequired\) restoreConversationSettingsToComposer\(c\);',
                      load_conv)
     # newChat keeps its own (internally consistent) gate — untouched.
     assert 'hasInput' in _extract_fn(src, 'newChat')

@@ -28,7 +28,7 @@ pytestmark = pytest.mark.unit
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
 BABEL_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'babel.ts')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 _BODY = r"""
@@ -202,7 +202,7 @@ win._saveActivePaperState = () => { calls.saves++; };
 
 
 @pytest.mark.skipif(not shutil.which('node') or not os.path.isfile(ESBUILD),
-                    reason='node + esbuild dev-deps not installed')
+                    reason='node + vite test bundler dev-deps not installed')
 def test_vite_paper_babel_contract(tmp_path):
     built = tmp_path / 'paper-babel.js'
     compiled = subprocess.run(

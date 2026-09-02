@@ -61,7 +61,8 @@ pathconf、tox、setuptools、httpbin、代理等 20 类 monkeypatch。这产生
 | 官方 Docker harness | 强 | 最高 | 不可运行 | 中 | 本地有 daemon 时用于 patch 复核 |
 | 官方 Modal harness | 强 | 最高 | 可运行 | 高 | 当前环境的 patch 复核首选 |
 | sb-cli | 托管 | 官方 | 可运行 | 托管 | 发布/远程评分备选 |
-| Harbor + Apptainer | 文件/PID 强，网络/cgroup 较弱 | 使用同一预构建镜像 | 普通 Linux 可运行 | 低（强制串行） | 无 Docker 的本地开发/内部回归首选 |
+| Harbor + rootless QEMU/TCG | VM + user/net/PID/IPC/UTS namespace + seccomp + chroot | 同一任务定义/镜像，时钟性能不同 | 当前主机已实测 | 中 | 无 root 本地正式回归主路径 |
+| Harbor + Apptainer | 文件/PID 强，网络/cgroup 较弱 | 使用同一预构建镜像 | 当前 Pod 不可运行 | 低（强制串行） | 兼容后端，不再是默认 |
 | Harbor + 云 sandbox | 强 | adapter 有 parity 证据 | 可运行 | 高 | 多 agent/多模型 rollout 首选 |
 | Harbor + Daytona（Terminal-Bench 2.1） | 强 | 官方提交配置 | 可运行 | 高 | TB 2.1 首选 |
 
@@ -69,8 +70,10 @@ pathconf、tox、setuptools、httpbin、代理等 20 类 monkeypatch。这产生
 
 - 共享的只能是不可变 image/snapshot/cache；workspace、home、tmp、进程、网络命名空间和日志
   必须属于单个 trial。
-- Apptainer 例外地共享宿主网络且无严格 per-trial cgroup，因此强制单 trial 串行，并在 manifest
-  显式披露隔离差异；不能把它描述为 Daytona/Docker 的完全等价环境。
+- rootless QEMU 只共享固定 digest 的只读 base/cache；每个 trial 使用新 qcow2 overlay。QEMU
+  自身再置于无宿主网卡的 user/net/PID/IPC/UTS namespace、最小 chroot、零 capability、
+  `no_new_privs` 和 seccomp 内。公网只能经过拒绝私网/metadata、认证、限流和限字节的 proxy。
+- Apptainer 仍共享宿主网络且无严格 per-trial cgroup，因此只作为兼容后端并强制单 trial 串行。
 - runner 不实现 verifier，不对 upstream test script 做兼容性改写。
 - 运行身份由固定 dataset version、agent、model、backend、项目 SHA 和 harness version 构成；
   manifest 原子写入，重复 run id 拒绝覆盖。
@@ -80,3 +83,6 @@ pathconf、tox、setuptools、httpbin、代理等 20 类 monkeypatch。这产生
   保留为真实失败。
 - 默认产物在仓库外；Git ignore、通用 `.ignore`、项目扫描器、编辑器 watcher 和导出器是互相
   独立的防线。
+- SWE-bench 当前每任务导出一个完整 runc rootfs，隔离和恢复已成立，但跨镜像 layer 去重不足。
+  全量 500 题的下一步优化应是数据集级 content-addressed OCI/cache backing，而不是重新引入
+  可写共享容器 root。

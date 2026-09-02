@@ -21,12 +21,21 @@ from ._signals import _count_tool_errors
 logger = get_logger(__name__)
 
 
-def _compute_post_apply_metrics(cutoff_local: datetime) -> list[dict]:
+def _compute_post_apply_metrics(
+    cutoff_local: datetime,
+    *,
+    owner_user_id: int,
+    allow_unowned_observability: bool,
+) -> list[dict]:
     """For each still-active applied action without a recorded outcome,
     compute a simple count-based metric and persist it."""
     summaries: list[dict] = []
     try:
-        actions = _facade.storage.list_applied_actions(include_reverted=True, limit=100)
+        actions = _facade.storage.list_applied_actions(
+            owner_user_id=owner_user_id,
+            include_reverted=True,
+            limit=100,
+        )
     except Exception as e:
         logger.warning('[Optimizer.analyzer] could not list prior actions: %s', e)
         return summaries
@@ -48,12 +57,19 @@ def _compute_post_apply_metrics(cutoff_local: datetime) -> list[dict]:
 
         if action_type == 'block_search_domain':
             domain = str(args.get('domain') or '').lower()
-            dropped = _count_irrelevant_dropped_for_domain(domain, cutoff_local)
-            tool_errs = _count_tool_errors(cutoff_local)
+            if allow_unowned_observability:
+                dropped = _count_irrelevant_dropped_for_domain(
+                    domain, cutoff_local)
+                tool_errs = _count_tool_errors(cutoff_local)
+            else:
+                dropped = 0
+                tool_errs = 0
             metric = {
                 'domain': domain,
                 'irrelevant_dropped_24h': dropped,
                 'total_tool_errors_24h': tool_errs,
+                'unscoped_observability_available': (
+                    allow_unowned_observability),
                 'interpretation': (
                     'near-zero drops → block working; high drops → may no longer'
                     ' be needed or need broader match'),
@@ -63,7 +79,8 @@ def _compute_post_apply_metrics(cutoff_local: datetime) -> list[dict]:
 
         if not has_outcome:
             try:
-                _facade.storage.record_outcome_metric(log_id, metric)
+                _facade.storage.record_outcome_metric(
+                    log_id, metric, owner_user_id=owner_user_id)
             except Exception as e:
                 logger.warning('[Optimizer.analyzer] record_outcome_metric '
                                'failed for %s: %s', log_id, e)

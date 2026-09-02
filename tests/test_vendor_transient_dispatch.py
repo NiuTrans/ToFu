@@ -327,10 +327,9 @@ class TestDispatchStreamVendorStorm:
                    and r.get('status_code') == 429 for r in retries)
         assert len(key_stats_recorders['rate_limit']) == 1
 
-    def test_cooldown_wait_labels_itself_by_actual_cause(
+    def test_cooldown_wait_uses_waiting_channel_not_retry(
             self, monkeypatch, key_stats_recorders):
-        """All-slots-cooling with an ERROR-backoff cause must NOT claim
-        限流排队 — the incident's fake rate-limit label."""
+        """Pool polling has typed wait state but is not a request retry."""
         from lib.llm_dispatch import api
 
         good = _make_slot(key='k9')
@@ -345,16 +344,20 @@ class TestDispatchStreamVendorStorm:
         monkeypatch.setattr(llm_mod, 'stream_chat', _fake_stream)
 
         retries = []
+        waits = []
         msg, finish, usage = api.dispatch_stream(
             [{'role': 'user', 'content': 'hi'}], log_prefix='[t]',
-            on_retry=lambda **kw: retries.append(kw))
+            on_retry=lambda **kw: retries.append(kw),
+            on_waiting=lambda **kw: waits.append(kw))
 
         assert msg == 'ok'
-        assert retries, 'the cooldown wait must surface a phase'
-        assert retries[0].get('reason') == 'Waiting for model (retry backoff)'
-        assert retries[0].get('status_code') == 0
+        assert retries == []
+        assert waits
+        assert waits[0]['status'].kind == 'waiting_slot'
+        assert waits[0]['status'].request_elapsed_s >= 0
+        assert waits[0]['slot'] is None
 
-    def test_cooldown_wait_with_rate_limit_cause_keeps_legacy_label(
+    def test_rate_limit_cooldown_poll_is_not_a_retry(
             self, monkeypatch, key_stats_recorders):
         from lib.llm_dispatch import api
 
@@ -369,13 +372,16 @@ class TestDispatchStreamVendorStorm:
         monkeypatch.setattr(llm_mod, 'stream_chat', _fake_stream)
 
         retries = []
+        waits = []
         msg, finish, usage = api.dispatch_stream(
             [{'role': 'user', 'content': 'hi'}], log_prefix='[t]',
-            on_retry=lambda **kw: retries.append(kw))
+            on_retry=lambda **kw: retries.append(kw),
+            on_waiting=lambda **kw: waits.append(kw))
 
         assert msg == 'ok'
-        assert retries[0].get('reason') == 'Waiting for model (rate-limited)'
-        assert retries[0].get('status_code') == 429
+        assert retries == []
+        assert waits[0]['status'].kind == 'waiting_slot'
+        assert waits[0]['slot'] is None
 
 
 if __name__ == '__main__':

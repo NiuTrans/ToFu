@@ -2,13 +2,13 @@
 
 The Settings flow for local engines is user-driven: pick a preset (vLLM /
 SGLang / Ollama), paste a URL, probe. But the three engines have canonical
-default ports, and a box on loopback costs one TCP connect to find. This
-worker probes those ports shortly after startup (and periodically, so an
-engine started AFTER Tofu — or a model pulled later — is still picked up)
-and, when an endpoint answers with a non-empty model list, registers it as
-a normal ``brand: 'local'`` provider in ``server_config.json``. From that
-moment the regular machinery owns it: the dispatcher gets slots, the health
-checker (``health_local.py``) tracks model drift, and the Settings UI
+default ports, and a box on loopback costs one TCP connect to find. The shared
+local-endpoint monitor probes those ports shortly after startup (and
+periodically, so an engine started AFTER Tofu — or a model pulled later — is
+still picked up) and, when an endpoint answers with a non-empty model list,
+registers it as a normal ``brand: 'local'`` provider in
+``server_config.json``. From that moment the regular machinery owns it: the
+dispatcher gets slots, ``health_local.py`` tracks model drift, and Settings
 renders the card exactly like a user-created one (engine icon included).
 
 Safety rails
@@ -17,7 +17,9 @@ Safety rails
   extension is ``$OLLAMA_HOST`` (the operator's own declaration of where
   Ollama listens).
 * **Cheap when absent.** A closed loopback port is a ~1 ms
-  ``ECONNREFUSED``; absence is logged at DEBUG, never WARNING.
+  ``ECONNREFUSED``; absence is logged at DEBUG, never WARNING. Open endpoints
+  with no models keep the cheap two-minute TCP check but exponentially back
+  off full HTTP discovery to a bounded fifteen minutes.
 * **Idempotent.** A port already covered by ANY provider's
   ``endpoints``/``base_url`` (any spelling of localhost) is skipped.
 * **No zombies.** If the user deletes an auto-created provider, the port
@@ -45,9 +47,11 @@ logger = get_logger(__name__)
 
 __all__ = [
     'WELL_KNOWN_ENGINES',
+    'poll_if_due',
     'sweep_once',
     'start_local_autodiscovery',
     'stop_local_autodiscovery',
+    'trigger_local_autodiscovery',
 ]
 
 
@@ -61,14 +65,41 @@ WELL_KNOWN_ENGINES = (
 
 _CONNECT_TIMEOUT = 1.0   # closed loopback port refuses instantly; this is the firewall-drop guard
 _DISCOVER_TIMEOUT = 3    # loopback /models is local and fast
-_BOOT_DELAY = float(os.environ.get('TOFU_LOCAL_AUTODISCOVER_DELAY', '5'))
-_SWEEP_INTERVAL = int(os.environ.get('TOFU_LOCAL_AUTODISCOVER_INTERVAL', '120'))
+def _env_seconds(name: str, default: float, minimum: float,
+                 maximum: float) -> float:
+    """Read one bounded polling value without making import env-fragile."""
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError, OverflowError):
+        value = default
+    return min(maximum, max(minimum, value))
+
+
+_BOOT_DELAY = _env_seconds(
+    'TOFU_LOCAL_AUTODISCOVER_DELAY', 5.0, 0.0, 300.0)
+_SWEEP_INTERVAL = _env_seconds(
+    'TOFU_LOCAL_AUTODISCOVER_INTERVAL', 120.0, 10.0, 3600.0)
+_MAX_PROBE_INTERVAL = max(
+    _SWEEP_INTERVAL,
+    _env_seconds(
+        'TOFU_LOCAL_AUTODISCOVER_MAX_INTERVAL', 900.0,
+        _SWEEP_INTERVAL, 3600.0),
+)
 
 _STATE_PATH = config_path('local_autodiscover.json')
 
-_thread = None
-_stop_event = threading.Event()
-_thread_lock = threading.Lock()
+# Auto-discovery is a cooperative job of health_local's single monitor thread,
+# not a second resident worker. These fields hold only bounded in-process
+# scheduling state; provider/dismissal authority remains the atomic JSON store.
+_schedule_lock = threading.Lock()
+_runtime_enabled = True
+_next_sweep_at: float | None = None
+_last_open_keys: set[str] = set()
+_empty_keys: set[str] = set()
+_probe_due_at: dict[str, float] = {}
+_next_probe_delay: dict[str, float] = {}
+_force_full_probe = False
+_schedule_generation = 0
 
 
 def _disabled() -> bool:
@@ -176,7 +207,7 @@ def _discover(base_url: str):
     """``(models, effective_base_url)`` via the shared discovery machinery."""
     register_no_proxy_url(base_url)
     return discover_models(base_url, '', timeout=_DISCOVER_TIMEOUT,
-                           return_effective=True)
+                           return_effective=True, quiet_not_found=True)
 
 
 def _build_provider(cand: dict, effective_url: str, models: list) -> dict:
@@ -240,13 +271,27 @@ def _rebuild_slots() -> None:
     _rebuild_dispatcher_slots()
 
 
-def sweep_once(port_open=None, discover=None, rebuild=None) -> dict:
+def sweep_once(port_open=None, discover=None, rebuild=None,
+               probe_due=None) -> dict:
     """One auto-discovery pass over the well-known ports.
 
     Dependency-injected seams (``port_open`` / ``discover`` / ``rebuild``)
-    keep the tests off the network. Returns a stats dict.
+    keep the tests off the network. ``probe_due(key)`` may defer only the full
+    HTTP model query after an open TCP result; it never suppresses the cheap
+    topology check. Returns a stats dict.
     """
-    stats = {'scanned': 0, 'probed': 0, 'added': []}
+    stats = {
+        'scanned': 0,
+        'open': [],
+        'probed': 0,
+        'probed_keys': [],
+        'deferred': [],
+        'empty': [],
+        'failed': [],
+        'unpersisted': [],
+        'added': [],
+        'config_loaded': False,
+    }
     if _disabled():
         stats['disabled'] = True
         return stats
@@ -258,6 +303,7 @@ def sweep_once(port_open=None, discover=None, rebuild=None) -> dict:
     except Exception as e:
         logger.warning('[AutoDiscover] cannot load server config: %s', e)
         return stats
+    stats['config_loaded'] = True
     providers = cfg.get('providers') or []
     covered = _covered_port_keys(providers)
     state = _load_state()
@@ -287,28 +333,39 @@ def sweep_once(port_open=None, discover=None, rebuild=None) -> dict:
         try:
             if not port_open(cand['host'], cand['port']):
                 continue
+            stats['open'].append(key)
+            if probe_due is not None and not probe_due(key):
+                stats['deferred'].append(key)
+                continue
             stats['probed'] += 1
-            base = 'http://%s:%d' % (cand['host'], cand['port'])
+            stats['probed_keys'].append(key)
+            # All three well-known engines expose the OpenAI-compatible
+            # catalogue at /v1/models. Starting at /v1 avoids the guaranteed
+            # bare-origin 404 + retry that doubled every successful probe.
+            base = 'http://%s:%d/v1' % (cand['host'], cand['port'])
             models, effective = discover(base)
         except Exception as e:
             # One misbehaving engine must not mask the others.
             logger.warning('[AutoDiscover] probe of %s failed: %s', key, e)
+            stats['failed'].append(key)
             continue
         if not models:
             # Engine answers but serves nothing yet (no model pulled). Not
             # an error and NOT dismissed — the next sweep re-probes, so a
             # model pulled later still appears automatically.
-            logger.info('[AutoDiscover] %s answers but serves no models', key)
+            stats['empty'].append(key)
+            logger.debug('[AutoDiscover] %s answers but serves no models', key)
             continue
         prov = _build_provider(cand, effective, models)
         if not _persist_provider(prov):
+            stats['unpersisted'].append(key)
             continue
         state['added'][key] = prov['id']
         _save_state(state)
         covered.add(key)
         stats['added'].append({
             'engine': cand['engine'], 'endpoint': effective,
-            'n_models': len(models), 'provider_id': prov['id'],
+            'n_models': len(models), 'provider_id': prov['id'], 'key': key,
         })
         logger.info('[AutoDiscover] %s (%s) serves %d model(s) — provider %r '
                     'auto-configured', cand['name'], effective, len(models),
@@ -325,55 +382,189 @@ def sweep_once(port_open=None, discover=None, rebuild=None) -> dict:
     return stats
 
 
-def _loop() -> None:
-    logger.info('[AutoDiscover] worker started (delay=%.0fs, interval=%ds)',
-                _BOOT_DELAY, _SWEEP_INTERVAL)
-    if _stop_event.wait(_BOOT_DELAY):
-        return
-    while not _stop_event.is_set():
-        try:
-            sweep_once()
-        except Exception as e:
-            logger.error('[AutoDiscover] sweep failed: %s', e, exc_info=True)
-        if _stop_event.wait(_SWEEP_INTERVAL):
-            break
-    logger.info('[AutoDiscover] worker stopped')
+def _inactive_poll_stats(reason: str) -> dict:
+    return {
+        reason: True,
+        'scheduled': False,
+        'next_poll_s': None,
+    }
+
+
+def _remaining_poll_delay_locked(clock_now: float) -> float:
+    deadline = clock_now if _next_sweep_at is None else _next_sweep_at
+    return max(0.0, deadline - clock_now)
+
+
+def _record_poll_result(stats: dict, *, clock_now: float, generation: int,
+                        previous_empty: set[str]) -> dict:
+    """Commit one claimed sweep unless a newer wake/stop generation won."""
+    global _last_open_keys, _empty_keys
+
+    with _schedule_lock:
+        # A Settings wake or stop that landed during network I/O owns the next
+        # generation. Never let this stale completion erase its immediate run.
+        if generation != _schedule_generation:
+            stats['next_poll_s'] = _remaining_poll_delay_locked(clock_now)
+            return stats
+        if not stats.get('config_loaded'):
+            stats['next_poll_s'] = _remaining_poll_delay_locked(clock_now)
+            return stats
+
+        open_keys = set(stats['open'])
+        probed_keys = set(stats['probed_keys'])
+        added_keys = {row['key'] for row in stats['added']}
+
+        for key in set(_probe_due_at) - open_keys:
+            _probe_due_at.pop(key, None)
+            _next_probe_delay.pop(key, None)
+        for key in probed_keys:
+            if key in added_keys:
+                _probe_due_at.pop(key, None)
+                _next_probe_delay.pop(key, None)
+                continue
+            delay = max(
+                _SWEEP_INTERVAL,
+                _next_probe_delay.get(key, _SWEEP_INTERVAL),
+            )
+            _probe_due_at[key] = clock_now + delay
+            _next_probe_delay[key] = min(
+                _MAX_PROBE_INTERVAL, max(_SWEEP_INTERVAL, delay * 2.0))
+
+        current_empty = previous_empty & open_keys
+        current_empty -= probed_keys
+        current_empty.update(stats['empty'])
+        newly_empty = sorted(current_empty - previous_empty)
+        _empty_keys = current_empty
+        _last_open_keys = open_keys
+        stats['next_poll_s'] = _remaining_poll_delay_locked(clock_now)
+
+    if newly_empty:
+        logger.info(
+            '[AutoDiscover] %s answers but serves no models; full HTTP probes '
+            'back off to <=%.0fs while TCP topology checks remain %.0fs',
+            ', '.join(newly_empty), _MAX_PROBE_INTERVAL, _SWEEP_INTERVAL)
+    return stats
+
+
+def poll_if_due(*, now: float | None = None, port_open=None,
+                discover=None, rebuild=None) -> dict:
+    """Run one due topology sweep from the shared local-endpoint monitor.
+
+    TCP topology remains sampled every ``_SWEEP_INTERVAL`` so a newly started
+    engine is discovered promptly. Only repeated full HTTP probes of an
+    already-open, still-empty endpoint back off: 2m -> 4m -> 8m -> 15m by
+    default. The state is process-local, bounded by the three candidate keys,
+    and reset immediately by a topology change or explicit trigger.
+    """
+    global _next_sweep_at, _last_open_keys, _empty_keys
+    global _force_full_probe
+
+    if _disabled():
+        return _inactive_poll_stats('disabled')
+    clock_now = time.monotonic() if now is None else float(now)
+    with _schedule_lock:
+        if not _runtime_enabled:
+            return _inactive_poll_stats('stopped')
+        if _next_sweep_at is None:
+            _next_sweep_at = clock_now + _BOOT_DELAY
+        if clock_now < _next_sweep_at and not _force_full_probe:
+            return {
+                'scheduled': False,
+                'next_poll_s': _next_sweep_at - clock_now,
+            }
+        generation = _schedule_generation
+        force_full = _force_full_probe
+        _force_full_probe = False
+        previous_open = set(_last_open_keys)
+        previous_empty = set(_empty_keys)
+        due_at = dict(_probe_due_at)
+        # Claim this topology sweep before any network I/O so an accidental
+        # concurrent caller joins the next cadence instead of duplicating it.
+        _next_sweep_at = clock_now + _SWEEP_INTERVAL
+
+    def _probe_is_due(key: str) -> bool:
+        return (
+            force_full
+            or key not in previous_open
+            or clock_now >= due_at.get(key, 0.0)
+        )
+
+    stats = sweep_once(
+        port_open=port_open,
+        discover=discover,
+        rebuild=rebuild,
+        probe_due=_probe_is_due,
+    )
+    stats['scheduled'] = True
+    return _record_poll_result(
+        stats,
+        clock_now=clock_now,
+        generation=generation,
+        previous_empty=previous_empty,
+    )
+
+
+def trigger_local_autodiscovery(*, reset_backoff: bool = True) -> bool:
+    """Request an immediate pass after an explicit provider/config change."""
+    global _next_sweep_at, _force_full_probe, _schedule_generation
+    if _disabled():
+        return False
+    with _schedule_lock:
+        if not _runtime_enabled:
+            return False
+        _schedule_generation += 1
+        _force_full_probe = True
+        _next_sweep_at = 0.0
+        if reset_backoff:
+            _probe_due_at.clear()
+            _next_probe_delay.clear()
+    try:
+        from .health_local import wake_local_health_checker
+        return wake_local_health_checker()
+    except Exception as exc:
+        logger.debug('[AutoDiscover] shared-monitor wake failed: %s', exc)
+        return False
 
 
 def start_local_autodiscovery() -> bool:
-    """Idempotent: spawn the background sweep thread (no-op if running/disabled)."""
-    global _thread
+    """Compatibility entry point: enable discovery on the shared monitor."""
+    global _runtime_enabled, _next_sweep_at, _force_full_probe
+    global _schedule_generation
     if _disabled():
         logger.info('[AutoDiscover] disabled via TOFU_LOCAL_AUTODISCOVER=0')
         return False
-    with _thread_lock:
-        if _thread is not None and _thread.is_alive():
-            return False
-        _stop_event.clear()
-        _thread = threading.Thread(target=_loop, name='local-autodiscover',
-                                   daemon=True)
-        _thread.start()
-    return True
+    with _schedule_lock:
+        was_enabled = _runtime_enabled
+        _runtime_enabled = True
+        _schedule_generation += 1
+        _force_full_probe = False
+        _next_sweep_at = time.monotonic() + _BOOT_DELAY
+    from .health_local import (
+        start_local_health_checker,
+        wake_local_health_checker,
+    )
+    started = start_local_health_checker()
+    wake_local_health_checker()
+    return bool(started or not was_enabled)
 
 
 def stop_local_autodiscovery(timeout: float = 2.0) -> bool:
-    """Signal and bounded-join the local discovery worker."""
-    global _thread
-    _stop_event.set()
-    with _thread_lock:
-        thread = _thread
-    if thread is None:
-        return True
+    """Disable discovery; the shared health monitor retains its own lifecycle."""
+    del timeout  # retained for compatibility with the former worker API
+    global _runtime_enabled, _next_sweep_at, _force_full_probe
+    global _schedule_generation
+    with _schedule_lock:
+        _runtime_enabled = False
+        _schedule_generation += 1
+        _force_full_probe = False
+        _next_sweep_at = None
+        _last_open_keys.clear()
+        _empty_keys.clear()
+        _probe_due_at.clear()
+        _next_probe_delay.clear()
     try:
-        wait_seconds = max(0.0, float(timeout))
-    except (TypeError, ValueError, OverflowError) as exc:
-        logger.debug('[AutoDiscover] invalid stop timeout; using 2.0: %s', exc)
-        wait_seconds = 2.0
-    if thread is not threading.current_thread():
-        thread.join(timeout=wait_seconds)
-    if thread.is_alive():
-        return False
-    with _thread_lock:
-        if _thread is thread:
-            _thread = None
+        from .health_local import wake_local_health_checker
+        wake_local_health_checker()
+    except Exception as exc:
+        logger.debug('[AutoDiscover] shared-monitor wake failed: %s', exc)
     return True

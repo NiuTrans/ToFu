@@ -150,8 +150,7 @@ def test_wire_change_is_not_laundered_into_upstream_fallback():
 
 
 def test_codex_fallback_is_stamped_on_api_round(monkeypatch):
-    from lib.tasks_pkg.orchestrator import _cache_round_accounting as accounting
-
+    import lib.tasks_pkg.orchestrator._cache_round_accounting as accounting
     monkeypatch.setattr(accounting, 'detect_cache_break', lambda *a, **k: None)
     monkeypatch.setattr(accounting, 'get_prev_turn_cache_read', lambda _cid: 0)
     monkeypatch.setattr(accounting, '_compute_write_breakdown',
@@ -173,7 +172,7 @@ def test_codex_fallback_is_stamped_on_api_round(monkeypatch):
     rounds = [{'round': 2}]
 
     accounting.stamp_round_cache_accounting(
-        {'id': 'task-1', 'convId': 'conv-accounting'},
+        {'id': 'task-1', 'convId': 'conv-accounting', '_userId': 1},
         round_num=1,
         tid='task-1',
         model='gpt-5.6-luna',

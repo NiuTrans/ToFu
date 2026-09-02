@@ -1,7 +1,6 @@
 """lib/pdf_parser/vlm/ — VLM-based PDF parsing (Gemini Flash Lite).
 
-Façade package — import path unchanged (``from lib.pdf_parser.vlm import X``
-and ``from lib.pdf_parser import vlm_parse_pdf`` both work byte-identically).
+Public VLM parsing and task operations live at this module boundary.
 
 Renders each PDF page to a JPEG image, sends batches to a VLM via an
 OpenAI-compatible API for transcription to high-quality Markdown, and

@@ -28,7 +28,8 @@ def guard(monkeypatch):
     # Neutralise env so defaults apply unless a test sets them.
     for k in ('TOFU_CGROUP_WARN_PCT', 'TOFU_CGROUP_RELIEF_PCT',
               'TOFU_CGROUP_REQUEST_PCT', 'TOFU_CGROUP_POLL_SEC',
-              'TOFU_CGROUP_REQUEST_MIN_BYTES', 'TOFU_CGROUP_REQUEST_GUARD'):
+              'TOFU_CGROUP_REQUEST_MIN_BYTES', 'TOFU_CGROUP_REQUEST_GUARD',
+              'TOFU_CGROUP_RELIEF_COOLDOWN_SEC'):
         monkeypatch.delenv(k, raising=False)
     for k in ('TOFU_PROCESS_RSS_RELIEF_MB',
               'TOFU_PROCESS_RSS_COOLDOWN_SEC',
@@ -36,6 +37,9 @@ def guard(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(cg, '_last_process_rss_relief_at', 0.0)
     monkeypatch.setattr(cg, '_process_rss_recycle_requested', False)
+    monkeypatch.setattr(cg, '_ineffective_reliefs', 0)
+    monkeypatch.setattr(cg, '_ineffective_escalated', False)
+    monkeypatch.setattr(cg, '_relief_suppressed_until', 0.0)
     return cg
 
 
@@ -59,6 +63,22 @@ def test_unreadable_cgroup_is_total_noop(guard, monkeypatch):
     assert guard.start_monitor() is False              # ② thread not started
     ok, reason = guard.check_request_headroom('x', approx_bytes=50 * 1024 * 1024)  # ③
     assert ok is True and reason is None
+
+
+def test_bare_metal_personal_rss_defaults_leave_room_for_the_desktop(
+        guard, monkeypatch):
+    monkeypatch.delenv('TOFU_DEPLOYMENT_MODE', raising=False)
+    monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: None)
+    defaults = {
+        'TOFU_PROCESS_RSS_RELIEF_MB': 2048,
+        'TOFU_PROCESS_RSS_RECYCLE_MB': 3072,
+    }
+    monkeypatch.setattr(
+        guard, 'deployment_resource_default',
+        lambda name, _environment: defaults[name])
+
+    assert guard._process_rss_relief_limit_bytes() == 2 * _GIB
+    assert guard._process_rss_recycle_limit_bytes() == 3 * _GIB
 
 
 # ── ① startup self-check ──
@@ -101,6 +121,31 @@ def test_monitor_neuter_below_threshold_no_relief(guard, monkeypatch):
                         lambda reason: called.__setitem__('n', called['n'] + 1))
     assert guard.run_monitor_once() is None
     assert called['n'] == 0
+
+
+def test_monitor_cools_down_after_ineffective_shared_relief(guard, monkeypatch):
+    _set_pressure(guard, monkeypatch, pct=99.0, swap=0)
+    monkeypatch.setattr(guard, '_relief_suppressed_until', float('inf'))
+    monkeypatch.setattr(
+        guard, 'relieve_memory',
+        lambda _reason: (_ for _ in ()).throw(AssertionError('must cool down')))
+
+    assert guard.run_monitor_once() is None
+
+
+def test_ineffective_probe_renews_cooldown_after_the_first_escalation(
+        guard, monkeypatch):
+    _set_pressure(guard, monkeypatch, pct=99.0, swap=0)
+    monkeypatch.setattr(guard, '_ineffective_reliefs', guard._INEFFECTIVE_LIMIT)
+    monkeypatch.setattr(guard, '_ineffective_escalated', True)
+    monkeypatch.setattr(guard, '_relief_suppressed_until', 0.0)
+    monkeypatch.setattr(guard, 'malloc_trim', lambda: False)
+    monkeypatch.setattr(guard, 'drop_logs_cache', lambda: {
+        'files': 0, 'bytes': 0, 'skipped': 0})
+
+    guard.relieve_memory('cooldown probe')
+
+    assert guard._relief_suppressed_until > 0
 
 
 def test_monitor_relieves_process_rss_even_when_cgroup_is_roomy(
@@ -205,7 +250,8 @@ def test_relieve_clears_caches_and_trims(guard, monkeypatch):
 # ── ③ large-request headroom guard ──
 
 def test_request_guard_refuses_when_critical(guard, monkeypatch):
-    _set_pressure(guard, monkeypatch, pct=99.0, swap=0)
+    # 200 MiB free cannot cover the 320 MiB peak envelope for a 40 MiB body.
+    _set_pressure(guard, monkeypatch, pct=99.9, swap=0)
     # relief cannot help in this scenario (still critical after trim)
     monkeypatch.setattr(guard, 'relieve_memory', lambda reason: {'reason': reason})
     ok, reason = guard.check_request_headroom('conv=abc', approx_bytes=40 * 1024 * 1024)
@@ -236,8 +282,34 @@ def test_request_guard_relief_rescues(guard, monkeypatch):
                 'pct': pct, 'swap': 0}
     monkeypatch.setattr(guard, 'pressure', fake_pressure)
     monkeypatch.setattr(guard, 'relieve_memory', lambda reason: {'reason': reason})
-    ok, reason = guard.check_request_headroom('conv=abc', approx_bytes=40 * 1024 * 1024)
+    ok, reason = guard.check_request_headroom('conv=abc', approx_bytes=400 * 1024 * 1024)
     assert ok is True and reason is None
+
+
+def test_request_guard_allows_small_request_with_large_absolute_headroom(
+        guard, monkeypatch):
+    """A huge shared cgroup's percentage is not a refusal by itself.
+
+    Production rejected a 2.3 MB request at 99.3% of 220 GiB even though about
+    1.5 GiB remained and Tofu itself used under 40 MiB. That cannot protect the
+    process from sibling pressure; it only kills an otherwise safe turn.
+    """
+    limit = 220 * _GIB
+    monkeypatch.setattr(guard, 'pressure', lambda: {
+        'limit': limit,
+        'usage': int(limit * 0.993),
+        'pct': 99.3,
+        'swap': 0,
+    })
+    relief_calls = []
+    monkeypatch.setattr(
+        guard, 'relieve_memory', lambda reason: relief_calls.append(reason))
+
+    ok, reason = guard.check_request_headroom(
+        'conv=production-regression', approx_bytes=2_300_000)
+
+    assert ok is True and reason is None
+    assert relief_calls == [], 'ample absolute headroom must not trigger trim'
 
 
 def test_request_guard_neuter_ignoring_pressure_would_pass(guard, monkeypatch):
@@ -563,6 +635,7 @@ def test_pressure_journal_writes_and_rings(guard, monkeypatch, tmp_path):
     assert rec['pct'] == 50.0
     assert rec['cache_gib'] == 1.0 and rec['kmem_gib'] == 3.0
     assert os.path.getsize(jpath) <= 400 + 200  # bounded (last append may exceed slightly)
+    assert (jpath.stat().st_mode & 0o777) == 0o600
 
 
 def test_pressure_journal_concurrent_appends_are_not_lost(guard, monkeypatch,

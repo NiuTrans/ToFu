@@ -1,59 +1,18 @@
-"""lib.conversations.project_charter — the project "north star" (Pillar #2).
+"""Project charter aggregate: north star and committed invariants.
 
-Where the Activity Feed (``project_feed.py``) is the LIVE pulse of what sibling
-conversations are *doing*, the Charter is the slow-changing SHARED INTENT every
-coordinating conversation reads: the project goal/north-star (``content``) plus
-the COMMITTED key decisions (``decisions``). It is the thing that makes N
-conversations feel like one mind instead of N amnesiac sessions.
-
-Discipline (locked 2026-06-30; DECISION-commit de-gated by owner 2026-07-12 to
-"further reduce human involvement — humans no longer participate in charter
-decision-making"):
-
-  • **read** — any project-mode conversation may read the charter
-    (``read_charter`` / the ``project_charter_read`` tool). Read-only.
-  • **propose** — an agent may PROPOSE an amendment (``propose_amendment`` /
-    the ``project_charter_propose`` tool). A proposal writes ONE
-    ``proposed_decision`` event into the Activity Feed and NEVER touches the
-    ``project_charter`` table. Now optional — a suggestion the agent is not yet
-    ready to make binding.
-  • **commit** — an agent may now self-COMMIT a DECISION
-    (``commit_charter(add_decision=…)`` via the human REST route; the
-    ``project_charter_commit`` agent tool was withdrawn 2026-07-30
-    tool): it bumps ``version`` under an optimistic lock so two concurrent
-    commits can't silently clobber, and emits ONE ``decided`` event so the
-    commit is auditable. The agent path is ``add_decision``-ONLY — it can never
-    edit the north-star ``content``.
-    **Kind routing (owner-directed 2026-07-28):** every commit declares a
-    ``kind``. Only ``invariant`` (a binding rule constraining FUTURE
-    decisions) lands here; ``lesson`` (methodology experience) routes to the
-    project memory system with BM25 dedup; ``report`` (completion record)
-    is rejected to JOURNAL.md. The per-turn injection
-    (``render_charter_injection_block``) renders each invariant's one-line
-    ``summary`` — the full text is the ``project_charter_read`` detail path.
-
-HUMAN-ONLY corrective levers (optional, NOT required for normal progress): the
-north-star ``content`` edit, ``update_decision`` / ``delete_decision`` /
-``delete_charter`` — all reachable only through the REST routes. The human
-defines the goal and can veto/correct a decision; it need not approve each one.
-
-All functions key STRICTLY on ``project_path`` (a string) — never a
-process-global singleton (the read/write-badge thrash trap). Best-effort feed
-emission never raises into the caller.
+Reads and optimistic writes use the Sidecar record authority. Public mutation
+functions own validation, audit/feed publication, and background refresh
+triggers; agents may append invariants while corrective overwrite/delete
+operations remain route-controlled.
 """
 
 from __future__ import annotations
 
-import json
 import time
 
-from lib.database import (
-    DOMAIN_CHAT,
-    db_execute_with_retry,
-    get_thread_db,
-)
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
+from lib.storage import StorageError, get_storage_client
 
 logger = get_logger(__name__)
 
@@ -104,7 +63,7 @@ _LESSON_AUTOFOLD_MIN_CONTAINMENT = 0.5
 # window nor FIFO-evicted by decision churn — a goal committed as a decision
 # instead is subject to both, which is how one previously went invisible.
 # CRITICAL: this text must NOT contain the literal marker of any OTHER injected
-# block. `_refresh_tail_block` enforces idempotency by STRIPPING every block
+# block. The Context Composer enforces idempotency by replacing every block
 # whose text contains the marker it is placing — so when this notice spelled the
 # goals marker out in full, injecting the goals block DELETED the charter block.
 # Measured 2026-07-30: the log showed charter:656 built, then absent from the
@@ -129,7 +88,7 @@ def _empty_charter(project_path: str) -> dict:
     }
 
 
-def read_charter(project_path: str) -> dict:
+def read_charter(project_path: str, *, user_id: int) -> dict:
     """Return the charter record for ``project_path`` (or an empty shell).
 
     Read-only. ``{'content', 'decisions': [...], 'version', 'updated_by_conv',
@@ -142,37 +101,38 @@ def read_charter(project_path: str) -> dict:
     from lib.conversations.project_feed import normalize_project_path
     project_path = normalize_project_path(project_path)
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT project_path, content, decisions, updated_by_conv, '
-            '       updated_at, version '
-            'FROM project_charter WHERE project_path=?',
-            (project_path,)).fetchone()
+        record = get_storage_client().query(
+            'project.charter.get', {
+                'project_path': project_path,
+                'user_id': int(user_id),
+            },
+        )
     except Exception as e:
         logger.warning('[Charter] read failed proj=%.40r: %s', project_path, e)
         return _empty_charter(project_path)
-    if not row:
+    if not record:
         return _empty_charter(project_path)
-    try:
-        decisions = json.loads(row['decisions']) if row['decisions'] else []
-        if not isinstance(decisions, list):
-            decisions = []
-    except (TypeError, ValueError) as e:
-        logger.debug('[Charter] decisions JSON parse failed (using []): %s', e)
-        decisions = []
+    value = record.get('value') or {}
     return {
-        'project_path': row['project_path'],
-        'content': row['content'] or '',
-        'decisions': decisions,
-        'updated_by_conv': row['updated_by_conv'] or '',
-        'updated_at': int(row['updated_at'] or 0),
-        'version': int(row['version'] or 0),
+        'project_path': project_path,
+        'content': str(value.get('content') or ''),
+        'decisions': list(value.get('decisions') or []),
+        'updated_by_conv': str(value.get('updated_by_conv') or ''),
+        'updated_at': int(
+            value.get('updated_at') or record.get('updated_at_ms') or 0),
+        'version': int(record.get('version') or value.get('version') or 0),
         'exists': True,
     }
 
 
-def propose_amendment(project_path: str, conv_id: str, proposal: str, *,
-                      title: str = '') -> dict:
+def propose_amendment(
+    project_path: str,
+    conv_id: str,
+    proposal: str,
+    *,
+    user_id: int,
+    title: str = '',
+) -> dict:
     """Record a PROPOSED charter amendment — feed-only, never writes the table.
 
     Writes exactly one ``proposed_decision`` event into the Activity Feed so
@@ -195,7 +155,7 @@ def propose_amendment(project_path: str, conv_id: str, proposal: str, *,
         from lib.conversations.project_feed import emit_project_event
         ev = emit_project_event(
             project_path, conv_id or '', 'proposed_decision',
-            proposal, title=title,
+            proposal, user_id=int(user_id), title=title,
             payload={'proposal': proposal, 'proposalId': proposal_id})
     except Exception as e:
         logger.warning('[Charter] propose feed-emit failed proj=%.40r: %s',
@@ -212,146 +172,161 @@ def propose_amendment(project_path: str, conv_id: str, proposal: str, *,
 # loop, so a small bound is ample; exhausting it is REPORTED as a failure
 # rather than silently dropping the decision.
 _CAS_MAX_ATTEMPTS = 6
+_PROJECT_FEED_REPAIR_LIMIT = 200
 
-
-def commit_charter(project_path: str, *, content: str | None = None,
+def commit_charter(project_path: str, *, user_id: int,
+                   content: str | None = None,
                    add_decision: str | None = None,
                    decision_kind: str = '',
                    summary: str = '',
                    expected_version: int | None = None,
                    updated_by_conv: str = '',
                    resolves_proposal: str = '') -> dict:
-    """Commit a charter change. Concurrency-safe per OPERATION, not per caller.
+    """Apply one optimistic charter mutation.
 
-    ``content`` and ``add_decision`` are MUTUALLY EXCLUSIVE — a mixed call is
-    refused with ``invalid_combination``. That is not tidiness: it is what makes
-    "is this a pure append?" decidable from the arguments, which is the
-    precondition for replaying one safely below. While the combination was
-    representable, replay safety rested on caller habit.
-
-    Two operations, two concurrency contracts:
-
-    * **append** (``add_decision``) — COMMUTES with every other append, so a
-      concurrent commit is not a conflict. The write is a CAS on ``version``;
-      on a miss we RE-READ and re-append only our OWN entry, up to
-      ``_CAS_MAX_ATTEMPTS``. ``expected_version`` is therefore advisory here: a
-      stale one does NOT refuse the append. (The panel bakes the version it
-      rendered into the button and sibling agents self-commit constantly, so
-      refusing would break that button exactly when the project is busy.)
-      ``content`` is never written by this path — an append carries no opinion
-      about the north star and must not revert a concurrent edit to it.
-    * **overwrite** (``content``) — does NOT commute: rewriting the north star
-      from a stale base destroys the other edit. ``expected_version`` stays a
-      HARD gate (``version_conflict``), and the write is still CAS'd so the
-      check cannot be defeated by a race after the read.
-
-    Before this split the whole function was a read-modify-write that wrote the
-    ENTIRE row from a stale read, so two interleaved commits clobbered each
-    other and the loser was told ``ok=True`` — measured, see
-    tests/test_project_charter_concurrency.py.
-
-    Returns ``{'ok': bool, 'version'?: int, 'error'?: str,
-    'current_version'?: int}``.
+    Decision appends commute and retry against the newest version. North-star
+    overwrites do not commute, so an explicit expected version is a hard gate.
+    Storage acknowledgement precedes feed, audit, status, and watch effects.
     """
     if not project_path:
         return {'ok': False, 'error': 'no project'}
-    if content is not None and add_decision:
-        # Refused BEFORE any write: a partial application is worse than none.
-        logger.info('[Charter] commit refused (content + add_decision in one '
-                    'call) proj=%.40r', project_path)
-        return {'ok': False, 'error': 'invalid_combination',
-                'detail': 'content and add_decision are mutually exclusive'}
+    if content is not None and add_decision is not None:
+        return {
+            'ok': False,
+            'error': 'invalid_combination',
+            'detail': 'content and add_decision are mutually exclusive',
+        }
+    committed_decision = (
+        (add_decision or '').strip()[:_DECISION_MAX_CHARS]
+        if add_decision is not None else ''
+    )
+    if add_decision is not None and not committed_decision:
+        return {'ok': False, 'error': 'empty decision'}
+    if content is None and add_decision is None:
+        return {'ok': False, 'error': 'no change'}
+
     from lib.conversations.project_feed import normalize_project_path
     project_path = normalize_project_path(project_path)
-
-    committed_decision = ''
-    if add_decision:
-        committed_decision = add_decision.strip()[:_DECISION_MAX_CHARS]
+    mutation_id = short_id('charter_', 16)
+    client = get_storage_client(write=True)
 
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        new_version = None
         for attempt in range(_CAS_MAX_ATTEMPTS):
-            cur = read_charter(project_path)
-            base_version = cur['version']
+            current = read_charter(project_path, user_id=user_id)
+            base_version = int(current['version'])
+            if (
+                content is not None
+                and expected_version is not None
+                and base_version != expected_version
+            ):
+                return {
+                    'ok': False,
+                    'error': 'version_conflict',
+                    'current_version': base_version,
+                }
 
-            if content is not None:
-                if expected_version is not None and base_version != expected_version:
-                    logger.info('[Charter] commit rejected (version skew) '
-                                'proj=%.40r expected=%s current=%s',
-                                project_path, expected_version, base_version)
-                    return {'ok': False, 'error': 'version_conflict',
-                            'current_version': base_version}
-                new_content = (content or '')[:_CONTENT_MAX_CHARS]
-                decisions = list(cur['decisions'])
-            else:
-                # Pure append: carry the CURRENT content through untouched.
-                new_content = (cur['content'] or '')[:_CONTENT_MAX_CHARS]
-                decisions = list(cur['decisions'])
-                if committed_decision:
-                    decisions.append(_decision_entry(
-                        committed_decision, decision_kind=decision_kind,
-                        summary=summary, updated_by_conv=updated_by_conv))
-                    if len(decisions) > _MAX_DECISIONS:
-                        decisions = decisions[-_MAX_DECISIONS:]
-
-            if _cas_write(db, project_path, content=new_content,
-                          decisions=decisions,
-                          updated_by_conv=updated_by_conv,
-                          base_version=base_version):
-                new_version = base_version + 1
+            decisions = list(current['decisions'])
+            if committed_decision:
+                decisions.append(_decision_entry(
+                    committed_decision,
+                    decision_kind=decision_kind,
+                    summary=summary,
+                    updated_by_conv=updated_by_conv,
+                ))
+                decisions = decisions[-_MAX_DECISIONS:]
+            value = {
+                'content': (
+                    (content or '')[:_CONTENT_MAX_CHARS]
+                    if content is not None
+                    else current['content'][:_CONTENT_MAX_CHARS]
+                ),
+                'decisions': decisions,
+                'updated_by_conv': updated_by_conv or '',
+                'updated_at': int(time.time() * 1000),
+                'version': base_version + 1,
+            }
+            try:
+                result = client.command(
+                    'project.charter.put',
+                    {
+                        'project_path': project_path,
+                        'user_id': int(user_id),
+                        'value': value,
+                        'expected_version': base_version,
+                    },
+                    f'charter.commit:{mutation_id}:{base_version}:{attempt}',
+                )
+                new_version = int(result['version'])
                 break
-
-            # Lost the race. An overwrite that pinned a version must NOT be
-            # silently replayed onto the winner's text — report the skew.
-            if content is not None and expected_version is not None:
-                return {'ok': False, 'error': 'version_conflict',
-                        'current_version': read_charter(project_path)['version']}
-            logger.debug('[Charter] CAS miss proj=%.40r attempt=%d base=%s',
-                         project_path, attempt + 1, base_version)
+            except StorageError as exc:
+                if exc.code != 'database_conflict':
+                    raise
+                if content is not None and expected_version is not None:
+                    return {
+                        'ok': False,
+                        'error': 'version_conflict',
+                        'current_version': read_charter(
+                            project_path, user_id=user_id
+                        )['version'],
+                    }
         else:
-            logger.warning('[Charter] commit gave up after %d CAS attempts '
-                           'proj=%.40r', _CAS_MAX_ATTEMPTS, project_path)
-            return {'ok': False, 'error': 'contention',
-                    'current_version': read_charter(project_path)['version']}
-    except Exception as e:
-        logger.error('[Charter] commit failed proj=%.40r: %s',
-                     project_path, e, exc_info=True)
-        return {'ok': False, 'error': str(e)}
+            return {
+                'ok': False,
+                'error': 'contention',
+                'current_version': read_charter(
+                    project_path, user_id=user_id
+                )['version'],
+            }
+    except Exception as exc:
+        logger.error(
+            '[Charter] commit failed proj=%.40r: %s',
+            project_path, exc, exc_info=True,
+        )
+        return {'ok': False, 'error': str(exc)}
 
-    # Emit a 'decided' event so the commit is auditable in the feed.
     try:
         from lib.conversations.project_feed import emit_project_event
-        summary = committed_decision or 'Charter updated'
-        _dec_payload = {'version': new_version}
+        event_payload = {'version': new_version}
         if resolves_proposal:
-            # Mark WHICH pending proposal this commit resolves so
-            # pending_proposals() can exclude it durably (no over-count).
-            _dec_payload['resolvesProposal'] = resolves_proposal
+            event_payload['resolvesProposal'] = resolves_proposal
         emit_project_event(
-            project_path, updated_by_conv or '', 'decided',
-            summary, payload=_dec_payload)
-    except Exception as e:
-        logger.debug('[Charter] decided feed-emit skipped (commit persisted): %s', e)
-    audit_log('charter_committed', project_path=project_path,
-              version=new_version, by_conv=updated_by_conv)
-    # ── Pillar #7: keep the human-facing status lane warm on a committed
-    #    decision (non-blocking; the snapshot's staleness gate elides the LLM
-    #    when nothing material moved). Best-effort — never raises into commit. ──
+            project_path,
+            updated_by_conv or '',
+            'decided',
+            committed_decision or 'Charter updated',
+            user_id=int(user_id),
+            payload=event_payload,
+        )
+    except Exception as exc:
+        logger.debug('[Charter] decided feed skipped: %s', exc)
+
+    audit_log(
+        'charter_committed',
+        project_path=project_path,
+        version=new_version,
+        by_conv=updated_by_conv,
+    )
     try:
         from lib.conversations.project_status import build_status_snapshot
-        build_status_snapshot(project_path, trigger='decision_committed',
-                              blocking=False)
-    except Exception as e:
-        logger.debug('[Charter] status snapshot trigger skipped: %s', e)
+        build_status_snapshot(
+            project_path,
+            user_id=user_id,
+            trigger='decision_committed',
+            blocking=False,
+        )
+    except Exception as exc:
+        logger.debug('[Charter] status snapshot trigger skipped: %s', exc)
     try:
         from lib.conversations.project_watch import address_open_items
-        address_open_items(project_path, trigger='decision_committed',
-                           blocking=False)
-    except Exception as e:
-        logger.debug('[Charter] watch address trigger skipped: %s', e)
+        address_open_items(
+            project_path,
+            user_id=user_id,
+            trigger='decision_committed',
+            blocking=False,
+        )
+    except Exception as exc:
+        logger.debug('[Charter] watch address trigger skipped: %s', exc)
     return {'ok': True, 'version': new_version}
-
 
 def _decision_entry(text: str, *, decision_kind: str, summary: str,
                     updated_by_conv: str) -> dict:
@@ -369,89 +344,16 @@ def _decision_entry(text: str, *, decision_kind: str, summary: str,
     return entry
 
 
-def _cas_write(db, project_path: str, *, content: str, decisions: list,
-               updated_by_conv: str, base_version: int) -> bool:
-    """Write the row ONLY if it is still at ``base_version``. Returns whether
-    it landed.
-
-    The version test lives in the WHERE clause, not in a preceding read: a
-    read-then-compare only narrows the race window, it does not close it. This
-    is the single place the charter row is written under contention.
-
-    ``base_version == 0`` means "the row must not exist yet", so that case takes
-    the INSERT branch whose PK conflict is itself the CAS-failure signal — a
-    concurrent creator wins and we re-read rather than clobbering their row.
-    """
-    ts = int(time.time() * 1000)
-    decisions_json = json.dumps(decisions, ensure_ascii=False)
-    if base_version == 0:
-        cur = db_execute_with_retry(
-            db,
-            'INSERT INTO project_charter '
-            '(project_path, content, decisions, updated_by_conv, updated_at, version) '
-            'VALUES (?, ?, ?, ?, ?, ?) '
-            'ON CONFLICT(project_path) DO NOTHING',
-            (project_path, content, decisions_json,
-             updated_by_conv or '', ts, 1), return_cursor=True)
-    else:
-        cur = db_execute_with_retry(
-            db,
-            'UPDATE project_charter SET content=?, decisions=?, '
-            'updated_by_conv=?, updated_at=?, version=? '
-            'WHERE project_path=? AND version=?',
-            (content, decisions_json, updated_by_conv or '', ts,
-             base_version + 1, project_path, base_version),
-            return_cursor=True)
-    landed = (getattr(cur, 'rowcount', 0) or 0) > 0
-    return landed
-
-
 # Sentinel distinguishing "caller said nothing about the summary" from "caller
 # explicitly asked to clear it". `None` cannot carry that distinction, and the
 # difference is load-bearing: see update_decision's omission semantics.
 _SUMMARY_UNSET = object()
 
-
-def update_decision(project_path: str, index: int, text: str, *,
+def update_decision(project_path: str, index: int, text: str, *, user_id: int,
                     summary=_SUMMARY_UNSET,
                     expected_version: int | None = None,
                     updated_by_conv: str = '') -> dict:
-    """HUMAN-GATED edit of ONE committed decision, addressed by ``index``.
-
-    The index is resolved against the CURRENT decisions list; ``expected_version``
-    (when provided) must match the row version, so the caller is guaranteed the
-    list is exactly what it rendered (the index can't silently address the wrong
-    decision after a concurrent edit). Bumps ``version`` and emits a ``decided``
-    event. Returns ``{'ok', 'version'?, 'error'?, 'current_version'?}``.
-
-    **``summary`` is what agents actually read.** ``_decision_headline`` prefers
-    the stored summary, and the per-turn injection renders ONLY that headline —
-    the body is one ``project_charter_read`` call away. Until 2026-07-30 this
-    function had no ``summary`` parameter at all, so a human correction rewrote
-    the body, returned ok=True, bumped the version, and left the one line every
-    sibling conversation reads unchanged FOREVER. Measured on the live project:
-    decision #0's body described the shipped design while its summary was still
-    broadcasting the design that design had replaced. The edit looked applied in
-    the panel and was inert in the prompt — the same shape as a badge asserting
-    something already untrue.
-
-    Omission semantics, chosen deliberately:
-
-    * entry HAS a summary and ``summary`` is omitted → **refused**
-      (``summary_required``). A caller rewriting the rule's body without saying
-      what the new rule line is has almost certainly hit the trap above. The two
-      safe answers are refuse or clear; the unsafe one is to keep broadcasting
-      the old line. Refusing is better than clearing because clearing silently
-      downgrades a curated one-liner to an abridged first line — a quiet loss
-      the human never asked for — whereas a refusal is a question they can
-      answer. A refused edit changes NOTHING, not even the version.
-    * ``summary=''`` → clear it, so the headline falls back to the fresh text.
-      That is an explicit instruction, not an omission.
-    * entry has NO summary and ``summary`` is omitted → edit proceeds. Legacy
-      (pre-summary) entries already render an abridged first line; demanding a
-      summary to touch them would make this a tax on every legacy edit instead
-      of a trap for the stale-summary case.
-    """
+    """Edit one current decision using optimistic version control."""
     text = (text or '').strip()[:_DECISION_MAX_CHARS]
     if not project_path:
         return {'ok': False, 'error': 'no project'}
@@ -459,164 +361,299 @@ def update_decision(project_path: str, index: int, text: str, *,
         return {'ok': False, 'error': 'empty decision'}
     from lib.conversations.project_feed import normalize_project_path
     project_path = normalize_project_path(project_path)
+    mutation_id = short_id('charter_edit_', 16)
+    client = get_storage_client(write=True)
+
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        cur = read_charter(project_path)
-        if not cur.get('exists'):
-            return {'ok': False, 'error': 'no charter'}
-        if expected_version is not None and cur['version'] != expected_version:
-            return {'ok': False, 'error': 'version_conflict',
-                    'current_version': cur['version']}
-        decisions = list(cur['decisions'])
-        if index < 0 or index >= len(decisions):
-            return {'ok': False, 'error': 'index_out_of_range',
-                    'current_version': cur['version']}
-        d = decisions[index]
-        had_summary = bool(
-            isinstance(d, dict) and (d.get('summary') or '').strip())
-        if summary is _SUMMARY_UNSET and had_summary:
-            # Refuse BEFORE any mutation: a rejected edit must leave the text,
-            # the summary and the version exactly as they were.
-            return {'ok': False, 'error': 'summary_required',
-                    'current_version': cur['version'],
-                    'current_summary': (d.get('summary') or '').strip()}
-        if isinstance(d, dict):
-            d = dict(d)
-            d['text'] = text
+        for attempt in range(_CAS_MAX_ATTEMPTS):
+            current = read_charter(project_path, user_id=user_id)
+            if not current.get('exists'):
+                return {'ok': False, 'error': 'no charter'}
+            if (
+                expected_version is not None
+                and current['version'] != expected_version
+            ):
+                return {
+                    'ok': False,
+                    'error': 'version_conflict',
+                    'current_version': current['version'],
+                }
+            decisions = list(current['decisions'])
+            if index < 0 or index >= len(decisions):
+                return {
+                    'ok': False,
+                    'error': 'index_out_of_range',
+                    'current_version': current['version'],
+                }
+
+            original = decisions[index]
+            had_summary = bool(
+                isinstance(original, dict)
+                and (original.get('summary') or '').strip()
+            )
+            if summary is _SUMMARY_UNSET and had_summary:
+                return {
+                    'ok': False,
+                    'error': 'summary_required',
+                    'current_version': current['version'],
+                    'current_summary': (original.get('summary') or '').strip(),
+                }
+
+            decision = (
+                dict(original) if isinstance(original, dict)
+                else {
+                    'by_conv': updated_by_conv or '',
+                    'ts': int(time.time() * 1000),
+                }
+            )
+            decision['text'] = text
             if summary is not _SUMMARY_UNSET:
-                new_summary = (summary or '').strip()[:_SUMMARY_MAX_CHARS]
+                new_summary = (
+                    (summary or '').strip()[:_SUMMARY_MAX_CHARS])
                 if new_summary:
-                    d['summary'] = new_summary
+                    decision['summary'] = new_summary
                 else:
-                    d.pop('summary', None)
-            d['edited_by_conv'] = updated_by_conv or ''
-            d['edited_at'] = int(time.time() * 1000)
+                    decision.pop('summary', None)
+            decision['edited_by_conv'] = updated_by_conv or ''
+            decision['edited_at'] = int(time.time() * 1000)
+            decisions[index] = decision
+
+            value = {
+                'content': current['content'],
+                'decisions': decisions,
+                'updated_by_conv': updated_by_conv or '',
+                'updated_at': int(time.time() * 1000),
+                'version': current['version'] + 1,
+            }
+            try:
+                result = client.command(
+                    'project.charter.put',
+                    {
+                        'project_path': project_path,
+                        'user_id': int(user_id),
+                        'value': value,
+                        'expected_version': current['version'],
+                    },
+                    f'charter.update:{mutation_id}:{current["version"]}:{attempt}',
+                )
+                new_version = int(result['version'])
+                break
+            except StorageError as exc:
+                if exc.code != 'database_conflict':
+                    raise
         else:
-            d = {'text': text, 'by_conv': updated_by_conv or '',
-                 'ts': int(time.time() * 1000)}
-            if summary is not _SUMMARY_UNSET:
-                new_summary = (summary or '').strip()[:_SUMMARY_MAX_CHARS]
-                if new_summary:
-                    d['summary'] = new_summary
-        decisions[index] = d
-        new_version = cur['version'] + 1
-        if not _cas_write(
-                db, project_path, content=cur['content'], decisions=decisions,
-                updated_by_conv=updated_by_conv,
-                base_version=cur['version']):
-            return {'ok': False, 'error': 'version_conflict',
-                    'current_version': read_charter(project_path)['version']}
-    except Exception as e:
-        logger.error('[Charter] update_decision failed proj=%.40r: %s',
-                     project_path, e, exc_info=True)
-        return {'ok': False, 'error': str(e)}
+            return {
+                'ok': False,
+                'error': 'contention',
+                'current_version': read_charter(
+                    project_path, user_id=user_id
+                )['version'],
+            }
+    except Exception as exc:
+        logger.error(
+            '[Charter] update decision failed proj=%.40r: %s',
+            project_path, exc, exc_info=True,
+        )
+        return {'ok': False, 'error': str(exc)}
+
     try:
         from lib.conversations.project_feed import emit_project_event
-        emit_project_event(project_path, updated_by_conv or '', 'decided',
-                           'Decision edited: ' + text,
-                           payload={'version': new_version, 'charterEdit': True})
-    except Exception as e:
-        logger.debug('[Charter] edit feed-emit skipped (persisted): %s', e)
-    audit_log('charter_decision_edited', project_path=project_path,
-              index=index, version=new_version, by_conv=updated_by_conv)
+        emit_project_event(
+            project_path,
+            updated_by_conv or '',
+            'decided',
+            'Decision edited: ' + text,
+            user_id=int(user_id),
+            payload={'version': new_version, 'charterEdit': True},
+        )
+    except Exception as exc:
+        logger.debug('[Charter] edit feed skipped: %s', exc)
+    audit_log(
+        'charter_decision_edited',
+        project_path=project_path,
+        index=index,
+        version=new_version,
+        by_conv=updated_by_conv,
+    )
     return {'ok': True, 'version': new_version}
 
 
-def delete_decision(project_path: str, index: int, *,
+def delete_decision(project_path: str, index: int, *, user_id: int,
                     expected_version: int | None = None,
                     updated_by_conv: str = '') -> dict:
-    """HUMAN-GATED removal of ONE committed decision, addressed by ``index``.
-
-    Same optimistic-lock + index-resolution contract as ``update_decision``.
-    Bumps ``version`` and emits a ``decided`` event so the removal is auditable.
-    Returns ``{'ok', 'version'?, 'error'?, 'current_version'?}``.
-    """
+    """Delete one current decision using optimistic version control."""
     if not project_path:
         return {'ok': False, 'error': 'no project'}
     from lib.conversations.project_feed import normalize_project_path
     project_path = normalize_project_path(project_path)
+    mutation_id = short_id('charter_drop_', 16)
+    client = get_storage_client(write=True)
+
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        cur = read_charter(project_path)
-        if not cur.get('exists'):
-            return {'ok': False, 'error': 'no charter'}
-        if expected_version is not None and cur['version'] != expected_version:
-            return {'ok': False, 'error': 'version_conflict',
-                    'current_version': cur['version']}
-        decisions = list(cur['decisions'])
-        if index < 0 or index >= len(decisions):
-            return {'ok': False, 'error': 'index_out_of_range',
-                    'current_version': cur['version']}
-        removed = decisions.pop(index)
-        removed_txt = (removed.get('text') if isinstance(removed, dict)
-                       else str(removed)) or ''
-        new_version = cur['version'] + 1
-        if not _cas_write(
-                db, project_path, content=cur['content'], decisions=decisions,
-                updated_by_conv=updated_by_conv,
-                base_version=cur['version']):
-            return {'ok': False, 'error': 'version_conflict',
-                    'current_version': read_charter(project_path)['version']}
-    except Exception as e:
-        logger.error('[Charter] delete_decision failed proj=%.40r: %s',
-                     project_path, e, exc_info=True)
-        return {'ok': False, 'error': str(e)}
+        for attempt in range(_CAS_MAX_ATTEMPTS):
+            current = read_charter(project_path, user_id=user_id)
+            if not current.get('exists'):
+                return {'ok': False, 'error': 'no charter'}
+            if (
+                expected_version is not None
+                and current['version'] != expected_version
+            ):
+                return {
+                    'ok': False,
+                    'error': 'version_conflict',
+                    'current_version': current['version'],
+                }
+            decisions = list(current['decisions'])
+            if index < 0 or index >= len(decisions):
+                return {
+                    'ok': False,
+                    'error': 'index_out_of_range',
+                    'current_version': current['version'],
+                }
+            removed = decisions.pop(index)
+            removed_text = (
+                removed.get('text') if isinstance(removed, dict)
+                else str(removed)
+            ) or ''
+            value = {
+                'content': current['content'],
+                'decisions': decisions,
+                'updated_by_conv': updated_by_conv or '',
+                'updated_at': int(time.time() * 1000),
+                'version': current['version'] + 1,
+            }
+            try:
+                result = client.command(
+                    'project.charter.put',
+                    {
+                        'project_path': project_path,
+                        'user_id': int(user_id),
+                        'value': value,
+                        'expected_version': current['version'],
+                    },
+                    f'charter.delete-decision:{mutation_id}:'
+                    f'{current["version"]}:{attempt}',
+                )
+                new_version = int(result['version'])
+                break
+            except StorageError as exc:
+                if exc.code != 'database_conflict':
+                    raise
+        else:
+            return {
+                'ok': False,
+                'error': 'contention',
+                'current_version': read_charter(
+                    project_path, user_id=user_id
+                )['version'],
+            }
+    except Exception as exc:
+        logger.error(
+            '[Charter] delete decision failed proj=%.40r: %s',
+            project_path, exc, exc_info=True,
+        )
+        return {'ok': False, 'error': str(exc)}
+
     try:
         from lib.conversations.project_feed import emit_project_event
-        emit_project_event(project_path, updated_by_conv or '', 'decided',
-                           'Decision removed: ' + removed_txt,
-                           payload={'version': new_version, 'charterEdit': True})
-    except Exception as e:
-        logger.debug('[Charter] delete feed-emit skipped (persisted): %s', e)
-    audit_log('charter_decision_deleted', project_path=project_path,
-              index=index, version=new_version, by_conv=updated_by_conv)
+        emit_project_event(
+            project_path,
+            updated_by_conv or '',
+            'decided',
+            'Decision removed: ' + removed_text,
+            user_id=int(user_id),
+            payload={'version': new_version, 'charterEdit': True},
+        )
+    except Exception as exc:
+        logger.debug('[Charter] delete decision feed skipped: %s', exc)
+    audit_log(
+        'charter_decision_deleted',
+        project_path=project_path,
+        index=index,
+        version=new_version,
+        by_conv=updated_by_conv,
+    )
     return {'ok': True, 'version': new_version}
 
 
-def delete_charter(project_path: str, *, expected_version: int | None = None,
+def delete_charter(project_path: str, *, user_id: int,
+                   expected_version: int | None = None,
                    updated_by_conv: str = '') -> dict:
-    """HUMAN-GATED deletion of the ENTIRE charter row (north star + all
-    committed decisions). Optimistic-locked. Emits a ``decided`` event so the
-    deletion is auditable. Deleting a non-existent charter is a no-op success.
-    Returns ``{'ok', 'error'?, 'current_version'?}``.
-    """
+    """Delete the complete charter only if the rendered version is current."""
     if not project_path:
         return {'ok': False, 'error': 'no project'}
     from lib.conversations.project_feed import normalize_project_path
     project_path = normalize_project_path(project_path)
+    current = read_charter(project_path, user_id=user_id)
+    if not current.get('exists'):
+        return {'ok': True, 'deleted': False}
+    if (
+        expected_version is not None
+        and current['version'] != expected_version
+    ):
+        return {
+            'ok': False,
+            'error': 'version_conflict',
+            'current_version': current['version'],
+        }
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        cur = read_charter(project_path)
-        if not cur.get('exists'):
-            return {'ok': True, 'deleted': False}
-        if expected_version is not None and cur['version'] != expected_version:
-            return {'ok': False, 'error': 'version_conflict',
-                    'current_version': cur['version']}
-        cursor = db_execute_with_retry(
-            db,
-            'DELETE FROM project_charter WHERE project_path=? AND version=?',
-            (project_path, cur['version']), return_cursor=True)
-        if getattr(cursor, 'rowcount', 0) == 0:
-            return {'ok': False, 'error': 'version_conflict',
-                    'current_version': read_charter(project_path)['version']}
-    except Exception as e:
-        logger.error('[Charter] delete_charter failed proj=%.40r: %s',
-                     project_path, e, exc_info=True)
-        return {'ok': False, 'error': str(e)}
+        result = get_storage_client(write=True).command(
+            'project.charter.delete',
+            {
+                'project_path': project_path,
+                'user_id': int(user_id),
+                'expected_version': current['version'],
+            },
+            f'charter.delete:{project_path}:{current["version"]}',
+        )
+    except StorageError as exc:
+        if exc.code == 'database_conflict':
+            return {
+                'ok': False,
+                'error': 'version_conflict',
+                'current_version': read_charter(
+                    project_path, user_id=user_id
+                )['version'],
+            }
+        logger.error(
+            '[Charter] delete failed proj=%.40r: %s',
+            project_path, exc, exc_info=True,
+        )
+        return {'ok': False, 'error': str(exc)}
+    except Exception as exc:
+        logger.error(
+            '[Charter] delete failed proj=%.40r: %s',
+            project_path, exc, exc_info=True,
+        )
+        return {'ok': False, 'error': str(exc)}
+
     try:
         from lib.conversations.project_feed import emit_project_event
-        emit_project_event(project_path, updated_by_conv or '', 'decided',
-                           'Charter deleted',
-                           payload={'charterDeleted': True})
-    except Exception as e:
-        logger.debug('[Charter] delete-charter feed-emit skipped (persisted): %s', e)
-    audit_log('charter_deleted', project_path=project_path,
-              by_conv=updated_by_conv)
-    return {'ok': True, 'deleted': True}
+        emit_project_event(
+            project_path,
+            updated_by_conv or '',
+            'decided',
+            'Charter deleted',
+            user_id=int(user_id),
+            payload={'charterDeleted': True},
+        )
+    except Exception as exc:
+        logger.debug('[Charter] delete feed skipped: %s', exc)
+    audit_log(
+        'charter_deleted',
+        project_path=project_path,
+        by_conv=updated_by_conv,
+    )
+    return {'ok': True, 'deleted': bool(result.get('deleted'))}
 
-
-def dismiss_proposal(project_path: str, conv_id: str, proposal_id: str, *,
-                     summary: str = '') -> dict:
+def dismiss_proposal(
+    project_path: str,
+    conv_id: str,
+    proposal_id: str,
+    *,
+    user_id: int,
+    summary: str = '',
+) -> dict:
     """Durably REJECT a pending proposal — emits a ``dismissed`` feed event
     carrying the resolved ``proposalId`` so the proposal drops out of
     ``pending_proposals`` for everyone, permanently (not a local DOM dismiss
@@ -632,6 +669,7 @@ def dismiss_proposal(project_path: str, conv_id: str, proposal_id: str, *,
         emit_project_event(
             project_path, conv_id or '', 'dismissed',
             (summary or 'Proposal dismissed')[:_DECISION_MAX_CHARS],
+            user_id=int(user_id),
             payload={'resolvesProposal': proposal_id})
     except Exception as e:
         logger.warning('[Charter] dismiss feed-emit failed proj=%.40r: %s',
@@ -642,7 +680,7 @@ def dismiss_proposal(project_path: str, conv_id: str, proposal_id: str, *,
     return {'ok': True}
 
 
-def pending_proposals(project_path: str) -> list[dict]:
+def pending_proposals(project_path: str, *, user_id: int) -> list[dict]:
     """The SINGLE source of "decisions awaiting the human".
 
     A ``proposed_decision`` is PENDING unless a later ``decided`` or
@@ -659,7 +697,7 @@ def pending_proposals(project_path: str) -> list[dict]:
         return []
     try:
         from lib.conversations.project_feed import read_project_feed
-        feed = read_project_feed(project_path, limit=500)
+        feed = read_project_feed(project_path, user_id=user_id, limit=500)
     except Exception as e:
         logger.warning('[Charter] pending read failed proj=%.40r: %s',
                        project_path, e)
@@ -697,79 +735,104 @@ def pending_proposals(project_path: str) -> list[dict]:
     return out
 
 
-def repair_truncated_decisions(project_path: str) -> dict:
-    """Re-source committed decisions that were stored truncated.
 
-    Historically a commit derived its decision text from the feed-row
-    ``summary`` (capped to 280 chars by ``project_feed._SUMMARY_MAX_CHARS``)
-    instead of the full ``proposed_decision`` payload — so decisions landed
-    clipped mid-sentence in the panel AND the injected ``[PROJECT CHARTER]``
-    block. This idempotent repair walks the committed decisions and, for any
-    whose stored ``text`` is a strict PREFIX of a longer proposal payload found
-    in the feed, replaces it with the full payload text (re-capped to the
-    current ``_DECISION_MAX_CHARS``). Bumps ``version`` only when something
-    actually changed. Best-effort — never raises into the caller.
-
-    Returns ``{'ok': bool, 'repaired': int, 'version'?: int, 'error'?: str}``.
-    """
+def repair_truncated_decisions(project_path: str, *, user_id: int) -> dict:
+    """Restore decisions that are strict prefixes of full proposal payloads."""
     if not project_path:
         return {'ok': False, 'repaired': 0, 'error': 'no project'}
-    from lib.conversations.project_feed import normalize_project_path
+    from lib.conversations.project_feed import (
+        normalize_project_path,
+        read_project_feed,
+    )
     project_path = normalize_project_path(project_path)
     try:
-        rec = read_charter(project_path)
-        if not rec.get('exists') or not rec.get('decisions'):
+        current = read_charter(project_path, user_id=user_id)
+        if not current.get('exists') or not current.get('decisions'):
             return {'ok': True, 'repaired': 0}
-        # Full proposal texts available in the feed (payload.proposal is the
-        # untruncated source), longest-first so a decision matches its longest
-        # available superset.
-        from lib.conversations.project_feed import read_project_feed
-        feed = read_project_feed(project_path, limit=500)
-        proposals = []
-        for e in feed.get('events', []):
-            if e.get('kind') != 'proposed_decision':
-                continue
-            full = ((e.get('payload') or {}).get('proposal') or '').strip()
-            if full:
-                proposals.append(full)
-        proposals.sort(key=len, reverse=True)
 
-        decisions = list(rec['decisions'])
+        proposals = [
+            ((event.get('payload') or {}).get('proposal') or '').strip()
+            for event in read_project_feed(
+                project_path, limit=_PROJECT_FEED_REPAIR_LIMIT,
+                user_id=user_id,
+            ).get('events', [])
+            if event.get('kind') == 'proposed_decision'
+        ]
+        proposals = sorted(filter(None, proposals), key=len, reverse=True)
+        decisions = [
+            dict(item) if isinstance(item, dict) else item
+            for item in current['decisions']
+        ]
         repaired = 0
-        for d in decisions:
-            if not isinstance(d, dict):
+        for decision in decisions:
+            if not isinstance(decision, dict):
                 continue
-            cur_txt = (d.get('text') or '').strip()
-            if not cur_txt:
-                continue
-            for full in proposals:
-                # A stored decision that is a strict prefix of a longer full
-                # proposal was clipped from THAT proposal → restore it.
-                if len(full) > len(cur_txt) and full.startswith(cur_txt):
-                    d['text'] = full[:_DECISION_MAX_CHARS]
-                    repaired += 1
-                    break
+            stored = (decision.get('text') or '').strip()
+            replacement = next(
+                (
+                    proposal for proposal in proposals
+                    if len(proposal) > len(stored)
+                    and proposal.startswith(stored)
+                ),
+                '',
+            )
+            if replacement:
+                decision['text'] = replacement[:_DECISION_MAX_CHARS]
+                repaired += 1
         if not repaired:
-            return {'ok': True, 'repaired': 0, 'version': rec['version']}
+            return {
+                'ok': True,
+                'repaired': 0,
+                'version': current['version'],
+            }
 
-        db = get_thread_db(DOMAIN_CHAT)
-        new_version = rec['version'] + 1
-        if not _cas_write(
-                db, project_path, content=rec['content'], decisions=decisions,
-                updated_by_conv=rec['updated_by_conv'] or '',
-                base_version=rec['version']):
-            return {'ok': False, 'repaired': 0,
-                    'error': 'version_conflict'}
-    except Exception as e:
-        logger.error('[Charter] repair failed proj=%.40r: %s',
-                     project_path, e, exc_info=True)
-        return {'ok': False, 'repaired': 0, 'error': str(e)}
-    audit_log('charter_decisions_repaired', project_path=project_path,
-              repaired=repaired, version=new_version)
-    logger.info('[Charter] repaired %d truncated decision(s) proj=%.40r',
-                repaired, project_path)
-    return {'ok': True, 'repaired': repaired, 'version': new_version}
+        result = get_storage_client(write=True).command(
+            'project.charter.put',
+            {
+                'project_path': project_path,
+                'user_id': int(user_id),
+                'value': {
+                    'content': current['content'],
+                    'decisions': decisions,
+                    'updated_by_conv': current['updated_by_conv'] or '',
+                    'updated_at': int(time.time() * 1000),
+                    'version': current['version'] + 1,
+                },
+                'expected_version': current['version'],
+            },
+            f'charter.repair:{project_path}:{current["version"]}',
+        )
+        new_version = int(result['version'])
+    except StorageError as exc:
+        if exc.code == 'database_conflict':
+            return {
+                'ok': False,
+                'repaired': 0,
+                'error': 'version_conflict',
+            }
+        logger.error(
+            '[Charter] repair failed proj=%.40r: %s',
+            project_path, exc, exc_info=True,
+        )
+        return {'ok': False, 'repaired': 0, 'error': str(exc)}
+    except Exception as exc:
+        logger.error(
+            '[Charter] repair failed proj=%.40r: %s',
+            project_path, exc, exc_info=True,
+        )
+        return {'ok': False, 'repaired': 0, 'error': str(exc)}
 
+    audit_log(
+        'charter_decisions_repaired',
+        project_path=project_path,
+        repaired=repaired,
+        version=new_version,
+    )
+    return {
+        'ok': True,
+        'repaired': repaired,
+        'version': new_version,
+    }
 
 def _decision_headline(d) -> str:
     """The ONE line a per-turn injection shows for a decision.
@@ -793,7 +856,7 @@ def _decision_headline(d) -> str:
     return first
 
 
-def render_charter_injection_block(project_path: str) -> str:
+def render_charter_injection_block(project_path: str, *, user_id: int) -> str:
     """Render the charter for PER-TURN prompt injection: goal in full,
     decisions as a one-line headline list (summary when stored, abridged
     first line otherwise), with a pointer to project_charter_read for the
@@ -804,7 +867,7 @@ def render_charter_injection_block(project_path: str) -> str:
     Mirrors the board split (render_board_injection_block vs
     render_board_block). Returns '' when there is no charter.
     """
-    rec = read_charter(project_path)
+    rec = read_charter(project_path, user_id=user_id)
     if not rec.get('exists') or not (rec['content'] or rec['decisions']):
         return ''
     lines = ['[PROJECT CHARTER] — the shared north star for this project. '
@@ -835,14 +898,14 @@ def render_charter_injection_block(project_path: str) -> str:
     return '\n'.join(lines)
 
 
-def render_charter_block(project_path: str) -> str:
+def render_charter_block(project_path: str, *, user_id: int) -> str:
     """Render the charter with EVERY decision's complete stored text, never
     abridged. The per-turn prompt injection uses
     ``render_charter_injection_block`` instead; this full renderer backs the
     ``project_charter_read`` tool — the on-demand detail path the injection
     block points to.
     """
-    rec = read_charter(project_path)
+    rec = read_charter(project_path, user_id=user_id)
     if not rec.get('exists') or not (rec['content'] or rec['decisions']):
         return ''
     lines = ['[PROJECT CHARTER] — the shared north star for this project. '
@@ -989,7 +1052,7 @@ def _route_lesson_to_memory(project_path: str, lesson_text: str,
         return {'ok': False, 'error': str(e)}
 
 
-def execute_charter_tool(fn_name: str, fn_args: dict, *,
+def execute_charter_tool(fn_name: str, fn_args: dict, *, user_id: int,
                          current_conv_id: str = '',
                          project_path: str = '') -> str:
     """Execute a charter agent tool → human-readable string.
@@ -1009,7 +1072,7 @@ def execute_charter_tool(fn_name: str, fn_args: dict, *,
             return ('Error: the project charter is only available in project '
                     'mode (open a project first).')
         if fn_name == 'project_charter_read':
-            rec = read_charter(project_path)
+            rec = read_charter(project_path, user_id=user_id)
             if not rec.get('exists') or not (rec['content'] or rec['decisions']):
                 return ('This project has no charter yet. If you reach a '
                         'project-wide binding rule, raise it with '
@@ -1045,7 +1108,7 @@ def execute_charter_tool(fn_name: str, fn_args: dict, *,
                 return (head + '\n\n' + txt +
                         f'\n\n(charter version {rec["version"]}, '
                         f'{i + 1} of {len(decisions)})')
-            block = render_charter_injection_block(project_path)
+            block = render_charter_injection_block(project_path, user_id=user_id)
             return (block + f'\n\n(charter version {rec["version"]}; pass '
                     'index=N for an entry\'s full text)')
         if fn_name == 'project_charter_propose':
@@ -1054,6 +1117,7 @@ def execute_charter_tool(fn_name: str, fn_args: dict, *,
                 return 'Error: proposal text is required.'
             res = propose_amendment(
                 project_path, current_conv_id, proposal,
+                user_id=user_id,
                 title=(fn_args.get('title') or '').strip())
             if res.get('ok'):
                 return ('Proposal recorded — it appears in the project '

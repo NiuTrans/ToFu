@@ -1,7 +1,7 @@
 """lib/paper/podcast_prompts.py — podcast script generation prompts + vocab.
 
 The podcast script is the make-or-break artifact of the paper-podcast feature
-(docs/PAPER_PODCAST_DESIGN.md §3): a TTS engine only reads what the script
+(docs/modules/ingest_media.md): a TTS engine only reads what the script
 gives it, so every "hard to verbalize" element (formulas, figures, tables,
 abbreviations, numbers) is handled HERE at the writing layer, and then
 machine-enforced by ``lib/paper/podcast_engine/_validate.py`` before the

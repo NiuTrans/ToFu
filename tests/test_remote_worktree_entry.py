@@ -1,20 +1,20 @@
 """tests/test_remote_worktree_entry.py — RWA P4a:每用户 bridge token + agent_run remote 绑定.
 
-docs/REMOTE_WORKTREE_DESIGN.md §3.2(约束②第三条)+ §5 P4 + 拍板 5A:
+docs/modules/remote_execution.md:
   * bridge token 复用 api_keys 生命周期,scope ``agents:bridge``;
-    poll 认证顺序:全局 TOFU_BRIDGE_SECRET(legacy 超户)→ per-user token
-    → 401;token 解析出的 user_id 打进 agent 注册表;
+    token 解析出的 owner_user_id 打进 agent 注册表;
   * 命令按用户作用域投递:注册表 user_id 与命令 user_id 不一致绝不交付
     (fail-closed;relay 场景 A 用户的 agent 领不走 B 用户的命令);
   * ``agent_run`` config 别名 ``remote: '<agent_id>:<root>'`` → 校验
     (在线 / root 已声明 / 用户匹配)→ ``cfg['project_remote']``;
   * 远程绑定隐含 project_enabled(服务器无 projectPath 也投影项目工具);
-  * legacy 单用户世界(全 '' user_id)wire 投影逐字节不变。
 
 Run:  pytest tests/test_remote_worktree_entry.py -m unit -v
 """
 
 from __future__ import annotations
+
+pytest_plugins = ('tests._credential_sidecar',)
 
 import threading
 import time
@@ -35,9 +35,7 @@ def _run_async(coro):
 
 @pytest.fixture(autouse=True)
 def _clean_bridge(monkeypatch):
-    monkeypatch.setenv('TOFU_DESKTOP_ADDRESSING', '1')
     monkeypatch.setattr(db, '_last_poll', [0.0])
-    monkeypatch.setattr(db, '_v1_last_poll', 0.0)
     with db.command_queue_lock:
         db.command_queue.clear()
         db._agents.clear()
@@ -69,16 +67,15 @@ def _plant(cmd_id='cmd-1', cmd_type='desktop_list_files', target=None,
     }
     if target:
         cmd['target_agent_id'] = target
-    if user_id:
-        cmd['user_id'] = user_id
+    cmd['user_id'] = user_id
     with db.command_queue_lock:
         db.command_queue[cmd_id] = cmd
     return cmd
 
 
-def _drain(agent_id=None, v1=True, user_id='', timeout=0.3):
+def _drain(agent_id, user_id='', timeout=0.3):
     return _run_async(db.take_pending_commands_async(
-        timeout=timeout, agent_id=agent_id, v1=v1, user_id=user_id))
+        timeout=timeout, agent_id=agent_id, user_id=user_id))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -114,17 +111,17 @@ class TestCommandUserScope:
         _register('agent-B', user_id='u-bob')
         _plant(target='agent-A', user_id='u-alice')
         # bob 的 agent 轮询:拿不到 alice 的命令
-        assert _drain('agent-B', v1=False, user_id='u-bob') == []
-        assert _drain('agent-A', v1=False, user_id='u-alice')[0]['id'] == 'cmd-1'
+        assert _drain('agent-B', user_id='u-bob') == []
+        assert _drain('agent-A', user_id='u-alice')[0]['id'] == 'cmd-1'
 
     def test_unaddressed_counts_only_own_user_online(self):
         _register('agent-A', user_id='u-alice')
         _register('agent-B', user_id='u-bob')
         # alice 视角只有一个在线 agent → 回退档放行,且只到 alice 的 agent
         _plant(user_id='u-alice')
-        assert _drain('agent-B', v1=False, user_id='u-bob') == []
-        assert _drain('agent-A', v1=False,
-                      user_id='u-alice')[0]['type'] == 'desktop_list_files'
+        assert _drain('agent-B', user_id='u-bob') == []
+        assert _drain(
+            'agent-A', user_id='u-alice')[0]['type'] == 'desktop_list_files'
 
     def test_addressed_cross_user_refused_at_enqueue(self):
         _register('agent-B', user_id='u-bob')
@@ -140,32 +137,29 @@ class TestCommandUserScope:
         _register('agent-B', user_id='u-bob')
         result, error = db.send_desktop_command(
             'desktop_list_files', {}, timeout=0.01, user_id='u-alice')
-        # 入队本身放行(0 个 alice agent 在线 = legacy 语义),bob 拿不到
-        with db.command_queue_lock:
-            ids = list(db.command_queue.keys())
-        db.resolve_results([{'id': i, 'result': {}, 'error': None}
-                            for i in ids])
-        assert _drain('agent-B', v1=False, user_id='u-bob') == []
+        # 入队本身放行(0 个 alice agent 在线),bob 拿不到。
+        assert result is None and error
+        assert _drain('agent-B', user_id='u-bob') == []
 
     def test_legacy_world_byte_identical(self):
         """全 '' user_id 的单用户世界:wire 投影键逐字节不变."""
         _register('agent-old')
         _plant()
-        cmds = _drain('agent-old', v1=False)
+        cmds = _drain('agent-old')
         assert len(cmds) == 1
         assert set(cmds[0].keys()) == {'id', 'type', 'params'}
 
     def test_scoped_command_never_leaks_user_id_on_wire(self):
         _register('agent-A', user_id='u-alice')
         _plant(target='agent-A', user_id='u-alice')
-        cmds = _drain('agent-A', v1=False, user_id='u-alice')
+        cmds = _drain('agent-A', user_id='u-alice')
         assert 'user_id' not in cmds[0]
 
     def test_unscoped_agent_cannot_receive_user_command(self):
         # 全局 secret 注册的 legacy agent(user_id='')不许领用户命令
         _register('agent-old')
         _plant(user_id='u-alice')
-        assert _drain('agent-old', v1=False) == []
+        assert _drain('agent-old') == []
 
 
 # ═══════════════════════════════════════════════════════════
@@ -178,75 +172,51 @@ class TestPollPerUserToken:
     def _fast_long_poll(self, monkeypatch):
         monkeypatch.setattr(db, 'POLL_WAIT_TIMEOUT', 0.2)
 
-    def _make_token(self, scopes=('agents:bridge',), user_id='u-alice'):
+    def _make_token(self, scopes=('agents:bridge',), user_id='101'):
         from lib.api_keys import create_key
-        _row, token = create_key(name='bridge-test', scopes=list(scopes),
-                                 user_id=user_id)
+        _row, token = create_key(
+            owner_user_id=int(user_id), name='bridge-test',
+            scopes=list(scopes))
         return token
 
     def test_bridge_scope_in_all_scopes(self):
         from lib.api_keys import ALL_SCOPES
         assert 'agents:bridge' in ALL_SCOPES
 
-    def test_user_token_registers_with_user_id(self, flask_client, monkeypatch):
-        monkeypatch.setenv('TOFU_BRIDGE_SECRET', 'global-secret')
+    def test_user_token_registers_with_owner_id(self, flask_client):
         token = self._make_token()
         r = flask_client.post('/api/desktop/poll',
                               json={'results': [], 'agent': {
                                   'agent_id': 'agent-A', 'name': 'mac'}},
                               headers={'X-Bridge-Secret': token})
         assert r.status_code == 200
-        assert db.online_agents()[0]['user_id'] == 'u-alice'
+        assert db.online_agents()[0]['user_id'] == '101'
 
-    def test_global_secret_still_super_user(self, flask_client, monkeypatch):
-        monkeypatch.setenv('TOFU_BRIDGE_SECRET', 'global-secret')
-        r = flask_client.post('/api/desktop/poll',
-                              json={'results': [], 'agent': {
-                                  'agent_id': 'agent-G', 'name': 'ops'}},
-                              headers={'X-Bridge-Secret': 'global-secret'})
-        assert r.status_code == 200
-        assert db.online_agents()[0]['user_id'] == ''
-
-    def test_token_without_bridge_scope_rejected(self, flask_client, monkeypatch):
-        monkeypatch.setenv('TOFU_BRIDGE_SECRET', 'global-secret')
+    def test_token_without_bridge_scope_rejected(self, flask_client):
         token = self._make_token(scopes=('chat',))
         r = flask_client.post('/api/desktop/poll',
                               json={'results': []},
                               headers={'X-Bridge-Secret': token})
         assert r.status_code == 401
 
-    def test_garbage_token_rejected(self, flask_client, monkeypatch):
-        monkeypatch.setenv('TOFU_BRIDGE_SECRET', 'global-secret')
+    def test_garbage_token_rejected(self, flask_client):
         r = flask_client.post('/api/desktop/poll',
                               json={'results': []},
                               headers={'X-Bridge-Secret': 'tofu-nope'})
         assert r.status_code == 401
 
-    def test_no_secret_still_requires_a_credential(self, flask_client, monkeypatch):
-        """B0: 未设 TOFU_BRIDGE_SECRET 不再等于「桥开放」。
-
-        本条原名 ``test_open_mode_unchanged``,断言「未设 secret → 200」。
-        该契约已被统一设备桥 B0 取代(docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md
-        §3.4):桥命令能读 cookie、挂 CDP、写文件、跑 shell,「默认开放」
-        从来不是安全的默认值。
-
-        注意本类相邻的两条(``test_token_without_bridge_scope_rejected`` /
-        ``test_garbage_token_rejected``)已经在断言 401 —— 旧断言与它们
-        自相矛盾,只因不传 scope_base 拿到了 ``'<local>'`` 回环豁免才一直
-        绿着(pt_f6742ab6,守卫失效第三态的近亲)。
-        """
-        monkeypatch.delenv('TOFU_BRIDGE_SECRET', raising=False)
+    def test_missing_credential_is_rejected(self, flask_client):
         r = flask_client.post('/api/desktop/poll', json={'results': []},
                               scope_base={'client': ('127.0.0.1', 5555)})
         assert r.status_code == 401
 
-    def test_in_process_agent_token_accepted(self, flask_client, monkeypatch):
+    def test_in_process_agent_token_accepted(self, flask_client):
         """打包托盘 app 的同进程 agent 走进程内 token(不落盘、不进 env)。"""
-        from routes.api_v1.auth import loopback_agent_token
-        monkeypatch.delenv('TOFU_BRIDGE_SECRET', raising=False)
+        from lib.bridge_auth import process_agent_token
         r = flask_client.post(
-            '/api/desktop/poll', json={'results': []},
-            headers={'X-Bridge-Secret': loopback_agent_token()},
+            '/api/desktop/poll', json={
+                'results': [], 'agent': {'agent_id': 'process-agent'}},
+            headers={'X-Bridge-Secret': process_agent_token()},
             scope_base={'client': ('127.0.0.1', 5555)})
         assert r.status_code == 200
 
@@ -391,10 +361,10 @@ class TestUserThreading:
 class TestStatusUserFilter:
     def test_status_scopes_agents_to_caller(self, flask_client):
         from lib.api_keys import create_key
-        _row, token = create_key(name='status-viewer', scopes=['chat'],
-                                 user_id='u-alice')
-        _register('agent-A', user_id='u-alice', name='mac')
-        _register('agent-B', user_id='u-bob', name='win')
+        _row, token = create_key(
+            owner_user_id=101, name='status-viewer', scopes=['chat'])
+        _register('agent-A', user_id='101', name='mac')
+        _register('agent-B', user_id='202', name='win')
         r = flask_client.get('/api/v1/desktop/status',
                              headers={'Authorization': f'Bearer {token}'})
         assert r.status_code == 200

@@ -1,24 +1,32 @@
 """Core LLM-call-with-fallback entry point.
 
-Streams one LLM round and transparently retries with the configured
-fallback model (Claude Opus 4, medium preset) when the primary model
-errors out; also drives reactive compaction on ``PromptTooLongError``.
-
-Collaborators that tests may monkeypatch (``stream_llm_response``,
-``_get_fallback_model``, ``_flag_empty_stop_for_retry``, ``_emit_round_usage``)
-are resolved through the package facade at CALL TIME, so a
-``patch('lib.tasks_pkg.llm_fallback.<name>')`` is honoured here.
+Streams one LLM round and transparently retries with the configured fallback
+model when the primary model errors out; also drives same-model reactive
+compaction when the provider rejects an oversized prompt or the local memory
+guard cannot safely serialise the current derived payload. Dependencies are
+bound from their concrete owner modules, so tests and callers have one
+explicit injection seam.
 
 The reactive-compaction retry state (``_reactive_compact_attempts`` /
 ``_REACTIVE_COMPACT_MAX_RETRIES``) is imported BY REFERENCE from
 ``._state`` — there is exactly one such dict in the process.
 """
 
-from lib.agent_core.events import Phase, build_phase
-from lib.llm import build_body
+from lib.agent_core.events import EventType, Phase, build_event, build_phase
+from lib.cgroup_guard import MemoryPressureError, approx_body_bytes
+from lib.llm import AbortedError, build_body
+from lib.llm.stream_result import ensure_provider_stream_result
 from lib.llm_error_format import format_llm_error_for_user
 from lib.llm_errors import _ERR_BODY_LIMIT
 from lib.log import audit_log, get_logger
+from lib.llm_dispatch.retry_i18n import display_model_name as _display_model_name
+from lib.tasks_pkg.llm_fallback._retry import (
+    _flag_empty_stop_for_retry,
+    _get_fallback_model,
+)
+from lib.tasks_pkg.llm_fallback._usage import _emit_round_usage
+from lib.tasks_pkg.manager._events import append_event
+from lib.tasks_pkg.manager._stream import stream_llm_response
 
 # Shared reactive-compaction state — imported by reference (never reassigned)
 # so cleanup_reactive_compact_state mutates the SAME dict this module reads.
@@ -30,39 +38,82 @@ from lib.tasks_pkg.llm_fallback._state import (
 logger = get_logger(__name__)
 
 
-def _facade():
-    """Return the package facade so collaborators resolve at call time.
+def _log_stream_attempt_outcome(
+    task,
+    *,
+    tid,
+    round_num,
+    model,
+    stream_result,
+    label='LLM',
+    fallback_from=None,
+    failed_models=None,
+):
+    """Log transport completion without calling an unusable stream success."""
+    assistant_msg = stream_result.message
+    usage = stream_result.usage or {}
+    content_len = len(assistant_msg.get('content', '') or '')
+    tool_calls = len(assistant_msg.get('tool_calls', []) or [])
+    trace_id = usage.get('trace_id', 'N/A')
+    elapsed_s = (usage.get('stream_elapsed_ms', 0) or 0) / 1000
+    context_parts = []
+    if fallback_from:
+        context_parts.append(f'fallback_from={fallback_from}')
+    if failed_models:
+        context_parts.append(f'failed_models={sorted(failed_models)}')
+    context = f" {' '.join(context_parts)}" if context_parts else ''
 
-    Lets ``patch('lib.tasks_pkg.llm_fallback.<name>')`` in tests take effect
-    even though the core loop calls the helper by a bare name below.
+    if stream_result.is_verified_complete:
+        logger.info(
+            '[%s] conv=%s ✓ %s round %d OK: stream_state=%s '
+            'finish_reason=%s model=%s content=%dchars tool_calls=%d '
+            'M-TraceId=%s elapsed=%.1fs%s',
+            tid, task.get('convId', ''), label, round_num,
+            stream_result.state.value, stream_result.finish_reason, model,
+            content_len, tool_calls, trace_id, elapsed_s, context,
+        )
+        return
+
+    logger.warning(
+        '[%s] conv=%s ⚠ %s round %d UNUSABLE: stream_state=%s '
+        'compatibility_finish_reason=%s model=%s content=%dchars tool_calls=%d '
+        'M-TraceId=%s elapsed=%.1fs; recovery analysis pending%s',
+        tid, task.get('convId', ''), label, round_num,
+        stream_result.state.value, stream_result.finish_reason, model,
+        content_len, tool_calls, trace_id, elapsed_s, context,
+    )
+
+
+def _is_gateway_error(exc: BaseException) -> bool:
+    """True for the gateway/outage error class — RateLimitError raised with
+    ``is_gateway=True`` (HTTP 502/503/504, plus vendor-transient outages
+    wrapped in 4xx bodies). This class is WAITABLE, not proof the model is
+    dead: the dispatcher already cycled within the pinned model's slots
+    until the outage budget expired. It must NEVER trigger a model switch
+    (owner directive 2026-08-18, strict mode)."""
+    try:
+        from lib.llm import RateLimitError as _RL
+    except Exception as _imp:
+        logger.debug('lib.llm import failed in gateway-error check: %s', _imp)
+        return False
+    return isinstance(exc, _RL) and bool(getattr(exc, 'is_gateway', False))
+
+
+def _is_request_payload_error(exc: BaseException) -> bool:
+    """True when changing models cannot repair the rejected request.
+
+    These errors describe this request's wire shape or semantics, not model
+    availability. Replaying the same payload on a configured fallback (and
+    possibly stripping unsupported inputs such as images) only hides the
+    producer defect and violates strict model selection.
     """
-    import lib.tasks_pkg.llm_fallback as _pkg
-    return _pkg
-
-
-def stream_llm_response(*args, **kwargs):
-    """Facade-resolved shim for the streaming primitive (patchable at package level)."""
-    return _facade().stream_llm_response(*args, **kwargs)
-
-
-def append_event(*args, **kwargs):
-    """Facade-resolved shim for SSE delivery (patchable at package level)."""
-    return _facade().append_event(*args, **kwargs)
-
-
-def _get_fallback_model(*args, **kwargs):
-    """Facade-resolved shim (patchable at package level)."""
-    return _facade()._get_fallback_model(*args, **kwargs)
-
-
-def _flag_empty_stop_for_retry(*args, **kwargs):
-    """Facade-resolved shim (patchable at package level)."""
-    return _facade()._flag_empty_stop_for_retry(*args, **kwargs)
-
-
-def _emit_round_usage(*args, **kwargs):
-    """Facade-resolved shim (patchable at package level)."""
-    return _facade()._emit_round_usage(*args, **kwargs)
+    try:
+        from lib.llm import BadRequestError, RequestScopedError
+    except Exception as import_error:
+        logger.debug('lib.llm import failed in request-error check: %s',
+                     import_error)
+        return False
+    return isinstance(exc, (BadRequestError, RequestScopedError))
 
 
 def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
@@ -130,16 +181,24 @@ def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
     _rescue_body['_task_id'] = task.get('id', '')
 
     try:
-        assistant_msg, finish_reason, usage = stream_llm_response(
+        stream_result = ensure_provider_stream_result(stream_llm_response(
             task, _rescue_body, tag=f'R{round_num+1}-RESCUE',
             on_tool_call_ready=on_tool_call_ready,
-            pool_wide=True, exclude_models=failed_models)
+            pool_wide=True, exclude_models=failed_models))
+        assistant_msg, finish_reason, usage = stream_result
     except Exception as e3:
+        if isinstance(e3, AbortedError):
+            raise
+        if isinstance(e3, MemoryPressureError):
+            return _finish_local_memory_pressure(
+                task, e3, _rescue_body.get('model') or original_model,
+                preset, thinking_enabled, round_num)
         logger.warning('[%s] pool-rescue dispatch also failed: %s', tid, e3)
         return None
 
     _rescue_model = ((usage or {}).get('_dispatch') or {}).get('model') \
         or _rescue_body.get('model') or original_model
+    _rescue_from_model = _rescue_body.get('model') or original_model
 
     if usage is not None and _flag_empty_stop_for_retry(
             assistant_msg, finish_reason, task, round_num, usage):
@@ -154,6 +213,14 @@ def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
     task['_fallback_reason'] = (
         f'{_rk_kind}: {_rk_detail}' if _rk_detail else _rk_kind)[:300]
     task['_fallback_kind'] = _rk_kind
+    if _rescue_model != _rescue_from_model:
+        append_event(task, build_event(
+            EventType.MODEL_FALLBACK,
+            fallbackModel=_rescue_model,
+            fallbackFrom=_rescue_from_model,
+            fallbackKind='pool_rescue',
+            fallbackReason=task['_fallback_reason'],
+        ))
 
     # Honest accounting — identical to the primary/fallback success paths.
     if usage:
@@ -182,21 +249,252 @@ def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
     audit_log('model_fallback', old=original_model, new=_rescue_model,
               reason=f'pool-rescue: {_rk_kind}: {_rk_detail[:160]}',
               kind=_rk_kind, tid=tid, conv=task.get('convId', ''))
-    logger.warning('[%s] ✓ POOL-RESCUE round %d OK: finish_reason=%s '
-                   'model=%s (rescued from %s; failed chain: %s)',
-                   tid, round_num + 1, finish_reason, _rescue_model,
-                   original_model, sorted(failed_models))
+    _log_stream_attempt_outcome(
+        task,
+        tid=tid,
+        round_num=round_num + 1,
+        model=_rescue_model,
+        stream_result=stream_result,
+        label='POOL-RESCUE',
+        fallback_from=original_model,
+        failed_models=failed_models,
+    )
 
     return {
         'assistant_msg': assistant_msg,
         'finish_reason': finish_reason,
         'usage': usage,
+        'stream_result': stream_result,
         'model': _rescue_model,
         'preset': preset,
         'thinking_enabled': thinking_enabled,
         '_loop_action': None,
         '_loop_exit_reason': None,
     }
+
+
+def _learn_context_limit_from_overflow(task, model, error, tid):
+    """Best-effort learning for provider-reported context-window overflows."""
+    try:
+        from lib.context_limits import learn_shrink_from_error
+        from lib.tasks_pkg.compaction._tokens import (
+            _get_context_limit,
+            _parse_context_overflow,
+        )
+        reported, stated_max = _parse_context_overflow(str(error))
+        prior_limit = _get_context_limit(task)
+        learned_info = learn_shrink_from_error(
+            task.get('provider_id') or '', model, reported,
+            preset_limit=prior_limit, stated_max=stated_max)
+        if learned_info:
+            append_event(task, build_phase(
+                Phase.RETRYING,
+                detail=(
+                    f'⚙️ Auto-detected smaller context window for {model}: '
+                    f'{learned_info["new_limit"]:,} tokens '
+                    f'(was {learned_info["old_limit"]:,})'
+                ),
+            ))
+    except Exception as learn_error:
+        logger.debug('[%s] context_limits shrink-learn failed: %s',
+                     tid, learn_error)
+
+
+def _prepare_reactive_retry_body(task, body, model, messages, tool_list,
+                                 preset, thinking_enabled, cause, tid):
+    """Compact derived context and rebuild one same-model retry body.
+
+    Compaction/body rebuilding are recovery mechanics. If either mechanic has
+    its own defect, keep the original typed failure so it can be surfaced or
+    handled by normal policy instead of replacing it with a new FATAL.
+    """
+    try:
+        from lib.tasks_pkg.compaction.api import reactive_compact
+        byte_target = None
+        if isinstance(cause, MemoryPressureError):
+            # Make the recovery load-bearing: halve the derived body, bounded
+            # at 1 MiB, instead of hoping token compaction happens to reduce a
+            # request whose model context may already be perfectly valid.
+            byte_target = max(1 << 20, approx_body_bytes(body) // 2)
+        reactive_compact(
+            messages, task=task, error_text=str(cause),
+            byte_target=byte_target)
+        retry_body = build_body(
+            model, messages,
+            max_tokens=task.get('config', {}).get('maxTokens', 128000),
+            temperature=body.get('temperature', 1.0),
+            thinking_enabled=thinking_enabled,
+            preset=preset,
+            tools=tool_list,
+            response_format=body.get('response_format'),
+            stream=True,
+        )
+    except Exception as prep_error:
+        logger.error(
+            '[%s] Reactive request recovery could not prepare a smaller body; '
+            'preserving original %s: %s',
+            tid, type(cause).__name__, prep_error, exc_info=True)
+        return None
+
+    # Preserve the session-stable TTL latch key after a body rebuild.
+    retry_body['_task_id'] = task.get('id', '')
+    return retry_body
+
+
+def _record_reactive_usage(task, usage, model, round_num,
+                           accumulated_usage, api_rounds):
+    """Account for a successful reactive retry and discarded sub-rounds."""
+    if not usage:
+        return
+    for key, value in usage.items():
+        if isinstance(value, (int, float)):
+            accumulated_usage[key] = accumulated_usage.get(key, 0) + value
+    api_rounds.append({
+        'round': round_num + 1,
+        'model': model,
+        'usage': dict(usage),
+        'tag': f'R{round_num+1}-REACTIVE',
+    })
+    _emit_round_usage(
+        task, round_num + 1, model, usage, tag=f'R{round_num+1}-REACTIVE')
+    for billed_round in (usage.get('_extra_billing_rounds') or []):
+        billed_usage = billed_round.get('usage') or {}
+        for key, value in billed_usage.items():
+            if isinstance(value, (int, float)):
+                accumulated_usage[key] = accumulated_usage.get(key, 0) + value
+        tag = (billed_round.get('tag')
+               or f'R{round_num+1}-REACTIVE-DISCARDED')
+        billed_model = billed_round.get('model') or model
+        api_rounds.append({
+            'round': round_num + 1,
+            'model': billed_model,
+            'usage': dict(billed_usage),
+            'tag': tag,
+        })
+        _emit_round_usage(
+            task, round_num + 1, billed_model, billed_usage, tag=tag)
+
+
+def _attempt_request_payload_recovery(
+        task, body, model, round_num, tool_list, messages, preset,
+        thinking_enabled, accumulated_usage, api_rounds,
+        on_tool_call_ready, cause):
+    """Shrink a locally-derived request and retry the same model once.
+
+    Returns ``(success_result, next_error, retry_body)``. ``next_error`` is
+    the reactive retry's actual exception, so downstream policy never
+    misclassifies it as the original size/pressure failure.
+    """
+    tid = task['id'][:8]
+    task_id = task.get('id', '')
+    attempts = _reactive_compact_attempts.get(task_id, 0)
+    memory_pressure = isinstance(cause, MemoryPressureError)
+
+    if not memory_pressure:
+        _learn_context_limit_from_overflow(task, model, cause, tid)
+
+    if attempts >= _REACTIVE_COMPACT_MAX_RETRIES:
+        logger.error(
+            '[%s] Reactive request recovery exhausted (%d/%d) for %s',
+            tid, attempts, _REACTIVE_COMPACT_MAX_RETRIES,
+            type(cause).__name__)
+        return None, cause, None
+
+    _reactive_compact_attempts[task_id] = attempts + 1
+    cause_label = ('local memory headroom' if memory_pressure
+                   else 'provider context limit')
+    logger.warning(
+        '[%s] ⚡ REACTIVE COMPACT at round %d (attempt %d/%d): %s for '
+        'model=%s — reducing the derived payload and retrying the same model',
+        tid, round_num, attempts + 1, _REACTIVE_COMPACT_MAX_RETRIES,
+        cause_label, model)
+
+    retry_body = _prepare_reactive_retry_body(
+        task, body, model, messages, tool_list, preset, thinking_enabled,
+        cause, tid)
+    if retry_body is None:
+        return None, cause, None
+
+    if memory_pressure:
+        phase = build_phase(
+            Phase.RETRYING,
+            detail='⚡ 本地内存余量不足，已缩减请求上下文后重试…',
+            detailKey='stream.phase.compactingWindow',
+        )
+    else:
+        phase = build_phase(
+            Phase.RETRYING,
+            detail=(f'⚡ 上下文超长，已自动压缩 '
+                    f'(reactive compact {attempts + 1}/'
+                    f'{_REACTIVE_COMPACT_MAX_RETRIES})…'),
+            detailKey='stream.phase.reactiveCompact',
+            detailArgs={
+                'attempt': attempts + 1,
+                'max': _REACTIVE_COMPACT_MAX_RETRIES,
+            },
+        )
+    # This event belongs to authoritative task state; preserve its existing
+    # fail-closed behavior rather than hiding a durable-write failure.
+    append_event(task, phase)
+
+    try:
+        stream_result = ensure_provider_stream_result(stream_llm_response(
+            task, retry_body, tag=f'R{round_num+1}-REACTIVE',
+            on_tool_call_ready=on_tool_call_ready))
+        assistant_msg, finish_reason, usage = stream_result
+    except Exception as retry_error:
+        if isinstance(retry_error, AbortedError):
+            return None, retry_error, retry_body
+        logger.error('[%s] Reactive compact retry also failed: %s',
+                     tid, retry_error, exc_info=True)
+        return None, retry_error, retry_body
+
+    _record_reactive_usage(
+        task, usage, model, round_num, accumulated_usage, api_rounds)
+    return ({
+        'assistant_msg': assistant_msg,
+        'finish_reason': finish_reason,
+        'usage': usage,
+        'stream_result': stream_result,
+        'model': model,
+        'preset': preset,
+        'thinking_enabled': thinking_enabled,
+        '_loop_action': None,
+        '_loop_exit_reason': None,
+    }, None, retry_body)
+
+
+def _finish_local_memory_pressure(task, error, model, preset,
+                                  thinking_enabled, round_num):
+    """Settle genuine local pressure without a useless model/pool switch."""
+    # A fallback/rescue may have been announced at decision time but produced
+    # no reply before the shared local guard refused its payload. Never persist
+    # a model-switch badge for a switch that did not successfully generate.
+    _clear_failed_fallback_stamp(task)
+    task['error'] = format_llm_error_for_user(
+        error, model=model, context='local-memory-pressure',
+        source='llm-stream')
+    logger.warning(
+        '[%s] Local request headroom is still insufficient after compaction; '
+        'settling as retryable server_busy without switching models',
+        task['id'][:8])
+    return {
+        'assistant_msg': {'role': 'assistant', 'content': ''},
+        'finish_reason': 'error',
+        'usage': None,
+        'model': model,
+        'preset': preset,
+        'thinking_enabled': thinking_enabled,
+        '_loop_action': 'break',
+        '_loop_exit_reason': f'local_memory_pressure_round_{round_num}',
+    }
+
+
+def _clear_failed_fallback_stamp(task):
+    """Remove decision-time fallback metadata when no fallback reply exists."""
+    for key in ('_fallback_model', '_fallback_from',
+                '_fallback_reason', '_fallback_kind'):
+        task.pop(key, None)
 
 
 def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
@@ -275,9 +573,10 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
 
     # ── Primary model call ──
     try:
-        assistant_msg, finish_reason, usage = stream_llm_response(
+        stream_result = ensure_provider_stream_result(stream_llm_response(
             task, body, tag=f'R{round_num+1}',
-            on_tool_call_ready=on_tool_call_ready)
+            on_tool_call_ready=on_tool_call_ready))
+        assistant_msg, finish_reason, usage = stream_result
         last_finish_reason = finish_reason
 
         # Round-0 empty stop → flag for the empty_stop/zero_byte RETRY bucket,
@@ -317,7 +616,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             api_rounds.append({'round': round_num + 1, 'model': model,
                                'usage': dict(usage), 'tag': f'R{round_num+1}'})
             _emit_round_usage(task, round_num + 1, model, usage, tag=f'R{round_num+1}')
-            # ★ HONEST ACCOUNTING: bill every DISCARDED FloorRetry attempt the
+            # HONEST ACCOUNTING: bill every DISCARDED FloorRetry attempt the
             #   gateway processed. Each was a real request the provider charged
             #   for — hiding them made cost popover / wallet debit / daily
             #   report under-report by ~9%~50% per triggered round. See
@@ -344,19 +643,19 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                                'cost popover now matches gateway bill',
                                tid, task.get('convId', ''), len(_extra))
 
-        _content_len = len(assistant_msg.get('content', '') or '')
-        _tool_calls = len(assistant_msg.get('tool_calls', []))
-        _u_trace = (usage or {}).get('trace_id', 'N/A')
-        _u_elapsed = (usage or {}).get('stream_elapsed_ms', 0)
-        logger.info('[%s] conv=%s ✓ LLM round %d OK: finish_reason=%s model=%s '
-                    'content=%dchars tool_calls=%d M-TraceId=%s elapsed=%.1fs',
-                    tid, task.get('convId', ''), round_num + 1, last_finish_reason, model,
-                    _content_len, _tool_calls, _u_trace, _u_elapsed / 1000)
+        _log_stream_attempt_outcome(
+            task,
+            tid=tid,
+            round_num=round_num + 1,
+            model=model,
+            stream_result=stream_result,
+        )
 
         return {
             'assistant_msg': assistant_msg,
             'finish_reason': last_finish_reason,
             'usage': usage,
+            'stream_result': stream_result,
             'model': model,
             'preset': preset,
             'thinking_enabled': thinking_enabled,
@@ -366,142 +665,34 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
 
     except Exception as e:
         # AbortedError must escape — never fallback/retry on user abort
-        from lib.llm import AbortedError, ContentFilterError, PromptTooLongError
+        from lib.llm import ContentFilterError, PromptTooLongError
         if isinstance(e, AbortedError):
             logger.debug('[%s] ✋ AbortedError at round %d — stopping immediately', tid, round_num)
             raise
 
-        # ── PromptTooLongError → reactive compaction + retry ──
-        # Inspired by Claude Code's reactive compact: when the API rejects
-        # with "prompt too long", compress the conversation and retry.
-        if isinstance(e, PromptTooLongError):
-            _task_id = task.get('id', '')
-            _attempts = _reactive_compact_attempts.get(_task_id, 0)
+        # Derived-payload failures are recoverable locally. Repeatedly compact
+        # within the small shared retry budget, preserving the latest typed
+        # error from each retry. Local memory pressure is never evidence that
+        # another model/provider will help, so a persistent instance settles as
+        # server_busy instead of replaying the same body across the pool.
+        while isinstance(e, (PromptTooLongError, MemoryPressureError)):
+            _prior_error = e
+            _recovered, e, _retry_body = _attempt_request_payload_recovery(
+                task, body, model, round_num, tool_list, messages, preset,
+                thinking_enabled, accumulated_usage, api_rounds,
+                on_tool_call_ready, e)
+            if _retry_body is not None:
+                body = _retry_body
+            if _recovered is not None:
+                return _recovered
+            if isinstance(e, AbortedError):
+                raise e
+            if e is _prior_error:
+                break
 
-            # ── Auto-learn a SHRUNK context limit for this (provider, model)
-            # ── before we compact. The next call will use the corrected
-            # ── ceiling, so future overflows on this provider become rarer.
-            try:
-                from lib.context_limits import learn_shrink_from_error
-                from lib.tasks_pkg.compaction import (
-                    _get_context_limit,
-                    _parse_context_overflow,
-                )
-                _reported, _stated_max = _parse_context_overflow(str(e))
-                _prior_limit = _get_context_limit(task)
-                _learned_info = learn_shrink_from_error(
-                    task.get('provider_id') or '',
-                    model,
-                    _reported,
-                    preset_limit=_prior_limit,
-                    stated_max=_stated_max,
-                )
-                if _learned_info:
-                    append_event(task, build_phase(
-                        Phase.RETRYING,
-                        detail=(
-                            f'⚙️ Auto-detected smaller context window for '
-                            f'{model}: '
-                            f'{_learned_info["new_limit"]:,} tokens '
-                            f'(was {_learned_info["old_limit"]:,})'
-                        ),
-                    ))
-            except Exception as _learn_e:
-                logger.debug('[%s] context_limits shrink-learn failed: %s',
-                             tid, _learn_e)
-
-            if _attempts < _REACTIVE_COMPACT_MAX_RETRIES:
-                _reactive_compact_attempts[_task_id] = _attempts + 1
-                logger.warning(
-                    '[%s] ⚡ REACTIVE COMPACT triggered at round %d (attempt %d/%d): '
-                    'prompt too long for model=%s — compressing and retrying',
-                    tid, round_num, _attempts + 1, _REACTIVE_COMPACT_MAX_RETRIES, model)
-
-                from lib.tasks_pkg.compaction import reactive_compact
-                # Pass the raw error text so reactive_compact can extract
-                # the upstream-reported token count ("N tokens > M maximum")
-                # and use it as the authoritative seed for head-truncate
-                # sizing. Without this we fall back to our under-counting
-                # heuristic and shed ~5 % when we actually need to shed ~30 %.
-                reactive_compact(messages, task=task, error_text=str(e))
-
-                # Rebuild body with compressed messages
-                _tools_this_round = tool_list
-                body = build_body(
-                    model, messages,
-                    max_tokens=task.get('config', {}).get('maxTokens', 128000),
-                    temperature=body.get('temperature', 1.0),
-                    thinking_enabled=thinking_enabled,
-                    preset=preset,
-                    tools=_tools_this_round,
-                    response_format=body.get('response_format'),
-                    stream=True,
-                )
-                # ★ Preserve the session-stable TTL latch key. Without
-                #   _task_id, add_cache_breakpoints / the extended-cache-ttl
-                #   beta header fall back to the LIVE global CACHE_EXTENDED_TTL
-                #   instead of the per-task latch — flipping the cache key
-                #   mid-task and forcing a full prefix re-write (cache_read=0).
-                body['_task_id'] = task.get('id', '')
-
-                # Notify frontend (phase event = transient UI status,
-                # does NOT pollute assistantMsg.content)
-                append_event(task, build_phase(
-                    Phase.RETRYING,
-                    detail=f'⚡ 上下文超长，已自动压缩 (reactive compact {_attempts + 1}/{_REACTIVE_COMPACT_MAX_RETRIES})…',
-                    detailKey='stream.phase.reactiveCompact',
-                    detailArgs={
-                        'attempt': _attempts + 1,
-                        'max': _REACTIVE_COMPACT_MAX_RETRIES,
-                    },
-                ))
-
-                # Retry the LLM call with compacted messages
-                try:
-                    assistant_msg, finish_reason, usage = stream_llm_response(
-                        task, body, tag=f'R{round_num+1}-REACTIVE')
-                    if usage:
-                        for k, v in usage.items():
-                            if isinstance(v, (int, float)):
-                                accumulated_usage[k] = accumulated_usage.get(k, 0) + v
-                        api_rounds.append({'round': round_num + 1, 'model': model,
-                                           'usage': dict(usage), 'tag': f'R{round_num+1}-REACTIVE'})
-                        _emit_round_usage(task, round_num + 1, model, usage,
-                                           tag=f'R{round_num+1}-REACTIVE')
-                        # Honest accounting (same as primary path)
-                        for _bill in (usage.get('_extra_billing_rounds') or []):
-                            _bu = _bill.get('usage') or {}
-                            for k, v in _bu.items():
-                                if isinstance(v, (int, float)):
-                                    accumulated_usage[k] = accumulated_usage.get(k, 0) + v
-                            api_rounds.append({
-                                'round': round_num + 1,
-                                'model': _bill.get('model') or model,
-                                'usage': dict(_bu),
-                                'tag': _bill.get('tag') or f'R{round_num+1}-REACTIVE-DISCARDED',
-                            })
-                            _emit_round_usage(task, round_num + 1,
-                                              _bill.get('model') or model,
-                                              _bu,
-                                              tag=_bill.get('tag') or
-                                              f'R{round_num+1}-REACTIVE-DISCARDED')
-                    return {
-                        'assistant_msg': assistant_msg,
-                        'finish_reason': finish_reason,
-                        'usage': usage,
-                        'model': model,
-                        'preset': preset,
-                        'thinking_enabled': thinking_enabled,
-                        '_loop_action': None,
-                        '_loop_exit_reason': None,
-                    }
-                except Exception as e2:
-                    logger.error('[%s] Reactive compact retry also failed: %s', tid, e2, exc_info=True)
-                    # Fall through to normal fallback handling
-            else:
-                logger.error('[%s] Reactive compact retries exhausted (%d/%d) — '
-                             'falling through to model fallback',
-                             tid, _attempts, _REACTIVE_COMPACT_MAX_RETRIES)
+        if isinstance(e, MemoryPressureError):
+            return _finish_local_memory_pressure(
+                task, e, model, preset, thinking_enabled, round_num)
 
         # InvalidImageError — image content rejected (too large, corrupt, etc.)
         # Fallback to another model won't help (same image = same rejection).
@@ -568,6 +759,86 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
         logger.error('[%s] conv=%s LLM call failed at round %d (model=%s): %s '
                      '(check M-TraceId in preceding debug logs for gateway coordination)',
                      tid, task.get('convId', ''), round_num + 1, model, err_str, exc_info=True)
+
+        # Gateway/outage class — WAITABLE, never a model-switch trigger
+        #   (owner directive 2026-08-18, strict mode). A 502-class error is
+        #   the backend being sick, not this model being dead; the
+        #   dispatcher already waited it out cycling WITHIN the pinned
+        #   model's slots (strict_model=True, pair-level rotation only).
+        #   Switching to the configured fallback — or rescuing onto an
+        #   arbitrary pool slot — here is exactly the silent model swap the
+        #   user forbade: they interrupt and switch models THEMSELVES.
+        #   Surface the upstream_error envelope (retryable) instead.
+        #   NOTE (owner directive 2026-08-20): the dispatcher's outage
+        #   budget is DISABLED by default (TOFU_GATEWAY_OUTAGE_BUDGET_S=0)
+        #   — it waits out a gateway storm indefinitely and only the user's
+        #   abort interrupts it — so this branch fires only when ops
+        #   re-enable the bounded give-up (or a non-dispatch path raises
+        #   the class).
+        if _is_gateway_error(e):
+            _gw_status = int(getattr(e, 'status_code', 0) or 0)
+            _gw_label = _display_model_name(model)
+            logger.warning(
+                '[%s] 🛑 Gateway outage (HTTP %s) outlasted the dispatch wait '
+                'budget on model=%s — NOT switching models (strict mode); '
+                'surfacing upstream_error envelope instead',
+                tid, _gw_status or '?', model)
+            append_event(task, build_phase(
+                Phase.RETRYING,
+                detail=(f'⛔ 后端网关故障持续未恢复——模型保持 {_gw_label}，'
+                        f'未自动切换。可稍后重试，或中断后手动切换模型。'),
+                detailKey='stream.phase.gatewayOutageFinal',
+                detailArgs={'model': _gw_label, 'status': _gw_status},
+            ))
+            _gateway_error_envelope = format_llm_error_for_user(
+                e, model=model, context='gateway-outage', source='llm-stream')
+            if tool_call_happened:
+                task['error'] = _gateway_error_envelope
+                return {
+                    'assistant_msg': {'role': 'assistant', 'content': ''},
+                    'finish_reason': 'error', 'usage': None,
+                    'model': model, 'preset': preset,
+                    'thinking_enabled': thinking_enabled,
+                    '_loop_action': 'break',
+                    '_loop_exit_reason': f'gateway_outage_round_{round_num}',
+                }
+            try:
+                e._user_message = _gateway_error_envelope  # type: ignore[attr-defined]
+            except Exception as _attr_err:
+                logger.debug('[%s] Could not attach _user_message: %s',
+                             tid, _attr_err)
+            raise
+
+        # Deterministic request rejection — never switch models or attempt a
+        # pool-wide rescue. A 400/404/422 says the payload/route is invalid;
+        # it is not evidence that the selected model is dead. In particular,
+        # a locally malformed tool schema must remain visible as our defect
+        # instead of silently degrading a Kimi vision request onto text-only
+        # GLM.
+        if _is_request_payload_error(e):
+            logger.warning(
+                '[%s] Request-scoped rejection on model=%s — NOT switching '
+                'models or attempting pool rescue: %s', tid, model, err_str)
+            request_error_envelope = format_llm_error_for_user(
+                e, model=model, context='request-rejected',
+                source='llm-stream')
+            if tool_call_happened:
+                task['error'] = request_error_envelope
+                return {
+                    'assistant_msg': {'role': 'assistant', 'content': ''},
+                    'finish_reason': 'error', 'usage': None,
+                    'model': model, 'preset': preset,
+                    'thinking_enabled': thinking_enabled,
+                    '_loop_action': 'break',
+                    '_loop_exit_reason':
+                        f'request_rejected_round_{round_num}',
+                }
+            try:
+                e._user_message = request_error_envelope  # type: ignore[attr-defined]
+            except Exception as attribute_error:
+                logger.debug('[%s] Could not attach _user_message: %s',
+                             tid, attribute_error)
+            raise
 
         # If already on the fallback model, or no fallback configured —
         # try the pool-wide last resort before giving up (owner directive
@@ -637,7 +908,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             detail=(f'⚠️ 模型 {original_model} 请求失败（{_fb_kind}）：'
                     f'{_fb_detail[:120]} — 已自动回退到 {_FALLBACK_MODEL} 继续生成…'),
         ))
-        # ★ EARLY notification, at the DECISION MOMENT — before the fallback
+        # EARLY notification, at the DECISION MOMENT — before the fallback
         #   stream starts. A fallback generation can run for minutes; the
         #   transient phase line is cleared the moment fallback content
         #   starts streaming, so without a STRUCTURED event + early task
@@ -645,13 +916,13 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
         #   whole generation, and a cold reload mid-fallback cannot repaint
         #   the banner (build_fresh_state_snapshot reads these fields).
         #   Cleared again below if the fallback itself fails.
-        append_event(task, {
-            'type': 'model_fallback',
-            'fallbackModel': _FALLBACK_MODEL,
-            'fallbackFrom': original_model,
-            'fallbackKind': _fb_kind,
-            'fallbackReason': _fb_reason[:300],
-        })
+        append_event(task, build_event(
+            EventType.MODEL_FALLBACK,
+            fallbackModel=_FALLBACK_MODEL,
+            fallbackFrom=original_model,
+            fallbackKind=_fb_kind,
+            fallbackReason=_fb_reason[:300],
+        ))
         task['_fallback_model'] = _FALLBACK_MODEL
         task['_fallback_from'] = original_model
         task['_fallback_reason'] = _fb_reason[:300]
@@ -680,15 +951,17 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             response_format=body.get('response_format'),
             stream=True,
         )
-        # ★ Preserve the session-stable TTL latch key on the fallback body
+        # Preserve the session-stable TTL latch key on the fallback body
         #   too (see reactive-compact rebuild above). The fallback model is a
         #   different cache namespace anyway, but a stable TTL decision keeps
         #   the fallback model's OWN prefix reusable across its rounds.
         fallback_body['_task_id'] = task.get('id', '')
 
         try:
-            assistant_msg, finish_reason, usage = stream_llm_response(
-                task, fallback_body, tag=f'R{round_num+1}-FALLBACK')
+            stream_result = ensure_provider_stream_result(
+                stream_llm_response(
+                    task, fallback_body, tag=f'R{round_num+1}-FALLBACK'))
+            assistant_msg, finish_reason, usage = stream_result
             last_finish_reason = finish_reason
 
             if usage is not None and _flag_empty_stop_for_retry(
@@ -735,21 +1008,21 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                                       tag=_bill.get('tag') or
                                       f'R{round_num+1}-FALLBACK-DISCARDED')
 
-            _fb_content_len = len(assistant_msg.get('content', '') or '')
-            _fb_tool_calls = len(assistant_msg.get('tool_calls', []))
-            _fb_trace = (usage or {}).get('trace_id', 'N/A')
-            _fb_elapsed = (usage or {}).get('stream_elapsed_ms', 0)
-            logger.info('[%s] ✓ FALLBACK round %d OK: finish_reason=%s model=%s '
-                        '(fallback from %s) content=%dchars tool_calls=%d '
-                        'M-TraceId=%s elapsed=%.1fs',
-                        tid, round_num + 1, last_finish_reason, _FALLBACK_MODEL,
-                        original_model, _fb_content_len, _fb_tool_calls,
-                        _fb_trace, _fb_elapsed / 1000)
+            _log_stream_attempt_outcome(
+                task,
+                tid=tid,
+                round_num=round_num + 1,
+                model=_FALLBACK_MODEL,
+                stream_result=stream_result,
+                label='FALLBACK',
+                fallback_from=original_model,
+            )
 
             return {
                 'assistant_msg': assistant_msg,
                 'finish_reason': last_finish_reason,
                 'usage': usage,
+                'stream_result': stream_result,
                 'model': _FALLBACK_MODEL,
                 'preset': 'medium',
                 'thinking_enabled': True,
@@ -758,11 +1031,41 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             }
 
         except Exception as e2:
-            logger.error('[%s] Opus fallback also failed: %s', tid, e2, exc_info=True)
-            # ★ Pool-wide last resort (owner directive 2026-08-03) — the
+            if isinstance(e2, AbortedError):
+                raise
+            logger.error('[%s] Opus fallback also failed: %s', tid, e2,
+                         exc_info=True)
+            # A fallback request has the same local recovery rights as the
+            # primary. In particular, cgroup pressure must not trigger a
+            # pool-wide replay of the same payload. If compaction reveals a
+            # different upstream error, continue with ordinary rescue policy.
+            while isinstance(e2, (PromptTooLongError, MemoryPressureError)):
+                _prior_fallback_error = e2
+                _recovered, e2, _retry_body = _attempt_request_payload_recovery(
+                    task, fallback_body, _FALLBACK_MODEL, round_num,
+                    tool_list, messages, 'medium', True,
+                    accumulated_usage, api_rounds, on_tool_call_ready, e2)
+                if _retry_body is not None:
+                    fallback_body = _retry_body
+                if _recovered is not None:
+                    return _recovered
+                if isinstance(e2, AbortedError):
+                    raise e2
+                if e2 is _prior_fallback_error:
+                    break
+            if isinstance(e2, MemoryPressureError):
+                _clear_failed_fallback_stamp(task)
+                return _finish_local_memory_pressure(
+                    task, e2, _FALLBACK_MODEL, 'medium', True, round_num)
+
+            # Pool-wide last resort (owner directive 2026-08-03) — the
             #   configured fallback dying must not kill the turn while the
-            #   pool still has healthy (key, model) slots.
-            if not _fb_disabled_by_request:
+            #   pool still has healthy (key, model) slots. EXCEPTION (owner
+            #   directive 2026-08-18, strict mode): a GATEWAY/outage class
+            #   failure is waitable, not proof any model is dead — the
+            #   rescue's arbitrary-pool-model pick is the silent switch the
+            #   user forbade. Fall through to the honest error envelope.
+            if not _fb_disabled_by_request and not _is_gateway_error(e2):
                 _rescue = _attempt_pool_rescue(
                     task, fallback_body, round_num, max_tokens, tool_list,
                     accumulated_usage, api_rounds,
@@ -777,9 +1080,7 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             # decision-time stamp. done/persist read these fields to claim a
             # fallback happened; claiming one that failed is a lie. (A
             # successful pool-rescue above re-stamps with its own values.)
-            for _fk in ('_fallback_model', '_fallback_from',
-                        '_fallback_reason', '_fallback_kind'):
-                task.pop(_fk, None)
+            _clear_failed_fallback_stamp(task)
             if tool_call_happened:
                 _user_err = format_llm_error_for_user(
                     e2, model=_FALLBACK_MODEL,

@@ -1,7 +1,7 @@
-"""lib/browser/_resolve.py — Server-side intelligence for the v2 tool surface.
+"""Server-side target resolution for the current browser tool surface.
 
 Everything here is work the MODEL used to do by hand, moved into code
-(epic pt_869e5648403e4745 — the "handle as much as we can through code"
+( — the "handle as much as we can through code"
 half of the v2 surface):
 
 1. **Working-tab memory** — the last tab a tool acted on is remembered, so
@@ -25,15 +25,13 @@ half of the v2 surface):
    "nothing happened". Entirely server-side: works with every extension
    version, no extension update required.
 
-All functions take an optional ``send`` callable (the bridge command
-dispatcher) so callers keep their own monkeypatch contract — handlers pass
-their facade proxy, advanced.py passes its module-level name, and tests
-inject fakes directly. The default is lib.browser.queue.send_browser_command.
+Every stateful function requires an explicit ``(owner_user_id, client_id)``
+route key and every bridge operation requires an injected sender. Browser
+state can therefore never cross users or devices through a module global.
 """
 
 import threading
 
-from lib.browser.display import get_tab_title, get_tab_url, update_tab_title
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -44,20 +42,27 @@ __all__ = [
 ]
 
 
-def _default_send():
-    from lib.browser.queue import send_browser_command
-    return send_browser_command
-
-
 # ══════════════════════════════════════════════════════════
 #  1. Working-tab memory
 # ══════════════════════════════════════════════════════════
 
 _work_tab_lock = threading.Lock()
-_work_tab = {'id': None}
+_work_tabs: dict[tuple[str, str], int] = {}
 
 
-def remember_work_tab(tab_id):
+def _normalize_route_key(route_key) -> tuple[str, str]:
+    if not isinstance(route_key, tuple) or len(route_key) != 2:
+        raise ValueError('browser route_key must be (owner_user_id, client_id)')
+    owner_user_id = str(route_key[0] or '').strip()
+    client_id = str(route_key[1] or '').strip()
+    if not owner_user_id.isdigit() or int(owner_user_id) < 1:
+        raise ValueError('owner_user_id must be a positive integer')
+    if not client_id:
+        raise ValueError('client_id is required')
+    return owner_user_id, client_id
+
+
+def remember_work_tab(route_key, tab_id):
     """Record the tab a tool just acted on (or created)."""
     if tab_id is None:
         return
@@ -66,11 +71,12 @@ def remember_work_tab(tab_id):
     except (TypeError, ValueError):
         logger.debug('Non-numeric work tab id ignored: %s', tab_id)
         return
+    route_key = _normalize_route_key(route_key)
     with _work_tab_lock:
-        _work_tab['id'] = tab_id
+        _work_tabs[route_key] = tab_id
 
 
-def forget_work_tab(tab_id):
+def forget_work_tab(route_key, tab_id):
     """Drop the remembered tab if it is the one being closed."""
     try:
         tab_id = int(tab_id)
@@ -78,22 +84,23 @@ def forget_work_tab(tab_id):
         logger.debug('Non-numeric work tab id ignored on forget: %s (%s)',
                      tab_id, e)
         return
+    route_key = _normalize_route_key(route_key)
     with _work_tab_lock:
-        if _work_tab['id'] == tab_id:
-            _work_tab['id'] = None
+        if _work_tabs.get(route_key) == tab_id:
+            _work_tabs.pop(route_key, None)
 
 
-def current_work_tab():
+def current_work_tab(route_key):
     """Return the remembered working-tab id (int) or None — no bridge call.
 
-    Display-layer consumers (lib/browser/display.py) use this to NAME the
-    tab a ``tab_id``-omitted call will land on.
+    The route key prevents one owner's tab choice from influencing another.
     """
+    route_key = _normalize_route_key(route_key)
     with _work_tab_lock:
-        return _work_tab['id']
+        return _work_tabs.get(route_key)
 
 
-def resolve_work_tab(fn_args, send=None):
+def resolve_work_tab(fn_args, *, route_key, send):
     """Resolve which tab this call should act on. Returns int tab id or None.
 
     Priority: explicit ``tabId`` arg (which also becomes the new working
@@ -108,13 +115,13 @@ def resolve_work_tab(fn_args, send=None):
             logger.debug('Non-numeric explicit tabId ignored: %s (%s)',
                          explicit, e)
             return None
-        remember_work_tab(tab_id)
+        remember_work_tab(route_key, tab_id)
         return tab_id
+    route_key = _normalize_route_key(route_key)
     with _work_tab_lock:
-        current = _work_tab['id']
+        current = _work_tabs.get(route_key)
     if current is not None:
         return current
-    send = send or _default_send()
     try:
         result, error = send('list_tabs', timeout=10)
     except Exception as e:
@@ -124,10 +131,10 @@ def resolve_work_tab(fn_args, send=None):
         return None
     for t in result:
         if t.get('active') and t.get('id') is not None:
-            remember_work_tab(t['id'])
+            remember_work_tab(route_key, t['id'])
             return int(t['id'])
     if result[0].get('id') is not None:
-        remember_work_tab(result[0]['id'])
+        remember_work_tab(route_key, result[0]['id'])
         return int(result[0]['id'])
     return None
 
@@ -183,7 +190,7 @@ def _score_element(el, query, kinds):
     return best + boost if best else 0
 
 
-def resolve_element(tab_id, query, kinds='clickable', send=None):
+def resolve_element(tab_id, query, kinds='clickable', *, send):
     """Resolve a natural-language target to a concrete element.
 
     Returns ``(element, error_note, candidates)``: exactly one of element /
@@ -191,7 +198,6 @@ def resolve_element(tab_id, query, kinds='clickable', send=None):
     closest matches, meant to be embedded in the error so the model's next
     call hits (self-healing failure).
     """
-    send = send or _default_send()
     try:
         result, error = send('get_interactive_elements', {
             'tabId': int(tab_id), 'viewport': False, 'maxElements': 300,
@@ -228,7 +234,7 @@ def _candidate_line(el):
 #  3. Auto-wait (Playwright-style, advisory)
 # ══════════════════════════════════════════════════════════
 
-def auto_wait(tab_id, selector, send=None, timeout_ms=3000):
+def auto_wait(tab_id, selector, *, send, timeout_ms=3000):
     """Wait briefly for the selector to exist before acting on it.
 
     Advisory only: returns '' when the element is present, otherwise a short
@@ -236,7 +242,6 @@ def auto_wait(tab_id, selector, send=None, timeout_ms=3000):
     (the extension's click scrolls/retries on its own, and a wait false
     negative must not break a click that would have worked).
     """
-    send = send or _default_send()
     try:
         result, error = send('wait_for_element', {
             'tabId': int(tab_id), 'selector': selector,
@@ -256,7 +261,7 @@ def auto_wait(tab_id, selector, send=None, timeout_ms=3000):
 #  4. Action receipts — post-action page-state delta
 # ══════════════════════════════════════════════════════════
 
-def tab_snapshot(tab_id, send=None):
+def tab_snapshot(tab_id, *, send):
     """Pre-action snapshot: ``(title, url, tab-id set)``.
 
     The id set is what lets :func:`action_receipt` spot a tab the ACTION
@@ -266,8 +271,7 @@ def tab_snapshot(tab_id, send=None):
     cheap list_tabs; on any failure the id set is None and the receipt
     degrades to the pre-v3 title/URL-only comparison.
     """
-    title, url = get_tab_title(tab_id), get_tab_url(tab_id)
-    send = send or _default_send()
+    title, url = None, None
     try:
         result, error = send('list_tabs', timeout=8)
     except Exception as e:
@@ -310,7 +314,7 @@ def _pick_new_tabs(before_ids, tabs):
     return chosen, len(new) - 1
 
 
-def action_receipt(tab_id, before, send=None):
+def action_receipt(tab_id, before, *, route_key, send):
     """One-line post-action page-state delta.
 
     Compares the tab's title/URL after the action against the ``before``
@@ -320,11 +324,10 @@ def action_receipt(tab_id, before, send=None):
     read. Costs one cheap list_tabs bridge call; degrades to '' on any
     failure.
 
-    New-tab path (v3): when the tab-id set grew, the action opened a tab.
+    When the tab-id set grew, the action opened a tab.
     The new tab becomes the working tab (that is where a human's attention
     goes — Chrome focuses it too) and the receipt says so explicitly, so
-    the next tab_id-less call lands on the NEW page. ``before`` may be a
-    legacy 2-tuple (title, url) — then only the title/URL comparison runs.
+    the next tab_id-less call lands on the new page for this owner/device.
 
     Known limit: an ASYNC window.open — one fired from an XHR callback
     hundreds of ms after the click returns — can slip the diff window (the
@@ -332,7 +335,9 @@ def action_receipt(tab_id, before, send=None):
     target=_blank case that motivated v3 is covered; a delayed open is
     still discoverable via browser_list_tabs / the next action's receipt.
     """
-    send = send or _default_send()
+    route_key = _normalize_route_key(route_key)
+    if not isinstance(before, tuple) or len(before) != 3:
+        raise ValueError('browser action snapshot must be a 3-tuple')
     try:
         result, error = send('list_tabs', timeout=8)
     except Exception as e:
@@ -340,8 +345,7 @@ def action_receipt(tab_id, before, send=None):
         return ''
     if error or not isinstance(result, list):
         return ''
-    before_title, before_url = before[0], before[1]
-    before_ids = before[2] if len(before) > 2 else None
+    before_title, before_url, before_ids = before
 
     parts = []
     if before_ids is not None:
@@ -363,8 +367,7 @@ def action_receipt(tab_id, before, send=None):
         if chosen is not None:
             new_id = chosen.get('id')
             new_title, new_url = chosen.get('title', ''), chosen.get('url', '')
-            update_tab_title(new_id, new_title, url=new_url)
-            remember_work_tab(new_id)
+            remember_work_tab(route_key, new_id)
             where = f' — {new_title} ({new_url})' if (new_title or new_url) else ''
             more = f' (+{extras} more new tabs)' if extras else ''
             parts.append(
@@ -380,7 +383,6 @@ def action_receipt(tab_id, before, send=None):
         parts.append('→ note: the tab no longer exists (closed or crashed)')
         return '\n' + '\n'.join(parts)
     title, url = current.get('title', ''), current.get('url', '')
-    update_tab_title(tab_id, title, url=url)
     if before_url and url and url != before_url:
         parts.append(f'→ page navigated: {title} ({url})')
     elif before_url and url == before_url:

@@ -20,6 +20,25 @@ from ._logs import _safe_tail_lines
 logger = get_logger(__name__)
 
 
+def _entry_matches_owner(
+    entry: dict,
+    *,
+    owner_user_id: int,
+    allow_unowned: bool,
+) -> bool:
+    """Keep explicitly matching audit rows; unowned rows are personal-only."""
+    raw_owner = entry.get('owner_user_id', entry.get('user_id'))
+    principal = entry.get('principal')
+    if raw_owner in (None, '') and isinstance(principal, dict):
+        raw_owner = principal.get('owner_user_id')
+    if raw_owner in (None, ''):
+        return allow_unowned
+    try:
+        return int(raw_owner) == owner_user_id
+    except (TypeError, ValueError):
+        return False
+
+
 def _parse_audit_line(line: str) -> dict | None:
     try:
         return json.loads(line)
@@ -41,13 +60,23 @@ def _audit_ts_aware(entry: dict) -> datetime | None:
         return None
 
 
-def _collect_audit_events(cutoff_utc: datetime) -> tuple[dict[str, int], list[dict]]:
+def _collect_audit_events(
+    cutoff_utc: datetime,
+    *,
+    owner_user_id: int,
+    allow_unowned: bool,
+) -> tuple[dict[str, int], list[dict]]:
     """Return (event_counts, optimizer-related rows)."""
     counts: Counter = Counter()
     optimizer_events: list[dict] = []
     for line in _safe_tail_lines(_facade.AUDIT_LOG_FILE):
         entry = _parse_audit_line(line)
         if not entry:
+            continue
+        if not _entry_matches_owner(
+                entry,
+                owner_user_id=owner_user_id,
+                allow_unowned=allow_unowned):
             continue
         ts = _audit_ts_aware(entry)
         if ts is None or ts < cutoff_utc:
@@ -66,7 +95,12 @@ def _collect_audit_events(cutoff_utc: datetime) -> tuple[dict[str, int], list[di
     return dict(counts), optimizer_events
 
 
-def _collect_audit_secondary(cutoff_utc: datetime) -> dict:
+def _collect_audit_secondary(
+    cutoff_utc: datetime,
+    *,
+    owner_user_id: int,
+    allow_unowned: bool,
+) -> dict:
     """Scan audit.log for structured cost / routing events.
 
     Returns ``model_switch_events`` (most recent 10).
@@ -75,6 +109,11 @@ def _collect_audit_secondary(cutoff_utc: datetime) -> dict:
     for line in _safe_tail_lines(_facade.AUDIT_LOG_FILE):
         entry = _parse_audit_line(line)
         if not entry:
+            continue
+        if not _entry_matches_owner(
+                entry,
+                owner_user_id=owner_user_id,
+                allow_unowned=allow_unowned):
             continue
         ts = _audit_ts_aware(entry)
         if ts is None or ts < cutoff_utc:

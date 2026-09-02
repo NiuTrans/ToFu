@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Incident anchor: born in commit ab99ef8b — checkpoint: accumulated work since last commit
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Prompt-injection hardening tests for Paper Review / Report Mode.
 
 A submitted PDF is UNTRUSTED input. Attackers embed directives aimed at the LLM
@@ -140,8 +138,8 @@ def _capture_prompt_for(lang_key):
     """Drive /report/start with the attack blob under `lang_key` and capture the
     system + user messages the engine received. Returns (system, user)."""
     import asyncio
-    import lib.paper.report_engine as re_mod
-    from lib.paper import _report_runtime
+    import lib.paper.report_engine.worker as re_mod
+    from lib.paper.report_runtime import _report_runtime
 
     app = _load_app()
     orig = re_mod.dispatch_stream
@@ -283,7 +281,7 @@ def test_source_level_negative_control_sanitize_noop_breaks_defang():
     """
     import importlib
     import lib.paper.injection_guard as guard
-    from lib.paper import injection_guard as _same  # same module object
+    import lib.paper.injection_guard as _same
 
     orig_fn = guard.sanitize_paper_text
 
@@ -291,12 +289,9 @@ def test_source_level_negative_control_sanitize_noop_breaks_defang():
         # The vulnerable behaviour: splice the text through untouched.
         return text, []
 
-    # Patch at BOTH the defining module and the package facade binding, since
-    # routes/paper.py imported the name from the facade.
-    import lib.paper as paper_pkg
-    import routes.paper as routes_paper
+    # Patch both the defining module and the route's explicit consumer binding.
+    import routes.paper_pkg._report as routes_paper
     guard.sanitize_paper_text = _noop_sanitize
-    paper_pkg.sanitize_paper_text = _noop_sanitize
     routes_paper.sanitize_paper_text = _noop_sanitize
     try:
         _system, user = _capture_prompt_for('review:neurips:en')
@@ -307,7 +302,6 @@ def test_source_level_negative_control_sanitize_noop_breaks_defang():
         assert 'IGNORE ALL PREVIOUS INSTRUCTIONS' in user
     finally:
         guard.sanitize_paper_text = orig_fn
-        paper_pkg.sanitize_paper_text = orig_fn
         routes_paper.sanitize_paper_text = orig_fn
 
     # Restored: the marker returns.

@@ -48,7 +48,6 @@ class CacheState:
         'last_cache_write_tokens',
         'last_update_time', 'call_count',
         'compaction_pending',
-        'history_rewrite_pending',
         # v2: detailed diagnostics
         'per_tool_hashes',
         'prefix_content_hash',
@@ -76,11 +75,6 @@ class CacheState:
         self.last_update_time: float = 0.0
         self.call_count: int = 0
         self.compaction_pending: bool = False
-        # Set by notify_history_rewrite() when a backend reconcile /
-        # committed-dict projection edited committed messages. Unlike
-        # compaction_pending it feeds NO break gate and does NOT skip the wire
-        # diff — it only NAMES the cause (see detect_cache_break).
-        self.history_rewrite_pending: bool = False
         # Phase-C L2 ROI: the 'saved' half of one force-summary event, stashed
         # at compaction time and completed with the FOLLOWING round's re-billed
         # cache_write in detect_cache_break. None when no L2 event is pending.
@@ -179,14 +173,14 @@ COLD_STREAK_GUARD_OPEN = 3
 COLD_ROUND_TOKEN_FLOOR = 1000
 
 
-_cache_states: dict[tuple, CacheState] = {}
-"""Cache state keyed by ``(conv_id, thread_id)`` — see ``_state_key``."""
+_cache_states: dict[tuple[int, str, int], CacheState] = {}
+"""Cache state keyed by ``(user_id, conv_id, thread_id)``."""
 
 _cache_lock = threading.Lock()
 
 
-def _state_key(conv_id: str) -> tuple:
-    """Key ``_cache_states`` per ``(conv_id, thread)``.
+def _state_key(conv_id: str, *, user_id: int) -> tuple[int, str, int]:
+    """Key ``_cache_states`` per owner, conversation, and worker thread.
 
     N concurrent agent loops running under ONE conversation (swarm / flow /
     orchestration fan-out) previously shared a single ``conv_id``-keyed
@@ -200,30 +194,41 @@ def _state_key(conv_id: str) -> tuple:
     (``detect_cache_break`` post-round, ``notify_compaction`` /
     ``get_cache_prefix_count`` in the pipeline) resolve to the same entry.
     """
-    return (conv_id, threading.get_ident())
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 1:
+        raise ValueError('user_id must be a positive integer')
+    return (user_id, conv_id, threading.get_ident())
 
 
-def get_warm_cache_read(conv_id: str) -> int:
+def get_warm_cache_read(conv_id: str, *, user_id: int) -> int:
     """Largest recent cache-read prefix observed for this conversation.
 
     The proactive L2 gate runs before the next provider call and may execute on
     a different worker thread from the turn that warmed the cache.  Inspect all
     live per-thread states and the durable previous-turn baseline, then return
-    the larger value.  Zero means there is no evidence of a warm prefix, so an
-    automatic rewrite has no known cache entry to destroy.
+    the larger value.  The current task's existing three-round verified-cold
+    guard is stronger, newer evidence than either fallback and returns zero.
+    One or two cold rounds still preserve the warm baseline.  Zero means there
+    is no evidence of a warm prefix, so an automatic rewrite has no known cache
+    entry to destroy.
     """
     if not conv_id:
         return 0
     with _cache_lock:
+        current = _cache_states.get(_state_key(conv_id, user_id=user_id))
+        if (current is not None and current.call_count > 0
+                and current.cold_streak >= COLD_STREAK_GUARD_OPEN):
+            return 0
         live = max(
-            (int(st.last_cache_read_tokens) for (cid, _tid), st
-             in _cache_states.items() if cid == conv_id and st.call_count > 0),
+            (int(st.last_cache_read_tokens) for (uid, cid, _tid), st
+             in _cache_states.items()
+             if uid == user_id and cid == conv_id and st.call_count > 0),
             default=0,
         )
     try:
         from lib.tasks_pkg.cache_tracking._persist import (
             read_last_turn_cache_read)
-        durable = int(read_last_turn_cache_read(conv_id) or 0)
+        durable = int(read_last_turn_cache_read(
+            conv_id, user_id=user_id) or 0)
     except Exception as e:
         logger.debug('[CacheTrack] durable warm-cache read unavailable '
                      'conv=%s: %s', conv_id[:8], e)
@@ -231,7 +236,7 @@ def get_warm_cache_read(conv_id: str) -> int:
     return max(live, durable)
 
 
-def get_prev_turn_cache_read(conv_id: str) -> int:
+def get_prev_turn_cache_read(conv_id: str, *, user_id: int) -> int:
     """Best CROSS-THREAD ``cache_read`` baseline for a turn's round-1 (0 if none).
 
     ``_cache_states`` is keyed per ``(conv_id, thread)``. A new user turn runs
@@ -268,8 +273,9 @@ def get_prev_turn_cache_read(conv_id: str) -> int:
     _self_tid = threading.get_ident()
     best = None
     with _cache_lock:
-        for (cid, _tid), st in _cache_states.items():
-            if cid != conv_id or _tid == _self_tid or st.call_count <= 0:
+        for (uid, cid, _tid), st in _cache_states.items():
+            if (uid != user_id or cid != conv_id or _tid == _self_tid
+                    or st.call_count <= 0):
                 continue
             if best is None or st.last_update_time > best.last_update_time:
                 best = st
@@ -289,14 +295,14 @@ def get_prev_turn_cache_read(conv_id: str) -> int:
     try:
         from lib.tasks_pkg.cache_tracking._persist import (
             read_last_turn_cache_read)
-        return read_last_turn_cache_read(conv_id)
+        return read_last_turn_cache_read(conv_id, user_id=user_id)
     except Exception as e:
         logger.debug('[CacheTrack] durable prev-turn read fallback '
                      'unavailable conv=%s: %s', conv_id[:8], e)
         return 0
 
 
-def cleanup_cache_state(conv_id: str) -> None:
+def cleanup_cache_state(conv_id: str, *, user_id: int) -> None:
     """Remove cache state for a conversation that's no longer active.
 
     Call when a conversation is explicitly deleted or after extended
@@ -308,7 +314,10 @@ def cleanup_cache_state(conv_id: str) -> None:
         # State is keyed per (conv_id, thread) — a conversation may have
         # several entries when its agent loops ran on different worker
         # threads (swarm / flow fan-out). Drop them all.
-        _keys = [k for k in _cache_states if k[0] == conv_id]
+        _keys = [
+            key for key in _cache_states
+            if key[0] == user_id and key[1] == conv_id
+        ]
         removed = None
         for k in _keys:
             removed = _cache_states.pop(k, None)
@@ -318,6 +327,7 @@ def cleanup_cache_state(conv_id: str) -> None:
             # dropped, biasing the retune dataset. Marked 'no_following_round'.
             if removed is not None and removed.pending_l2_roi is not None:
                 _emit_l2_roi(conv_id, removed.pending_l2_roi,
+                             user_id=user_id,
                              cache_write_rebilled=None)
                 removed.pending_l2_roi = None
         if removed:
@@ -355,7 +365,8 @@ def cleanup_stale_cache_states(max_age_s: float = 3600) -> int:
             # whose last cache-relevant act was an L2 fire must still emit its
             # ROI (re-bill unobserved), not drop it.
             if _stale is not None and _stale.pending_l2_roi is not None:
-                _emit_l2_roi(key[0], _stale.pending_l2_roi,
+                _emit_l2_roi(key[1], _stale.pending_l2_roi,
+                             user_id=key[0],
                              cache_write_rebilled=None)
                 _stale.pending_l2_roi = None
             removed += 1

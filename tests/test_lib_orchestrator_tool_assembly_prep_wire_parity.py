@@ -1,8 +1,5 @@
-# Incident anchor: born in commit 53f33659 — refactor(orchestrator): pt_03f4cdf1 slice 29 — extract Section 2 tool...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 29 — extract Section 2
-(tool assembly + pending-swarm force-enable + tool-schema stash) from
-_run.py's pre-stream prep into
+(tool assembly + tool-schema stash) from _run.py's pre-stream prep into
 lib.tasks_pkg.orchestrator._tool_assembly_prep.assemble_round_tools().
 
 The block runs once per run_task invocation, after config resolution
@@ -10,14 +7,12 @@ The block runs once per run_task invocation, after config resolution
 
     1. ``_assemble_tool_list`` — builds the per-turn tool schema from
        cfg + the mcfg feature flags,
-    2. Pending-swarm force-enable guard (the get_agent_result /
-       await_agents "非真实工具" rejection-desync root fix): if
-       swarm_enabled is False but a live-or-pending swarm exists for
-       this conversation, the follow-up tools are force-added so the injected
-       <swarm-update> can be acted on. LOGIC BRANCH — pinned by behavioural tests below, not
-       just source greps (owner directive 2026-07-31).
-    3. ``task['_tool_schema'] = tool_list`` stash so the compaction
+    2. ``task['_tool_schema'] = tool_list`` stash so the compaction
        token-gate accounts for the tool-schema cost.
+
+(The pending-swarm force-enable guard was RETIRED 2026-08-23: swarm tools
+are now default tools — always assembled — so a turn can never lack the
+follow-up surface the guard used to force in.)
 
 Signature shape: all feature flags arrive via the ``mcfg`` dict
 (produced by _resolve_model_config in Section 1) — no 12-kwarg
@@ -100,13 +95,6 @@ def test_run_py_no_longer_calls_assemble_tool_list_inline():
         'not _run.py')
 
 
-def test_run_py_no_longer_carries_swarm_guard_inline():
-    src = RUN_PY.read_text()
-    assert 'has_live_or_pending_swarm' not in src, (
-        'the pending-swarm force-enable guard must live in '
-        '_tool_assembly_prep.py, not _run.py')
-
-
 def test_run_py_no_longer_stashes_schema_inline():
     src = RUN_PY.read_text()
     assert "task['_tool_schema'] = tool_list" not in src, (
@@ -126,15 +114,6 @@ def test_leaf_calls_real_assembler():
         'lib.tasks_pkg.model_config')
 
 
-def test_leaf_carries_swarm_force_enable_guard():
-    src = LEAF_PY.read_text()
-    assert 'has_live_or_pending_swarm' in src, (
-        'leaf must carry the pending-swarm probe')
-    assert 'resolve_turn_swarm_tools' in src, (
-        'leaf must carry resolve_turn_swarm_tools')
-    assert 'max_tool_rounds' not in src
-
-
 def test_leaf_stashes_tool_schema_on_task():
     src = LEAF_PY.read_text()
     assert "task['_tool_schema'] = tool_list" in src, (
@@ -151,80 +130,3 @@ def test_leaf_reads_flags_from_mcfg_with_same_defaults():
         'leaf must read human_guidance_enabled via .get(..., False)')
     assert "mcfg.get('scheduler_enabled', False)" in src, (
         'leaf must read scheduler_enabled via .get(..., False)')
-    assert "mcfg['swarm_enabled']" in src, (
-        'leaf must read swarm_enabled via subscript (guaranteed key)')
-
-
-# ---------------------------------------------------------------------------
-# 6. BEHAVIOURAL: pending-swarm force-enable branch (owner directive —
-#    logic-bearing leaves must ship monkeypatch-driven tests, not just
-#    source greps)
-# ---------------------------------------------------------------------------
-def _mcfg(**overrides):
-    base = {
-        'project_path': '/tmp/proj', 'project_enabled': False,
-        'search_mode': 'off', 'search_enabled': False,
-        'fetch_enabled': False, 'code_exec_enabled': False,
-        'browser_enabled': False, 'desktop_enabled': False,
-        'swarm_enabled': False, 'image_gen_enabled': False,
-        'human_guidance_enabled': False, 'scheduler_enabled': False,
-    }
-    base.update(overrides)
-    return base
-
-
-def test_behaviour_pending_swarm_forces_tools(monkeypatch):
-    """swarm_enabled=False + live-or-pending swarm → the follow-up
-    tools land in the schema and has_real_tools flips True."""
-    import lib.tasks_pkg.orchestrator._tool_assembly_prep as leaf
-    import lib.swarm.integration as integ
-
-    monkeypatch.setattr(
-        leaf, '_assemble_tool_list',
-        lambda *a, **k: ([], False))
-    monkeypatch.setattr(
-        integ, 'has_live_or_pending_swarm', lambda task: True)
-
-    task = {'id': 'deadbeef' * 5, 'convId': 'convX', 'messages': []}
-    tool_list, has_real_tools = leaf.assemble_round_tools(
-        {}, task, _mcfg())
-
-    names = {
-        (t.get('function') or {}).get('name')
-        for t in (tool_list or [])
-        if isinstance(t, dict)
-    }
-    assert {'spawn_agents', 'await_agents', 'get_agent_result'} <= names, (
-        f'pending-swarm turn must expose the swarm follow-up tools; '
-        f'got {sorted(n for n in names if n)}')
-    assert has_real_tools is True, (
-        'forced swarm tools must flip has_real_tools to True')
-    assert task['_tool_schema'] is tool_list, (
-        "task['_tool_schema'] must be stashed to the returned list")
-
-
-def test_behaviour_no_pending_swarm_leaves_schema_alone(monkeypatch):
-    """swarm_enabled=False + NO pending swarm → the assembler's output
-    passes through untouched (no forced tools)."""
-    import lib.tasks_pkg.orchestrator._tool_assembly_prep as leaf
-    import lib.swarm.integration as integ
-
-    monkeypatch.setattr(
-        leaf, '_assemble_tool_list',
-        lambda *a, **k: ([], False))
-    monkeypatch.setattr(
-        integ, 'has_live_or_pending_swarm', lambda task: False)
-
-    task = {'id': 'deadbeef' * 5, 'convId': 'convX', 'messages': []}
-    tool_list, has_real_tools = leaf.assemble_round_tools(
-        {}, task, _mcfg())
-
-    names = {
-        (t.get('function') or {}).get('name')
-        for t in (tool_list or [])
-        if isinstance(t, dict)
-    }
-    assert not ({'spawn_agents', 'await_agents', 'get_agent_result'} & names), (
-        'no pending swarm → swarm tools must NOT be forced in')
-    assert has_real_tools is False
-    assert task['_tool_schema'] == (tool_list or [])

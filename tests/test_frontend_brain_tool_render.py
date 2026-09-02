@@ -463,6 +463,30 @@ check('digest_open', _isOpenD(dHtml));
 check('digest_count_in_meta', dHtml.includes('ptool-convdigest-msgcount') && dHtml.includes('1 messages'));
 check('digest_why_caption', dHtml.includes('ptool-convmeta-why') && dHtml.includes('full transcript'));
 check('digest_head_friendly', dHtml.includes('Opened a past conversation'));
+// The referenced conversation's TITLE leads the digest meta row (its id rides
+// the tooltip) — previously the title appeared NOWHERE on the card.
+check('digest_title_in_meta', dHtml.includes('ptool-convdigest-title') && dHtml.includes('Prefix cache bug'));
+
+// ── EMPTY conversation → the designed empty-state card (the reported
+//    screenshot: an existing-but-empty conversation used to get NO digest
+//    from the backend, so the raw ═══ header + JSON skeleton fell through to
+//    the Markdown dump as two giant bars + a JSON blob). The backend now
+//    attaches a digest with messages: [] and the card renders its empty
+//    state. ──
+const digestEmpty = {
+  status: 'done', toolName: 'get_conversation', query: 'get_conversation: empty1',
+  toolContent: 'Conversation "Empty conv" [empty1] exists but has no messages.',
+  toolRounds: [],
+  results: [{ source: 'Conversations', convDigest: {
+    convId: 'empty1', title: 'Empty conv', preset: '', msgCount: 0,
+    truncated: false, messages: [] } }],
+};
+const eHtml = _renderUnifiedToolLine(digestEmpty, false);
+check('emptydigest_card_rendered', eHtml.includes('ptool-convdigest'));
+check('emptydigest_empty_state', eHtml.includes('ptool-convdigest-empty') && eHtml.includes('no messages'));
+check('emptydigest_title', eHtml.includes('ptool-convdigest-title') && eHtml.includes('Empty conv'));
+check('emptydigest_count', eHtml.includes('ptool-convdigest-msgcount') && eHtml.includes('0 messages'));
+check('emptydigest_not_md_dump', !eHtml.includes('MD-DUMP:'));
 
 // get_conversation WITHOUT structured meta (e.g. raw-mode dump) → Markdown fallback
 const digestRaw = {
@@ -560,6 +584,10 @@ def test_structured_brain_tool_renderers():
         'PASS digest_is_conv_meta', 'PASS digest_open',
         'PASS digest_count_in_meta', 'PASS digest_why_caption',
         'PASS digest_head_friendly', 'PASS digest_raw_falls_back',
+        'PASS digest_title_in_meta',
+        'PASS emptydigest_card_rendered', 'PASS emptydigest_empty_state',
+        'PASS emptydigest_title', 'PASS emptydigest_count',
+        'PASS emptydigest_not_md_dump',
     ):
         assert must in output, output
 

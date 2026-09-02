@@ -163,7 +163,7 @@ class TestPerRequestIsolation:
 
 class TestPartitionUnion:
     def test_task_partitions_union_env_flags(self):
-        from lib.tasks_pkg.tool_dispatch import (
+        from lib.tasks_pkg.tool_dispatch._flags import (
             _IDEMPOTENT_TOOLS, _WRITE_TOOLS, _task_partitions,
         )
         os.environ['TOFU_BYO_ALLOW_HOSTS'] = 'x.example.com'
@@ -196,19 +196,44 @@ class TestClientHandoff:
     def test_request_then_resolve_unblocks(self):
         call_id = 'ctool_test123'
         result = {}
+        task = {'id': 'task-owner-1', '_userId': 1}
 
         def _wait():
-            result['val'] = request_client_tool_result(call_id, timeout=5)
+            result['val'] = request_client_tool_result(
+                call_id, task=task, timeout=5)
 
         t = threading.Thread(target=_wait, daemon=True)
         t.start()
         time.sleep(0.2)
-        assert resolve_client_tool_result(call_id, 'the answer', is_error=False)
+        assert resolve_client_tool_result(
+            call_id, 'the answer', task_id='task-owner-1', user_id=1,
+            is_error=False)
         t.join(timeout=3)
         assert result['val'] == ('the answer', False)
 
     def test_resolve_unknown_returns_false(self):
-        assert resolve_client_tool_result('ctool_nope', 'x') is False
+        assert resolve_client_tool_result(
+            'ctool_nope', 'x', task_id='task-owner-1', user_id=1) is False
+
+    def test_foreign_task_cannot_resolve_handoff(self):
+        call_id = 'ctool_owner_fence'
+        task = {'id': 'task-owner-1', '_userId': 1}
+        result = {}
+
+        waiter = threading.Thread(
+            target=lambda: result.setdefault(
+                'val', request_client_tool_result(
+                    call_id, task=task, timeout=5)),
+            daemon=True,
+        )
+        waiter.start()
+        time.sleep(0.2)
+        assert resolve_client_tool_result(
+            call_id, 'stolen', task_id='task-owner-2', user_id=2) is False
+        assert resolve_client_tool_result(
+            call_id, 'owned', task_id='task-owner-1', user_id=1) is True
+        waiter.join(timeout=3)
+        assert result['val'] == ('owned', False)
 
 
 # ── AST guard: request modules must not mutate the global registry ──

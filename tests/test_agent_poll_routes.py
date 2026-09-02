@@ -12,7 +12,10 @@ verify they're discoverable via stable v1 paths and that auth/scope
 gating works.
 """
 
+
 from __future__ import annotations
+
+pytest_plugins = ('tests._credential_sidecar',)
 
 import asyncio
 import os
@@ -63,11 +66,6 @@ class AgentPollRouteTest(unittest.TestCase):
         _install_shim()  # full Flask→Quart shim (idempotent; no revert)
         cls._tmp = tempfile.TemporaryDirectory()
         from lib import api_keys
-        cls._orig_path = api_keys._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(cls._tmp.name, 'api_keys.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        os.environ['TUNNEL_TOKEN'] = 'tt'
 
         from quart import Quart
         cls.app = Quart(__name__)
@@ -81,19 +79,16 @@ class AgentPollRouteTest(unittest.TestCase):
         cls.app.register_blueprint(api_v1_agents_bp)
 
         from lib.api_keys import create_key
-        _r1, cls.translate_token = create_key(
+        _r1, cls.translate_token = create_key(owner_user_id=1, 
             name='t-test', scopes=['agents:translate'])
-        _r2, cls.paper_token = create_key(
+        _r2, cls.paper_token = create_key(owner_user_id=1, 
             name='p-test', scopes=['agents:paper'])
-        _r3, cls.unscoped_token = create_key(
+        _r3, cls.unscoped_token = create_key(owner_user_id=1, 
             name='no-scope', scopes=['chat'])
 
     @classmethod
     def tearDownClass(cls):
         from lib import api_keys
-        api_keys._STORE_PATH = cls._orig_path
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
         cls._tmp.cleanup()
 
     def _hdr(self, token):
@@ -173,7 +168,7 @@ class AgentPollRouteTest(unittest.TestCase):
         # AsyncMock whose call returns a coroutine — which the sync façade
         # route would hand to Quart verbatim (TypeError). Force a sync
         # MagicMock so the delegate returns the dict the route serializes.
-        with patch('routes.paper.poll_report_task',
+        with patch('routes.paper_pkg._report.poll_report_task',
                     new_callable=MagicMock, return_value=sentinel):
             async def go():
                 return await self.app.test_client().get(
@@ -190,7 +185,7 @@ class AgentPollRouteTest(unittest.TestCase):
         sentinel = {'ok': True, 'status': 'done',
                     'events': [{'seq': 0, 'type': 'done'}],
                     'next_cursor': 1}
-        with patch('routes.paper.poll_translate_task',
+        with patch('routes.paper_pkg._qa_translate.poll_translate_task',
                     new_callable=MagicMock, return_value=sentinel):
             async def go():
                 return await self.app.test_client().get(

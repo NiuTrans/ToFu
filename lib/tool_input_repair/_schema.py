@@ -1,6 +1,6 @@
 """Tool-schema index and type introspection helpers for tool-arg repair.
 
-Walks ``lib.tools`` once at first use to build ``{tool_name: parameters}``
+Walks declared schema-owner modules once to build ``{tool_name: parameters}``
 and exposes the small pure accessors the repair passes anchor on
 (``_expected_types``, ``_required_keys``, ``_array_item_schema``). The
 ``RepairLog`` public type alias also lives here so every submodule can import
@@ -20,8 +20,35 @@ logger = get_logger(__name__)
 RepairLog = list[tuple[str, str]]  # [(json_path, pattern_name), ...]
 
 
+def _schema_owner_modules():
+    """Return the explicit built-in modules that own wire tool schemas."""
+    import lib.tools.browser as browser
+    import lib.tools.code_exec as code_exec
+    import lib.tools.conversation as conversation
+    import lib.tools.human_guidance as human_guidance
+    import lib.tools.image_edit as image_edit
+    import lib.tools.image_gen as image_gen
+    import lib.tools.motion_video as motion_video
+    import lib.tools.project as project
+    import lib.tools.search as search
+    import lib.tools.tool_result_artifacts as tool_result_artifacts
+
+    return (
+        browser,
+        code_exec,
+        conversation,
+        human_guidance,
+        image_edit,
+        image_gen,
+        motion_video,
+        project,
+        search,
+        tool_result_artifacts,
+    )
+
+
 def _build_schema_index() -> dict[str, dict[str, Any]]:
-    """Walk ``lib.tools`` and return ``{tool_name: parameters_schema}``.
+    """Walk declared schema owners and return the repair schema index.
 
     The map is built once at import time. New tools added later won't be
     seen until the process restarts; that matches how every other tool
@@ -32,15 +59,18 @@ def _build_schema_index() -> dict[str, dict[str, Any]]:
     """
     index: dict[str, dict[str, Any]] = {}
     try:
-        import lib.tools as tools_mod
         candidates: list[Any] = []
-        for attr in dir(tools_mod):
-            obj = getattr(tools_mod, attr, None)
-            if isinstance(obj, list):
-                candidates.extend(obj)
-            elif isinstance(obj, dict) and obj.get('type') == 'function':
-                candidates.append(obj)
-            elif callable(obj) and attr.startswith('build_'):
+        for owner_module in _schema_owner_modules():
+            for attr in dir(owner_module):
+                obj = getattr(owner_module, attr, None)
+                if isinstance(obj, list):
+                    candidates.extend(obj)
+                    continue
+                if isinstance(obj, dict) and obj.get('type') == 'function':
+                    candidates.append(obj)
+                    continue
+                if not (callable(obj) and attr.startswith('build_')):
+                    continue
                 # Zero-arg schema BUILDERS (e.g. build_search_tool): when a
                 # static module-level schema dict becomes runtime-built, the
                 # attr walk above goes blind and the repair for that tool
@@ -51,7 +81,10 @@ def _build_schema_index() -> dict[str, dict[str, Any]]:
                 try:
                     built = obj()
                 except Exception as e:
-                    logger.debug('[ToolRepair] builder %s() skipped: %s', attr, e)
+                    logger.debug(
+                        '[ToolRepair] builder %s.%s() skipped: %s',
+                        owner_module.__name__, attr, e,
+                    )
                     continue
                 if isinstance(built, list):
                     candidates.extend(built)

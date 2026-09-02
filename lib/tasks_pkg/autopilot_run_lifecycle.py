@@ -1,8 +1,8 @@
-"""Autopilot run close-out lifecycle — extracted from ``autopilot.py`` (pt_00459503 slice 3).
+"""Autopilot run close-out lifecycle — extracted from ``autopilot.py`` ( slice 3).
 
-**Extraction context** (board epic ``pt_00459503f23b4c0e``, slice 3):
+**Extraction context** (board epic ```, slice 3):
 carved out of ``lib/tasks_pkg/autopilot.py`` per
-``docs/AUTOPILOT_DECOMPOSITION_AUDIT.md``. Chose a SIBLING module rather
+``docs/modules/task_engine.md``. Chose a SIBLING module rather
 than a package conversion, matching slice 1 (``autopilot_state.py``) and
 slice 2 (``autopilot_markers.py``).
 
@@ -34,8 +34,8 @@ slice 2 (``autopilot_markers.py``).
   ``autopilot.py``. The cycle is ELIMINATED, not merely guarded — a
   strict architectural upgrade over slice 2's lazy-import contract.
 
-**pt_8dc03017 sequencing constraint**: the sibling epic
-``pt_8dc030176bad450b`` (owner-parked, human-gated) plans to mutate
+** sequencing constraint**: the sibling epic
+``` (owner-parked, human-gated) plans to mutate
 ``_VUEventForwarder``, the ``_autopilot_deciding`` latch, and the VU
 ``convId=''`` opt-out. This module carries NONE of those symbols — the
 close-out lifecycle is strictly disjoint from that mutation surface.
@@ -72,7 +72,7 @@ from lib.log import get_logger
 from lib.tasks_pkg.autopilot_state import (
     _clear_run_id,
     _resolve_recent_run_id,
-    _resolve_run_anchor_msgid,
+    _resolve_run_anchor_turn_id,
 )
 
 logger = get_logger(__name__)
@@ -81,6 +81,7 @@ logger = get_logger(__name__)
 
 
 def _store_run_record(conv_id: str, run_id: str, *,
+                      user_id: int,
                       reason: str,
                       text: str = '',
                       unsent: bool = False,
@@ -105,7 +106,7 @@ def _store_run_record(conv_id: str, run_id: str, *,
     ``task_done`` with a report supersedes an earlier bare ``stopped`` marker,
     and never downgrades a report back to empty). Returns the stored record
     (``{runId, status, reason, content?, translatedContent?, ts, _summaryId}``),
-    or ``None`` on failure. The record has NO ``role`` and NO ``_msgId`` — it is
+    or ``None`` on failure. The record has no ``role``/``_turnId`` — it is
     not a message.
     """
     try:
@@ -114,11 +115,12 @@ def _store_run_record(conv_id: str, run_id: str, *,
     except Exception as e:
         logger.warning('[Autopilot] run record: import failed: %s', e)
         return None
-    # Resolve the run's boundary turn's stable _msgId ONCE, server-side — the
+    # Resolve the run's boundary turn identity once, server-side — the
     # backend authority for report placement. Read outside the settings mutation
     # (a separate column) so the frontend never has to re-derive placement by
     # scanning run-id stamps. '' when the run's turns aren't on disk yet.
-    anchor_msgid = _resolve_run_anchor_msgid(conv_id, run_id)
+    anchor_turn_id = _resolve_run_anchor_turn_id(
+        conv_id, run_id, user_id=user_id)
     try:
         # Serialized read-merge-write (settings_store): autopilotSummaries
         # ACCRETES run records — a bare RMW would drop a concurrently-stored
@@ -152,11 +154,11 @@ def _store_run_record(conv_id: str, run_id: str, *,
                 'ts': int(time.time() * 1000),
                 '_summaryId': prior.get('_summaryId') or str(uuid.uuid4()),
             }
-            # ★ BACKEND-AUTHORITATIVE PLACEMENT — the stable _msgId of the run's
+            # BACKEND-AUTHORITATIVE PLACEMENT — the stable turn id of the run's
             #   boundary turn. Resolved server-side (above) where the run's turns
             #   are known; the frontend docks the report at this id (a pure
             #   lookup) instead of inferring the boundary from run-id stamps.
-            #   ★ STICKY: a prior anchor ALWAYS wins over a fresh re-resolution.
+            #   STICKY: a prior anchor ALWAYS wins over a fresh re-resolution.
             #   The anchor is resolved+persisted ONCE, synchronously, at the
             #   conclude point (the TASK_DONE sync pre-stamp below, or the
             #   manual-stop conclude_run) — while the run's boundary is known
@@ -165,10 +167,10 @@ def _store_run_record(conv_id: str, run_id: str, *,
             #   NEVER move it: recomputing then could drift the boundary past a
             #   newer turn and offset the report to the transcript tail. So once
             #   stamped, keep it; only compute fresh when there is no prior.
-            anchor_final = (prior.get('anchorMsgId') or '') or anchor_msgid
+            anchor_final = (prior.get('anchorTurnId') or '') or anchor_turn_id
             if anchor_final:
-                record['anchorMsgId'] = anchor_final
-            # ★ A run cut off by a safety cap (budget_exhausted / stuck /
+                record['anchorTurnId'] = anchor_final
+            # A run cut off by a safety cap (budget_exhausted / stuck /
             #   no_progress) is UNFINISHED — the objective is unverified. Flag
             #   it so the fold renders "stopped early — needs review" instead of
             #   a clean conclusion. A later clean task_done supersedes it (the
@@ -178,7 +180,7 @@ def _store_run_record(conv_id: str, run_id: str, *,
                 record['incomplete'] = True
             if content:
                 record['content'] = content
-            # ★ UNSENT — ``content`` here is a VU reply that was PRODUCED but
+            # UNSENT — ``content`` here is a VU reply that was PRODUCED but
             #   never delivered into the conversation (the run yielded to a
             #   human / was superseded mid-flight). The frontend must label it
             #   as such: it is evidence of work done, NOT a turn that happened,
@@ -194,7 +196,7 @@ def _store_run_record(conv_id: str, run_id: str, *,
             if translated_final:
                 record['translatedContent'] = translated_final
             summaries[run_id] = record
-            # ★ RETENTION — the map accretes one record per run and re-serializes
+            # RETENTION — the map accretes one record per run and re-serializes
             #   into every settings PUT + IDB write, so on a year-scale
             #   conversation an unbounded map makes each turn's write cost grow
             #   O(n).  Keep the N most-recent runs by ``ts``; the run currently
@@ -225,7 +227,8 @@ def _store_run_record(conv_id: str, run_id: str, *,
                         conv_id[:8], reason_final, len(content), run_id)
             return None
 
-        res = update_conversation_settings(conv_id, _mut)
+        res = update_conversation_settings(
+            conv_id, _mut, user_id=user_id)
         if res is None:
             logger.warning('[Autopilot] run record: conv=%s not found', conv_id[:8])
             return None
@@ -238,8 +241,14 @@ def _store_run_record(conv_id: str, run_id: str, *,
 
 
 
-def _emit_run_concluded(conv_id: str, run_id: str, text: str,
-                        config: dict | None) -> None:
+def _emit_run_concluded(
+    conv_id: str,
+    run_id: str,
+    text: str,
+    config: dict | None,
+    *,
+    user_id: int,
+) -> None:
     """Emit ONE project-brain 'run_concluded' Activity event for a finished run.
 
     Autopilot per-turn 'started'/'completed' events are SUPPRESSED at the task
@@ -256,6 +265,7 @@ def _emit_run_concluded(conv_id: str, run_id: str, text: str,
         emit_project_event(
             proj, conv_id, 'run_concluded',
             summary or 'Autopilot run concluded',
+            user_id=user_id,
             payload={'runId': run_id})
     except Exception as e:
         logger.debug('[Autopilot] run_concluded feed emit skipped: %s', e)
@@ -263,8 +273,13 @@ def _emit_run_concluded(conv_id: str, run_id: str, text: str,
 
 
 
-def conclude_run(conv_id: str, reason: str = 'stopped',
-                 run_id: str = '') -> dict | None:
+def conclude_run(
+    conv_id: str,
+    *,
+    user_id: int,
+    reason: str = 'stopped',
+    run_id: str = '',
+) -> dict | None:
     """Record the BACKEND-AUTHORITATIVE 'this autopilot run is over' fact.
 
     The single close-out seam for the paths that end a run WITHOUT a clean
@@ -289,13 +304,14 @@ def conclude_run(conv_id: str, reason: str = 'stopped',
     if not conv_id:
         return None
     if not run_id:
-        run_id = _resolve_recent_run_id(conv_id)
+        run_id = _resolve_recent_run_id(conv_id, user_id=user_id)
     if not run_id:
         logger.debug('[Autopilot] conclude_run: conv=%s no run id — nothing to '
                      'conclude', conv_id[:8])
         return None
-    record = _store_run_record(conv_id, run_id, reason=reason)
-    _clear_run_id(conv_id)
+    record = _store_run_record(
+        conv_id, run_id, user_id=user_id, reason=reason)
+    _clear_run_id(conv_id, user_id=user_id)
     return record
 
 
@@ -311,7 +327,7 @@ def _emit_run_concluded_event(task: dict, conv_id: str, run_id: str,
 
       1. write the BACKEND-AUTHORITATIVE concluded record via
          :func:`_store_run_record` (``status='concluded'``, ``reason``,
-         ``anchorMsgId`` — NO report ``content``);
+         ``anchorTurnId`` — NO report ``content``);
       2. emit the project-brain ``run_concluded`` Activity pulse;
       3. emit the ``autopilot_run_concluded`` SSE so a connected client folds
          the run's (VU→assistant)×N transcript immediately.
@@ -323,13 +339,22 @@ def _emit_run_concluded_event(task: dict, conv_id: str, run_id: str,
     ``None`` on persist failure. Best-effort on the emit steps.
     """
     from lib.tasks_pkg.manager import append_event
+    from lib.tasks_pkg.manager import task_user_id
 
     tid = task['id'][:8]
-    record = _store_run_record(conv_id, run_id, reason=reason)
+    owner_user_id = int(task_user_id(task))
+    record = _store_run_record(
+        conv_id, run_id, user_id=owner_user_id, reason=reason)
     if record is None:
         return None
 
-    _emit_run_concluded(conv_id, run_id, '', task.get('config'))
+    _emit_run_concluded(
+        conv_id,
+        run_id,
+        '',
+        task.get('config'),
+        user_id=owner_user_id,
+    )
 
     try:
         append_event(task, build_event(

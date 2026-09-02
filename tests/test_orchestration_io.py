@@ -11,20 +11,22 @@ A mock agent_runner keeps it LLM-free: it echoes the context it received so a
 test can assert exactly what a downstream node saw.
 """
 
-import inspect
 import threading
 import unittest
 
-import lib.orchestration._io as io_facade
-from lib.orchestration import io_contract as io_contract_owner
-from lib.orchestration import io_validation as io_validation_owner
-from lib.orchestration import io_values as io_values_owner
-from lib.orchestration import (
+import pytest
+
+from lib.orchestration._validate import validate_definition
+from lib.orchestration.io_contract import (
     DEFAULT_OUTPUT_NAME, IO_AUTHORING_PRESETS, IO_PORT_NAME_CONTRACT,
     MAX_IO_PORTS,
-    io_contract_schema, node_output_names, parse_io_ref, validate_definition,
+    io_contract_schema,
 )
+from lib.orchestration.io_values import node_output_names, parse_io_ref
 from lib.orchestration_engine import FlowExecutor
+
+
+pytestmark = pytest.mark.unit
 
 
 def _role(nid, role, **params):
@@ -38,25 +40,6 @@ def _ctrl(nid, kind, **params):
 # ── Pure helpers ────────────────────────────────────────────────────
 
 class IoHelpersTest(unittest.TestCase):
-    def test_compatibility_facade_reexports_split_owner_identities(self):
-        self.assertNotIn('\ndef ', inspect.getsource(io_facade))
-        self.assertIs(
-            io_facade.io_contract_schema,
-            io_contract_owner.io_contract_schema,
-        )
-        self.assertIs(
-            io_facade.node_output_names,
-            io_values_owner.node_output_names,
-        )
-        self.assertIs(
-            io_facade.parse_io_ref,
-            io_values_owner.parse_io_ref,
-        )
-        self.assertIs(
-            io_facade._validate_node_io,
-            io_validation_owner._validate_node_io,
-        )
-
     def test_serializable_authoring_contract_is_derived_from_backend_constants(self):
         contract = io_contract_schema()
         self.assertEqual(contract['maxPorts'], MAX_IO_PORTS)

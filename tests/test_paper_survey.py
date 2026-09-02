@@ -30,6 +30,7 @@ Under pytest:    pytest tests/test_paper_survey.py -m unit
 import os
 import sys
 import time
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -44,6 +45,7 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 
 try:
     import pytest
+    pytest_plugins = ('tests._artifact_sidecar',)
     pytestmark = [pytest.mark.unit, pytest.mark.auth_mode('open')]
 except ImportError:
     pytest = None
@@ -63,56 +65,59 @@ def test_survey_prompt_requires_a_per_paper_comparison_matrix():
 _APP = None
 
 
+def _start_test_storage():
+    from lib.storage import start_storage
+    start_storage()
+
+
+def _stop_test_storage():
+    from lib.storage import stop_storage
+    stop_storage()
+
+
 def _load_app():
     global _APP
-    if _APP is not None:
-        return _APP
-    import tempfile
-    os.environ['TOFU_DB_BACKEND'] = 'sqlite'
-    if not os.environ.get('TOFU_DB_PATH'):
-        _dbf = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
-        _dbf.close()
-        os.environ['TOFU_DB_PATH'] = _dbf.name
-    os.environ.setdefault('TOFU_AUTH_MODE', 'open')
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        'server', os.path.join(os.path.dirname(os.path.dirname(__file__)), 'server.py'))
-    mod = importlib.util.module_from_spec(spec)
-    mod.__name__ = 'server'
-    spec.loader.exec_module(mod)
-    try:
-        from lib.database import init_db
-        init_db()
-    except Exception as e:
-        print(f'[survey_test] init_db: {e}')
-    _APP = mod.app
+    if _APP is None:
+        _start_test_storage()
+        os.environ.setdefault('TOFU_AUTH_MODE', 'open')
+        import server
+        _APP = server.app
     return _APP
-
-
 def _seed_library_paper(arxiv_id, *, phash=None, parsed_text=None, report=None,
                         lang='en', user_id=1, folder_id='research_test'):
-    """Insert a paper_library row (+ optional paper_reports row) directly."""
-    from lib.database._core import _pool_get, _pool_put
-    from lib.database._core_schema import PAPER_LIBRARY, PAPER_REPORTS, upsert
+    """Persist one owned library row and optional report through repositories."""
+    from lib.paper.artifact_repository import PaperArtifactRepository, PaperReport
+    from lib.paper.library_repository import PaperLibraryEntry, PaperLibraryRepository
+
+    _start_test_storage()
     phash = phash or ('h' + arxiv_id.replace('.', '').replace('/', '')[:20])
     parsed_text = parsed_text if parsed_text is not None else f'Full parsed text of {arxiv_id}.'
     now = int(time.time() * 1000)
-    db = _pool_get()
-    try:
-        upsert(db, PAPER_LIBRARY, {
-            'id': f'lib_{arxiv_id}', 'user_id': user_id, 'title': f'Paper {arxiv_id}',
-            'pdf_url': '', 'pdf_filename': '', 'arxiv_id': arxiv_id, 'paper_hash': phash,
-            'parsed_text': parsed_text, 'parser_version': '', 'qa_history': '[]', 'images': '[]',
-            'babel_cache': '{}', 'page_count': 5, 'folder_id': folder_id,
-            'created_at': now, 'updated_at': now,
-        }, retry=True)
-        if report is not None:
-            upsert(db, PAPER_REPORTS, {
-                'paper_hash': phash, 'lang': lang, 'report': report,
-                'model': '', 'meta': '{}', 'created_at': now,
-            }, retry=True)
-    finally:
-        _pool_put(db)
+    entry = PaperLibraryEntry(
+        paper_id=f'lib_{arxiv_id}',
+        title=f'Paper {arxiv_id}',
+        arxiv_id=arxiv_id,
+        paper_hash=phash,
+        parsed_text=parsed_text,
+        page_count=5,
+        folder_id=folder_id,
+        created_at=now,
+        updated_at=now,
+    )
+    saved = PaperLibraryRepository(user_id).put(
+        entry, command_id=f'survey-test-library:{uuid.uuid4().hex}')
+    assert saved
+    if report is not None:
+        saved_report = PaperArtifactRepository(user_id).put_report(
+            PaperReport(
+                paper_hash=phash,
+                lang=lang,
+                report=report,
+                created_at=now,
+            ),
+            command_id=f'survey-test-report:{uuid.uuid4().hex}',
+        )
+        assert saved_report
     return phash
 
 
@@ -157,7 +162,8 @@ def test_survey_schema_and_all_ids_library_verifiable():
     restore = _patch_synthesis('A survey citing arXiv:2305.11111.', raw)
     ra = _patch_citation_audit(lambda md: None)
     try:
-        res = sv.build_survey('long-context KV compression', ids, lang='en', folder_id=folder)
+        res = sv.build_survey(
+            'long-context KV compression', ids, lang='en', user_id=1, folder_id=folder)
         assert res['ok'], res.get('error')
         gm = res['open_gaps']
         assert gm['schema_version'] == sv.OPEN_GAPS_SCHEMA_VERSION, 'schema_version not frozen value'
@@ -202,7 +208,7 @@ def test_unknown_arxiv_id_is_stripped_NEUTER():
     _orig_ground = _sv._fetch_arxiv_title
     _sv._fetch_arxiv_title = lambda aid: ''
     try:
-        res = sv.build_survey('dir', real, lang='en', folder_id=folder)
+        res = sv.build_survey('dir', real, lang='en', user_id=1, folder_id=folder)
         gm = res['open_gaps']
         # The fake id is stripped everywhere and recorded as a hallucination.
         assert FAKE in gm['stripped_ids'], f"fake id not recorded stripped: {gm['stripped_ids']}"
@@ -229,14 +235,16 @@ def test_verify_against_library_is_pure_and_biting():
     raw = {'clusters': [{'id': 'c', 'papers': ['1111.00001', '2222.00002']}],
            'method_matrix': [{'paper': '1111.00001'}, {'paper': '9999.00009'}],
            'open_gaps': [{'id': 'g', 'gap': 'x', 'evidence': ['9999.00009']}]}
-    out = sv._verify_against_library(raw, lib_ids={'1111.00001'}, ground_fn=lambda aid: '')
+    out = sv._verify_against_library(
+        raw, user_id=1, lib_ids={'1111.00001'}, ground_fn=lambda aid: '')
     assert out['clusters'][0]['papers'] == ['1111.00001']
     assert [m['paper'] for m in out['method_matrix']] == ['1111.00001']
     assert out['open_gaps'] == [], 'gap backed only by a hallucinated id should drop'
     assert sorted(out['stripped_ids']) == ['2222.00002', '9999.00009']
     # counter: with both ids present, nothing strips
-    out2 = sv._verify_against_library(raw, lib_ids={'1111.00001', '2222.00002', '9999.00009'},
-                                      ground_fn=lambda aid: '')
+    out2 = sv._verify_against_library(
+        raw, user_id=1, lib_ids={'1111.00001', '2222.00002', '9999.00009'},
+        ground_fn=lambda aid: '')
     assert out2['stripped_ids'] == [] and len(out2['open_gaps']) == 1
     _ok('_verify_against_library is a pure, biting gate (version-normalized id set)')
 
@@ -257,7 +265,8 @@ def test_fake_citation_flagged():
     restore = _patch_synthesis('A survey citing arXiv:2499.00000 which does not exist.', raw)
     ra = _patch_citation_audit(lambda md: fake_card if '2499.00000' in md else None)
     try:
-        res = sv.build_survey('dir', ['2305.66666'], lang='en', folder_id=folder)
+        res = sv.build_survey(
+            'dir', ['2305.66666'], lang='en', user_id=1, folder_id=folder)
         assert res['citation_audit'] is not None, 'suspicious citation not surfaced'
         assert res['citation_audit']['counts']['suspicious'] == 1
     finally:
@@ -274,7 +283,8 @@ def test_clean_citations_no_card():
     restore = _patch_synthesis('A clean survey citing arXiv:2305.77777.', raw)
     ra = _patch_citation_audit(lambda md: None)  # nothing suspicious
     try:
-        res = sv.build_survey('dir', ['2305.77777'], lang='en', folder_id=folder)
+        res = sv.build_survey(
+            'dir', ['2305.77777'], lang='en', user_id=1, folder_id=folder)
         assert res['citation_audit'] is None, 'clean survey should carry no audit card'
     finally:
         ra(); restore()
@@ -286,7 +296,7 @@ def test_clean_citations_no_card():
 def test_load_inputs_never_reparses_and_prefers_report():
     _load_app()
     import lib.paper.survey as sv
-    import lib.pdf_parser as pp
+    import lib.pdf_parser.core as pdf_core
     folder = f'rf_{int(time.time())%100000}_r'
     # paper A has a generated report; paper B only parsed_text.
     _seed_library_paper('2305.88888', folder_id=folder, report='REPORT-A body', lang='en')
@@ -294,10 +304,11 @@ def test_load_inputs_never_reparses_and_prefers_report():
 
     # Spy: parse_pdf must never be called by the survey input path.
     calls = {'n': 0}
-    orig_parse = pp.parse_pdf
-    pp.parse_pdf = lambda *a, **k: (calls.__setitem__('n', calls['n'] + 1) or {'text': '', 'totalPages': 0})
+    orig_parse = pdf_core.parse_pdf
+    pdf_core.parse_pdf = lambda *a, **k: (calls.__setitem__('n', calls['n'] + 1) or {'text': '', 'totalPages': 0})
     try:
-        inputs = sv._load_paper_inputs(['2305.88888', '2401.99999'], lang='en')
+        inputs = sv._load_paper_inputs(
+            ['2305.88888', '2401.99999'], lang='en', user_id=1)
         assert calls['n'] == 0, f'survey input load must NOT reparse, parse_pdf called {calls["n"]}x'
         by_id = {p['arxiv_id']: p for p in inputs}
         assert by_id['2305.88888']['source'] == 'report', 'should prefer existing report'
@@ -305,7 +316,7 @@ def test_load_inputs_never_reparses_and_prefers_report():
         assert by_id['2401.99999']['source'] == 'parsed_text', 'fallback to parsed_text'
         assert 'PARSED-B' in by_id['2401.99999']['content']
     finally:
-        pp.parse_pdf = orig_parse
+        pdf_core.parse_pdf = orig_parse
     _ok('input load reuses reports/parsed_text, prefers report, and NEVER reparses')
 
 
@@ -317,7 +328,7 @@ def test_grounded_tier_keeps_gap_and_flags_low_confidence():
     raw = {'clusters': [], 'method_matrix': [],
            'open_gaps': [{'id': 'g', 'gap': 'real but unharvested', 'evidence': ['2404.00001']}]}
     # 2404.00001 is not in lib_ids, but ground_fn confirms it exists → grounded.
-    out = sv._verify_against_library(raw, lib_ids=set(),
+    out = sv._verify_against_library(raw, user_id=1, lib_ids=set(),
                                      ground_fn=lambda aid: 'A Real Title')
     assert len(out['open_gaps']) == 1, 'grounded-only gap must survive (not dropped)'
     g = out['open_gaps'][0]
@@ -335,7 +346,7 @@ def test_library_tier_gap_is_high_confidence():
     import lib.paper.survey as sv
     raw = {'open_gaps': [{'id': 'g', 'gap': 'x',
                           'evidence': ['1111.00001', '2404.00002']}]}
-    out = sv._verify_against_library(raw, lib_ids={'1111.00001'},
+    out = sv._verify_against_library(raw, user_id=1, lib_ids={'1111.00001'},
                                      ground_fn=lambda aid: 'Real')  # 2404 grounded
     g = out['open_gaps'][0]
     assert g['library_evidence_count'] == 1 and g['grounded_evidence_count'] == 1
@@ -364,7 +375,8 @@ def test_dict_shaped_ids_are_extracted_not_crash():
                                     '1111.00001']}],
     }
     out = sv._verify_against_library(
-        raw, lib_ids={'1111.00001', '2222.00002'}, ground_fn=lambda aid: '')
+        raw, user_id=1, lib_ids={'1111.00001', '2222.00002'},
+        ground_fn=lambda aid: '')
     # Dict-carried ids are salvaged and kept; the id-less dict is stripped.
     assert out['clusters'][0]['papers'] == ['1111.00001', '2222.00002'], \
         out['clusters'][0]['papers']
@@ -387,7 +399,8 @@ def test_grounding_tier_NEUTER():
     grounded tier is what keeps it alive."""
     import lib.paper.survey as sv
     raw = {'open_gaps': [{'id': 'g', 'gap': 'real but unharvested', 'evidence': ['2404.00001']}]}
-    out = sv._verify_against_library(raw, lib_ids=set(), ground_fn=lambda aid: '')
+    out = sv._verify_against_library(
+        raw, user_id=1, lib_ids=set(), ground_fn=lambda aid: '')
     assert out['open_gaps'] == [], \
         'NEUTER FAILED: without the grounded tier the unharvested gap should drop'
     assert '2404.00001' in out['stripped_ids']
@@ -397,8 +410,9 @@ def test_grounding_tier_NEUTER():
 def test_no_library_inputs_is_clean_failure():
     _load_app()
     import lib.paper.survey as sv
-    res = sv.build_survey('a direction with no harvested papers', ['1234.00000'],
-                          lang='en', folder_id='nonexistent_folder')
+    res = sv.build_survey(
+        'a direction with no harvested papers', ['1234.00000'], lang='en',
+        user_id=1, folder_id='nonexistent_folder')
     assert not res['ok'] and 'harvest' in res['error'], res
     _ok('no library papers → clean ok=False with a run-harvest-first message')
 
@@ -420,19 +434,24 @@ def main():
         test_no_library_inputs_is_clean_failure,
         test_dict_shaped_ids_are_extracted_not_crash,
     ]
-    for fn in tests:
-        try:
-            fn()
-        except AssertionError as e:
-            _fail(f'{fn.__name__}: {e}')
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            _fail(f'{fn.__name__}: unexpected {type(e).__name__}: {e}')
-    print()
-    print(_color(f'═══ ALL {len(tests)} TESTS PASSED ═══', '32'))
-    print()
+    try:
+        for fn in tests:
+            try:
+                fn()
+            except AssertionError as e:
+                _fail(f'{fn.__name__}: {e}')
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                _fail(f'{fn.__name__}: unexpected {type(e).__name__}: {e}')
+        print()
+        print(_color(f'═══ ALL {len(tests)} TESTS PASSED ═══', '32'))
+        print()
+    finally:
+        _stop_test_storage()
 
 
 if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_paper_survey.standalone')
     main()

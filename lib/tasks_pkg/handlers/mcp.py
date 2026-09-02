@@ -156,7 +156,7 @@ def handle_mcp_tool(
     # in the UI tells users *which resource* the call touches — instead of
     # every create_file / edit_file looking identical.
     #
-    # ★ Single source of truth: use compose_mcp_display (the SAME helper the
+    # Single source of truth: use compose_mcp_display (the SAME helper the
     #   live tool-round line uses in tool_display._tool_display_mcp), NOT a
     #   direct _mcp_arg_suffix call — otherwise batch-file tools (batch_commit
     #   / push_files) whose paths live inside a list regress to a branch-only

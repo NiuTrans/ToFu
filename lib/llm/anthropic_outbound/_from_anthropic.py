@@ -24,6 +24,14 @@ _STOP_REASON_MAP = {
 }
 
 
+def _map_stop_reason(value: object) -> str | None:
+    """Preserve missing/unknown terminal evidence instead of inventing stop."""
+    if value is None or value == '':
+        return None
+    raw = str(value)
+    return _STOP_REASON_MAP.get(raw, raw)
+
+
 def _blocks_to_openai_message(content_blocks: list) -> dict:
     """Anthropic response content blocks → OpenAI assistant message dict."""
     text_parts = []
@@ -87,7 +95,7 @@ def _convert_usage(usage: dict) -> dict:
 def anthropic_response_to_openai(data: dict) -> dict:
     """Non-streaming Anthropic Messages response → OpenAI ChatCompletion."""
     msg = _blocks_to_openai_message(data.get('content'))
-    finish = _STOP_REASON_MAP.get(data.get('stop_reason') or 'end_turn', 'stop')
+    finish = _map_stop_reason(data.get('stop_reason'))
     return {
         'id': data.get('id', ''),
         'object': 'chat.completion',

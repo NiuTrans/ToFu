@@ -29,7 +29,7 @@ pytestmark = pytest.mark.unit
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEVICES_TS = Path(PROJECT_ROOT) / 'frontend/src/features/settings/devices.ts'
 SETTINGS_TS = Path(PROJECT_ROOT) / 'frontend/src/features/settings.ts'
-ESBUILD = Path(PROJECT_ROOT) / 'node_modules/.bin/esbuild'
+ESBUILD = Path(PROJECT_ROOT) / 'scripts' / 'vite_test_bundle.mjs'
 
 
 def _read(path):
@@ -181,7 +181,7 @@ def _compile_devices(tmp_path):
     return built
 
 
-@pytest.mark.skipif(not ESBUILD.is_file(), reason='esbuild not installed')
+@pytest.mark.skipif(not ESBUILD.is_file(), reason='vite test bundler not installed')
 def test_devices_tab_behaviour_jsdom(tmp_path):
     built = _compile_devices(tmp_path)
     run_harness(

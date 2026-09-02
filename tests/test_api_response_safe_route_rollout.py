@@ -62,7 +62,6 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _OPTIMIZER_PATH = os.path.join(_ROOT, 'routes', 'api_v1', 'optimizer.py')
 _AGENTS_PATH = os.path.join(_ROOT, 'routes', 'api_v1', 'agents.py')
 _CONFIG_PATH = os.path.join(_ROOT, 'routes', 'config.py')
-_PAPER_PATH = os.path.join(_ROOT, 'routes', 'paper.py')
 
 
 def _unit(fn):
@@ -181,30 +180,16 @@ def _agents_src() -> str:
         return f.read()
 
 
-# ── Batch 5 (config.py + paper.py) ──────────────────────────────────
+# ── Batch 5 (config.py) ─────────────────────────────────────────────
 # Same strict gate: FINAL except is a pure logger.error/warning +
 # api_internal_error(e) with no distinct context, no side effects.
 # Batch 5 audit found 6 candidates matching:
 #   * routes/config.py — feishu_status, discover_models_endpoint
-#   * routes/paper.py  — list_library, upsert_library_entry,
-#                        delete_library_entry, prune_broken_library_rows
-# list_library has an INNER try/except (hasReport soft-fail) that stays.
 _CONVERTED_CONFIG_HANDLERS = ('feishu_status', 'discover_models_endpoint')
-_CONVERTED_PAPER_HANDLERS = (
-    'list_library',
-    'upsert_library_entry',
-    'delete_library_entry',
-    'prune_broken_library_rows',
-)
 
 
 def _config_src() -> str:
     with open(_CONFIG_PATH, encoding='utf-8') as f:
-        return f.read()
-
-
-def _paper_src() -> str:
-    with open(_PAPER_PATH, encoding='utf-8') as f:
         return f.read()
 
 
@@ -463,47 +448,26 @@ def test_batch5_converted_config_handlers_have_safe_route():
 
 
 @_unit
-def test_batch5_converted_paper_handlers_have_safe_route():
-    """batch 5: 4 paper.py library handlers carry @safe_route
-    (async def variant — @safe_route is dual-mode)."""
-    src = _paper_src()
-    for name in _CONVERTED_PAPER_HANDLERS:
-        pattern = re.compile(
-            r'@safe_route\b[^\n]*\nasync\s+def\s+' + re.escape(name) + r'\s*\(',
-            re.MULTILINE)
-        assert pattern.search(src), (
-            f'{name}: expected @safe_route immediately before its "async '
-            f'def" line in routes/paper.py')
-
-
-@_unit
 def test_batch5_ad_hoc_final_except_patterns_gone():
     """batch 5: the specific "except Exception → api_internal_error(e)"
     trailing pattern that @safe_route replaces is GONE from each
     converted handler.
 
-    We do NOT forbid all try/except in these files — list_library still
-    keeps an inner try/except for the hasReport soft-fail. What we forbid
-    is the SPECIFIC trailing pattern: an except Exception followed by
+    We do NOT forbid all try/except in the file. What we forbid is the
+    SPECIFIC trailing pattern: an except Exception followed by
     ``return api_internal_error(e)`` on the NEXT line (that's the ad-hoc
     wrap @safe_route replaces).
     """
-    for path in (_CONFIG_PATH, _PAPER_PATH):
+    for path in (_CONFIG_PATH,):
         with open(path, encoding='utf-8') as f:
             src = f.read()
-        # In config.py we specifically drop feishu_status + discover_models
-        # ad-hoc wraps. In paper.py we drop the 4 library ones. Both files
-        # legitimately RETAIN api_internal_error calls at OTHER call sites
+        # config.py legitimately RETAINS api_internal_error calls at OTHER sites
         # (with distinct context= strings — image_gen-style). So we search
         # for the LITERAL 3-line ad-hoc pattern that only ever appeared
         # around the converted handlers.
         for _label, _fn_marker in (
             ('feishu_status', 'def feishu_status'),
             ('discover_models_endpoint', 'def discover_models_endpoint'),
-            ('list_library', 'async def list_library'),
-            ('upsert_library_entry', 'async def upsert_library_entry'),
-            ('delete_library_entry', 'async def delete_library_entry'),
-            ('prune_broken_library_rows', 'async def prune_broken_library_rows'),
         ):
             if _fn_marker not in src:
                 continue
@@ -544,7 +508,6 @@ if __name__ == '__main__':
         test_batch4_converted_agents_no_ad_hoc_final_except,
         test_batch4_unconverted_agents_keep_their_reasons,
         test_batch5_converted_config_handlers_have_safe_route,
-        test_batch5_converted_paper_handlers_have_safe_route,
         test_batch5_ad_hoc_final_except_patterns_gone,
     ]
     for fn in tests:

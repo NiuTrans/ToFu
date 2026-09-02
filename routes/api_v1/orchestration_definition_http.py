@@ -20,8 +20,10 @@ from lib.orchestration.application_result_ports import (
     DefinitionDeleteResultPort,
     DefinitionWriteResultPort,
 )
-from lib.orchestration.definition_wire_contracts import (
+from lib.orchestration.definition_contract_registry import (
     definition_write_contract,
+)
+from lib.orchestration.definition_wire_projection import (
     definition_write_conflict,
     definition_write_version_token,
     project_definition_entry,
@@ -36,8 +38,8 @@ _DEFINITION_WRITE = definition_write_contract()
 
 
 def definition_conflict_response(
-    expected_updated_at: int | None,
-    current_updated_at: int | None,
+    expected_updated_at: int,
+    current_updated_at: int,
     *,
     operation: str,
 ):
@@ -123,7 +125,7 @@ def definition_delete_response(
     result: DefinitionDeleteResultPort,
     *,
     operation: str,
-    expected_updated_at: int | None = None,
+    expected_updated_at: int,
 ):
     """Project one guarded delete without route-local CAS interpretation."""
     if result.conflict:

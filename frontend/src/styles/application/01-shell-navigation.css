@@ -1,0 +1,871 @@
+/* v20260408b — attach button: borderless ghost icon, absolutely positioned inside textarea area */
+:root{--bg-primary:#0a0a0c;--bg-secondary:#111115;--bg-tertiary:#1a1a21;--bg-hover:#22222b;--bg-active:#2a2a35;--border:#2a2a35;--border-light:#33333f;--text-primary:#e8e8ed;--text-secondary:#9898a8;--text-tertiary:#6a6a7a;--accent:#6e56cf;--accent-hover:#7c66d4;--accent-subtle:rgba(110,86,207,0.12);--thinking-bg:rgba(207,167,56,0.06);--thinking-border:rgba(207,167,56,0.25);--thinking-text:#cfb850;--error-bg:rgba(207,56,56,0.08);--error-border:rgba(207,56,56,0.3);--error-text:#cf5050;--user-bubble:#1e1b4b;--shadow:0 2px 12px rgba(0,0,0,0.4);--radius:12px;--radius-sm:8px;--radius-xs:6px;--transition:0.2s cubic-bezier(0.4,0,0.2,1);--search-blue:#3b82f6;--search-cyan:#06b6d4;--search-purple:#8b5cf6;--fetch-green:#10b981;--fetch-teal:#14b8a6;
+/* ── CJK-aware body font stack (base; applies to dark + light themes) ──
+ * font-family resolves PER GLYPH: 'Plus Jakarta Sans' carries no Han glyphs,
+ * so without an explicit CJK tail Chinese falls through to the browser's
+ * default serif (usually SimSun/宋体) — inconsistent and hard to read. The
+ * shared --cjk-fallback ends EVERY body stack in ONE Han face so Chinese is
+ * uniform. Identical face list to the tofu-theme token (which redefines it
+ * locally); keeping them byte-identical means no 黑体/宋体 fork across themes. */
+--cjk-fallback:'PingFang SC','Microsoft YaHei','Hiragino Sans GB','Noto Sans SC','Noto Sans CJK SC';
+--md-sans:'Plus Jakarta Sans','Jakarta Fallback','Inter',var(--cjk-fallback),-apple-system,sans-serif}
+*{margin:0;padding:0;box-sizing:border-box}html{overflow:hidden;height:100%;width:100%}body{font-family:var(--md-sans);background:var(--bg-primary);color:var(--text-primary);height:100vh;height:100dvh;overflow:hidden;display:flex;width:100%;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility}
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:transparent;border-radius:3px}::-webkit-scrollbar-thumb:hover{background:var(--border-light)}.conversations-list:hover::-webkit-scrollbar-thumb,.chat-container:hover::-webkit-scrollbar-thumb,.modal:hover::-webkit-scrollbar-thumb{background:var(--border)}.conversations-list,.chat-container,.modal{scrollbar-color:transparent transparent}.conversations-list:hover,.chat-container:hover,.modal:hover{scrollbar-color:var(--border) transparent}
+.sidebar{--project-rail-w:150px;--project-rail-w-collapsed:52px;--sidebar-list-min:280px;width:280px;min-width:280px;background:var(--bg-secondary);border-right:1px solid var(--border);display:flex;flex-direction:column;transition:margin-left var(--transition),width var(--transition),min-width var(--transition);z-index:20}
+/* When ≥1 project exists the sidebar hosts the vertical rail + list side by
+ * side, so its total width is derived (rail + list-min), never a magic number.
+ * With 0 projects the rail is absent and the sidebar keeps its single-column
+ * width (zero-folder degradation). */
+.sidebar.has-rail{width:calc(var(--project-rail-w) + var(--sidebar-list-min));min-width:calc(var(--project-rail-w) + var(--sidebar-list-min))}
+.sidebar.has-rail.rail-collapsed{width:calc(var(--project-rail-w-collapsed) + var(--sidebar-list-min));min-width:calc(var(--project-rail-w-collapsed) + var(--sidebar-list-min))}
+/* ── Zero-CLS first paint ── The html[data-rail] hint is stamped by the inline
+ * script in index.html BEFORE any JS/folders round-trip, from a persisted
+ * `tofu_has_folders` cache. These give the sidebar its correct steady-state
+ * width on the very first paint; because the width is byte-identical to the
+ * .has-rail rules above, when the async render later adds .has-rail the
+ * computed width doesn't change → the `transition:width` never fires → no
+ * layout shift. The rail CONTENT still renders async (reconcile), only the
+ * GEOMETRY is settled up front. */
+html[data-rail="full"] .sidebar{width:calc(var(--project-rail-w) + var(--sidebar-list-min));min-width:calc(var(--project-rail-w) + var(--sidebar-list-min))}
+html[data-rail="collapsed"] .sidebar{width:calc(var(--project-rail-w-collapsed) + var(--sidebar-list-min));min-width:calc(var(--project-rail-w-collapsed) + var(--sidebar-list-min))}
+/* Hide the zero-folder quick-add pre-paint when the hint says folders exist
+ * (mirrors .sidebar.has-rail .folder-quickadd) so it never flashes. */
+html[data-rail] .folder-quickadd{display:none}
+.sidebar.collapsed{margin-left:-280px}
+.sidebar.has-rail.collapsed{margin-left:calc(-1 * (var(--project-rail-w) + var(--sidebar-list-min)))}
+.sidebar.has-rail.rail-collapsed.collapsed{margin-left:calc(-1 * (var(--project-rail-w-collapsed) + var(--sidebar-list-min)))}.sidebar-header{padding:16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}.sidebar-header h1{font-size:15px;font-weight:700;letter-spacing:0.06em;flex:1;display:flex;align-items:center;gap:5px;font-family:'Pixelify Sans','Press Start 2P',cursive}.sidebar-brand{display:inline-flex}.sidebar-brand-t,.sidebar-brand-o,.sidebar-brand-f,.sidebar-brand-u{-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}.sidebar-tofu-icon{flex-shrink:0}
+.sidebar-header-actions{display:flex;gap:2px;align-items:center}
+.sidebar-header-actions .action-btn{width:30px;height:30px}
+.sidebar-action-row{display:flex;gap:6px;padding:12px 16px;align-items:stretch}
+.new-chat-btn{flex:1;padding:10px 16px;margin:0;background:var(--accent);color:white;border:none;border-radius:var(--radius-sm);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:background var(--transition);display:flex;align-items:center;gap:8px;justify-content:center}.new-chat-btn:hover{background:var(--accent-hover)}
+/* new-folder-btn removed — folders use tab bar with "+" button */
+/* ── Folder create/rename dialog ── */
+.folder-dialog-overlay{position:fixed;inset:0;height:var(--vh100,100vh);background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease}
+.folder-dialog{background:var(--bg-secondary);border:1px solid var(--border-light);border-radius:var(--radius);padding:20px 24px;width:340px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
+.folder-dialog-title{font-size:15px;font-weight:600;color:var(--text-primary);margin-bottom:14px}
+.folder-dialog-input{width:100%;padding:9px 12px;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text-primary);font-size:14px;font-family:inherit;outline:none;transition:border-color var(--transition)}
+.folder-dialog-input:focus{border-color:var(--accent)}
+.folder-dialog-colors{display:flex;gap:8px;margin:14px 0 18px;flex-wrap:wrap}
+.folder-color-dot{width:22px;height:22px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:border-color 0.15s,transform 0.15s;flex-shrink:0}
+.folder-color-dot:hover{transform:scale(1.15)}
+.folder-color-dot.selected{border-color:var(--text-primary);transform:scale(1.15)}
+.folder-dialog-actions{display:flex;gap:8px;justify-content:flex-end}
+.folder-dialog-cancel{padding:7px 16px;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border);border-radius:var(--radius-xs);font-size:13px;font-family:inherit;cursor:pointer;transition:background var(--transition)}.folder-dialog-cancel:hover{background:var(--bg-hover)}
+.folder-dialog-ok{padding:7px 16px;background:var(--accent);color:white;border:none;border-radius:var(--radius-xs);font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;transition:background var(--transition)}.folder-dialog-ok:hover{background:var(--accent-hover)}.folder-dialog-ok:disabled{opacity:0.6;cursor:not-allowed}
+
+/* ── Conversation rename dialog (dedicated, redesigned) ── */
+.conv-rename-overlay{position:fixed;inset:0;height:var(--vh100,100vh);background:rgba(0,0,0,0.55);backdrop-filter:blur(2px);z-index:9999;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease}
+.conv-rename-card{background:var(--bg-secondary);border:1px solid var(--border-light);border-radius:16px;padding:22px 24px 20px;width:380px;max-width:90vw;box-shadow:0 16px 48px rgba(0,0,0,0.45);animation:convRenamePop 0.18s cubic-bezier(0.16,1,0.3,1)}
+@keyframes convRenamePop{from{opacity:0;transform:translateY(8px) scale(0.97)}to{opacity:1;transform:translateY(0) scale(1)}}
+.conv-rename-head{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:600;color:var(--text-primary);margin-bottom:16px}
+.conv-rename-icon{color:var(--accent);flex-shrink:0}
+.conv-rename-input{width:100%;box-sizing:border-box;padding:11px 14px;background:var(--bg-primary);border:1px solid var(--border);border-radius:10px;color:var(--text-primary);font-size:14px;font-family:inherit;outline:none;transition:border-color var(--transition),box-shadow var(--transition)}
+.conv-rename-input::placeholder{color:var(--text-tertiary)}
+.conv-rename-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
+.conv-rename-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:20px}
+.conv-rename-btn{padding:8px 18px;border-radius:9px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;transition:background var(--transition),border-color var(--transition),transform 0.08s}
+.conv-rename-btn:active{transform:scale(0.97)}
+.conv-rename-btn.cancel{background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border)}.conv-rename-btn.cancel:hover{background:var(--bg-hover);color:var(--text-primary)}
+.conv-rename-btn.ok{background:var(--accent);color:#fff;border:1px solid transparent}.conv-rename-btn.ok:hover{background:var(--accent-hover)}
+/* ═══ Vertical project rail ═══
+ * Sidebar body = rail (left column) + conversation list (flex). The rail
+ * stacks projects as full-width rows so names of any length align cleanly —
+ * replaces the old ragged wrapping pill bar. Width driven by --project-rail-w
+ * on .sidebar; collapses to an icon-only strip via .sidebar.rail-collapsed. */
+.sidebar-body{display:flex;flex:1;min-height:0;overflow:hidden}
+.project-rail{display:flex;flex-direction:column;flex-shrink:0;width:var(--project-rail-w);border-right:1px solid var(--border);background:var(--bg-tertiary);overflow:hidden;transition:width var(--transition)}
+.project-rail:empty{display:none}
+.sidebar.rail-collapsed .project-rail{width:var(--project-rail-w-collapsed)}
+.project-rail-head{display:flex;align-items:center;justify-content:space-between;padding:10px 10px 6px 12px;flex-shrink:0}
+.project-rail-title{font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.project-rail-collapse{display:flex;align-items:center;justify-content:center;width:20px;height:20px;flex-shrink:0;border:none;background:transparent;color:var(--text-tertiary);cursor:pointer;border-radius:var(--radius-xs);transition:color 0.15s,background 0.15s,transform 0.25s}
+.project-rail-collapse:hover{color:var(--accent);background:var(--bg-hover)}
+.sidebar.rail-collapsed .project-rail-collapse svg{transform:rotate(180deg)}
+.sidebar.rail-collapsed .project-rail-title{display:none}
+.sidebar.rail-collapsed .project-rail-head{justify-content:center;padding:10px 0 6px}
+.project-rail-list{display:flex;flex-direction:column;gap:2px;flex:1;overflow-y:auto;overflow-x:hidden;padding:2px 8px 4px;min-height:0}
+
+/* Project ROW (reuses .folder-tab so all JS handlers still match) */
+.folder-tab{display:flex;align-items:center;gap:8px;width:100%;padding:7px 9px;border:1px solid transparent;border-radius:var(--radius-xs);background:transparent;color:var(--text-secondary);font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer;white-space:nowrap;transition:background 0.15s,color 0.15s;user-select:none;line-height:1.3;position:relative;text-align:left}
+.folder-tab:hover{background:var(--bg-hover);color:var(--text-primary)}
+.folder-tab.active{background:var(--accent-subtle);color:var(--accent);font-weight:700}
+/* Left accent bar for the active project — reads as "you are here" */
+.folder-tab.active::before{content:'';position:absolute;left:0;top:6px;bottom:6px;width:3px;border-radius:0 3px 3px 0;background:var(--accent)}
+/* Project tile — a colored rounded-square "app icon" carrying a 1–2 char
+ * monogram (data-initial), used in BOTH the labeled rail and the collapsed
+ * strip so a project is recognizable at a glance, not just a lone letter. */
+.folder-tab-dot{width:20px;height:20px;border-radius:6px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;color:#fff;font-size:9.5px;font-weight:700;line-height:1;letter-spacing:-0.03em;overflow:hidden}
+.folder-tab-dot[data-initial]::after{content:attr(data-initial)}
+.folder-tab-dot[data-mono-len="1"]{font-size:12px;letter-spacing:0}
+.folder-tab-dot.streaming{animation:folderDotPulse 1.6s ease-in-out infinite}
+@keyframes folderDotPulse{0%,100%{opacity:1}50%{opacity:0.45}}
+/* Default (未分类) home tile: its glyph blinks periodically so it reads
+ * "alive" and stops clashing with the flat colored project tiles. */
+@keyframes folderInboxBlink{0%,88%,100%{opacity:1}94%{opacity:0.3}}
+/* Inbox (未分类) + add tiles share the tile footprint but read as "system"
+ * chips: a neutral surface square with a centered glyph, not a colored brand
+ * tile — so they group with, yet stay distinct from, the projects. */
+.folder-tab-inbox-dot,.folder-tab-add-dot{width:20px;height:20px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;color:var(--text-tertiary);background:var(--bg-hover);box-shadow:inset 0 0 0 1px var(--border)}
+.folder-tab-inbox-dot svg,.folder-tab-add-dot svg{width:12px;height:12px}
+.folder-tab-inbox-dot svg{width:15px;height:15px;animation:folderInboxBlink 4.8s ease-in-out infinite}
+.folder-tab.active .folder-tab-inbox-dot{color:var(--accent);background:var(--accent-subtle);box-shadow:inset 0 0 0 1px var(--accent)}
+.folder-tab-add:hover .folder-tab-add-dot{color:var(--accent);background:var(--accent-subtle);box-shadow:inset 0 0 0 1px var(--accent)}
+.folder-tab-name{flex:1;overflow:hidden;text-overflow:ellipsis}
+.folder-tab-count{font-size:10px;min-width:18px;height:16px;line-height:16px;text-align:center;border-radius:8px;background:var(--bg-hover);color:var(--text-secondary);padding:0 5px;flex-shrink:0;font-weight:600}
+.folder-tab.active .folder-tab-count{background:var(--accent);color:#fff}
+/* Footer "+ New project" row (kept separate from the scroll list) */
+.folder-tab-add{flex-shrink:0;margin:2px 8px 8px;width:auto;color:var(--text-tertiary)}
+.folder-tab-add:hover{color:var(--accent);background:var(--accent-subtle)}
+.folder-tab-add-dot{color:inherit}
+/* Drag-a-conversation drop target */
+.folder-tab.folder-tab-drop{background:var(--accent-subtle);box-shadow:inset 0 0 0 1.5px var(--accent)}
+
+/* ── Collapsed (icon-only) rail: show dot/glyph, hide name + count ── */
+.sidebar.rail-collapsed .folder-tab{justify-content:center;padding:8px 0;gap:0}
+.sidebar.rail-collapsed .folder-tab-name,
+.sidebar.rail-collapsed .folder-tab-count{display:none}
+.sidebar.rail-collapsed .project-rail-list{padding:2px 6px 4px}
+.sidebar.rail-collapsed .folder-tab-add{margin:2px 6px 8px}
+/* Colored initial inside the collapsed dot so projects stay distinguishable */
+.sidebar.rail-collapsed .folder-tab-dot{width:30px;height:30px;border-radius:9px;font-size:12px}
+.sidebar.rail-collapsed .folder-tab-dot[data-mono-len="1"]{font-size:16px}
+.sidebar.rail-collapsed .folder-tab-inbox-dot svg,.sidebar.rail-collapsed .folder-tab-add-dot svg{width:15px;height:15px}
+.sidebar.rail-collapsed .folder-tab-inbox-dot svg{width:18px;height:18px}
+/* Centered tiles read "selected" via a ring, not the far-left accent bar. */
+.sidebar.rail-collapsed .folder-tab.active{background:transparent}
+.sidebar.rail-collapsed .folder-tab.active::before{display:none}
+.sidebar.rail-collapsed .folder-tab.active .folder-tab-dot{outline:2px solid var(--accent);outline-offset:2px}
+
+/* Folder quick-add (zero-folder state entry point) — hidden once the rail exists */
+.folder-quickadd{display:flex;align-items:center;gap:7px;margin:0 12px 8px;padding:7px 12px;border:1px dashed var(--border);border-radius:var(--radius-sm);background:transparent;color:var(--text-tertiary);font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:color 0.15s,border-color 0.15s,background 0.15s}
+.folder-quickadd:hover{color:var(--accent);border-color:var(--accent);background:var(--accent-subtle)}
+.folder-quickadd svg{flex-shrink:0}
+.sidebar.has-rail .folder-quickadd{display:none}
+
+/* ═══ Rail on drawer viewports (phone ≤768 ∪ portrait touch-tablet) ═══
+ * The rail respects the SAME .rail-collapsed toggle as desktop here (default
+ * labeled/expandable, tap the chevron to collapse to an icon strip) — one
+ * consistent mental model across form factors. These rules only apply the
+ * icon-only compaction to the COLLAPSED state, tuned for touch (slightly taller
+ * rows, 30px tiles) and beating the desktop collapsed rules at matching
+ * specificity. Rule of thumb matches core.js isDrawerViewport() / TOFU_BP + the
+ * paper-mode predicate. The per-block drawer WIDTH override lives in the two
+ * drawer blocks below (their drawer widths differ). NO horizontal chip
+ * fallback. */
+@media(max-width:768px),(max-width:1024px) and (pointer:coarse){
+  .sidebar.has-rail.rail-collapsed .project-rail{width:var(--project-rail-w-collapsed)!important}
+  .sidebar.has-rail.rail-collapsed .project-rail-title{display:none}
+  .sidebar.has-rail.rail-collapsed .project-rail-head{justify-content:center;padding:10px 0 6px}
+  .sidebar.has-rail.rail-collapsed .folder-tab{justify-content:center;padding:9px 0;gap:0}
+  .sidebar.has-rail.rail-collapsed .folder-tab-name,
+  .sidebar.has-rail.rail-collapsed .folder-tab-count{display:none}
+  .sidebar.has-rail.rail-collapsed .project-rail-list{padding:2px 5px 4px}
+  .sidebar.has-rail.rail-collapsed .folder-tab-add{margin:2px 5px 8px}
+  .sidebar.has-rail.rail-collapsed .folder-tab-dot{width:30px;height:30px;border-radius:9px;font-size:12px}
+  .sidebar.has-rail.rail-collapsed .folder-tab-dot[data-mono-len="1"]{font-size:16px}
+  .sidebar.has-rail.rail-collapsed .folder-tab-inbox-dot svg,.sidebar.has-rail.rail-collapsed .folder-tab-add-dot svg{width:15px;height:15px}
+  .sidebar.has-rail.rail-collapsed .folder-tab.active::before{display:none}
+  .sidebar.has-rail.rail-collapsed .folder-tab.active .folder-tab-dot{outline:2px solid var(--accent);outline-offset:2px}
+}
+/* Folder tab context menu */
+.folder-tab-menu{position:fixed;z-index:9999;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:var(--shadow);min-width:140px;padding:4px 0;animation:folderPickerIn 0.1s ease}
+.folder-tab-menu-item{display:flex;align-items:center;gap:8px;padding:7px 12px;font-size:12.5px;color:var(--text-primary);cursor:pointer;transition:background var(--transition)}
+.folder-tab-menu-item:hover{background:var(--bg-hover)}
+.folder-tab-menu-delete{color:var(--text-secondary)}
+.folder-tab-menu-delete:hover{color:var(--error-text);background:var(--error-bg)}
+/* Folder empty state */
+.folder-view-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 16px;text-align:center}
+/* Folder members still loading (C4 — distinct from "genuinely empty") */
+.folder-view-spinner{width:20px;height:20px;margin-bottom:10px;border:2px solid var(--border);border-top-color:var(--text-secondary);border-radius:50%;animation:folderSpin .7s linear infinite}
+@keyframes folderSpin{to{transform:rotate(360deg)}}
+/* Sidebar "N earlier not loaded · Load more" affordance (C4) */
+.conv-load-more{display:block;width:calc(100% - 16px);margin:8px auto;padding:8px 10px;font-size:11px;color:var(--text-tertiary);background:var(--bg-secondary);border:1px dashed var(--border);border-radius:var(--radius-sm);cursor:pointer;text-align:center}
+.conv-load-more:hover{color:var(--text-secondary);background:var(--bg-hover)}
+/* ── Folder picker dropdown ── */
+.folder-picker{position:fixed;z-index:9999;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:var(--shadow);min-width:180px;max-width:260px;padding:4px 0;animation:folderPickerIn 0.15s ease}
+@keyframes folderPickerIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.folder-picker-title{padding:6px 12px 4px;font-size:10px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.06em}
+.folder-picker-item{display:flex;align-items:center;gap:8px;padding:7px 12px;font-size:12.5px;color:var(--text-primary);cursor:pointer;transition:background var(--transition)}
+.folder-picker-item:hover{background:var(--bg-hover)}
+.folder-picker-item.active{color:var(--accent);font-weight:600}
+.folder-picker-item.folder-picker-remove{color:var(--text-tertiary)}
+.folder-picker-item.folder-picker-remove:hover{color:var(--error-text)}
+.folder-picker-item.folder-picker-new{color:var(--accent)}
+.folder-picker-divider{height:1px;background:var(--border);margin:4px 8px}
+.conv-item.in-folder .conv-action-btn.conv-folder-assign{color:var(--accent);opacity:0.7}
+
+/* ── Drag-and-drop folder assignment ── */
+.conv-item.conv-dragging{opacity:0.4}
+.folder-tabs-drop-active .folder-tab:not(.folder-tab-add){box-shadow:inset 0 0 0 1px var(--border-light)}
+.folder-tabs-drop-active .folder-tab.folder-tab-drop{background:var(--accent-subtle)!important;box-shadow:inset 0 0 0 1.5px var(--accent)!important}
+/* ── Sidebar search (expandable panel) ── */
+.sidebar-search-wrapper{padding:4px 12px 8px;position:relative;flex-shrink:0;animation:searchSlideDown 0.15s ease}
+@keyframes searchSlideDown{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+.sidebar-search-box{display:flex;align-items:center;background:var(--bg-tertiary);border:1px solid var(--accent);border-radius:var(--radius-sm);padding:0 10px;box-shadow:0 0 0 3px rgba(110,86,207,0.10)}
+.sidebar-search-icon{color:var(--accent);display:flex;align-items:center;flex-shrink:0}
+.sidebar-search-input{flex:1;background:transparent;border:none;outline:none;color:var(--text-primary);font-family:inherit;font-size:12.5px;padding:8px;min-width:0}
+.sidebar-search-input::placeholder{color:var(--text-tertiary)}
+.sidebar-search-clear{background:none;border:none;color:var(--text-tertiary);cursor:pointer;padding:4px;border-radius:4px;display:flex;align-items:center;justify-content:center;transition:color var(--transition),background-color var(--transition);flex-shrink:0}
+.sidebar-search-clear:hover{color:var(--text-primary);background:var(--bg-hover)}
+.sidebar-search-stats{font-size:10px;color:var(--text-tertiary);padding:4px 4px 0;font-family:'JetBrains Mono',monospace;display:none}
+.sidebar-search-stats.visible{display:block}
+.sidebar-search-highlight{background:rgba(110,86,207,0.35);color:var(--text-primary);border-radius:2px;padding:0 1px}
+.conv-item-snippet{font-size:11px;color:var(--text-tertiary);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.3}
+.sidebar-search-empty{padding:24px 16px;text-align:center;color:var(--text-tertiary);font-size:12px;line-height:1.5}
+.sidebar-search-empty-icon{font-size:28px;margin-bottom:8px;opacity:.5}
+.search-loading{opacity:.6;font-style:italic}
+@keyframes search-pulse{0%,100%{opacity:.6}50%{opacity:1}}.search-loading{animation:search-pulse 1.2s ease-in-out infinite}
+/* Search toggle button active state */
+#sidebarSearchToggle.active{color:var(--accent);background:var(--accent-subtle)}
+/* ── Pinned zone + freeze border removed — pinning replaced by folders ── */
+/* ── Scrollable list ── */
+.conversations-list{flex:1;overflow-y:auto;padding:4px 8px 8px}
+/* ── Collapsible date-group headers in the conversation list ── */
+.conv-date-group{display:flex;align-items:center;gap:5px;width:100%;box-sizing:border-box;margin:0;padding:7px 8px 3px;background:var(--bg-secondary);border:none;cursor:pointer;user-select:none;font-family:inherit;font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-tertiary);position:sticky;top:0;z-index:1;transition:color .12s ease}
+.conv-date-group:first-child{padding-top:2px}
+.conv-date-group:hover{color:var(--text-secondary)}
+.conv-date-chevron{flex-shrink:0;opacity:0.7;transition:transform .18s ease}
+.conv-date-group.collapsed .conv-date-chevron{transform:rotate(-90deg)}
+.conv-date-label{flex:1;text-align:left}
+.conv-date-count{font-weight:600;font-size:10px;opacity:0.55;font-variant-numeric:tabular-nums}
+/* ── Conversation item ── */
+.conv-item{padding:10px 12px;border-radius:var(--radius-sm);cursor:pointer;transition:background var(--transition);margin-bottom:2px;display:flex;align-items:center;gap:10px;position:relative;overflow:hidden;contain:layout style;content-visibility:auto;contain-intrinsic-size:auto 56px}
+.conv-item:hover{background:var(--bg-hover)}
+.conv-item.active{background:var(--bg-active)}
+.conv-item .conv-text{flex:1;min-width:0}
+.conv-item .conv-title{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:5px;padding-right:4px}
+.conv-feishu-badge{font-size:12px;flex-shrink:0;filter:grayscale(0.2);opacity:0.85}
+/* Summarized-conversation glyph in the sidebar title. Quiet by default,
+ * brightens on hover; click reveals the cached AI summary via a toast. */
+.conv-summary-badge{display:inline-flex;align-items:center;flex-shrink:0;color:var(--text-tertiary);opacity:0.7;cursor:pointer;line-height:0;transition:opacity .12s,color .12s}
+.conv-summary-badge:hover{opacity:1;color:var(--accent,#6ea8fe)}
+/* Embedded memory list inside the Memory & Preferences settings tab — slightly
+ * tighter than the modal, with a soft cap + scroll so it never dominates. */
+.memory-list-embedded{margin-top:8px;max-height:340px;overflow-y:auto}
+.settings-section-divider{height:1px;background:var(--border,rgba(255,255,255,.08));margin:18px 0 14px}
+.conv-item .conv-date{display:flex;align-items:center;gap:4px;margin-top:3px}
+.conv-date-text{font-size:11px;color:var(--text-tertiary)}
+.conv-date-sep{font-size:9px;color:var(--text-tertiary);opacity:0.35}
+.conv-date-time{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-tertiary);opacity:0.65;letter-spacing:-0.02em}
+/* ── Status tags in sidebar date line ── */
+.conv-status-tag{font-size:9px;font-weight:600;padding:1px 5px;border-radius:6px;line-height:14px;margin-left:4px;white-space:nowrap;animation:statusTagFadeIn .3s ease}
+.conv-status-translating{color:#14b8a6;background:rgba(20,184,166,0.12)}
+.conv-status-memprefetch{color:#eab308;background:rgba(234,179,8,0.12)}
+/* Rate-limit — the SAME amber the in-bubble "限流中" chip / memprefetch uses;
+ * a live retry-state the user should notice, not an error. */
+.conv-status-ratelimit{color:#eab308;background:rgba(234,179,8,0.12)}
+.conv-status-streaming{color:var(--accent);background:var(--accent-subtle)}
+.conv-status-error{color:#ef4444;background:rgba(239,68,68,0.12)}
+.conv-status-incomplete{color:#f59e0b;background:rgba(245,158,11,0.12)}
+@keyframes statusTagFadeIn{from{opacity:0;transform:translateX(-4px)}to{opacity:1;transform:translateX(0)}}
+/* ── Overlay action buttons (gradient fade) ── */
+.conv-actions{position:absolute;right:0;top:0;bottom:0;display:flex;align-items:center;gap:1px;padding:0 6px 0 24px;opacity:0;pointer-events:none;transition:opacity 0.15s ease;background:linear-gradient(90deg,transparent 0%,var(--bg-secondary) 40%)}
+.conv-item:hover>.conv-actions{opacity:1;pointer-events:auto;background:linear-gradient(90deg,transparent 0%,var(--bg-hover) 40%)}
+.conv-item.active>.conv-actions{background:linear-gradient(90deg,transparent 0%,var(--bg-active) 40%)}
+.conv-item.active:hover>.conv-actions{opacity:1;pointer-events:auto;background:linear-gradient(90deg,transparent 0%,var(--bg-active) 40%)}
+.conv-action-btn{display:flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;background:none;color:var(--text-tertiary);cursor:pointer;border-radius:var(--radius-xs);transition:color 0.15s ease,background-color 0.15s ease}
+.conv-action-btn:hover{background:rgba(255,255,255,0.08);color:var(--text-primary)}
+/* conv-pin hover removed — replaced by folders */
+.conv-action-btn.conv-delete:hover{color:var(--error-text);background:var(--error-bg)}
+
+.conv-action-btn.conv-dup:hover{color:var(--accent)}
+/* pinned hint removed — replaced by folders */
+/* ── Streaming dot ── */
+.conv-streaming-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0;animation:pulse 1.5s infinite}
+/* ── Translating dot — teal pulsing, visually distinct from streaming blue ── */
+.conv-translating-dot{width:8px;height:8px;border-radius:50%;background:#14b8a6;flex-shrink:0;animation:translateDotPulse 1.2s ease-in-out infinite;box-shadow:0 0 5px rgba(20,184,166,0.4)}
+@keyframes translateDotPulse{0%,100%{opacity:1;transform:scale(1);box-shadow:0 0 5px rgba(20,184,166,0.4)}50%{opacity:0.5;transform:scale(0.8);box-shadow:0 0 2px rgba(20,184,166,0.2)}}
+/* ── Memory-prefetch dot — amber pulsing; matches the in-bubble chip color ── */
+.conv-memprefetch-dot{width:8px;height:8px;border-radius:50%;background:#eab308;flex-shrink:0;animation:memPrefetchDotPulse 1.2s ease-in-out infinite;box-shadow:0 0 5px rgba(234,179,8,0.4)}
+@keyframes memPrefetchDotPulse{0%,100%{opacity:1;transform:scale(1);box-shadow:0 0 5px rgba(234,179,8,0.4)}50%{opacity:0.5;transform:scale(0.8);box-shadow:0 0 2px rgba(234,179,8,0.2)}}
+/* ── Rate-limit dot — recolors the base streaming dot amber while the turn is
+ *   queued on a 429 (mirrors the in-bubble 限流中 chip). Kept as a modifier on
+ *   .conv-streaming-dot so it stays inside the existing DOM-reconcile selector. ── */
+.conv-streaming-dot.conv-ratelimit-dot{background:#eab308;box-shadow:0 0 5px rgba(234,179,8,0.4)}
+/* ── Awaiting-human dot — amber blinking, more prominent than streaming ── */
+.conv-awaiting-human-dot{width:9px;height:9px;border-radius:50%;background:#f59e0b;flex-shrink:0;animation:hgDotBlink 1s ease-in-out infinite;box-shadow:0 0 6px rgba(245,158,11,0.5)}
+@keyframes hgDotBlink{0%,100%{opacity:1;box-shadow:0 0 6px rgba(245,158,11,0.5)}50%{opacity:0.3;box-shadow:0 0 2px rgba(245,158,11,0.2)}}
+/* ── Error dot — settled failure state, static red with a soft glow (no pulse: the turn is over) ── */
+.conv-error-dot{width:8px;height:8px;border-radius:50%;background:#ef4444;flex-shrink:0;box-shadow:0 0 5px rgba(239,68,68,0.5);animation:errDotFadeIn .3s ease}
+@keyframes errDotFadeIn{from{opacity:0;transform:scale(0.6)}to{opacity:1;transform:scale(1)}}
+/* ── Incomplete dot — settled interrupted/unfinished turn, static amber with a soft glow (no pulse: the turn is over, just needs attention) ── */
+.conv-incomplete-dot{width:8px;height:8px;border-radius:50%;background:#f59e0b;flex-shrink:0;box-shadow:0 0 5px rgba(245,158,11,0.5);animation:errDotFadeIn .3s ease}
+/* ── Freshness degrade (pt_cadaa70ffa6b468d) ──
+   The authoritative channel is not delivering, so a busy indicator may be
+   showing a state that has since changed. Deliberately a SOFTENING (hollow +
+   dimmed + slow pulse), never a different colour: the conversation really may
+   still be busy, so this must read as "uncertain", not as a new status.
+   Applied ON TOP of the existing dot class, so both the layout and the
+   DOM-reconcile selector in conversation_list.js stay unchanged. */
+.conv-streaming-dot.conv-state-unconfirmed{opacity:.45;background:transparent;box-shadow:none;border:1.5px solid #10b981;animation:convUnconfirmedPulse 2s ease-in-out infinite}
+.conv-status-tag.conv-state-unconfirmed{opacity:.6;font-style:italic}
+@keyframes convUnconfirmedPulse{0%,100%{opacity:.4}50%{opacity:.85}}
+.main{flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden;max-width:100%}.topbar{height:52px;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 16px;gap:12px;background:var(--bg-secondary);flex-shrink:0}.toggle-sidebar-btn{background:none;border:none;color:var(--text-secondary);cursor:pointer;padding:6px;border-radius:var(--radius-xs);transition:color var(--transition),background-color var(--transition);display:flex;align-items:center}.toggle-sidebar-btn:hover{color:var(--text-primary);background:var(--bg-hover)}.topbar-title{flex:1;font-size:14px;font-weight:500;color:var(--text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.model-badge{font-size:11px;font-weight:600;font-family:'JetBrains Mono',monospace;padding:4px 10px;background:var(--accent-subtle);color:var(--accent);border-radius:20px;white-space:nowrap}
+
+.topbar-folder-badge{font-size:11px;font-weight:500;margin-left:6px;opacity:0.7}.welcome-folder-badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--text-secondary);margin-bottom:8px;padding:4px 12px;border-radius:16px;background:var(--bg-tertiary);border:1px solid var(--border)}.welcome-folder-dot{font-size:10px}
+.chat-wrapper{flex:1;position:relative;overflow:hidden;display:flex;flex-direction:column;min-height:0}
+/* ── Project Collaboration Bar — a slim single line under the top bar ──
+ *   Replaces the old multi-row "who's working" strip that crowded the top of
+ *   the conversation. Docked as a sibling AFTER .topbar and BEFORE
+ *   .chat-wrapper, so it never pushes the message list around. Shown only in
+ *   project mode with collaborative state to surface. */
+.presence-strip{flex:0 0 auto;width:100%;font-size:12px;animation:fadeIn .2s ease}
+.presence-strip[hidden]{display:none}
+.collab-bar-inner{display:flex;align-items:center;gap:8px;width:100%;height:28px;padding:0 16px;background:var(--bg-secondary);border:none;border-bottom:1px solid var(--border);color:var(--text-secondary);font-size:12px;font-family:inherit;cursor:pointer;text-align:left;overflow:hidden;white-space:nowrap;transition:background var(--transition)}
+.collab-bar-inner:hover{background:var(--bg-hover)}
+.collab-brain{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:6px;background:var(--accent-subtle);color:var(--accent);flex:0 0 auto}
+.collab-brain-ico{display:block}
+.collab-label{font-weight:600;color:var(--text-secondary);flex:0 0 auto;letter-spacing:.02em}
+/* Pillar #7 ambient status headline — the leading, flexible, truncating slot.
+   Unlike the fixed-width count segments it takes the remaining space and
+   ellipsizes so a long narrative never pushes the counts off the bar. */
+.collab-sep{color:var(--text-tertiary);opacity:.5;flex:0 0 auto}
+.collab-seg{flex:0 0 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.collab-seg-decisions{color:#e0a13a;font-weight:600}
+.collab-seg-progress{color:var(--accent)}
+.collab-seg-open{color:var(--text-secondary)}
+.collab-seg-peers{color:var(--text-tertiary)}
+.collab-has-decisions{box-shadow:inset 3px 0 0 #e0a13a}
+.collab-peer-epics{display:inline-flex;align-items:center;gap:10px;min-width:0;overflow:hidden;margin-left:4px}
+.collab-peer-epic{display:inline-flex;align-items:center;gap:5px;min-width:0;overflow:hidden;color:var(--text-tertiary)}
+.collab-peer-dot{width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 0 var(--accent);animation:presencePulse 2s infinite;flex:0 0 auto}
+.collab-epic-title{color:var(--text-primary);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+@keyframes presencePulse{0%{box-shadow:0 0 0 0 rgba(110,86,207,.5)}70%{box-shadow:0 0 0 5px rgba(110,86,207,0)}100%{box-shadow:0 0 0 0 rgba(110,86,207,0)}}
+/* ★ Perf: will-change:scroll-position promotes chat-container to its own compositor layer,
+ * preventing scroll from triggering layout/paint of the parent .main container. */
+/* ── Icon alignment utility (base layer; theme-agnostic) ──
+   Centers an SVG/img glyph inside any box with NO baseline drift. Use on the
+   PARENT of a standalone icon (button, tile, logo+label row, toolbar control).
+   The child `display:block` removes the inline SVG descender gap that makes a
+   glyph sit low even inside a centered box. Decision rule + traps: CLAUDE.md §3.4. */
+.icon-box{display:inline-flex;align-items:center;justify-content:center}
+.icon-box>svg,.icon-box>img{display:block}
+/* ── Chat pane = the SIZING CONTAINER for the right rail ──────────
+ * `container-type:inline-size` MUST be declared HERE, not on
+ * `.chat-wrapper`. The space the rail can occupy is
+ *   viewport − sidebar − request-inspector-drawer
+ * and the drawer (`.ri-drawer`, position:fixed) shrinks THIS element via
+ * `body.ri-open .chat-container{margin-right:min(780px,94vw)}` — it never
+ * touches the wrapper's used width. Measured across 64 states
+ * (8 widths × 4 sidebar states × drawer open/closed): wrapper and container
+ * disagree in 32 of them, by exactly the 780px drawer. A container query on
+ * the wrapper is therefore blind in half the matrix — the same class of bug
+ * as the `@media (max-width:1280px)` rule it replaces, one level down.
+ * Guarded by tests/test_turn_ctx_rail_geometry.py. */
+.chat-container{flex:1;overflow-y:auto;overflow-x:hidden;min-height:0;will-change:scroll-position;container-type:inline-size;container-name:chatpane}
+/* Tracks: [reading column] [right rail]. The rail OWNS its width instead of
+ * being floated into hoped-for margin, so it cannot be clipped by
+ * construction.
+ *
+ * ⚠️ THE MEASURE IS CAPPED ON THE MESSAGE BODY, NOT HERE. Two earlier attempts
+ * were wrong in instructive ways — don't redo either:
+ *   1. Clamping `.chat-inner` and leaving the text as a bare `1fr` poured every
+ *      spare pixel into line length (~130 chars at 2560, vs ~90 comfortable).
+ *   2. Capping via a `--measure-max` var on THIS element was INERT: the real
+ *      bound came from `[data-theme="tofu"] .md-content{max-width:72ch}`, so
+ *      deleting the var changed nothing and the guard asserting it was vacuous.
+ *      That theme-scoped rule also meant dark/light had NO cap at all.
+ * The single source of truth is now `--msg-measure` on `.message-content`
+ * (below), which is theme-agnostic. This element is a plain track container:
+ * surplus width becomes symmetric outer margin via `margin:0 auto`, which is
+ * what "the pane breathes" should mean. */
+.chat-inner{
+  --rail-w:0px;
+  --rail-gap:0px;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) var(--rail-w);
+  column-gap:var(--rail-gap);
+  max-width:calc(var(--msg-measure) + 52px + var(--rail-gap) + var(--rail-w) + 48px);
+  margin:0 auto;
+  padding:24px 24px 120px;
+}
+/* The rail column exists only when it fits — and the grant threshold is
+ * DERIVED, not tuned. The geometry guard pins a 700px floor on the running
+ * text column (tests/test_turn_ctx_rail_geometry.py::_MIN_MEASURE_PX), so the
+ * smallest pane that can host the rail without starving the prose is
+ *   700 text + 52 row furniture (40px avatar + 12px gap) + 12 text→rail gap
+ *   + 232 rail + 48 padding = 1044px.
+ * The grant is set at 1056px (floor + 12px of rounding slack). At full
+ * comfort the same sum with the 820px measure cap is 1176px — the max-width
+ * above — so panes 1056–1175 get the rail with a 700–820px measure and no
+ * outer margin, and wider panes get the margin back. Below 1056px the rail
+ * folds inline under each message (see .turn-ctx rules) rather than being
+ * clipped. The previous 1368px threshold was full-comfort PLUS a 192px
+ * luxury buffer, which disenfranchised every pane in 1056–1367 — e.g. a
+ * ~1365px pane at 100% zoom lost the rail entirely and only re-gained it at
+ * 80% zoom (the 2026-08-03 report). */
+@container chatpane (min-width: 1056px){
+  .chat-inner{ --rail-w:232px; --rail-gap:24px; }
+}
+
+/* ── Conversation-status strip — conversation-scoped chrome, IN-FLOW ──
+ * The context gauge and the turn-nav are CONVERSATION-scoped (one gauge for
+ * the whole context window, one dot strip for the whole conversation) —
+ * unlike the per-turn right rail, they were never per-message furniture.
+ * They used to float absolutely over the message flow (gauge left:18px,
+ * dots right:8px, both top:50% of .chat-wrapper): the gauge genuinely
+ * overlapped the message column below a ~1420px pane, and the dots VANISHED
+ * below a viewport media query. Both now live in-flow in this strip directly
+ * above the composer — they cannot overlap prose by construction, and narrow
+ * panes compress (the dots scroll horizontally) instead of disappearing.
+ * The strip is a child of .input-inner so --input-area-h (main.js:1105,
+ * measured from inputArea.offsetHeight) automatically includes it and the
+ * scroll-to-bottom button keeps anchoring above the whole band.
+ *
+ * WIDTH TRACK: the strip carries NO max-width of its own — as a block child
+ * of .input-inner it spans exactly the composer's --toolbar-w track, so the
+ * gauge's left edge IS the input box's left edge and the dots' right edge
+ * IS its right edge, at every viewport and toolbar content. It previously
+ * had its own max-width (--msg-measure + 52px = 872px): a second width
+ * source beside the composer's dynamic --toolbar-w, which could only agree
+ * by coincidence — measured live: a 26px/side overhang at the 820px floor,
+ * and arbitrary mismatch as the toolbar grows (2026-08-03 owner report).
+ * Guard: tests/test_turn_ctx_rail_geometry.py (strip invariants). */
+.conv-status-strip{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:0 0 8px;min-height:0}
+/* When both cells are empty (fresh conversation, <2 turns) the strip takes
+ * no vertical space at all — the composer band looks exactly as before. */
+.conv-status-strip:has(.turn-nav:empty):not(:has(.ctx-health-bar)){display:none}
+
+/* Scroll-to-bottom affordance — a floating pill anchored just above the
+ * composer inside the position:relative .chat-wrapper. Hidden by default;
+ * JS toggles .visible via the #chatContainer scroll listener when the reader
+ * is scrolled up away from the latest message. */
+.scroll-to-bottom-btn{position:absolute;left:50%;bottom:calc(var(--input-area-h, 120px) + 12px);transform:translateX(-50%) translateY(6px);z-index:9;display:flex;align-items:center;justify-content:center;width:36px;height:36px;padding:0;border-radius:50%;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-secondary);box-shadow:0 2px 10px rgba(0,0,0,0.28);cursor:pointer;opacity:0;pointer-events:none;visibility:hidden;transition:opacity .18s ease,transform .18s ease}
+.scroll-to-bottom-btn:hover{color:var(--text-primary);border-color:var(--accent)}
+.scroll-to-bottom-btn>svg{display:block}
+.scroll-to-bottom-btn.visible{opacity:1;pointer-events:auto;visibility:visible;transform:translateX(-50%) translateY(0)}
+.welcome{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:50vh;text-align:center;animation:fadeIn .5s ease;gap:2px}.welcome-icon{width:64px;height:64px;border-radius:0;background:transparent;display:flex;align-items:center;justify-content:center;font-size:28px;margin-bottom:6px;box-shadow:none;border:none;outline:none}.welcome-icon img{width:100%;height:100%;object-fit:contain;border-radius:0;border:none;outline:none;transition:transform 0.3s cubic-bezier(0.34,1.56,0.64,1)}.welcome-icon:hover img{transform:rotate(-5deg) scale(1.08)}.welcome-icon svg{filter:drop-shadow(0 2px 8px rgba(168,85,247,0.3))}.welcome h2 small{display:inline;font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;font-size:11px;font-weight:400;color:var(--text-tertiary);letter-spacing:0.12em;margin-left:6px;vertical-align:middle;opacity:0.7}.welcome h2{font-size:24px;font-weight:600;margin-bottom:4px;letter-spacing:-0.03em}
+/* ══ TOFU wordmark — THEME-AGNOSTIC LETTERFORM SOURCE ══════════════════════
+   侧栏(15/18px)与欢迎屏(24/42px)是同一个字标的两个字号,在**每个主题下**都必须同源。
+   字族/字重/字距/结构在此一次性供给,两处共同消费;各主题只允许再覆盖颜色,各面
+   只允许再覆盖自己的字号与悬停编排。
+
+   为什么必须在基础层而不是 [data-theme] 层(2026-07-29 owner 实测退回):上一版共享
+   规则挂在 `[data-theme="tofu"]` 前缀上,于是 dark/light 下两处依旧各写一套——实测
+   侧栏 700 / +0.6px / 紫渐变,欢迎屏 600 / -0.72px / 金渐变,字距方向都相反。
+
+   而真因不止配色。`.tofu-brand`(0,1,0) 自己写的 font-weight:700 与
+   letter-spacing:0.08em 是**死代码**:通用 `.welcome h2`(0,1,1) 特异性更高,把它们压成
+   600 / -0.03em;而侧栏那份同样的意图却生效了。同一份声明在两处得出相反结果,源码
+   看上去两边却都写了 700/0.08em——这正是漂移能长期隐形的机制。故本规则刻意带上下文
+   (`.sidebar-header h1 .sidebar-brand` = 0,2,2 / `.welcome h2.tofu-brand` = 0,2,1),
+   两者都严格压过 `.welcome h2`(0,1,1),让「写下的就是生效的」。
+   守卫 tests/test_brand_wordmark_parity.py 按 tofu/dark/light 三主题参数化钉死。
+
+   字重 700 不是随手取的:Pixelify Sans 只随包提供 Bold 一个字面(见
+   static/vendor/google-fonts-local.css 仅 PixelifySans-Bold.woff2),700 是它唯一真实
+   可渲染的字重;写 600 只会让浏览器合成假粗体,不同字号下粗细还不一致。 */
+.sidebar-header h1 .sidebar-brand,
+.welcome h2.tofu-brand{
+  font-family:'Pixelify Sans','Press Start 2P',cursive;
+  font-weight:700;
+  letter-spacing:0.06em;
+  text-transform:none
+}
+.sidebar-header h1 .sidebar-brand>span,
+.welcome h2.tofu-brand>span{display:inline-block}
+
+
+/* ══ TOFU BRAND LOCKUP — 吉祥物与字标同源(THEME-AGNOSTIC MASCOT FORM)══════════
+   吉祥物和上面那串字标是**同一个锁定组合**(lockup),不是恰好相邻的两个元素,所以
+   它的形态声明就放在字标源旁边、同一个基础层里。两处消费同一份资产:
+   侧栏 22px 与欢迎屏 100px,都是 static/icons/tofu-welcome.svg。
+
+   为什么存在(实测 shipped CSS,owner 第五轮退回)——字标已在前四轮做到三主题同源,
+   但吉祥物从未被审计,仍带着这四轮要杀的同一个病根「形态钉在 [data-theme=tofu]」:
+     1. opacity 按主题分叉:基础层 .sidebar-tofu-icon{opacity:0.85} vs
+        tofu 层 {opacity:.92},而欢迎屏同一只是 1 —— 同一个品牌物三种重量。
+     2. hover 编排 tofu-only:`[data-theme="tofu"] ...h1:hover` 无基础层对应,
+        dark/light 的侧栏吉祥物 hover 完全僵死,欢迎屏却三主题都会浮动+抬升。
+     3. 渲染保真度分叉:侧栏 image-rendering:pixelated vs 欢迎屏不设 ——
+        同一份矢量在一处被硬边栅格化。已删除而非搬移,理由见原处注释。
+     4. (连带)transition 当时被塞在 tofu-only 的 opacity 规则里,所以基础层若只
+        搬 transform 不搬 transition,hover 会变成瞬跳而不是弹性过渡。
+
+   opacity 统一取 1 而不是 .85/.92 的任一个:那两个值是在补偿早期深色背景下的
+   刺眼白边,而 tofu 调色板已无该背景;更要紧的是,品牌标记把自己调暗读起来像
+   disabled chrome,不像产品身份。欢迎屏本来就是 1,取 1 同时消掉第三个值。
+
+   hover 手势按尺度分工但三主题都存在(与 float 同一条规矩):侧栏 22px 用
+   rotate(-8deg) scale(1.1),欢迎屏 100px 用 rotate(-5deg) scale(1.08) ——
+   同样的角位移在大尺寸上看着过火,故幅度随尺寸收敛,而**是否有反馈**不随主题变。
+
+   ★ 欢迎屏那只的 transition 仍写在它自己的 `.welcome-icon img` 规则里(与
+   width/height/object-fit 同处),此处再供一份是有意的:两处同一时长同一缓动,
+   让「同一个吉祥物」在两个尺寸下手感一致,且侧栏那只在本轮之前根本没有基础层
+   transition(它借的是 tofu 层那份)。
+
+   主题只准覆盖颜色/滤镜,不准覆盖上面任何一项形态。
+   守卫 tests/test_brand_wordmark_parity.py 第 7 节按三主题参数化钉死。 ── */
+.sidebar-tofu-icon,
+.welcome-icon img{
+  opacity:1;
+  image-rendering:auto;
+  transition:transform .3s cubic-bezier(.34,1.56,.64,1)
+}
+.sidebar-header h1:hover .sidebar-tofu-icon{transform:rotate(-8deg) scale(1.1)}
+
+/* ══ BRAND SEAL + GROUND SHADOW — THEME-AGNOSTIC FORM ══════════════════════
+   品牌区的两个形态特征。与字形真源同一道理(2026-07-29 owner 实测二次退回):上一版
+   它们只挂在 `[data-theme="tofu"]` 上,于是切到 dark/light 品牌区就退回改造前的样子
+   ——实测「豆腐」在 dark 为 11px/400/灰 #6a6a7a、light 为 11px/400/灰 #868490 的裸字,
+   正是「在 42px 主标旁读作漏排说明文字」那个原始缺陷在另两个主题原样存活;吉祥物
+   落影同样缺席,两个主题下它仍悬空。
+
+   故形态(印章几何 / clamp 字号下限 / 字距补偿 / 倾角 / 落影椭圆)在此一次性供给三个
+   主题,主题层只允许覆盖「印底色」与「落影浓度」。选择器带上下文到 (0,3,2),严格压过
+   低优先级的 `.welcome h2 small`(0,2,2)——后者把 `-webkit-text-fill-color` 设成灰色
+   且该属性可继承,不显式声明会被它穿透。
+
+   三个数字是实拍定的,不是估的(static/icons/_gen/wordmark-preview/a3.png):
+   ① font-size 用 clamp 而非纯 em —— 纯 .30em 在移动 20px 主标下只有 6px,中文两字
+      糊成一团;纯 px(12.5)反过来在 20px 主标旁几乎与主标同高。两端都实拍过。
+   ② padding 左右不等(.64em 左 / .50em 右)—— letter-spacing 会在末字「腐」后多留一份
+      字距,左右等距会看起来右边更空。
+   ③ margin-left .52em —— .36em 实拍贴住了 u 的右侧。
+   几何全部用 em,随 clamp 后的字号一起缩放,只有字号本身有下限。 */
+.welcome h2.tofu-brand small{
+  font-family:var(--sans-body);
+  font-size:clamp(10.5px,.30em,13px);
+  font-weight:700;
+  letter-spacing:.14em;line-height:1;
+  color:#FCF8EE;-webkit-text-fill-color:#FCF8EE;
+  background:linear-gradient(150deg,#A05E17 0%,#84470F 100%);
+  padding:.42em .50em .42em .64em;
+  border-radius:.52em;
+  margin-left:.52em;
+  vertical-align:middle;opacity:1;
+  transform:translateY(-.62em) rotate(-3.2deg);
+  box-shadow:0 .06em .16em rgba(92,72,44,.30),
+             inset 0 .06em 0 rgba(255,247,232,.30)
+}
+/* 吉祥物接地投影 —— 没有它时吉祥物悬在纸面上方(只有 drop-shadow、没有落影),读作
+   贴图而非放在纸上的物件。纯装饰,不参与布局。
+   position:relative 必须在此一并声明 —— 基础层 .welcome-icon 本来没有定位,之前只是
+   tofu 层顺手给了一个;不补的话落影会逃到最近的定位祖先上去。 */
+.welcome-icon{position:relative}
+
+/* ══ BRAND-AREA SCALE — THEME-AGNOSTIC ═══════════════════════════════════════
+   品牌区的**尺度**(吉祥物大小、主标字号、图标与字标的间距)与形态/配色/动效同属
+   品牌形态,必须三主题同源。
+
+   2026-07-29 owner 实测退回(本家族第四次,前三次分别是字标/印章+落影/动效):基础层
+   `.welcome-icon{64px}` 与 `.welcome h2{24px}` 是早年的**通用**小尺寸,而放大值只写在
+   `[data-theme="tofu"]` 里 ⇒ 实测吉祥物 100px vs 64px、主标 42px vs 24px、图标下间距
+   24px vs 6px。也就是说 dark/light 下这块区域退化成「一个小图标配一行普通 h2」,
+   而不是品牌时刻。移动端阶梯(84/68px)同样只有 tofu 有,那两个主题在手机上连缩放
+   曲线都没有。
+
+   ★ 放大值锚在 `.welcome-icon` 与 `.welcome h2.tofu-brand`,**不动通用 `.welcome h2`**
+   —— 后者仍要服务非品牌的欢迎标题(空文件夹提示等),把它一起放大会波及无关表面。
+   `.welcome h2.tofu-brand` 是 (0,2,1),严格压过基础层 `.welcome h2`(0,1,1)。
+
+   ★ 尺度取 tofu 现值而非把 tofu 拉小:那是 owner 在岗看得最久、且本轮设计(落款印
+   几何、落影椭圆比例、字距补偿)全部围绕它求解的比例;反过来迁就旧通用值会让前三轮
+   的实测结论全部失效。
+
+   守卫 tests/test_brand_wordmark_parity.py 按 _THEMES 参数化钉死三主题尺度相等,
+   桌面与移动断点各测一次。 */
+.welcome-icon{
+  width:100px;height:100px;
+  border-radius:var(--radius-sm);
+  overflow:visible;
+  margin-bottom:24px
+}
+.welcome h2.tofu-brand{font-size:42px}
+/* 移动端阶梯不写在这里 —— 全局 `@media(max-width:768px){.welcome-icon{52px}}`(约 17031 行)
+   与横屏那条(约 18456 行)同为 (0,1,0) 且位置更靠后,写在此处会被它们压成死代码
+   (实测:此处写 84px,浏览器解析出 52px)。故品牌区的移动阶梯放在那两条之后,
+   见文件尾部 BRAND-AREA SCALE · MOBILE。 */
+.welcome-icon::before{
+  /* bottom 取负值：图片盒与图标盒完全重合(实测两者同为 84×84、imgTop=0),
+     落影若留在盒内就贴在贴图下沿、读不出「托住」的感觉;探出盒外才像地面。
+     这要求祖先不能裁切 —— .welcome-icon 本身无 overflow 设置(默认 visible),
+     守卫会按三主题钉住「差分像素必须出现在图标下缘」。
+     ★ 水平居中用 left:11%(=(100-78)/2) 而不用 translateX(-50%) —— transform 必须
+     整个留给呼吸动画的 scale,两者写在同一属性上会互相覆盖。 */
+  content:"";position:absolute;left:11%;bottom:-5px;
+  width:78%;height:13px;border-radius:50%;display:block;
+  background:radial-gradient(ellipse at 50% 50%,rgba(140,100,52,.34),rgba(140,100,52,0) 72%);
+  animation:tofuShadowBreathe 4s ease-in-out infinite
+}
+
+/* ══ 品牌动效 — 会呼吸的吉祥物 + 跟着呼吸的影子 ══════════════════════════
+   2026-07-29 owner 实测退回:此前 `animation:tofuFloat` 挂在 .welcome-icon 上,而落影是
+   同一元素的 ::before ⇒ 父元素 translateY 时影子**锁死同步移动**(9 帧采样 icon bottom
+   160.03→156.55,摆幅 3.48px)。地面线跟着飘,恰好复活了引入落影本要解决的「贴纸感」。
+   真实接触影的行为是:地面线**不动**,物体升高时影子**变小变淡**。
+
+   落点:浮动改挂在 img 上,宿主 .welcome-icon 保持静止,落影的地面线因此钉死;落影配一条
+   同周期同缓动的反相动画,相位天然对齐(两者都 4s ease-in-out、同时起播)。
+
+   ★ img 的浮动用独立变换属性 `translate` 而不是 `transform` —— hover 态
+   (`transform:scale(1.06) rotate(-3deg)`)已经占用了 transform,写在同一属性上会互相
+   覆盖:悬停会掐掉浮动,或浮动会掐掉悬停。独立属性与 transform 各自成分复合,两者共存。
+   同理落影的呼吸占用 transform,故它的水平居中改用 left:11% 几何量而非 translateX。
+
+   ★ 挂在基础层而非 [data-theme="tofu"] —— 动效同属品牌形态,此前只有 tofu 用户看得到,
+   dark/light 下吉祥物完全静止,与前两轮「形态挂在 tofu 上」是同一类缺陷。 */
+@keyframes tofuMascotFloat{
+  0%,100%{translate:0 0}
+  50%{translate:0 -4px}
+}
+@keyframes tofuShadowBreathe{
+  /* 反相:吉祥物升到最高点(50%)时影子最小最淡 —— 物体离地面越远,接触影越散越弱 */
+  0%,100%{transform:scale(1);opacity:1}
+  50%{transform:scale(.82);opacity:.62}
+}
+.welcome-icon img{animation:tofuMascotFloat 4s ease-in-out infinite}
+/* 无障碍兜底:关掉动效后,影子必须停在「贴地」的静止态(scale 1 / opacity 1),
+   而不是停在动画中途某个收缩帧。 */
+@media (prefers-reduced-motion:reduce){
+  .welcome-icon img{animation:none;translate:0 0}
+  .welcome-icon::before{animation:none;transform:scale(1);opacity:1}
+}
+/* ── 字母配色 — 两处共用同一套渐变。侧栏此前是紫渐变(#8b6cf6→#a78bfa)、欢迎屏是
+   豆腐奶油-琥珀金渐变,dark 下实测就是「侧栏紫 Tofu + 欢迎屏金 Tofu」同一品牌两个
+   颜色。保留金系(它是豆腐本身的颜色;紫是早年通用 accent 的遗留)。 ── */
+.sidebar-brand-t,.welcome h2.tofu-brand .tofu-brand-t{background-image:linear-gradient(135deg,#f5d5a0,#e8b86d)}
+.sidebar-brand-o,.welcome h2.tofu-brand .tofu-brand-o1{background-image:linear-gradient(135deg,#fdf2d7,#f0dbb8)}
+.sidebar-brand-f,.welcome h2.tofu-brand .tofu-brand-f{background-image:linear-gradient(135deg,#dcc8a4,#c5a87e)}
+.sidebar-brand-u,.welcome h2.tofu-brand .tofu-brand-u{background-image:linear-gradient(135deg,#e8b86d,#d4a050)}
+.welcome h2.tofu-brand>span{-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+/* `.tofu-brand` 原有的 font-family/font-size/font-weight/letter-spacing 已删除:后两项
+   是死代码(被 .welcome h2 压过),font-size 同样由 .welcome h2 的 24px 决定——留着只会
+   让下一个人以为它们生效。 */
+.tofu-brand{margin-bottom:6px}.welcome p{color:var(--text-secondary);font-size:13px;max-width:380px;line-height:1.5}.feature-pills{display:flex;gap:6px;margin-top:16px;flex-wrap:wrap;justify-content:center}.feature-pill{font-size:11px;padding:4px 12px;border-radius:20px;border:1px solid var(--border);color:var(--text-secondary);background:var(--bg-tertiary);display:flex;align-items:center;gap:5px}
+.cv-off .message{content-visibility:visible!important}.message{margin-bottom:24px;content-visibility:auto;contain-intrinsic-size:auto 120px;display:grid;grid-template-columns:auto minmax(0,1fr) var(--rail-w);column-gap:12px;align-items:flex-start;position:relative;grid-column:1 / -1}@keyframes slideUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}@keyframes fadeIn{from{opacity:0}to{opacity:1}}.message-new{animation:slideUp .3s ease;content-visibility:visible}
+.message-avatar{width:40px;height:40px;border-radius:0;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;flex-shrink:0;background:transparent;color:white;margin-top:2px;overflow:visible;box-shadow:none}.message-avatar img,.message-avatar svg{filter:brightness(0.82) saturate(0.85)}.message-avatar svg{image-rendering:pixelated}.message:not(.user-msg) .message-avatar{background:transparent;border-radius:0;box-shadow:none}.message.user-msg .message-avatar{width:40px;height:40px;background:transparent;color:#a5b4fc}
+/* ── READING MEASURE (single source of truth, theme-agnostic) ──────
+ * `--msg-measure` bounds the ENTIRE message body: prose, code blocks, tables
+ * and tool cards all lay out against the same number, so a code block never
+ * runs wider than the paragraph above it.
+ *
+ * WHY IT LIVES HERE AND NOT IN A THEME BLOCK: the only cap that ever existed
+ * was `[data-theme="tofu"] .md-content{max-width:72ch}` — theme-scoped, so
+ * dark and light users had NO bound and read the full content box. Declaring
+ * it on `:root` + applying it on `.message-content` makes all three themes
+ * inherit one value. Re-introducing a per-theme measure would recreate the
+ * split; change THIS number instead.
+ * Guarded per-theme by tests/test_turn_ctx_rail_geometry.py. */
+:root{ --msg-measure:820px; }
+.message-content{flex:1;min-width:0;max-width:var(--msg-measure);overflow:hidden;position:relative;contain:layout style}
+.conversation-surface [hidden]{display:none!important}
+/* ConversationSurface owns keyed blocks, but the retained visual contract has
+ * one body flow inside `.message-content`. A second grid here creates doubled
+ * gaps and lets cards establish competing width tracks. */
+.message-content>.conversation-turn-blocks{display:block;min-width:0;max-width:100%}
+.message-content>.conversation-turn-blocks>.conversation-block{min-width:0;max-width:100%}
+.message-header{display:flex;align-items:center;gap:10px;margin-bottom:5px}
+.avatar{width:28px;height:28px;border-radius:var(--radius-xs);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;flex-shrink:0}.avatar.user{background:var(--user-bubble);color:#a5b4fc}.avatar.assistant{background:linear-gradient(135deg,var(--accent),#a78bfa);color:white}
+.message-role{font-size:13px;font-weight:600}.message-time{font-size:11px;color:var(--text-tertiary)}.stream-elapsed-timer{font-size:11px;font-family:'JetBrains Mono',monospace;margin-left:6px;display:inline-flex;align-items:center;gap:4px}.stream-elapsed{color:var(--text-tertiary);font-weight:400}.stream-stuck-warn{color:var(--thinking-text);font-weight:600;animation:stuckPulse 2s ease-in-out infinite}.stream-stuck-severe{color:var(--error-text);font-weight:700;animation:stuckPulse 1s ease-in-out infinite}.stream-stuck-activity{color:var(--text-secondary);font-weight:500;font-style:italic;animation:stuckPulse 2.4s ease-in-out infinite}@keyframes stuckPulse{0%,100%{opacity:0.6}50%{opacity:1}}.stream-liveness{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:6px;line-height:1.5}.stream-liveness-icon{flex-shrink:0}.stream-liveness-warn{color:var(--thinking-text);background:rgba(200,170,90,.12);animation:stuckPulse 2s ease-in-out infinite}.stream-force-finish-btn{font-size:10px;font-family:'JetBrains Mono',monospace;background:var(--error-text);color:white;border:none;border-radius:4px;padding:1px 8px;margin-left:6px;cursor:pointer;font-weight:600;opacity:0.9;transition:opacity .2s}.stream-force-finish-btn:hover{opacity:1}.message-body{padding-left:0;overflow:hidden;max-width:100%}
+/* ── Message image thumbnail grid ── */
+.msg-image-grid{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.msg-video-list{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.msg-video-card{display:flex;align-items:center;gap:10px;padding:6px 12px 6px 6px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;max-width:300px;transition:border-color .2s}
+.msg-video-card:hover{border-color:var(--accent)}
+.msg-video-thumb{position:relative;width:72px;height:44px;border-radius:6px;overflow:hidden;background:#000;flex:none;display:flex;align-items:center;justify-content:center}
+.msg-video-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.msg-video-play{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:15px;text-shadow:0 1px 3px rgba(0,0,0,.75)}
+.msg-video-info{min-width:0}
+.msg-video-name{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
+.msg-video-meta{font-size:11px;color:var(--text-tertiary);white-space:nowrap}
+.video-chip img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.video-chip.video-failed{opacity:.75;border-color:var(--error-text)}
+.msg-img-thumb{position:relative;width:80px;height:80px;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border);cursor:pointer;transition:border-color .2s,transform .15s;flex-shrink:0}
+.msg-img-thumb:hover{border-color:var(--accent);transform:scale(1.04)}
+.msg-img-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.msg-img-thumb.pdf-page{border-color:rgba(207,167,56,0.35)}
+.msg-img-badge{position:absolute;top:3px;left:3px;background:rgba(207,167,56,0.9);color:#fff;font-size:7px;font-weight:700;padding:1px 4px;border-radius:3px;font-family:'JetBrains Mono',monospace}
+.msg-img-size{position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.7);color:#aaa;font-size:8px;text-align:center;padding:1px 0;font-family:'JetBrains Mono',monospace}
+.msg-img-thumb.placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--bg-tertiary)}
+.msg-img-placeholder-icon{font-size:20px}
+/* Legacy bare img fallback (markdown-rendered images)
+ * ★ Excludes image-gen cards: :not() specificity (0,2,2) was beating the (0,2,1) overrides
+ *   in .ig-result-card / .imagegen-card, squishing generated images to 300×200px */
+.message-body img:not(.msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){max-width:300px;max-height:200px;border-radius:var(--radius-sm);margin-bottom:8px;border:1px solid var(--border);cursor:pointer;transition:opacity .2s}.message-body img:not(.msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img):hover{opacity:0.85}
+.md-content{font-family:var(--md-sans);font-size:14.5px;line-height:1.75;letter-spacing:0.005em;color:var(--text-primary);contain:layout style;overflow-x:hidden;max-width:100%;overflow-wrap:break-word;word-wrap:break-word}.md-content p{margin-bottom:13px}.md-content p:last-child{margin-bottom:0}.md-content strong{font-weight:650}.md-content em{font-style:italic;color:var(--text-secondary)}.md-content a{color:var(--accent);text-decoration:none;word-break:break-word;text-underline-offset:2px}.md-content a:hover{text-decoration:underline}.md-content ul,.md-content ol{margin:10px 0 13px 22px}.md-content li{margin-bottom:5px}.md-content li::marker{color:var(--text-tertiary)}.md-content h1,.md-content h2,.md-content h3,.md-content h4{margin:22px 0 9px;font-weight:650;letter-spacing:-0.01em;line-height:1.35}.md-content h1{font-size:20px}.md-content h2{font-size:17px}.md-content h3{font-size:15px}.md-content blockquote{border-left:3px solid var(--accent);padding:8px 16px;margin:12px 0;color:var(--text-secondary);background:var(--bg-tertiary);border-radius:0 var(--radius-xs) var(--radius-xs) 0}.md-content code{font-family:'JetBrains Mono',monospace;font-size:12.5px;background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;border:1px solid var(--border)}.md-content pre{margin:12px 0;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border)}.md-content pre code{display:block;padding:16px;overflow-x:auto;background:var(--bg-secondary);border:none;line-height:1.5}.code-header{display:flex;align-items:center;gap:8px;padding:6px 12px;background:var(--bg-tertiary);border-bottom:1px solid var(--border);font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}.code-header span{flex:1}.copy-btn{background:none;border:none;color:var(--text-tertiary);cursor:pointer;font-size:11px;font-family:inherit;padding:2px 8px;border-radius:4px;transition:color var(--transition),background-color var(--transition);flex-shrink:0}.copy-btn:hover{color:var(--text-primary);background:var(--bg-hover)}.md-content.user-content{white-space:pre-wrap;word-break:break-word}pre.code-long{position:relative}pre.code-long[data-collapsed="true"]>code{max-height:200px;overflow:hidden}pre.code-long[data-collapsed="true"]::after{content:'';position:absolute;bottom:0;left:0;right:0;height:60px;background:linear-gradient(to bottom,transparent,var(--bg-secondary));pointer-events:none;border-radius:0 0 var(--radius-sm) var(--radius-sm)}.code-collapse-btn{background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;font-family:'JetBrains Mono',monospace;padding:2px 8px;border-radius:4px;transition:color var(--transition),background-color var(--transition);flex-shrink:0;white-space:nowrap}.code-collapse-btn:hover{background:var(--accent-subtle);color:var(--accent-hover)}.table-header{display:flex;align-items:center;gap:8px;padding:4px 12px;background:var(--bg-tertiary);border-bottom:1px solid var(--border);font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}.table-header span{flex:1}.md-table-wrapper{overflow-x:auto;margin:12px 0;border:1px solid var(--border);border-radius:var(--radius-sm);scrollbar-width:thin;scrollbar-color:var(--text-tertiary) transparent}.md-table-wrapper::-webkit-scrollbar{height:6px}.md-table-wrapper::-webkit-scrollbar-track{background:transparent}.md-table-wrapper::-webkit-scrollbar-thumb{background:var(--text-tertiary);border-radius:3px}.md-content table{width:max-content;min-width:100%;border-collapse:collapse;font-size:13px;margin:0}.md-content th,.md-content td{padding:8px 12px;border:1px solid var(--border);text-align:left;white-space:normal;word-break:break-word}.md-content th{background:var(--bg-tertiary);font-weight:600;white-space:nowrap}
+/* ★ Perf: replaced backdrop-filter:blur(10px) with solid rgba bg — blur forces GPU re-composite on every scroll frame, 
+ * costing ~2-4ms per frame. Solid bg is visually identical on dark theme and costs nothing. */
+.turn-nav{display:flex;flex-direction:row;align-items:center;gap:2px;min-width:0;max-width:min(52%,560px);overflow-x:auto;overflow-y:hidden;padding:3px 5px;background:rgba(17,17,21,0.96);border:1px solid var(--border);border-radius:16px;scrollbar-width:none;opacity:0.85;transition:opacity .3s;flex:0 1 auto}.turn-nav:hover{opacity:1}.turn-nav::-webkit-scrollbar{display:none}.turn-nav:empty{display:none}.turn-nav-label{font-size:8px;font-weight:700;color:var(--text-secondary);letter-spacing:.08em;text-transform:uppercase;padding:2px 0 3px;user-select:none}.turn-dot{width:26px;height:26px;border-radius:50%;background:rgba(255,255,255,0.04);border:1.5px solid var(--border);color:var(--text-secondary);font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:color .2s,background-color .2s,border-color .2s,transform .2s;font-family:'JetBrains Mono',monospace;flex-shrink:0}.turn-dot:hover{background:var(--accent-subtle);color:var(--accent);border-color:var(--accent);transform:scale(1.15)}.turn-dot.active{background:var(--accent);color:white;border-color:var(--accent)}/* ★ Perf: contain:content isolates thinking block layout from parent reflows */
+.thinking-block{margin-bottom:8px;border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;overflow:hidden;contain:content}
+
+/* Windowed messages keep their execution history available as quiet metadata,
+   not as a second full-width action bar competing with the turn controls. */
+.message-activity-loader{width:fit-content;max-width:100%;min-height:28px;margin:3px 0 7px;padding:4px 6px;border:0;border-radius:5px;background:transparent;color:var(--text-tertiary);font:500 11px/1.4 var(--md-sans);text-align:left;cursor:pointer;display:inline-flex;align-items:center;gap:6px;vertical-align:top;transition:background-color var(--transition),color var(--transition),opacity var(--transition)}
+.message-activity-loader>svg{opacity:.62}
+.message-activity-loader>span:nth-child(2){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.message-activity-loader-chevron{font-size:14px;font-weight:400;line-height:1;color:currentColor;opacity:.38;transition:opacity var(--transition),transform var(--transition)}
+.message-activity-loader:hover{background:var(--bg-hover);color:var(--text-secondary)}
+.message-activity-loader:hover .message-activity-loader-chevron{opacity:.72;transform:translateX(1px)}
+.message-activity-loader.is-loading{cursor:wait;opacity:.62}
+.message-activity-loader.is-loading>svg{animation:spin .8s linear infinite}
+.message-activity-loader.is-loading .message-activity-loader-chevron{visibility:hidden}
+.message-activity-loader.is-error{color:var(--error-text);background:transparent}
+.message-activity-loader.is-error:hover{background:var(--error-bg)}
+.message-activity-loader:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* Display-only "Earlier Thinking" block surfaced on Continue rollback —
+   the trailing reasoning that was discarded because no provider can
+   accept it on replay. Visually distinguished from live thinking via
+   dashed border + slightly muted background. */
+.thinking-block.thinking-prior{border-style:dashed;opacity:.85}
+.thinking-block.thinking-prior .thinking-label::before{content:"\2937  ";opacity:.7}
+.thinking-block.content-prior .thinking-label{color:var(--text-tertiary)}
+.thinking-block.content-prior .thinking-label::before{content:"\21A9  "}
+.thinking-header{display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;user-select:none;transition:background var(--transition)}.thinking-header:hover{background:var(--bg-hover)}.thinking-label{font-size:12px;font-weight:500;color:var(--text-tertiary);flex:1}.thinking-toggle{font-size:11px;color:var(--text-tertiary);opacity:.6;transition:transform .3s ease}.thinking-block.expanded .thinking-toggle{transform:rotate(180deg)}.thinking-content{max-height:0;overflow:hidden;transition:max-height .4s ease}.thinking-block.expanded .thinking-content{max-height:none}.thinking-text{padding:0 14px 14px;font-size:13px;line-height:1.6;color:var(--text-secondary);white-space:pre-wrap;word-break:break-word}
+/* Markdown-rendered thinking (Codex '**…**' headline summaries): the base
+ * rule is white-space:pre-wrap for plain-text streaming; rendered HTML must
+ * NOT pre-wrap or the newlines between tags become visible blank lines. */
+.thinking-text.thinking-md{white-space:normal}
+.thinking-text.thinking-md p{margin:0 0 8px}
+.thinking-text.thinking-md p:last-child{margin-bottom:0}
+.thinking-text.thinking-md ul,.thinking-text.thinking-md ol{margin:0 0 8px;padding-left:1.4em}
+.thinking-text.thinking-md ul:last-child,.thinking-text.thinking-md ol:last-child{margin-bottom:0}
+/* Typed conversation surface renders the thinking block as semantic
+   <details>/<summary> reusing the same classes as the div+.expanded idiom:
+   hide the UA disclosure marker, rotate the chevron and reveal the content
+   off the [open] attribute instead of the .expanded class. */
+summary.thinking-header{list-style:none}
+summary.thinking-header::-webkit-details-marker{display:none}
+.thinking-block[open] .thinking-toggle{transform:rotate(180deg)}
+.thinking-block[open] .thinking-content{max-height:none}
+.bilingual-block{margin-top:10px;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;background:var(--bg-secondary);contain:layout style}.bilingual-original{border-color:rgba(165,180,252,0.2);background:rgba(30,27,75,0.15)}.bilingual-translated{border-color:rgba(110,86,207,0.2);background:rgba(110,86,207,0.04)}.bilingual-header{display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;user-select:none;transition:background var(--transition)}.bilingual-header:hover{background:var(--bg-hover)}.bilingual-label{font-size:12px;color:var(--text-tertiary);flex:1;display:flex;align-items:center;gap:0}.bilingual-type{opacity:.5;transition:opacity .2s}.bilingual-type.active{opacity:1;color:var(--text-secondary);font-weight:600}.bilingual-sep{opacity:.3;margin:0 4px;font-size:10px}.bilingual-model{margin-left:8px;font-size:10px;font-weight:500;color:var(--accent);background:rgba(139,92,246,0.1);padding:1px 7px;border-radius:8px;font-family:'JetBrains Mono',monospace;letter-spacing:.02em;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bilingual-toggle{font-size:10px;color:var(--text-tertiary);opacity:.5;transition:transform .3s ease}.bilingual-block.expanded .bilingual-toggle{transform:rotate(180deg)}.bilingual-body{max-height:0;overflow:hidden;transition:max-height .4s ease}.bilingual-block.expanded .bilingual-body{max-height:none}.bilingual-body .md-content{padding:0 12px 10px;font-size:13px;opacity:.85}.bilingual-copy-btn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:none;border-radius:4px;background:transparent;color:var(--text-tertiary);cursor:pointer;opacity:.5;transition:all .2s ease;flex-shrink:0}.bilingual-copy-btn:hover{opacity:1;background:var(--bg-hover);color:var(--text-secondary)}.bilingual-copy-btn.copied{opacity:1;color:#34d399}
+/* ── Live auto-translation indicator ──
+ * Streams the 译文 in as it arrives, then morphs into the purple
+ * bilingual block. Tinted with the same accent (139,92,246) as
+ * .bilingual-* so the transition is seamless; colors lean on CSS
+ * variables / low-alpha accent so they hold up on light/tofu themes. */
+.translate-loading{margin-top:10px;border:1px solid var(--accent-subtle);border-radius:var(--radius-sm);background:linear-gradient(180deg,rgba(110,86,207,0.07),rgba(110,86,207,0.02));overflow:hidden;position:relative;contain:layout style}
+.translate-loading::before{content:"";position:absolute;top:0;left:-40%;width:40%;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);animation:translate-sheen 1.8s ease-in-out infinite;opacity:.7}
+@keyframes translate-sheen{0%{left:-40%}100%{left:100%}}
+.translate-loading-head{display:flex;align-items:center;gap:8px;padding:9px 13px}
+.translate-loading.has-preview .translate-loading-head{border-bottom:1px solid var(--accent-subtle)}
+.translate-loading-label{font-size:12px;font-weight:600;letter-spacing:.02em;color:var(--accent);background:linear-gradient(90deg,var(--accent) 0%,var(--text-secondary) 50%,var(--accent) 100%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:translate-shimmer 2.4s linear infinite}
+@keyframes translate-shimmer{to{background-position:-200% 0}}
+.translate-spinner{width:13px;height:13px;border:2px solid var(--accent-subtle);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0}@keyframes spin{to{transform:rotate(360deg)}}
+.translate-status-sub{font-size:11px;color:var(--thinking-text);display:flex;align-items:center;gap:4px;padding:2px 13px 8px}
+.translate-preview{padding:10px 14px 12px;max-height:440px;overflow-y:auto;overscroll-behavior:contain;contain:content;animation:translate-fade-in .25s ease}
+.translate-preview::-webkit-scrollbar{width:6px}.translate-preview::-webkit-scrollbar-track{background:transparent}.translate-preview::-webkit-scrollbar-thumb{background:transparent;border-radius:3px}.translate-preview:hover::-webkit-scrollbar-thumb{background:var(--border)}
+@keyframes translate-fade-in{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
+.translate-preview .md-content{font-size:13.5px;color:var(--text-primary);line-height:1.7}
+.translate-preview .md-content>:first-child{margin-top:0}.translate-preview .md-content>:last-child{margin-bottom:0}
+.translate-caret{display:inline-block;width:7px;height:14px;margin-left:3px;vertical-align:text-bottom;background:var(--accent);border-radius:2px;animation:translate-blink 1s step-end infinite;box-shadow:0 0 6px var(--accent-subtle)}
+@keyframes translate-blink{0%,100%{opacity:1}50%{opacity:0}}
+
+/* ── Streaming auto-translate render UNIFICATION (2026-07-07) ──
+ * During an agent task with auto-translate ON, the incremental translator's
+ * Chinese-so-far renders as the PRIMARY body in the [data-zone="translatedPrimary"]
+ * slot (ABOVE the English content zone) — the same role Chinese has in the
+ * SETTLED bilingual view. The still-untranslated English tail (current round)
+ * is DEMOTED in the content zone below, styled to read as the quiet live edge
+ * of the translation rather than a competing full body. Because the streaming
+ * bubble already has the settled structure, finalize is a visual no-op.
+ * Understated by design: no boxes, no extra chrome — just typographic weight. */
+.stream-translated-body{animation:translate-fade-in .25s ease}
+.stream-translated-body .md-content{color:var(--text-primary)}
+.stream-translated-body .md-content>:first-child{margin-top:0}
+/* The live Chinese edge: a soft blinking caret trailing the last block. */
+.stream-translated-body .md-content>:last-child::after{content:"";display:inline-block;width:6px;height:1em;margin-left:3px;vertical-align:text-bottom;background:var(--accent);border-radius:2px;opacity:.75;animation:translate-blink 1s step-end infinite}
+/* English tail: demoted to a quiet, smaller, dimmed continuation directly
+ * under the Chinese — no separator box, so the two read as one flowing body
+ * that is converging to Chinese round-by-round. */
+.stream-content-demoted{margin-top:2px}
+.stream-content-demoted .md-content{font-size:12.5px;color:var(--text-tertiary);opacity:.72;transition:opacity .3s ease}
+.stream-content-demoted .md-content>:first-child{margin-top:0}
+/* Finalize handoff: the closing round's English is hidden the instant the
+ * worker starts assembling the final Chinese, so it never doubles. */
+.stream-content-tail-hidden{display:none}
+
+/* Send-path auto-translate failed → original text was sent. Quiet amber pill
+   under the user bubble; clicking it retranslates just that message. */
+.translate-failed-notice{display:inline-flex;align-items:center;gap:7px;margin-top:8px;padding:5px 11px;font-size:11.5px;line-height:1.3;color:#fbbf24;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.22);border-radius:999px;cursor:pointer;user-select:none;transition:background .2s ease,border-color .2s ease}
+.translate-failed-notice:hover{background:rgba(245,158,11,0.14);border-color:rgba(245,158,11,0.4)}
+.translate-failed-notice .tfn-icon{flex-shrink:0;opacity:.9}
+.translate-failed-notice .tfn-text{opacity:.92}
+.translate-failed-notice .tfn-retry{margin-left:2px;padding-left:8px;border-left:1px solid rgba(245,158,11,0.3);font-weight:600;opacity:.85}
+.translate-failed-notice:hover .tfn-retry{opacity:1;text-decoration:underline}
+/* Display-translation terminal failure (assistant / critic / VU bubble): a
+   quiet borderless inline retry line — no filled pill, no box, matching the
+   "just typographic weight" understatement of the translate family. Muted
+   tertiary text at rest; lifts to the accent color + spins its glyph on
+   hover/focus to read as "click to retry". The full upstream error (429/402
+   quota etc.) sits on the title tooltip. */
+.translate-retry-line{display:inline-flex;align-items:center;gap:6px;margin-top:7px;font-size:11.5px;line-height:1.3;color:var(--text-tertiary);cursor:pointer;user-select:none;border-radius:var(--radius-sm);transition:color .18s ease}
+.translate-retry-line:hover,.translate-retry-line:focus-visible{color:var(--accent);outline:none}
+.translate-retry-line .trl-icon{flex-shrink:0;display:block;opacity:.75;transition:opacity .18s ease,transform .5s ease}
+.translate-retry-line:hover .trl-icon,.translate-retry-line:focus-visible .trl-icon{opacity:1;transform:rotate(-180deg)}
+.translate-retry-line .trl-text{opacity:.9}
+.translate-retry-line:hover .trl-text{text-decoration:underline;text-underline-offset:2px}
+/* Subtle inline translating indicator on user message — replaces the old separate ✨ bubble */
+@keyframes translatePulse{0%,100%{opacity:.4}50%{opacity:1}}
+/* ★ Perf: content-visibility:auto on search blocks — off-screen blocks skip layout/paint.
+ * contain-intrinsic-size provides estimated height to preserve scrollbar accuracy. */
+.search-result-item{padding:10px 14px;border-top:1px solid rgba(59,130,246,0.1);transition:background var(--transition)}.search-result-item:hover{background:rgba(59,130,246,0.04)}.search-result-title{font-size:13px;font-weight:600;color:#93c5fd;display:flex;align-items:center;gap:6px;flex-wrap:wrap}.search-result-title a{color:#93c5fd;text-decoration:none}.search-result-title a:hover{text-decoration:underline;color:#bfdbfe}.search-result-source{font-size:10px;color:var(--text-tertiary);padding:1px 6px;background:var(--bg-tertiary);border-radius:4px;font-family:'JetBrains Mono',monospace}.search-result-snippet{font-size:12px;color:var(--text-secondary);margin-top:4px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.search-result-url{font-size:10px;color:var(--text-tertiary);margin-top:3px;font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.search-result-fetched{font-size:9px;color:#34d399;background:rgba(52,211,153,0.1);padding:1px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;margin-left:4px;white-space:nowrap}.search-result-fetched.pdf{color:#f59e0b;background:rgba(245,158,11,0.1)}
+
+/* ── Vertical-domain card (HF Papers / Semantic Scholar / arXiv / etc.) ── */
+.vertical-card{margin:6px 14px 10px;border:1px solid rgba(168,85,247,0.25);border-radius:var(--radius-sm);background:linear-gradient(180deg,rgba(168,85,247,0.06),rgba(99,102,241,0.04));overflow:hidden}
+.vertical-card-header{display:flex;align-items:center;gap:8px;padding:7px 12px;background:rgba(168,85,247,0.08);border-bottom:1px solid rgba(168,85,247,0.15);font-size:12px}
+.vertical-card-icon{display:inline-flex;align-items:center;color:#c4b5fd;flex-shrink:0}
+.vertical-card-title{font-weight:600;color:#c4b5fd;letter-spacing:0.2px}
+.vertical-card-sources{font-size:11px;color:var(--text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.vertical-card-count{font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--text-muted);background:rgba(168,85,247,0.10);padding:1px 7px;border-radius:8px}
+.vertical-card-body{padding:4px 0}
+.vertical-row{padding:7px 14px;border-top:1px solid rgba(168,85,247,0.10)}
+.vertical-row:first-child{border-top:none}
+.vertical-row:hover{background:rgba(168,85,247,0.04)}
+.vertical-row-title{font-size:13px;font-weight:600;color:#ddd6fe;line-height:1.35}
+.vertical-row-title a{color:#ddd6fe;text-decoration:none}
+.vertical-row-title a:hover{text-decoration:underline;color:#ede9fe}
+.vertical-row-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:3px}
+.vertical-meta-pill{font-size:10px;color:#c4b5fd;background:rgba(168,85,247,0.10);padding:1px 7px;border-radius:4px;font-family:'JetBrains Mono',monospace;white-space:nowrap}
+.vertical-row-snippet{font-size:12px;color:var(--text-secondary);margin-top:4px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.vertical-card-more{padding:6px 14px;font-size:11px;color:var(--text-muted);text-align:center;font-style:italic}
+.ptool-badge.vertical-badge{background:rgba(168,85,247,0.15);color:#c4b5fd;border:1px solid rgba(168,85,247,0.25);text-transform:capitalize;max-width:40%;overflow:hidden;text-overflow:ellipsis;flex-shrink:1;min-width:0}
+
+/* ── Vertical card: light/tofu theme contrast overrides ──
+ *    The default palette is tuned for the dark theme (pale lavender on
+ *    translucent purple).  On the cream (tofu) and light themes that text
+ *    washes out to near-invisible, so we darken titles/meta and warm the
+ *    card to match each theme. */
+[data-theme="light"] .vertical-card{border-color:rgba(124,58,237,0.28);background:linear-gradient(180deg,rgba(124,58,237,0.05),rgba(99,102,241,0.03))}
+[data-theme="light"] .vertical-card-header{background:rgba(124,58,237,0.07);border-bottom-color:rgba(124,58,237,0.16)}
+[data-theme="light"] .vertical-card-icon,[data-theme="light"] .vertical-card-title{color:#6d28d9}
+[data-theme="light"] .vertical-card-count{color:#6d28d9;background:rgba(124,58,237,0.1)}
+[data-theme="light"] .vertical-row{border-top-color:rgba(124,58,237,0.1)}
+[data-theme="light"] .vertical-row:hover{background:rgba(124,58,237,0.05)}
+[data-theme="light"] .vertical-row-title,[data-theme="light"] .vertical-row-title a{color:#5b21b6}
+[data-theme="light"] .vertical-row-title a:hover{color:#4c1d95}
+[data-theme="light"] .vertical-meta-pill{color:#6d28d9;background:rgba(124,58,237,0.1)}
+[data-theme="light"] .ptool-badge.vertical-badge{color:#6d28d9;background:rgba(124,58,237,0.12);border-color:rgba(124,58,237,0.28)}
+
+[data-theme="tofu"] .vertical-card{border:2px solid rgba(150,120,170,0.4);border-radius:var(--radius);background:rgba(150,120,170,0.05);box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .vertical-card-header{background:rgba(150,120,170,0.1);border-bottom-color:rgba(150,120,170,0.25)}
+[data-theme="tofu"] .vertical-card-icon,[data-theme="tofu"] .vertical-card-title{color:#7A5C8A}
+[data-theme="tofu"] .vertical-card-sources{color:#716A55}
+[data-theme="tofu"] .vertical-card-count{color:#7A5C8A;background:rgba(150,120,170,0.14);border-radius:var(--radius)}
+[data-theme="tofu"] .vertical-row{border-top-color:rgba(150,120,170,0.14)}
+[data-theme="tofu"] .vertical-row:hover{background:rgba(150,120,170,0.06)}
+[data-theme="tofu"] .vertical-row-title,[data-theme="tofu"] .vertical-row-title a{color:#5E4670}
+[data-theme="tofu"] .vertical-row-title a:hover{color:#4A3656}
+[data-theme="tofu"] .vertical-row-snippet{color:#716A55}
+[data-theme="tofu"] .vertical-meta-pill{color:#7A5C8A;background:rgba(150,120,170,0.12);border-radius:var(--radius-sm)}
+[data-theme="tofu"] .ptool-badge.vertical-badge{color:#7A5C8A;background:rgba(150,120,170,0.12);border:1px solid rgba(150,120,170,0.3);border-radius:var(--radius-sm);box-shadow:var(--clay-sm)}
+
+/* ── Engine Breakdown section (inside search results panel) ── */
+.eb-section{border-top:1px solid rgba(59,130,246,0.15);margin-top:4px;padding:0}.eb-toggle{display:flex;align-items:center;gap:6px;padding:8px 14px;font-size:11px;color:var(--text-tertiary);cursor:pointer;user-select:none;transition:background var(--transition)}.eb-toggle:hover{background:rgba(59,130,246,0.04)}.eb-total{font-size:10px;color:var(--text-muted);font-family:'JetBrains Mono',monospace}.eb-arrow{font-size:10px;margin-left:auto;transition:transform .2s ease}.eb-section.eb-expanded .eb-arrow{transform:rotate(90deg)}.eb-content{max-height:0;overflow:hidden;transition:max-height .3s ease}.eb-section.eb-expanded .eb-content{max-height:2000px}.eb-engine{padding:4px 14px 6px}.eb-engine-name{font-size:11px;font-weight:600;color:#60a5fa;margin-bottom:2px}.eb-engine-count{font-weight:400;color:var(--text-tertiary);font-size:10px}.eb-engine-urls{padding-left:8px;border-left:2px solid rgba(59,130,246,0.15)}.eb-url-item{padding:2px 0 2px 8px;font-size:11px;line-height:1.4}.eb-url-item a{color:var(--text-secondary);text-decoration:none}.eb-url-item a:hover{text-decoration:underline;color:#93c5fd}.eb-url-text{font-size:9px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.error-block{padding:12px 16px;border:1px solid var(--error-border);border-radius:var(--radius-sm);background:var(--error-bg);font-size:13px;color:var(--error-text);overflow:hidden;word-break:break-word;white-space:pre-wrap;line-height:1.55}.stream-status{font-size:11px;color:var(--text-tertiary);padding:4px 0;display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono',monospace}.stream-status .pulse{width:6px;height:6px;background:var(--thinking-text);border-radius:50%;animation:pulse 1.5s infinite}.stream-phase{display:flex;align-items:flex-start;gap:8px;padding:8px 14px;margin-top:8px;border-radius:var(--radius-sm);background:linear-gradient(135deg,rgba(110,86,207,0.08),rgba(59,130,246,0.08));border:1px solid rgba(110,86,207,0.15);font-size:12px;line-height:1.5;font-family:'JetBrains Mono',monospace;color:var(--accent);transition:opacity .3s ease}.stream-phase-icon{flex-shrink:0;display:inline-flex;align-items:center;height:1.5em}.stream-phase-text{flex:1;min-width:0;opacity:0.85;line-height:1.5;white-space:normal;overflow-wrap:anywhere;word-break:break-word}.stream-phase-ctx{display:inline;margin-left:6px;opacity:0.6;font-size:11px}.stream-phase-dots{display:inline-flex;gap:1px;margin-left:2px}.stream-phase-dots span{animation:phaseDot 1.4s infinite;opacity:0;font-weight:bold}.stream-phase-dots span:nth-child(2){animation-delay:0.2s}.stream-phase-dots span:nth-child(3){animation-delay:0.4s}@keyframes phaseDot{0%,80%,100%{opacity:0}40%{opacity:1}}@keyframes phaseIconPulse{0%,100%{opacity:0.6;transform:scale(1)}50%{opacity:1;transform:scale(1.1)}}.stream-phase-retrying{background:linear-gradient(135deg,rgba(245,158,11,0.10),rgba(234,179,8,0.06));border-color:rgba(245,158,11,0.20);color:#f59e0b}.stream-phase-retrying .stream-phase-icon{animation:phaseIconPulse 1.5s ease-in-out infinite}.stream-phase-thinking{background:linear-gradient(135deg,rgba(168,85,247,0.10),rgba(139,92,246,0.06));border-color:rgba(168,85,247,0.20)}.stream-phase-thinking .stream-phase-icon{animation:phaseIconPulse 2s ease-in-out infinite}.stream-phase-counter{display:inline-block;margin-left:8px;padding:1px 7px;border-radius:8px;background:rgba(168,85,247,0.15);font-size:10px;font-weight:600;color:rgba(196,167,255,0.85);letter-spacing:0.3px;min-width:48px;text-align:center;transition:background .2s ease}@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}@keyframes searchOrbit{0%{transform:rotate(0deg) translateX(10px) rotate(0deg)}100%{transform:rotate(360deg) translateX(10px) rotate(-360deg)}}.search-orbit-container{width:22px;height:22px;position:relative;display:inline-block;flex-shrink:0}.search-orbit-center{position:absolute;inset:6px;border-radius:50%;background:var(--search-blue);opacity:.6;animation:pulse 1.2s infinite}.search-orbit-dot{position:absolute;width:4px;height:4px;border-radius:50%;top:50%;left:50%;margin:-2px;animation:searchOrbit 1.2s linear infinite}.search-orbit-dot:nth-child(2){background:#60a5fa}.search-orbit-dot:nth-child(3){background:#a78bfa;animation-delay:-.4s}.search-orbit-dot:nth-child(4){background:#34d399;animation-delay:-.8s}
+.debug-panel{position:fixed;bottom:80px;right:16px;width:700px;max-width:calc(100vw - 32px);max-height:70vh;max-height:calc(var(--vh100,100vh)*0.7);overflow-y:auto;background:rgba(0,0,0,0.94);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#aaa;z-index:50;display:none}.debug-panel.visible{display:block}.debug-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)}.debug-header span{color:var(--text-primary);font-weight:600}.debug-clear{background:none;border:none;color:var(--text-tertiary);cursor:pointer;font-size:10px;font-family:inherit}
+.debug-msg-block{margin:0 0 6px 0;border:1px solid rgba(255,255,255,0.1);border-radius:4px;overflow:hidden}
+.debug-msg-header{display:flex;align-items:center;gap:6px;padding:4px 8px;font-size:11px;font-weight:600;cursor:pointer;user-select:none}
+.debug-msg-header:hover{filter:brightness(1.2)}
+.debug-msg-header .role-system{color:#ff9800}.debug-msg-header .role-user{color:#4fc3f7}.debug-msg-header .role-assistant{color:#81c784}.debug-msg-header .role-tool{color:#ce93d8}.debug-msg-header .role-tools{color:#ffb74d;font-weight:600}
+.debug-msg-body{display:none;overflow-y:auto}
+.debug-msg-block.open .debug-msg-body{display:block}
+.debug-msg-body pre{margin:0;padding:6px 8px;white-space:pre-wrap;word-break:break-all;font-size:10.5px;line-height:1.4;color:#ccc}
+.debug-msg-body pre .debug-key{color:#82aaff}.debug-msg-body pre .debug-str{color:#c3e88d}.debug-msg-body pre .debug-num{color:#f78c6c}.debug-msg-body pre .debug-null{color:#89ddff;font-style:italic}
+/* --text-secondary, NOT --text-tertiary: measured 3.55:1 (dark) / 3.05:1
+   (light) on the panel ground, i.e. below 4.5:1. This line carries the byte
+   and token counts — the numbers the panel is opened to read. */
+.debug-msg-summary{color:var(--text-secondary);font-weight:400;margin-left:auto;font-size:10px}
+.debug-tool-calls{color:#ffd54f;font-size:10px;padding:2px 8px 4px}

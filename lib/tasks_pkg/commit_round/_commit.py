@@ -5,8 +5,9 @@
     can't block ``persist_task_result`` → ``_dispatch_queued_message``; emit a
     ``round_committed`` SSE event + enrich ``modifiedFileList`` with
     opaque-writer (code_exec / MCP) side-effects the journal misses.
-  - ``_patch_assistant_message_with_git`` — persist the snapshotId onto the
-    conversation's assistant message after the SSE reader may have closed.
+  - ``_patch_turn_projection_with_file_list`` — fold the derived file list
+    into the settled turn-native projection (the turn authority refuses
+    post-settlement event frames, so the card data needs this CAS seam).
 
 Dependency is one-directional: imports from ``lib.agent_core.events`` +
 ``lib.tasks_pkg.manager`` (append_event), never the reverse.  The actual
@@ -27,21 +28,55 @@ from lib.tasks_pkg.manager import append_event
 logger = get_logger(__name__)
 
 
-def _spawn_async_commit_round(task: dict, project_enabled: bool, project_path: str | None) -> None:
+def _note_write_set_advisories(
+    task: dict,
+    changed_files: list[dict],
+    project_path: str,
+) -> None:
+    """Emit owner-scoped write-set drift notes for one committed file list."""
+    try:
+        from lib.tasks_pkg.manager import task_user_id
+        from lib.write_set_advisory import note_project_write
+
+        owner_user_id = int(task_user_id(task))
+        for changed_file in changed_files:
+            if not isinstance(changed_file, dict):
+                continue
+            changed_path = changed_file.get('path') or ''
+            changed_root = changed_file.get('root') or project_path
+            if changed_path:
+                note_project_write(
+                    task['convId'],
+                    changed_root,
+                    changed_path,
+                    user_id=owner_user_id,
+                )
+    except Exception as error:
+        logger.debug(
+            '[Task:%s] write-set advisory failed: %s',
+            str(task.get('id') or '')[:8],
+            error,
+        )
+
+
+def _spawn_async_commit_round(task: dict, project_enabled: bool,
+                              project_path: str | None,
+                              project_paths: list[str] | None = None) -> None:
     """Run ``file_history.make_snapshot`` in a daemon thread.
 
     Decoupled from ``_finalize_and_emit_done`` so the snapshot persist
     cannot block ``persist_task_result`` → ``_dispatch_queued_message``.
     On success, emits a ``round_committed`` SSE event carrying
-    ``snapshotId`` (and ``gitSha`` for backward-compat) plus any
-    file-history-derived ``modifiedFileList`` additions.
+    ``snapshotId`` (and ``gitSha`` for backward-compat) plus the
+    journal-derived ``modifiedFileList`` and any file-history-derived
+    side-channel additions.
     """
     if not (project_enabled and project_path and task.get('id')):
         return
     try:
         threading.Thread(
             target=_run_commit_round_async,
-            args=(task, project_path),
+            args=(task, project_path, project_paths),
             name=f'commit-round-{task["id"][:8]}',
             daemon=True,
         ).start()
@@ -50,21 +85,137 @@ def _spawn_async_commit_round(task: dict, project_enabled: bool, project_path: s
                        task['id'][:8], e, exc_info=True)
 
 
-def _run_commit_round_async(task: dict, project_path: str) -> None:
-    """Daemon-thread body for the deferred ``make_snapshot`` call.
+def _run_commit_round_async(task: dict, project_path: str,
+                            project_paths: list[str] | None = None) -> None:
+    """Daemon-thread body for the deferred snapshot + file-list work.
 
     Uses the file-history store (lib.file_history) — the previous
     shadow-git shim was retired in the Tier-3 redesign.  See
     ``lib/file_history/__init__.py`` for the rationale.
+
+    Also runs ``derive_round_modified_files`` here (moved OFF the done hot
+    path) so the authoritative per-round file list is built + persisted
+    without ever blocking the terminal frame.
     """
     tid = task['id'][:8]
+    linear_checkpoint: dict | None = None
+    try:
+        from lib.linear_git_checkpoint import settle_task_checkpoint
+        from lib.tasks_pkg.manager import task_user_id
+        linear_checkpoint = settle_task_checkpoint(
+            task, user_id=task_user_id(task), project_path=project_path,
+            project_paths=project_paths)
+        if linear_checkpoint:
+            logger.info(
+                '[Task:%s] linear Git checkpoint settled status=%s repos=%d',
+                tid, linear_checkpoint.get('status'),
+                len(linear_checkpoint.get('repositories') or []),
+            )
+    except Exception as error:
+        # Checkpointing is a best-effort post-task observer. It must never
+        # rewrite the already-settled task result or block later project tools.
+        logger.warning('[Task:%s] linear Git checkpoint settlement failed: %s',
+                       tid, error, exc_info=True)
+
+    linear_event_fields = (
+        {'linearGitCheckpoint': linear_checkpoint}
+        if linear_checkpoint else {})
     try:
         from lib import file_history as fh
         from lib.file_history.store import _project_lock as _fh_project_lock
         from lib.file_history.store import load_tracked as _fh_load_tracked
         from lib.project_mod import get_modifications
 
+        # ── Authoritative modified-file list (moved OFF the done hot path) ──
+        # The per-root modifications journal + per-mod filesystem probes used
+        # to run inline in _finalize_and_emit_done between the last round_end
+        # and the terminal done.  Do it here so the done frame is never
+        # blocked by journal I/O; the result rides out on round_committed and
+        # is folded into the settled turn projection below.
+        _own_files: list[dict] = []
+        _used_ts_fallback = False
+        try:
+            from lib.tasks_pkg.commit_round._derive import derive_round_modified_files
+            _own_files, _n_mods, _used_ts_fallback = derive_round_modified_files(
+                task, project_path, project_paths)
+        except Exception as _e:
+            logger.debug('[Task:%s] derive_round_modified_files failed: %s',
+                         tid, _e)
+        if _used_ts_fallback:
+            logger.info('[Task:%s] modifiedFileList derived via timestamp fallback '
+                        '(%d file(s))', tid, len(_own_files))
+        # Merge any continue-flow checkpoint list (prior rounds) so the full
+        # turn's list is what gets persisted, exactly as the old synchronous
+        # finalize assembled it before emit.
+        _cp_mod_list = task.get('_checkpointModifiedFileList')
+        if _cp_mod_list:
+            _merged_map: dict[tuple[str, str], dict] = {}
+            def _mkey(f):
+                if isinstance(f, dict):
+                    return (f.get('root', '') or '', f.get('path', ''))
+                return ('', str(f))
+            for _f in _cp_mod_list:
+                _merged_map[_mkey(_f)] = _f
+            for _f in _own_files:
+                _merged_map[_mkey(_f)] = _f
+            _own_files = list(_merged_map.values())
+        if _own_files:
+            task['modifiedFileList'] = _own_files
+            # Unique (root, path) count across checkpoint + this round —
+            # adding the raw mod counts would double-count a file touched in
+            # both and the card's headline would disagree with its own list.
+            task['modifiedFiles'] = len(_own_files)
+
+        # Presence: merge this turn's touched files into the peer registry.
+        # Best-effort — moved here with the derivation it depends on.
+        if _own_files and task.get('convId'):
+            try:
+                from lib.presence import record_files as _presence_record
+                from lib.tasks_pkg.manager import task_user_id
+                _presence_record(
+                    project_path,
+                    task['convId'],
+                    _own_files,
+                    user_id=int(task_user_id(task)),
+                )
+            except Exception as _pe:
+                logger.debug('[Task:%s] presence record_files failed: %s',
+                             tid, _pe)
+
+            # Write-set drift is judged only after the round journal has
+            # attributed files to this task. This seam owns all required
+            # authority: authenticated owner, conversation, project roots and
+            # the canonical file list. Low-level atomic file writers remain
+            # storage-agnostic and cannot accidentally guess a tenant.
+            _note_write_set_advisories(task, _own_files, project_path)
+
         if not fh.is_enabled():
+            # No snapshot to anchor the round_committed event, but the journal
+            # list above is still authoritative — persist/emit it independently.
+            if _own_files:
+                _files_evt = build_event(
+                    EventType.ROUND_COMMITTED,
+                    taskId=task['id'],
+                    modifiedFileList=_own_files,
+                    modifiedFiles=task.get('modifiedFiles'),
+                    **linear_event_fields,
+                )
+                try:
+                    append_event(task, _files_evt)
+                except Exception as _e:
+                    logger.debug('[Task:%s] append_event for file-list '
+                                 'round_committed failed: %s', tid, _e)
+                _patch_turn_projection_with_file_list(task, _files_evt)
+            elif linear_event_fields:
+                try:
+                    append_event(task, build_event(
+                        EventType.ROUND_COMMITTED,
+                        taskId=task['id'],
+                        **linear_event_fields,
+                    ))
+                except Exception as _e:
+                    logger.debug('[Task:%s] append_event for linear Git '
+                                 'checkpoint failed: %s', tid, _e)
             return
 
         # Pull actual tool names (mod['type']) from this task's modifications.
@@ -122,6 +273,22 @@ def _run_commit_round_async(task: dict, project_path: str) -> None:
             if not _snap_id:
                 logger.debug('[Task:%s] async make_snapshot returned no id (no-op or disabled) elapsed=%.2fs',
                              tid, _elapsed)
+                if _own_files or linear_event_fields:
+                    _no_snapshot_evt = build_event(
+                        EventType.ROUND_COMMITTED,
+                        taskId=task['id'],
+                        modifiedFileList=_own_files or None,
+                        modifiedFiles=(task.get('modifiedFiles')
+                                       if _own_files else None),
+                        **linear_event_fields,
+                    )
+                    try:
+                        append_event(task, _no_snapshot_evt)
+                    except Exception as _e:
+                        logger.debug('[Task:%s] append_event for no-snapshot '
+                                     'round commit failed: %s', tid, _e)
+                    _patch_turn_projection_with_file_list(
+                        task, _no_snapshot_evt)
                 return
 
             # Diff + tracked-index snapshot still inside the lock so
@@ -151,7 +318,13 @@ def _run_commit_round_async(task: dict, project_path: str) -> None:
         amend_evt = build_event(EventType.ROUND_COMMITTED,
                                 snapshotId=_snap_id,
                                 gitSha=_snap_id,
-                                taskId=task['id'])
+                                taskId=task['id'],
+                                **linear_event_fields)
+        # Authoritative journal-derived list (built above, off the hot path)
+        # rides on the same round_committed frame as the snapshot id.
+        if task.get('modifiedFileList'):
+            amend_evt['modifiedFileList'] = task['modifiedFileList']
+            amend_evt['modifiedFiles'] = task.get('modifiedFiles')
 
         # File-history-derived additions (run_command / code_exec / MCP side
         # effects that modifications.py doesn't track) come from
@@ -163,17 +336,18 @@ def _run_commit_round_async(task: dict, project_path: str) -> None:
         # other task belongs to a concurrent conversation operating
         # on the same project root and must not be reported here.
         # ── The fh diff is ENRICHMENT ONLY, never a source of truth. ──
-        # The authoritative ``modifiedFileList`` was already built in
-        # ``_finalize_and_emit_done`` from this round's OWN writes
-        # (modifications journal, aggregated across all roots) — a
-        # conversation-isolated signal.  The fh diff is computed against
-        # the PRIMARY root's project-global snapshot index, so it
-        # legitimately catches only one thing the journal can't: file
-        # edits made by OPAQUE writers that don't stamp attribution —
-        # ``code_exec`` and arbitrary MCP tools.  (``run_command`` IS
-        # journalled by modifications.py, and the file-edit tools
-        # write_file / apply_diff(s) / insert_content(s) journal AND
-        # stamp ``last_writer_task_id`` on their own tracked entries.)
+        # The authoritative ``modifiedFileList`` was already built ABOVE
+        # (``derive_round_modified_files``, moved here off the done hot
+        # path) from this round's OWN writes (modifications journal,
+        # aggregated across all roots) — a conversation-isolated signal.
+        # The fh diff is computed against the PRIMARY root's project-global
+        # snapshot index, so it legitimately catches only one thing the
+        # journal can't: file edits made by OPAQUE writers that don't stamp
+        # attribution — ``code_exec`` and arbitrary MCP tools.
+        # (``run_command`` IS journalled by modifications.py, and the
+        # file-edit tools write_file / apply_diff(s) / insert_content(s)
+        # journal AND stamp ``last_writer_task_id`` on their own tracked
+        # entries.)
         #
         # So an fh diff path is only legitimately OURS when:
         #   • its tracked entry's ``last_writer_task_id`` == this task, OR
@@ -319,53 +493,46 @@ def _run_commit_round_async(task: dict, project_path: str) -> None:
             logger.debug('[Task:%s] append_event for round_committed failed: %s',
                          tid, _e)
 
-        # ── Persist snapshotId to the conversation DB so reloads after
-        #    the SSE reader has closed still see it for the redo UI. ──
-        try:
-            _patch_assistant_message_with_git(task, amend_evt)
-        except Exception as _e:
-            from lib.database import log_db_finalize_error
-            log_db_finalize_error(logger, 'warning', _e,
-                                  f'[Task:{tid}] failed to patch assistant message with snapshotId')
+        _patch_turn_projection_with_file_list(task, amend_evt)
     except Exception as e:
         logger.warning('[Task:%s] async make_snapshot failed: %s',
                        tid, e, exc_info=True)
 
 
-def _patch_assistant_message_with_git(task: dict, amend_evt: dict) -> None:
-    """Stamp gitSha + git-derived files onto THIS task's assistant message.
+def _patch_turn_projection_with_file_list(task: dict, amend_evt: dict) -> None:
+    """Fold the derived file list into the settled turn-native projection.
 
-    Called from the async commit thread after ``persist_task_result`` has
-    already run.  Mirrors the subset of ``_sync_result_to_conversation``
-    that depends on git output.
+    The turn-native UI reads ``storage_conversation_turns.projection_json``,
+    and the post-settlement ``round_committed`` frame is refused by
+    ``record_task_event`` (the attempt is no longer live).  Without this seam
+    the files-changed card never renders on turn-native conversations
+    (2026-08-26 regression from moving derivation off the done hot path).
 
-    Goes through the store's field-level patch rather than rewriting the whole
-    transcript: this daemon races the autopilot's VU append (both fire within
-    the same second at turn settle), and a read-modify-write of the entire blob
-    erased the appended row — measured 13 appends vs 8 survivors on conv
-    ms3sfyrmn31omb.  The patch re-reads under a rev-CAS so a concurrent append
-    survives.
+    This CAS seam is the ONLY post-settlement persistence path: turn identity
+    keys (``_taskId``) are deliberately stripped from projections by
+    ``normalize_projection_document``, so the retired legacy bridge that
+    looked a turn up by ``projection._taskId`` could never match — and its
+    ``_gitSha``/``_snapshotId`` payload is outside
+    ``PUBLIC_PROJECTION_FIELDS`` and would have been stripped on write
+    anyway.  Undo/redo resolves through the ``fileChanges.taskId`` block and
+    the project-mod journal, not through any snapshot id on the message.
     """
+    file_list = amend_evt.get('modifiedFileList')
     conv_id = task.get('convId') or ''
-    task_id = task.get('id') or ''
-    git_sha = amend_evt.get('gitSha')
-    if not (conv_id and task_id and git_sha):
+    turn_id = task.get('_turnId') or ''
+    if not (file_list and conv_id and turn_id):
         return
-    fields = {
-        '_gitSha': git_sha,
-        '_snapshotId': amend_evt.get('snapshotId') or git_sha,
-    }
-    if amend_evt.get('modifiedFileList'):
-        fields['modifiedFileList'] = amend_evt['modifiedFileList']
-    if amend_evt.get('modifiedFiles'):
-        fields['modifiedFiles'] = amend_evt['modifiedFiles']
-
-    from lib.agent_core.store import get_conversation_store
-    store = get_conversation_store()
     try:
-        if store.patch_message_fields_by_task(conv_id, task_id, fields):
-            logger.info('[Task:%s] persisted gitSha=%s to conv=%s',
-                        task_id[:8], git_sha[:12], conv_id[:8])
-    except Exception as _e:
-        logger.warning('[Task:%s] gitSha DB write failed: %s',
-                       task_id[:8], _e, exc_info=True)
+        from lib.turn_lifecycle import apply_commit_round_file_changes
+        from lib.tasks_pkg.manager import task_user_id
+        apply_commit_round_file_changes(
+            conv_id,
+            turn_id,
+            files=file_list,
+            modified_count=amend_evt.get('modifiedFiles'),
+            task_id=str(task.get('id') or ''),
+            user_id=task_user_id(task),
+        )
+    except Exception as error:
+        logger.debug('[Task:%s] turn-projection file-changes fold failed: %s',
+                     str(task.get('id') or '')[:8], error)

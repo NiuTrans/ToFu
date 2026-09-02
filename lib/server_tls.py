@@ -28,7 +28,7 @@ def ensure_tls_certificates(
     environ: Mapping[str, str] | None = None,
     logger: logging.Logger | None = None,
     boot: BootReporter | None = None,
-) -> tuple[str | None, str | None]:
+) -> tuple[str, str]:
     """Reuse or create a local certificate pair for explicit direct TLS."""
     log = logger or logging.getLogger('server.tls')
     report = boot or _noop_boot
@@ -38,9 +38,11 @@ def ensure_tls_certificates(
         if os.path.isfile(certfile) and os.path.isfile(keyfile):
             log.info('[TLS] Using provided certs: %s, %s', certfile, keyfile)
             return certfile, keyfile
-        log.warning(
-            '[TLS] Provided cert/key files not found: %s, %s',
-            certfile, keyfile,
+        missing = [
+            path for path in (certfile, keyfile) if not os.path.isfile(path)
+        ]
+        raise FileNotFoundError(
+            'configured TLS file(s) not found: ' + ', '.join(missing)
         )
 
     cert_dir = os.path.join(data_root or runtime_data_root(), 'certs')
@@ -142,18 +144,13 @@ def ensure_tls_certificates(
         )
         report('TLS certificate ready (self-signed, valid 10 years).')
         return cert_path, key_path
-    except ImportError:
-        log.warning(
-            '[TLS] cryptography library not installed — falling back to '
-            'HTTP/1.1. Install: pip install cryptography',
-        )
+    except ImportError as exc:
+        raise RuntimeError(
+            'TLS was requested but cryptography is not installed; '
+            'install it with: pip install cryptography') from exc
     except Exception as exc:
-        log.warning(
-            '[TLS] Certificate generation failed: %s — falling back to '
-            'HTTP/1.1',
-            exc,
-        )
-    return None, None
+        raise RuntimeError(
+            f'TLS certificate generation failed: {exc}') from exc
 
 
 __all__ = ['ensure_tls_certificates']

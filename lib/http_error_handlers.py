@@ -12,12 +12,33 @@ from lib.api_response import (
     api_method_not_allowed,
     api_not_found,
     api_payload_too_large,
-    api_service_unavailable,
 )
 from lib.log import get_logger, req_id
 
 
 logger = get_logger('server.lifecycle')
+
+
+def _explicit_exception_info(error: BaseException) -> tuple[type, BaseException, Any]:
+    """Return logging ``exc_info`` without depending on ``sys.exc_info()``."""
+    original = getattr(error, 'original_exception', None)
+    failure = original if isinstance(original, BaseException) else error
+    return type(failure), failure, failure.__traceback__
+
+
+def _v4_problem(
+    *, status: int, code: str, title: str, detail: str,
+):
+    from lib.api_v4 import is_api_v4_path, problem_response
+    if not is_api_v4_path(request.path):
+        return None
+    return problem_response(
+        status=status,
+        code=code,
+        title=title,
+        detail=detail,
+        instance=request.path,
+    )
 
 
 def is_api_request() -> bool:
@@ -42,6 +63,14 @@ async def handle_not_found(_error: Any):
         logger.debug('404 (well-known probe): %s', request.path)
     else:
         logger.warning('404 Not Found: %s %s', request.method, request.path)
+    v4_response = _v4_problem(
+        status=404,
+        code='not_found',
+        title='Resource not found',
+        detail='The requested API v4 resource does not exist.',
+    )
+    if v4_response is not None:
+        return v4_response
     if is_api_request():
         return api_not_found(f'Not Found: {request.path}')
     return await make_response(
@@ -49,6 +78,14 @@ async def handle_not_found(_error: Any):
 
 
 async def handle_payload_too_large(_error: Any):
+    v4_response = _v4_problem(
+        status=413,
+        code='payload_too_large',
+        title='Payload too large',
+        detail='The request body exceeds the configured maximum size.',
+    )
+    if v4_response is not None:
+        return v4_response
     if is_api_request():
         return api_payload_too_large(
             current_app.config['MAX_CONTENT_LENGTH'])
@@ -56,6 +93,14 @@ async def handle_payload_too_large(_error: Any):
 
 
 async def handle_method_not_allowed(_error: Any):
+    v4_response = _v4_problem(
+        status=405,
+        code='method_not_allowed',
+        title='Method not allowed',
+        detail='This API v4 resource does not support the requested method.',
+    )
+    if v4_response is not None:
+        return v4_response
     if is_api_request():
         return api_method_not_allowed()
     return await make_response('<h2>405 — Method Not Allowed</h2>', 405)
@@ -65,7 +110,16 @@ async def handle_internal_error(error: BaseException):
     request_id = req_id() or '-'
     method, path = safe_method_path()
     logger.error(
-        '500 ISE: [%s] %s %s', request_id, method, path, exc_info=error)
+        '500 ISE: [%s] %s %s', request_id, method, path,
+        exc_info=_explicit_exception_info(error))
+    v4_response = _v4_problem(
+        status=500,
+        code='internal_error',
+        title='Internal server error',
+        detail='The server could not complete this API v4 request.',
+    )
+    if v4_response is not None:
+        return v4_response
     if path.startswith('/api/'):
         return api_internal_error(error, log_traceback=False)
     return await make_response(
@@ -74,6 +128,16 @@ async def handle_internal_error(error: BaseException):
 
 async def handle_uncaught(error: BaseException):
     if isinstance(error, HTTPException):
+        status = int(error.code or 500)
+        if status >= 400:
+            v4_response = _v4_problem(
+                status=status,
+                code='http_error',
+                title=error.name or 'HTTP error',
+                detail=error.description or 'The API v4 request failed.',
+            )
+            if v4_response is not None:
+                return v4_response
         return error
     request_id = req_id() or '-'
     method, path = safe_method_path()
@@ -81,9 +145,20 @@ async def handle_uncaught(error: BaseException):
     from lib.storage import StorageError, http_status_for_storage_error
     if isinstance(error, StorageError):
         status = http_status_for_storage_error(error)
-        logger.warning(
-            '[%s] %d storage error code=%s operation_id=%s: %s %s',
-            request_id, status, error.code, error.operation_id, method, path)
+        storage_log = logger.error if status >= 500 else logger.warning
+        storage_log(
+            '[%s] %d storage error code=%s operation_id=%s retryable=%s '
+            'retry_after_ms=%s message=%s: %s %s',
+            request_id, status, error.code, error.operation_id,
+            error.retryable, error.retry_after_ms, error.message, method, path)
+        v4_response = _v4_problem(
+            status=status,
+            code='storage_unavailable',
+            title='Storage request failed',
+            detail='The storage authority could not complete this request.',
+        )
+        if v4_response is not None:
+            return v4_response
         if path.startswith('/api/'):
             from lib.api_response import api_error
             return api_error(
@@ -97,22 +172,9 @@ async def handle_uncaught(error: BaseException):
             f'<h2>{status}</h2><p>Storage is unavailable. '
             f'Request ID: <code>{request_id}</code></p>', status)
 
-    from lib.database import PoolExhaustedError
-    if isinstance(error, PoolExhaustedError):
-        logger.warning(
-            '[%s] 503 pool-exhausted: %s %s (active=%d/%d pooled=%d '
-            'tracked=%d)', request_id, method, path, error.active,
-            error.max_conns, error.pooled, error.tracked)
-        if path.startswith('/api/'):
-            return api_service_unavailable(
-                'Server busy (database pool saturated) — retry shortly',
-                retry_after=2, kind='overloaded')
-        return await make_response(
-            f'<h2>503</h2><p>Server busy — retry shortly. '
-            f'Request ID: <code>{request_id}</code></p>', 503)
-
     logger.error('[%s] Uncaught: %s %s: %s',
-                 request_id, method, path, error, exc_info=True)
+                 request_id, method, path, error,
+                 exc_info=_explicit_exception_info(error))
     if path.startswith('/api/'):
         return api_internal_error(error, log_traceback=False)
     return await make_response(

@@ -14,12 +14,14 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-_BOARD_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_board.py')
+_POLICY_SRC = os.path.join(
+    ROOT, 'lib', 'conversations', 'project_board_policy.py')
 
 
 def test_module_name_from_path():
     from tests._nc_harness import module_name_from_path
-    assert module_name_from_path(_BOARD_SRC) == 'lib.conversations.project_board'
+    assert module_name_from_path(
+        _POLICY_SRC) == 'lib.conversations.project_board_policy'
 
 
 def test_neuter_bites_and_leaves_no_trace():
@@ -28,35 +30,42 @@ def test_neuter_bites_and_leaves_no_trace():
     """
     from tests._nc_harness import neutered_source
 
-    with open(_BOARD_SRC, encoding='utf-8') as f:
+    with open(_POLICY_SRC, encoding='utf-8') as f:
         original_bytes = f.read()
 
-    import lib.conversations.project_board as pb_before
+    import lib.conversations.project_board_policy as pb_before
     canonical_id = id(pb_before)
 
     # Real behavior: an expired claim reads 'open' (anti-deadlock).
-    from lib.conversations.project_board import _effective_status
+    from lib.conversations.project_board_policy import effective_board_status
     now = 1_000_000
-    assert _effective_status('claimed', now - 5000, now) == 'open'
+    assert effective_board_status('claimed', now - 5000, now) == 'open'
 
     # Neuter the reclaim → inside the context an expired claim STAYS 'claimed'.
     with neutered_source(
-        _BOARD_SRC,
-        "    if stored_status == 'claimed' and lease_expires_at and lease_expires_at <= now_ms:\n        return 'open'\n    return stored_status",
+        _POLICY_SRC,
+        '    if (\n'
+        '        stored_status == "claimed"\n'
+        '        and lease_expires_at\n'
+        '        and lease_expires_at <= current_time_ms\n'
+        '    ):\n'
+        '        return "open"\n'
+        '    return stored_status',
         "    return stored_status  # NC (reclaim disabled)",
     ) as mod:
-        assert mod._effective_status('claimed', now - 5000, now) == 'claimed', \
+        assert mod.effective_board_status(
+            'claimed', now - 5000, now) == 'claimed', \
             'neuter must BITE: expired claim stays claimed with reclaim disabled'
         # The swapped module is the throwaway, not the canonical one.
-        assert sys.modules['lib.conversations.project_board'] is mod
+        assert sys.modules['lib.conversations.project_board_policy'] is mod
         assert id(mod) != canonical_id
 
     # After the context: canonical module restored verbatim, file untouched.
-    assert sys.modules['lib.conversations.project_board'] is pb_before
-    with open(_BOARD_SRC, encoding='utf-8') as f:
+    assert sys.modules['lib.conversations.project_board_policy'] is pb_before
+    with open(_POLICY_SRC, encoding='utf-8') as f:
         assert f.read() == original_bytes, 'shipped source must be byte-identical'
     # And the canonical function still works (was never reloaded/mutated).
-    assert _effective_status('claimed', now - 5000, now) == 'open'
+    assert effective_board_status('claimed', now - 5000, now) == 'open'
 
 
 def test_patch_restore_runs_closure_and_restores():
@@ -67,17 +76,23 @@ def test_patch_restore_runs_closure_and_restores():
     seen = {}
 
     def run():
-        import lib.conversations.project_board as pb
+        import lib.conversations.project_board_policy as pb
         # Inside: sys.modules entry is the neutered throwaway.
-        seen['effective'] = pb._effective_status('claimed', 5, 10)
+        seen['effective'] = pb.effective_board_status('claimed', 5, 10)
 
     patch_restore(
-        _BOARD_SRC,
-        "    if stored_status == 'claimed' and lease_expires_at and lease_expires_at <= now_ms:\n        return 'open'\n    return stored_status",
+        _POLICY_SRC,
+        '    if (\n'
+        '        stored_status == "claimed"\n'
+        '        and lease_expires_at\n'
+        '        and lease_expires_at <= current_time_ms\n'
+        '    ):\n'
+        '        return "open"\n'
+        '    return stored_status',
         "    return stored_status  # NC (reclaim disabled)",
         run,
     )
     assert seen['effective'] == 'claimed', 'closure saw the neutered module'
     # Restored: canonical reclaim works again.
-    from lib.conversations.project_board import _effective_status
-    assert _effective_status('claimed', 5, 10) == 'open'
+    from lib.conversations.project_board_policy import effective_board_status
+    assert effective_board_status('claimed', 5, 10) == 'open'

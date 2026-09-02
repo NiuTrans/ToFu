@@ -151,3 +151,15 @@ def test_script_still_fails_fast_on_non_lock_death():
 def test_script_syntax_is_valid_bash():
     proc = subprocess.run(['bash', '-n', SCRIPT], capture_output=True, text=True)
     assert proc.returncode == 0, f'bash -n rejected the script: {proc.stderr}'
+
+
+def test_help_and_argument_gate_precede_all_host_specific_restart_work():
+    source = _script()
+    gate_at = source.index('case "$#:${1:-}" in')
+    project_at = source.index('PROJ=')
+    lifecycle_at = source.index('[lifecycle-gate]')
+
+    assert gate_at < project_at < lifecycle_at
+    assert '1:-h|1:--help) _restart_usage; exit 0' in source
+    assert 'unsupported arguments: $*' in source
+    assert 'python serverctl.py restart' in source

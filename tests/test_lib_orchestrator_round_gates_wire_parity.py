@@ -1,5 +1,3 @@
-# Incident anchor: born in commit ed744645 — refactor(orchestrator): pt_03f4cdf1 slice 17 — extract per-round budg...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 17 wire-parity: _round_gates.py extraction from _run.py.
 
 Failing-first: these tests FAIL before the extraction module exists
@@ -9,7 +7,8 @@ Failing-first: these tests FAIL before the extraction module exists
 import inspect
 import pytest
 
-from lib.tasks_pkg.orchestrator import _round_gates
+import lib.tasks_pkg.orchestrator._round_gates as _round_gates
+pytestmark = pytest.mark.unit
 
 
 class TestRoundGatesWireParity:
@@ -64,18 +63,15 @@ class TestRoundGatesWireParity:
         src = inspect.getsource(_round_gates.check_round_gates)
         assert "return True" in src
 
-    def test_docstring_mentions_extraction(self):
-        assert "pt_03f4cdf1" in (_round_gates.__doc__ or "")
-
     def test_run_task_delegates_to_helper(self):
-        """_run.py must call check_round_gates, not carry the gates inline."""
-        from lib.tasks_pkg.orchestrator import _run
-        src = inspect.getsource(_run.run_task)
-        assert "check_round_gates(task, rs" in src
+        """The root adapter calls the helper; the runner owns control flow."""
+        import lib.tasks_pkg.orchestrator._root_agent_loop as _root_agent_loop
+        src = inspect.getsource(_root_agent_loop)
+        assert "check_round_gates(" in src
 
     def test_run_task_no_longer_carries_gates_inline(self):
         """The inline gate bodies must be gone from run_task."""
-        from lib.tasks_pkg.orchestrator import _run
+        import lib.tasks_pkg.orchestrator._run as _run
         src = inspect.getsource(_run.run_task)
         assert "budget_exceeded_round_" not in src
         assert "tool_rounds_exhausted_" not in src

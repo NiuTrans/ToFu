@@ -179,7 +179,7 @@ def cached_read_is_stale(task: dict, fn_args: dict,
     tool pipeline consults this before serving a cached
     read_files/inspect_image result: True → drop the entry and re-execute
     for real — the real read also re-stamps the token, which is what lets
-    a previously-refused write recover (pt_26c703c5, the 'stable file,
+    a previously-refused write recover (, the 'stable file,
     3× refused' loop). Fail-open everywhere, mirroring
     ``check_write_freshness``: no token / unresolvable / vanished → False.
     """

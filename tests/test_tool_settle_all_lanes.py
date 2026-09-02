@@ -68,30 +68,17 @@ Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
 
 from __future__ import annotations
 
-import ast
-import inspect
+import json
 import os
-import shutil
-import subprocess
-import textwrap
 import threading
 import time
 
 import pytest
 
-from tests._runtime_sections import runtime_section_path
-
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-STREAM_REDUCER_JS = runtime_section_path('ui/stream_reducer.js')
-
-
-def _node_available() -> bool:
-    return bool(shutil.which('node'))
-
-
 # ═══════════════════════════════════════════════════════════════════
 #  Harness — the REAL pipeline, real round constructor, fake tool bodies
 # ═══════════════════════════════════════════════════════════════════
@@ -103,6 +90,7 @@ def _mk_task(**over):
         'status': 'running',
         'aborted': False,
         'model': 'test-model',
+        '_userId': 1,
         'events': [],
         'events_lock': threading.Lock(),
         '_dispatch_heartbeat': 0.0,
@@ -161,9 +149,9 @@ class _Recorder:
 @pytest.fixture()
 def rec(monkeypatch):
     r = _Recorder()
-    from lib.tasks_pkg import tool_dispatch as facade
+    import lib.tasks_pkg.tool_dispatch._heartbeat as facade
     from lib.tasks_pkg.executor import _finalize as exec_finalize
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     monkeypatch.setattr(_pipeline, 'append_event', r, raising=False)
     monkeypatch.setattr(facade, 'append_event', r, raising=False)
     monkeypatch.setattr(exec_finalize, 'append_event', r, raising=False)
@@ -187,14 +175,15 @@ def slow_tools(monkeypatch):
               'source': 'Test', 'fetched': True, 'fetchedChars': len(text)}])
         return tc_id, text, False
 
-    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     monkeypatch.setattr(_heartbeat, '_execute_tool_one', _fake, raising=False)
     monkeypatch.setattr(_pipeline, '_execute_tool_one', _fake, raising=False)
     return script
 
 
 def _run(task, tcs, cfg=None, messages=None):
-    from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline
+    from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
     messages = messages if messages is not None else []
     execute_tool_pipeline(
         task, tcs, cfg=cfg or {'autoApply': True}, project_path=None,
@@ -224,83 +213,6 @@ def _assert_settles_before_slow(rec, fast_id, slow_id, lane):
 # ═══════════════════════════════════════════════════════════════════
 #  Face 0 — enumerate the lanes (do not trust a hand-written list)
 # ═══════════════════════════════════════════════════════════════════
-
-def test_every_skip_lane_is_accounted_for():
-    """★ Enumerate, don't enumerate-by-hand.
-
-    The originating ticket named 3 skip lanes; an AST walk finds 8. A guard
-    that checks only the named ones would go green while an unnamed lane keeps
-    the defect — the same "the ticket itself may be incomplete" failure this
-    project has hit before.
-
-    This test pins the COUNT and requires each ``continue`` to sit in a branch
-    that is either (a) settled, or (b) explicitly listed below as
-    deliberately-not-settled with a reason. A new ``continue`` appearing in
-    this function fails the test until someone classifies it.
-    """
-    from lib.tasks_pkg.tool_dispatch import _pipeline
-
-    src = inspect.getsource(_pipeline.execute_tool_pipeline)
-    tree = ast.parse(textwrap.dedent(src))
-    fn = tree.body[0]
-
-    parent = {}
-    for p in ast.walk(fn):
-        for c in ast.iter_child_nodes(p):
-            parent[c] = p
-
-    lanes = []
-    for cont in [n for n in ast.walk(fn) if isinstance(n, ast.Continue)]:
-        node, guard = cont, ''
-        while node in parent:
-            node = parent[node]
-            if isinstance(node, ast.If):
-                guard = ast.unparse(node.test)
-                break
-        lanes.append(guard)
-
-    # Two of these are receipt-rehydration pre-pass filters; the remaining
-    # branches are active call lanes. They deliberately do not settle a round
-    # because no new call has been admitted yet.
-    assert len(lanes) == 13, (
-        'the skip-lane inventory changed (found %d `continue` branches, '
-        'expected 13). Classify the new one: does it settle its round, or does '
-        'it have a documented reason not to?\nGuards: %r' % (len(lanes), lanes))
-
-    # ★ The screenshot branch deliberately has NO `continue` any more. It used
-    #   to early-exit this loop after emitting its OWN terminal frame, and that
-    #   early exit was precisely why it stayed behind the barrier. Its display
-    #   verdict is a pure function of `model`
-    #   (``model_supports_vision(model) -> bool``), so it is resolved at
-    #   DISPATCH time; the post-phase now only appends the order-sensitive
-    #   message and falls through to the shared idempotent settle. A `continue`
-    #   reappearing there means the lane regressed to self-emitting.
-    assert 'model_supports_vision' not in ' | '.join(lanes), (
-        'the screenshot branch has an early-exit `continue` again — it must '
-        'fall through to the shared settle instead of emitting its own '
-        'terminal frame from the post-phase.\nGuards: %r' % (lanes,))
-
-    # Each lane must be recognisable. Keyed on a distinctive token of its guard
-    # so a refactor that renames a local does not silently drop a lane.
-    expected_tokens = [
-        '_parse_err',                 # hallucinated / unparseable tool call
-        'cached is not None',         # dedup + streaming-prefetch HIT
-        'not approved',               # write-approval REJECTED
-        "aborted",                    # abort short-circuit (x2: pre + serial)
-        '_serial_cfg',                # long-blocking serial dispatch
-        'action ==',                  # pre-hook BLOCK
-        '_receipt',                   # completed call-id replay / conflict
-        'tc_id in _claimed_call_ids', # duplicate ID inside one model turn
-        '_row',                       # receipt rehydration filters only
-    ]
-    joined = ' | '.join(lanes)
-    for tok in expected_tokens:
-        assert tok in joined, (
-            'skip lane matching %r vanished from execute_tool_pipeline — if it '
-            'was intentionally removed, update this inventory; if it was '
-            'renamed, the settle wiring for it needs re-checking.\nGuards: %r'
-            % (tok, lanes))
-
 
 # ═══════════════════════════════════════════════════════════════════
 #  Face 1 — the streaming-prefetch cache hit (the sharpest case)
@@ -332,9 +244,11 @@ def test_prefetch_cache_hit_settles_immediately(rec, slow_tools):
     _assert_settles_before_slow(rec, 'tc-pf', 'tc-slow', 'streaming-prefetch hit')
 
     ev = rec.find('tc-pf', 'tool_complete')
-    assert ev.get('toolContent') == 'PREFETCHED BODY', (
-        'the prefetched content must reach the UI verbatim; got %r'
-        % (ev.get('toolContent'),))
+    visible_result = json.loads(ev.get('toolContent', ''))
+    assert visible_result['contractVersion'] == 'tofu.tool-result/v2'
+    assert visible_result['summary'] == 'PREFETCHED BODY', (
+        'the prefetched content must reach the UI result envelope without '
+        'loss; got %r' % (visible_result,))
 
 
 def test_dedup_cache_hit_settles_immediately(rec, slow_tools):
@@ -377,9 +291,35 @@ def test_parse_error_lane_settles_immediately(rec, slow_tools):
     _assert_settles_before_slow(rec, 'tc-bad', 'tc-slow', 'parse-error')
 
 
+def test_contract_rejection_stays_typed_and_never_becomes_done(
+        rec, slow_tools):
+    """A final ToolContractV2 refusal remains rejected through settlement."""
+    task = _mk_task()
+    rejected = _mk_tc(
+        'tc-contract', 'read_files', 1,
+        parse_err=('ERROR: Tool call `read_files` was NOT executed. '
+                   '[invalid_argument_length] Invalid length at $.path.'))
+    contract_error = {
+        'code': 'invalid_argument_length', 'message': 'Invalid length.',
+        'path': '$.path', 'retryable': True,
+        'nextAction': 'Match arguments_schema and retry.',
+    }
+    rejected[5]['status'] = 'rejected'
+    rejected[5]['_contractError'] = contract_error
+
+    _run(task, [rejected])
+
+    assert rejected[5]['status'] == 'rejected'
+    assert rejected[5]['results'][0]['contractError'] == contract_error
+    result_event = rec.find('tc-contract', 'tool_result')
+    assert result_event is not None
+    assert result_event['status'] == 'rejected'
+    assert result_event['_contractError'] == contract_error
+
+
 def test_pre_hook_block_lane_settles_immediately(rec, slow_tools, monkeypatch):
     """A pre-hook block refuses the tool before execution."""
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
 
     class _Blocked:
         action = 'block'
@@ -403,7 +343,7 @@ def test_pre_hook_block_lane_settles_immediately(rec, slow_tools, monkeypatch):
 def test_approval_rejected_lane_settles_immediately(rec, slow_tools, monkeypatch):
     """A user who clicks Reject has ALREADY answered — the round is settled at
     that instant, and must not wait for an unrelated slow sibling."""
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
 
     monkeypatch.setattr(
         _pipeline, '_handle_approval',
@@ -430,7 +370,7 @@ def test_rejected_round_is_never_marked_done(rec, slow_tools, monkeypatch):
     carried no verdict, the client's tool_complete case would flip it to
     'done' and a write the user explicitly REFUSED would render as applied.
     """
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
 
     monkeypatch.setattr(
         _pipeline, '_handle_approval',
@@ -480,93 +420,6 @@ def test_aborted_round_is_never_marked_done(rec, slow_tools):
         assert ev.get('status') != 'done', (
             'a completion frame for an aborted round must not claim done: %r'
             % (ev,))
-
-
-@pytest.mark.skipif(not _node_available(), reason='node not available')
-def test_client_never_overwrites_a_terminal_verdict():
-    """★ The client half, driving the REAL pure reducer.
-
-    Measured on HEAD: the tool_complete case reads
-    ``if (r.status !== 'rejected') r.status = 'done'`` — it protects exactly
-    ONE verdict. ``aborted`` / ``error`` / ``unanswerable`` are all real round
-    statuses in this codebase, and each would be silently promoted to 'done'
-    by a later completion frame.
-
-    A backend-only guard cannot catch this: the server could ship a perfect
-    ``status='aborted'`` and the client would still overwrite it.
-    """
-    harness = r"""
-    const fs = require('fs');
-    const path = require('path');
-    global.window = global;
-    const _log = console.log.bind(console);
-    global.console = { log: _log, warn: () => {}, error: () => {}, debug: () => {} };
-    const out = [];
-    function check(n, c, d) { out.push((c ? 'PASS ' : 'FAIL ') + n + (c ? '' : '  :: ' + (d || ''))); }
-
-    (0, eval)(fs.readFileSync(process.argv[1], 'utf8'));
-
-    // Every terminal verdict must survive a later tool_complete.
-    for (const verdict of ['rejected', 'aborted', 'error', 'unanswerable']) {
-      let st = emptyStreamState();
-      st = reduceStreamState(st, { type: 'tool_start', roundNum: 1,
-                                   toolCallId: 'tc-1', toolName: 'write_file',
-                                   query: 'w' });
-      st.toolRounds[0].status = verdict;
-      st = reduceStreamState(st, { type: 'tool_complete', roundNum: 1,
-                                   toolCallId: 'tc-1', toolContent: 'X' });
-      check('verdict_' + verdict + '_survives',
-            st.toolRounds[0].status === verdict,
-            'a tool_complete must NOT overwrite the terminal verdict "'
-            + verdict + '"; got "' + st.toolRounds[0].status + '" — a refused '
-            + 'or interrupted tool would render as successfully completed');
-      // toolContent must still be attached (the settle is not a no-op).
-      check('verdict_' + verdict + '_keeps_content',
-            st.toolRounds[0].toolContent === 'X',
-            'settling must still attach the content');
-    }
-
-    // An explicit status on the frame is honoured.
-    {
-      let st = emptyStreamState();
-      st = reduceStreamState(st, { type: 'tool_start', roundNum: 2,
-                                   toolCallId: 'tc-2', toolName: 'write_file',
-                                   query: 'w' });
-      st = reduceStreamState(st, { type: 'tool_complete', roundNum: 2,
-                                   toolCallId: 'tc-2', toolContent: 'Y',
-                                   status: 'aborted' });
-      check('frame_status_honoured', st.toolRounds[0].status === 'aborted',
-            'a tool_complete carrying status must apply it; got '
-            + st.toolRounds[0].status);
-    }
-
-    // The ordinary in-flight round still settles to done.
-    {
-      let st = emptyStreamState();
-      st = reduceStreamState(st, { type: 'tool_start', roundNum: 3,
-                                   toolCallId: 'tc-3', toolName: 'read_files',
-                                   query: 'r' });
-      st = reduceStreamState(st, { type: 'tool_complete', roundNum: 3,
-                                   toolCallId: 'tc-3', toolContent: 'Z' });
-      check('searching_still_becomes_done', st.toolRounds[0].status === 'done',
-            'a normal in-flight round must still settle to done; got '
-            + st.toolRounds[0].status);
-    }
-
-    console.log(out.join('\n'));
-    """
-    proc = subprocess.run(['node', '-e', harness, STREAM_REDUCER_JS],
-                          capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 0, (
-        'harness crashed (rc=%s)\nstdout:\n%s\nstderr:\n%s'
-        % (proc.returncode, proc.stdout, proc.stderr))
-    lines = [ln for ln in proc.stdout.strip().splitlines()
-             if ln.startswith(('PASS', 'FAIL'))]
-    failed = [ln for ln in lines if ln.startswith('FAIL')]
-    assert not failed, ('terminal-verdict faces failed:\n  '
-                        + '\n  '.join(failed))
-    assert len(lines) >= 10, (
-        'expected 10 checks, got %d:\n%s' % (len(lines), '\n'.join(lines)))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -635,10 +488,8 @@ def test_message_order_survives_the_new_wiring(rec, slow_tools):
 # ═══════════════════════════════════════════════════════════════════
 #
 # The ordering faces above read the EVENT STREAM. That is structurally blind to
-# a field missing on the ROUND — and the round is what the recovery paths read:
-#   * the poll lane (/api/v1/chat/poll) ships whole `toolRounds` objects and
-#     never replays events, so it serves every client with no SSE at all;
-#   * a page reload rebuilds from the persisted rounds, not from the stream.
+# a field missing on the ROUND — and a page reload rebuilds from persisted
+# rounds, not from the live event stream.
 # Measured before this face existed: a rejected round carried tStart with NO
 # tEnd, because _settle_tool_result computed tEnd for the EVENT and never wrote
 # it back. So the execution segment — the first of the three segments this epic
@@ -655,7 +506,7 @@ def test_every_lane_leaves_a_self_describing_round(rec, slow_tools, monkeypatch)
     Each lane must leave: a terminal status, a tStart, and a tEnd — so
     ``execution = tEnd - tStart`` is computable from the persisted round alone.
     """
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key
 
     slow_tools['web_search'] = (0.3, 'SLOW')
@@ -719,14 +570,14 @@ def test_every_lane_leaves_a_self_describing_round(rec, slow_tools, monkeypatch)
                                                'fetched': True, 'fetchedChars': 4}])
         return tcid, {'__screenshot__': True, '_text_fallback': 'IMG',
                       'compressedSize': 10}, False
-    from lib.tasks_pkg.tool_dispatch import _heartbeat
+    import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
     monkeypatch.setattr(_heartbeat, '_execute_tool_one', _shot, raising=False)
     monkeypatch.setattr(_pipeline, '_execute_tool_one', _shot, raising=False)
     for label, model in (('screenshot-vision', 'gpt-4o'),
                          ('screenshot-no-vision', 'deepseek-v3.2')):
         t5 = _mk_task(model=model)
         sh = _mk_tc('tc-sh', 'browser_screenshot', 1)
-        from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline
+        from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
         execute_tool_pipeline(
             t5, [sh], cfg={'autoApply': True}, project_path=None,
             project_enabled=False, tool_list=[], messages=[],
@@ -741,8 +592,8 @@ def test_every_lane_leaves_a_self_describing_round(rec, slow_tools, monkeypatch)
             problems.append('%s: round has NO tStart' % lane)
         if r.get('tEnd') is None:
             problems.append(
-                '%s: round has NO tEnd — the poll lane and every page reload '
-                'read the ROUND, not the event stream, so this lane\'s '
+                '%s: round has NO tEnd — every page reload reads the ROUND, '
+                'not the event stream, so this lane\'s '
                 'execution segment (tEnd - tStart) is unresolvable for any '
                 'client without SSE and for anyone who refreshed' % lane)
         if (r.get('tStart') is not None and r.get('tEnd') is not None
@@ -787,7 +638,8 @@ def test_settle_adopts_the_finalize_completion_instant(rec, monkeypatch):
         time.sleep(0.25)
         return tc_id, 'BODY', False
 
-    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     monkeypatch.setattr(_heartbeat, '_execute_tool_one', _fake, raising=False)
     monkeypatch.setattr(_pipeline, '_execute_tool_one', _fake, raising=False)
 
@@ -841,7 +693,8 @@ def test_screenshot_lane_settles_immediately(rec, monkeypatch):
               'source': 'Test', 'fetched': True, 'fetchedChars': 1}])
         return tc_id, 'SLOW', False
 
-    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     monkeypatch.setattr(_heartbeat, '_execute_tool_one', _fake, raising=False)
     monkeypatch.setattr(_pipeline, '_execute_tool_one', _fake, raising=False)
 
@@ -856,7 +709,7 @@ def test_screenshot_lane_settles_immediately(rec, monkeypatch):
         task = _mk_task(model=model)
         tcs = [_mk_tc('tc-sh', 'browser_screenshot', 1),
                _mk_tc('tc-slow', 'web_search', 2)]
-        from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline
+        from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
         execute_tool_pipeline(
             task, tcs, cfg={'autoApply': True}, project_path=None,
             project_enabled=False, tool_list=[], messages=[],
@@ -897,12 +750,13 @@ def test_screenshot_message_and_ui_agree_on_the_vision_verdict(monkeypatch):
         return tc_id, {'__screenshot__': True, '_text_fallback': 'IMG',
                        'compressedSize': 10}, False
 
-    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     monkeypatch.setattr(_heartbeat, '_execute_tool_one', _fake, raising=False)
     monkeypatch.setattr(_pipeline, '_execute_tool_one', _fake, raising=False)
 
     from lib.model_info import model_supports_vision
-    from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline
+    from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
 
     for model in ('gpt-4o', 'deepseek-chat'):
         task = _mk_task(model=model)

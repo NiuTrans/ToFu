@@ -148,17 +148,28 @@ def test_save_failure_never_raises(_isolate, monkeypatch):
 
 
 @pytest.mark.unit
-def test_reexec_saves_snapshot_before_execv(monkeypatch):
-    """Wiring pin: _perform_server_reexec must save the snapshot BEFORE the
-    execv (atexit does NOT run on execv — the signal path's atexit hook
-    cannot cover restarts)."""
+def test_reexec_arms_shutdown_before_saving_snapshot(monkeypatch, tmp_path):
+    """Restart preparation runs under the graceful-shutdown hard deadline.
+
+    ``execv`` skips atexit, so the freshness snapshot must still finish before
+    the main thread is allowed to replace the stopped production lifespan.
+    """
     from routes.api_v1 import update as upd
-    import lib.shutdown_marker as sm
+    import lib.server_reexec as reexec
     calls = []
+    monkeypatch.setattr(
+        reexec, 'begin_server_reexec',
+        lambda reason: calls.append(('begin', reason)) or True)
+    monkeypatch.setattr(
+        reexec, 'finish_server_reexec_preparation',
+        lambda: calls.append(('prepared', None)) or True)
     monkeypatch.setattr('lib.write_freshness.save_snapshot',
-                        lambda: calls.append('save') or True)
-    monkeypatch.setattr(sm, 'mark_clean', lambda *a, **k: None)
-    monkeypatch.setattr(upd, '_close_inheritable_listen_sockets', lambda: None)
-    monkeypatch.setattr(upd.os, 'execv', lambda *a: calls.append('execv'))
+                        lambda: calls.append(('save', None)) or True)
+    monkeypatch.setattr(upd, 'data_root', lambda: str(tmp_path))
     assert upd._perform_server_reexec('test') is True
-    assert calls == ['save', 'execv']
+    assert calls == [
+        ('begin', 'test'),
+        ('save', None),
+        ('prepared', None),
+    ]
+    assert (tmp_path / '.reexec_in_progress').is_file()

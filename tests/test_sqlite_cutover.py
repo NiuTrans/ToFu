@@ -9,7 +9,7 @@ import sqlite3
 
 import pytest
 
-from lib.database.sqlite_cutover import (
+from lib.storage_sidecar.cutover import (
     AUTHORITY_FILE,
     SQLiteCutoverError,
     activate_candidate,
@@ -118,7 +118,7 @@ def test_activation_requires_both_human_approval_and_live_read_only(tmp_path):
 
 def test_activation_failure_restores_candidate_and_old_fallback(
         tmp_path, monkeypatch):
-    import lib.database.sqlite_cutover as cutover
+    import lib.storage_sidecar.cutover as cutover
 
     candidate, report = _candidate_and_report(tmp_path)
     canonical = tmp_path / 'tofu.db'
@@ -142,7 +142,7 @@ def test_activation_failure_restores_candidate_and_old_fallback(
 
 def test_marker_cleanup_failure_never_re_attests_stale_fallback(
         tmp_path, monkeypatch):
-    import lib.database.sqlite_cutover as cutover
+    import lib.storage_sidecar.cutover as cutover
 
     candidate, report = _candidate_and_report(tmp_path)
     canonical = tmp_path / 'tofu.db'
@@ -189,20 +189,46 @@ def test_pg_history_probe_is_bounded_and_detects_cluster(tmp_path):
     assert pg_history_exists(pgdata, tmp_path) is True
 
 
-def test_backend_selector_does_not_infer_from_historical_authority(
-        tmp_path, monkeypatch):
-    from lib.database import _core as core
-    candidate, report = _candidate_and_report(tmp_path)
-    canonical = tmp_path / 'tofu.db'
-    activate_candidate(
-        candidate=candidate, report_path=report,
-        canonical_path=canonical, data_dir=tmp_path,
-        owner_approved=True, source_still_read_only=True)
+def test_activation_command_requires_verified_dsn_secret(tmp_path):
+    from scripts import activate_sqlite_cutover as command
 
-    monkeypatch.setenv('TOFU_DB_BACKEND', 'postgres')
-    assert core._selected_backend() == 'postgres'
-    monkeypatch.setenv('TOFU_DB_BACKEND', 'sqlite')
-    assert core._selected_backend() == 'sqlite'
-    monkeypatch.setenv('TOFU_DB_BACKEND', 'pg')
-    with pytest.raises(RuntimeError, match='exactly sqlite or postgres'):
-        core._selected_backend()
+    insecure = tmp_path / 'postgres-dsn'
+    insecure.write_text(
+        'postgresql://db.example/tofu?sslmode=require', encoding='utf-8')
+    with pytest.raises(
+            command.SQLiteCutoverError, match='sslmode=verify-full'):
+        command._read_dsn_secret(insecure)
+    secure = tmp_path / 'postgres-dsn-verified'
+    secure.write_text(
+        'postgresql://db.example/tofu?sslmode=verify-full', encoding='utf-8')
+    assert command._read_dsn_secret(secure).endswith('sslmode=verify-full')
+
+
+def test_activation_next_step_uses_supported_deployment_configuration(
+        tmp_path, monkeypatch, capsys):
+    from scripts import activate_sqlite_cutover as command
+
+    dsn_file = tmp_path / 'postgres-dsn'
+    dsn_file.write_text(
+        'postgresql://db.example/tofu?sslmode=verify-full', encoding='utf-8')
+    monkeypatch.setattr(command, 'validate_candidate', lambda *_args: {})
+    monkeypatch.setattr(command, '_pg_quiescence', lambda _dsn: {
+        'default_transaction_read_only': True,
+        'other_client_sessions': 0,
+    })
+    monkeypatch.setattr(command, 'activate_candidate', lambda **_kwargs: {})
+
+    assert command.main([
+        '--candidate', str(tmp_path / 'candidate.sqlite3'),
+        '--report', str(tmp_path / 'report.json'),
+        '--canonical', str(tmp_path / 'tofu.db'),
+        '--postgres-dsn-file', str(dsn_file),
+        '--apply',
+        '--owner-approved',
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    next_step = result['next_step']
+    assert 'TOFU_DEPLOYMENT_MODE=personal' in next_step
+    assert 'TOFU_PROCESS_ROLE=all' in next_step
+    assert 'TOFU_DB_BACKEND=sqlite' not in next_step
+    assert 'remove TOFU_POSTGRES_DSN_FILE' in next_step

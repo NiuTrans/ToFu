@@ -1,30 +1,8 @@
-"""lib/pdf_parser/ — Unified PDF parsing: text, images, math, VLM.
+"""PDF parsing namespace.
 
-Façade package — all public API is re-exported here::
-
-    from lib.pdf_parser import parse_pdf, extract_pdf_text
-    from lib.pdf_parser import vlm_parse_pdf, start_vlm_task, get_vlm_task
-    from lib.pdf_parser import render_pdf_pages
+Core parsing, validation/text extraction, image processing, VLM tasks, math
+cleanup, and worker-pool operations have separate concrete owners.  Importing
+this namespace never probes optional dependencies or hides import failures.
 """
 
-from lib._pkg_utils import build_facade, safe_import
-
-__all__: list[str] = []
-_import = safe_import(__name__, globals(), __all__)
-
-# ── Core (must load) ──
-from . import core, text
-from .core import *  # noqa: F401,F403
-from .text import *  # noqa: F401,F403
-
-build_facade(__all__, text, core)
-
-# ── Optional sub-modules (degrade gracefully) ──
-_import('images', 'image extraction')
-_import('vlm', 'VLM-based parsing')
-_import('math', 'math formula detection')
-_import('postprocess', 'text postprocessing')
-_import('pool', 'process-pool PDF parsing offload')
-# docling is OPT-IN (heavy dep ~2 GB). The submodule import itself is
-# light — it only checks `HAS_DOCLING` and lazy-loads on first use.
-_import('docling', 'Docling layout-aware parsing (opt-in)')
+__all__ = ()

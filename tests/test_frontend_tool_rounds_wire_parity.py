@@ -1,8 +1,6 @@
-# Incident anchor: born in commit 73c874b0 — test(tool-rounds): permanent wire-parity gate for _renderUnifiedToolLine
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity regression gate for _renderUnifiedToolLine (tool_rounds.js).
 
-Renders the 41-round battery (tests/_tool_rounds_wire_parity_rounds.json)
+Renders the 51-round battery (tests/_tool_rounds_wire_parity_rounds.json)
 through the CURRENT static/js/ui/tool_rounds.js and asserts the emitted HTML
 is byte-identical to the frozen baseline
 (tests/_tool_rounds_wire_parity_baseline.json).
@@ -34,10 +32,15 @@ from pathlib import Path
 
 import pytest
 
+from tests._runtime_sections import runtime_section_path
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-TOOL_ROUNDS = ROOT / 'static' / 'js' / 'ui' / 'tool_rounds.js'
-TOOL_ROUNDS_RICH = ROOT / 'static' / 'js' / 'ui' / 'tool_rounds_rich.js'
+# Materialized migrated runtime sections (scope prelude included — the
+# harness evals them whole under bare node, and the migrated sources read
+# the module-private runtimeScope binding).
+TOOL_ROUNDS = Path(runtime_section_path('ui/tool_rounds.js'))
+TOOL_ROUNDS_RICH = Path(runtime_section_path('ui/tool_rounds_rich.js'))
 HARNESS = HERE / '_tool_rounds_wire_parity_harness.js'
 ROUNDS = HERE / '_tool_rounds_wire_parity_rounds.json'
 BASELINE = HERE / '_tool_rounds_wire_parity_baseline.json'
@@ -91,6 +94,7 @@ def test_battery_covers_every_branch_helper():
     # every branch the dispatcher probes must appear in the battery by name
     required_markers = [
         'ask_human',            # _renderHumanGuidanceRows
+        'awaiting_human',       # _renderHumanGuidanceCard (live interactive card)
         'pending_approval',     # _renderPendingApprovalBlock
         'timer_create',         # _renderTimerWaitingRow
         'awaiting_stdin',       # _renderStdinBlock

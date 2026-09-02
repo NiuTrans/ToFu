@@ -42,7 +42,7 @@ def _count_active_on_model(model: str, exclude_conv: str = '') -> int:
     cutoff = time.time() - 60  # consider "active" if called within last 60s
     count = 0
     for key, state in _cache_states.items():
-        cid = key[0]
+        cid = key[1]
         if cid == exclude_conv:
             continue
         if (state.model == model

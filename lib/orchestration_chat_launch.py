@@ -128,7 +128,6 @@ def build_tools_for_chat_task(
             model_config['code_exec_enabled'],
             model_config['browser_enabled'],
             model_config['desktop_enabled'],
-            model_config['swarm_enabled'],
             image_gen_enabled=model_config['image_gen_enabled'],
             human_guidance_enabled=model_config['human_guidance_enabled'],
             scheduler_enabled=model_config['scheduler_enabled'],
@@ -161,13 +160,13 @@ class OrchestrationChatFlowLaunchSpec:
     max_iterations: int
 
     def apply_task_projection(self, task: dict, *, label: str) -> None:
+        # Canonical flow-task fields are shared by terminal projection,
+        # fallback telemetry, and the live event sink.
         task.update({
-            'endpoint_mode': True,
             'flow_mode': True,
             '_flow_projection': self.projection,
-            '_endpoint_phase': self.initial_phase,
-            '_endpoint_iteration': 0,
-            '_endpoint_via_flow': True,
+            '_flow_phase': self.initial_phase,
+            '_flow_iteration': 0,
             '_flow_label': label,
         })
 

@@ -3,7 +3,7 @@
 Converts a canonical OpenAI Chat Completions request body into the OpenAI
 **Responses API** shape (``POST /v1/responses``). Extracted from
 ``lib/oauth/codex.py:codex_translate_request`` (2026-07-31, epic
-pt_b7a29ea7) and generalised from a Codex-only converter into the shared
+) and generalised from a Codex-only converter into the shared
 boundary for EVERY Responses-speaking provider — the Codex-OAuth path is
 now just one profile of it.
 
@@ -402,8 +402,28 @@ def openai_body_to_responses(body: dict, *, profile: str = 'default',
         body.get('_programmatic_tool_calling') or 'off').lower()
     tool_search_mode = str(
         body.get('_tool_search_mode') or 'off').lower()
+    from lib.tools.programmatic import ACTIVE_PROGRAMMATIC_MODES
     programmatic_enabled = (
-        public_openai_features and programmatic_mode == 'auto')
+        public_openai_features
+        and programmatic_mode in ACTIVE_PROGRAMMATIC_MODES)
+    # The wire boundary resolves native_openai vs local per request; a local
+    # resolution must never leak the hosted-only PTC fields onto a generic
+    # Responses upstream.  An absent key preserves the legacy gate verbatim.
+    _resolved_ptc = str(
+        body.get('_resolved_programmatic_backend') or '').lower()
+    if _resolved_ptc and _resolved_ptc != 'native_openai':
+        programmatic_enabled = False
+    multi_agent_enabled = (
+        public_openai_features
+        and str(body.get('_multi_agent_mode') or '').lower() == 'read_only')
+    # Like PTC, provider-native multi-agent is enabled by the final resolved
+    # backend, never by model-name inference inside this converter.  An absent
+    # key preserves direct-call compatibility with older callers.
+    _resolved_multi_agent = str(
+        body.get('_resolved_multi_agent_backend') or '').lower()
+    if (_resolved_multi_agent
+            and _resolved_multi_agent != 'native_openai'):
+        multi_agent_enabled = False
     resolved_tool_search = str(
         body.get('_resolved_tool_search_backend') or '').lower()
     tool_search_enabled = (
@@ -487,10 +507,11 @@ def openai_body_to_responses(body: dict, *, profile: str = 'default',
         safety_identifier = str(body.get('_safety_identifier') or '').strip()
         if safety_identifier:
             out['safety_identifier'] = safety_identifier[:64]
-        if str(body.get('_multi_agent_mode') or '').lower() == 'read_only':
+        if multi_agent_enabled:
             try:
                 max_subagents = int(
-                    body.get('_multi_agent_max_concurrent_subagents') or 3)
+                    body.get('_multi_agent_max_concurrent_agents')
+                    or body.get('_multi_agent_max_concurrent_subagents') or 3)
             except (TypeError, ValueError) as exc:
                 logger.debug('[ResponsesOut] invalid max-subagents value: %s', exc)
                 max_subagents = 3

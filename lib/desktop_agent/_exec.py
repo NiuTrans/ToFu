@@ -74,7 +74,7 @@ def cmd_run_local(params):
 
 
 # ══════════════════════════════════════════════════════════
-#  Streamed execution (RWA P2 — docs/REMOTE_WORKTREE_DESIGN.md §3.4)
+#  Streamed execution (docs/modules/remote_execution.md)
 # ══════════════════════════════════════════════════════════
 
 # Per-stream capture cap; mirrors cmd_run_local's 100k stdout ceiling.

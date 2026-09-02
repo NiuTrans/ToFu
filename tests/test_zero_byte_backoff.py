@@ -18,15 +18,16 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.tasks_pkg import stream_handler  # noqa: E402
-from lib.tasks_pkg.stream_handler import (  # noqa: E402
+import lib.tasks_pkg.stream_handler._budget as stream_budget  # noqa: E402
+from lib.tasks_pkg.stream_handler.api import analyse_stream_result  # noqa: E402
+from lib.tasks_pkg.stream_handler._budget import (  # noqa: E402
     _PREMATURE_RETRY_MAX_CLASSIC,
     _ZERO_BYTE_BACKOFF_BASE_S,
     _ZERO_BYTE_BACKOFF_MAX_S,
     _interruptible_sleep,
     _zero_byte_backoff_seconds,
-    analyse_stream_result,
 )
+from tests._registered_chat_task import registered_chat_task  # noqa: E402
 
 
 def _fresh_task():
@@ -92,7 +93,7 @@ def test_zero_byte_retry_calls_sleep_with_backoff(monkeypatch):
     def fake_sleep(seconds, task):
         sleeps.append(seconds)
 
-    monkeypatch.setattr(stream_handler, '_interruptible_sleep', fake_sleep)
+    monkeypatch.setattr(stream_budget, '_interruptible_sleep', fake_sleep)
 
     task = _fresh_task()
     decision = analyse_stream_result(
@@ -113,21 +114,23 @@ def test_zero_byte_retry_calls_sleep_with_backoff(monkeypatch):
 
 
 def test_phase_event_carries_backoff_s(monkeypatch):
-    monkeypatch.setattr(stream_handler, '_interruptible_sleep',
+    monkeypatch.setattr(stream_budget, '_interruptible_sleep',
                         lambda s, t: None)
 
     task = _fresh_task()
-    analyse_stream_result(
-        assistant_msg={'role': 'assistant', 'content': '', 'reasoning_content': ''},
-        last_finish_reason='stop',
-        task=task,
-        tid='test',
-        model='aws.claude-opus-4.7',
-        round_num=0,
-        _premature_retry_count=2,
-        messages=[],
-        usage=_zero_byte_usage(),
-    )
+    with registered_chat_task(task):
+        analyse_stream_result(
+            assistant_msg={'role': 'assistant', 'content': '',
+                           'reasoning_content': ''},
+            last_finish_reason='stop',
+            task=task,
+            tid='test',
+            model='aws.claude-opus-4.7',
+            round_num=0,
+            _premature_retry_count=2,
+            messages=[],
+            usage=_zero_byte_usage(),
+        )
     phase = [e for e in task['events'] if e.get('type') == 'phase'][-1]
     assert phase['bucket'] == 'zero_byte'
     assert 'backoff_s' in phase
@@ -146,7 +149,7 @@ def test_classic_premature_retry_uses_backoff(monkeypatch):
     (Earlier design: cap=2, no backoff — that's what the prior version of
     this test asserted.)"""
     sleeps = []
-    monkeypatch.setattr(stream_handler, '_interruptible_sleep',
+    monkeypatch.setattr(stream_budget, '_interruptible_sleep',
                         lambda s, t: sleeps.append(s))
 
     task = _fresh_task()
@@ -182,7 +185,7 @@ def test_late_round_stream_anomaly_does_not_sleep(monkeypatch):
     paced). This is an empty round with a stream anomaly on round > 0 that
     is NOT a zero-byte hang (substantial elapsed, no thinking)."""
     sleeps = []
-    monkeypatch.setattr(stream_handler, '_interruptible_sleep',
+    monkeypatch.setattr(stream_budget, '_interruptible_sleep',
                         lambda s, t: sleeps.append(s))
 
     task = _fresh_task()

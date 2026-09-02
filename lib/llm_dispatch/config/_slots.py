@@ -73,7 +73,7 @@ DEFAULT_SLOT_CONFIGS = {
     # Sol is the flagship (and the gpt-5.6 alias target), Terra balances
     # quality/cost, and Luna serves cost-sensitive high-volume work. Pro is a
     # Responses reasoning mode, not a model slug. Values come from the shared
-    # static/provider_templates/openai.json contract.
+    # lib/model_info/data/openai.json contract.
     **gpt56_slot_configs(),
     # ── OpenAI (GPT-5.4 family — March 2026; kept as the cost tier) ──
     'gpt-5.4':                       {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 3000, 'cost': 0.015},
@@ -125,6 +125,9 @@ DEFAULT_SLOT_CONFIGS = {
     'gemini-3.5-flash':              {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 30,  'latency': 2000, 'cost': 0.005},
     # Jul 2026 marketplace additions — marketplace default quota is 20 RPM each.
     'gemini-3.6-flash':              {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 20,  'latency': 2000, 'cost': 0.005},
+    # Aug 2026 marketplace addition (released 2026-08-13, 1M ctx / 64K out) —
+    # marketplace default quota 20 RPM.
+    'gemini-3.7-flash':              {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 20,  'latency': 2000, 'cost': 0.005},
     'gemini-3.5-flash-lite':         {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 20,  'latency': 1500, 'cost': 0.001},
 
     # ── Qwen (DashScope) ──

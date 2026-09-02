@@ -20,7 +20,6 @@ __all__ = [
     'DEFAULT_PROJECT_PATH',
     'WORKSPACE_ROOT',
     'MAX_HISTORY',
-    'MAX_WEB_MESSAGES',
     'FEISHU_MSG_LIMIT',
     'get_user_lock',
 ]
@@ -59,11 +58,6 @@ _user_state_lock = threading.Lock()  # Guards the 5 dicts above
 _user_task_locks = {}
 _task_locks = {}
 _task_locks_lock = threading.Lock()
-
-# Per-user web-format message list (rich format for DB sync)
-_user_web_messages = {}   # user_id → list of web-format messages
-_web_msg_lock = threading.Lock()
-MAX_WEB_MESSAGES = 40     # cap mirroring MAX_HISTORY
 
 # Feishu Lark client singleton
 _lark_client = None

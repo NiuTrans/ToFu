@@ -6,7 +6,7 @@ Root cause this guards against (the "sidebar shows nothing running, but the
 restart dialog says N conversations are running" report):
 
   * The autopilot virtual-user (VU) sub-task is created with ``create_task('')``
-    and runs synchronously under ``_endpoint_managed=True``, which SUPPRESSES
+    and runs synchronously under ``_flow_managed=True``, which SUPPRESSES
     the orchestrator's terminal-status flip + ``persist_task_result``. So it
     never reaches a terminal status on its own and, before this fix, lingered
     in the registry as ``status='running'`` until the 30-min stuck-task reaper.
@@ -28,6 +28,7 @@ carrier filter off and the guard counts the invisible carrier again.
 
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,6 +41,7 @@ def _mk(tid, conv, *, created, last_event=None, heartbeat=None,
     t = {
         'id': tid,
         'convId': conv,
+        '_userId': 1,
         'status': status,
         'aborted': aborted,
         'created_at': created,
@@ -53,11 +55,11 @@ def _mk(tid, conv, *, created, last_event=None, heartbeat=None,
 
 
 def _install(monkeypatch, task_list, *, max_silent=300):
-    """Point the registry's `tasks` at our synthetic set + pin the threshold."""
-    from lib.tasks_pkg.manager import _registry, _maintenance
-    fake = {t['id']: t for t in task_list}
-    monkeypatch.setattr(_registry, 'tasks', fake, raising=True)
-    monkeypatch.setattr(_registry, 'tasks_lock', threading.Lock(), raising=True)
+    """Install a public-runtime snapshot and pin the liveness threshold."""
+    import lib.tasks_pkg.manager._maintenance as _maintenance
+    import lib.tasks_pkg.manager._registry as _registry
+    runtime = SimpleNamespace(snapshot=lambda: list(task_list))
+    monkeypatch.setattr(_registry, 'chat_task_runtime', runtime, raising=True)
     monkeypatch.setattr(_maintenance, '_stuck_task_max_silent_secs',
                         lambda: max_silent, raising=True)
 
@@ -131,7 +133,7 @@ def test_kick_carrier_still_counted(monkeypatch):
 # VU carrier is counted again — proving the filter is load-bearing.
 # ─────────────────────────────────────────────────────────────────────────
 def test_neuter_carrier_filter_recounts_carrier(monkeypatch):
-    from lib.tasks_pkg.manager import _registry
+    import lib.tasks_pkg.manager._registry as _registry
     now = time.time()
     # Neuter: make the predicate always say "not a carrier".
     monkeypatch.setattr(_registry, 'is_carrier_task', lambda t: False, raising=True)
@@ -151,7 +153,7 @@ def test_neuter_carrier_filter_recounts_carrier(monkeypatch):
 def _base_vu_task():
     now = time.time()
     return {
-        'id': 'parent-vu', 'convId': 'convParent',
+        'id': 'parent-vu', 'convId': 'convParent', '_userId': 1,
         'status': 'running', 'aborted': False, 'created_at': now,
         'messages': [{'role': 'user', 'content': 'hi'},
                      {'role': 'assistant', 'content': 'done'}],
@@ -163,9 +165,13 @@ def _base_vu_task():
 
 def test_vu_carrier_discarded_on_normal_return(monkeypatch):
     import lib.tasks_pkg.autopilot as ap
-    from lib.tasks_pkg.manager import tasks, tasks_lock
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
 
     seen = {}
+    with tasks_lock:
+        baseline_carriers = {
+            tid for tid, item in tasks.items() if item.get('_vu_subtask')
+        }
 
     def _fake_single_turn(sub_task, messages_override=None):
         # The carrier must be registered WHILE it runs.
@@ -176,10 +182,10 @@ def test_vu_carrier_discarded_on_normal_return(monkeypatch):
                 'usage': {}, 'finishReason': 'stop',
                 'messages': list(sub_task.get('messages') or [])}
 
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._turn as orch
     monkeypatch.setattr(orch, '_run_single_turn', _fake_single_turn, raising=True)
     # Neutralize the objective-persist DB hop + segment assembly noise.
-    monkeypatch.setattr(ap, '_get_or_persist_objective', lambda c, m: '', raising=True)
+    monkeypatch.setattr(ap, '_get_or_persist_objective', lambda c, m, *, user_id: '', raising=True)
 
     task = _base_vu_task()
     ap.run_virtual_user(task)
@@ -187,27 +193,37 @@ def test_vu_carrier_discarded_on_normal_return(monkeypatch):
     assert seen.get('present_during') is True, \
         'carrier must be registered while _run_single_turn runs'
     with tasks_lock:
-        leaked = [tid for tid, t in tasks.items() if t.get('_vu_subtask')]
+        leaked = [
+            tid for tid, item in tasks.items()
+            if item.get('_vu_subtask') and tid not in baseline_carriers
+        ]
     assert leaked == [], \
         'the VU carrier must be discarded from the registry after the turn'
 
 
 def test_vu_carrier_discarded_even_when_turn_raises(monkeypatch):
     import lib.tasks_pkg.autopilot as ap
-    from lib.tasks_pkg.manager import tasks, tasks_lock
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
 
     def _boom(sub_task, messages_override=None):
         raise RuntimeError('turn blew up')
 
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._turn as orch
     monkeypatch.setattr(orch, '_run_single_turn', _boom, raising=True)
-    monkeypatch.setattr(ap, '_get_or_persist_objective', lambda c, m: '', raising=True)
+    monkeypatch.setattr(ap, '_get_or_persist_objective', lambda c, m, *, user_id: '', raising=True)
 
+    with tasks_lock:
+        baseline_carriers = {
+            tid for tid, item in tasks.items() if item.get('_vu_subtask')
+        }
     task = _base_vu_task()
     result = ap.run_virtual_user(task)
 
     assert result is None, 'a raising VU turn stops the loop (returns None)'
     with tasks_lock:
-        leaked = [tid for tid, t in tasks.items() if t.get('_vu_subtask')]
+        leaked = [
+            tid for tid, item in tasks.items()
+            if item.get('_vu_subtask') and tid not in baseline_carriers
+        ]
     assert leaked == [], \
         'the VU carrier must be discarded even when the turn raises'

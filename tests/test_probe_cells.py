@@ -41,6 +41,24 @@ class ProbeCellClassificationTest(unittest.TestCase):
         self.assertEqual(status, 'invalid_response')
         self.assertIn('no generated text', detail)
 
+    def test_200_reasoning_only_is_ok(self):
+        # 2026-08-18 incident: hybrid-reasoning models (LongCat-2.0, glm-5.2,
+        # deepseek-v4, kimi-k2.5) exhaust the tiny probe budget on thinking —
+        # HTTP 200, content='', reasoning_content non-empty. That IS generated
+        # output; flagging it invalid_response red-pipped every reasoning
+        # model in the matrix.
+        body = jsonlib.dumps({'choices': [{
+            'index': 0, 'finish_reason': 'length',
+            'message': {'role': 'assistant', 'content': '',
+                        'reasoning_content': 'We need answer exactly OK.'}}]})
+        self.assertEqual(self._probe(200, body)[0], 'ok')
+
+    def test_200_reasoning_field_dialect_is_ok(self):
+        body = jsonlib.dumps({'choices': [{
+            'message': {'role': 'assistant', 'content': '',
+                        'reasoning': 'thinking about the prompt'}}]})
+        self.assertEqual(self._probe(200, body)[0], 'ok')
+
     def test_provider_error_detail_redacts_echoed_app_id(self):
         status, detail = self._probe(
             400, 'invalid model name for appId YOUR_API_KEY_HERE')
@@ -225,7 +243,8 @@ class ProbeProtocolTest(unittest.TestCase):
         self.assertEqual(seen['headers'].get('x-api-key'), 'app-id-123')
         self.assertEqual(seen['headers'].get('anthropic-version'), '2023-06-01')
         self.assertEqual(seen['headers'].get('M-X'), '1')  # extra_headers merged
-        self.assertEqual(seen['body']['max_tokens'], 16)
+        import lib.provider_probe as _pp
+        self.assertEqual(seen['body']['max_tokens'], _pp._CHAT_PROBE_MAX_TOKENS)
         self.assertNotIn('stream', seen['body'])
 
     def test_openai_branch_unchanged(self):

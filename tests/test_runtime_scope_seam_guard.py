@@ -8,7 +8,7 @@ in file B referenced file A's export as a bare identifier. After the
 migration those identifiers resolve against the ESM module scope →
 ``globalThis`` → ``undefined``: typeof-guarded call sites became SILENT
 no-ops (Project Brain could not be opened from the collab bar; context-bar
-never refreshed; voice input never initialized; TurnStoreV2 abort threw at
+never refreshed; voice input never initialized; ConversationTurnStore abort threw at
 click time …) and unguarded ones threw ``ReferenceError``.
 
 This test pins the seam dead for the names fixed in that incident. A bare
@@ -16,18 +16,20 @@ reference outside an owner section is a regression: route it through
 ``runtimeScope.<name>`` (or the action registry for inline handlers).
 """
 
+import json
 import re
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-RUNTIME = REPO / "frontend" / "src" / "runtime" / "app-runtime.js"
+SECTIONS = REPO / "frontend" / "src" / "runtime" / "sections"
+MANIFEST = SECTIONS / "manifest.json"
 
 # Names whose cross-section bare references were rewritten to runtimeScope.X.
 PINNED_NAMES = [
     "openProjectBrain", "projectBrainRefresh", "presenceRefresh",
-    "updateContextBar", "TurnStoreV2", "attachCompactionMarkersToConversation",
+    "updateContextBar", "ConversationTurnStore",
     "renderTurnCtxNote", "buildTurnCtxSnapshot", "reconcileTurnCtxCapsule",
     "initVoiceInput", "ChipInput", "openCompactionViewer",
     "resolveOrchestrationApiClient", "isChatModel", "modelGroupKey",
@@ -45,8 +47,20 @@ ALLOWED_GLOBAL_BRIDGES = ("modelGroupKey", "modelGroupLabel", "modelGroupBrandNa
 MARKER_RE = re.compile(r"^/\*\s*=====\s*migrated source:\s*(.+?)\s*=====\s*\*/\s*$")
 
 
+def _runtime_source() -> str:
+    """Compose the retained source graph without reading generated output."""
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    paths = [manifest["prelude"]]
+    paths.extend(row["path"] for row in manifest["sections"])
+    paths.append(manifest["epilogue"])
+    return "\n".join(
+        (SECTIONS / path).read_text(encoding="utf-8")
+        for path in paths
+    )
+
+
 def _sections():
-    lines = RUNTIME.read_text(encoding="utf-8").split("\n")
+    lines = _runtime_source().split("\n")
     out = []  # (section_name, start, end)
     cur_name, cur_start = "(prelude)", 0
     for i, ln in enumerate(lines):
@@ -110,7 +124,7 @@ def test_runtimescope_is_not_window_backed():
     """The migration contract: runtimeScope must NOT be window/globalThis,
     and global bridges for pinned names stay limited to the transitional
     allowlist above."""
-    text = RUNTIME.read_text(encoding="utf-8")
+    text = _runtime_source()
     assert "const runtimeScope = Object.create(null);" in text, (
         "runtimeScope is no longer a null-prototype object — if it became "
         "window-backed, the bare-ref guard above is moot and this incident's "

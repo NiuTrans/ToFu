@@ -12,12 +12,10 @@ re-orders, epics move) re-billed the whole body uncached. Worse, the detector's
 wire fingerprint only hashed ``body['messages']`` — NEVER the hoisted system —
 so it laundered the client-caused miss into a false "server-side — PROVEN".
 
-FIX 1 (止血, lib/tasks_pkg/system_context/_inject.py + _reminders.py):
-  the digest / charter / board blocks now ride the TRUE tail via
-  ``_refresh_tail_block`` (the same cache-safe seam ``<relevant_memories>`` and
-  the preference detail tier already use), NOT the system message. The static
-  system prefix therefore stays byte-identical across turns → ``cache_read`` can
-  grow instead of being pinned.
+FIX 1 (``lib/tasks_pkg/context_composer``): volatile blocks declare tail
+  placement in the canonical context plan instead of mutating the system
+  message. The static system prefix therefore stays byte-identical across
+  turns, so ``cache_read`` can grow instead of being pinned.
 
 FIX 2 (仪器, lib/tasks_pkg/wire_fingerprint.py + cache_tracking/_detect.py +
   _state.py): ``system_fingerprint(system, tools)`` hashes the hoisted system
@@ -83,7 +81,8 @@ def test_detector_names_system_change_not_server_side():
     """★ THE INSTRUMENT FIX. A round whose MESSAGES are byte-identical but whose
     hoisted SYSTEM block changed must be NAMED (<hoisted>.system) and must NOT
     be laundered into a false 'server-side — PROVEN'."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.wire_fingerprint import (
         canonical_messages, static_prefix_hash, system_fingerprint,
     )
@@ -104,8 +103,8 @@ def test_detector_names_system_change_not_server_side():
     u2 = {'cache_read_tokens': 26016, 'cache_creation_input_tokens': 120000,
           '_wire_fp': fp, '_wire_static': st,
           '_wire_system': system_fingerprint(sys2, tools)}
-    detect_cache_break(conv, msgs, tools, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, msgs, tools, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, msgs, tools, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, msgs, tools, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None, 'expected a break (read pinned, big re-write)'
     blob = _json.dumps(r)
     assert 'PROVEN' not in blob, (
@@ -122,7 +121,8 @@ def test_detector_NEUTER_without_system_fp_launders_to_proven():
     'upstream cache miss' verdict, the current wording; historically
     'upstream cache eviction' / 'server-side — PROVEN'). Proves Fix 2's system
     fingerprint is load-bearing."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.wire_fingerprint import (
         canonical_messages, static_prefix_hash,
     )
@@ -137,8 +137,8 @@ def test_detector_NEUTER_without_system_fp_launders_to_proven():
           '_wire_fp': fp, '_wire_static': st}
     u2 = {'cache_read_tokens': 26016, 'cache_creation_input_tokens': 120000,
           '_wire_fp': fp, '_wire_static': st}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None
     blob = _json.dumps(r)
     # Without the system fingerprint, the messages look byte-identical → the
@@ -174,101 +174,16 @@ def _system_text_of(messages):
     return ''
 
 
-def _base_messages():
-    return [
-        {'role': 'system', 'content': [{'type': 'text', 'text': 'STATIC PROMPT'}]},
-        {'role': 'user', 'content': 'first turn'},
-        {'role': 'assistant', 'content': 'ok'},
-        {'role': 'user', 'content': 'second turn'},
-    ]
 
 
-def test_fix1_volatile_block_rides_tail_not_system():
-    """_refresh_tail_block places a volatile block on the LAST user message and
-    leaves the system floor untouched — so a per-turn change to that block never
-    rewrites the cached system prefix."""
-    from lib.tasks_pkg.system_context._reminders import _refresh_tail_block
-
-    msgs_n = _base_messages()
-    _refresh_tail_block(msgs_n, '<system-reminder>\n[PROJECT BOARD] v1\n</system-reminder>',
-                        '[PROJECT BOARD]')
-    # System floor is unchanged (the whole point).
-    assert _system_text_of(msgs_n) == 'STATIC PROMPT', (
-        'volatile block leaked into the system floor')
-    # It landed on the last user message.
-    last_user = msgs_n[3]
-    assert isinstance(last_user['content'], list)
-    assert any('[PROJECT BOARD] v1' in b.get('text', '')
-               for b in last_user['content'] if isinstance(b, dict)), (
-        'block did not land on the last user message')
-
-    # Per-turn refresh: a NEW value on the SAME message replaces the stale one
-    # (no duplicate, no proliferation) — the endpoint-reentry idempotency.
-    action = _refresh_tail_block(
-        msgs_n, '<system-reminder>\n[PROJECT BOARD] v2\n</system-reminder>',
-        '[PROJECT BOARD]')
-    assert action == 'replaced'
-    texts = [b.get('text', '') for b in msgs_n[3]['content'] if isinstance(b, dict)]
-    assert any('[PROJECT BOARD] v2' in t for t in texts)
-    assert not any('[PROJECT BOARD] v1' in t for t in texts), 'stale block not stripped'
-
-
-def test_fix1_system_floor_byte_identical_across_turns():
-    """★ THE 止血 INVARIANT. Two consecutive turns whose ONLY difference is a
-    changed volatile board/digest value must produce a BYTE-IDENTICAL system
-    floor (so cache_read grows) — because the volatile block rides the tail.
-
-    NEUTER twin: append the same volatile block to the SYSTEM message (the OLD
-    behavior) and prove the floor then DIVERGES (cache bust)."""
-    from lib.tasks_pkg.system_context._reminders import (
-        _refresh_tail_block, _append_to_system_message,
-    )
-
-    # ── FIXED path: volatile block on the tail ──
-    a = _base_messages()
-    b = _base_messages()
-    b.append({'role': 'assistant', 'content': 'ok2'})
-    b.append({'role': 'user', 'content': 'third turn'})
-    _refresh_tail_block(a, '<system-reminder>\n[PROJECT BOARD] epics=[x]\n</system-reminder>',
-                        '[PROJECT BOARD]')
-    _refresh_tail_block(b, '<system-reminder>\n[PROJECT BOARD] epics=[y MOVED]\n</system-reminder>',
-                        '[PROJECT BOARD]')
-    assert _system_text_of(a) == _system_text_of(b), (
-        'FIX 1 broken: the system floor changed across turns despite the '
-        'volatile block riding the tail')
-
-    # ── NEUTER: the OLD system-append behavior busts the floor ──
-    a2 = _base_messages()
-    b2 = _base_messages()
-    _append_to_system_message(
-        a2, '<system-reminder>\n[PROJECT BOARD] epics=[x]\n</system-reminder>',
-        as_separate_block=True)
-    _append_to_system_message(
-        b2, '<system-reminder>\n[PROJECT BOARD] epics=[y MOVED]\n</system-reminder>',
-        as_separate_block=True)
-    assert _system_text_of(a2) != _system_text_of(b2), (
-        'NEUTER expectation: appending the volatile block to the SYSTEM message '
-        '(old behavior) MUST diverge the floor — proving Fix 1 (tail placement) '
-        'is load-bearing')
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  A — Current date rides the TRUE tail, never the cached system floor
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# The date changes once per UTC day. Baking it into the static system block
-# meant the daily rollover rewrote a cached block and re-billed the whole body
-# uncached at the UTC boundary (Anthropic's named "don't put timestamps in the
-# cached prompt" anti-pattern). It now rides the true tail via
-# _refresh_tail_block, so the system floor stays byte-stable across the day
-# boundary.
 
 def _run_inject(messages, *, model='claude-opus-4', mode='append'):
-    from lib.tasks_pkg.system_context import _inject_system_contexts
-    _inject_system_contexts(
-        messages, project_path='/tmp/x', project_enabled=False,
-        memory_enabled=False, search_enabled=False, swarm_enabled=False,
-        has_real_tools=True, conv_id='', task={'config': {}}, model=model,
+    from lib.tasks_pkg.context_composer import compose_task_context
+    compose_task_context(
+        messages, user_id=1, project_path='/tmp/x', project_enabled=False,
+        memory_enabled=False, search_enabled=False,
+        has_real_tools=True, conv_id='', task={'config': {}, '_userId': 1},
+        model=model,
         system_prompt_mode=mode,
     )
 

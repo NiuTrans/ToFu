@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import stat
 import subprocess
 import threading
 
@@ -224,7 +225,12 @@ def prepare_env(env: dict, workspace: str) -> dict:
     return env
 
 
-def wrap_command(full_command: str, workspace: str) -> str:
+def wrap_command(
+    full_command: str,
+    workspace: str,
+    *,
+    writable_cache_dir: str | None = None,
+) -> str:
     """Wrap *full_command* with a real-isolation backend IF one works on this
     host; otherwise return it unchanged (Layer-2 env jail already applied via
     :func:`prepare_env`). Restricted-context callers only."""
@@ -235,9 +241,32 @@ def wrap_command(full_command: str, workspace: str) -> str:
     if backend == 'bwrap':
         # Read-only host, writable workspace + its own /tmp, dev minimal.
         inner = ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev',
-                 '--bind', ws, ws, '--chdir', ws,
-                 '--unshare-all', '--share-net',
-                 'sh', '-c', full_command]
+                 '--bind', ws, ws]
+        # CPython's optional local bytecode namespace is the sole writable
+        # path outside the workspace.  It is created and owner-validated by
+        # python_bytecode_cache before this trusted internal seam is called;
+        # bind only that exact namespace, never its multi-owner parent.
+        if writable_cache_dir:
+            cache_dir = os.path.realpath(writable_cache_dir)
+            try:
+                metadata = os.lstat(cache_dir)
+                private = (
+                    os.path.isabs(cache_dir)
+                    and stat.S_ISDIR(metadata.st_mode)
+                    and not stat.S_ISLNK(metadata.st_mode)
+                    and metadata.st_uid == os.getuid()
+                    and stat.S_IMODE(metadata.st_mode) & 0o077 == 0
+                )
+            except OSError:
+                private = False
+            if private:
+                inner.extend(('--bind', cache_dir, cache_dir))
+            else:
+                logger.warning(
+                    '[portable_sandbox] refused unsafe writable cache bind: %s',
+                    writable_cache_dir)
+        inner.extend(('--chdir', ws, '--unshare-all', '--share-net',
+                      'sh', '-c', full_command))
         return ' '.join(shlex.quote(x) for x in inner)
     # podman path intentionally conservative: only used if a prebuilt image is
     # configured, else fall through. (Full podman wiring is a follow-up; the

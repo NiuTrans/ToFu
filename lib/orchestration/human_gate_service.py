@@ -26,12 +26,12 @@ GuidanceResolver = Callable[[str, str], Any]
 
 
 def _resolve_approval(request_id: str, approved: bool) -> Any:
-    from lib.tasks_pkg import resolve_write_approval
+    from lib.tasks_pkg.approval import resolve_write_approval
     return resolve_write_approval(request_id, approved)
 
 
 def _resolve_guidance(request_id: str, response: str) -> Any:
-    from lib.tasks_pkg import resolve_human_guidance
+    from lib.tasks_pkg.human_guidance import resolve_human_guidance
     return resolve_human_guidance(request_id, response)
 
 

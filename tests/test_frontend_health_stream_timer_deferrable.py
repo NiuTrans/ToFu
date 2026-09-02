@@ -148,7 +148,6 @@ def test_typeof_guards_are_actually_present():
         'ui/sse_handlers_swarm.js',
         'ui/sse_handlers_tool.js',
         'ui/sse_handlers_misc.js',
-        'ui/sse_poll_fallback.js',
         'ui/sse_pipeline.js',
         # Files the audit missed but the guard test discovered on first
         # run — kept in the required-set so a future edit can't silently

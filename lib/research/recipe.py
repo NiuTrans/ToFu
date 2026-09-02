@@ -2,7 +2,7 @@
 
 The auto-research recipe's spine wires the three generative primitives
 (harvest / survey / ideate) and an independent LLM evaluation pass into the production stage graph
-(docs/AUTO_RESEARCH_SYSTEM_DESIGN.md §4), so a single ``produce_research`` call
+(docs/modules/ingest_media.md §4), so a single ``produce_research`` call
 runs the whole chain with checkpointed crash-resume — and each stage stays
 independently callable.
 
@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import os
 
+from lib.identity import require_user_id
 from lib.log import get_logger
 from lib.production.stages import Stage, run_stages
 
@@ -85,10 +86,11 @@ def _build_survey(direction, arxiv_ids, *, lang, user_id, folder_id, abort=None,
                         on_tool_event=on_tool_event)
 
 
-def _generate_ideas(direction, open_gaps, *, lang, n_ideas, abort=None,
-                    on_tool_event=None):
+def _generate_ideas(direction, open_gaps, *, lang, n_ideas, user_id,
+                    abort=None, on_tool_event=None):
     from lib.paper.ideate import generate_ideas
     return generate_ideas(direction, open_gaps, lang=lang, n_ideas=n_ideas,
+                          user_id=user_id,
                           abort=abort, on_tool_event=on_tool_event)
 
 
@@ -97,14 +99,17 @@ def _evaluate_result(direction, result, *, model=None, abort=None):
     return evaluate_research_result(direction, result, model=model, abort=abort)
 
 
-def _persist_survey(direction, lang, survey_md, open_gaps, usage=None):
+def _persist_survey(
+    direction, lang, survey_md, open_gaps, usage=None, *, user_id: int,
+):
     from lib.research.persistence import persist_survey
-    return persist_survey(direction, lang, survey_md, open_gaps, usage=usage)
+    return persist_survey(
+        direction, lang, survey_md, open_gaps, usage=usage, user_id=user_id)
 
 
-def _persist_ideate(direction, lang, artifact):
+def _persist_ideate(direction, lang, artifact, *, user_id: int):
     from lib.research.persistence import persist_ideate
-    return persist_ideate(direction, lang, artifact)
+    return persist_ideate(direction, lang, artifact, user_id=user_id)
 
 
 def _aggregate_usage(survey_usage: dict, ideate_usage: dict,
@@ -125,7 +130,7 @@ def _run_harvest(ctx: dict) -> dict:
     """
     direction = ctx['direction']
     folder_id = ctx['folder_id']
-    user_id = ctx.get('user_id', 1)
+    user_id = require_user_id(ctx.get('user_id'), context='research harvest stage')
     seed = list(ctx.get('seed_arxiv_ids') or [])
     if not seed:
         n = ctx.get('harvest_n', _DEFAULT_HARVEST_N)
@@ -167,7 +172,8 @@ def _run_survey(ctx: dict) -> dict:
     artifact — the stage data contract, not an in-memory global.
     """
     h = ctx['artifacts']['harvest']
-    kwargs = dict(lang=ctx.get('lang', 'en'), user_id=ctx.get('user_id', 1),
+    user_id = require_user_id(ctx.get('user_id'), context='research survey stage')
+    kwargs = dict(lang=ctx.get('lang', 'en'), user_id=user_id,
                   folder_id=h['folder_id'], abort=ctx.get('abort'))
     # Keep the monkeypatch seam backward-compatible for offline graph tests;
     # real jobs always carry the stage runner's event sink.
@@ -186,7 +192,8 @@ def _run_survey(ctx: dict) -> dict:
     # restart). Never raises — a storage fault must not discard a finished
     # survey (see lib/research/persistence.py).
     _persist_survey(ctx['direction'], ctx.get('lang', 'en'), art['survey_md'],
-                    art['open_gaps'], art['usage'])
+                    art['open_gaps'], art['usage'],
+                    user_id=int(ctx['user_id']))
     return art
 
 
@@ -220,8 +227,9 @@ def _run_ideate(ctx: dict) -> dict:
     checkpointed artifact.
     """
     s = ctx['artifacts']['survey']
+    user_id = require_user_id(ctx.get('user_id'), context='research ideate stage')
     kwargs = dict(lang=ctx.get('lang', 'en'), n_ideas=ctx.get('n_ideas', 6),
-                  abort=ctx.get('abort'))
+                  user_id=user_id, abort=ctx.get('abort'))
     if ctx.get('emit') is not None:
         kwargs['on_tool_event'] = ctx['emit']
     res = _generate_ideas(ctx['direction'], s['open_gaps'], **kwargs)
@@ -245,7 +253,9 @@ def _run_ideate(ctx: dict) -> dict:
     # Durable BEFORE the checkpoint. The rejection audit carried here is the
     # calibration data for IDEATE_GATE_THRESHOLD, so losing it to a TTL sweep
     # forfeits the ability to tune the gate from real runs.
-    _persist_ideate(ctx['direction'], ctx.get('lang', 'en'), art)
+    _persist_ideate(
+        ctx['direction'], ctx.get('lang', 'en'), art,
+        user_id=int(ctx['user_id']))
     return art
 
 
@@ -306,7 +316,7 @@ def _run_evaluate(ctx: dict) -> dict:
     # third schema/key family.
     _persist_ideate(ctx['direction'], ctx.get('lang', 'en'), {
         **ideate, 'evaluation': evaluation,
-    })
+    }, user_id=int(ctx['user_id']))
     return evaluation
 
 
@@ -326,7 +336,7 @@ def research_recipe_stages() -> list:
 
 
 def build_research_from_direction(direction: str, workdir: str, *, lang: str = 'en',
-                                  user_id: int = 1, n_ideas: int = 6,
+                                  user_id: int, n_ideas: int = 6,
                                   seed_arxiv_ids=None, harvest_n: int = _DEFAULT_HARVEST_N,
                                   abort_event=None, emit=None,
                                   evaluation_model: str | None = None) -> dict:
@@ -348,6 +358,7 @@ def build_research_from_direction(direction: str, workdir: str, *, lang: str = '
     Returns the ideate stage artifact ({accepted, rejected, threshold}), plus
     ``survey_md`` / ``open_gaps`` / ``folder_id`` folded in for the caller.
     """
+    user_id = require_user_id(user_id, context='research recipe')
     os.makedirs(workdir, exist_ok=True)
     folder_id = f'research_{os.path.basename(workdir.rstrip("/"))}'
     ctx = {

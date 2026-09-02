@@ -128,36 +128,32 @@ global.removeEventListener = (ev, fn) => {
 };
 
 let _scopeCreates = 0, _scopeDestroys = 0;
-if (process.argv[3] === 'E') {
-  global.TofuModules = {
-    createLifecycleScope: () => {
-      _scopeCreates++;
-      const cleanups = [];
-      return {
-        signal: {},
-        listen(target, type, fn) {
-          target.addEventListener(type, fn);
-          cleanups.push(() => target.removeEventListener(type, fn));
-        },
-        interval(fn, ms) {
-          const id = setInterval(fn, ms);
-          cleanups.push(() => clearInterval(id));
-          return id;
-        },
-        timeout(fn, ms) {
-          const id = setTimeout(fn, ms);
-          cleanups.push(() => clearTimeout(id));
-          return id;
-        },
-        add(fn) { cleanups.push(fn); },
-        destroy() {
-          _scopeDestroys++;
-          while (cleanups.length) cleanups.pop()();
-        },
-      };
+global.createLifecycleScope = () => {
+  _scopeCreates++;
+  const cleanups = [];
+  return {
+    signal: {},
+    listen(target, type, fn) {
+      target.addEventListener(type, fn);
+      cleanups.push(() => target.removeEventListener(type, fn));
+    },
+    interval(fn, ms) {
+      const id = setInterval(fn, ms);
+      cleanups.push(() => clearInterval(id));
+      return id;
+    },
+    timeout(fn, ms) {
+      const id = setTimeout(fn, ms);
+      cleanups.push(() => clearTimeout(id));
+      return id;
+    },
+    add(fn) { cleanups.push(fn); },
+    destroy() {
+      _scopeDestroys++;
+      while (cleanups.length) cleanups.pop()();
     },
   };
-}
+};
 
 // ── Controllable health probe ──
 let _healthOk = true;

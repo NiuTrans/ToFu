@@ -23,14 +23,14 @@ import os
 import unittest
 from unittest import mock
 
-from lib.tools import (
+from lib.tools.registry import (
     ToolContext,
     ToolSpec,
     assemble_tool_list,
     available_plugins,
     resolve_enabled_plugins,
 )
-from lib.tools import registry as _reg
+import lib.tools.registry as _reg
 
 
 def _names(tool_list):
@@ -43,7 +43,7 @@ def _ctx(enabled_plugins=set(), **overrides):  # noqa: B006 — explicit default
         project_path='', project_enabled=False,
         search_mode='off', search_enabled=False, fetch_enabled=False,
         code_exec_enabled=False, browser_enabled=False, desktop_enabled=False,
-        swarm_enabled=False, image_gen_enabled=False,
+        image_gen_enabled=False,
         human_guidance_enabled=False, scheduler_enabled=False, messages=[],
         enabled_plugins=enabled_plugins,
     )
@@ -118,12 +118,12 @@ class TestVisibilityGate(_PluginSpecMixin, unittest.TestCase):
     def test_visible_when_allow_listed(self):
         ctx = _ctx(enabled_plugins={self.PLUGIN})
         assemble_tool_list(ctx)
-        self.assertIn(self.TOOL, _names(ctx.enabled_tool_catalog))
+        self.assertIn(self.TOOL, _names(ctx.executable_tool_catalog))
 
     def test_visible_when_gate_open(self):
         ctx = _ctx(enabled_plugins=None)
         assemble_tool_list(ctx)
-        self.assertIn(self.TOOL, _names(ctx.enabled_tool_catalog))
+        self.assertIn(self.TOOL, _names(ctx.executable_tool_catalog))
 
     def test_other_plugin_name_does_not_unlock(self):
         tl, _ = assemble_tool_list(_ctx(enabled_plugins={'some_other'}))
@@ -158,7 +158,7 @@ class TestEmptyPluginNameFailsClosed(unittest.TestCase):
         self.assertNotIn(self.TOOL, _names(tl_closed))
         ctx_open = _ctx(enabled_plugins=None)
         assemble_tool_list(ctx_open)
-        self.assertIn(self.TOOL, _names(ctx_open.enabled_tool_catalog))
+        self.assertIn(self.TOOL, _names(ctx_open.executable_tool_catalog))
 
 
 class TestAutoStamping(unittest.TestCase):

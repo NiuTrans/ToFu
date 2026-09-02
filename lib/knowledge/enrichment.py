@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import threading
+import uuid
 
-from lib.database import knowledge_repository as _repository
 from lib.log import get_logger
 
 from .assets import model_ready_image, proxy_text
 
 logger = get_logger(__name__)
 
+
 _WORKER_LOCK = threading.Lock()
-_worker: threading.Thread | None = None
-_worker_stop = threading.Event()
+_workers: dict[int, threading.Thread] = {}
+_worker_stops: dict[int, threading.Event] = {}
 
 
 def _vision_models() -> list[str]:
@@ -47,14 +49,18 @@ def _describe(raw: bytes, mime_type: str, row: dict) -> tuple[str, str]:
     # 400 ("stream must be set to true") before fallback. Always consume the
     # streaming surface; callers still receive one compact final description.
     from lib.llm_dispatch import dispatch_stream
+    from lib.llm.stream_result import require_verified_provider_stream_result
     chunks: list[str] = []
-    message, _finish_reason, usage = dispatch_stream(
+    stream_result = require_verified_provider_stream_result(dispatch_stream(
         [{'role': 'user', 'content': [
             {'type': 'image_url', 'image_url': {'url': data_url}},
             {'type': 'text', 'text': prompt},
         ]}],
         capability='vision', temperature=0, max_tokens=2200,
-        log_prefix='[KnowledgeVision]', on_content=chunks.append)
+        log_prefix='[KnowledgeVision]', on_content=chunks.append),
+        context='knowledge vision enrichment')
+    message = stream_result.message
+    usage = stream_result.usage
     if isinstance(message, dict):
         content = message.get('content') or ''
     else:
@@ -73,25 +79,45 @@ def _describe(raw: bytes, mime_type: str, row: dict) -> tuple[str, str]:
     return description, model
 
 
-def _run() -> None:
+def _run(user_id: int, stop_event: threading.Event) -> None:
     from . import store
+    from .repository import KnowledgeRepository
 
-    if not store.visual_enrichment_enabled():
+    repository = KnowledgeRepository(user_id)
+    worker_intent_id = uuid.uuid4().hex
+    claim_sequence = 0
+    if not store.visual_enrichment_enabled(user_id=user_id):
         return
     if not _vision_models():
-        _repository.mark_pending_assets_no_vision(store._db_path())
+        repository.mark_pending_assets_no_vision(
+            command_id=(
+                f'knowledge.assets.no_vision:{user_id}:{worker_intent_id}'))
         logger.info('[KnowledgeVision] no configured vision slot; work deferred')
         return
-    while not _worker_stop.is_set() and store.visual_enrichment_enabled():
-        row = _repository.claim_pending_asset(store._db_path())
+    while (not stop_event.is_set()
+           and store.visual_enrichment_enabled(user_id=user_id)):
+        claim_sequence += 1
+        row = repository.claim_pending_asset(command_id=(
+            f'knowledge.asset.claim:{user_id}:{worker_intent_id}:'
+            f'{claim_sequence}'))
         if row is None:
             return
         asset_id = str(row['id'])
-        loaded = store.read_asset(asset_id)
+        asset_receipt_key = hashlib.sha256(
+            asset_id.encode('utf-8')).hexdigest()
+        loaded = store.read_asset(asset_id, user_id=user_id)
         if loaded is None:
-            _repository.update_asset_enrichment(
-                store._db_path(), asset_id, description='', status='failed',
-                error='Stored image asset is missing')
+            repository.update_asset(
+                asset_id,
+                command_id=(
+                    f'knowledge.asset.missing:{user_id}:{worker_intent_id}:'
+                    f'{asset_receipt_key}'),
+                updates={
+                    'description': '',
+                    'enrichment_status': 'failed',
+                    'enrichment_error': 'Stored image asset is missing',
+                },
+            )
             continue
         _, raw = loaded
         try:
@@ -105,50 +131,101 @@ def _run() -> None:
                 str(row.get('document_name') or 'document'),
                 str(row.get('caption') or 'Visual evidence'), chunk_content,
                 cap=4096)
-            _repository.update_asset_enrichment(
-                store._db_path(), asset_id, description=description,
-                status='ready', model=model, chunk_content=chunk_content,
-                chunk_search_text=chunk_search_text)
+            repository.update_asset(
+                asset_id,
+                command_id=(
+                    f'knowledge.asset.ready:{user_id}:{worker_intent_id}:'
+                    f'{asset_receipt_key}'),
+                updates={
+                    'description': description,
+                    'enrichment_status': 'ready',
+                    'enrichment_model': model,
+                    'enrichment_error': '',
+                },
+                chunk_content=chunk_content,
+                chunk_search_text=chunk_search_text,
+            )
             logger.info('[KnowledgeVision] enriched asset %s via %s',
                         asset_id, model or '?')
         except Exception as exc:
             logger.warning('[KnowledgeVision] asset %s failed: %s', asset_id, exc)
-            _repository.update_asset_enrichment(
-                store._db_path(), asset_id, description='', status='failed',
-                error=str(exc)[:1000])
+            repository.update_asset(
+                asset_id,
+                command_id=(
+                    f'knowledge.asset.failed:{user_id}:{worker_intent_id}:'
+                    f'{asset_receipt_key}'),
+                updates={
+                    'description': '',
+                    'enrichment_status': 'failed',
+                    'enrichment_error': str(exc)[:1000],
+                },
+            )
 
 
-def start_visual_enrichment() -> bool:
-    """Start at most one daemon worker. Returns whether work was scheduled."""
-    global _worker
+def start_visual_enrichment(*, user_id: int) -> bool:
+    """Start at most one daemon worker for one explicit corpus owner."""
     from . import store
-    if not store.visual_enrichment_enabled():
+    from lib.identity import require_user_id
+
+    owner_user_id = require_user_id(
+        user_id, context='knowledge enrichment owner')
+    if not store.visual_enrichment_enabled(user_id=owner_user_id):
         return False
     with _WORKER_LOCK:
-        if _worker is not None and _worker.is_alive():
+        current = _workers.get(owner_user_id)
+        if current is not None and current.is_alive():
             return False
-        _worker_stop.clear()
+        stop_event = threading.Event()
+        _worker_stops[owner_user_id] = stop_event
+
         def guarded() -> None:
             try:
-                _run()
+                _run(owner_user_id, stop_event)
             except Exception as exc:
                 logger.error(
                     '[KnowledgeVision] background worker crashed: %s',
                     exc, exc_info=True)
+            finally:
+                with _WORKER_LOCK:
+                    if _workers.get(owner_user_id) is threading.current_thread():
+                        _workers.pop(owner_user_id, None)
+                        _worker_stops.pop(owner_user_id, None)
 
-        _worker = threading.Thread(
-            target=guarded, name='knowledge-visual-enrichment', daemon=True)
-        _worker.start()
+        worker = threading.Thread(
+            target=guarded,
+            name=f'knowledge-visual-enrichment-{owner_user_id}',
+            daemon=True,
+        )
+        _workers[owner_user_id] = worker
+        worker.start()
         return True
 
 
-def stop_visual_enrichment(timeout: float = 2.0) -> bool:
-    """Stop between assets and bounded-join the one-shot enrichment worker."""
-    global _worker
-    _worker_stop.set()
+def resume_visual_enrichment(*, principal) -> int:
+    """Resume every corpus whose owner has durably opted into vision work."""
+    from .repository import visual_enrichment_owner_ids
+
+    return sum(
+        bool(start_visual_enrichment(user_id=owner_user_id))
+        for owner_user_id in visual_enrichment_owner_ids(principal=principal)
+    )
+
+
+def stop_visual_enrichment(
+    timeout: float = 2.0, *, user_id: int | None = None,
+) -> bool:
+    """Stop one owner's worker, or every worker during process shutdown."""
     with _WORKER_LOCK:
-        thread = _worker
-    if thread is None:
+        owner_ids = ([int(user_id)] if user_id is not None
+                     else list(_workers))
+        pairs = [
+            (owner_id, _workers.get(owner_id), _worker_stops.get(owner_id))
+            for owner_id in owner_ids
+        ]
+        for _owner_id, _thread, stop_event in pairs:
+            if stop_event is not None:
+                stop_event.set()
+    if not pairs:
         return True
     try:
         wait_seconds = max(0.0, float(timeout))
@@ -156,14 +233,25 @@ def stop_visual_enrichment(timeout: float = 2.0) -> bool:
         logger.debug(
             '[KnowledgeVision] invalid stop timeout; using 2.0: %s', exc)
         wait_seconds = 2.0
-    if thread is not threading.current_thread():
-        thread.join(timeout=wait_seconds)
-    if thread.is_alive():
-        return False
-    with _WORKER_LOCK:
-        if _worker is thread:
-            _worker = None
-    return True
+    deadline_share = wait_seconds / max(1, len(pairs))
+    all_stopped = True
+    for owner_id, thread, _stop_event in pairs:
+        if thread is None:
+            continue
+        if thread is not threading.current_thread():
+            thread.join(timeout=deadline_share)
+        if thread.is_alive():
+            all_stopped = False
+            continue
+        with _WORKER_LOCK:
+            if _workers.get(owner_id) is thread:
+                _workers.pop(owner_id, None)
+                _worker_stops.pop(owner_id, None)
+    return all_stopped
 
 
-__all__ = ['start_visual_enrichment', 'stop_visual_enrichment']
+__all__ = [
+    'resume_visual_enrichment',
+    'start_visual_enrichment',
+    'stop_visual_enrichment',
+]

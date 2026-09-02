@@ -1,6 +1,6 @@
 """Snapshot delta storage (Request Inspector P5) — pytest suite.
 
-Design: docs/DEBUG_PANEL_REDESIGN.md §10 (format FROZEN). The owner's
+Design: docs/FRONTEND_ARCHITECTURE.md §10 (format FROZEN). The owner's
 acceptance criteria drive these tests:
 
   1. ROUNDTRIP FIDELITY — rebuild(project(x)) == x byte-for-byte
@@ -13,7 +13,7 @@ acceptance criteria drive these tests:
      reported as degraded=True with a reason, never silently truncated.
   4. IDEMPOTENCE — projecting an already-projected row is a no-op, and a
      partially-migrated row list still rebuilds correctly.
-  5. TURN ISOLATION — endpoint phases re-number rounds from 1, so their
+  5. TURN ISOLATION — Flow node turns re-number rounds from 1, so their
      baseline chains must not cross-contaminate.
 
 NEUTER: disable the tools dedup, and the "tools stored once" assertion
@@ -219,7 +219,7 @@ def test_legacy_full_rows_still_rebuild():
 
 
 def test_turn_chains_do_not_cross_contaminate():
-    """Endpoint phases re-number rounds from 1; their baseline chains are
+    """Flow node turns re-number rounds from 1; their baseline chains are
     independent, so a planner R1 must never be diffed against a worker R1."""
     planner = _task_rounds(3, turn='planning')
     worker = _task_rounds(3, turn='working')

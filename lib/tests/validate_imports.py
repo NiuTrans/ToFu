@@ -35,7 +35,6 @@ _TOP_LEVEL_MODULES = [
     'lib.browser',
     'lib.browser.advanced',
     'lib.conv_ref',
-    'lib.database',
     # 'lib.desktop_agent' excluded — standalone client script requiring pyautogui/psutil/pyperclip
     'lib.desktop_tools',
     'lib.embeddings',

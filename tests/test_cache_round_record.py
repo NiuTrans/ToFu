@@ -27,6 +27,7 @@ Run DIRECTLY (env-guarded):
 
 from __future__ import annotations
 
+import copy
 import json as _json
 import logging
 import os
@@ -99,7 +100,7 @@ def _body(system_ttl=None, sys_text='STATIC SYSTEM PROMPT'):
 def test_classify_verdict_is_single_source():
     """replay.classify_verdict MUST be the SAME object as the detector's — no
     second copy that could drift (the bug class this whole objective is about)."""
-    from lib.tasks_pkg.cache_tracking import classify_verdict as detect_cv
+    from lib.tasks_pkg.cache_tracking._detect import classify_verdict as detect_cv
     from lib.tasks_pkg.cache_tracking.replay import classify_verdict as replay_cv
     assert detect_cv is replay_cv, (
         'classify_verdict must be single-source (replay re-exports the '
@@ -117,11 +118,12 @@ def test_round_record_emitted_every_round():
         replay_rounds([
             {'body': b, 'cache_read': 90000, 'cache_write': 50000, 'routing': rt},
             {'body': b, 'cache_read': 88000, 'cache_write': 3000, 'routing': rt},
-        ], conv_id='rec-every')
+        ], user_id=7, conv_id='rec-every')
     assert len(cap.records) == 2, (
         f'expected one record per round (2), got {len(cap.records)}')
     for r in cap.records:
         for k in ('bucket', 'routing_diff', 'ttl_flip', 'body_identical',
+                  'wire_available', 'wire_changed', 'read_collapsed',
                   'cache_read', 'cache_write'):
             assert k in r, f'record missing field {k}: {r}'
 
@@ -138,7 +140,7 @@ def test_round_record_labels_namespace_switch():
              'routing': {'key_hash': 'kA', 'anthropic_beta': 'pc', 'endpoint': 'e1'}},
             {'body': b, 'cache_read': 40000, 'cache_write': 120000,
              'routing': {'key_hash': 'kB', 'anthropic_beta': 'pc', 'endpoint': 'e1'}},
-        ], conv_id='rec-nsflip')
+        ], user_id=7, conv_id='rec-nsflip')
     r2 = cap.records[-1]
     assert r2['bucket'] == 'cache_namespace_switch', r2
     assert '<ns>key' in r2['routing_diff'], r2
@@ -156,7 +158,7 @@ def test_round_record_labels_ttl_flip():
              'cache_write': 50000, 'routing': rt},
             {'body': _body(system_ttl=''), 'cache_read': 40000,
              'cache_write': 120000, 'routing': rt},
-        ], conv_id='rec-ttlflip')
+        ], user_id=7, conv_id='rec-ttlflip')
     r2 = cap.records[-1]
     assert r2['bucket'] == 'ttl_flip', r2
     assert r2['ttl_flip'] is True, r2
@@ -212,10 +214,75 @@ def test_round_record_labels_upstream_identical():
         replay_rounds([
             {'body': b, 'cache_read': 90000, 'cache_write': 50000, 'routing': rt},
             {'body': b, 'cache_read': 40000, 'cache_write': 120000, 'routing': rt},
-        ], conv_id='rec-upstream')
+        ], user_id=7, conv_id='rec-upstream')
     r2 = cap.records[-1]
     assert r2['bucket'] == 'upstream_identical', r2
     assert r2['namespace_verified'] is True, r2
+
+
+def test_projected_tools_mutation_with_zero_write_is_client_break():
+    """Behaviour regression for Kimi R4/R6-style accounting.
+
+    The live detector receives stable source/authority tools while the final
+    provider projection is captured in ``_wire_*`` usage fields.  If that
+    last-mile schema changes and cache_read collapses, the mutation is proven
+    client-side even when the gateway never meters cache_write.
+    """
+    from lib.tasks_pkg.cache_tracking.replay import replay_rounds
+
+    source_tools = [{
+        'type': 'function',
+        'function': {
+            'name': 'read_files', 'description': 'stable source schema',
+            'parameters': {'type': 'object', 'properties': {}},
+        },
+    }]
+    warm = _body(system_ttl='1h')
+    warm['model'] = 'kimi-k3'
+    warm['tools'] = [{
+        'type': 'function',
+        'function': {
+            'name': 'execute_tools',
+            'description': 'stable program guidance',
+            'parameters': {'type': 'object', 'properties': {
+                'program': {'type': 'string'},
+            }},
+        },
+    }]
+    changed = copy.deepcopy(warm)
+    changed['tools'][0]['function']['description'] = (
+        'stable program guidance Serial chain grep_search > grep_search > '
+        'find_files: collapse remaining reads')
+    routing = {
+        'key_hash': 'same-key', 'anthropic_beta': 'same-beta',
+        'endpoint': 'same-endpoint',
+    }
+
+    with _RecordCapture() as cap:
+        result = replay_rounds([
+            {'body': warm, 'source_tools': source_tools,
+             'cache_read': 18944, 'cache_write': 0, 'routing': routing},
+            {'body': changed, 'source_tools': source_tools,
+             'cache_read': 3840, 'cache_write': 0, 'routing': routing},
+        ], user_id=7, conv_id='rec-tools-zero-write')
+
+    verdict = result['rounds'][1]['verdict']
+    assert verdict is not None and 'prefix_mutation' in verdict, verdict
+    assert 'server_side' not in verdict, verdict
+    cause = verdict['prefix_mutation']
+    assert '<hoisted>.tools' in cause and '<bytes>tools' in cause, cause
+    assert 'provider-bound system/tools structure changed' in cause, cause
+    assert 'lossy system fingerprint matched' not in cause, cause
+
+    record = cap.records[-1]
+    assert record['bucket'] == 'body_change', record
+    assert record['cache_write'] == 0, record
+    assert record['read_collapsed'] is True, record
+    assert record['wire_available'] is True, record
+    assert record['wire_changed'] is True, record
+    assert record['body_identical'] is False, record
+    assert '<hoisted>.tools' in record['culprits'], record
+    assert '<bytes>tools' in record['culprits'], record
 
 
 def test_round_record_NEUTER_without_routing_not_namespace():
@@ -232,7 +299,7 @@ def test_round_record_NEUTER_without_routing_not_namespace():
              'routing': {'key_hash': 'kA', 'anthropic_beta': 'pc', 'endpoint': 'e1'}},
             {'body': b, 'cache_read': 40000, 'cache_write': 120000,
              'routing': {'key_hash': 'kB', 'anthropic_beta': 'pc', 'endpoint': 'e1'}},
-        ], conv_id='rec-neuter', capture_routing=False)
+        ], user_id=7, conv_id='rec-neuter', capture_routing=False)
     r2 = cap.records[-1]
     assert r2['bucket'] != 'cache_namespace_switch', (
         f'NEUTER: without routing capture the flip must not be labelled a '

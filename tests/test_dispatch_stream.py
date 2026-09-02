@@ -104,6 +104,100 @@ class TestDispatchStreamSuccess:
         assert usage['_dispatch']['model'] == 'qwen-plus'
         assert usage['_dispatch']['key'] == 'k0'
         assert usage['_dispatch']['429_retries'] == 0
+        assert usage['_dispatch']['queue_wait_ms'] >= 0
+        assert usage['_dispatch']['queue_wait_measurement'] == \
+            'dispatcher_backpressure_only'
+
+    def test_semantic_retry_avoids_failed_pair_on_first_pick(self, monkeypatch):
+        """A fresh dispatch must apply the prior attempt's rotate hint now.
+
+        The analyser emits ``avoid_pairs`` only after an unusable stream.  If
+        the new dispatch hides that set until it has its own failure, the first
+        pick repeats the poisoned slot and the advertised rotation is fictive.
+        """
+        from lib.llm_dispatch import api
+
+        failed = _make_slot(model='kimi-k3', key='k0')
+        alternate = _make_slot(model='kimi-k3', key='k1')
+
+        class _AvoidAwareDispatcher:
+            slots = [failed, alternate]
+
+            def __init__(self):
+                self.first_exclusions = None
+
+            def pick_and_reserve(self, **kwargs):
+                excluded = set(kwargs.get('exclude_pairs') or set())
+                if self.first_exclusions is None:
+                    self.first_exclusions = excluded
+                for slot in self.slots:
+                    if (slot.key_name, slot.model) not in excluded:
+                        slot.record_request()
+                        return slot
+                return None
+
+            def has_capable_slots(self, *args, **kwargs):
+                return True
+
+            def summarize_slots(self, *args, **kwargs):
+                return 'avoid-aware'
+
+        dispatcher = _AvoidAwareDispatcher()
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: dispatcher)
+
+        import lib.llm as llm_mod
+        monkeypatch.setattr(
+            llm_mod, 'stream_chat',
+            lambda *_args, **_kwargs: (
+                'recovered', 'stop', {'completion_tokens': 1}),
+        )
+
+        _msg, _finish, usage = api.dispatch_stream(
+            [{'role': 'user', 'content': 'hi'}],
+            prefer_model='kimi-k3', strict_model=True,
+            avoid_pairs={('k0', 'kimi-k3')}, log_prefix='[rotate]',
+        )
+
+        assert dispatcher.first_exclusions == {('k0', 'kimi-k3')}
+        assert usage['_dispatch']['key'] == 'k1'
+
+
+@pytest.mark.unit
+class TestFirstOutputCallbacks:
+    def test_thinking_first_stamps_once_and_forwards_every_channel(
+            self, monkeypatch):
+        from lib.llm_dispatch import api
+
+        monkeypatch.setattr(api.time, 'time', lambda: 10.025)
+        observed = {'thinking': [], 'content': [], 'tool': []}
+        ttft, thinking, content, tool = api._first_output_callbacks(
+            10.0,
+            observed['thinking'].append,
+            observed['content'].append,
+            observed['tool'].append,
+        )
+
+        thinking('reasoning')
+        content('answer')
+        tool({'id': 'call-1'})
+
+        assert ttft[0] == pytest.approx(25.0)
+        assert observed == {
+            'thinking': ['reasoning'],
+            'content': ['answer'],
+            'tool': [{'id': 'call-1'}],
+        }
+
+    def test_tool_only_output_stamps_without_consumer(self, monkeypatch):
+        from lib.llm_dispatch import api
+
+        monkeypatch.setattr(api.time, 'time', lambda: 4.75)
+        ttft, _thinking, _content, tool = api._first_output_callbacks(
+            4.0, None, None, None)
+
+        tool({'id': 'call-only'})
+
+        assert ttft[0] == pytest.approx(750.0)
 
 
 @pytest.mark.unit
@@ -139,6 +233,7 @@ class TestDispatchStreamRetry:
         assert msg == 'ok'
         assert calls['n'] == 2
         assert usage['_dispatch']['429_retries'] >= 1
+        assert usage['_dispatch']['queue_wait_ms'] >= 0
         assert slot1.total_errors >= 1
         assert slot2.last_success_time > 0
 
@@ -273,11 +368,8 @@ class TestDispatchStreamAllUnreachable:
 
 
 @pytest.mark.unit
-class TestFinalizeStreamSuccessHelper:
-    """The success-path bookkeeping shared by the sync + async dispatch loops
-    was extracted into ``_finalize_stream_success``. Pin its contract directly
-    so a drift in WHICH usage fields get stamped fails here (both loops call
-    it identically, so this covers both)."""
+class TestSettleStreamResultHelper:
+    """Pin the one-shot settlement shared by sync and async dispatch loops."""
 
     def _state(self, hard=0, r429=0):
         from lib.llm_dispatch.api import _StreamRetryState
@@ -287,41 +379,48 @@ class TestFinalizeStreamSuccessHelper:
         return st
 
     def test_stamps_dispatch_metadata_and_records_success(self):
-        from lib.llm_dispatch.api import _finalize_stream_success
+        from lib.llm_dispatch.api import _settle_stream_result
         slot = _make_slot(model='gpt-4o', key='kZ')
         usage = {'completion_tokens': 11}
         st = self._state(hard=1, r429=2)
-        _finalize_stream_success(slot, usage, latency=123.4, ttft=45.6,
-                                 state=st, cache_conv_id='', tag='[t]')
+        _settle_stream_result(slot, usage, latency=123.4, ttft=45.6,
+                              state=st, cache_conv_id='', tag='[t]')
         assert usage['_dispatch']['model'] == 'gpt-4o'
         assert usage['_dispatch']['key'] == 'kZ'
         assert usage['_dispatch']['latency_ms'] == 123
+        assert usage['_dispatch']['ttft_ms'] == 45.6
+        assert usage['_dispatch']['first_content_at_unix_ns'] >= \
+            usage['_dispatch']['stream_started_at_unix_ns']
+        assert usage['_dispatch']['stream_completed_at_unix_ns'] >= \
+            usage['_dispatch']['first_content_at_unix_ns']
         assert usage['_dispatch']['attempt'] == 2      # hard_attempts + 1
         assert usage['_dispatch']['429_retries'] == 2
         assert slot.last_success_time > 0
         assert slot.consecutive_errors == 0
 
     def test_non_dict_usage_is_tolerated(self):
-        from lib.llm_dispatch.api import _finalize_stream_success
+        from lib.llm_dispatch.api import _settle_stream_result
         slot = _make_slot()
         st = self._state()
         # Some providers return None usage — must not raise, must still record.
-        _finalize_stream_success(slot, None, latency=10.0, ttft=None,
-                                 state=st, cache_conv_id='', tag='[t]')
+        _settle_stream_result(slot, None, latency=10.0, ttft=None,
+                              state=st, cache_conv_id='', tag='[t]')
         assert slot.last_success_time > 0
 
     def test_output_tokens_from_output_tokens_key(self):
-        from lib.llm_dispatch.api import _finalize_stream_success
+        from lib.llm_dispatch.api import _settle_stream_result
         slot = _make_slot()
         # Anthropic-shape usage uses output_tokens, not completion_tokens.
         usage = {'output_tokens': 9}
-        _finalize_stream_success(slot, usage, latency=5.0, ttft=None,
-                                 state=self._state(), cache_conv_id='', tag='[t]')
+        _settle_stream_result(slot, usage, latency=5.0, ttft=None,
+                              state=self._state(), cache_conv_id='', tag='[t]')
         assert usage['_dispatch']['model'] == slot.model
+        assert usage['_dispatch']['ttft_ms'] is None
+        assert usage['_dispatch']['first_content_at_unix_ns'] is None
 
     def test_codex_success_arms_unmetered_write_visibility(self, monkeypatch):
         from lib.llm_dispatch import cache_settle
-        from lib.llm_dispatch.api import _finalize_stream_success
+        from lib.llm_dispatch.api import _settle_stream_result
 
         observed = []
         recorded = []
@@ -338,7 +437,7 @@ class TestFinalizeStreamSuccessHelper:
             'prompt_tokens': 5066,
             'prompt_tokens_details': {'cached_tokens': 0},
         }
-        _finalize_stream_success(
+        _settle_stream_result(
             slot, usage, latency=5.0, ttft=None,
             state=self._state(), cache_conv_id='conv-codex', tag='[t]')
 
@@ -346,6 +445,80 @@ class TestFinalizeStreamSuccessHelper:
         assert recorded[0][0] == 'conv-codex'
         assert recorded[0][1]['cache_profile'] == 'codex'
         assert recorded[0][1]['pending_write'] is True
+
+    @pytest.mark.parametrize('stream_state', [
+        'semantic_progress_timeout',
+        'malformed_stream',
+        'empty_response',
+        'tool_payload_missing',
+    ])
+    def test_invalid_stream_settles_slot_once_without_provisional_success(
+            self, stream_state):
+        from types import SimpleNamespace
+
+        from lib.llm.stream_result import ProviderStreamState
+        from lib.llm_dispatch.api import _settle_stream_result
+
+        slot = _make_slot()
+        slot.inflight = 1
+        usage = {
+            # Deliberately stale compatibility data: the typed result must win.
+            '_stream_state': 'provider_finished',
+            'stream_elapsed_ms': 301_234,
+            '_chunks_received': 974,
+        }
+        typed_result = SimpleNamespace(
+            state=ProviderStreamState(stream_state))
+
+        _settle_stream_result(
+            slot, usage, latency=301_234, ttft=10.0,
+            state=self._state(), cache_conv_id='', tag='[t]',
+            stream_result=typed_result,
+        )
+
+        assert slot.inflight == 0
+        assert slot.last_success_time == 0
+        assert slot.consecutive_errors == 1
+        assert stream_state in slot.last_error_msg
+
+    def test_client_abort_releases_reservation_without_health_mutation(self):
+        from types import SimpleNamespace
+
+        from lib.llm.stream_result import ProviderStreamState
+        from lib.llm_dispatch.api import _settle_stream_result
+
+        slot = _make_slot()
+        slot.inflight = 1
+        slot.consecutive_errors = 2
+        _settle_stream_result(
+            slot, {'_stream_state': 'provider_finished'},
+            latency=5.0, ttft=None, state=self._state(),
+            cache_conv_id='', tag='[t]',
+            stream_result=SimpleNamespace(
+                state=ProviderStreamState.CLIENT_ABORTED),
+        )
+
+        assert slot.inflight == 0
+        assert slot.consecutive_errors == 2
+        assert slot.last_success_time == 0
+
+
+def test_cooldown_polling_is_not_a_retry_attempt():
+    from lib.llm_dispatch.api import _StreamRetryState
+
+    state = _StreamRetryState()
+    state.note_cooldown_cycle()
+    state.note_cooldown_cycle()
+
+    assert state.capacity_wait_cycles == 2
+    assert state.total_attempts == 0
+    assert state._429_count == 0
+    assert state.wait_status().kind == 'waiting_slot'
+
+    state.note_free_429()
+    assert state.capacity_wait_cycles == 3
+    assert state.total_attempts == 1
+    assert state._429_count == 1
 
 
 @pytest.mark.unit

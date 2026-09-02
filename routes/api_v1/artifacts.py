@@ -36,7 +36,7 @@ from lib.openapi import api_meta
 from lib.request_parser import async_parse_body
 from lib.storage import StorageError
 
-from .auth import require_auth
+from .auth import request_user_id, require_auth
 
 logger = get_logger(__name__)
 
@@ -160,18 +160,16 @@ async def delete_artifact_v1(artifact_id):
 async def scan_conv_v1():
     import asyncio
 
-    from routes.common import DEFAULT_USER_ID
-
     body = await async_parse_body()
     conv_id = (body.get('conv_id') or '').strip()
     if not conv_id:
         return api_bad_request('conv_id is required', field='conv_id')
 
+    owner_user_id = int(request_user_id())
+
     def _load():
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        from lib.database.conversation_repository import load_conversation
-        return load_conversation(
-            get_thread_db(DOMAIN_CHAT), conv_id, user_id=DEFAULT_USER_ID)
+        from lib.conversations.repository import get_conversation
+        return get_conversation(conv_id, user_id=owner_user_id)
 
     snapshot = await asyncio.to_thread(_load)
     if snapshot is None:
@@ -189,7 +187,9 @@ async def scan_conv_v1():
         if not isinstance(content, str) or not content.strip():
             continue
         scanned += 1
-        msg_id = m.get('_msgId') or ''
+        # Turn-native projections deliberately do not persist the legacy
+        # message id.  The canonical turn id is the stable source identity.
+        msg_id = m.get('_msgId') or m.get('_turnId') or ''
         try:
             created = scan_message(conv_id, content, msg_id=msg_id,
                                     task_id='', task=None)

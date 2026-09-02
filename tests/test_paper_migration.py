@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Migration tests for routes/paper.py after TaskRuntime adoption.
-
-Verifies both _report_tasks and _translate_tasks were correctly migrated
-without breaking the dedup-by-(phash,lang) semantics or the existing
-event/poll/abort response shapes.
-"""
+"""Paper TaskRuntime lifecycle, deduplication, polling, and abort contracts."""
 
 import os
 import sys
 import time
+
+TEST_OWNER_USER_ID = 1
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -24,7 +21,7 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 # the file is run standalone via ``python tests/test_paper_migration.py``.
 try:
     import pytest
-    pytestmark = pytest.mark.auth_mode('open')
+    pytestmark = [pytest.mark.unit, pytest.mark.auth_mode('open')]
 except ImportError:
     pass
 
@@ -32,32 +29,38 @@ except ImportError:
 # ─── Report tasks ────────────────────────────────────────────────
 
 def test_report_runtime_created():
-    from routes.paper import _report_runtime, _report_dedup_index, _report_tasks
+    from lib.paper.report_runtime import _report_runtime
     assert _report_runtime is not None
-    assert isinstance(_report_dedup_index, dict)
-    assert _report_tasks is _report_runtime._tasks
-    _ok('_report_runtime + dedup index created')
+    assert _report_runtime.kind == 'paper-report'
+    _ok('paper report runtime is the lifecycle authority')
 
 
 def test_report_new_task_registers_dedup():
-    from routes.paper import _new_report_task, _report_index_get, _report_runtime
+    from lib.paper.report_runtime import (
+        _new_report_task,
+        _report_index_get,
+        _report_runtime,
+    )
     tid = f'rpt_test_{int(time.time())}'
-    task = _new_report_task(tid, 'phash-r-1', 'en', 'gpt-4o')
+    task = _new_report_task(tid, 'phash-r-1', 'en', 'gpt-4o', user_id=TEST_OWNER_USER_ID)
 
     # Direct lookup
     assert _report_runtime.get(tid) is task
     # Dedup-index lookup
-    found = _report_index_get('phash-r-1', 'en')
+    found = _report_index_get('phash-r-1', 'en', user_id=TEST_OWNER_USER_ID)
     assert found is task
     # Different lang → not found
-    assert _report_index_get('phash-r-1', 'zh') is None
+    assert _report_index_get('phash-r-1', 'zh', user_id=TEST_OWNER_USER_ID) is None
     _ok('_new_report_task registers (phash,lang) → task in dedup index')
 
 
 def test_report_append_event():
-    from routes.paper import _new_report_task, _append_report_event
+    from lib.paper.report_runtime import (
+        _new_report_task,
+        _append_report_event,
+    )
     tid = f'rpt_evt_{int(time.time())}'
-    task = _new_report_task(tid, 'phash-r-2', 'en', 'gpt-4o')
+    task = _new_report_task(tid, 'phash-r-2', 'en', 'gpt-4o', user_id=TEST_OWNER_USER_ID)
     _append_report_event(task, {'type': 'tool_start', 'roundNum': 1, 'toolName': 'web_search'})
     _append_report_event(task, {'type': 'delta', 'text': 'Hello'})
     assert len(task['events']) == 2
@@ -67,46 +70,55 @@ def test_report_append_event():
     _ok('_append_report_event preserves seq + payload')
 
 
-def test_report_legacy_fields_present():
-    from routes.paper import _new_report_task
-    task = _new_report_task('rpt_legacy', 'phash-r-3', 'en', 'gpt-4o')
-    # Legacy fields the rest of paper.py depends on
+def test_report_execution_fields_present():
+    from lib.paper.report_runtime import _new_report_task
+    task = _new_report_task('rpt_legacy', 'phash-r-3', 'en', 'gpt-4o', user_id=TEST_OWNER_USER_ID)
+    # Report-engine fields live on the task snapshot.
     for f in ('task_id', 'paper_hash', 'lang', 'model', 'status',
                'finished_at', 'full_text', 'enriched_text',
                'tool_rounds', 'round_counter', 'events', 'events_lock',
                'abort_event'):
-        assert f in task, f'Missing legacy field: {f}'
+        assert f in task, f'Missing report field: {f}'
     assert task['status'] == 'pending'
     assert task['full_text'] == ''
     assert task['enriched_text'] == ''
     assert task['tool_rounds'] == []
-    _ok('all legacy fields (full_text, enriched_text, tool_rounds, …) present')
+    _ok('all report execution fields are present')
 
 
 def test_report_cleanup_purges_finished():
-    from routes.paper import (_new_report_task, _cleanup_stale_report_tasks,
-                                _report_runtime, _report_index_get)
+    from lib.paper.report_runtime import (
+        _new_report_task,
+        _cleanup_stale_report_tasks,
+        _report_runtime,
+        _report_index_get,
+    )
     tid = f'rpt_cleanup_{int(time.time())}'
-    task = _new_report_task(tid, 'phash-r-cleanup', 'en', 'gpt-4o')
+    task = _new_report_task(tid, 'phash-r-cleanup', 'en', 'gpt-4o', user_id=TEST_OWNER_USER_ID)
 
-    # Mark it done with old finished_at
     _report_runtime.finish(tid, result='done')
-    task['finished_at'] = time.time() - 7200  # 2 hours ago (TTL=3600)
-
-    _cleanup_stale_report_tasks()
+    original_ttl = _report_runtime.ttl
+    _report_runtime.ttl = -1
+    try:
+        _cleanup_stale_report_tasks()
+    finally:
+        _report_runtime.ttl = original_ttl
 
     assert _report_runtime.get(tid) is None
     # Dedup index entry must also be removed
-    assert _report_index_get('phash-r-cleanup', 'en') is None
+    assert _report_index_get('phash-r-cleanup', 'en', user_id=TEST_OWNER_USER_ID) is None
     _ok('cleanup purges finished task AND its dedup-index entry')
 
 
 def test_report_cleanup_keeps_running():
-    from routes.paper import (_new_report_task, _cleanup_stale_report_tasks,
-                                _report_runtime)
+    from lib.paper.report_runtime import (
+        _new_report_task,
+        _cleanup_stale_report_tasks,
+        _report_runtime,
+    )
     tid = f'rpt_keep_{int(time.time())}'
-    task = _new_report_task(tid, 'phash-r-keep', 'en', 'gpt-4o')
-    task['status'] = 'running'  # never finished
+    task = _new_report_task(tid, 'phash-r-keep', 'en', 'gpt-4o', user_id=TEST_OWNER_USER_ID)
+    _report_runtime.mark_running(tid)
     _cleanup_stale_report_tasks()
     assert _report_runtime.get(tid) is not None  # still alive
     _ok('cleanup keeps running tasks even past TTL')
@@ -124,12 +136,15 @@ def test_report_lookup_endpoint():
     app = mod.app
 
     import asyncio
-    from routes.paper import _new_report_task
+    from lib.paper.report_runtime import (
+        _new_report_task,
+        _report_runtime,
+    )
 
     async def _t():
         tid = f'rpt_lookup_{int(time.time() * 1000)}'
-        task = _new_report_task(tid, 'phash-lookup-x', 'zh', 'opus')
-        task['status'] = 'running'
+        task = _new_report_task(tid, 'phash-lookup-x', 'zh', 'opus', user_id=TEST_OWNER_USER_ID)
+        _report_runtime.mark_running(tid)
 
         async with app.test_client() as client:
             r = await client.post('/api/v1/paper/report/lookup',
@@ -161,12 +176,16 @@ def test_report_poll_endpoint():
     app = mod.app
 
     import asyncio
-    from routes.paper import _new_report_task, _append_report_event
+    from lib.paper.report_runtime import (
+        _append_report_event,
+        _new_report_task,
+        _report_runtime,
+    )
 
     async def _t():
         tid = f'rpt_poll_{int(time.time() * 1000)}'
-        task = _new_report_task(tid, 'phash-poll-y', 'en', 'opus')
-        task['status'] = 'running'
+        task = _new_report_task(tid, 'phash-poll-y', 'en', 'opus', user_id=TEST_OWNER_USER_ID)
+        _report_runtime.mark_running(tid)
         _append_report_event(task, {'type': 'delta', 'text': 'A'})
         _append_report_event(task, {'type': 'delta', 'text': 'B'})
 
@@ -205,12 +224,15 @@ def test_report_abort_endpoint():
     app = mod.app
 
     import asyncio
-    from routes.paper import _new_report_task
+    from lib.paper.report_runtime import (
+        _new_report_task,
+        _report_runtime,
+    )
 
     async def _t():
         tid = f'rpt_abort_{int(time.time() * 1000)}'
-        task = _new_report_task(tid, 'phash-abort-z', 'en', 'opus')
-        task['status'] = 'running'
+        task = _new_report_task(tid, 'phash-abort-z', 'en', 'opus', user_id=TEST_OWNER_USER_ID)
+        _report_runtime.mark_running(tid)
 
         async with app.test_client() as client:
             # Factory-minted route: task_id is a PATH segment (was a body key).
@@ -246,20 +268,36 @@ def test_all_factory_abort_routes_set_event():
     app = mod.app
 
     import asyncio
-    from routes.paper import (_new_report_task, _new_qa_task,
-                               _new_translate_task)
+    from lib.paper.qa_runtime import (
+        _new_qa_task,
+        _qa_runtime,
+    )
+    from lib.paper.report_runtime import (
+        _new_report_task,
+        _report_runtime,
+    )
+    from lib.paper.translate_runtime import (
+        _new_translate_task,
+        _translate_runtime,
+    )
 
     cases = [
-        ('report', _new_report_task('rpt_fab', 'phash-fab-r', 'en', 'opus')),
-        ('qa', _new_qa_task('qa_fab', 'phash-fab-q', 'en', 'opus', question='q')),
-        ('translate', _new_translate_task('tr_fab', 'phash-fab-t', 'zh', 'opus')),
+        ('report', _report_runtime,
+         _new_report_task('rpt_fab', 'phash-fab-r', 'en', 'opus',
+                          user_id=TEST_OWNER_USER_ID)),
+        ('qa', _qa_runtime,
+         _new_qa_task('qa_fab', 'phash-fab-q', 'en', 'opus',
+                      question='q', user_id=TEST_OWNER_USER_ID)),
+        ('translate', _translate_runtime,
+         _new_translate_task('tr_fab', 'phash-fab-t', 'zh', 'opus',
+                             user_id=TEST_OWNER_USER_ID)),
     ]
 
     async def _t():
         async with app.test_client() as client:
-            for kind, task in cases:
-                task['status'] = 'running'
+            for kind, runtime, task in cases:
                 tid = task['task_id']
+                runtime.mark_running(tid)
                 # Factory route: task_id is a PATH segment.
                 r = await client.post(f'/api/v1/paper/{kind}/abort/{tid}')
                 assert r.status_code == 200, (kind, r.status_code)
@@ -276,31 +314,32 @@ def test_all_factory_abort_routes_set_event():
 # ─── Paper translate tasks ───────────────────────────────────────
 
 def test_translate_runtime_created():
-    from routes.paper import (_translate_runtime, _translate_dedup_index,
-                                _translate_tasks)
+    from lib.paper.translate_runtime import _translate_runtime
     assert _translate_runtime is not None
-    assert isinstance(_translate_dedup_index, dict)
-    assert _translate_tasks is _translate_runtime._tasks
-    _ok('_translate_runtime + dedup index created')
+    assert _translate_runtime.kind == 'paper-translate'
+    _ok('paper translation runtime is the lifecycle authority')
 
 
-def test_translate_new_task_legacy_fields():
-    from routes.paper import _new_translate_task
-    task = _new_translate_task('tr_test', 'phash-tr-1', 'zh', 'opus')
+def test_translate_new_task_execution_fields():
+    from lib.paper.translate_runtime import _new_translate_task
+    task = _new_translate_task('tr_test', 'phash-tr-1', 'zh', 'opus', user_id=TEST_OWNER_USER_ID)
     for f in ('task_id', 'paper_hash', 'lang', 'model', 'status',
                'finished_at', 'full_text', 'progress',
                'events', 'events_lock', 'abort_event'):
-        assert f in task, f'Missing legacy field: {f}'
+        assert f in task, f'Missing translate field: {f}'
     assert task['progress'] == {'done': 0, 'total': 0}
-    _ok('paper-translate legacy fields (full_text, progress) present')
+    _ok('paper-translate execution fields (full_text, progress) are present')
 
 
 def test_translate_dedup_index():
-    from routes.paper import _new_translate_task, _translate_index_get
-    task = _new_translate_task('tr_dedup', 'phash-tr-2', 'zh', 'opus')
-    found = _translate_index_get('phash-tr-2', 'zh')
+    from lib.paper.translate_runtime import (
+        _new_translate_task,
+        _translate_index_get,
+    )
+    task = _new_translate_task('tr_dedup', 'phash-tr-2', 'zh', 'opus', user_id=TEST_OWNER_USER_ID)
+    found = _translate_index_get('phash-tr-2', 'zh', user_id=TEST_OWNER_USER_ID)
     assert found is task
-    assert _translate_index_get('phash-tr-2', 'en') is None
+    assert _translate_index_get('phash-tr-2', 'en', user_id=TEST_OWNER_USER_ID) is None
     _ok('paper-translate dedup index works')
 
 
@@ -315,12 +354,15 @@ def test_translate_lookup_endpoint():
     app = mod.app
 
     import asyncio
-    from routes.paper import _new_translate_task
+    from lib.paper.translate_runtime import (
+        _new_translate_task,
+        _translate_runtime,
+    )
 
     async def _t():
         tid = f'tr_lookup_{int(time.time() * 1000)}'
-        task = _new_translate_task(tid, 'phash-tr-look', 'ja', 'opus')
-        task['status'] = 'running'
+        task = _new_translate_task(tid, 'phash-tr-look', 'ja', 'opus', user_id=TEST_OWNER_USER_ID)
+        _translate_runtime.mark_running(tid)
 
         async with app.test_client() as client:
             r = await client.post('/api/v1/paper/translate/lookup',
@@ -357,7 +399,10 @@ def test_translate_composite_lang_task_id_is_url_safe():
 
     import asyncio
     from urllib.parse import quote
-    from routes.paper import _translate_runtime, _translate_index_get
+    from lib.paper.translate_runtime import (
+        _translate_runtime,
+        _translate_index_get,
+    )
 
     async def _t():
         composite = 'review:neurips:zh'
@@ -380,7 +425,7 @@ def test_translate_composite_lang_task_id_is_url_safe():
             assert quote(tid, safe='') == tid, f'task_id not URL-safe: {tid!r}'
 
             # (2) The REAL composite lang still keys the dedup index.
-            assert _translate_index_get('phash-tr-composite', composite) is not None
+            assert _translate_index_get('phash-tr-composite', composite, user_id=TEST_OWNER_USER_ID) is not None
 
             # (3) The exact same id round-trips through the poll URL → NOT 404
             #     (this is the failure the user hit: poll 404 → "translation failed").
@@ -402,13 +447,18 @@ def test_translate_poll_endpoint():
     app = mod.app
 
     import asyncio
-    from routes.paper import _new_translate_task, _append_translate_event
+    from lib.paper.translate_runtime import (
+        _append_translate_event,
+        _new_translate_task,
+        _translate_runtime,
+    )
 
     async def _t():
         tid = f'tr_poll_{int(time.time() * 1000)}'
-        task = _new_translate_task(tid, 'phash-tr-poll', 'zh', 'opus')
-        task['status'] = 'running'
-        task['progress'] = {'done': 1, 'total': 5}
+        task = _new_translate_task(tid, 'phash-tr-poll', 'zh', 'opus', user_id=TEST_OWNER_USER_ID)
+        _translate_runtime.mark_running(tid)
+        _translate_runtime.update_fields(
+            tid, fields={'progress': {'done': 1, 'total': 5}})
         _append_translate_event(task, {'type': 'chunk', 'index': 0, 'total': 5,
                                         'preview': 'hello'})
 
@@ -433,7 +483,7 @@ def main():
         test_report_runtime_created,
         test_report_new_task_registers_dedup,
         test_report_append_event,
-        test_report_legacy_fields_present,
+        test_report_execution_fields_present,
         test_report_cleanup_purges_finished,
         test_report_cleanup_keeps_running,
         test_report_lookup_endpoint,
@@ -441,7 +491,7 @@ def main():
         test_report_abort_endpoint,
         test_all_factory_abort_routes_set_event,
         test_translate_runtime_created,
-        test_translate_new_task_legacy_fields,
+        test_translate_new_task_execution_fields,
         test_translate_dedup_index,
         test_translate_composite_lang_task_id_is_url_safe,
         test_translate_lookup_endpoint,

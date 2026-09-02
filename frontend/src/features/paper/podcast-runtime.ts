@@ -1,10 +1,10 @@
 import { featureRegistry } from '../../feature-registry';
+import type { I18nKey } from '../../i18n';
 import {
   adoptMediaModel,
   adoptServerClocks,
   seedMediaModel,
 } from './media-model-ui';
-import { getRuntimeService } from '../../runtime/app-runtime.js';
 
 type LooseObject = Record<string, any>;
 type MediaWindow = Window & Record<string, any>;
@@ -14,7 +14,7 @@ function globals(): MediaWindow {
 }
 
 function podcast(): LooseObject {
-  const state = globals()._podcast ?? getRuntimeService('_podcast');
+  const state = globals()._podcast;
   if (!state) throw new Error('Podcast view state is unavailable');
   return state as LooseObject;
 }
@@ -28,7 +28,7 @@ function paperApi(): LooseObject | undefined {
   return api?.paper as LooseObject | undefined;
 }
 
-function translate(key: string, fallback: string): string {
+function translate(key: I18nKey, fallback: string): string {
   const fn = globals()._pcT;
   return typeof fn === 'function' ? String(fn(key, fallback)) : fallback;
 }

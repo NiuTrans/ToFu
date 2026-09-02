@@ -15,7 +15,7 @@ import time
 import pytest
 
 import lib.context_limits as cl
-from lib.tasks_pkg.compaction import _parse_context_overflow
+from lib.tasks_pkg.compaction._tokens import _parse_context_overflow
 
 
 PRESET = 1_000_000
@@ -171,7 +171,10 @@ def test_resolve_no_entry_returns_static():
 
 def test_get_context_limit_kimi_k3_unpinned():
     """kimi-k3 (real 1M window) must not be capped by a stale expand pin."""
-    from lib.tasks_pkg.compaction import _get_context_limit, _get_static_context_limit
+    from lib.tasks_pkg.compaction._tokens import (
+        _get_context_limit,
+        _get_static_context_limit,
+    )
 
     task = {'config': {'model': 'kimi-k3'}, 'provider_id': 'sankuai'}
     assert _get_static_context_limit(task) == 1_000_000

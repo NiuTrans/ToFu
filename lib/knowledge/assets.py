@@ -14,7 +14,6 @@ import os
 import re
 import zipfile
 
-from lib.env_compat import getenv_compat
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -37,7 +36,7 @@ class KnowledgeImageError(ValueError):
 
 
 def _bounded_env(name: str, default: int, low: int, high: int) -> int:
-    raw = getenv_compat(name, default=str(default))
+    raw = os.environ.get(name, str(default))
     try:
         return max(low, min(int(raw), high))
     except (TypeError, ValueError):

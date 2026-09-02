@@ -2,9 +2,8 @@
 
 This is the long-missing executor: it interprets a *validated* definition
 (role nodes + control nodes + edges) and actually runs the agents, in the
-topology the graph describes. It is the piece that finally unifies the two
-hand-built orchestrators — endpoint mode (loop + verifier) and the swarm
-(fan-out) — under one declarative engine.
+topology the graph describes. It unifies verifier loops and swarm fan-out under
+one declarative engine.
 
 Architecture
 ------------
@@ -29,7 +28,7 @@ Supported control semantics (v1)
   loop     — two outgoing edges: a *body* entry (a path that loops back to
              the loop node) and an *exit*. The body runs repeatedly until a
              verifier verdict says STOP or ``max_iterations`` is hit; then
-             the exit edge is taken. This IS endpoint mode expressed as data.
+             the exit edge is taken. This is a verifier loop expressed as data.
   branch   — picks ONE outgoing edge (v1: the first; a future classifier
              agent will choose). Documented limitation.
   stop     — terminal; returns the converged result.
@@ -48,9 +47,8 @@ from lib.agent_verdict import (
     parse_progress as _parse_progress,
 )
 from lib.log import get_logger
-from lib.orchestration import (
-    expand_subflows, validate_definition,
-)
+from lib.orchestration._subflow_expansion import expand_subflows
+from lib.orchestration._validate import validate_definition
 from lib.orchestration._role_axes import VERIFIER_ROLES
 from lib.orchestration.human_gate_request_identity import (
     HumanGateRequestIdentity,
@@ -124,11 +122,10 @@ _DEFAULT_PARALLEL = 8
 # contracts. Runner result shape normalization lives at the dedicated
 # ``orchestration_tool_usage`` boundary instead of in this interpreter.
 
-# ── Replan branch (endpoint CONTINUE_PLANNER + PLAN_DEFECT gate) ──
-# A loop's verifier may request a structural re-plan. We mirror endpoint
-# mode's gating (lib/tasks_pkg/endpoint_review._parse_verdict): the request
+# ── Replan branch (CONTINUE_PLANNER + PLAN_DEFECT gate) ──
+# A loop's verifier may request a structural re-plan. The request
 # MUST carry a [PLAN_DEFECT: ...] reason, and reasons that are really
-# worker-execution complaints are rejected. Bounded by _MAX_REPLANS.
+# worker-execution complaints are rejected.
 # Verdict parsing + gating (tag regexes, PLAN_DEFECT gate, STOP-with-
 # unresolved-markers override, replan kill-switch and its cap) all live in
 # ``lib.agent_verdict.classify_verdict`` now — see ``_classify_verdict``
@@ -666,7 +663,7 @@ class FlowExecutor:
         unless the VU emits the [VU: TASK_DONE] sentinel or a STOP verdict).
 
         The STOP-with-unresolved-markers override, the [PLAN_DEFECT:] gate,
-        and the TOFU_ENDPOINT_REPLAN=0 kill-switch all live in the shared
+        and the TOFU_FLOW_REPLAN=0 kill-switch all live in the shared
         core — there is no longer an engine-local copy to drift.
         """
         res = _classify_verdict_core(

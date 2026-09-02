@@ -63,7 +63,7 @@ class TestDeprecatedOpenAISkuAbsence:
     def test_current_provider_templates_omit_unsupported_ids(self):
         root = Path(__file__).resolve().parents[1]
         bodies = [
-            (root / 'static/provider_templates/openai.json').read_text(),
+            (root / 'lib/model_info/data/openai.json').read_text(),
             (root / 'frontend/src/runtime/app-runtime.js').read_text(),
         ]
         for mid in _RETIRED_EXACT_IDS:

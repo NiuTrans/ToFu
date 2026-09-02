@@ -93,22 +93,11 @@ export function normalizeOrchestrationRuntimeStart(
   const idField = String(contract.idField || defaults.idField);
   const kindSupported = !Array.isArray(contract.kinds)
     || contract.kinds.includes(kind);
-  const defaultLegacyFields = record(defaults.legacyIdFields) ?? {};
-  let legacyIdField = defaultLegacyFields[kind];
-  const legacyFields = record(contract.legacyIdFields) ?? defaultLegacyFields;
-  if (legacyFields) {
-    legacyIdField = String(legacyFields[kind] || legacyIdField);
-  }
   const canonicalId = identity && wire.supported && kindSupported
     && identity[kindField] === kind ? String(identity[idField] || '') : '';
-  const legacyId = String(body[String(legacyIdField)] || '');
-  const identityConsistent = !wire.present
-    || Boolean(canonicalId) && canonicalId === legacyId;
-  const runtimeId = hasIdentity ? canonicalId : legacyId;
+  const runtimeId = canonicalId;
   const evidenceFields = options.responseRequiredFields;
-  const identityFields = [
-    ...Object.values(defaultLegacyFields), 'ok', 'start',
-  ];
+  const identityFields = ['ok', 'start'];
   const evidenceMatches = !wire.present || body.ok !== true
     || Array.isArray(evidenceFields) && evidenceFields.length > 0
       && evidenceFields.every((field) => typeof field === 'string'
@@ -125,10 +114,10 @@ export function normalizeOrchestrationRuntimeStart(
   const statusMatches = !read.normalized || !wire.present
     || read.status === Number(successStatuses[kind]);
   const accepted = read.recognized && body.ok === true
-    && wire.supported && kindSupported && identityConsistent
+    && hasIdentity && wire.present && wire.supported && kindSupported
     && Boolean(runtimeId) && evidenceMatches && statusMatches;
   const failedRuntimeId = !accepted && read.envelope
-    && body.ok === false && !hasIdentity ? legacyId : '';
+    && body.ok === false && kind === 'durable' ? canonicalId : '';
   const actionReason = orchestrationActionReason(
     read, accepted, rejectedReason);
   return {
@@ -136,12 +125,11 @@ export function normalizeOrchestrationRuntimeStart(
     status: read.status,
     reason: !wire.supported ? 'unsupported-format'
       : !kindSupported ? 'unsupported-kind'
-        : !identityConsistent ? 'identity-mismatch'
-          : actionReason,
+        : actionReason,
     runtimeId: accepted ? runtimeId : '',
     failedRuntimeId,
     identity: accepted && hasIdentity ? identity : null,
-    canonical: accepted && hasIdentity && wire.present,
+    canonical: accepted,
     expectedFormat: wire.expected,
     wireFormat: wire.actual,
     data: accepted ? body : null,

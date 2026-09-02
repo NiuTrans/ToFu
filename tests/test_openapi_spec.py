@@ -7,6 +7,11 @@ with a couple of registered routes to confirm `build_spec` walks
 
 import unittest
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 
 class ApiMetaDecoratorTest(unittest.TestCase):
 
@@ -136,7 +141,8 @@ class BuildSpecTest(unittest.TestCase):
         self.assertIn('ApiKey', spec['components']['schemas'])
         # Security schemes wired.
         self.assertIn('bearerAuth', spec['components']['securitySchemes'])
-        self.assertIn('tunnelTokenHeader', spec['components']['securitySchemes'])
+        self.assertEqual(
+            set(spec['components']['securitySchemes']), {'bearerAuth'})
 
     def test_error_schemas_share_the_runtime_envelope_contract(self):
         from lib.error_envelope import KINDS, make_envelope

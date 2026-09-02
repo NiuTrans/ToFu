@@ -1,6 +1,6 @@
 """lib/design_sys/visual_qa.py — multimodal visual QA for produced frames/pages.
 
-The missing half of every gate stack we had (docs/SLIDES_CAPABILITY_DESIGN.md
+The missing half of every gate stack we had (docs/modules/ingest_media.md
 §3.3): the existing gates are all PROGRAMMATIC — contract, contrast, overflow,
 fill. None of them can see that a frame is ugly. This module puts a
 vision-capable model on the rendered pixels with a designer's checklist, and

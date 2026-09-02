@@ -43,7 +43,10 @@ _TOOL_EXEC_LABELS = {
     'code_exec':    'Running code',
     'bash_exec':    'Running command',
     'create_memory': 'Saving memory',
+    'search_skills': 'Searching skills',
     'load_skill': 'Loading skill',
+    'read_skill_resource': 'Reading skill resource',
+    'request_skill_install': 'Installing skill',
     'ask_human': 'Asking for your input',
 }
 
@@ -79,14 +82,12 @@ def _known_tool_names(task: dict[str, Any]) -> set[str]:
     everything.
     """
     names: set[str] = set()
-    has_authority_catalog = ('_executable_tool_catalog' in task
-                             or '_enabled_tool_catalog' in task)
+    has_authority_catalog = '_executable_tool_catalog' in task
     if has_authority_catalog:
         # An explicit empty catalog means zero authority.  It must not fall
         # back to a stale conversation-latched visibility schema after the
         # user disables every tool.
-        catalog = task.get(
-            '_executable_tool_catalog', task.get('_enabled_tool_catalog')) or []
+        catalog = task.get('_executable_tool_catalog') or []
     else:
         catalog = task.get('_tool_schema') or []
     for t in catalog:

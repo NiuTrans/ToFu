@@ -1,7 +1,7 @@
 """Canonical FlowExecutor-backed chat task runtime.
 
-This is the single assembly seam shared by Endpoint, Autopilot and selected
-Studio flows. It binds the engine to chat SSE, durable turn persistence and
+This is the single assembly seam shared by goal mode (autopilot graph) and
+selected Studio flows. It binds the engine to chat SSE, durable turn persistence and
 terminal projection without owning entry selection or rollout flags.
 """
 
@@ -32,8 +32,6 @@ class OrchestrationChatFlowRuntimePorts:
     stamp_terminal: Callable
     store_turns: Callable
     sync_turns: Callable
-    translate_turn: Callable
-    translate_final: Callable
     complete_autopilot: Callable
 
     @classmethod
@@ -41,29 +39,25 @@ class OrchestrationChatFlowRuntimePorts:
         """Resolve production task/persistence adapters at execution time."""
         from lib.tasks_pkg.manager import (
             append_event,
-            notify_terminal_busy_state,
+            notify_terminal_conversation_change,
             persist_task_result,
             stamp_chat_task_terminal,
         )
         from lib.orchestration_chat_autopilot import (
             complete_orchestration_autopilot_flow,
         )
-        from lib.tasks_pkg.endpoint import (
-            _store_endpoint_turns_on_task,
-            _sync_endpoint_turns_to_conversation,
-            _trigger_endpoint_auto_translate,
-            _trigger_per_turn_auto_translate,
+        from lib.orchestration_chat_turn_sync import (
+            store_flow_turns_on_task,
+            sync_flow_turns_to_conversation,
         )
 
         return cls(
             append_event=append_event,
             persist_task_result=persist_task_result,
-            notify_terminal=notify_terminal_busy_state,
+            notify_terminal=notify_terminal_conversation_change,
             stamp_terminal=stamp_chat_task_terminal,
-            store_turns=_store_endpoint_turns_on_task,
-            sync_turns=_sync_endpoint_turns_to_conversation,
-            translate_turn=_trigger_per_turn_auto_translate,
-            translate_final=_trigger_endpoint_auto_translate,
+            store_turns=store_flow_turns_on_task,
+            sync_turns=sync_flow_turns_to_conversation,
             complete_autopilot=complete_orchestration_autopilot_flow,
         )
 
@@ -96,7 +90,7 @@ def execute_orchestration_chat_flow_task(
         OrchestrationChatTurnPersistence,
     )
     from lib.orchestration.runtime_service import execute_flow
-    from lib.orchestration_endpoint_adapter import EndpointEventAdapter
+    from lib.orchestration_chat_flow_adapter import FlowEventAdapter
 
     if 'id' not in task:
         raise ValueError(
@@ -130,12 +124,10 @@ def execute_orchestration_chat_flow_task(
         task,
         store_turns=ports.store_turns,
         sync_turns=ports.sync_turns,
-        translate_turn=ports.translate_turn,
-        translate_final=ports.translate_final,
     )
 
     virtual_user_flow = projection == 'autopilot'
-    adapter = EndpointEventAdapter(
+    adapter = FlowEventAdapter(
         emit=turn_persistence,
         on_stream=task_event_sink,
         vu_flow=virtual_user_flow,

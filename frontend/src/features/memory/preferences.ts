@@ -1,5 +1,6 @@
 import { featureRegistry } from '../../feature-registry';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
+import type { I18nKey } from '../../i18n';
 
 type ContextType = 'identity' | 'work_rule' | 'response_preference';
 
@@ -54,10 +55,10 @@ type PreferencesWindow = Window & {
 
 interface ContextSection {
   type: ContextType;
-  titleKey: string;
-  descKey: string;
-  addKey: string;
-  emptyKey: string;
+  titleKey: I18nKey;
+  descKey: I18nKey;
+  addKey: I18nKey;
+  emptyKey: I18nKey;
   icon: string;
 }
 
@@ -78,7 +79,7 @@ function globals(): PreferencesWindow {
 }
 
 function translate(
-  key: string,
+  key: I18nKey,
   fallback: string,
   values?: Record<string, unknown>,
 ): string {

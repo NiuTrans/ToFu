@@ -36,6 +36,7 @@ or via pytest.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import sys
@@ -48,8 +49,21 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+
+_TASK_IDS = itertools.count()
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_chat_runtime_tasks():
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+
+    before = set(chat_task_runtime.task_ids())
+    yield
+    for task_id in set(chat_task_runtime.task_ids()) - before:
+        chat_task_runtime.discard(task_id)
+
 from lib.tasks_pkg.tool_display import _build_tool_round_entry
-from lib.tasks_pkg.tool_dispatch import parse_tool_calls
+from lib.tasks_pkg.tool_dispatch.api import parse_tool_calls
 from lib.tasks_pkg.tool_dispatch._repair import (
     _apply_repair_to_round,
     _build_repair_summary,
@@ -63,9 +77,12 @@ _FULL_COMMAND = 'git status --short lib/llm_dispatch/api.py'
 
 
 def _make_task():
-    return {
-        'id': 'task_repair_patch_x',
+    task = {
+        'id': f'task_repair_patch_{next(_TASK_IDS)}',
         'convId': 'convrepairpatch',
+        '_userId': 1,
+        'kind': 'chat',
+        'status': 'running',
         'model': 'test-model',
         'events': [],
         'events_lock': threading.Lock(),
@@ -77,6 +94,9 @@ def _make_task():
         ],
         '_tool_result_cache': {},
     }
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    assert chat_task_runtime.adopt(task) is True
+    return task
 
 
 def _early_announce(task, fn_args, tc_args_str):

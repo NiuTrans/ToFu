@@ -34,53 +34,45 @@ Run with::
 
 from __future__ import annotations
 
-import os
-import tempfile
-import time
 import unittest
 
 import pytest
 
 pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._chat_sidecar',)
+
+TEST_OWNER_USER_ID = 1
+_STEER_CONVERSATION_ID = 'steerconv000001'
+
+
+@pytest.fixture(autouse=True)
+def _conversation_authority(chat_sidecar):
+    """Exercise the queue against an isolated owned Sidecar conversation."""
+    from tests._seed import delete_conversation, seed_conversation
+    seed_conversation(_STEER_CONVERSATION_ID, title='Steer test')
+    try:
+        yield
+    finally:
+        delete_conversation(_STEER_CONVERSATION_ID)
 
 
 class UserSteerInjectionTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._tmp = tempfile.TemporaryDirectory()
-        from lib.database import reset_sqlite_for_tests
-        cls._db_snapshot = reset_sqlite_for_tests(
-            os.path.join(cls._tmp.name, 'tofu.db'))
-
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        db = get_thread_db(DOMAIN_CHAT)
-        now = int(time.time() * 1000)
-        db.execute(
-            'INSERT INTO conversations '
-            '(id, user_id, title, messages, created_at, updated_at, '
-            ' settings, msg_count, search_text) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            ('steerconv000001', 1, 'T', '[]', now, now, '{}', 0, ''))
-        db.commit()
-        cls._conv = 'steerconv000001'
-
-    @classmethod
-    def tearDownClass(cls):
-        from lib.database import restore_db_state
-        restore_db_state(getattr(cls, '_db_snapshot', None))
-        cls._tmp.cleanup()
+        cls._conv = _STEER_CONVERSATION_ID
 
     def setUp(self):
         from lib import agent_inbox
         from lib.message_queue import clear_queue
-        clear_queue(self._conv)
+        clear_queue(self._conv, user_id=TEST_OWNER_USER_ID)
         agent_inbox.reset_for_test(self._conv)
 
     # ── helpers ──────────────────────────────────────────────────────
     def _task(self, **over):
         t = {'id': 'steertask00001', 'convId': self._conv, 'status': 'running',
-             'aborted': False, 'config': {'model': 'm'}, 'toolRounds': []}
+             '_userId': TEST_OWNER_USER_ID, 'aborted': False,
+             'config': {'model': 'm'}, 'toolRounds': []}
         t.update(over)
         return t
 
@@ -145,8 +137,8 @@ class UserSteerInjectionTest(unittest.TestCase):
         self.assertFalse(drainable)
         um = {'role': 'user', 'content': 'fallback steer'}
         enqueue_message(self._conv, {'text': um['content'], '_user_msg': um},
-                        {'model': 'm'})
-        self.assertEqual(len(get_queue(self._conv)), 1,
+                        {'model': 'm'}, user_id=TEST_OWNER_USER_ID)
+        self.assertEqual(len(get_queue(self._conv, user_id=TEST_OWNER_USER_ID)), 1,
                          'not-drainable steer must fall back to the durable queue')
 
     # ═══════════════════ Exactly-once salvage on task end ═══════════════════
@@ -161,7 +153,7 @@ class UserSteerInjectionTest(unittest.TestCase):
         self._enqueue_steer('please also run the linter')
         n = _salvage_undelivered_steer(self._task())
         self.assertEqual(n, 1)
-        q = get_queue(self._conv)
+        q = get_queue(self._conv, user_id=TEST_OWNER_USER_ID)
         self.assertEqual(len(q), 1, 'exactly one durable row salvaged')
         self.assertEqual(agent_inbox.peek(self._conv), 0,
                          'the inbox item was consumed by the salvage (no double)')
@@ -181,7 +173,7 @@ class UserSteerInjectionTest(unittest.TestCase):
         }]
         n = _salvage_undelivered_steer(task)
         self.assertEqual(n, 1)
-        self.assertEqual(len(get_queue(self._conv)), 1,
+        self.assertEqual(len(get_queue(self._conv, user_id=TEST_OWNER_USER_ID)), 1,
                          'NEVER ZERO: an abort before flush still delivers via '
                          'the salvaged durable row')
         self.assertNotIn('_steer_inject_pending', task,
@@ -194,22 +186,21 @@ class UserSteerInjectionTest(unittest.TestCase):
         from lib.tasks_pkg.orchestrator._finalize import _salvage_undelivered_steer
         n = _salvage_undelivered_steer(self._task())
         self.assertEqual(n, 0)
-        self.assertEqual(len(get_queue(self._conv)), 0)
+        self.assertEqual(len(get_queue(self._conv, user_id=TEST_OWNER_USER_ID)), 0)
 
     def test_salvage_verbatim_user_msg_not_retranslated(self):
         """The salvaged row carries the pre-built _user_msg verbatim so
         dispatch_next_queued appends it without re-translating."""
-        import json
-        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.storage import get_storage_client
         from lib.tasks_pkg.orchestrator._finalize import _salvage_undelivered_steer
         um = {'role': 'user', 'content': 'translated body',
               'originalContent': '原始正文', '_translateDone': True}
         self._enqueue_steer('translated body', user_msg=um)
         _salvage_undelivered_steer(self._task())
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute('SELECT payload FROM message_queue WHERE conv_id=?',
-                         (self._conv,)).fetchone()
-        payload = json.loads(row['payload'])
+        rows = get_storage_client().query(
+            'queue.list', {'conv_id': self._conv, 'user_id': TEST_OWNER_USER_ID})
+        self.assertEqual(len(rows), 1)
+        payload = rows[0]['payload']
         self.assertEqual(payload.get('_user_msg', {}).get('originalContent'),
                          '原始正文',
                          'salvage must preserve the pre-built (translated) '
@@ -229,7 +220,7 @@ class UserSteerInjectionTest(unittest.TestCase):
         # teardown that clears+tombstones the inbox on task end.
         agent_inbox.clear(self._conv)
         self.assertEqual(agent_inbox.peek(self._conv), 0)
-        self.assertEqual(len(get_queue(self._conv)), 0,
+        self.assertEqual(len(get_queue(self._conv, user_id=TEST_OWNER_USER_ID)), 0,
                          'ZERO DELIVERY: without the salvage the undrained steer '
                          'is cleared with the inbox and never reaches the queue')
 
@@ -245,10 +236,12 @@ class UserSteerInjectionTest(unittest.TestCase):
         # Second call: the item was DRAINED (removed) by the first salvage, so
         # nothing is left to re-queue → still exactly one durable row.
         self.assertEqual(_salvage_undelivered_steer(self._task()), 0)
-        self.assertEqual(len(get_queue(self._conv)), 1,
+        self.assertEqual(len(get_queue(self._conv, user_id=TEST_OWNER_USER_ID)), 1,
                          'the drain-as-you-salvage keeps it exactly once even if '
                          'the finalizer runs twice')
 
 
 if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_user_steer_injection.__main__')
     unittest.main()

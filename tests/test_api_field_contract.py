@@ -1,7 +1,7 @@
 """Field-level frontend↔backend contract — P1 (docs/TESTING_STRATEGY.md §4).
 
-The path-contract guard (test_frontend_backend_contract.py) proves every
-``/api`` path api.js calls RESOLVES to a live route. That is necessary but
+The path-contract guard proves every frontend API path resolves to a live
+route. That is necessary but
 not sufficient: the recurring drift class behind it is the route staying
 put while its RESPONSE loses or renames a field the frontend reads — the
 sidebar renders blank titles, the send flow loses ``taskId``, the model
@@ -20,8 +20,8 @@ Design rules (anti negative-optimization, per the strategy doc):
 * The checker carries its own NEUTER proof: ``assert_shape`` must BITE on
   wrong shapes, or a vacuous checker would turn every pin into theatre.
 
-Endpoints pinned (api.js consumption order):
-  1. POST /api/v1/chat/send        — send flow (taskId/convId/userMessage…)
+Endpoints pinned (frontend consumption order):
+  1. POST /api/v3/conversations/<id>/turns — turn command acknowledgement
   2. GET  /api/v1/conversations    — sidebar list ({ok, items[]})
   3. GET  /api/v1/conversations/<id> — conversation open (messages[]…)
   4. GET  /api/v1/server-config    — model picker data source (providers[]…)
@@ -44,9 +44,9 @@ _PNG_B64 = base64.b64encode(base64.b64decode(
 @pytest.fixture(autouse=True)
 def _no_background_llm(monkeypatch):
     """Field-shape probes stop at task admission; no model call is needed."""
-    import lib.tasks_pkg as tasks_pkg
+    import lib.tasks_pkg.spawn as task_spawn
 
-    monkeypatch.setattr(tasks_pkg, 'spawn_task', lambda _task: None)
+    monkeypatch.setattr(task_spawn, 'spawn_task', lambda _task: None)
 
 
 # ─── Shape checker ─────────────────────────────────────────────────────
@@ -145,17 +145,29 @@ class TestAssertShapeBites:
 
 # ─── Endpoint pins (consumer-driven) ───────────────────────────────────
 
-_CHAT_SEND_SPEC = {
+_TURN_CREATE_SPEC = {
     'ok': bool,
-    'taskId': str,
-    'convId': str,
-    'title': str,
-    'isNew': bool,
-    'msgCount': int,
-    'userMessage': {
-        'role': str,
-        'content': str,
-        'timestamp': int,
+    'conversationId': str,
+    'conversationRevision': int,
+    'submittedTurn': {
+        'turnId': str,
+        'actor': str,
+        'projection': dict,
+        'projectionRevision': int,
+    },
+    'turn': {
+        'turnId': str,
+        'status': str,
+        'currentAttemptId': str,
+        'projection': dict,
+        'projectionRevision': int,
+    },
+    'attempt': {
+        'attemptId': str,
+        'turnId': str,
+        'taskId': str,
+        'operation': str,
+        'status': str,
     },
 }
 
@@ -197,57 +209,118 @@ _SERVER_CONFIG_SPEC = {
             'capabilities': [str],
         }],
     }],
-    'dropdown_models': 'any',
     'models': 'any',
+    'dropdown_models': 'any',
+    'model_price_display': {
+        'base_currency': str,
+        'usd_rates': {
+            'USD': float,
+            'CNY': float,
+            'JPY': float,
+            'KRW': float,
+        },
+        'updated_at': int,
+        'source': str,
+    },
     'cost_experiment': {
         'enabled': bool,
+        'lifecycle': str,
         'experiment_id': str,
         'traffic_percent': int,
         'treatment_percent': int,
         'min_sample_size': int,
+        'started_at_ms': int,
+        'sealed_at_ms': int,
         'assignment_unit': str,
         'sticky': bool,
         'arms': dict,
+        'contract_version': str,
+        'spec_digest': str,
+        'spec': dict,
     },
 }
 
 _COST_EXPERIMENT_REPORT_SPEC = {
     'ok': bool,
+    'contractVersion': str,
+    'experimentId': str,
     'experiment_id': str,
+    'specDigest': str,
     'enabled': bool,
+    'lifecycle': str,
     'windowDays': int,
     'assignmentUnit': str,
     'minSampleSize': int,
+    'maximumAssignmentUnits': int,
+    'observedAssignmentUnits': int,
+    'analyzedAssignmentUnits': int,
+    'analysisClosed': bool,
+    'analysisStartVerified': bool,
+    'analysisSealVerified': bool,
+    'analysisStartedAt': (int, type(None)),
+    'analysisSealedAt': (int, type(None)),
+    'fixedHorizonReached': bool,
     'ready': bool,
+    'sampleReady': bool,
+    'pricingReady': bool,
+    'qualityReady': bool,
+    'latencyReady': bool,
+    'promotionEligible': bool,
     'truncated': bool,
     'rowCap': int,
     'arms': {
         'control': {
             'conversations': int,
+            'assignedUnits': int,
+            'analysisUnits': int,
             'turns': int,
             'pricedTurns': int,
             'unpricedTurns': int,
             'fullyPricedConversations': int,
+            'fullyPricedAssignmentUnits': int,
+            'assignmentUnitPricingCoverage': (float, type(None)),
             'costPerPricedTurnUsd': (float, type(None)),
             'costPerFullyPricedConversationUsd': (float, type(None)),
+            'analysisCostPerFullyPricedAssignmentUnitUsd': (float, type(None)),
             'pricingCoverage': (float, type(None)),
         },
         'optimized': {
             'conversations': int,
+            'assignedUnits': int,
+            'analysisUnits': int,
             'turns': int,
             'pricedTurns': int,
             'unpricedTurns': int,
             'fullyPricedConversations': int,
+            'fullyPricedAssignmentUnits': int,
+            'assignmentUnitPricingCoverage': (float, type(None)),
             'costPerPricedTurnUsd': (float, type(None)),
             'costPerFullyPricedConversationUsd': (float, type(None)),
+            'analysisCostPerFullyPricedAssignmentUnitUsd': (float, type(None)),
             'pricingCoverage': (float, type(None)),
         },
     },
     'comparison': {
         'costPerConversationDeltaPct': (float, type(None)),
+        'allObservedCostPerConversationDeltaPct': (float, type(None)),
         'costPerPricedTurnDeltaPct': (float, type(None)),
+        'pointEstimateOptimizedCheaper': bool,
         'optimizedIsCheaper': bool,
     },
+    'decision': {
+        'contractVersion': str,
+        'status': str,
+        'dataValid': bool,
+        'analysisClosed': bool,
+        'analysisStartVerified': bool,
+        'analysisSealVerified': bool,
+        'fixedHorizonReached': bool,
+        'maximumAssignmentUnits': int,
+        'decisionEligible': bool,
+        'promotionEligible': bool,
+        'blockers': [str],
+    },
+    'funnel': dict,
 }
 
 _IMAGE_UPLOAD_SPEC = {
@@ -256,11 +329,21 @@ _IMAGE_UPLOAD_SPEC = {
 }
 
 
-def _send_probe_message(flask_client, conv_id):
-    resp = flask_client.post('/api/v1/chat/send', json={
-        'convId': conv_id,
-        'message': {'text': 'field-contract probe'},
+def _submit_probe_turn(flask_client, conv_id):
+    resp = flask_client.post(f'/api/v3/conversations/{conv_id}/turns', json={
+        'commandId': f'field-contract:{conv_id}',
+        'message': {
+            'text': 'field-contract probe',
+            'timestamp': 1,
+            '_msgId': f'field-contract-message:{conv_id}',
+        },
         'config': {'model': 'field-contract-model'},
+        'conversation': {
+            'allowCreate': True,
+            'title': 'Field contract probe',
+            'settings': {'model': 'field-contract-model'},
+            'createdAt': 1,
+        },
     })
     return resp
 
@@ -268,16 +351,19 @@ def _send_probe_message(flask_client, conv_id):
 class TestFieldContract:
     """Live-app shape pins for the top-N endpoints api.js consumes."""
 
-    def test_chat_send_response_shape(self, flask_client):
-        resp = _send_probe_message(flask_client, 'field-contract-conv-1')
+    def test_turn_create_response_shape(self, flask_client):
+        resp = _submit_probe_turn(flask_client, 'field-contract-conv-1')
         assert resp.status_code == 200, (
-            f'chat/send rejected the canonical body: {resp.status_code} '
+            f'v3 turn create rejected the canonical body: {resp.status_code} '
             f'{resp.get_json()}')
-        _assert_endpoint_shape(resp.get_json(), _CHAT_SEND_SPEC,
-                               'POST /api/v1/chat/send')
+        _assert_endpoint_shape(
+            resp.get_json(),
+            _TURN_CREATE_SPEC,
+            'POST /api/v3/conversations/<id>/turns',
+        )
 
     def test_conversations_list_shape(self, flask_client):
-        _send_probe_message(flask_client, 'field-contract-conv-2')  # seed one
+        _submit_probe_turn(flask_client, 'field-contract-conv-2')  # seed one
         resp = flask_client.get('/api/v1/conversations')
         assert resp.status_code == 200
         data = resp.get_json()
@@ -288,7 +374,7 @@ class TestFieldContract:
             'the seeded conversation is absent from the list payload')
 
     def test_conversation_get_shape(self, flask_client):
-        _send_probe_message(flask_client, 'field-contract-conv-3')
+        _submit_probe_turn(flask_client, 'field-contract-conv-3')
         resp = flask_client.get('/api/v1/conversations/field-contract-conv-3')
         assert resp.status_code == 200
         _assert_endpoint_shape(resp.get_json(), _CONV_GET_SPEC,

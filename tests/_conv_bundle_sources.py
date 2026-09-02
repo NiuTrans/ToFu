@@ -1,63 +1,8 @@
-"""tests/_conv_bundle_sources.py — resolve which shipped JS files a node
-harness must eval to get a symbol defined, using the PRODUCTION bundle list.
+"""Resolve production runtime sources for focused JavaScript harnesses.
 
-WHY THIS EXISTS
----------------
-`static/js/core/conversations.js` has been progressively decomposed (epic
-pt_3879f00e sub-part 2: slice 3 pulled the persist/freshness/rebase helper
-cluster into `core/conv_persist_helpers.js`, slice 4 the image hydrator, slice 5
-`_applySettingsToConv`, ...). Every slice moved symbols OUT of that file while
-keeping runtime behaviour identical, because the bundler concatenates the pieces
-in a declared order.
-
-Eleven node-harness guards hard-coded `core/conversations.js` as "the file that
-defines these symbols" and eval'd it standalone. Each extraction slice therefore
-broke a batch of them at once: the harness eval'd a file that no longer contains
-the symbol, and the guard failed with a confusing shape (`typeof X !== 'function'`
-or `substring not found`) that looks like a product regression but is pure
-harness drift. That is the 8th recurrence of the "guard anchored on a path
-instead of a symbol" family in this project.
-
-THE FIX (single source of truth, not 11 copies)
------------------------------------------------
-`lib/js_bundler._BUNDLE_FILES` is the PRODUCTION load order — the same list the
-browser gets. So instead of guessing a filename, a harness asks:
-
-    sources_defining('_trimMsgForPersist')   -> ordered abs paths to eval
-
-which searches the bundle's core files for the definition and returns every file
-that must be eval'd, IN BUNDLE ORDER, so bare cross-file references resolve
-exactly as they do at runtime. When a future slice moves the symbol again, these
-guards follow it automatically instead of going red.
-
-PROJECT CONVENTION (owner directive 2026-08-01)
------------------------------------------------
-NEW node harnesses that eval shipped JS MUST resolve their eval list through
-this module — never a hand-maintained extras list. Concretely:
-
-  * Driving a conversations.js top-level function
-    (loadConversationMessages / loadConversationsFromServer /
-    syncConversationToServer / hydrateSidebarFromCache / …):
-    use ``conv_family_sources()`` — conversations.js + EVERY core/conv_* leaf
-    + pending_sync.js in bundle order. The wide reference surface makes any
-    hand-picked subset a drift time-bomb (five measured stale-pin instances
-    and one zero-extras standalone harness in a single day, 2026-08-01).
-  * Driving a single subject file (paper/*, swarm, oauth, …):
-    ``sources_defining('<the_fn>')`` or ``eval_prelude('<the_fn>')``.
-  * NEUTER copies: pass them via the ``override`` map so the mutated file
-    REPLACES its shipped counterpart in the eval list (a mutated file that
-    merely JOINS the list loses to the real definition).
-
-Migrated inventory (all GREEN, NC bites intact): reconcile,
-boot_early_active_paint, conv_verify_failure_reheal,
-sidebar_shell_count_keys, windowed_no_truncate, pending_sync_durability,
-pending_sync_shell_flush, send_failure_persists_message,
-list_merge_rev_authority.
-
-Deliberately reads the bundler's own list rather than globbing the directory:
-globbing would silently pick up a file the bundle does NOT ship (a leftover, a
-vendored copy) and eval it, which is how a guard ends up testing code that never
-reaches a user.
+The section manifest is the execution-order authority. Tests locate symbols
+through it instead of pinning paths, so moving code between sections cannot
+turn a product test into a source-layout failure.
 """
 
 from __future__ import annotations
@@ -182,29 +127,15 @@ def sources_defining(*symbols, subtree=''):
 
 
 def conv_family_sources(*, override=None):
-    """``core/conversations.js`` + EVERY shipped conv-family leaf, in bundle
-    order — the correct eval scope for a harness that drives a top-level
-    conversations.js function.
+    """Return every shipped conversation-core section in execution order.
 
-    Why a family closure, not symbol pins (2026-08-01, measured): driving
-    ``loadConversationMessages`` / ``loadConversationsFromServer`` touches a
-    WIDE reference surface, and every hand-picked pin list went stale at the
-    next decomposition slice — five measured instances in one day
-    (_serverConvCount → conv_merge_shells, _setCacheVerifying →
-    conv_verify_visibility, _scheduleConvVerifyRetry → conv_verify_retry,
-    …), each discovered one whack-a-mole layer at a time. The decomposition
-    invariant is that every ``core/conv_*`` leaf shares window scope with
-    conversations.js by construction, so the family closure is the only
-    list that cannot drift: a future conv_* leaf joins automatically via
-    the bundle manifest. ``core/pending_sync.js`` is included explicitly —
-    it belongs to the persist family despite the different prefix.
-
-    *override* maps a bundle-relative path to a substitute (the NEUTER
-    pattern: eval a mutated copy INSTEAD of the shipped file).
+    ``override`` replaces a shipped source with a test mutation. Use this for
+    behavior spanning several conversation sections; single-symbol tests
+    should prefer :func:`sources_defining`.
     """
     family = [name for name in bundle_files()
               if name.startswith('core/conv_')
-              or name in ('core/conversations.js', 'core/pending_sync.js')]
+              or name.startswith('core/conversation_')]
     out = []
     for rel in family:
         if override and rel in override:
@@ -217,7 +148,7 @@ def conv_family_sources(*, override=None):
 def source_argv(*symbols, override=None, subtree=''):
     """Ordered abs paths for ``node harness <paths...>``, with optional override.
 
-    *override* maps a bundle-relative path (e.g. ``'core/conversations.js'``) to
+    *override* maps a bundle-relative path to
     a substitute file — the NEUTER pattern several guards use: write a mutated
     copy to tmp_path and eval that instead of the shipped file, leaving the real
     tree untouched. Passing an override for a path this symbol set does not need
@@ -249,8 +180,7 @@ def source_argv(*symbols, override=None, subtree=''):
 def eval_prelude(*symbols, subtree=''):
     """A node snippet that eval's every file needed to define *symbols*.
 
-    Drop-in replacement for a harness's hard-coded
-    ``eval(fs.readFileSync('core/conversations.js'))``.
+    Use this instead of hard-coding a section path.
     """
     paths = sources_defining(*symbols, subtree=subtree)
     lines = ["const fs = require('fs');"]

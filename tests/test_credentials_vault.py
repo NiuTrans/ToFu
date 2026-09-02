@@ -185,7 +185,7 @@ def test_bootstrap_is_a_noop_without_legacy_files(_isolated_vault, tmp_path):
 
 def _admin_token():
     from lib.api_keys import create_key
-    _row, token = create_key(name='vault-test', scopes=[], admin=True)
+    _row, token = create_key(owner_user_id=1, name='vault-test', scopes=[], admin=True)
     return token
 
 
@@ -398,16 +398,17 @@ def test_build_vault_index_never_raises_on_corrupt_store(_isolated_vault):
     assert v.exec_env_overlay() == {}
 
 
-# ── 9. System-prompt splice seam (system_context/_inject.py ★3.6) ──
+# ── 9. Context Composer credential splice seam ──
 
 def _run_inject(messages, *, has_real_tools=True):
-    from lib.tasks_pkg.system_context import _inject_system_contexts
-    _inject_system_contexts(
+    from lib.tasks_pkg.context_composer import compose_task_context
+    compose_task_context(
         messages,
+        user_id=0,
         project_path='/tmp/x',
         project_enabled=False,
         memory_enabled=False,
-        search_enabled=False, swarm_enabled=False,
+        search_enabled=False,
         has_real_tools=has_real_tools,
         conv_id='', task={'config': {}}, model='claude-opus-4',
     )

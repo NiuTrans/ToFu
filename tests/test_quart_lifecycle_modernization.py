@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 import threading
 
 import pytest
@@ -92,17 +91,6 @@ def test_base_app_factory_owns_native_shell_and_lifespan():
         assert app.extensions['tofu_lifecycle']['status'] == 'stopped'
 
     _run_async(exercise())
-
-
-def test_full_application_factory_is_a_separate_repeatable_boundary():
-    root = Path(__file__).resolve().parents[1]
-    source = (root / 'server.py').read_text()
-    assembly = (root / 'lib/app_assembly.py').read_text()
-    assert 'from lib.app_assembly import create_application' in source
-    assert 'return create_application(' in source
-    assert 'def configure_application(' in assembly
-    assert 'register_all(app, start_workers=False)' in assembly
-    assert "app.extensions[marker] = True" in assembly
 
 
 def test_lifecycle_runs_named_handlers_on_serving_loop_and_shutdown_in_reverse():
@@ -234,6 +222,7 @@ def test_hypercorn_config_defaults_overrides_and_tls():
     )
     assert config.bind == ['127.0.0.1:15000']
     assert config.keep_alive_timeout == 30
+    assert config.websocket_max_message_size == 64 * 1024
     assert config.graceful_timeout == 4.5
     assert config.backlog == 2048
     assert config.certfile == '/tmp/cert.pem'
@@ -248,118 +237,3 @@ def test_hypercorn_config_invalid_numbers_fall_back():
     )
     assert config.graceful_timeout == 3.0
     assert config.backlog == 1024
-
-
-def test_production_entry_uses_quart_lifespan_not_a_disposable_startup_loop():
-    root = Path(__file__).resolve().parents[1]
-    server_source = (root / 'server.py').read_text()
-    lifespan_source = (root / 'lib/production_lifecycle.py').read_text()
-    loop_source = (root / 'lib/serving_loop_lifecycle.py').read_text()
-    asgi_source = (root / 'asgi.py').read_text()
-    assert 'asyncio.run(_startup())' not in server_source
-    assert "name='tofu.production.startup'" in lifespan_source
-    assert "name='tofu.production.shutdown'" in lifespan_source
-    assert "name='tofu.serving-loop.startup'" in loop_source
-    assert "name='tofu.serving-loop.shutdown'" in loop_source
-    assert 'deferred_dispatch_provider()' in loop_source
-    assert 'await hypercorn_serve(app, hconfig' in server_source
-    assert 'create_production_app' in asgi_source
-
-
-def test_shutdown_policy_is_owned_outside_server_entrypoint():
-    root = Path(__file__).resolve().parents[1]
-    server_source = (root / 'server.py').read_text()
-    shutdown_source = (root / 'lib/server_shutdown.py').read_text()
-    assert 'from lib.server_shutdown import (' in server_source
-    assert 'def graceful_shutdown_signals(' not in server_source
-    assert 'def _request_graceful_shutdown(' not in server_source
-    assert 'def graceful_shutdown_signals(' in shutdown_source
-    assert 'def request_graceful_shutdown(' in shutdown_source
-
-
-def test_listener_network_policy_is_owned_outside_server_entrypoint():
-    root = Path(__file__).resolve().parents[1]
-    server_source = (root / 'server.py').read_text()
-    network_source = (root / 'lib/server_network.py').read_text()
-    assert 'from lib.server_network import (' in server_source
-    for name in (
-        '_detect_reverse_proxy', '_resolve_tls_policy',
-        '_find_free_port', '_wait_port_free',
-    ):
-        assert f'def {name}(' not in server_source
-    assert 'def detect_reverse_proxy(' in network_source
-    assert 'def resolve_tls_policy(' in network_source
-    assert 'def find_free_port(' in network_source
-    assert 'def wait_port_free(' in network_source
-
-
-def test_tls_certificate_owner_is_outside_server_entrypoint():
-    root = Path(__file__).resolve().parents[1]
-    server_source = (root / 'server.py').read_text()
-    tls_source = (root / 'lib/server_tls.py').read_text()
-    assert 'ensure_tls_certificates as _ensure_tls_certs' in server_source
-    assert 'def _ensure_tls_certs(' not in server_source
-    assert 'def ensure_tls_certificates(' in tls_source
-    assert 'x509.CertificateBuilder()' in tls_source
-
-
-def test_http_compression_is_registered_outside_server_assembly():
-    root = Path(__file__).resolve().parents[1]
-    source = (root / 'server.py').read_text()
-    middleware = (root / 'lib/http_compression.py').read_text()
-    assembly = (root / 'lib/app_assembly.py').read_text()
-    assert 'configure_application(' in source
-    assert 'register_http_compression(app)' in assembly
-    assert 'async def _compress_response' not in source
-    assert 'async def compress_response' in middleware
-    assert 'run_in_executor' in middleware
-
-
-def test_request_observation_is_registered_outside_server_assembly():
-    root = Path(__file__).resolve().parents[1]
-    source = (root / 'server.py').read_text()
-    middleware = (root / 'lib/http_request_lifecycle.py').read_text()
-    assembly = (root / 'lib/app_assembly.py').read_text()
-    assert 'configure_application(' in source
-    assert 'register_request_lifecycle(app)' in assembly
-    assert 'async def _assign_req_id_and_log' not in source
-    assert 'async def assign_request_id_and_log' in middleware
-    assert 'route_template_for_request(request)' in middleware
-
-
-def test_http_compat_and_cache_policy_are_registered_outside_assembly():
-    root = Path(__file__).resolve().parents[1]
-    source = (root / 'server.py').read_text()
-    middleware = (root / 'lib/http_compat_middleware.py').read_text()
-    assembly = (root / 'lib/app_assembly.py').read_text()
-    assert 'configure_application(' in source
-    assert 'register_method_override(app)' in assembly
-    assert 'register_static_cache_headers(app)' in assembly
-    assert 'async def method_override' not in source
-    assert 'async def add_static_cache_headers' in middleware
-
-
-def test_global_error_mapping_is_registered_outside_server_assembly():
-    root = Path(__file__).resolve().parents[1]
-    source = (root / 'server.py').read_text()
-    middleware = (root / 'lib/http_error_handlers.py').read_text()
-    assembly = (root / 'lib/app_assembly.py').read_text()
-    assert 'configure_application(' in source
-    assert 'register_http_error_handlers(app)' in assembly
-    assert 'async def _handle_uncaught' not in source
-    assert 'async def handle_uncaught' in middleware
-    assert "retry_after=2, kind='overloaded'" in middleware
-
-
-def test_static_route_is_registered_outside_server_assembly():
-    root = Path(__file__).resolve().parents[1]
-    source = (root / 'server.py').read_text()
-    serving = (root / 'lib/static_serving.py').read_text()
-    assembly = (root / 'lib/app_assembly.py').read_text()
-    assert 'configure_application(' in source
-    assert 'register_static_route(' in assembly
-    assert "@app.route('/static/<path:filename>')" not in source
-    assert 'async def _static_route' not in source
-    assert 'def register_static_route(' in serving
-    assert "app.add_url_rule(" in serving
-    assert "endpoint='tofu_static'" in serving

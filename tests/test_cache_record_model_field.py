@@ -69,7 +69,7 @@ class TestTheRecordCarriesTheModel:
 
     @staticmethod
     def _emitted(monkeypatch, model):
-        from lib.tasks_pkg.cache_tracking import _detect as det
+        import lib.tasks_pkg.cache_tracking._detect as det
 
         seen = []
         real = det._emit_round_record
@@ -102,7 +102,7 @@ class TestTheRecordCarriesTheModel:
                 conv, [{'role': 'user', 'content': 'x'}], None, model,
                 {'prompt_tokens': 1000, 'completion_tokens': 10,
                  'cache_read_input_tokens': read,
-                 'cache_creation_input_tokens': write})
+                 'cache_creation_input_tokens': write}, user_id=1)
         return payloads
 
     def test_record_includes_the_model(self, monkeypatch):

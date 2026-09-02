@@ -9,7 +9,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from lib.tools import ToolContext, assemble_tool_list
+from lib.tools.registry import ToolContext, assemble_tool_list
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +32,7 @@ def _ctx(**overrides):
         project_path='', project_enabled=False,
         search_mode='off', search_enabled=False, fetch_enabled=False,
         code_exec_enabled=False, browser_enabled=False, desktop_enabled=False,
-        swarm_enabled=False, image_gen_enabled=False,
+        image_gen_enabled=False,
         human_guidance_enabled=False, scheduler_enabled=False, messages=[],
     )
     base.update(overrides)
@@ -111,7 +111,7 @@ class TestLiveToolAvailability(unittest.TestCase):
 
     CONV = '_live_tool_conv'
 
-    def _assemble(self, *, swarm=False, project=False):
+    def _assemble(self, *, project=False):
         from lib.tasks_pkg.model_config import _assemble_tool_list
 
         cfg = {
@@ -125,21 +125,15 @@ class TestLiveToolAvailability(unittest.TestCase):
             task_id='t-live-tool',
             search_mode='off', search_enabled=False, fetch_enabled=False,
             code_exec_enabled=False, browser_enabled=False,
-            desktop_enabled=False, swarm_enabled=swarm,
+            desktop_enabled=False,
             messages=[], conv_id=self.CONV,
         )[0]
 
-    def test_swarm_toggle_on_is_visible_next_assembly(self):
-        before = _names(self._assemble(swarm=False))
-        after = _names(self._assemble(swarm=True))
-        self.assertNotIn('spawn_agents', before)
-        self.assertIn('spawn_agents', after)
-
-    def test_swarm_toggle_off_is_visible_next_assembly(self):
-        before = _names(self._assemble(swarm=True))
-        after = _names(self._assemble(swarm=False))
-        self.assertIn('spawn_agents', before)
-        self.assertNotIn('spawn_agents', after)
+    def test_swarm_tools_are_default_tools(self):
+        # Swarm is a default tool family (no user-facing switch since
+        # 2026-08-23): spawn_agents must ride EVERY assembly, project or not.
+        self.assertIn('spawn_agents', _names(self._assemble()))
+        self.assertIn('spawn_agents', _names(self._assemble(project=True)))
 
     def test_project_attach_is_visible_next_assembly(self):
         before = _names(self._assemble(project=False))

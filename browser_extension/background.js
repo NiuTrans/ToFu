@@ -1,5 +1,5 @@
 /**
- * Tofu Browser Bridge — Background Service Worker (v5.0)
+ * Tofu Browser Bridge — Background Service Worker (v5.4.1)
  *
  * Single-endpoint architecture:
  *   Every poll is a POST to /api/browser/poll with:
@@ -26,16 +26,22 @@ const COMMAND_TIMEOUT  = 25000;   // Per-command execution timeout
 const AUTH_RETRY_BASE_DELAY = 9000;    // first 401 retry (~POLL_RETRY_DELAY × 3)
 const AUTH_RETRY_MAX_DELAY  = 300000;  // parked probe cadence (5 min)
 const AUTH_GIVE_UP_AFTER    = 5;       // consecutive 401s → needs-re-pair state
+const UPGRADE_RETRY_DELAY   = 300000;  // old protocol cannot heal by busy retry
 // Some commands can legitimately take longer than the default; override here.
 const COMMAND_TIMEOUT_OVERRIDES = {
+  fetch_url: 35000,       // navigation + bounded SPA/network settle
+  research_url: 80000,    // bounded scroll/pagination + network/body capture
+  devtools: 35000,        // bounded console observation / debugger command
   screenshot_tab: 55000,  // full-page CDP capture + lazy-load wait
   wait_download: 65000,
+  fetch_file_to_server: 125000, // bounded browser response → server stream
 };
 const PROTOCOL_VERSION = 2;
 const BROWSER_CAPABILITIES = [
   'tabs', 'navigate', 'read', 'snapshot', 'click', 'fill', 'press',
   'select', 'scroll', 'wait', 'execute', 'iframes', 'network_capture',
-  'upload', 'downloads', 'screenshot',
+  'network_body', 'deep_collect', 'devtools_console', 'js_debugger',
+  'upload', 'file_export', 'downloads', 'screenshot',
 ];
 // Auto re-pair (owner decree 2026-08-04): the extension must NEVER send the
 // user hunting for a bridge secret. A 401 kicks a silent re-pair ladder that
@@ -53,7 +59,7 @@ const REPAIR_TAB_COOLDOWN = 30 * 60 * 1000;  // hidden-tab repair, twice/hour ca
 let SERVER_URL = '';
 let CLIENT_ID = '';               // Stable per-device client identifier
 let PROFILE_NAME = '';
-let BRIDGE_SECRET = '';           // Optional: matches server TOFU_BRIDGE_SECRET
+let BRIDGE_SECRET = '';           // Owner-scoped agents:bridge credential
 let pollActive = false;
 let connected = false;
 let lastError = '';
@@ -91,8 +97,123 @@ let _flushPending = false;        // true ⇒ active poll aborted to flush a res
 // Result queue: completed results waiting to be sent with next poll
 const _resultQueue = [];        // [{id, result, error}, ...]
 const _inflight = new Set();    // Command IDs currently executing
-const _networkCaptures = new Map(); // captureId -> {tabId, patterns, responses}
+const POLL_RESULT_BATCH_MAX = 32;
+let _pollResultBatchMax = POLL_RESULT_BATCH_MAX;
+// The smallest server profile accepts a 16 MiB poll body. Keep exact UTF-8
+// result bytes below 12 MiB so frame metadata and non-result fields retain
+// headroom. This also prevents one screenshot from becoming a memory bomb.
+const POLL_RESULT_BODY_MAX_BYTES = 12 * 1024 * 1024;
+const POLL_RESULT_OVERSIZE_ERROR =
+  `Browser command result exceeded the ${POLL_RESULT_BODY_MAX_BYTES / (1024 * 1024)} MiB poll transport limit`;
+
+function _compactOversizeResult(candidate) {
+  return {
+    id: candidate && candidate.id,
+    result: null,
+    error: POLL_RESULT_OVERSIZE_ERROR,
+  };
+}
+
+function _takeBoundedResultBatch() {
+  const candidates = _resultQueue.splice(
+    0, Math.min(_pollResultBatchMax, _resultQueue.length));
+  const batch = [];
+  let encodedBytes = 0;
+  for (let index = 0; index < candidates.length; index += 1) {
+    let candidate = candidates[index];
+    let serialized = '';
+    try {
+      serialized = JSON.stringify(candidate);
+    } catch (_) {
+      candidate = _compactOversizeResult(candidate);
+      serialized = JSON.stringify(candidate);
+    }
+    let candidateBytes = new TextEncoder().encode(serialized).byteLength;
+    if (candidateBytes > POLL_RESULT_BODY_MAX_BYTES) {
+      candidate = _compactOversizeResult(candidate);
+      serialized = JSON.stringify(candidate);
+      candidateBytes = new TextEncoder().encode(serialized).byteLength;
+    }
+    if (batch.length && encodedBytes + candidateBytes > POLL_RESULT_BODY_MAX_BYTES) {
+      _resultQueue.unshift(...candidates.slice(index));
+      break;
+    }
+    batch.push(candidate);
+    encodedBytes += candidateBytes;
+  }
+  return batch;
+}
+// Response-body capture is deliberately bounded.  The payload is transient
+// reconstructible transport data: at most 1 MiB per capture, 384 KiB per
+// response, 80 metadata rows, and 12 recently navigated tabs.
+const NETWORK_CAPTURE_MAX_ENTRIES = 80;
+const NETWORK_CAPTURE_MAX_TRACKED_REQUESTS = 160;
+const NETWORK_CAPTURE_MAX_BODY_CHARS = 384 * 1024;
+const NETWORK_CAPTURE_MAX_TOTAL_BODY_CHARS = 1024 * 1024;
+const NETWORK_CAPTURE_RECENT_TABS = 12;
+const NETWORK_CAPTURE_MAX_WEBSOCKET_FRAMES = 40;
+const NETWORK_CAPTURE_MAX_ACTIVE = 4;
+const NETWORK_CAPTURE_SETTLE_MAX_MS = 4500;
+const NETWORK_CAPTURE_IDLE_MS = 650;
+const _networkCaptures = new Map(); // captureId -> owned transient capture
+const _networkCaptureByTab = new Map(); // tabId -> automatic body-capture id
+const _recentNetworkByTab = new Map(); // tabId -> bounded public snapshot
 let _networkListenerInstalled = false;
+
+// One extension-owned CDP attachment per tab. Network capture, screenshots,
+// trusted input and DevTools commands take independent leases on this broker;
+// the last lease detaches. This prevents a screenshot from tearing down an
+// active console/network session and prevents two simultaneous attach calls
+// from racing each other.
+const _cdpSessions = new Map(); // tabId -> {target, holders, attachPromise, tail}
+let _cdpLeaseSequence = 0;
+
+// Console/debugger state is transient and explicitly bounded. It is useful
+// only while diagnosing the page and is never written to extension storage.
+const DEVTOOLS_MAX_ACTIVE_DEBUG_SESSIONS = 2;
+const DEVTOOLS_MAX_OBSERVERS = 4;
+const DEVTOOLS_MAX_LOG_ENTRIES = 200;
+const DEVTOOLS_MAX_LOG_CHARS = 256 * 1024;
+const DEVTOOLS_MAX_CONTEXTS = 80;
+const DEVTOOLS_MAX_SCRIPTS = 120;
+const DEVTOOLS_MAX_BREAKPOINTS = 24;
+const DEVTOOLS_MAX_OBJECT_NODES = 400;
+const DEVTOOLS_MAX_OBJECT_CHARS = 60 * 1024;
+const DEVTOOLS_DEBUG_TTL_MS = 120000;
+const DEVTOOLS_PAUSE_FAILSAFE_MS = 30000;
+const DEVTOOLS_RECENT_TABS = 12;
+const _devtoolsObservers = new Map(); // observerId -> bounded temporary sink
+const _debugSessions = new Map(); // tabId -> persistent bounded debug session
+const _recentDevtoolsByTab = new Map(); // tabId -> last bounded console snapshot
+
+// MV3 event listeners are registered synchronously so Chrome can wake the
+// service worker for debugger/tab lifecycle events.
+chrome.debugger.onEvent.addListener(_onNetworkDebuggerEvent);
+chrome.debugger.onEvent.addListener(_onDevtoolsDebuggerEvent);
+chrome.debugger.onDetach.addListener(_onNetworkDebuggerDetach);
+chrome.debugger.onDetach.addListener(_onCdpDebuggerDetach);
+function _invalidateRecentNetworkOnUncapturedNavigation(details) {
+  if (!details || Number(details.frameId) !== 0) return;
+  const tabId = Number(details.tabId);
+  if (!_networkCaptureByTab.has(tabId)) _recentNetworkByTab.delete(tabId);
+}
+chrome.webNavigation.onCommitted.addListener(
+  _invalidateRecentNetworkOnUncapturedNavigation);
+chrome.webNavigation.onHistoryStateUpdated.addListener(
+  _invalidateRecentNetworkOnUncapturedNavigation);
+chrome.webNavigation.onReferenceFragmentUpdated.addListener(
+  _invalidateRecentNetworkOnUncapturedNavigation);
+chrome.tabs.onRemoved.addListener((tabId) => {
+  _recentNetworkByTab.delete(Number(tabId));
+  _recentDevtoolsByTab.delete(Number(tabId));
+  _stopDebugSession(Number(tabId), 'tab-closed').catch(() => {});
+  for (const capture of Array.from(_networkCaptures.values())) {
+    if (capture.tabId === Number(tabId)) {
+      _stopNetworkCaptureInternal(
+        capture.captureId, { remember: false }).catch(() => {});
+    }
+  }
+});
 
 // Stats
 let commandsExecuted = 0;
@@ -186,6 +307,15 @@ function buildHeaders() {
   const h = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
   if (BRIDGE_SECRET) h['X-Bridge-Secret'] = BRIDGE_SECRET;
   return h;
+}
+
+function buildPollHeaders() {
+  return {
+    ...buildHeaders(),
+    // Pre-auth recovery hint only. The authenticated JSON frame below remains
+    // the authoritative protocol declaration.
+    'X-Browser-Protocol-Version': String(PROTOCOL_VERSION),
+  };
 }
 
 // ══════════════════════════════════════════
@@ -376,8 +506,9 @@ async function poll() {
   let resultsToSend = [];
   let timeoutId = null;
   try {
-    // Drain the result queue — send all completed results with this poll
-    resultsToSend = _resultQueue.splice(0, _resultQueue.length);
+    // Drain one bounded result batch. Remaining completions ride the next
+    // poll; command settlement is idempotent and no result is discarded.
+    resultsToSend = _takeBoundedResultBatch();
 
     const controller = new AbortController();
     _activePollController = controller;
@@ -387,7 +518,7 @@ async function poll() {
     const resp = await fetch(`${SERVER_URL}/api/browser/poll`, {
       method: 'POST',
       signal: controller.signal,
-      headers: buildHeaders(),
+      headers: buildPollHeaders(),
       // Carry the browser's OWN cookies for the server host: behind an
       // SSO-fronted gateway (cloud-IDE preview proxy) the bridge secret
       // alone can never pass the edge — the user's live SSO session can.
@@ -437,6 +568,66 @@ async function poll() {
         _scheduleNextPoll(delay);
         return;
       }
+      if (resp.status === 426) {
+        // Authentication succeeded, but this binary cannot enter the strict
+        // command protocol. Preserve completed results and park: retrying
+        // every three seconds cannot upgrade a side-loaded extension and only
+        // floods server diagnostics. The Local Control status endpoint sees
+        // the rejected device and offers the current pre-paired ZIP.
+        _resultQueue.unshift(...resultsToSend);
+        _resetAuthBackoff();
+        connected = false;
+        const errBody = await resp.json().catch(() => null);
+        const required = Number(
+          errBody && errBody.requiredProtocolVersion) || '?';
+        lastError = `Extension upgrade required (protocol ${PROTOCOL_VERSION} → ${required})`;
+        updateBadge('repair');
+        console.warn(`[Bridge] ${lastError}; parked until the next upgrade probe`);
+        _scheduleNextPoll(UPGRADE_RETRY_DELAY);
+        return;
+      }
+      if (resp.status === 429) {
+        // Admission pressure is transient. Preserve every result, remain
+        // visually connected, and obey the server instead of retrying harder.
+        _resultQueue.unshift(...resultsToSend);
+        const errBody = await resp.json().catch(() => null);
+        const headerSeconds = Number(resp.headers.get('Retry-After')) || 0;
+        const bodySeconds = Number(errBody && errBody.retryAfter) || 0;
+        const delay = Math.min(
+          AUTH_RETRY_MAX_DELAY,
+          Math.max(1000, (headerSeconds || bodySeconds || 3) * 1000));
+        connected = true;
+        lastError = '';
+        updateBadge('on');
+        console.warn(`[Bridge] Server admission busy; retrying in ${Math.ceil(delay / 1000)}s`);
+        _scheduleNextPoll(delay);
+        return;
+      }
+      if (resp.status === 413) {
+        // A lower proxy/server payload ceiling may be smaller than our known
+        // server floor. Preserve ordinary results and bisect the batch first;
+        // only a single result that still cannot fit becomes an explicit
+        // command error, so replay can never loop forever.
+        let payloadRetryDelay = 0;
+        if (resultsToSend.length > 1) {
+          _pollResultBatchMax = Math.max(
+            1, Math.floor(resultsToSend.length / 2));
+          _resultQueue.unshift(...resultsToSend);
+        } else if (resultsToSend.length === 1
+                   && resultsToSend[0].error !== POLL_RESULT_OVERSIZE_ERROR) {
+          _resultQueue.unshift(...resultsToSend.map(_compactOversizeResult));
+        } else {
+          // Even the compact floor was rejected. Retain it for recovery but
+          // back off, rather than manufacturing a zero-delay 413 loop.
+          _resultQueue.unshift(...resultsToSend);
+          payloadRetryDelay = POLL_RETRY_DELAY;
+        }
+        connected = true;
+        lastError = '';
+        updateBadge('on');
+        _scheduleNextPoll(payloadRetryDelay);
+        return;
+      }
       if (resp.status >= 500) {
         // Proxy error — put results back so they're not lost
         _resultQueue.unshift(...resultsToSend);
@@ -470,14 +661,17 @@ async function poll() {
   } catch (err) {
     if (timeoutId) clearTimeout(timeoutId);
     _activePollController = null;
+    // The server may or may not have received the frame. Settlement is
+    // owner/device/idempotency keyed, so replay is always safer than losing a
+    // completed result on a timeout, proxy reset, malformed response, or
+    // other transport error.
+    if (resultsToSend.length) _resultQueue.unshift(...resultsToSend);
     if (err.name === 'AbortError') {
       if (_flushPending) {
         // Deliberate abort: a command result just landed, so we cut the idle
         // long-poll short. Re-poll INSTANTLY (not the 100ms reconnect path) so
         // the result goes out now instead of waiting the server's 8s window.
-        // Restore the in-flight poll's drained results so none are lost.
         _flushPending = false;
-        if (resultsToSend.length) _resultQueue.unshift(...resultsToSend);
         _scheduleNextPoll(0);
         return;
       }
@@ -581,6 +775,9 @@ async function executeCommand(type, params) {
     case 'download':       return cmdDownload(params);
     case 'notify':         return cmdNotify(params);
     case 'fetch_url':      return cmdFetchUrl(params);
+    case 'fetch_file_to_server': return cmdFetchFileToServer(params);
+    case 'research_url':   return cmdResearchUrl(params);
+    case 'devtools':       return cmdDevtools(params);
     case 'page_state':     return cmdPageState(params);
     case 'page_snapshot':  return cmdPageSnapshot(params);
     case 'page_click':     return cmdPageClick(params);
@@ -655,6 +852,15 @@ async function cmdReadTab(params) {
     const r = results[0].result;
     r.title = tab.title || '';
     r.url = tab.url || '';
+    const network = _recentNetworkByTab.get(Number(tabId));
+    if (network && network.pageUrl === (tab.url || '')) {
+      r.network = network;
+    } else if (network) {
+      // Never attach a prior document's API data to the current page. Manual
+      // browser navigations normally invalidate through webNavigation; this
+      // exact-URL check is the fail-closed backstop for event races.
+      _recentNetworkByTab.delete(Number(tabId));
+    }
     return r;
   }
 
@@ -954,15 +1160,12 @@ async function _waitForContentStable(target) {
 }
 
 async function _screenshotFullPageCDP(tabId, format, quality) {
-  const target = { tabId };
-  let attached = false;
-  let overridden = false;
-  try {
-    await chrome.debugger.attach(target, '1.3');
-    attached = true;
+  return _cdpRun(tabId, async (target) => {
+    let overridden = false;
+    try {
 
-    // Page domain must be enabled before layout/screenshot commands
-    await chrome.debugger.sendCommand(target, 'Page.enable');
+      // Page domain must be enabled before layout/screenshot commands
+      await chrome.debugger.sendCommand(target, 'Page.enable');
 
     // Read the content size FIRST so we can size the forced viewport to it.
     const pre = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics');
@@ -1022,32 +1225,28 @@ async function _screenshotFullPageCDP(tabId, format, quality) {
     const shot = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', shotParams);
     if (!shot || !shot.data) throw new Error('CDP returned empty screenshot');
 
-    const mime = format === 'jpeg' ? 'image/jpeg' : 'image/png';
-    return {
-      dataUrl: `data:${mime};base64,${shot.data}`,
-      format,
-      fullPage: true,
-      width,
-      height: clipHeight,
-      contentHeight: height,
-      truncatedHeight: height > FULL_PAGE_MAX_HEIGHT_PX,
-    };
-  } finally {
-    // ALWAYS clear the override before detaching, on every path (success,
-    // capture error, or empty-shot throw) — leaving it set would corrupt the
-    // user's real page layout. clearDeviceMetricsOverride needs the debugger
-    // session, so it must run before detach.
-    if (overridden) {
-      try {
-        await chrome.debugger.sendCommand(target, 'Emulation.clearDeviceMetricsOverride');
-      } catch (errClear) {
-        console.warn('[Screenshot] clearDeviceMetricsOverride failed:', errClear && errClear.message);
+      const mime = format === 'jpeg' ? 'image/jpeg' : 'image/png';
+      return {
+        dataUrl: `data:${mime};base64,${shot.data}`,
+        format,
+        fullPage: true,
+        width,
+        height: clipHeight,
+        contentHeight: height,
+        truncatedHeight: height > FULL_PAGE_MAX_HEIGHT_PX,
+      };
+    } finally {
+      // ALWAYS clear the override before releasing this lease. The broker may
+      // keep the shared attachment alive for network/console capture.
+      if (overridden) {
+        try {
+          await chrome.debugger.sendCommand(target, 'Emulation.clearDeviceMetricsOverride');
+        } catch (errClear) {
+          console.warn('[Screenshot] clearDeviceMetricsOverride failed:', errClear && errClear.message);
+        }
       }
     }
-    if (attached) {
-      try { await chrome.debugger.detach(target); } catch (_) {}
-    }
-  }
+  }, 'full-page-screenshot');
 }
 
 // Background viewport capture via CDP — captures the tab's current viewport
@@ -1055,11 +1254,7 @@ async function _screenshotFullPageCDP(tabId, format, quality) {
 // can only grab the foreground tab). captureBeyondViewport:false keeps it to
 // the visible area, so it's fast and never triggers the tab-switch flicker.
 async function _screenshotViewportCDP(tabId, format, quality) {
-  const target = { tabId };
-  let attached = false;
-  try {
-    await chrome.debugger.attach(target, '1.3');
-    attached = true;
+  return _cdpRun(tabId, async (target) => {
     await chrome.debugger.sendCommand(target, 'Page.enable');
 
     const shotParams = { format, captureBeyondViewport: false, fromSurface: true };
@@ -1074,11 +1269,7 @@ async function _screenshotViewportCDP(tabId, format, quality) {
       format,
       fullPage: false,
     };
-  } finally {
-    if (attached) {
-      try { await chrome.debugger.detach(target); } catch (_) {}
-    }
-  }
+  }, 'viewport-screenshot');
 }
 
 async function _screenshotViewport(tabId, format, quality) {
@@ -1562,17 +1753,120 @@ function _getAppState(深度) {
 // flashes only for the duration of the command, and every failure falls
 // back to the synthetic path (e.g. DevTools already attached to the tab).
 
-async function _cdpRun(tabId, fn) {
-  const target = { tabId };
-  let attached = false;
-  try {
-    await chrome.debugger.attach(target, '1.3');
-    attached = true;
-    return await fn(target);
-  } finally {
-    if (attached) {
-      try { await chrome.debugger.detach(target); } catch (_) {}
+async function _acquireCdp(tabId, purpose) {
+  const normalizedTabId = Number(tabId);
+  if (!Number.isInteger(normalizedTabId) || normalizedTabId <= 0) {
+    throw new Error('A valid tabId is required for DevTools access');
+  }
+  // A release removes the session only after Chrome confirms detach. Wait for
+  // that transition before attempting a new attach to the same target.
+  for (;;) {
+    let session = _cdpSessions.get(normalizedTabId);
+    if (session && session.closing) {
+      await session.closing.catch(() => {});
+      continue;
     }
+    if (!session) {
+      const target = { tabId: normalizedTabId };
+      session = {
+        tabId: normalizedTabId,
+        target,
+        holders: new Map(),
+        tail: Promise.resolve(),
+        attached: false,
+        detached: false,
+        closing: null,
+      };
+      _cdpSessions.set(normalizedTabId, session);
+      session.attachPromise = chrome.debugger.attach(target, '1.3')
+        .then(() => { session.attached = true; })
+        .catch((error) => {
+          session.detached = true;
+          if (_cdpSessions.get(normalizedTabId) === session) {
+            _cdpSessions.delete(normalizedTabId);
+          }
+          throw error;
+        });
+    }
+    await session.attachPromise;
+    if (session.detached || _cdpSessions.get(normalizedTabId) !== session) {
+      throw new Error('Chrome detached the DevTools session while it was starting');
+    }
+    const leaseId = `${normalizedTabId}:${++_cdpLeaseSequence}`;
+    session.holders.set(leaseId, {
+      purpose: String(purpose || 'command').slice(0, 80),
+      acquiredAt: Date.now(),
+    });
+    return {tabId: normalizedTabId, target: session.target, leaseId, session};
+  }
+}
+
+async function _releaseCdp(lease) {
+  if (!lease || lease.released) return;
+  lease.released = true;
+  const session = lease.session;
+  if (!session) return;
+  session.holders.delete(lease.leaseId);
+  if (session.holders.size || session.closing || session.detached ||
+      _cdpSessions.get(lease.tabId) !== session) return;
+  session.closing = (async () => {
+    try {
+      await chrome.debugger.detach(session.target);
+    } catch (_) {
+      // Chrome may already have detached because the user opened DevTools or
+      // closed the tab. Either way this broker no longer owns the target.
+    } finally {
+      session.attached = false;
+      session.detached = true;
+      if (_cdpSessions.get(lease.tabId) === session) {
+        _cdpSessions.delete(lease.tabId);
+      }
+    }
+  })();
+  await session.closing;
+}
+
+function _onCdpDebuggerDetach(source, reason) {
+  const tabId = Number(source && source.tabId);
+  const session = _cdpSessions.get(tabId);
+  if (!session) return;
+  session.attached = false;
+  session.detached = true;
+  session.detachReason = String(reason || 'detached').slice(0, 120);
+  _cdpSessions.delete(tabId);
+  const debug = _debugSessions.get(tabId);
+  if (debug) {
+    _debugSessions.delete(tabId);
+    debug.active = false;
+    debug.detachReason = session.detachReason;
+    if (debug.expiryTimer) clearTimeout(debug.expiryTimer);
+    if (debug.pauseFailsafe) clearTimeout(debug.pauseFailsafe);
+    _rememberDevtoolsSnapshot(tabId, {
+      url: debug.url, entries: debug.consoleEntries,
+      droppedEntries: debug.droppedConsoleEntries, capturedAt: Date.now(),
+    });
+  }
+}
+
+async function _runWithCdpLease(lease, fn) {
+  const session = lease && lease.session;
+  if (!session || session.detached) {
+    throw new Error('DevTools session is no longer attached');
+  }
+  const run = session.tail.catch(() => {}).then(() => {
+    if (session.detached) throw new Error('DevTools session was detached');
+    return fn(lease.target);
+  });
+  session.tail = run.catch(() => {});
+  return run;
+}
+
+async function _cdpRun(tabId, fn, purpose = 'command') {
+  const lease = await _acquireCdp(tabId, purpose);
+  try {
+    return await _runWithCdpLease(lease, fn);
+  } finally {
+    await _releaseCdp(lease);
   }
 }
 
@@ -2372,16 +2666,36 @@ async function cmdGetBookmarks(params) {
 // ══════════════════════════════════════════
 
 async function cmdCreateTab(params) {
-  const opts = { url: params.url || 'about:blank' };
+  const requestedUrl = params.url || 'about:blank';
+  const captureNavigation = params.waitForLoad === true && requestedUrl !== 'about:blank';
+  // A response capture must exist BEFORE the first application request.  When
+  // load waiting was requested, create an inert tab first and navigate only
+  // after CDP Network is enabled.  The non-waiting path preserves the cheap
+  // historical tab-create behavior.
+  const opts = { url: captureNavigation ? 'about:blank' : requestedUrl };
   // Default to background (active: false) unless explicitly requested
   opts.active = params.active === true ? true : false;
   if (params.pinned !== undefined) opts.pinned = params.pinned;
   if (params.windowId) opts.windowId = params.windowId;
 
   const tab = await chrome.tabs.create(opts);
-  if (params.waitForLoad) {
-    await waitForTabLoad(
-      tab.id, Math.max(1000, Math.min(30000, Number(params.timeoutMs) || 15000)));
+  let captureId = null;
+  if (captureNavigation) {
+    const timeoutMs = Math.max(1000, Math.min(30000, Number(params.timeoutMs) || 15000));
+    try {
+      captureId = (await _startNetworkCapture({
+        tabId: tab.id, captureBodies: true,
+      }, { allowInertBlank: true })).captureId;
+      await chrome.tabs.update(tab.id, { url: requestedUrl });
+      await waitForTabLoad(tab.id, timeoutMs);
+      await _waitForCapturedPageSettle(tab.id, captureId, timeoutMs);
+      await _stopNetworkCaptureInternal(captureId, { remember: true });
+      captureId = null;
+    } finally {
+      if (captureId) {
+        await _stopNetworkCaptureInternal(captureId, { remember: true }).catch(() => {});
+      }
+    }
   }
   const current = await chrome.tabs.get(tab.id);
   return { id: current.id, url: current.url, title: current.title,
@@ -2391,6 +2705,7 @@ async function cmdCreateTab(params) {
 async function cmdCloseTab(params) {
   const tabIds = Array.isArray(params.tabIds) ? params.tabIds : [params.tabId];
   await chrome.tabs.remove(tabIds);
+  for (const tabId of tabIds) _recentNetworkByTab.delete(Number(tabId));
   return { closed: tabIds };
 }
 
@@ -2421,10 +2736,11 @@ async function cmdFetchUrl(params) {
   const url = params.url;
   if (!url) throw new Error('No url specified');
   const maxChars = params.maxChars || 50000;
-  const timeoutMs = params.timeoutMs || 20000;
+  const timeoutMs = Math.max(
+    1000, Math.min(20000, Number(params.timeoutMs) || 20000));
 
   if (isProtectedUrl(url)) {
-    throw new Error(`Cannot fetch protected URL: ${url}`);
+    throw new Error(`Cannot fetch protected URL: ${_urlForDiagnostic(url)}`);
   }
 
   // Refuse binary assets by extension. Navigating a tab to a PDF/zip/media URL
@@ -2433,27 +2749,55 @@ async function cmdFetchUrl(params) {
   // (The server-side bridge already filters these, but a redirect could still
   // land us on one, so guard defensively.)
   if (isBinaryAssetUrl(url)) {
-    throw new Error(`Refusing to open binary asset in a tab (would download): ${url}`);
+    throw new Error(
+      `Refusing to open binary asset in a tab (would download): ${_urlForDiagnostic(url)}`);
   }
 
-  // Create a background tab (not active, so it doesn't steal focus)
+  // Extensionless download endpoints (for example `/download?version=latest`)
+  // cannot be recognized from the URL. Inspect authenticated response
+  // headers with fetch and cancel its body before opening a tab. `fetch()`
+  // never invokes Chrome's download manager, so an attachment cannot leak to
+  // the client device. A blocked/unclassifiable probe fails closed; a known
+  // file response reuses that exact Response for server transfer.
+  const fileReceipt = await _refuseFileResponseBeforeNavigation(
+    url, timeoutMs, params.fileTransfer || null);
+  if (fileReceipt) return fileReceipt;
+
+  // Create an inert background tab first.  Navigating directly in
+  // chrome.tabs.create loses the initial XHR/fetch responses before Network
+  // capture can attach — exactly the SPA failure this command must solve.
   let tab;
   try {
-    tab = await chrome.tabs.create({ url, active: false });
+    tab = await chrome.tabs.create({ url: 'about:blank', active: false });
   } catch (e) {
-    throw new Error(`Failed to create tab for ${url}: ${e.message}`);
+    throw new Error(
+      `Failed to create tab for ${_urlForDiagnostic(url)}: ${_textForDiagnostic(e)}`);
   }
 
+  let captureId = null;
   try {
+    captureId = (await _startNetworkCapture({
+      tabId: tab.id, captureBodies: true,
+    }, { allowInertBlank: true })).captureId;
+    await chrome.tabs.update(tab.id, { url });
     // Wait for the tab to fully load
     await waitForTabLoad(tab.id, timeoutMs);
+    await _waitForCapturedPageSettle(tab.id, captureId, timeoutMs);
+    const network = await _stopNetworkCaptureInternal(
+      captureId, { remember: false });
+    captureId = null;
 
     // Re-fetch tab info for final URL (after redirects)
     tab = await chrome.tabs.get(tab.id);
 
     // If it ended up on a protected page (e.g. login redirect), bail
     if (tab.url && isProtectedUrl(tab.url)) {
-      throw new Error(`Redirected to protected page: ${tab.url}`);
+      throw new Error(
+        `Redirected to protected page: ${_urlForDiagnostic(tab.url)}`);
+    }
+    if (tab.url && isBinaryAssetUrl(tab.url)) {
+      throw new Error(
+        `Redirected to binary asset (refusing download): ${_urlForDiagnostic(tab.url)}`);
     }
 
     // Extract text content
@@ -2467,13 +2811,717 @@ async function cmdFetchUrl(params) {
       const r = results[0].result;
       r.title = tab.title || '';
       r.url = tab.url || '';
+      if (network) r.network = network;
       return r;
     }
 
     return { text: '', title: tab.title || '', url: tab.url || '', error: 'No content extracted' };
   } finally {
+    if (captureId) {
+      await _stopNetworkCaptureInternal(
+        captureId, { remember: false }).catch(() => {});
+    }
     // Always close the background tab, even on error
     try { await chrome.tabs.remove(tab.id); } catch (_) {}
+    _recentNetworkByTab.delete(Number(tab.id));
+  }
+}
+
+function _isTextualResponseType(contentType) {
+  const value = String(contentType || '').split(';', 1)[0].trim().toLowerCase();
+  if (!value) return false;
+  return value.startsWith('text/') ||
+    value === 'application/json' || value.endsWith('+json') ||
+    value === 'application/xml' || value.endsWith('+xml') ||
+    value === 'application/xhtml+xml' ||
+    value === 'application/javascript' ||
+    value === 'application/x-javascript' ||
+    value === 'image/svg+xml';
+}
+
+function _responseLooksLikeFile(response) {
+  const disposition = response.headers.get('Content-Disposition') || '';
+  if (/(?:^|;)\s*(?:attachment\b|filename\*?\s*=)/i.test(disposition)) {
+    return true;
+  }
+  const contentType = response.headers.get('Content-Type') || '';
+  // Only a positively textual response is safe to open in a hidden tab.
+  // Missing/unknown metadata stays on the byte-transfer path: guessing
+  // "page" here can make Chrome's download manager write to the client.
+  return !_isTextualResponseType(contentType);
+}
+
+async function _refuseFileResponseBeforeNavigation(
+  url, timeoutMs, fileTransfer,
+) {
+  const controller = new AbortController();
+  const probeStartedAt = _monotonicNowMs();
+  const fileOperationBudgetMs = fileTransfer
+    ? Math.max(1000, Math.min(
+      30000, Number(fileTransfer.timeoutMs) || Number(timeoutMs) || 20000))
+    : null;
+  let timer = setTimeout(
+    () => controller.abort(), Math.max(1000, Math.min(
+      8000, Number(timeoutMs) || 20000,
+      fileOperationBudgetMs || 8000)));
+  let response = null;
+  try {
+    response = await fetch(url, {
+      method: 'GET', credentials: 'include', redirect: 'follow',
+      cache: 'no-store', signal: controller.signal,
+    });
+    if (response.url && isProtectedUrl(response.url)) {
+      const error = new Error(
+        `Redirected to protected page: ${_urlForDiagnostic(response.url)}`);
+      error.tofuFileProbeDecision = true;
+      throw error;
+    }
+    if (_responseLooksLikeFile(response)) {
+      if (fileTransfer && fileTransfer.transferId && fileTransfer.transferToken) {
+        clearTimeout(timer);
+        timer = null;
+        // Reuse this exact authenticated response. Download URLs can be
+        // single-use or signed, so probing once and fetching again is not an
+        // acceptable transport contract.
+        try {
+          const remainingTransferMs = Math.floor(
+            fileOperationBudgetMs - (_monotonicNowMs() - probeStartedAt));
+          if (remainingTransferMs < 1000) {
+            throw new Error(
+              'Browser file-transfer deadline elapsed during response classification');
+          }
+          return await cmdFetchFileToServer({
+            ...fileTransfer, url,
+            timeoutMs: remainingTransferMs,
+            _response: response, _controller: controller,
+          });
+        } catch (error) {
+          // A classified file must fail closed. Falling through to tab
+          // navigation here would resurrect the client-download bug.
+          error.tofuFileProbeDecision = true;
+          throw error;
+        }
+      }
+      const contentType = response.headers.get('Content-Type') || 'unknown type';
+      const error = new Error(
+        `Resource is a file (${contentType}); use browser-to-server file transfer`);
+      error.tofuFileProbeDecision = true;
+      throw error;
+    }
+  } catch (error) {
+    if (error && error.tofuFileProbeDecision) throw error;
+    // A failed/blocked probe says nothing about the response type. Navigating
+    // anyway would turn an unclassified attachment into a client download, so
+    // this read path must fail closed.
+    const guarded = new Error(
+      `Could not safely classify response before navigation: ${_textForDiagnostic(error)}`);
+    guarded.tofuFileProbeDecision = true;
+    throw guarded;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (response && response.body) {
+      try { await response.body.cancel(); } catch (_) {}
+    }
+  }
+}
+
+function _transferHeaders(token, contentType, chunkSha256) {
+  const headers = buildHeaders();
+  headers['X-Browser-Client-Id'] = CLIENT_ID;
+  headers['X-Transfer-Token'] = String(token || '');
+  headers['Content-Type'] = contentType || 'application/json';
+  if (chunkSha256) headers['X-Chunk-SHA256'] = chunkSha256;
+  return headers;
+}
+
+function _transferErrorMessage(data, status) {
+  const raw = data && data.error;
+  const message = typeof raw === 'string'
+    ? raw
+    : (raw && (raw.message || raw.detail)) || `HTTP ${status}`;
+  const code = data && data.code;
+  return code ? `${code}: ${message}` : message;
+}
+
+async function _transferRequest(path, options) {
+  const opts = options || {};
+  let lastError = null;
+  const attempts = opts.retry ? 2 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetch(`${SERVER_URL}${path}`, {
+        method: opts.method || 'POST',
+        headers: _transferHeaders(
+          opts.token, opts.contentType, opts.chunkSha256),
+        credentials: 'include',
+        body: opts.body,
+        signal: opts.signal,
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        const error = new Error(_transferErrorMessage(data, response.status));
+        error.status = response.status;
+        if (response.status < 500 || attempt + 1 >= attempts) throw error;
+        lastError = error;
+        continue;
+      }
+      return data || {};
+    } catch (error) {
+      lastError = error;
+      if (error && error.status && error.status < 500) throw error;
+      if (attempt + 1 >= attempts) throw error;
+    }
+  }
+  throw lastError || new Error('Browser file-transfer request failed');
+}
+
+function _suggestedResponseFilename(response, fallbackUrl) {
+  // Content-Disposition parsing is server-authoritative. This hint is only
+  // the final response URL basename when the header has no usable filename.
+  try {
+    return decodeURIComponent(new URL(response.url || fallbackUrl).pathname
+      .split('/').filter(Boolean).pop() || '');
+  } catch (_) { return ''; }
+}
+
+async function _sha256Hex(bytes) {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const exact = view.byteOffset === 0 && view.byteLength === view.buffer.byteLength
+    ? view.buffer
+    : view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', exact));
+  return Array.from(digest, (value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Read a response with credentials allowed by Chrome's cookie policy and
+ * stream it into the issuing Tofu server's bounded staging store. This
+ * function never extracts/replays cookies and never calls chrome.downloads,
+ * so it never writes to the client Downloads folder.
+ */
+async function cmdFetchFileToServer(params) {
+  const url = String(params.url || '').trim();
+  const transferId = String(params.transferId || '').trim();
+  const transferToken = String(params.transferToken || '').trim();
+  const maxBytes = Math.max(1, Number(params.maxBytes) || 0);
+  const chunkBytes = Math.max(
+    16 * 1024, Math.min(256 * 1024, Number(params.chunkBytes) || 256 * 1024));
+  const timeoutMs = Math.max(
+    1000, Math.min(115000, Number(params.timeoutMs) || 110000));
+  if (!url || !transferId || !transferToken || !maxBytes) {
+    throw new Error('Incomplete browser-to-server file-transfer command');
+  }
+  if (isProtectedUrl(url)) {
+    throw new Error(`Cannot fetch protected URL: ${_urlForDiagnostic(url)}`);
+  }
+
+  const controller = params._controller || new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const basePath = `/api/browser/file-transfers/${encodeURIComponent(transferId)}`;
+  let completed = false;
+  let reader = null;
+  try {
+    const response = params._response || await fetch(url, {
+        method: 'GET', credentials: 'include', redirect: 'follow',
+        cache: 'no-store', signal: controller.signal,
+      });
+    if (!response.ok) {
+      throw new Error(`Upstream file request returned HTTP ${response.status}`);
+    }
+    if (!response.url || isProtectedUrl(response.url)) {
+      throw new Error(
+        `File request redirected to a protected URL: ${_urlForDiagnostic(response.url)}`);
+    }
+    const rawLength = response.headers.get('Content-Length');
+    const contentEncoding = (
+      response.headers.get('Content-Encoding') || '').trim().toLowerCase();
+    // Fetch exposes decoded body bytes, while Content-Length can describe the
+    // compressed wire body. Only compare lengths when those units match.
+    const contentLength = (!contentEncoding || contentEncoding === 'identity')
+      && rawLength && /^\d+$/.test(rawLength.trim())
+      ? Number(rawLength) : null;
+    if (contentLength != null && contentLength > maxBytes) {
+      throw new Error(`Browser response exceeds the ${maxBytes}-byte limit`);
+    }
+    await _transferRequest(`${basePath}/start`, {
+      token: transferToken,
+      signal: controller.signal,
+      body: JSON.stringify({
+        finalUrl: response.url,
+        responseStatus: response.status,
+        contentType: (response.headers.get('Content-Type') || '').slice(0, 200),
+        contentDisposition: (
+          response.headers.get('Content-Disposition') || '').slice(0, 1024),
+        contentLength,
+        suggestedFilename: _suggestedResponseFilename(response, url).slice(0, 240),
+      }),
+      retry: true,
+    });
+    if (!response.body) throw new Error('Browser response body is not streamable');
+
+    reader = response.body.getReader();
+    let totalBytes = 0;
+    let sequence = 0;
+    let pendingBytes = 0;
+    const pending = new Uint8Array(chunkBytes);
+    const maxChunks = Math.max(1, Math.ceil(maxBytes / (16 * 1024)));
+
+    const sendPendingChunk = async () => {
+      if (!pendingBytes) return;
+      if (sequence >= maxChunks) {
+        throw new Error('Browser response exceeded the bounded chunk count');
+      }
+      const chunk = pending.subarray(0, pendingBytes);
+      const chunkSha256 = await _sha256Hex(chunk);
+      await _transferRequest(`${basePath}/chunks/${sequence}`, {
+        method: 'PUT', token: transferToken,
+        contentType: 'application/octet-stream', chunkSha256,
+        body: chunk, signal: controller.signal, retry: true,
+      });
+      totalBytes += pendingBytes;
+      pendingBytes = 0;
+      sequence += 1;
+    };
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      const incoming = value instanceof Uint8Array ? value : new Uint8Array(value || []);
+      if (totalBytes + pendingBytes + incoming.byteLength > maxBytes) {
+        controller.abort();
+        throw new Error(`Browser response exceeds the ${maxBytes}-byte limit`);
+      }
+      let offset = 0;
+      while (offset < incoming.byteLength) {
+        const copied = Math.min(
+          chunkBytes - pendingBytes, incoming.byteLength - offset);
+        pending.set(incoming.subarray(offset, offset + copied), pendingBytes);
+        pendingBytes += copied;
+        offset += copied;
+        if (pendingBytes === chunkBytes) await sendPendingChunk();
+      }
+    }
+    await sendPendingChunk();
+    const receipt = await _transferRequest(`${basePath}/complete`, {
+      token: transferToken,
+      signal: controller.signal,
+      body: JSON.stringify({totalBytes, chunkCount: sequence}),
+      retry: true,
+    });
+    if (receipt.transferId !== transferId || receipt.location !== 'server_staging') {
+      throw new Error('Server returned a mismatched file-transfer receipt');
+    }
+    completed = true;
+    return receipt;
+  } finally {
+    clearTimeout(timer);
+    if (reader && !completed) {
+      try { await reader.cancel(); } catch (_) {}
+    }
+    if (!completed) {
+      // Cleanup uses a fresh request rather than the aborted transfer signal.
+      const cleanupController = new AbortController();
+      const cleanupTimer = setTimeout(() => cleanupController.abort(), 5000);
+      try {
+        await _transferRequest(basePath, {
+          method: 'DELETE', token: transferToken,
+          signal: cleanupController.signal, retry: false,
+        });
+      } catch (_) {
+        // The server registry also owns an inactivity TTL; cleanup is bounded
+        // best effort and must never hold command settlement open forever.
+      } finally {
+        clearTimeout(cleanupTimer);
+      }
+    }
+  }
+}
+
+function _researchPageSignals(maxChars) {
+  const cap = Math.max(1000, Math.min(30000, Number(maxChars) || 30000));
+  const textParts = [];
+  const bodyText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+  if (bodyText) textParts.push(bodyText);
+  // Open shadow roots are part of the user-visible page but are absent from
+  // document.body.innerText in several component libraries.
+  let shadowCount = 0;
+  let shadowScanned = 0;
+  for (const el of document.querySelectorAll('*')) {
+    if (shadowScanned++ >= 5000) break;
+    if (!el.shadowRoot || shadowCount >= 40) continue;
+    const shadowText = el.shadowRoot.innerText || el.shadowRoot.textContent || '';
+    if (shadowText) textParts.push(shadowText);
+    shadowCount++;
+  }
+  const fullText = textParts.join('\n');
+  const stateNames = [
+    '__INITIAL_STATE__', '__PRELOADED_STATE__', '__NEXT_DATA__', '__NUXT__',
+    '__APOLLO_STATE__', '__REMIX_CONTEXT__',
+  ];
+  const initialState = {};
+  const initialStatePayloads = {};
+  let stateChars = 0;
+  const preview = (value) => {
+    const seen = new WeakSet();
+    let remaining = 60000;
+    let nodes = 0;
+    const clone = (child, depth) => {
+      if (remaining <= 0 || nodes++ >= 1200) return '[truncated]';
+      if (child == null || typeof child === 'boolean' || typeof child === 'number') {
+        remaining -= 16;
+        return child;
+      }
+      if (typeof child === 'string') {
+        const out = child.slice(0, Math.min(2000, Math.max(0, remaining)));
+        remaining -= out.length + 2;
+        return out;
+      }
+      if (typeof child === 'bigint') return String(child);
+      if (typeof child === 'function') return '[function]';
+      if (!child || typeof child !== 'object') return String(child);
+      if (seen.has(child)) return '[circular]';
+      if (depth >= 8) return '[depth limit]';
+      seen.add(child);
+      if (Array.isArray(child)) {
+        const out = [];
+        for (const item of child.slice(0, 50)) {
+          if (remaining <= 0) break;
+          out.push(clone(item, depth + 1));
+        }
+        if (child.length > out.length) out.push(`[${child.length - out.length} more items]`);
+        return out;
+      }
+      const out = {};
+      for (const key of Object.keys(child).slice(0, 50)) {
+        if (remaining <= 0) break;
+        remaining -= String(key).length + 4;
+        try { out[key] = clone(child[key], depth + 1); }
+        catch (_) { out[key] = '[unavailable]'; }
+      }
+      return out;
+    };
+    try {
+      return JSON.stringify(clone(value, 0));
+    } catch (_) {
+      return '';
+    }
+  };
+  for (const name of stateNames) {
+    let value;
+    try { value = window[name]; } catch (_) { value = undefined; }
+    if (name === '__NEXT_DATA__' && value == null) {
+      try {
+        const node = document.querySelector('script#__NEXT_DATA__[type="application/json"]');
+        if (node && node.textContent) value = JSON.parse(node.textContent);
+      } catch (_) {}
+    }
+    const present = value != null;
+    initialState[name] = present;
+    if (!present || stateChars >= 160000) continue;
+    const serialized = preview(value);
+    if (!serialized) continue;
+    const remaining = 160000 - stateChars;
+    initialStatePayloads[name] = serialized.slice(0, Math.min(60000, remaining));
+    stateChars += initialStatePayloads[name].length;
+  }
+  if (stateChars < 160000) {
+    const jsonLd = [];
+    for (const node of document.querySelectorAll('script[type="application/ld+json"]')) {
+      if (jsonLd.length >= 8) break;
+      const value = String(node.textContent || '').trim();
+      if (value) jsonLd.push(value.slice(0, 20000));
+    }
+    if (jsonLd.length) initialStatePayloads.JSON_LD = `[${jsonLd.join(',')}]`.slice(0, 60000);
+  }
+  let framework = 'unknown';
+  if (window.__NEXT_DATA__) framework = 'Next.js';
+  else if (window.__NUXT__) framework = 'Nuxt';
+  else if (window.__VUE_DEVTOOLS_GLOBAL_HOOK__ || window.Vue) framework = 'Vue';
+  else if (window.__REACT_DEVTOOLS_GLOBAL_HOOK__ || window.React) framework = 'React';
+  else if (window.angular) framework = 'Angular';
+  const root = document.scrollingElement || document.documentElement;
+  const text = fullText.slice(0, cap);
+  return {
+    url: location.href, title: document.title || '', text,
+    textLength: fullText.length,
+    initialState, initialStatePayloads, framework, shadowRootCount: shadowCount,
+    fingerprint: [location.href, document.title, fullText.length,
+      fullText.slice(-400), root ? root.scrollHeight : 0].join('|'),
+  };
+}
+
+function _researchScrollStep() {
+  const root = document.scrollingElement || document.documentElement;
+  let target = root;
+  let bestScore = root ? Math.max(0, root.scrollHeight - root.clientHeight) *
+    Math.max(1, Math.min(root.clientWidth || window.innerWidth, window.innerWidth)) : 0;
+  const candidates = document.querySelectorAll('main,section,article,div,ul,ol,[role="main"],[role="list"]');
+  const scanLimit = Math.min(candidates.length, 5000);
+  for (let index = 0; index < scanLimit; index++) {
+    const el = candidates[index];
+    const range = el.scrollHeight - el.clientHeight;
+    if (range < 160 || el.clientHeight < 120 || el.clientWidth < 160) continue;
+    const style = getComputedStyle(el);
+    if (!/(?:auto|scroll)/.test(style.overflowY || '')) continue;
+    const score = range * Math.min(el.clientWidth, window.innerWidth || el.clientWidth);
+    if (score > bestScore) {
+      bestScore = score;
+      target = el;
+    }
+  }
+  if (!target) return {scrolled: false, atBottom: true, reason: 'no-scroll-root'};
+  const isDocument = target === root;
+  const before = isDocument ? window.scrollY : target.scrollTop;
+  const viewport = isDocument ? window.innerHeight : target.clientHeight;
+  const maximum = Math.max(0, target.scrollHeight - viewport);
+  const amount = Math.max(400, Math.round(viewport * 0.88));
+  const next = Math.min(maximum, before + amount);
+  if (isDocument) window.scrollTo(0, next);
+  else target.scrollTop = next;
+  const after = isDocument ? window.scrollY : target.scrollTop;
+  return {
+    scrolled: after !== before, atBottom: after >= maximum - 2,
+    before: Math.round(before), after: Math.round(after),
+    scrollHeight: target.scrollHeight, viewportHeight: viewport,
+    target: isDocument ? 'document' : `${target.tagName.toLowerCase()}${target.id ? '#' + target.id : ''}`,
+  };
+}
+
+function _researchAdvancePagination(mode) {
+  const normalizedMode = String(mode || 'auto');
+  const roots = Array.from(document.querySelectorAll(
+    'nav,[role="navigation"],[aria-label*="pagin" i],[class*="pagination" i],[class*="pager" i]'));
+  const candidates = [];
+  const seen = new Set();
+  const addCandidate = (el) => {
+    if (!el || seen.has(el)) return;
+    seen.add(el);
+    candidates.push(el);
+  };
+  // Outside a semantic pagination container, only an explicit rel=next link
+  // is trusted. A generic button named "Next" may submit a wizard or form.
+  for (const el of document.querySelectorAll('a[rel~="next"][href],link[rel~="next"][href]')) {
+    addCandidate(el);
+  }
+  for (const root of roots.slice(0, 30)) {
+    if (root.matches && root.matches('a[href],button,[role="button"]')) addCandidate(root);
+    for (const el of root.querySelectorAll('a[href],button,[role="button"]')) {
+      addCandidate(el);
+      if (candidates.length >= 300) break;
+    }
+  }
+  const visible = (el) => {
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' &&
+      style.visibility !== 'hidden' && !el.disabled &&
+      el.getAttribute('aria-disabled') !== 'true' &&
+      !/(?:^|\s)(?:disabled|is-disabled)(?:\s|$)/i.test(el.className || '');
+  };
+  const labelOf = (el) => String(
+    (el && el.getAttribute && el.getAttribute('aria-label')) ||
+    (el && el.getAttribute && el.getAttribute('title')) ||
+    el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+  const isNext = (el) => {
+    const label = labelOf(el);
+    const rel = String(el.getAttribute('rel') || '');
+    const classes = `${el.className || ''} ${(el.parentElement && el.parentElement.className) || ''}`;
+    if (/\bnext\b/i.test(rel)) return true;
+    if (/^(?:next(?: page)?|下一页|下页|后一页|更多|加载更多|load more|show more|›|»|>)$/i.test(label)) return true;
+    return /(?:^|[-_\s])next(?:[-_\s]|$)/i.test(classes) &&
+      !/(?:^|[-_\s])prev(?:ious)?(?:[-_\s]|$)/i.test(classes);
+  };
+  let target = candidates.find((el) => visible(el) && isNext(el));
+  if (!target) {
+    for (const root of roots) {
+      const current = root.querySelector('[aria-current="page"],.active,.is-active,.selected');
+      const currentNumber = Number(labelOf(current || {}));
+      if (!Number.isFinite(currentNumber)) continue;
+      target = Array.from(root.querySelectorAll('a[href],button,[role="button"]'))
+        .find((el) => visible(el) && Number(labelOf(el)) === currentNumber + 1);
+      if (target) break;
+    }
+  }
+  if (!target) return {advanced: false, reason: 'no-safe-next-control'};
+  const label = labelOf(target).slice(0, 120);
+  const href = /^(?:A|LINK)$/.test(target.tagName || '') ? target.href : '';
+  if (href) {
+    let next;
+    try { next = new URL(href, location.href); } catch (_) {
+      return {advanced: false, reason: 'invalid-next-url'};
+    }
+    if (next.origin !== location.origin) {
+      return {advanced: false, reason: 'cross-origin-next-blocked'};
+    }
+    return {advanced: true, kind: 'link', href: next.href, label};
+  }
+  if (normalizedMode !== 'auto') {
+    return {advanced: false, reason: 'button-pagination-disabled'};
+  }
+  target.scrollIntoView({block: 'center', behavior: 'instant'});
+  target.click();
+  return {advanced: true, kind: 'click', label};
+}
+
+function _appendResearchText(accumulator, rawText, maxChars) {
+  const lines = String(rawText || '').split(/\r?\n/);
+  let added = 0;
+  for (const raw of lines) {
+    if (accumulator.seen.size >= 10000) {
+      accumulator.truncated = true;
+      break;
+    }
+    const line = raw.replace(/[\t ]+/g, ' ').trim().slice(0, 2000);
+    if (!line || accumulator.seen.has(line)) continue;
+    const extra = line.length + (accumulator.lines.length ? 1 : 0);
+    if (accumulator.chars + extra > maxChars) {
+      accumulator.truncated = true;
+      break;
+    }
+    accumulator.seen.add(line);
+    accumulator.lines.push(line);
+    accumulator.chars += extra;
+    added += extra;
+  }
+  return added;
+}
+
+async function _readResearchSignals(tabId, maxChars) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: {tabId: Number(tabId)}, world: 'MAIN',
+      func: _researchPageSignals, args: [maxChars],
+    });
+    return results && results[0] && results[0].result || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function cmdResearchUrl(params) {
+  const requestedUrl = String(params.url || '');
+  if (!requestedUrl) throw new Error('No url specified');
+  if (isProtectedUrl(requestedUrl)) {
+    throw new Error(
+      `Cannot research protected URL: ${_urlForDiagnostic(requestedUrl)}`);
+  }
+  if (isBinaryAssetUrl(requestedUrl)) {
+    throw new Error(
+      `Refusing to research binary asset: ${_urlForDiagnostic(requestedUrl)}`);
+  }
+  const maxChars = Math.max(1000, Math.min(80000, Number(params.maxChars) || 60000));
+  const maxScrolls = Math.max(0, Math.min(8, Number(params.maxScrolls) || 0));
+  const maxPages = Math.max(1, Math.min(5, Number(params.maxPages) || 1));
+  const pagination = ['auto', 'links', 'none'].includes(String(params.pagination))
+    ? String(params.pagination) : 'auto';
+  const timeoutMs = Math.max(10000, Math.min(65000, Number(params.timeoutMs) || 65000));
+  const deadline = Date.now() + timeoutMs;
+  let requestedOrigin;
+  try { requestedOrigin = new URL(requestedUrl).origin; }
+  catch (_) { throw new Error(`Invalid URL: ${requestedUrl}`); }
+
+  let tab = await chrome.tabs.create({url: 'about:blank', active: false});
+  let captureId = null;
+  const accumulator = {lines: [], seen: new Set(), chars: 0, truncated: false};
+  let firstSignals = null;
+  let lastSignals = null;
+  let pagesVisited = 1;
+  let scrollsCompleted = 0;
+  let stopReason = 'complete';
+  const seenFingerprints = new Set();
+  try {
+    captureId = (await _startNetworkCapture({
+      tabId: tab.id, captureBodies: true,
+    }, { allowInertBlank: true })).captureId;
+    await chrome.tabs.update(tab.id, {url: requestedUrl});
+    await waitForTabLoad(tab.id, Math.min(20000, timeoutMs));
+    await _waitForCapturedPageSettle(tab.id, captureId, Math.min(15000, timeoutMs));
+    tab = await chrome.tabs.get(tab.id);
+    const initialOrigin = (() => { try { return new URL(tab.url || '').origin; } catch (_) { return ''; } })();
+    lastSignals = await _readResearchSignals(tab.id, maxChars);
+    firstSignals = lastSignals;
+    if (lastSignals) {
+      seenFingerprints.add(String(lastSignals.fingerprint || ''));
+      _appendResearchText(accumulator, lastSignals.text, maxChars);
+    }
+    if (initialOrigin !== requestedOrigin) {
+      stopReason = 'cross_origin_redirect';
+    } else {
+      for (let pageIndex = 0; pageIndex < maxPages && Date.now() < deadline; pageIndex++) {
+        let stagnantScrolls = 0;
+        for (let scrollIndex = 0; scrollIndex < maxScrolls && Date.now() < deadline; scrollIndex++) {
+          const scrollResult = await chrome.scripting.executeScript({
+            target: {tabId: tab.id}, world: 'MAIN', func: _researchScrollStep,
+          });
+          const scroll = scrollResult && scrollResult[0] && scrollResult[0].result || {};
+          await _waitForCapturedPageSettle(tab.id, captureId, Math.min(5000, deadline - Date.now()));
+          const signals = await _readResearchSignals(tab.id, maxChars);
+          const added = signals ? _appendResearchText(accumulator, signals.text, maxChars) : 0;
+          lastSignals = signals || lastSignals;
+          scrollsCompleted++;
+          stagnantScrolls = added > 0 ? 0 : stagnantScrolls + 1;
+          if ((!scroll.scrolled && scroll.atBottom) || (scroll.atBottom && stagnantScrolls >= 2)) break;
+        }
+        if (pageIndex + 1 >= maxPages || pagination === 'none' || Date.now() >= deadline) {
+          stopReason = Date.now() >= deadline ? 'time_budget' :
+            (pageIndex + 1 >= maxPages ? 'page_limit' : 'scroll_complete');
+          break;
+        }
+        const advanceRows = await chrome.scripting.executeScript({
+          target: {tabId: tab.id}, world: 'MAIN', func: _researchAdvancePagination,
+          args: [pagination],
+        });
+        const advance = advanceRows && advanceRows[0] && advanceRows[0].result || {};
+        if (!advance.advanced) {
+          stopReason = advance.reason || 'no-next-page';
+          break;
+        }
+        if (advance.kind === 'link') await chrome.tabs.update(tab.id, {url: advance.href});
+        await waitForTabLoad(tab.id, Math.min(15000, Math.max(1000, deadline - Date.now())));
+        await _waitForCapturedPageSettle(tab.id, captureId, Math.min(5000, deadline - Date.now()));
+        tab = await chrome.tabs.get(tab.id);
+        let currentOrigin = '';
+        try { currentOrigin = new URL(tab.url || '').origin; } catch (_) {}
+        if (currentOrigin !== requestedOrigin) {
+          stopReason = 'cross_origin_pagination_blocked';
+          break;
+        }
+        const signals = await _readResearchSignals(tab.id, maxChars);
+        const fingerprint = String(signals && signals.fingerprint || '');
+        const added = signals ? _appendResearchText(accumulator, signals.text, maxChars) : 0;
+        if (!signals || (seenFingerprints.has(fingerprint) && added === 0)) {
+          stopReason = 'pagination_stalled';
+          break;
+        }
+        seenFingerprints.add(fingerprint);
+        lastSignals = signals;
+        pagesVisited++;
+      }
+    }
+    const network = await _stopNetworkCaptureInternal(captureId, {remember: false});
+    captureId = null;
+    tab = await chrome.tabs.get(tab.id);
+    let cookieNames = [];
+    try {
+      const cookies = await chrome.cookies.getAll({url: tab.url || requestedUrl});
+      cookieNames = Array.from(new Set(cookies.map((cookie) => cookie.name))).slice(0, 80);
+    } catch (_) {}
+    return {
+      requestedUrl, url: tab.url || '', title: tab.title || '',
+      collectedText: accumulator.lines.join('\n'),
+      textLength: accumulator.chars, truncated: accumulator.truncated,
+      framework: (firstSignals && firstSignals.framework) ||
+        (lastSignals && lastSignals.framework) || 'unknown',
+      initialState: firstSignals && firstSignals.initialState || {},
+      initialStatePayloads: firstSignals && firstSignals.initialStatePayloads || {},
+      cookieNames, network,
+      research: {pagesVisited, scrollsCompleted, stopReason,
+        maxPages, maxScrolls, pagination, elapsedMs: timeoutMs - Math.max(0, deadline - Date.now())},
+    };
+  } finally {
+    if (captureId) await _stopNetworkCaptureInternal(captureId, {remember: false}).catch(() => {});
+    try { await chrome.tabs.remove(tab.id); } catch (_) {}
+    if (tab && tab.id != null) _recentNetworkByTab.delete(Number(tab.id));
   }
 }
 
@@ -2483,10 +3531,25 @@ async function cmdNavigate(params) {
   if (!tabId) throw new Error('No tabId specified');
   if (!url) throw new Error('No url specified');
 
-  await chrome.tabs.update(tabId, { url });
+  let captureId = null;
+  try {
+    if (params.waitForLoad) {
+      captureId = (await cmdNetworkCaptureStart({
+        tabId, captureBodies: true,
+      })).captureId;
+    }
+    await chrome.tabs.update(tabId, { url });
 
-  if (params.waitForLoad) {
-    await waitForTabLoad(tabId, 15000);
+    if (params.waitForLoad) {
+      await waitForTabLoad(tabId, 15000);
+      await _waitForCapturedPageSettle(tabId, captureId, 15000);
+      await _stopNetworkCaptureInternal(captureId, { remember: true });
+      captureId = null;
+    }
+  } finally {
+    if (captureId) {
+      await _stopNetworkCaptureInternal(captureId, { remember: true }).catch(() => {});
+    }
   }
 
   const tab = await chrome.tabs.get(tabId);
@@ -2502,7 +3565,7 @@ async function cmdDownload(params) {
   if (params.filename) opts.filename = params.filename;
   if (params.saveAs !== undefined) opts.saveAs = params.saveAs;
   const downloadId = await chrome.downloads.download(opts);
-  return { downloadId };
+  return { location: 'device_downloads', clientId: CLIENT_ID, downloadId };
 }
 
 // ══════════════════════════════════════════
@@ -2694,6 +3757,772 @@ async function cmdPageUpload(params) {
   return {value: result, page: await cmdPageState(params)};
 }
 
+// ══════════════════════════════════════════
+//  DevTools Bridge (Console / Runtime / Debugger)
+// ══════════════════════════════════════════
+
+function _devtoolsText(value, limit = 4000) {
+  const text = String(value == null ? '' : value);
+  return text.length > limit ? text.slice(0, limit) + '…' : text;
+}
+
+function _remoteObjectPreview(remote) {
+  const value = remote || {};
+  if (Object.prototype.hasOwnProperty.call(value, 'value')) {
+    return typeof value.value === 'string'
+      ? _devtoolsText(value.value) : value.value;
+  }
+  if (value.unserializableValue != null) return String(value.unserializableValue);
+  if (value.description) return _devtoolsText(value.description, 1000);
+  return value.type || 'undefined';
+}
+
+function _appendDevtoolsEntry(sink, entry) {
+  if (!sink || !entry) return;
+  sink.consoleEntries = Array.isArray(sink.consoleEntries) ? sink.consoleEntries : [];
+  sink.consoleChars = Number(sink.consoleChars) || 0;
+  sink.droppedConsoleEntries = Number(sink.droppedConsoleEntries) || 0;
+  let chars = 0;
+  try { chars = JSON.stringify(entry).length; } catch (_) { chars = 1000; }
+  if (sink.consoleEntries.length >= DEVTOOLS_MAX_LOG_ENTRIES ||
+      sink.consoleChars + chars > DEVTOOLS_MAX_LOG_CHARS) {
+    sink.droppedConsoleEntries++;
+    return;
+  }
+  sink.consoleEntries.push(entry);
+  sink.consoleChars += chars;
+  sink.lastActivityAt = Date.now();
+}
+
+function _rememberDevtoolsSnapshot(tabId, snapshot) {
+  const key = Number(tabId);
+  if (!key || !snapshot) return;
+  const entries = Array.isArray(snapshot.entries)
+    ? snapshot.entries.slice(0, DEVTOOLS_MAX_LOG_ENTRIES) : [];
+  _recentDevtoolsByTab.delete(key);
+  _recentDevtoolsByTab.set(key, {
+    url: String(snapshot.url || ''), entries,
+    droppedEntries: Number(snapshot.droppedEntries) || 0,
+    capturedAt: Number(snapshot.capturedAt) || Date.now(),
+  });
+  while (_recentDevtoolsByTab.size > DEVTOOLS_RECENT_TABS) {
+    _recentDevtoolsByTab.delete(_recentDevtoolsByTab.keys().next().value);
+  }
+}
+
+function _devtoolsEventEntry(source, method, params) {
+  const sessionId = String((source && source.sessionId) || '');
+  if (method === 'Runtime.consoleAPICalled') {
+    const stack = params.stackTrace && params.stackTrace.callFrames || [];
+    const top = stack[0] || {};
+    return {
+      kind: 'console', level: String(params.type || 'log'),
+      text: (params.args || []).map(_remoteObjectPreview)
+        .map((value) => typeof value === 'string' ? value : JSON.stringify(value))
+        .join(' ').slice(0, 12000),
+      args: (params.args || []).slice(0, 20).map(_remoteObjectPreview),
+      timestamp: Number(params.timestamp) || Date.now(),
+      url: String(top.url || ''), line: Number(top.lineNumber) || 0,
+      column: Number(top.columnNumber) || 0,
+      executionContextId: Number(params.executionContextId) || 0,
+      ...(sessionId ? {sessionId} : {}),
+    };
+  }
+  if (method === 'Runtime.exceptionThrown') {
+    const detail = params.exceptionDetails || {};
+    const stack = detail.stackTrace && detail.stackTrace.callFrames || [];
+    const top = stack[0] || {};
+    return {
+      kind: 'exception', level: 'error',
+      text: _devtoolsText(
+        (detail.exception && detail.exception.description) || detail.text || 'Exception',
+        12000),
+      timestamp: Number(params.timestamp) || Date.now(),
+      url: String(detail.url || top.url || ''),
+      line: Number(detail.lineNumber != null ? detail.lineNumber : top.lineNumber) || 0,
+      column: Number(detail.columnNumber != null ? detail.columnNumber : top.columnNumber) || 0,
+      ...(sessionId ? {sessionId} : {}),
+    };
+  }
+  if (method === 'Log.entryAdded') {
+    const row = params.entry || {};
+    return {
+      kind: 'log', level: String(row.level || 'info'),
+      source: String(row.source || ''), text: _devtoolsText(row.text, 12000),
+      timestamp: Number(row.timestamp) || Date.now(),
+      url: String(row.url || ''), line: Number(row.lineNumber) || 0,
+      ...(sessionId ? {sessionId} : {}),
+    };
+  }
+  return null;
+}
+
+function _sameOriginUrl(left, right) {
+  try { return new URL(String(left)).origin === new URL(String(right)).origin; }
+  catch (_) { return false; }
+}
+
+function _publicCallFrame(frame) {
+  const location = frame.location || {};
+  return {
+    callFrameId: String(frame.callFrameId || ''),
+    functionName: String(frame.functionName || '(anonymous)'),
+    url: String(frame.url || ''),
+    lineNumber: Number(location.lineNumber) || 0,
+    columnNumber: Number(location.columnNumber) || 0,
+    scopeChain: (frame.scopeChain || []).slice(0, 12).map((scope) => ({
+      type: String(scope.type || ''), name: String(scope.name || ''),
+      object: _remoteObjectPreview(scope.object),
+    })),
+  };
+}
+
+async function _attachDebugChild(session, source, params) {
+  if (!session || !session.active) return;
+  const sessionId = String(params.sessionId || '');
+  const info = params.targetInfo || {};
+  if (!sessionId) return;
+  // A top-page grant must never silently authorize a cross-origin iframe or
+  // worker. Same-origin related targets are enough for framework workers and
+  // OOPIFs while preserving the server's exact-domain authority boundary.
+  if (!_sameOriginUrl(session.url, info.url || session.url) ||
+      session.targets.size >= DEVTOOLS_MAX_CONTEXTS) {
+    try {
+      await chrome.debugger.sendCommand(source, 'Target.detachFromTarget', {sessionId});
+    } catch (_) {}
+    return;
+  }
+  session.targets.set(sessionId, {
+    sessionId, targetId: String(info.targetId || ''),
+    type: String(info.type || ''), title: String(info.title || ''),
+    url: String(info.url || ''),
+  });
+  const child = {tabId: session.tabId, sessionId};
+  try {
+    await chrome.debugger.sendCommand(child, 'Runtime.enable');
+    await chrome.debugger.sendCommand(child, 'Log.enable');
+    await chrome.debugger.sendCommand(child, 'Debugger.enable', {
+      maxScriptsCacheSize: 2 * 1024 * 1024,
+    });
+    await chrome.debugger.sendCommand(child, 'Target.setAutoAttach', {
+      autoAttach: true, waitForDebuggerOnStart: false, flatten: true,
+      filter: [{type: 'iframe', exclude: false}, {type: 'worker', exclude: false}],
+    });
+  } catch (error) {
+    session.targets.delete(sessionId);
+    console.warn('[DevTools] related target attach failed:', error && error.message);
+  }
+}
+
+function _debugSessionForSource(source) {
+  const session = _debugSessions.get(Number(source && source.tabId));
+  return session && session.active ? session : null;
+}
+
+function _onDevtoolsDebuggerEvent(source, method, params) {
+  const tabId = Number(source && source.tabId);
+  const relatedSessionId = String((source && source.sessionId) || '');
+  const session = _debugSessionForSource(source);
+  const relatedSourceAllowed = !relatedSessionId || !!(
+    session && session.targets.has(relatedSessionId));
+  const entry = _devtoolsEventEntry(source, method, params || {});
+  if (entry) {
+    const sinks = new Set();
+    const capture = _networkCaptureForTab(tabId);
+    if (relatedSourceAllowed && capture && capture.cdpAttached && !capture.stopping) {
+      sinks.add(capture);
+    }
+    if (session && relatedSourceAllowed) sinks.add(session);
+    for (const observer of _devtoolsObservers.values()) {
+      if (relatedSourceAllowed && observer.tabId === tabId) sinks.add(observer);
+    }
+    for (const sink of sinks) _appendDevtoolsEntry(sink, entry);
+  }
+
+  if (!session) {
+    if (method === 'Runtime.executionContextCreated') {
+      for (const observer of _devtoolsObservers.values()) {
+        if (observer.tabId !== tabId || observer.contexts.length >= DEVTOOLS_MAX_CONTEXTS) continue;
+        const context = params.context || {};
+        observer.contexts.push({
+          id: Number(context.id) || 0, name: String(context.name || ''),
+          origin: String(context.origin || ''),
+          frameId: String((context.auxData && context.auxData.frameId) || ''),
+          isDefault: !!(context.auxData && context.auxData.isDefault),
+        });
+      }
+    }
+    return;
+  }
+
+  if (method === 'Target.attachedToTarget') {
+    _attachDebugChild(session, source, params || {}).catch(() => {});
+    return;
+  }
+  if (method === 'Target.detachedFromTarget') {
+    session.targets.delete(String(params.sessionId || ''));
+    return;
+  }
+  // A related session is inserted into ``targets`` only after its target URL
+  // passes the same-origin gate. Ignore any event Chrome races ahead of the
+  // detach for a rejected cross-origin iframe/worker.
+  if (!relatedSourceAllowed) return;
+  if (method === 'Runtime.executionContextCreated') {
+    const context = params.context || {};
+    const key = `${String((source && source.sessionId) || 'root')}:${Number(context.id) || 0}`;
+    if (session.contexts.size >= DEVTOOLS_MAX_CONTEXTS && !session.contexts.has(key)) {
+      session.contexts.delete(session.contexts.keys().next().value);
+    }
+    session.contexts.set(key, {
+      id: Number(context.id) || 0, name: String(context.name || ''),
+      origin: String(context.origin || ''),
+      frameId: String((context.auxData && context.auxData.frameId) || ''),
+      isDefault: !!(context.auxData && context.auxData.isDefault),
+      sessionId: String((source && source.sessionId) || ''),
+    });
+    return;
+  }
+  if (method === 'Runtime.executionContextDestroyed') {
+    const id = Number(params.executionContextId) || 0;
+    for (const [key, context] of session.contexts) {
+      if (context.id === id && context.sessionId === String((source && source.sessionId) || '')) {
+        session.contexts.delete(key);
+      }
+    }
+    return;
+  }
+  if (method === 'Debugger.scriptParsed') {
+    const scriptId = String(params.scriptId || '');
+    if (!scriptId) return;
+    const scriptSessionId = String((source && source.sessionId) || '');
+    const scriptKey = `${scriptSessionId || 'root'}:${scriptId}`;
+    if (session.scripts.size >= DEVTOOLS_MAX_SCRIPTS && !session.scripts.has(scriptKey)) {
+      session.scripts.delete(session.scripts.keys().next().value);
+    }
+    session.scripts.set(scriptKey, {
+      scriptId, url: String(params.url || ''),
+      startLine: Number(params.startLine) || 0,
+      startColumn: Number(params.startColumn) || 0,
+      endLine: Number(params.endLine) || 0,
+      endColumn: Number(params.endColumn) || 0,
+      length: Number(params.length) || 0,
+      hash: String(params.hash || ''),
+      sessionId: scriptSessionId,
+    });
+    return;
+  }
+  if (method === 'Debugger.paused') {
+    if (session.pauseFailsafe) clearTimeout(session.pauseFailsafe);
+    session.paused = {
+      reason: String(params.reason || 'other'),
+      data: params.data && typeof params.data === 'object' ? params.data : {},
+      hitBreakpoints: (params.hitBreakpoints || []).slice(0, DEVTOOLS_MAX_BREAKPOINTS),
+      callFrames: (params.callFrames || []).slice(0, 20).map(_publicCallFrame),
+      sessionId: String((source && source.sessionId) || ''),
+      pausedAt: Date.now(),
+    };
+    session.pauseFailsafe = setTimeout(() => {
+      _resumeDebugSession(session, 'resume', true).catch(() => {});
+    }, DEVTOOLS_PAUSE_FAILSAFE_MS);
+    return;
+  }
+  if (method === 'Debugger.resumed') {
+    if (session.pauseFailsafe) clearTimeout(session.pauseFailsafe);
+    session.pauseFailsafe = null;
+    session.paused = null;
+  }
+}
+
+function _debugTarget(session, sessionId = '') {
+  return sessionId
+    ? {tabId: session.tabId, sessionId: String(sessionId)}
+    : session.lease.target;
+}
+
+function _debugState(session) {
+  if (!session || !session.active) return {active: false};
+  return {
+    active: true, startedAt: session.startedAt,
+    expiresInMs: Math.max(0, session.expiresAt - Date.now()),
+    paused: session.paused,
+    breakpoints: Array.from(session.breakpoints.values()),
+    contexts: Array.from(session.contexts.values()).slice(0, DEVTOOLS_MAX_CONTEXTS),
+    targets: Array.from(session.targets.values()).slice(0, DEVTOOLS_MAX_CONTEXTS),
+    scripts: Array.from(session.scripts.values()).slice(-DEVTOOLS_MAX_SCRIPTS),
+    consoleEntries: session.consoleEntries.slice(-DEVTOOLS_MAX_LOG_ENTRIES),
+    droppedConsoleEntries: session.droppedConsoleEntries,
+  };
+}
+
+async function _startDebugSession(tab, ttlMs) {
+  const tabId = Number(tab.id);
+  const existing = _debugSessions.get(tabId);
+  if (existing && existing.active) return existing;
+  if (_debugSessions.size >= DEVTOOLS_MAX_ACTIVE_DEBUG_SESSIONS) {
+    throw new Error(`DevTools debug capacity reached (${DEVTOOLS_MAX_ACTIVE_DEBUG_SESSIONS} active tabs)`);
+  }
+  const lease = await _acquireCdp(tabId, 'javascript-debugger');
+  const session = {
+    tabId, url: String(tab.url || ''), lease, active: true,
+    startedAt: Date.now(), expiresAt: Date.now() + ttlMs,
+    consoleEntries: [], consoleChars: 0, droppedConsoleEntries: 0,
+    contexts: new Map(), targets: new Map(), scripts: new Map(),
+    breakpoints: new Map(), paused: null, pauseFailsafe: null,
+    expiryTimer: null,
+  };
+  _debugSessions.set(tabId, session);
+  try {
+    await _runWithCdpLease(lease, async (target) => {
+      await chrome.debugger.sendCommand(target, 'Runtime.enable');
+      await chrome.debugger.sendCommand(target, 'Log.enable');
+      await chrome.debugger.sendCommand(target, 'Debugger.enable', {
+        maxScriptsCacheSize: 2 * 1024 * 1024,
+      });
+      await chrome.debugger.sendCommand(target, 'Target.setAutoAttach', {
+        autoAttach: true, waitForDebuggerOnStart: false, flatten: true,
+        filter: [{type: 'iframe', exclude: false}, {type: 'worker', exclude: false}],
+      });
+    });
+    session.expiryTimer = setTimeout(() => {
+      _stopDebugSession(tabId, 'timeout').catch(() => {});
+    }, ttlMs);
+    return session;
+  } catch (error) {
+    _debugSessions.delete(tabId);
+    session.active = false;
+    await _releaseCdp(lease).catch(() => {});
+    throw error;
+  }
+}
+
+async function _resumeDebugSession(session, action = 'resume', failsafe = false) {
+  if (!session || !session.active || !session.paused) {
+    return {resumed: false, reason: 'not-paused'};
+  }
+  const commands = {
+    resume: 'Debugger.resume', step_over: 'Debugger.stepOver',
+    step_into: 'Debugger.stepInto', step_out: 'Debugger.stepOut',
+  };
+  const command = commands[action];
+  if (!command) throw new Error(`Unsupported debugger continuation: ${action}`);
+  const target = _debugTarget(session, session.paused.sessionId);
+  await _runWithCdpLease(
+    session.lease, () => chrome.debugger.sendCommand(target, command));
+  if (session.pauseFailsafe) clearTimeout(session.pauseFailsafe);
+  session.pauseFailsafe = null;
+  session.paused = null;
+  return {resumed: true, action, failsafe: !!failsafe};
+}
+
+async function _stopDebugSession(tabId, reason = 'requested') {
+  const key = Number(tabId);
+  const session = _debugSessions.get(key);
+  if (!session) return {stopped: false, reason: 'not-active'};
+  _debugSessions.delete(key);
+  session.active = false;
+  if (session.expiryTimer) clearTimeout(session.expiryTimer);
+  if (session.pauseFailsafe) clearTimeout(session.pauseFailsafe);
+  await _runWithCdpLease(session.lease, async () => {
+    try {
+      if (session.paused) {
+        await chrome.debugger.sendCommand(
+          _debugTarget(session, session.paused.sessionId), 'Debugger.resume');
+      }
+    } catch (_) {}
+    try {
+      await chrome.debugger.sendCommand(session.lease.target, 'Target.setAutoAttach', {
+        autoAttach: false, waitForDebuggerOnStart: false, flatten: true,
+      });
+    } catch (_) {}
+    try {
+      await chrome.debugger.sendCommand(session.lease.target, 'Debugger.disable');
+    } catch (_) {}
+  }).catch(() => {});
+  _rememberDevtoolsSnapshot(key, {
+    url: session.url, entries: session.consoleEntries,
+    droppedEntries: session.droppedConsoleEntries, capturedAt: Date.now(),
+  });
+  await _releaseCdp(session.lease).catch(() => {});
+  return {stopped: true, reason};
+}
+
+function _objectBudgetText(state, value, limit = 4000) {
+  const text = _devtoolsText(value, Math.min(limit, Math.max(0, state.maxChars - state.chars)));
+  state.chars += text.length;
+  if (state.chars >= state.maxChars) state.truncated = true;
+  return text;
+}
+
+async function _serializeRemoteObject(target, remote, depth, state) {
+  state.nodes++;
+  if (state.nodes > state.maxNodes || state.chars >= state.maxChars) {
+    state.truncated = true;
+    return '[truncated]';
+  }
+  const value = remote || {};
+  if (Object.prototype.hasOwnProperty.call(value, 'value')) {
+    if (typeof value.value === 'string') return _objectBudgetText(state, value.value);
+    return value.value;
+  }
+  if (value.unserializableValue != null) {
+    return _objectBudgetText(state, value.unserializableValue, 200);
+  }
+  if (!value.objectId) {
+    return _objectBudgetText(state, value.description || value.type || 'undefined', 1000);
+  }
+  if (state.seen.has(value.objectId)) return '[circular]';
+  const descriptor = {
+    type: String(value.type || 'object'),
+    ...(value.subtype ? {subtype: String(value.subtype)} : {}),
+    ...(value.className ? {className: String(value.className)} : {}),
+    ...(value.description
+      ? {description: _objectBudgetText(state, value.description, 1000)} : {}),
+  };
+  if (depth >= state.maxDepth) return descriptor;
+  state.seen.add(value.objectId);
+  let response;
+  try {
+    response = await chrome.debugger.sendCommand(target, 'Runtime.getProperties', {
+      objectId: value.objectId, ownProperties: true,
+      accessorPropertiesOnly: false, generatePreview: true,
+    });
+  } catch (error) {
+    descriptor.error = _objectBudgetText(
+      state, (error && error.message) || error || 'properties unavailable', 500);
+    return descriptor;
+  }
+  const properties = {};
+  for (const property of (response.result || []).slice(0, 80)) {
+    if (state.nodes >= state.maxNodes || state.chars >= state.maxChars) {
+      state.truncated = true;
+      break;
+    }
+    const name = _objectBudgetText(state, property.name, 300);
+    if (property.value) {
+      properties[name] = await _serializeRemoteObject(
+        target, property.value, depth + 1, state);
+    } else if (property.get || property.set) {
+      // Never invoke getters while inspecting: getter side effects would turn
+      // a structural read into hidden page mutation.
+      properties[name] = property.get && property.set
+        ? '[Getter/Setter]' : property.get ? '[Getter]' : '[Setter]';
+    } else {
+      properties[name] = '[unavailable]';
+    }
+  }
+  descriptor.properties = properties;
+  return descriptor;
+}
+
+function _exceptionPayload(details) {
+  if (!details) return null;
+  const stack = details.stackTrace && details.stackTrace.callFrames || [];
+  return {
+    text: _devtoolsText(
+      (details.exception && details.exception.description) || details.text || 'Evaluation failed',
+      12000),
+    url: String(details.url || ''),
+    lineNumber: Number(details.lineNumber) || 0,
+    columnNumber: Number(details.columnNumber) || 0,
+    stack: stack.slice(0, 30).map((frame) => ({
+      functionName: String(frame.functionName || '(anonymous)'),
+      url: String(frame.url || ''), lineNumber: Number(frame.lineNumber) || 0,
+      columnNumber: Number(frame.columnNumber) || 0,
+    })),
+  };
+}
+
+async function _evaluateWithTarget(target, expression, params) {
+  const objectGroup = `tofu-devtools-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    const request = {
+      expression: String(expression), objectGroup,
+      includeCommandLineAPI: true, silent: false,
+      awaitPromise: params.awaitPromise !== false,
+      userGesture: true, returnByValue: false, generatePreview: true,
+    };
+    if (params.contextId != null) request.contextId = Number(params.contextId);
+    const response = await chrome.debugger.sendCommand(
+      target, 'Runtime.evaluate', request);
+    if (response.exceptionDetails) {
+      return {ok: false, exception: _exceptionPayload(response.exceptionDetails)};
+    }
+    const state = {
+      maxDepth: Math.max(0, Math.min(6, Number(params.maxDepth) || 3)),
+      maxNodes: DEVTOOLS_MAX_OBJECT_NODES,
+      maxChars: DEVTOOLS_MAX_OBJECT_CHARS,
+      nodes: 0, chars: 0, truncated: false, seen: new Set(),
+    };
+    const value = await _serializeRemoteObject(target, response.result, 0, state);
+    return {
+      ok: true, value,
+      resultType: String((response.result && response.result.type) || ''),
+      resultSubtype: String((response.result && response.result.subtype) || ''),
+      nodesInspected: state.nodes, truncated: state.truncated,
+    };
+  } finally {
+    try {
+      await chrome.debugger.sendCommand(
+        target, 'Runtime.releaseObjectGroup', {objectGroup});
+    } catch (_) {}
+  }
+}
+
+function _debugContextTarget(session, params) {
+  const requestedSessionId = String(params.sessionId || '');
+  if (requestedSessionId) return _debugTarget(session, requestedSessionId);
+  if (params.contextId == null) return session.lease.target;
+  const contextId = Number(params.contextId);
+  const matches = Array.from(session.contexts.values())
+    .filter((context) => context.id === contextId);
+  if (matches.length > 1) {
+    throw new Error('context_id is ambiguous; pass session_id from context_list');
+  }
+  return _debugTarget(session, matches[0] && matches[0].sessionId);
+}
+
+function _debugScript(session, scriptId, requestedSessionId = '') {
+  const matches = Array.from(session.scripts.values()).filter((script) => (
+    script.scriptId === scriptId
+    && (!requestedSessionId || script.sessionId === requestedSessionId)
+  ));
+  if (matches.length > 1) {
+    throw new Error('script_id is ambiguous; pass its session_id');
+  }
+  return matches[0] || null;
+}
+
+function _debugBreakpoint(session, breakpointId, requestedSessionId = '') {
+  const matches = Array.from(session.breakpoints.values()).filter((breakpoint) => (
+    breakpoint.breakpointId === breakpointId
+    && (!requestedSessionId || breakpoint.sessionId === requestedSessionId)
+  ));
+  if (matches.length > 1) {
+    throw new Error('breakpoint_id is ambiguous; pass its session_id');
+  }
+  return matches[0] || null;
+}
+
+async function _observeDevtools(tabId, observeMs, includeContexts = false) {
+  if (_devtoolsObservers.size >= DEVTOOLS_MAX_OBSERVERS) {
+    throw new Error(`Console observer capacity reached (${DEVTOOLS_MAX_OBSERVERS} active)`);
+  }
+  const observerId = crypto.randomUUID();
+  const observer = {
+    observerId, tabId: Number(tabId), consoleEntries: [], consoleChars: 0,
+    droppedConsoleEntries: 0, contexts: [], startedAt: Date.now(),
+  };
+  const lease = await _acquireCdp(tabId, `console-observer:${observerId}`);
+  _devtoolsObservers.set(observerId, observer);
+  try {
+    await _runWithCdpLease(lease, async (target) => {
+      await chrome.debugger.sendCommand(target, 'Runtime.enable');
+      await chrome.debugger.sendCommand(target, 'Log.enable');
+    });
+    await new Promise((resolve) => setTimeout(
+      resolve, Math.max(50, Math.min(5000, Number(observeMs) || 250))));
+    return {
+      entries: observer.consoleEntries,
+      droppedEntries: observer.droppedConsoleEntries,
+      contexts: includeContexts ? observer.contexts : undefined,
+      observedMs: Date.now() - observer.startedAt,
+    };
+  } finally {
+    _devtoolsObservers.delete(observerId);
+    await _releaseCdp(lease).catch(() => {});
+  }
+}
+
+function _mergeConsoleEntries(recent, observed) {
+  const out = [];
+  const seen = new Set();
+  for (const entry of [...(recent || []), ...(observed || [])]) {
+    let key;
+    try { key = JSON.stringify(entry); } catch (_) { key = String(entry); }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(entry);
+    if (out.length >= DEVTOOLS_MAX_LOG_ENTRIES) break;
+  }
+  return out;
+}
+
+async function cmdDevtools(params) {
+  const tabId = Number(params.tabId);
+  if (!Number.isInteger(tabId) || tabId <= 0) throw new Error('No valid tabId specified');
+  const tab = await chrome.tabs.get(tabId);
+  if (tab.url && isProtectedUrl(tab.url)) {
+    throw new Error(`Cannot use DevTools on protected page: ${tab.url}`);
+  }
+  await _assertExpectedDomain(params, tab);
+  const action = String(params.action || 'console_read');
+  const result = {action, url: String(tab.url || ''), title: String(tab.title || '')};
+
+  if (action === 'console_clear') {
+    _recentDevtoolsByTab.delete(tabId);
+    const capture = _networkCaptureForTab(tabId);
+    const debug = _debugSessions.get(tabId);
+    for (const sink of [capture, debug]) {
+      if (!sink) continue;
+      sink.consoleEntries = [];
+      sink.consoleChars = 0;
+      sink.droppedConsoleEntries = 0;
+    }
+    return {...result, cleared: true};
+  }
+  if (action === 'console_read' || action === 'context_list') {
+    const recent = _recentDevtoolsByTab.get(tabId);
+    const observed = await _observeDevtools(
+      tabId, params.observeMs, action === 'context_list');
+    return {
+      ...result,
+      entries: action === 'console_read'
+        ? _mergeConsoleEntries(recent && recent.entries, observed.entries) : undefined,
+      droppedEntries: Number((recent && recent.droppedEntries) || 0)
+        + Number(observed.droppedEntries || 0),
+      contexts: action === 'context_list' ? observed.contexts : undefined,
+      observedMs: observed.observedMs,
+    };
+  }
+  if (action === 'evaluate' || action === 'inspect') {
+    const expression = String(params.expression || '');
+    if (!expression || expression.length > 50000) {
+      throw new Error('expression is required and must not exceed 50,000 characters');
+    }
+    const active = _debugSessions.get(tabId);
+    const evalParams = {...params, maxDepth: action === 'inspect'
+      ? Math.max(1, Number(params.maxDepth) || 4)
+      : Math.max(0, Number(params.maxDepth) || 2)};
+    const evaluation = active && active.active
+      ? await _runWithCdpLease(active.lease, () =>
+          _evaluateWithTarget(
+            _debugContextTarget(active, evalParams), expression, evalParams))
+      : await _cdpRun(tabId, async (target) => {
+          await chrome.debugger.sendCommand(target, 'Runtime.enable');
+          return _evaluateWithTarget(target, expression, evalParams);
+        }, `devtools-${action}`);
+    return {...result, ...evaluation};
+  }
+  if (action === 'debug_start') {
+    const ttlMs = Math.max(10000, Math.min(
+      DEVTOOLS_DEBUG_TTL_MS, Number(params.sessionTtlMs) || 60000));
+    const session = await _startDebugSession(tab, ttlMs);
+    // Give Runtime/Debugger a brief turn to report existing contexts/scripts.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return {...result, ..._debugState(session)};
+  }
+  if (action === 'debug_stop') {
+    return {...result, ...(await _stopDebugSession(tabId, 'requested'))};
+  }
+
+  const session = _debugSessions.get(tabId);
+  if (!session || !session.active) {
+    throw new Error('No active debug session; call action=debug_start first');
+  }
+  if (action === 'debug_state') return {...result, ..._debugState(session)};
+  if (['resume', 'step_over', 'step_into', 'step_out'].includes(action)) {
+    return {...result, ...(await _resumeDebugSession(session, action)),
+            state: _debugState(session)};
+  }
+  if (action === 'pause') {
+    const target = _debugTarget(session, String(params.sessionId || ''));
+    await _runWithCdpLease(
+      session.lease,
+      () => chrome.debugger.sendCommand(target, 'Debugger.pause'));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    return {...result, requested: true, state: _debugState(session)};
+  }
+  if (action === 'breakpoint_set') {
+    if (session.breakpoints.size >= DEVTOOLS_MAX_BREAKPOINTS) {
+      throw new Error(`Breakpoint capacity reached (${DEVTOOLS_MAX_BREAKPOINTS})`);
+    }
+    const sourceUrl = String(params.sourceUrl || '');
+    if (!sourceUrl) throw new Error('source_url is required for breakpoint_set');
+    let breakpointSessionId = String(params.sessionId || '');
+    if (!breakpointSessionId) {
+      const scriptSessions = new Set(
+        Array.from(session.scripts.values())
+          .filter((script) => script.url === sourceUrl)
+          .map((script) => script.sessionId));
+      if (scriptSessions.size === 1) {
+        breakpointSessionId = scriptSessions.values().next().value;
+      }
+    }
+    const breakpointTarget = _debugTarget(session, breakpointSessionId);
+    const response = await _runWithCdpLease(session.lease, () =>
+      chrome.debugger.sendCommand(
+      breakpointTarget, 'Debugger.setBreakpointByUrl', {
+        url: sourceUrl,
+        lineNumber: Math.max(0, Number(params.lineNumber) || 0),
+        columnNumber: Math.max(0, Number(params.columnNumber) || 0),
+        condition: String(params.condition || '').slice(0, 10000),
+      }));
+    const breakpoint = {
+      breakpointId: String(response.breakpointId || ''), sourceUrl,
+      sessionId: breakpointSessionId,
+      lineNumber: Math.max(0, Number(params.lineNumber) || 0),
+      columnNumber: Math.max(0, Number(params.columnNumber) || 0),
+      locations: (response.locations || []).slice(0, 20),
+    };
+    session.breakpoints.set(
+      `${breakpointSessionId || 'root'}:${breakpoint.breakpointId}`,
+      breakpoint);
+    return {...result, breakpoint};
+  }
+  if (action === 'breakpoint_remove') {
+    const breakpointId = String(params.breakpointId || '');
+    if (!breakpointId) throw new Error('breakpoint_id is required');
+    const breakpoint = _debugBreakpoint(
+      session, breakpointId, String(params.sessionId || ''));
+    if (!breakpoint) throw new Error('Unknown or expired breakpoint_id');
+    const breakpointTarget = _debugTarget(session, breakpoint.sessionId);
+    await _runWithCdpLease(session.lease, () =>
+      chrome.debugger.sendCommand(
+        breakpointTarget, 'Debugger.removeBreakpoint', {breakpointId}));
+    session.breakpoints.delete(
+      `${breakpoint.sessionId || 'root'}:${breakpointId}`);
+    return {...result, removed: breakpointId, sessionId: breakpoint.sessionId};
+  }
+  if (action === 'frame_evaluate') {
+    if (!session.paused) throw new Error('The debugger is not paused');
+    const expression = String(params.expression || '');
+    const callFrameId = String(params.callFrameId || '');
+    if (!expression || !callFrameId) {
+      throw new Error('expression and call_frame_id are required');
+    }
+    const target = _debugTarget(session, session.paused.sessionId);
+    const response = await _runWithCdpLease(session.lease, () =>
+      chrome.debugger.sendCommand(target, 'Debugger.evaluateOnCallFrame', {
+        callFrameId, expression, includeCommandLineAPI: true,
+        silent: false, returnByValue: true, generatePreview: true,
+      }));
+    return {
+      ...result,
+      ok: !response.exceptionDetails,
+      value: response.result ? _remoteObjectPreview(response.result) : null,
+      exception: _exceptionPayload(response.exceptionDetails),
+    };
+  }
+  if (action === 'script_source') {
+    const scriptId = String(params.scriptId || '');
+    const script = _debugScript(
+      session, scriptId, String(params.sessionId || ''));
+    if (!script) throw new Error('Unknown or expired script_id');
+    const target = _debugTarget(session, script.sessionId);
+    const response = await _runWithCdpLease(session.lease, () =>
+      chrome.debugger.sendCommand(
+        target, 'Debugger.getScriptSource', {scriptId}));
+    const source = String(response.scriptSource || '');
+    return {
+      ...result, script,
+      source: source.slice(0, DEVTOOLS_MAX_OBJECT_CHARS),
+      sourceLength: source.length,
+      truncated: source.length > DEVTOOLS_MAX_OBJECT_CHARS,
+    };
+  }
+  throw new Error(`Unknown DevTools action: ${action}`);
+}
+
 function _networkPatternMatches(url, patterns) {
   if (!patterns || !patterns.length) return true;
   return patterns.some(p => {
@@ -2702,43 +4531,411 @@ function _networkPatternMatches(url, patterns) {
   });
 }
 
+function _networkCaptureForTab(tabId) {
+  const captureId = _networkCaptureByTab.get(Number(tabId));
+  return captureId ? _networkCaptures.get(captureId) : null;
+}
+
+function _networkBodyTypeAllowed(type, mimeType) {
+  const kind = String(type || '').toLowerCase();
+  const mime = String(mimeType || '').toLowerCase();
+  if (['image', 'media', 'font', 'stylesheet', 'script', 'document'].includes(kind)) {
+    return false;
+  }
+  return kind === 'xhr' || kind === 'fetch' || kind === 'eventsource' ||
+    !mime || /(?:json|text|xml|graphql|javascript)/i.test(mime);
+}
+
+function _decodeBase64Utf8(value) {
+  const binary = atob(String(value || ''));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+}
+
+async function _captureResponseBody(capture, row, encodedDataLength) {
+  const fullSizeHint = Math.max(0, Number(encodedDataLength) || 0);
+  if (fullSizeHint > NETWORK_CAPTURE_MAX_BODY_CHARS) {
+    row.responseBodyTruncated = true;
+    row.responseBodyFullSize = fullSizeHint;
+    capture.droppedBodies++;
+    return;
+  }
+  const remaining = NETWORK_CAPTURE_MAX_TOTAL_BODY_CHARS - capture.totalBodyChars;
+  if (remaining <= 0) {
+    row.responseBodyTruncated = true;
+    row.responseBodyFullSize = fullSizeHint || null;
+    capture.droppedBodies++;
+    return;
+  }
+  try {
+    const response = await chrome.debugger.sendCommand(
+      capture.target, 'Network.getResponseBody', { requestId: row.requestId });
+    let text = response && response.body ? String(response.body) : '';
+    if (response && response.base64Encoded) text = _decodeBase64Utf8(text);
+    // A missing MIME type may still be a JSON API.  Refuse obvious binary
+    // content before it enters the transient result envelope.
+    if (!text || text.includes('\u0000')) return;
+    const allowed = Math.max(0, Math.min(
+      NETWORK_CAPTURE_MAX_BODY_CHARS, remaining));
+    const fullSize = text.length;
+    if (fullSize > allowed) {
+      text = text.slice(0, allowed);
+      row.responseBodyTruncated = true;
+      row.responseBodyFullSize = fullSize;
+    }
+    row.responsePreview = text;
+    capture.totalBodyChars += text.length;
+    capture.lastActivityAt = Date.now();
+  } catch (error) {
+    // Bodies can be unavailable for redirects, cached entries, preflight or a
+    // response evicted from CDP's bounded buffer.  Metadata remains useful and
+    // the failure is intentionally not promoted to a page-fetch failure.
+    row.bodyError = String((error && error.message) || error || 'body unavailable').slice(0, 160);
+  }
+}
+
+function _onNetworkDebuggerEvent(source, method, params) {
+  const capture = _networkCaptureForTab(source && source.tabId);
+  if (!capture || !capture.cdpAttached || capture.stopping) return;
+  capture.lastActivityAt = Date.now();
+  if (method === 'Network.requestWillBeSent') {
+    if (!capture.requestMethods.has(String(params.requestId)) &&
+        capture.requestMethods.size >= NETWORK_CAPTURE_MAX_TRACKED_REQUESTS) {
+      const oldest = capture.requestMethods.keys().next().value;
+      capture.requestMethods.delete(oldest);
+    }
+    capture.requestMethods.set(
+      String(params.requestId), String((params.request && params.request.method) || 'GET'));
+    return;
+  }
+  if (method === 'Network.webSocketCreated') {
+    const url = String(params.url || '');
+    if (_networkPatternMatches(url, capture.patterns)) {
+      if (capture.webSocketUrls.size >= NETWORK_CAPTURE_MAX_WEBSOCKET_FRAMES) {
+        capture.webSocketUrls.delete(capture.webSocketUrls.keys().next().value);
+      }
+      capture.webSocketUrls.set(String(params.requestId), url);
+    }
+    return;
+  }
+  if (method === 'Network.webSocketFrameReceived') {
+    const requestId = String(params.requestId || '');
+    const url = capture.webSocketUrls.get(requestId) || '';
+    const frame = params.response || {};
+    if (!url || Number(frame.opcode) !== 1) return;
+    if (capture.webSocketFrameCount >= NETWORK_CAPTURE_MAX_WEBSOCKET_FRAMES ||
+        capture.responses.length >= NETWORK_CAPTURE_MAX_ENTRIES) {
+      capture.droppedEntries++;
+      return;
+    }
+    let text = String(frame.payloadData || '');
+    if (!text || text.includes('\u0000')) return;
+    const remaining = NETWORK_CAPTURE_MAX_TOTAL_BODY_CHARS - capture.totalBodyChars;
+    if (remaining <= 0) {
+      capture.droppedBodies++;
+      return;
+    }
+    const fullSize = text.length;
+    const allowed = Math.min(NETWORK_CAPTURE_MAX_BODY_CHARS, remaining);
+    const truncated = fullSize > allowed;
+    if (truncated) {
+      text = text.slice(0, allowed);
+      capture.droppedBodies++;
+    }
+    capture.responses.push({
+      url, method: 'WS', status: 101, responseStatus: 101,
+      contentType: 'application/websocket+json',
+      responseContentType: 'application/websocket+json', type: 'WebSocket',
+      responsePreview: text, responseBodyTruncated: truncated,
+      responseBodyFullSize: truncated ? fullSize : undefined,
+      timestamp: Date.now(),
+    });
+    capture.totalBodyChars += text.length;
+    capture.webSocketFrameCount++;
+    capture.lastActivityAt = Date.now();
+    return;
+  }
+  if (method === 'Network.webSocketClosed') {
+    capture.webSocketUrls.delete(String(params.requestId || ''));
+    return;
+  }
+  if (method === 'Network.responseReceived') {
+    const response = params.response || {};
+    const url = String(response.url || '');
+    if (!_networkPatternMatches(url, capture.patterns) ||
+        !_networkBodyTypeAllowed(params.type, response.mimeType)) return;
+    if (capture.responses.length >= NETWORK_CAPTURE_MAX_ENTRIES) {
+      capture.droppedEntries++;
+      return;
+    }
+    const row = {
+      requestId: String(params.requestId),
+      url,
+      method: capture.requestMethods.get(String(params.requestId)) || 'GET',
+      status: Number(response.status) || 0,
+      responseStatus: Number(response.status) || 0,
+      contentType: String(response.mimeType || ''),
+      responseContentType: String(response.mimeType || ''),
+      type: String(params.type || ''),
+      fromCache: !!response.fromDiskCache || !!response.fromPrefetchCache,
+      timestamp: Date.now(),
+    };
+    capture.responses.push(row);
+    capture.responseByRequest.set(row.requestId, row);
+    return;
+  }
+  if (method === 'Network.loadingFinished') {
+    const requestId = String(params.requestId);
+    const row = capture.responseByRequest.get(requestId);
+    capture.responseByRequest.delete(requestId);
+    capture.requestMethods.delete(requestId);
+    if (!row) return;
+    // Serialize body reads so every request observes the updated shared byte
+    // budget. Concurrent getResponseBody calls could otherwise each reserve
+    // the same remaining 1 MiB and exceed the personal-computer budget.
+    const pending = capture.bodyCaptureTail.then(
+      () => _captureResponseBody(capture, row, params.encodedDataLength));
+    capture.bodyCaptureTail = pending.catch(() => {});
+    capture.pendingBodies.add(pending);
+    pending.finally(() => capture.pendingBodies.delete(pending));
+    return;
+  }
+  if (method === 'Network.loadingFailed') {
+    const requestId = String(params.requestId);
+    capture.responseByRequest.delete(requestId);
+    capture.requestMethods.delete(requestId);
+  }
+}
+
+function _onNetworkDebuggerDetach(source, reason) {
+  const capture = _networkCaptureForTab(source && source.tabId);
+  if (!capture) return;
+  capture.cdpAttached = false;
+  capture.detachReason = String(reason || 'detached').slice(0, 120);
+}
+
 function _onNetworkCompleted(details) {
   for (const capture of _networkCaptures.values()) {
+    // CDP owns the richer path. webRequest is only the explicit fallback when
+    // DevTools or another extension already holds the debugger attachment.
+    if (capture.cdpAttached) continue;
     if (details.tabId !== capture.tabId || !_networkPatternMatches(details.url, capture.patterns)) continue;
-    if (capture.responses.length >= 500) capture.responses.shift();
+    if (capture.responses.length >= NETWORK_CAPTURE_MAX_ENTRIES) {
+      capture.droppedEntries++;
+      continue;
+    }
     capture.responses.push({
-      url: details.url, status: details.statusCode, method: details.method,
+      url: details.url, status: details.statusCode,
+      responseStatus: details.statusCode, method: details.method,
       type: details.type, fromCache: !!details.fromCache,
-      timeStamp: details.timeStamp,
+      timestamp: details.timeStamp,
     });
+    capture.lastActivityAt = Date.now();
+  }
+}
+
+function _publicNetworkSnapshot(capture) {
+  if (!capture) return { responses: [], capturedAt: Date.now() };
+  return {
+    responses: capture.responses.map((row) => {
+      const clean = Object.assign({}, row);
+      delete clean.requestId;
+      delete clean.bodyError;
+      return clean;
+    }),
+    capturedAt: Date.now(),
+    startedAt: capture.startedAt,
+    bodyCapture: !!capture.everCdpAttached,
+    droppedEntries: capture.droppedEntries,
+    droppedBodies: capture.droppedBodies,
+    webSocketFrameCount: capture.webSocketFrameCount,
+    totalBodyChars: capture.totalBodyChars,
+    consoleEntries: Array.isArray(capture.consoleEntries)
+      ? capture.consoleEntries.slice(0, DEVTOOLS_MAX_LOG_ENTRIES) : [],
+    droppedConsoleEntries: Number(capture.droppedConsoleEntries) || 0,
+    pageUrl: capture.pageUrl || '',
+    ...(capture.attachError ? { captureError: capture.attachError } : {}),
+  };
+}
+
+function _rememberNetworkSnapshot(tabId, snapshot) {
+  const key = Number(tabId);
+  if (!key || !snapshot) return;
+  _recentNetworkByTab.delete(key);
+  _recentNetworkByTab.set(key, snapshot);
+  while (_recentNetworkByTab.size > NETWORK_CAPTURE_RECENT_TABS) {
+    const oldest = _recentNetworkByTab.keys().next().value;
+    _recentNetworkByTab.delete(oldest);
   }
 }
 
 async function cmdNetworkCaptureStart(params) {
+  return _startNetworkCapture(params);
+}
+
+async function _startNetworkCapture(params, { allowInertBlank = false } = {}) {
   const tab = await chrome.tabs.get(Number(params.tabId));
-  if (tab.url && isProtectedUrl(tab.url)) throw new Error(`Cannot capture protected page: ${tab.url}`);
+  const isAllowedInertBlank = allowInertBlank && tab.url === 'about:blank';
+  if (tab.url && isProtectedUrl(tab.url) && !isAllowedInertBlank) {
+    throw new Error(`Cannot capture protected page: ${tab.url}`);
+  }
   await _assertExpectedDomain(params, tab);
+  const captureBodies = params.captureBodies === true;
+  const priorBodyCapture = _networkCaptureByTab.get(Number(params.tabId));
+  if (captureBodies && priorBodyCapture) {
+    await _stopNetworkCaptureInternal(priorBodyCapture, { remember: true });
+  }
+  if (_networkCaptures.size >= NETWORK_CAPTURE_MAX_ACTIVE) {
+    throw new Error(
+      `Network capture capacity reached (${NETWORK_CAPTURE_MAX_ACTIVE} active tasks)`);
+  }
   const captureId = crypto.randomUUID();
-  _networkCaptures.set(captureId, {
-    tabId: Number(params.tabId), patterns: Array.isArray(params.urlPatterns) ? params.urlPatterns : [],
-    responses: [], startedAt: Date.now(),
-  });
+  const capture = {
+    captureId, tabId: Number(params.tabId),
+    target: { tabId: Number(params.tabId) },
+    patterns: Array.isArray(params.urlPatterns) ? params.urlPatterns : [],
+    responses: [], responseByRequest: new Map(), requestMethods: new Map(),
+    webSocketUrls: new Map(),
+    pendingBodies: new Set(), totalBodyChars: 0, droppedEntries: 0,
+    droppedBodies: 0, webSocketFrameCount: 0,
+    startedAt: Date.now(), lastActivityAt: Date.now(),
+    bodyCaptureTail: Promise.resolve(), pageUrl: '', captureBodies,
+    cdpAttached: false, everCdpAttached: false, stopping: false,
+    cdpLease: null,
+    consoleEntries: [], consoleChars: 0, droppedConsoleEntries: 0,
+  };
+  _networkCaptures.set(captureId, capture);
+  if (captureBodies) _networkCaptureByTab.set(capture.tabId, captureId);
   if (!_networkListenerInstalled) {
     chrome.webRequest.onCompleted.addListener(_onNetworkCompleted, {urls: ['<all_urls>']});
     _networkListenerInstalled = true;
   }
+  if (captureBodies) {
+    try {
+      capture.cdpLease = await _acquireCdp(
+        capture.tabId, `network-capture:${capture.captureId}`);
+      capture.target = capture.cdpLease.target;
+      capture.cdpAttached = true;
+      capture.everCdpAttached = true;
+      await _runWithCdpLease(capture.cdpLease, async (target) => {
+        await chrome.debugger.sendCommand(target, 'Network.enable', {
+          maxTotalBufferSize: 2 * 1024 * 1024,
+          maxResourceBufferSize: 512 * 1024,
+          maxPostDataSize: 0,
+        });
+        // Capture console/errors over the same pre-navigation lifetime. These
+        // entries are bounded separately and exposed only on explicit
+        // DevTools reads; normal network rendering ignores them.
+        await chrome.debugger.sendCommand(target, 'Runtime.enable');
+        await chrome.debugger.sendCommand(target, 'Log.enable');
+      });
+    } catch (error) {
+      capture.attachError = String(
+        (error && error.message) || error || 'CDP attach failed').slice(0, 200);
+      capture.cdpAttached = false;
+      if (capture.cdpLease) {
+        await _releaseCdp(capture.cdpLease).catch(() => {});
+        capture.cdpLease = null;
+      }
+      console.warn('[NetworkCapture] CDP body capture unavailable; URL metadata only:',
+                   capture.attachError);
+    }
+  }
   return {captureId, page: await cmdPageState(params)};
 }
 
-async function cmdNetworkCaptureStop(params) {
-  const capture = _networkCaptures.get(String(params.captureId));
-  _networkCaptures.delete(String(params.captureId));
+async function _stopNetworkCaptureInternal(captureId, { remember = true } = {}) {
+  const key = String(captureId || '');
+  const capture = _networkCaptures.get(key);
+  if (!capture) return { responses: [], capturedAt: Date.now() };
+  capture.stopping = true;
+  if (capture.pendingBodies.size) {
+    await Promise.race([
+      Promise.allSettled(Array.from(capture.pendingBodies)),
+      new Promise((resolve) => setTimeout(resolve, 1500)),
+    ]);
+  }
+  if (capture.cdpAttached) {
+    try {
+      await _runWithCdpLease(capture.cdpLease, (target) =>
+        chrome.debugger.sendCommand(target, 'Network.disable'));
+    } catch (_) {}
+  }
+  if (capture.cdpLease) {
+    await _releaseCdp(capture.cdpLease).catch(() => {});
+    capture.cdpLease = null;
+  }
+  try {
+    const tab = await chrome.tabs.get(capture.tabId);
+    capture.pageUrl = String((tab && tab.url) || '');
+  } catch (_) {
+    capture.pageUrl = '';
+  }
+  _networkCaptures.delete(key);
+  if (_networkCaptureByTab.get(capture.tabId) === key) {
+    _networkCaptureByTab.delete(capture.tabId);
+  }
   if (!_networkCaptures.size && _networkListenerInstalled) {
     chrome.webRequest.onCompleted.removeListener(_onNetworkCompleted);
     _networkListenerInstalled = false;
   }
-  return {captureId: String(params.captureId), responses: capture ? capture.responses : [],
-          startedAt: capture ? capture.startedAt : null, stoppedAt: Date.now()};
+  const snapshot = _publicNetworkSnapshot(capture);
+  if (remember && capture.captureBodies) {
+    _rememberNetworkSnapshot(capture.tabId, snapshot);
+    _rememberDevtoolsSnapshot(capture.tabId, {
+      url: snapshot.pageUrl || '',
+      entries: snapshot.consoleEntries || [],
+      droppedEntries: snapshot.droppedConsoleEntries || 0,
+      capturedAt: snapshot.capturedAt,
+    });
+  }
+  return snapshot;
+}
+
+async function cmdNetworkCaptureStop(params) {
+  const captureId = String(params.captureId || '');
+  const snapshot = await _stopNetworkCaptureInternal(captureId, { remember: true });
+  return Object.assign({ captureId, stoppedAt: Date.now() }, snapshot);
+}
+
+function _pageStabilitySignature() {
+  const body = document.body;
+  const root = document.documentElement;
+  return {
+    readyState: document.readyState,
+    textLength: body ? (body.textContent || '').length : 0,
+    elementCount: body ? body.getElementsByTagName('*').length : 0,
+    scrollHeight: root ? root.scrollHeight : 0,
+    resourceCount: performance.getEntriesByType('resource').length,
+  };
+}
+
+async function _waitForCapturedPageSettle(tabId, captureId, timeoutMs) {
+  const maxWait = Math.max(600, Math.min(
+    NETWORK_CAPTURE_SETTLE_MAX_MS, Math.floor((Number(timeoutMs) || 15000) / 3)));
+  const deadline = Date.now() + maxWait;
+  let priorSignature = '';
+  let stableReads = 0;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const capture = _networkCaptures.get(String(captureId || ''));
+    if (!capture) return;
+    let signature = '';
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: Number(tabId) }, func: _pageStabilitySignature,
+      });
+      signature = JSON.stringify(results && results[0] && results[0].result || {});
+    } catch (_) {
+      stableReads = 0;
+      continue;
+    }
+    stableReads = signature === priorSignature ? stableReads + 1 : 0;
+    priorSignature = signature;
+    const idleFor = Date.now() - capture.lastActivityAt;
+    if (stableReads >= 2 && idleFor >= NETWORK_CAPTURE_IDLE_MS) return;
+  }
 }
 
 async function cmdWaitDownload(params) {
@@ -2746,7 +4943,9 @@ async function cmdWaitDownload(params) {
   const timeoutMs = Math.max(1000, Math.min(120000, Number(params.timeoutMs) || 60000));
   const current = await chrome.downloads.search({id: downloadId});
   if (!current.length) throw new Error(`Download ${downloadId} not found`);
-  if (current[0].state === 'complete') return current[0];
+  if (current[0].state === 'complete') {
+    return {...current[0], location: 'device_downloads', clientId: CLIENT_ID};
+  }
   if (current[0].state === 'interrupted') throw new Error(current[0].error || 'Download interrupted');
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -2758,7 +4957,10 @@ async function cmdWaitDownload(params) {
       if (delta.state.current === 'complete') {
         clearTimeout(timer); chrome.downloads.onChanged.removeListener(listener);
         const rows = await chrome.downloads.search({id: downloadId});
-        resolve(rows[0] || {id: downloadId, state: 'complete'});
+        resolve({
+          ...(rows[0] || {id: downloadId, state: 'complete'}),
+          location: 'device_downloads', clientId: CLIENT_ID,
+        });
       } else if (delta.state.current === 'interrupted') {
         clearTimeout(timer); chrome.downloads.onChanged.removeListener(listener);
         reject(new Error('Download interrupted'));
@@ -2784,7 +4986,38 @@ async function cmdNotify(params) {
 // ══════════════════════════════════════════
 
 function isProtectedUrl(url) {
-  return /^(chrome|edge|chrome-extension|moz-extension|about|file|view-source|chrome-search|devtools):/.test(url);
+  return /^(chrome|edge|chrome-extension|moz-extension|about|file|view-source|chrome-search|devtools):/i
+    .test(String(url || '').trim());
+}
+
+function _monotonicNowMs() {
+  if (typeof performance !== 'undefined' && performance
+      && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function _urlForDiagnostic(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return `${parsed.protocol || 'unknown:'}[redacted]`;
+    }
+    const hasCapabilityParts = (
+      parsed.username || parsed.password || parsed.pathname !== '/'
+      || parsed.search || parsed.hash);
+    return `${parsed.protocol}//${parsed.host}/${hasCapabilityParts ? '…' : ''}`;
+  } catch (_) {
+    return '[invalid-url]';
+  }
+}
+
+function _textForDiagnostic(value) {
+  return String(value && value.message || value || '')
+    .replace(/https?:\/\/[^\s'"<>\\]+/gi, (url) => _urlForDiagnostic(url))
+    .replace(/[\r\n\t]+/g, ' ')
+    .slice(0, 240);
 }
 
 // Binary assets that Chrome downloads (instead of rendering) when a tab

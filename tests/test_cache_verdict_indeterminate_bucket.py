@@ -174,8 +174,8 @@ class TestRecordedBucketIsDecoupledFromReturnValue:
         that is the ONLY way to reach the indeterminate branch, because
         compaction is what exempts a round from every break gate.
         """
-        from lib.tasks_pkg.cache_tracking import _detect as det
-        from lib.tasks_pkg.cache_tracking import notify_compaction
+        import lib.tasks_pkg.cache_tracking._detect as det
+        from lib.tasks_pkg.cache_tracking._roi import notify_compaction
 
         seen = []
         real_emit = det._emit_round_record
@@ -189,13 +189,13 @@ class TestRecordedBucketIsDecoupledFromReturnValue:
         conv = f'conv-indet-{id(rounds)}'
         for i, (read, write) in enumerate(rounds, start=1):
             if i in compact_before:
-                notify_compaction(conv)
+                notify_compaction(conv, user_id=1)
             usage = {'prompt_tokens': 1000, 'completion_tokens': 10,
                      'cache_read_input_tokens': read,
                      'cache_creation_input_tokens': write}
             det.detect_cache_break(
                 conv, [{'role': 'user', 'content': 'x'}],
-                None, 'claude-opus-5', usage)
+                None, 'claude-opus-5', usage, user_id=1)
         return seen
 
     def test_a_compacted_zero_read_rebuild_is_counted_not_filed_as_no_break(

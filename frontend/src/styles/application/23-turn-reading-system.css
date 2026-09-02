@@ -1,0 +1,1234 @@
+/*
+ * Turn reading system.
+ *
+ * Responsibility: define the hierarchy, rhythm, disclosure affordances and
+ * stable-paint behavior of ConversationSurface turns. The retained renderer
+ * owns markup; this late application section deliberately overrides legacy
+ * card chrome without changing tool, error or provenance semantics.
+ */
+
+.conversation-surface {
+  --turn-rule: color-mix(in srgb, var(--border) 78%, transparent);
+  --turn-spine: color-mix(in srgb, var(--text-tertiary) 24%, transparent);
+  --turn-marker: color-mix(in srgb, var(--text-tertiary) 62%, var(--bg-primary));
+  --turn-process-surface: color-mix(in srgb, var(--bg-secondary) 62%, transparent);
+  --turn-process-hover: color-mix(in srgb, var(--bg-hover) 70%, transparent);
+  --turn-answer-marker: var(--accent);
+}
+
+[data-theme="tofu"] .conversation-surface {
+  --turn-rule: #e1d8c7;
+  --turn-spine: #d8cdbb;
+  --turn-marker: #978c78;
+  --turn-process-surface: rgba(244, 239, 229, .64);
+  --turn-process-hover: rgba(229, 222, 206, .7);
+  --turn-answer-marker: #b66f43;
+}
+
+.conversation-surface :is(summary, button) {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* One calm reading column: compact identity at the left, prose on the page. */
+.conversation-surface .conversation-turn.message {
+  grid-template-columns: 34px minmax(0, 1fr) var(--rail-w);
+  column-gap: 13px;
+  margin-bottom: 38px;
+  overflow: visible;
+}
+
+.conversation-surface .conversation-turn-avatar.message-avatar {
+  width: 34px;
+  height: 34px;
+  margin-top: 0;
+  opacity: .9;
+}
+
+.conversation-surface .conversation-turn-avatar.message-avatar :is(img, svg) {
+  max-width: 32px;
+  max-height: 32px;
+}
+
+.conversation-surface .conversation-turn-content.message-content {
+  overflow: visible;
+}
+
+.conversation-surface .conversation-turn-header.message-header {
+  justify-content: flex-start;
+  min-height: 20px;
+  margin: 0 0 9px;
+  gap: 7px;
+  line-height: 1.25;
+}
+
+.conversation-surface .message-role {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 660;
+  letter-spacing: .006em;
+}
+
+.conversation-surface .message-time {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .015em;
+  white-space: nowrap;
+}
+
+.conversation-surface .message-time::before {
+  width: 2px;
+  height: 2px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+  opacity: .56;
+}
+
+.conversation-surface .conversation-turn-blocks {
+  overflow: visible;
+}
+
+.conversation-surface .conversation-turn-blocks > .conversation-block {
+  margin: 0 0 7px;
+}
+
+.conversation-surface .conversation-turn-blocks > .conversation-block:last-child {
+  margin-bottom: 0;
+}
+
+/*
+ * Signature execution spine. It only appears when a turn contains process
+ * evidence; a plain question/answer remains clean prose. Per-block line
+ * segments stop at the final marker instead of running beside a long answer.
+ */
+.conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+  > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+) {
+  position: relative;
+  padding-left: 22px;
+}
+
+.conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+  > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+) > .conversation-block {
+  position: relative;
+}
+
+.conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+  > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+) > .conversation-block::after {
+  position: absolute;
+  z-index: 0;
+  top: -8px;
+  bottom: -8px;
+  left: -15px;
+  width: 1px;
+  background: var(--turn-spine);
+  content: "";
+  pointer-events: none;
+}
+
+.conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+  > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+) > .conversation-block:first-child::after {
+  top: 10px;
+}
+
+.conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+  > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+) > .conversation-block:last-child::after {
+  bottom: auto;
+  height: 10px;
+}
+
+.conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+  > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+) > .conversation-block::before {
+  position: absolute;
+  z-index: 1;
+  top: 8px;
+  left: -18px;
+  width: 7px;
+  height: 7px;
+  border: 2px solid var(--bg-primary);
+  border-radius: 50%;
+  background: var(--turn-marker);
+  box-sizing: border-box;
+  content: "";
+  pointer-events: none;
+}
+
+.conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+  > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+) > .conversation-block--text {
+  margin-top: 14px;
+}
+
+.conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+  > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+) > .conversation-block--text::before {
+  top: 7px;
+  left: -19px;
+  width: 9px;
+  height: 9px;
+  border-width: 3px;
+  background: var(--turn-answer-marker);
+}
+
+.conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content {
+  font-size: 15.25px;
+  line-height: 1.74;
+  letter-spacing: .002em;
+}
+
+/*
+ * Reasoning is inspectable process evidence, not a competing answer card —
+ * and per-round reasoning is rarely opened, so a stack of full bordered
+ * cards reads as visual noise (the same "too huge" verdict the retained
+ * timeline's .seg-thinking already settled). Render it as a slim muted
+ * one-liner disclosure: no card chrome, secondary label, full opacity only
+ * while the reasoning is actually streaming. (2026-08-27 owner readability
+ * recalibration: the previous .58-opacity header + 11.5px tertiary label
+ * crossed from "quiet" into "hard to read".)
+ */
+.conversation-surface .thinking-block {
+  margin: 2px 0 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.conversation-surface .thinking-header {
+  min-height: 28px;
+  padding: 3px 0;
+  gap: 6px;
+  background: transparent;
+  box-sizing: border-box;
+  opacity: .84;
+  transition: opacity .16s ease;
+}
+
+.conversation-surface .thinking-header:hover {
+  background: transparent;
+  opacity: 1;
+}
+
+.conversation-surface .thinking-block[data-state="active"] .thinking-header {
+  opacity: 1;
+}
+
+.conversation-surface .thinking-header:focus-visible,
+.conversation-surface .bilingual-header:focus-visible,
+.conversation-surface .conversation-tool > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.conversation-surface .thinking-state-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--text-tertiary) 70%, transparent);
+  border-radius: 50%;
+  background: transparent;
+}
+
+.conversation-surface .thinking-block[data-state="complete"] .thinking-state-dot {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--border));
+  background: color-mix(in srgb, var(--accent) 72%, var(--bg-primary));
+}
+
+.conversation-surface .thinking-block[data-state="active"] .thinking-state-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  animation: turn-thinking-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes turn-thinking-pulse {
+  0%, 100% { opacity: .62; transform: scale(.9); }
+  50% { opacity: 1; transform: scale(1.18); }
+}
+
+.conversation-surface .thinking-label {
+  color: var(--text-secondary);
+  font-family: var(--sans-body, var(--md-sans));
+  font-size: 12px;
+  font-weight: 550;
+  letter-spacing: .006em;
+}
+
+.conversation-surface .conversation-disclosure-chevron {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  opacity: .72;
+  transform: none;
+  transition: transform .16s ease, opacity .16s ease;
+}
+
+.conversation-surface :is(.thinking-block, .bilingual-block)[open] > summary .conversation-disclosure-chevron {
+  transform: rotate(180deg);
+}
+
+.conversation-surface .thinking-content,
+.conversation-surface .thinking-block[open] .thinking-content {
+  max-height: none;
+  overflow: visible;
+  transition: none;
+}
+
+.conversation-surface .thinking-block:not([open]) .thinking-content {
+  display: none;
+}
+
+.conversation-surface .thinking-text {
+  padding: 2px 0 8px 13px;
+  margin-left: 3px;
+  border-top: 0;
+  border-left: 1px solid var(--turn-spine);
+  color: color-mix(in srgb, var(--text-primary) 42%, var(--text-secondary));
+  font-family: var(--sans-body, var(--md-sans));
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.66;
+}
+
+.conversation-surface .thinking-text > :first-child {
+  margin-top: 2px;
+}
+
+/* Tool rounds share one restrained surface and never replay entrance effects. */
+.conversation-surface .conversation-block--tool .ptool-panel {
+  margin: 0;
+  animation: none;
+}
+
+.conversation-surface .conversation-block--tool .ptool-panel-header {
+  min-height: 24px;
+  padding: 0 3px 4px;
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  font-weight: 570;
+  letter-spacing: .012em;
+}
+
+.conversation-surface .conversation-block--tool .ptool-turn {
+  margin: 4px 0;
+  border: 1px solid var(--turn-rule);
+  border-radius: 8px;
+  background: var(--turn-process-surface);
+  box-shadow: none;
+}
+
+[data-theme="tofu"] .conversation-surface .conversation-block--tool .ptool-turn {
+  border-color: var(--turn-rule);
+  background: var(--turn-process-surface);
+  box-shadow: none;
+}
+
+.conversation-surface .conversation-block--tool .ptool-turn[data-batch-size="1"] > .ptool-turn-rno-solo {
+  display: none;
+}
+
+.conversation-surface .conversation-block--tool .ptool-line {
+  min-height: 34px;
+  padding: 6px 10px;
+  gap: 8px;
+  border-bottom-color: var(--turn-rule);
+  font-size: 12px;
+}
+
+.conversation-surface .conversation-block--tool .ptool-line:hover {
+  background: var(--turn-process-hover);
+}
+
+.conversation-surface .conversation-block--tool :is(
+  .ptool-badge-info,
+  .ptool-badge-ok,
+  .ptool-badge-err,
+  .ptool-badge-warn,
+  .ptool-badge-skip
+) {
+  border-width: 0;
+  border-radius: 5px;
+  box-shadow: none;
+  animation: none;
+}
+
+.conversation-surface .conversation-block--tool :is(.ptool-text, .ptool-cmd-label) {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.conversation-surface .conversation-tool {
+  border-color: var(--turn-rule);
+  border-radius: 8px;
+  background: var(--turn-process-surface);
+}
+
+.conversation-surface button.ptool-results-header,
+.conversation-surface button.eb-toggle,
+.conversation-surface button.ptool-cmd-toggle {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  touch-action: manipulation;
+}
+
+.conversation-surface .ptool-results-header[role="button"] {
+  border-bottom: 1px solid transparent;
+}
+
+.conversation-surface .ptool-results-header[role="button"]:focus-visible,
+.conversation-surface button.eb-toggle:focus-visible,
+.conversation-surface button.ptool-cmd-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.conversation-surface button.ptool-cmd-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.conversation-surface :is(.ptool-results-toggle, .eb-arrow) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform .16s ease;
+}
+
+.conversation-surface :is(.ptool-results-toggle, .eb-arrow) svg,
+.conversation-surface .ig-action-btn svg {
+  display: block;
+}
+
+.conversation-surface .ptool-results-block.expanded .ptool-results-toggle {
+  transform: rotate(180deg);
+}
+
+.conversation-surface .eb-section.eb-expanded .eb-arrow {
+  transform: rotate(90deg);
+}
+
+/* Durable activity reads as a log line, not a stack of colored banners. */
+.conversation-surface .conversation-block--activity-event {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.conversation-surface .activity-event {
+  position: relative;
+  display: block;
+  min-height: 29px;
+  padding: 5px 5px 5px 2px;
+  border-bottom: 1px solid color-mix(in srgb, var(--turn-rule) 70%, transparent);
+  border-radius: 0;
+  background: transparent;
+  box-sizing: border-box;
+}
+
+.conversation-surface :is(.activity-event--warning, .activity-event--error, .activity-event--failed) {
+  background: transparent;
+}
+
+.conversation-surface .activity-event__marker {
+  position: absolute;
+  z-index: 2;
+  top: 6px;
+  left: -22px;
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-primary);
+  box-shadow: 0 0 0 1px var(--turn-spine);
+  color: var(--text-tertiary);
+}
+
+.conversation-surface .activity-event__marker svg {
+  width: 12px;
+  height: 12px;
+}
+
+.conversation-surface :is(.activity-event--error, .activity-event--failed) .activity-event__marker {
+  background: var(--bg-primary);
+  color: var(--error-text);
+}
+
+.conversation-surface .activity-event--warning .activity-event__marker,
+.conversation-surface :is(.activity-event--switched, .activity-event--skipped, .activity-event--aborted) .activity-event__marker {
+  background: var(--bg-primary);
+  color: #b06d25;
+}
+
+.conversation-surface .activity-event--succeeded .activity-event__marker {
+  background: var(--bg-primary);
+  color: var(--s-done, #4f8151);
+}
+
+.conversation-surface .activity-event__summary {
+  font-size: 11.75px;
+  line-height: 1.45;
+}
+
+.conversation-surface .activity-event__chips {
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.conversation-surface .activity-event__duration {
+  min-width: 36px;
+  text-align: right;
+}
+
+.conversation-surface .activity-event__detail,
+.conversation-surface .activity-event__facts {
+  margin-top: 2px;
+  font-size: 10.5px;
+}
+
+/* Compaction is a durable context boundary, so it earns one quiet exception
+ * to the log-line treatment. The converging token rail carries the before /
+ * after accounting; accent chrome distinguishes it from failures. */
+.conversation-surface .activity-event--compaction {
+  margin: 6px 0;
+  padding: 9px 10px 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--turn-rule));
+  border-radius: 11px;
+  background:
+    linear-gradient(105deg,
+      color-mix(in srgb, var(--accent) 8%, var(--bg-primary)) 0%,
+      color-mix(in srgb, var(--accent) 2%, var(--bg-primary)) 74%);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 62%, transparent);
+}
+
+.conversation-surface .activity-event--compaction .activity-event__marker {
+  top: 10px;
+  background: var(--bg-primary);
+  color: color-mix(in srgb, var(--accent) 84%, var(--text-secondary));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 38%, var(--turn-spine));
+}
+
+.conversation-surface .activity-event--compaction .activity-event__summary {
+  color: var(--text-primary, var(--text));
+  font-size: 12.25px;
+  font-weight: 650;
+  letter-spacing: .003em;
+}
+
+.conversation-surface .activity-event--compaction .compaction-token-flow {
+  display: flex;
+  margin-top: 7px;
+}
+
+.conversation-surface .activity-event__compaction-open {
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--turn-rule));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  color: color-mix(in srgb, var(--accent) 76%, var(--text-secondary));
+  cursor: pointer;
+  font: 600 10px/1.2 var(--font-sans, sans-serif);
+  white-space: nowrap;
+}
+
+.conversation-surface .activity-event__compaction-open:hover {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--turn-rule));
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.conversation-surface .activity-event__compaction-open:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, white);
+  outline-offset: 2px;
+}
+
+.conversation-surface .activity-event--compaction.activity-event--failed {
+  border-color: color-mix(in srgb, #b06d25 28%, var(--turn-rule));
+  background: color-mix(in srgb, #b06d25 5%, var(--bg-primary));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, #b06d25 62%, transparent);
+}
+
+@media (max-width: 600px) {
+  .conversation-surface .activity-event--compaction .activity-event__line {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .conversation-surface .activity-event--compaction .activity-event__chips {
+    width: 100%;
+    margin-left: 0;
+  }
+  .conversation-surface .activity-event--compaction .compaction-token-flow {
+    flex-wrap: wrap;
+  }
+}
+
+.conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+  > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+) > .conversation-block--activity-event::before {
+  content: none;
+}
+
+.conversation-surface :is(.plan-card-icon, .msg-video-play) svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+.conversation-surface :is(
+  .conversation-turn-avatar,
+  .plan-decision-indicator-icon,
+  .ig-result-actions a,
+  .vertical-meta-icon,
+  .ig-path-icon,
+  .ig-ba-arrow,
+  .ptool-turn-chev,
+  .timer-poll-caret,
+  .timer-toggle,
+  .sw-tl-chev,
+  .sw-a-chevron,
+  .sw-chevron,
+  .finish-tag,
+  .cp-think
+) svg {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.conversation-surface :is(.vertical-meta-pill, .cp-think) {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.conversation-surface button.ptool-turn-head,
+.conversation-surface .timer-watcher-header[role="button"] {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  touch-action: manipulation;
+}
+
+.conversation-surface button.ptool-turn-head:focus-visible,
+.conversation-surface .timer-watcher-header[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.conversation-surface :is(.ptool-turn-chev, .timer-toggle) {
+  display: inline-flex;
+  transition: transform .16s ease;
+}
+
+.conversation-surface .ptool-turn.collapsed .ptool-turn-chev,
+.conversation-surface .timer-watcher-header[aria-expanded="false"] .timer-toggle {
+  transform: rotate(-90deg);
+}
+
+.conversation-surface .fc-chevron {
+  display: inline-flex;
+  transition: transform .16s ease;
+}
+
+.conversation-surface .conversation-file-changes[open] .fc-chevron {
+  transform: rotate(180deg);
+}
+
+/* File-changes summary joins the process family: one calm card riding the
+ * same spine marker as tool blocks, undo/redo tucked into a footer strip
+ * instead of an orphaned chip below. The [open] clamp lift also repairs the
+ * file list, which stayed invisible because only the retired .fc-expanded
+ * class raised max-height while the renderer drives native <details open>. */
+.conversation-surface .conversation-block--file-changes {
+  border: 1px solid var(--turn-rule);
+  border-radius: 8px;
+  background: var(--turn-process-surface);
+  box-shadow: none;
+}
+
+.conversation-surface .conversation-file-changes.file-changes-bar,
+.conversation-surface .conversation-file-changes.file-changes-bar:hover {
+  margin-top: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.conversation-surface .conversation-file-changes .fc-summary {
+  padding: 7px 10px;
+  border-radius: 7px;
+}
+
+.conversation-surface .conversation-file-changes .fc-summary:hover {
+  background: var(--turn-process-hover);
+}
+
+.conversation-surface .conversation-file-changes[open] .fc-details {
+  max-height: 400px;
+  padding: 2px 10px 8px;
+  border-top: 1px solid color-mix(in srgb, var(--turn-rule) 70%, transparent);
+}
+
+.conversation-surface .conversation-block--file-changes > .fc-actions {
+  margin-left: 0;
+  padding: 5px 10px 7px;
+  border-top: 1px solid color-mix(in srgb, var(--turn-rule) 70%, transparent);
+}
+
+.conversation-surface .conversation-block--file-changes > .fc-actions:empty {
+  display: none;
+}
+
+.conversation-surface .fc-undo-btn,
+.conversation-surface .fc-redo-btn {
+  padding: 3px 9px;
+  border: 1px solid var(--turn-rule);
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-secondary);
+  font-family: var(--sans-body, var(--md-sans));
+  font-size: 11px;
+  transition: background .15s ease, color .15s ease;
+}
+
+.conversation-surface .fc-undo-btn:hover,
+.conversation-surface .fc-redo-btn:hover {
+  border-color: var(--turn-rule);
+  background: var(--turn-process-hover);
+  box-shadow: none;
+  color: var(--text-primary);
+  transform: none;
+}
+
+.conversation-surface .msg-video-play svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* Live state is one quiet status line; character counts are implementation noise. */
+.conversation-surface .stream-status,
+.conversation-surface .stream-phase {
+  min-height: 28px;
+  margin: 0;
+  padding: 5px 3px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--sans-body, var(--md-sans));
+  font-size: 12.25px;
+  font-weight: 520;
+}
+
+.conversation-surface .stream-phase-counter {
+  display: none;
+}
+
+/* Error remains unmistakable, but it no longer owns the whole reading column. */
+.conversation-surface .error-block {
+  padding: 9px 11px;
+  border-width: 0 0 0 3px;
+  border-radius: 4px 7px 7px 4px;
+  box-shadow: none;
+}
+
+.conversation-surface .message .error-block {
+  margin: 2px 0 8px;
+}
+
+.conversation-surface .error-block-title {
+  margin-bottom: 4px;
+  font-size: 11.5px;
+  text-transform: none;
+  letter-spacing: .01em;
+}
+
+.conversation-surface .error-block-message {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Provenance and alternate-language content are tertiary disclosures. */
+.conversation-surface .turn-prov {
+  margin: 0 0 4px;
+  padding: 2px 3px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.conversation-surface .bilingual-block {
+  margin: 14px 0 0;
+  border: 0;
+  border-top: 1px solid var(--turn-rule);
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+[data-theme="tofu"] .conversation-surface :is(.bilingual-original, .bilingual-translated) {
+  border-color: var(--turn-rule);
+  background: transparent;
+}
+
+.conversation-surface .bilingual-header {
+  min-height: 34px;
+  padding: 6px 2px;
+  background: transparent;
+}
+
+.conversation-surface .bilingual-header:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.conversation-surface .bilingual-label {
+  font-size: 11.5px;
+  font-weight: 540;
+}
+
+.conversation-surface .bilingual-body .md-content {
+  padding: 6px 2px 4px 14px;
+  border-left: 1px solid var(--turn-rule);
+  color: var(--text-secondary);
+  font-size: 13px;
+  opacity: .9;
+}
+
+/* Controls form a single quiet shelf; metadata sits below it as plain facts. */
+.conversation-surface .conversation-turn-actions.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 10px;
+  padding-top: 5px;
+  opacity: .58;
+  transition: opacity .16s ease;
+}
+
+.conversation-surface .conversation-turn:hover .conversation-turn-actions,
+.conversation-surface .conversation-turn:focus-within .conversation-turn-actions {
+  opacity: 1;
+}
+
+.conversation-surface .msg-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-tertiary);
+  background: transparent;
+  font-family: var(--sans-body, var(--md-sans));
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: .01em;
+}
+
+.conversation-surface .msg-action-btn .msg-action-icon {
+  width: 13.5px;
+  height: 13.5px;
+  flex: 0 0 auto;
+  opacity: .82;
+}
+
+.conversation-surface .msg-action-btn:hover .msg-action-icon {
+  opacity: 1;
+}
+
+.conversation-surface .msg-action-btn:hover {
+  border-color: var(--turn-rule);
+  background: var(--turn-process-hover);
+  color: var(--text-primary);
+}
+
+.conversation-surface .msg-action-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.conversation-surface .conversation-action--delete {
+  margin-left: auto;
+}
+
+.conversation-surface .conversation-action--delete:hover {
+  border-color: color-mix(in srgb, var(--error-text, #ef4444) 34%, transparent);
+  background: color-mix(in srgb, var(--error-text, #ef4444) 9%, transparent);
+  color: var(--error-text, #ef4444);
+}
+
+/*
+ * Finish metadata is one quiet telemetry row of plain facts, not a second
+ * control shelf and not the legacy pill/box strip. Every tag shares one
+ * metrics baseline so icons, words and numbers align without wrap tricks.
+ */
+.conversation-surface .conversation-turn-footer.message-finish {
+  margin-top: 3px;
+  padding: 2px 0 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+  gap: 2px 9px;
+  color: var(--text-tertiary);
+  font-family: var(--sans-body, var(--md-sans));
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .01em;
+  opacity: .76;
+  transition: opacity .16s ease;
+}
+
+.conversation-surface .conversation-turn:hover .conversation-turn-footer,
+.conversation-surface .conversation-turn:focus-within .conversation-turn-footer {
+  opacity: 1;
+}
+
+.conversation-surface .conversation-turn-footer :is(
+  .finish-tag,
+  .token-tag,
+  .cost-tag,
+  .subscription-quota-tag
+) {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 500;
+  line-height: 1.5;
+  letter-spacing: inherit;
+  white-space: nowrap;
+}
+
+.conversation-surface .conversation-turn-footer .finish-tag.preset {
+  color: var(--text-secondary);
+  font-weight: 620;
+}
+
+.conversation-surface .conversation-turn-footer .finish-tag.ok {
+  color: var(--s-done, #4f8151);
+}
+
+.conversation-surface .conversation-turn-footer .finish-tag.warn {
+  color: var(--thinking-text, #b06d25);
+}
+
+.conversation-surface .conversation-turn-footer .finish-tag.err {
+  color: var(--error-text, #ef4444);
+}
+
+.conversation-surface .conversation-turn-footer .finish-tag.terminal-failure {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.conversation-surface .conversation-turn-footer .cost-tag {
+  color: var(--accent);
+  font-weight: 580;
+}
+
+.conversation-surface .conversation-turn-footer .cost-tag .cost-savings {
+  color: var(--s-done, #4f8151);
+  font-weight: 500;
+}
+
+/*
+ * The tofu theme's legacy Pixel HUD strip (2px box, gradient, drop shadow,
+ * oversized '·' separators, preset left-bar) is designed for the retained
+ * bubble; on the Surface footer it double-frames the telemetry row and its
+ * 14px separator glyph shoves an icon-only tag's block SVG onto a second
+ * line. Neutralize it inside the Surface only.
+ */
+[data-theme="tofu"] .conversation-surface .conversation-turn-footer :is(
+  .finish-tag,
+  .token-tag,
+  .cost-tag,
+  .subscription-quota-tag
+)::before {
+  content: none;
+}
+
+[data-theme="tofu"] .conversation-surface .conversation-turn-footer .finish-tag.preset {
+  padding-left: 0;
+  border-left: 0 !important;
+  background: transparent !important;
+  color: var(--text-secondary);
+  font-weight: 620;
+}
+
+[data-theme="tofu"] .conversation-surface .conversation-turn-footer .cost-tag {
+  color: #a67b52 !important;
+  font-weight: 580 !important;
+}
+
+/* User turns are compact notes; they deliberately do not grow an execution spine. */
+[data-theme="tofu"] .conversation-surface .message.user-msg .message-content {
+  padding: 11px 14px 10px;
+  border-color: var(--turn-rule);
+  border-radius: 10px;
+  background: #f4f0e7;
+  box-shadow: none;
+}
+
+.conversation-surface .message.user-msg .message-header {
+  margin-bottom: 6px;
+}
+
+.conversation-surface .message.user-msg .conversation-turn-blocks > .conversation-block {
+  margin-bottom: 5px;
+}
+
+.conversation-surface .message.user-msg .conversation-block--text > .md-content {
+  font-size: 14.5px;
+  line-height: 1.68;
+}
+
+.conversation-surface .message.user-msg .conversation-turn-actions {
+  margin-top: 5px;
+  padding-top: 2px;
+}
+
+@media (max-width: 720px) {
+  .conversation-surface .conversation-turn.message {
+    grid-template-columns: minmax(0, 1fr);
+    margin-bottom: 28px;
+  }
+
+  .conversation-surface .conversation-turn.message > .conversation-turn-content {
+    grid-column: 1;
+  }
+
+  .conversation-surface .conversation-turn-header.message-header {
+    min-height: 22px;
+    margin-bottom: 7px;
+  }
+
+  .conversation-surface .message-time {
+    font-size: 10px;
+  }
+
+  .conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+    > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+  ) {
+    padding-left: 18px;
+  }
+
+  .conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+    > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+  ) > .conversation-block::after {
+    left: -12px;
+  }
+
+  .conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+    > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+  ) > .conversation-block::before {
+    left: -15px;
+  }
+
+  .conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+    > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+  ) > .conversation-block--text::before {
+    left: -16px;
+  }
+
+  .conversation-surface .thinking-header {
+    min-height: 36px;
+  }
+
+  .conversation-surface .bilingual-header {
+    min-height: 44px;
+  }
+
+  .conversation-surface .thinking-text {
+    padding: 2px 0 8px 12px;
+    font-size: 13px;
+  }
+
+  .conversation-surface .conversation-turn-actions.message-actions {
+    flex-wrap: nowrap;
+    margin-right: -4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    opacity: 1;
+  }
+
+  .conversation-surface .conversation-turn-actions::-webkit-scrollbar {
+    display: none;
+  }
+
+  .conversation-surface .msg-action-btn,
+  [data-theme="tofu"] .conversation-surface .msg-action-btn {
+    min-height: 40px;
+    padding: 7px 10px;
+    flex: 0 0 auto;
+    font-size: 11px;
+  }
+
+  .conversation-surface .conversation-action--delete {
+    margin-left: 0;
+  }
+
+  [data-theme="tofu"] .conversation-surface .message.user-msg .message-content {
+    padding: 10px 12px 8px;
+    border-radius: 9px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conversation-surface .thinking-state-dot,
+  .conversation-surface .conversation-disclosure-chevron,
+  .conversation-surface .conversation-turn-actions,
+  .conversation-surface .thinking-header,
+  .conversation-surface .conversation-block--tool * {
+    animation: none !important;
+    transition-duration: .01ms !important;
+  }
+}
+/* ── Inline turn editor: in-place replacement for the detached edit prompt.
+ *   The turn keeps its shell (header/footer); blocks and per-turn actions
+ *   yield to the editing session until it saves or cancels. ── */
+.conversation-surface .conversation-turn[data-inline-editing] .conversation-turn-blocks,
+.conversation-surface .conversation-turn[data-inline-editing] .conversation-turn-actions {
+  display: none;
+}
+
+.conversation-surface .turn-inline-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 2px 0 4px;
+}
+
+.conversation-surface .turn-inline-editor-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 72px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+}
+
+.conversation-surface .turn-inline-editor-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.conversation-surface .turn-inline-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.conversation-surface .turn-inline-editor-hint {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.conversation-surface .turn-inline-editor-buttons {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.conversation-surface .turn-inline-editor-btn {
+  min-height: 32px;
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+
+.conversation-surface .turn-inline-editor-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.conversation-surface .turn-inline-editor-btn--resend {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+}
+
+.conversation-surface .turn-inline-editor-btn--resend:hover:not(:disabled) {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.conversation-surface .turn-inline-editor-btn--save {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.conversation-surface .turn-inline-editor-btn--save:hover:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+  filter: brightness(1.06);
+}
+
+.conversation-surface .turn-inline-editor-btn:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+.conversation-surface .turn-inline-editor[data-submitting="true"] {
+  opacity: .75;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conversation-surface .turn-inline-editor-btn {
+    transition-duration: .01ms !important;
+  }
+}

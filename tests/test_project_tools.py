@@ -14,7 +14,141 @@ from lib.project_mod.tools import (
     _is_catastrophic_delete,
     _is_destructive_command,
     _maybe_wrap_rm_with_trash,
+    execute_standalone_command,
+    parse_safe_directory_listing_command,
+    parse_safe_file_find_command,
+    tool_list_dir,
 )
+
+
+@pytest.mark.unit
+def test_plain_ls_parser_accepts_only_single_bounded_directory_reads():
+    assert parse_safe_directory_listing_command('ls') == {
+        'path': '.', 'show_hidden': False}
+    assert parse_safe_directory_listing_command('ls -lah src') == {
+        'path': 'src', 'show_hidden': True}
+    assert parse_safe_directory_listing_command('/bin/ls --color=auto -- lib') == {
+        'path': 'lib', 'show_hidden': False}
+    assert parse_safe_directory_listing_command("ls 'folder name'") == {
+        'path': 'folder name', 'show_hidden': False}
+    for command in (
+            'ls -R', 'ls ../outside', 'ls one two', 'ls | head',
+            'ls *.py', 'ls; touch changed', 'ls $HOME', 'ls # comment',
+            './ls', '/tmp/ls'):
+        assert parse_safe_directory_listing_command(command) is None
+
+
+@pytest.mark.unit
+def test_standalone_run_command_plain_ls_uses_bounded_directory_reader(tmp_path):
+    (tmp_path / 'sample.py').write_text('print(1)\n', encoding='utf-8')
+    (tmp_path / 'pkg').mkdir()
+    result = execute_standalone_command(
+        'run_command', {'command': 'ls -lh .'}, working_dir=str(tmp_path))
+    assert result.startswith('Directory: .')
+    assert 'sample.py' in result and 'pkg/' in result
+
+    file_result = execute_standalone_command(
+        'run_command', {'command': 'ls sample.py'},
+        working_dir=str(tmp_path))
+    assert 'sample.py' in file_result.splitlines()
+    assert '[exit code: 0]' in file_result
+
+
+@pytest.mark.unit
+def test_standalone_ls_fast_path_keeps_shell_visible_entries(tmp_path):
+    (tmp_path / 'node_modules').mkdir()
+    (tmp_path / '.hidden.txt').write_text('hidden', encoding='utf-8')
+    (tmp_path / 'target.txt').write_text('target', encoding='utf-8')
+    (tmp_path / 'link.txt').symlink_to(tmp_path / 'target.txt')
+
+    normal = execute_standalone_command(
+        'run_command', {'command': 'ls .'}, working_dir=str(tmp_path))
+    assert 'node_modules/' in normal
+    assert 'link.txt [symlink]' in normal
+    assert '.hidden.txt' not in normal
+
+    hidden = execute_standalone_command(
+        'run_command', {'command': 'ls -a .'}, working_dir=str(tmp_path))
+    assert '.hidden.txt' in hidden
+
+
+@pytest.mark.unit
+def test_list_dir_backend_reports_bounded_scan(monkeypatch, tmp_path):
+    import lib.project_mod.read_tools as read_tools
+    for index in range(8):
+        (tmp_path / f'{index}.txt').write_text('x', encoding='utf-8')
+    monkeypatch.setattr(read_tools, '_LIST_DIR_SCAN_LIMIT', 3)
+    monkeypatch.setattr(read_tools, '_LIST_DIR_ENTRY_LIMIT', 2)
+    result = tool_list_dir(str(tmp_path), '.', shell_compatible=True)
+    assert 'listing truncated' in result
+    assert 'returned 2' in result
+
+    monkeypatch.setattr(read_tools, '_LIST_DIR_SCAN_LIMIT', 20)
+    monkeypatch.setattr(read_tools, '_LIST_DIR_ENTRY_LIMIT', 20)
+    monkeypatch.setattr(read_tools, '_LIST_DIR_OUTPUT_CHAR_LIMIT', 8)
+    char_bounded = tool_list_dir(
+        str(tmp_path), '.', shell_compatible=True)
+    assert 'listing truncated' in char_bounded
+    assert 'returned 0' in char_bounded
+
+
+@pytest.mark.unit
+def test_safe_find_parser_accepts_only_index_compatible_read_shapes():
+    assert parse_safe_file_find_command(
+        "find . -type f -name '*.py'") == {
+            'path': '.', 'pattern': '*.py', 'case_sensitive': True,
+            'max_results': 500,
+        }
+    assert parse_safe_file_find_command(
+        'find src -iname "*.PY" -type f -print') == {
+            'path': 'src', 'pattern': '*.PY', 'case_sensitive': False,
+            'max_results': 500,
+        }
+    assert parse_safe_file_find_command('find -type f') == {
+        'path': '.', 'pattern': '*', 'case_sensitive': False,
+        'max_results': 500,
+    }
+    for command in (
+            "find . -name '*.py'", "find . -type d -name '*.py'",
+            "find . -type f -name 'src/*.py'", 'find ../outside -type f',
+            "find . -type f -exec echo {} \\;", 'find . -type f | head',
+            'find . -type f -delete', 'find . -type f -name *.py',
+            'find . -type f # comment', './find . -type f',
+            '/tmp/find . -type f'):
+        assert parse_safe_file_find_command(command) is None
+
+
+@pytest.mark.unit
+def test_standalone_find_fast_path_preserves_hidden_ignore_and_case(tmp_path):
+    (tmp_path / 'node_modules').mkdir()
+    for rel in ('lower.py', 'UPPER.PY', '.hidden.py',
+                'node_modules/dependency.py'):
+        (tmp_path / rel).write_text('x', encoding='utf-8')
+
+    sensitive = execute_standalone_command(
+        'run_command',
+        {'command': "find . -type f -name '*.py'"},
+        working_dir=str(tmp_path),
+    )
+    assert './lower.py' in sensitive
+    assert './.hidden.py' in sensitive
+    assert './node_modules/dependency.py' in sensitive
+    assert 'UPPER.PY' not in sensitive
+
+    insensitive = execute_standalone_command(
+        'run_command',
+        {'command': "find . -type f -iname '*.py'"},
+        working_dir=str(tmp_path),
+    )
+    assert './UPPER.PY' in insensitive
+
+    file_operand = execute_standalone_command(
+        'run_command',
+        {'command': 'find lower.py -type f'},
+        working_dir=str(tmp_path),
+    )
+    assert 'lower.py' in file_operand.splitlines()
+    assert '[exit code: 0]' in file_operand
 
 # ═══════════════════════════════════════════════════════════
 #  _clean_command_output — progress bar compression
@@ -189,6 +323,39 @@ class TestExtractWriteTargets:
         t = _extract_write_targets("sed -i 's/old/new/g' file1.py file2.py")
         assert t is not None and 'file1.py' in t and 'file2.py' in t
 
+    # gawk -i inplace (in-place extension) — mirrors sed -i coverage
+    def test_gawk_i_inplace(self):
+        t = _extract_write_targets("gawk -i inplace '{print $1}' file1.txt file2.txt")
+        assert t is not None and 'file1.txt' in t and 'file2.txt' in t
+
+    def test_gawk_i_inplace_glued(self):
+        t = _extract_write_targets("gawk -iinplace '{print $1}' data.csv")
+        assert t is not None and 'data.csv' in t
+
+    def test_gawk_include_inplace(self):
+        t = _extract_write_targets("gawk --include=inplace '{print}' a.log")
+        assert t is not None and 'a.log' in t
+
+    def test_gawk_inplace_skips_program_and_options(self):
+        # -F / -v consume values; the program text and assignments are
+        # not file targets. Junk over-inclusion is acceptable, missing
+        # the real file is not.
+        t = _extract_write_targets(
+            "gawk -F: -v thresh=9 -i inplace '{print $2}' thresh=8 /etc/passwd")
+        assert t is not None and '/etc/passwd' in t
+
+    def test_gawk_inplace_after_pipeline_isolated(self):
+        t = _extract_write_targets(
+            "cat in.txt | gawk -i inplace '{print}' out.txt")
+        assert t is not None and 'out.txt' in t
+
+    # awk without -i inplace is a pure filter (read-only)
+    def test_awk_without_inplace_readonly(self):
+        assert _extract_write_targets("awk '{print $1}' input.txt") == set()
+
+    def test_awk_pipeline_readonly(self):
+        assert _extract_write_targets("ps aux | awk '{print $2}'") == set()
+
     # Opaque commands → None
     def test_python_opaque(self):
         assert _extract_write_targets('python3 script.py') is None
@@ -239,6 +406,15 @@ class TestIsDestructiveCommand:
 
     def test_sed_without_i_not_destructive(self):
         assert not _is_destructive_command("sed 's/foo/bar/g' input.txt")
+
+    def test_gawk_i_inplace_destructive(self):
+        assert _is_destructive_command("gawk -i inplace '{print}' file.txt")
+
+    def test_gawk_iinplace_glued_destructive(self):
+        assert _is_destructive_command("gawk -iinplace '{print}' file.txt")
+
+    def test_awk_plain_not_destructive(self):
+        assert not _is_destructive_command("awk '{print $1}' file.txt")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -339,6 +515,33 @@ class TestRmTrashWrap:
         import lib.project_mod.run_command as t
         monkeypatch.setattr(t, '_RM_TRASH_ENABLED', False)
         assert t._maybe_wrap_rm_with_trash('rm -rf build/', '/work/ws') == 'rm -rf build/'
+    def test_trash_anchors_at_git_root(self, tmp_path):
+        # A sticky `cd` into a subdirectory must NOT drop the undo bin
+        # inside the source tree — the bin belongs to the workspace root
+        # (regression: lib/tasks_pkg/.tofu_trash held 161K of stale copies).
+        repo = tmp_path / 'repo'
+        sub = repo / 'lib' / 'pkg'
+        sub.mkdir(parents=True)
+        (repo / '.git').mkdir()
+        out = _maybe_wrap_rm_with_trash('rm -rf build/', str(sub))
+        assert f'{repo}/.tofu_trash' in out
+        assert f'{sub}/.tofu_trash' not in out
+
+    def test_trash_anchors_via_worktree_gitfile(self, tmp_path):
+        # A git WORKTREE has a `.git` FILE (not a dir) — still a root.
+        repo = tmp_path / 'wt'
+        sub = repo / 'sub'
+        sub.mkdir(parents=True)
+        (repo / '.git').write_text('gitdir: /elsewhere\n')
+        out = _maybe_wrap_rm_with_trash('rm -rf build/', str(sub))
+        assert f'{repo}/.tofu_trash' in out
+
+    def test_trash_falls_back_to_cwd_without_git(self, tmp_path):
+        # Un-versioned workspace: historical cwd-anchored behaviour kept.
+        d = tmp_path / 'noworkspace'
+        d.mkdir()
+        out = _maybe_wrap_rm_with_trash('rm -rf build/', str(d))
+        assert f'{d}/.tofu_trash' in out
 
 
 # ═══════════════════════════════════════════════════════════

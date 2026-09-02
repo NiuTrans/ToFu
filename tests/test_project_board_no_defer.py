@@ -23,24 +23,13 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
 
 
 @pytest.fixture(autouse=True)
-def _clean(flask_app):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_tasks')
-        db.execute('DELETE FROM project_events')
-        db.commit()
-    yield
+def _sidecar_authority(chat_sidecar):
+    return chat_sidecar
 
 
 @pytest.fixture(autouse=True)
@@ -64,10 +53,10 @@ def test_board_tool_defer_unknown(flask_app):
     unknown tool now (the branch was deleted)."""
     from lib.conversations.project_board import execute_board_tool, post_task
     with flask_app.app_context():
-        tid = post_task('/nd/tool', 'cA', 'epic')['id']
+        tid = post_task('/nd/tool', 'cA', 'epic', user_id=TEST_OWNER_USER_ID)['id']
         out = execute_board_tool(
             'project_board_defer', {'task_id': tid},
-            current_conv_id='cAGENT', project_path='/nd/tool')
+            current_conv_id='cAGENT', project_path='/nd/tool', user_id=TEST_OWNER_USER_ID)
     assert "Unknown board tool 'project_board_defer'" in out
 
 
@@ -75,7 +64,7 @@ def test_defer_tool_not_in_schema_or_name_set():
     """The model-facing tool schema must NOT advertise project_board_defer —
     this is the root-cause guard: an agent can no longer re-shelve an epic a
     human just reopened."""
-    from lib.tools import BOARD_TOOLS, BOARD_TOOL_NAMES
+    from lib.tools.conversation import BOARD_TOOLS, BOARD_TOOL_NAMES
     names = [t['function']['name'] for t in BOARD_TOOLS]
     assert 'project_board_defer' not in names
     assert 'project_board_defer' not in BOARD_TOOL_NAMES
@@ -95,8 +84,8 @@ def test_registry_does_not_route_defer():
 def test_render_board_block_has_no_parked_lane(flask_app):
     from lib.conversations.project_board import post_task, render_board_block
     with flask_app.app_context():
-        post_task('/nd/render', 'cA', 'live epic')
-        block = render_board_block('/nd/render', current_conv_id='cREADER')
+        post_task('/nd/render', 'cA', 'live epic', user_id=TEST_OWNER_USER_ID)
+        block = render_board_block('/nd/render', current_conv_id='cREADER', user_id=TEST_OWNER_USER_ID)
     assert 'Parked' not in block and 'deferred' not in block
     assert 'Open (unclaimed' in block
 
@@ -105,8 +94,8 @@ def test_open_epic_is_dispatchable(flask_app):
     from lib.conversations.project_board import post_task
     from lib.conversations.project_dispatch import select_dispatchable
     with flask_app.app_context():
-        tid = post_task('/nd/disp', 'cPOSTER', 'epic')['id']
-        cands = [c['id'] for c in select_dispatchable('/nd/disp')]
+        tid = post_task('/nd/disp', 'cPOSTER', 'epic', user_id=TEST_OWNER_USER_ID)['id']
+        cands = [c['id'] for c in select_dispatchable('/nd/disp', user_id=TEST_OWNER_USER_ID)]
     assert tid in cands, 'an open epic must be dispatchable (pushed forward)'
 
 
@@ -118,17 +107,18 @@ def test_legacy_deferred_row_reopens_and_dispatches(flask_app):
     """A row left in the retired 'deferred' status (e.g. written by an old
     build before the migration ran) must NOT stay shelved: reopen_task revives
     it and it dispatches. Simulates the legacy row directly (defer_task gone)."""
-    from lib.conversations.project_board import post_task, read_board, reopen_task
+    from lib.conversations.project_board import read_board, reopen_task
     from lib.conversations.project_dispatch import select_dispatchable
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    from tests._seed import seed_board_task
     with flask_app.app_context():
-        tid = post_task('/nd/legacy', 'cA', 'stale parked epic')['id']
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute("UPDATE project_tasks SET status='deferred' WHERE id=?", (tid,))
-        db.commit()
-        res = reopen_task('/nd/legacy', 'cHUMAN', tid)
-        board = read_board('/nd/legacy')
-        cands = [c['id'] for c in select_dispatchable('/nd/legacy')]
+        tid = 'pt_legacy_deferred'
+        seed_board_task(
+            tid, '/nd/legacy', user_id=TEST_OWNER_USER_ID,
+            title='stale parked epic', status='deferred',
+            created_by_conv='cA')
+        res = reopen_task('/nd/legacy', 'cHUMAN', tid, user_id=TEST_OWNER_USER_ID)
+        board = read_board('/nd/legacy', user_id=TEST_OWNER_USER_ID)
+        cands = [c['id'] for c in select_dispatchable('/nd/legacy', user_id=TEST_OWNER_USER_ID)]
     assert res['ok'] and res['from'] == 'deferred'
     assert board['tasks'][0]['status'] == 'open'
     assert tid in cands

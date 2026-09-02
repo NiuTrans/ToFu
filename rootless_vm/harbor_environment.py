@@ -24,9 +24,15 @@ from harbor.environments.capabilities import EnvironmentCapabilities
 from harbor.models.task.config import NetworkMode as HarborNetworkMode, TaskOS
 
 from .image_cache import PreparedImageCache, PreparedImageResult, PreparedImageSpec
-from .image_store import resolve_image_store
+from .dockerfile import dockerfile_base_image as _dockerfile_base_image
+from .image_store import resolve_image_store_entry
 from .qemu import QemuRuntime
-from .session import NetworkMode, SandboxSession, SandboxSpec
+from .session import (
+    LoopbackServiceForward,
+    NetworkMode,
+    SandboxSession,
+    SandboxSpec,
+)
 
 
 _CONTAINER = "task-env"
@@ -39,6 +45,50 @@ def _checked_file(value: str | os.PathLike[str], label: str) -> Path:
     if not path.is_file():
         raise ValueError(f"{label} must be a regular file: {path}")
     return path
+
+
+def _loopback_service_forwards(
+    value: Any,
+) -> tuple[LoopbackServiceForward, ...]:
+    """Parse harness-owned control-plane routes from Harbor configuration."""
+
+    if value in (None, ""):
+        return ()
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "loopback_service_forwards must be valid JSON"
+            ) from exc
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("loopback_service_forwards must be a list")
+    result: list[LoopbackServiceForward] = []
+    for index, raw in enumerate(value):
+        if isinstance(raw, LoopbackServiceForward):
+            service = raw
+        elif isinstance(raw, dict):
+            try:
+                service = LoopbackServiceForward(**raw)
+            except TypeError as exc:
+                raise ValueError(
+                    f"loopback service {index} has unsupported fields"
+                ) from exc
+        else:
+            raise ValueError(f"loopback service {index} must be an object")
+        service.validate()
+        result.append(service)
+    services = tuple(result)
+    # Reuse SandboxSpec's complete uniqueness/count validation rather than
+    # maintaining a second route policy in the Harbor adapter.
+    names = [service.name for service in services]
+    endpoints = [(service.guest_host, service.guest_port) for service in services]
+    if len(services) > 8 or len(set(names)) != len(names) \
+            or len(set(endpoints)) != len(endpoints):
+        raise ValueError(
+            "loopback services must have unique names/endpoints and at most 8 entries"
+        )
+    return services
 
 
 def _verify_sha256(path: Path, expected: str | None, label: str) -> None:
@@ -102,11 +152,21 @@ def _container_timed_command(command: str, timeout: float) -> str:
     )
 
 
-def _guest_network_setup_command(public_network: bool) -> str:
-    """Render fail-closed guest networking while retaining local loopback."""
+def _verifier_exec_timeout(
+    default_timeout: float, task_timeout: float, multiplier: float
+) -> float:
+    """Return a guest watchdog that leaves time for phase diagnostics."""
+
+    phase_timeout = task_timeout * multiplier
+    diagnostic_margin = min(30.0, max(2.0, phase_timeout * 0.01))
+    return min(default_timeout, max(1.0, phase_timeout - diagnostic_margin))
+
+
+def _guest_network_setup_command(restricted_network: bool) -> str:
+    """Configure a NIC only when QEMU owns at least one explicit guestfwd."""
 
     loopback = "ip link set lo up"
-    if not public_network:
+    if not restricted_network:
         return loopback
     return (
         loopback
@@ -278,7 +338,9 @@ class RootlessQemuEnvironment(BaseEnvironment):
         transfer_limit_bytes: int = _DEFAULT_TRANSFER_LIMIT,
         egress_max_bytes: int = 4 * 1024**3,
         egress_global_concurrency: int = 16,
+        loopback_service_forwards: Any = None,
         default_exec_timeout_sec: float = 900.0,
+        verifier_timeout_multiplier: float = 1.0,
         virtual_time_shift: int | None = None,
         **kwargs: Any,
     ) -> None:
@@ -286,6 +348,10 @@ class RootlessQemuEnvironment(BaseEnvironment):
         _verify_sha256(self._base_disk, base_disk_sha256, "base_disk")
         if (image_iso is None) == (image_store is None):
             raise ValueError("provide exactly one of image_iso or image_store")
+        self._image_store_value = (
+            Path(image_store).expanduser() if image_store is not None else None
+        )
+        self._build_context: Path | None = None
         self._runtime = QemuRuntime.discover(qemu=qemu_path, qemu_img=qemu_img_path)
         if self._runtime.qemu_img is None:
             raise RuntimeError("qemu-img is required for disposable VM overlays")
@@ -318,9 +384,16 @@ class RootlessQemuEnvironment(BaseEnvironment):
             raise ValueError(
                 "egress_global_concurrency must be between 1 and 128"
             )
+        self._loopback_services = _loopback_service_forwards(
+            loopback_service_forwards
+        )
         self._default_exec_timeout_sec = float(default_exec_timeout_sec)
         if not 1 <= self._default_exec_timeout_sec <= 86400:
             raise ValueError("default_exec_timeout_sec must be between 1 and 86400")
+        self._verifier_timeout_multiplier = float(verifier_timeout_multiplier)
+        if not 1 <= self._verifier_timeout_multiplier <= 64:
+            raise ValueError("verifier_timeout_multiplier must be between 1 and 64")
+        self._task_verifier_timeout_sec: float | None = None
         self._virtual_time_shift = (
             int(virtual_time_shift) if virtual_time_shift is not None else None
         )
@@ -339,12 +412,17 @@ class RootlessQemuEnvironment(BaseEnvironment):
                 )
             task_reference = self.task_env_config.docker_image
             if not task_reference:
-                raise ValueError("image_store requires a task Docker image")
+                task_reference = _dockerfile_base_image(self.environment_dir)
+                self._build_context = self.environment_dir
             (
                 self._image_iso,
                 self._image_iso_sha256,
                 self._image_reference_override,
-            ) = resolve_image_store(image_store, task_reference)
+                image_metadata,
+            ) = resolve_image_store_entry(image_store, task_reference)
+            verifier_timeout = image_metadata.get("verifier_timeout_sec")
+            if isinstance(verifier_timeout, (int, float)):
+                self._task_verifier_timeout_sec = float(verifier_timeout)
         else:
             assert image_iso is not None
             self._image_iso = _checked_file(image_iso, "image_iso")
@@ -359,6 +437,14 @@ class RootlessQemuEnvironment(BaseEnvironment):
     def capabilities(self) -> EnvironmentCapabilities:
         return EnvironmentCapabilities(disable_internet=True, mounted=False)
 
+    def loopback_service_url(self, name: str) -> str:
+        """Return a guest-visible URL for one predeclared host control service."""
+
+        for service in self._loopback_services:
+            if service.name == name:
+                return f"http://{service.guest_host}:{service.guest_port}"
+        raise KeyError(f"loopback service is not configured: {name}")
+
     @classmethod
     def preflight(cls) -> None:
         # Custom CLI kwargs are not available to Harbor's class-level preflight.
@@ -371,7 +457,17 @@ class RootlessQemuEnvironment(BaseEnvironment):
         if self.task_env_config.os != TaskOS.LINUX:
             raise ValueError("rootless-qemu currently supports Linux tasks only")
         if not self.task_env_config.docker_image:
-            raise ValueError("rootless-qemu requires [environment].docker_image")
+            if self._image_store_value is None:
+                raise ValueError(
+                    "rootless-qemu requires docker_image, or image_store plus "
+                    "environment/Dockerfile"
+                )
+            _dockerfile_base_image(self.environment_dir)
+            if self._prepared_cache_root is None:
+                raise ValueError(
+                    "Dockerfile tasks require prepared_cache_root so the build "
+                    "runs once inside an isolated guest"
+                )
         if self.extra_docker_compose_paths:
             raise ValueError("rootless-qemu does not support Docker Compose")
         if self.network_policy.network_mode not in {
@@ -453,6 +549,33 @@ class RootlessQemuEnvironment(BaseEnvironment):
         result.update(self._network_environment())
         return result
 
+    def _command_network_environment(self, *, is_verifier: bool) -> dict[str, str]:
+        """Use bounded fail-fast retries for replaceable verifier attempts.
+
+        Agent package installs retain the generous retry budget because losing
+        them can discard substantial model work. A verifier infrastructure
+        failure is classified and retried as a whole trial, so allowing one
+        dead package tunnel to consume the entire phase only reduces accuracy
+        and throughput.
+        """
+
+        result = self._network_environment()
+        if is_verifier:
+            result.update(
+                {
+                    # uv otherwise permits up to 50 simultaneous downloads.
+                    # Across many disposable VMs that burst can overwhelm a
+                    # required corporate parent proxy even though the outer
+                    # egress gate bounds tunnels globally.
+                    "UV_CONCURRENT_DOWNLOADS": "2",
+                    "UV_HTTP_RETRIES": "20",
+                    "UV_HTTP_TIMEOUT": "60",
+                    "PIP_RETRIES": "20",
+                    "PIP_DEFAULT_TIMEOUT": "60",
+                }
+            )
+        return result
+
     async def start(self, force_build: bool) -> None:
         if force_build:
             raise ValueError("rootless-qemu consumes a pre-fetched image and cannot build")
@@ -470,6 +593,7 @@ class RootlessQemuEnvironment(BaseEnvironment):
         storage_mb = int(self._effective_storage_mb or 10 * 1024)
         disk_gib = max(2, (storage_mb + 1023) // 1024)
         public_network = self.network_policy.network_mode == HarborNetworkMode.PUBLIC
+        restricted_network = public_network or bool(self._loopback_services)
         base_disk = self._base_disk
         read_only_images = (self._image_iso,)
         needs_payload_setup = True
@@ -481,6 +605,7 @@ class RootlessQemuEnvironment(BaseEnvironment):
                 payload_iso=self._image_iso,
                 task_image=image_reference,
                 python_runtime_image=self._python_runtime_image,
+                build_context=self._build_context,
                 expected_base_disk_sha256=self._base_disk_sha256,
                 expected_payload_iso_sha256=self._image_iso_sha256,
                 memory_mib=memory_mib,
@@ -514,6 +639,7 @@ class RootlessQemuEnvironment(BaseEnvironment):
                 disk_virtual_size_gib=disk_gib,
                 read_only_images=read_only_images,
                 network=NetworkMode.PUBLIC if public_network else NetworkMode.NONE,
+                loopback_services=self._loopback_services,
                 egress_max_bytes=self._egress_max_bytes,
                 egress_global_concurrency=self._egress_global_concurrency,
                 virtual_time_shift=self._virtual_time_shift,
@@ -527,7 +653,7 @@ class RootlessQemuEnvironment(BaseEnvironment):
             # even loopback DOWN.  A no-network VM shares only that loopback;
             # a public VM additionally receives the one restricted QEMU NIC.
             configured = await self._outer_exec(
-                _guest_network_setup_command(public_network), timeout=30.0
+                _guest_network_setup_command(restricted_network), timeout=30.0
             )
             if configured.return_code != 0:
                 raise RuntimeError(
@@ -537,6 +663,13 @@ class RootlessQemuEnvironment(BaseEnvironment):
             if public_network:
                 if session.egress_proxy is None or not session.egress_proxy.is_alive():
                     raise RuntimeError("restricted host egress proxy exited during startup")
+            if any(
+                not relay.is_alive()
+                for _service, relay in session.loopback_service_relays
+            ):
+                raise RuntimeError(
+                    "restricted host loopback service relay exited during startup"
+                )
             if needs_payload_setup:
                 setup = " && ".join(
                     [
@@ -573,7 +706,8 @@ class RootlessQemuEnvironment(BaseEnvironment):
                     memory_mb=self.task_env_config.memory_mb,
                     # A network=none VM has no emulated NIC at all. Sharing its
                     # guest namespace preserves localhost without opening an
-                    # egress path; public VMs share the restricted QEMU NIC.
+                    # egress path. Public or control-plane-enabled VMs share
+                    # the QEMU NIC whose only routes are explicit guestfwds.
                     private_network_namespace=False,
                 )
                 guest_config = f"/var/tmp/rootless-config-{uuid.uuid4().hex}.json"
@@ -611,7 +745,7 @@ class RootlessQemuEnvironment(BaseEnvironment):
                     "run",
                     "-d",
                     "--network",
-                    "bridge" if public_network else "none",
+                    "bridge" if restricted_network else "none",
                     "--name",
                     _CONTAINER,
                     "--pids-limit",
@@ -747,12 +881,26 @@ class RootlessQemuEnvironment(BaseEnvironment):
         user: str | int | None = None,
     ) -> ExecResult:
         resolved_user = self._resolve_user(user)
+        is_verifier = "/tests/" in command and "/logs/verifier/" in command
         timeout = float(
             timeout_sec
             if timeout_sec is not None
             else self._default_exec_timeout_sec
         )
-        is_verifier = "/tests/" in command and "/logs/verifier/" in command
+        if (
+            timeout_sec is None
+            and is_verifier
+            and self._task_verifier_timeout_sec is not None
+        ):
+            # Harbor owns the authoritative phase deadline but does not pass it
+            # to verifier environment.exec(). End the guest process shortly
+            # before that deadline so QGA returns, verifier logs can be copied,
+            # and asyncio cancellation cannot strand a 14,400-second worker.
+            timeout = _verifier_exec_timeout(
+                timeout,
+                self._task_verifier_timeout_sec,
+                self._verifier_timeout_multiplier,
+            )
         omit_guest_timeout = self._virtual_time_shift is not None and is_verifier
         container_command = (
             command if omit_guest_timeout else _container_timed_command(command, timeout)
@@ -765,7 +913,9 @@ class RootlessQemuEnvironment(BaseEnvironment):
             if cwd is not None:
                 argv += ["--cwd", cwd]
             command_env = self._merge_env(env) or {}
-            command_env.update(self._network_environment())
+            command_env.update(
+                self._command_network_environment(is_verifier=is_verifier)
+            )
             for key, value in sorted(command_env.items()):
                 argv += ["--env", f"{key}={value}"]
             # Harbor's Docker main-service adapter deliberately uses Bash:
@@ -780,7 +930,9 @@ class RootlessQemuEnvironment(BaseEnvironment):
             if cwd is not None:
                 argv += ["--workdir", cwd]
             command_env = self._merge_env(env) or {}
-            command_env.update(self._network_environment())
+            command_env.update(
+                self._command_network_environment(is_verifier=is_verifier)
+            )
             for key, value in sorted(command_env.items()):
                 argv += ["--env", f"{key}={value}"]
             argv += [_CONTAINER, "/bin/sh", "-lc", container_command]

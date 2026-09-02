@@ -10,7 +10,9 @@ from lib.browser.advanced import ADVANCED_BROWSER_TOOL_NAMES
 from lib.log import get_logger
 from lib.tasks_pkg.executor import _finalize_tool_round, tool_registry
 from lib.tasks_pkg.manager import append_event
-from lib.tools import BROWSER_TOOL_NAMES, IMAGE_GEN_TOOL_NAMES, PAGE_PREVIEW_TOOL_NAMES
+from lib.tools.browser import BROWSER_TOOL_NAMES, PAGE_PREVIEW_TOOL_NAMES
+from lib.tools.image_gen import IMAGE_GEN_TOOL_NAMES
+from lib.tools.result_envelope import tool_result_error
 
 logger = get_logger(__name__)
 
@@ -18,12 +20,17 @@ logger = get_logger(__name__)
 # ── Browser tool badge registry ─────────────────────────────────────────
 
 def _badge_list_tabs(meta, fn_name, display_text, chars, is_screenshot):
+    if tool_result_error(display_text) is not None:
+        meta['badge'] = 'error'
+        return
     m = re.search(r'\((\d+) total\)', display_text[:200])
     meta['badge'] = f'{m.group(1)} tabs' if m else 'tabs'
     meta['snippet'] = display_text[:150].replace('\n', ' ')
 
 def _badge_read_tab(meta, fn_name, display_text, chars, is_screenshot):
-    meta['badge'] = f'{chars:,} chars'
+    meta['badge'] = (
+        'error' if tool_result_error(display_text) is not None
+        else f'{chars:,} chars')
 
 def _badge_ok_or_error(label_ok, label_fail='error'):
     """Factory for simple ok/fail badge handlers.
@@ -32,6 +39,9 @@ def _badge_ok_or_error(label_ok, label_fail='error'):
     renders the per-tool SVG icon and colors the badge by ok/fail class.
     """
     def _handler(meta, fn_name, display_text, chars, is_screenshot):
+        if tool_result_error(display_text) is not None:
+            meta['badge'] = label_fail
+            return
         # Failure envelopes seen across the browser handlers:
         #   'Error …'                       (bridge/validation errors)
         #   '<fn_name> failed: …'           (advanced tools, dispatch.py)
@@ -50,20 +60,31 @@ def _badge_ok_or_error(label_ok, label_fail='error'):
 def _badge_screenshot(meta, fn_name, display_text, chars, is_screenshot):
     meta['badge'] = 'captured' if is_screenshot else 'failed'
 
+def _badge_devtools(meta, fn_name, display_text, chars, is_screenshot):
+    if (tool_result_error(display_text) is not None
+            or re.match(r'(?i)\s*error\b', display_text[:80])):
+        meta['badge'] = 'error'
+        return
+    match = re.match(r'DevTools ([a-z_]+)', display_text[:100])
+    meta['badge'] = match.group(1).replace('_', ' ') if match else 'devtools'
+
 def _badge_regex_count(pattern, unit, fallback='done'):
     """Factory for badges that extract a count via regex."""
     def _handler(meta, fn_name, display_text, chars, is_screenshot):
+        if tool_result_error(display_text) is not None:
+            meta['badge'] = 'error'
+            return
         m = re.search(pattern, display_text[:200])
         meta['badge'] = f'{m.group(1)} {unit}'.strip() if m else fallback
     return _handler
 
 _BROWSER_BADGE_DISPATCH = {
     'browser_list_tabs':                _badge_list_tabs,
-    'browser_read_tab':                 _badge_read_tab,
     'browser_read_page':                _badge_read_tab,
+    'browser_research_page':            _badge_read_tab,
+    'browser_devtools':                 _badge_devtools,
     'browser_execute_js':               _badge_ok_or_error('ok', 'error'),
     'browser_screenshot':               _badge_screenshot,
-    'browser_get_interactive_elements': _badge_regex_count(r'(\d+) shown', 'elements'),
     'browser_click':                    _badge_ok_or_error('clicked', 'failed'),
     'browser_type':                     _badge_ok_or_error('typed', 'failed'),
     'browser_press_key':                _badge_ok_or_error('sent', 'failed'),
@@ -71,7 +92,6 @@ _BROWSER_BADGE_DISPATCH = {
     'browser_fill_form':                _badge_ok_or_error('filled', 'failed'),
     'browser_get_cookies':              _badge_regex_count(r'(\d+) cookies?', 'cookies'),
     'browser_get_history':              _badge_regex_count(r'(\d+) results?', 'results'),
-    'browser_create_tab':               _badge_ok_or_error('opened', 'failed'),
     'browser_close_tab':                _badge_ok_or_error('closed', 'failed'),
     'browser_navigate':                 _badge_ok_or_error('done', 'failed'),
     'browser_preview_page':             _badge_screenshot,
@@ -81,7 +101,7 @@ _BROWSER_BADGE_DISPATCH = {
 @tool_registry.tool_set(BROWSER_TOOL_NAMES | ADVANCED_BROWSER_TOOL_NAMES | PAGE_PREVIEW_TOOL_NAMES, category='browser',
                         description='Execute a browser automation tool')
 def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
-    from lib.browser import execute_browser_tool
+    from lib.browser.dispatch import execute_browser_tool
     browser_client_id = cfg.get('browserClientId') or None
     if fn_name in PAGE_PREVIEW_TOOL_NAMES:
         # Server-side render — never touches the extension queue, but needs
@@ -92,7 +112,8 @@ def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         fn_args['_projectPath'] = project_path
     tool_content = execute_browser_tool(
         fn_name, fn_args, client_id=browser_client_id,
-        user_id=str(task.get('_userId') or ''))
+        owner_user_id=str(task.get('_userId') or ''))
+    typed_error = tool_result_error(tool_content)
 
     is_screenshot = isinstance(tool_content, dict) and tool_content.get('__screenshot__')
     if is_screenshot:
@@ -102,13 +123,12 @@ def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     else:
         display_text = tool_content if isinstance(tool_content, str) else json.dumps(tool_content, ensure_ascii=False)
 
-    # browser_read_tab / browser_read_page (text-bearing modes): apply the
-    # LLM content filter. elements/app_state modes return structured lists,
-    # not page prose — filtering those would mangle them.
-    is_read_tab = ((fn_name == 'browser_read_tab'
-                    or (fn_name == 'browser_read_page'
-                        and (fn_args or {}).get('mode', 'auto') in ('auto', 'text')))
+    # Text-bearing read_page modes receive the LLM content filter. Structured
+    # elements/app_state responses must remain machine-readable.
+    is_read_tab = (fn_name == 'browser_read_page'
+                   and (fn_args or {}).get('mode', 'auto') in ('auto', 'text')
                    and isinstance(tool_content, str)
+                   and typed_error is None
                    and not tool_content.startswith('Error'))
     if is_read_tab and len(display_text) > 1500:
         tab_url = ''
@@ -118,6 +138,8 @@ def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 break
         user_question = task.get('lastUserQuery', '')
         try:
+            from lib.search_runtime import ensure_search_runtime
+            ensure_search_runtime()
             from tofu_search.fetch.content_filter import IRRELEVANT_SENTINEL, filter_web_content
             raw_chars = len(display_text)
             filtered = filter_web_content(
@@ -155,7 +177,9 @@ def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     badge_fn = _BROWSER_BADGE_DISPATCH.get(fn_name)
     if badge_fn is not None:
         badge_fn(meta, fn_name, display_text, chars, is_screenshot)
-    _finalize_tool_round(task, rn, round_entry, [meta])
+    _finalize_tool_round(
+        task, rn, round_entry, [meta],
+        status='error' if typed_error is not None else 'done')
     return tc_id, tool_content, is_read_tab
 
 

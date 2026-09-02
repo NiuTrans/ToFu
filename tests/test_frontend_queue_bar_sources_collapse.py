@@ -4,7 +4,7 @@
 WHY
 ---
 Two UX gaps in the input-bar pending queue (``renderPendingQueueUI`` in
-``static/js/main/main_send_pipeline.js``):
+``runtime/sections/main/main_send_pipeline.js``):
 
 1.  A flooded queue grew upward and buried the chat transcript. The bar had
     a max-height + internal scroll, but no way to fold it away. Now the
@@ -42,11 +42,12 @@ import subprocess
 import tempfile
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 SEND_JS = os.path.join(ROOT, 'static', 'js', 'main', 'main_send_pipeline.js')
 CSS = os.path.join(ROOT, 'static', 'styles.css')
 

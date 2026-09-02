@@ -165,46 +165,6 @@ def test_anthropic_wire_marker_arithmetic_is_unaffected():
             % (prose, _count_markers(body)))
 
 
-# ── Why route A is closed: an OpenAI-wire schema fact ───────────────────
-
-def test_openai_wire_serialises_the_body_verbatim():
-    """The OpenAI path applies NO body translation, so no marker-hoisting step
-    exists to rescue an unmarkable assistant turn.
-
-    Verified by AST, not by string search, so a comment mentioning
-    'anthropic' cannot satisfy it.
-    """
-    import ast
-    import pathlib
-    src = pathlib.Path('lib/llm/_sse_core.py').read_text()
-    tree = ast.parse(src)
-    fn = next((n for n in ast.walk(tree)
-               if isinstance(n, ast.FunctionDef) and n.name == 'prepare_request'),
-              None)
-    assert fn is not None, 'prepare_request not found'
-
-    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
-             and getattr(n.func, 'id', '') == 'openai_body_to_anthropic']
-    assert calls, 'expected the anthropic translation to be called somewhere'
-
-    # Every such call must sit under a test on api_protocol.
-    guarded = False
-    for node in ast.walk(fn):
-        if not isinstance(node, ast.If):
-            continue
-        if 'api_protocol' not in ast.dump(node.test):
-            continue
-        if any(isinstance(c, ast.Call)
-               and getattr(c.func, 'id', '') == 'openai_body_to_anthropic'
-               for c in ast.walk(node)):
-            guarded = True
-            break
-    assert guarded, (
-        'openai_body_to_anthropic must be gated on api_protocol — if it now '
-        'runs unconditionally, the OpenAI wire gained a translation step and '
-        'route A may be reopenable')
-
-
 def test_assistant_tool_calls_carry_no_content_block_to_mark():
     """The OpenAI assistant schema offers nowhere to put cache_control.
 

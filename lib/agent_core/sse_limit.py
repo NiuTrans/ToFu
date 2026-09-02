@@ -22,7 +22,9 @@ Contract (token-based, so each stream owns a distinct slot):
   * ``release(token)`` → free the slot; MUST run in a ``finally`` so a
     dropped / aborted / errored stream can never leak a slot. The eager
     release is the normal path; the lease TTL is the crash-only backstop.
-  * cap via ``TOFU_MAX_SSE_PER_PRINCIPAL`` (default 12); ``0`` disables.
+  * cap via the launch-probed ``TOFU_MAX_SSE_PER_PRINCIPAL`` budget. Invalid,
+    zero, and huge environment values fall back/clamp instead of disabling the
+    resident-connection ceiling.
 
 The lease TTL for a stream slot is generous (streams can last up to the
 2h SSE ceiling) — the heartbeat that keeps a living stream's slot alive is
@@ -36,6 +38,7 @@ import os
 import uuid
 
 from lib.log import get_logger
+from runtime_guards import resolve_resource_budget
 
 logger = get_logger(__name__)
 
@@ -43,18 +46,15 @@ _KIND = 'sse'
 
 
 def _default_cap() -> int:
-    """Concurrent-SSE ceiling per principal, from env with a safe default.
+    """Launch-probed concurrent-SSE ceiling per principal.
 
-    Default 12 comfortably covers a power user with several tabs + a
-    reconnecting mobile client, while still bounding an abuser to a dozen
-    streams. Override via ``TOFU_MAX_SSE_PER_PRINCIPAL``; ``0`` disables.
+    The 8 GiB reference machine resolves to 12: enough for several tabs and
+    direct API streams without allowing proxy/socket residency to grow with
+    reconnect history. Distributed deployments resolve to 64; all overrides
+    retain the hard 128-stream ceiling.
     """
-    try:
-        n = int(os.environ.get('TOFU_MAX_SSE_PER_PRINCIPAL', '') or '12')
-    except (ValueError, TypeError) as e:
-        logger.debug('[SSELimit] TOFU_MAX_SSE_PER_PRINCIPAL parse failed, using default: %s', e)
-        n = 12
-    return max(0, n)
+    return resolve_resource_budget(
+        'TOFU_MAX_SSE_PER_PRINCIPAL', minimum=1, maximum=128)
 
 
 def _slot_ttl() -> float:
@@ -64,22 +64,30 @@ def _slot_ttl() -> float:
     the SSE loop refreshes via ``refresh(token)`` on each keepalive, so a
     living stream never expires. Default 300s (5 min) — a stream idle longer
     than that with no keepalive is treated as dead and its slot reclaims.
-    Override via ``TOFU_SSE_SLOT_TTL``.
+    Override via ``TOFU_SSE_SLOT_TTL``; values are clamped to 45..3600 so a
+    normal 15-second heartbeat can refresh before expiry and crash residue
+    still has a finite reclaim window.
     """
     try:
         n = float(os.environ.get('TOFU_SSE_SLOT_TTL', '') or '300')
     except (ValueError, TypeError) as e:
         logger.debug('[SSELimit] TOFU_SSE_SLOT_TTL parse failed, using default: %s', e)
         n = 300.0
-    return max(1.0, n)
+    return max(45.0, min(3600.0, n))
 
 
 class SSELimiter:
     """Bounds concurrent open SSE streams per principal via the shared store."""
 
     def __init__(self, cap: int | None = None):
-        self.cap = _default_cap() if cap is None else max(0, cap)
+        self.cap = (
+            _default_cap() if cap is None else max(1, min(128, int(cap))))
         self._ttl = _slot_ttl()
+
+    @property
+    def refresh_interval_seconds(self) -> float:
+        """Maximum wait between living-stream lease refreshes."""
+        return max(1.0, min(60.0, self._ttl / 3.0))
 
     def _store(self):
         from lib.runtime_state_store import get_store
@@ -89,15 +97,11 @@ class SSELimiter:
         """Atomically reserve a stream slot for ``principal``.
 
         Returns an opaque token (pass to :meth:`release` / :meth:`refresh`) on
-        success, or ``None`` when the principal is at capacity. When the cap is
-        disabled (``0``) a token is still returned so ``release`` is uniform.
+        success, or ``None`` when the principal is at capacity.
         """
         # Unique per-stream slot key under the principal's count prefix.
         prefix = f'{principal}::'
         slot_key = f'{prefix}{uuid.uuid4().hex}'
-        if self.cap <= 0:
-            self._store().acquire_lease(_KIND, slot_key, self._ttl)
-            return slot_key
         ok = self._store().acquire_slot(
             _KIND, slot_key, limit=self.cap, ttl=self._ttl, count_prefix=prefix)
         return slot_key if ok else None
@@ -112,12 +116,8 @@ class SSELimiter:
     def refresh(self, token: str) -> None:
         """Re-arm a held slot (SSE keepalive heartbeat) so a living stream's
         slot never expires. Re-acquiring the SAME member ZADD-refreshes its
-        deadline score (no double-count); under the disabled cap it's a lease
-        refresh."""
+        deadline score without double-counting."""
         if not token:
-            return
-        if self.cap <= 0:
-            self._store().refresh_lease(_KIND, token, self._ttl)
             return
         self._store().acquire_slot(_KIND, token, limit=self.cap, ttl=self._ttl,
                                    count_prefix=self._prefix_of(token))
@@ -125,9 +125,6 @@ class SSELimiter:
     def release(self, token: str) -> None:
         """Free a slot. Idempotent; safe on a None/empty token."""
         if not token:
-            return
-        if self.cap <= 0:
-            self._store().release_lease(_KIND, token)
             return
         self._store().release_slot(_KIND, token, self._prefix_of(token))
 

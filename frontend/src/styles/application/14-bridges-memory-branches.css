@@ -1,0 +1,1681 @@
+/* ═══════════════════════════════════════════
+   ★ Browser Bridge Modal & UI
+   ═══════════════════════════════════════════ */
+.browser-modal{max-width:540px}
+.browser-modal .modal-desc{color:var(--text-secondary,#888);font-size:13px;margin:0 0 16px}
+.browser-status-box{padding:12px 16px;border-radius:10px;margin-bottom:16px;background:rgba(56,189,248,0.06);border:1px solid rgba(56,189,248,0.15)}
+.browser-status-indicator{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600}
+.browser-status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.browser-status-dot.connected{background:#22c55e;box-shadow:0 0 6px rgba(34,197,94,0.5);animation:pulse 1.5s infinite}
+.browser-status-dot.disconnected{background:#888}
+.browser-status-text{color:var(--text-primary,#e0e0e0)}
+
+.browser-local-shortcut{padding:12px 16px;border-radius:10px;margin-bottom:16px;background:rgba(34,197,94,0.07);border:1px solid rgba(34,197,94,0.2)}
+.browser-local-shortcut strong{display:block;font-size:13px;color:var(--text-primary,#e0e0e0);margin-bottom:4px}
+.browser-local-shortcut p{font-size:12px;line-height:1.5;color:var(--text-secondary,#888);margin:0 0 8px}
+.browser-local-shortcut code{background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:4px;font-size:12px;font-family:'JetBrains Mono',monospace}
+.browser-local-shortcut code.copyable-url{position:relative;font-size:12px;color:#22c55e;transition:background-color .2s ease,box-shadow .2s ease,color .2s ease}
+.browser-local-shortcut code.copyable-url:hover{background:rgba(34,197,94,0.15);box-shadow:0 0 0 2px rgba(34,197,94,0.2)}
+.browser-local-shortcut code.copyable-url::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 6px);left:8px;font-size:11px;padding:3px 8px;border-radius:5px;background:#1e293b;color:#e2e8f0;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s}
+.browser-local-shortcut code.copyable-url:hover::after{opacity:1}
+.browser-local-shortcut code.copyable-url.copied{background:rgba(34,197,94,0.18);color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,0.25)}
+
+.browser-lna-warning{padding:12px 16px;border-radius:10px;margin:12px 0 0;background:rgba(245,158,11,0.07);border:1px solid rgba(245,158,11,0.25)}
+.browser-lna-warning strong{display:block;font-size:13px;color:#f59e0b;margin-bottom:4px}
+.browser-lna-warning p{font-size:12px;line-height:1.5;color:var(--text-secondary,#888);margin:0 0 8px}
+.browser-lna-warning code{background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:4px;font-size:12px;font-family:'JetBrains Mono',monospace}
+.browser-lna-warning code.copyable-url{position:relative;color:#f59e0b;transition:background-color .2s ease,box-shadow .2s ease,color .2s ease}
+.browser-lna-warning code.copyable-url:hover{background:rgba(245,158,11,0.15);box-shadow:0 0 0 2px rgba(245,158,11,0.2)}
+.browser-lna-warning code.copyable-url::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 6px);left:8px;font-size:11px;padding:3px 8px;border-radius:5px;background:#1e293b;color:#e2e8f0;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s}
+.browser-lna-warning code.copyable-url:hover::after{opacity:1}
+.browser-lna-warning code.copyable-url.copied{background:rgba(245,158,11,0.18);color:#f59e0b;box-shadow:0 0 0 2px rgba(245,158,11,0.25)}
+.browser-lna-path{font-size:12px;line-height:1.5;color:var(--text-secondary,#888);margin:8px 0 0}
+[data-theme="light"] .browser-local-shortcut{background:rgba(22,163,74,0.06);border-color:rgba(22,163,74,0.18)}
+[data-theme="light"] .browser-local-shortcut code.copyable-url{color:#16a34a}
+.browser-setup-steps{display:flex;flex-direction:column;gap:12px;margin-bottom:16px}
+.setup-step{display:flex;gap:12px;align-items:flex-start}
+.step-num{width:24px;height:24px;border-radius:50%;background:rgba(56,189,248,0.15);color:#38bdf8;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px}
+.step-content{flex:1;font-size:13px;line-height:1.5}
+.step-content strong{display:block;color:var(--text-primary,#e0e0e0);margin-bottom:2px}
+.step-content p strong{display:inline;margin-bottom:0}
+.step-content p{color:var(--text-secondary,#888);margin:0 0 6px}
+.step-content code{background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:4px;font-size:12px;font-family:'JetBrains Mono',monospace}
+.step-content code.copyable-url{transition:background-color .2s ease,box-shadow .2s ease,color .2s ease;color:#38bdf8}.step-content code.copyable-url:hover{background:rgba(56,189,248,0.15);box-shadow:0 0 0 2px rgba(56,189,248,0.2)}.step-content code.copyable-url::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);font-size:11px;padding:3px 8px;border-radius:5px;background:#1e293b;color:#e2e8f0;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s}.step-content code.copyable-url:hover::after{opacity:1}.step-content code.copyable-url.copied{background:rgba(34,197,94,0.15);color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,0.2)}.step-content code.copyable-url.copied::after{background:#166534;color:#bbf7d0}
+[data-theme="light"] .step-content code.copyable-url{color:#0284c7}[data-theme="light"] .step-content code.copyable-url:hover{background:rgba(2,132,199,0.1);box-shadow:0 0 0 2px rgba(2,132,199,0.15)}[data-theme="light"] .step-content code.copyable-url.copied{background:rgba(22,163,74,0.1);color:#16a34a}
+
+#browserToggle.active{background:rgba(56,189,248,0.15);color:#38bdf8;border-color:rgba(56,189,248,0.3)}
+
+[data-theme="light"] .browser-status-box{background:rgba(2,132,199,0.04);border-color:rgba(2,132,199,0.12)}
+[data-theme="light"] .step-num{background:rgba(2,132,199,0.1);color:#0284c7}
+[data-theme="light"] .step-content code{background:rgba(0,0,0,0.05)}
+[data-theme="light"] #browserToggle.active{background:rgba(2,132,199,0.1);color:#0284c7;border-color:rgba(2,132,199,0.25)}
+
+/* ── Desktop Agent toggle ── */
+#desktopToggle.active{background:rgba(168,85,247,0.15);color:#a855f7;border-color:rgba(168,85,247,0.3)}
+[data-theme="light"] #desktopToggle.active{background:rgba(126,34,206,0.1);color:#7e22ce;border-color:rgba(126,34,206,0.25)}
+
+/* ═══════════════════════════════════════════
+   ★ Local Control — merged browser + desktop surface
+   One toolbar entry, one modal, two capability rows.
+   ═══════════════════════════════════════════ */
+#localControlToggle.active{background:rgba(168,85,247,0.15);color:#a855f7;border-color:rgba(168,85,247,0.3)}
+[data-theme="light"] #localControlToggle.active{background:rgba(126,34,206,0.1);color:#7e22ce;border-color:rgba(126,34,206,0.25)}
+
+/* Wide layout: the two capabilities are peers, so they sit SIDE BY SIDE
+   (browser left / computer right) instead of forcing a vertical scan past
+   one card to reach the other. The base .modal cap (92vw) still bounds small
+   windows; the grid collapses to one column before the cards get cramped. */
+.local-modal{width:940px}
+.local-modal .modal-desc{color:var(--text-secondary,#888);font-size:13px;margin:0 0 18px}
+.lc-cols{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}
+.lc-cols .lc-cap{margin-bottom:0}
+@media(max-width:860px){.lc-cols{grid-template-columns:1fr}.lc-cols .lc-cap{margin-bottom:12px}}
+
+/* An <a class="btn …"> is still display:inline by default — and an inline
+   box's VERTICAL padding/border does not grow its line box, it PAINTS OVER
+   the lines above and below. Measured 2026-08-06: the agent-bundle CTA (an
+   anchor, unlike every <button> sibling, which is inline-block per UA style)
+   rendered its gold block straight across its own note paragraph. Any anchor
+   styled as a modal button gets the same box geometry a <button> would. */
+.modal a.btn{display:inline-flex;align-items:center;justify-content:center}
+.lc-cap-setup a.btn{margin:2px 0 10px}
+
+.lc-cap{border:1px solid var(--border,#2a2a35);border-radius:12px;padding:14px 16px;margin-bottom:12px;background:rgba(255,255,255,0.015)}
+.lc-cap-head{display:flex;align-items:center;gap:12px}
+.lc-cap-icon{display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:8px;background:rgba(168,85,247,0.12);color:#a855f7;flex-shrink:0}
+.lc-cap-text{flex:1;display:flex;flex-direction:column;gap:3px;min-width:0}
+.lc-cap-text strong{font-size:14px;color:var(--text-primary,#e8e8ed);font-weight:600}
+.lc-cap-status{display:flex;align-items:center;gap:6px;font-size:12px}
+.lc-status-text{color:var(--text-secondary,#9898a8)}
+
+/* Switch — reflects the REAL wire flag, one per capability. */
+.lc-switch{position:relative;width:40px;height:22px;border-radius:11px;border:none;flex-shrink:0;cursor:pointer;padding:0;background:var(--bg-active,#2a2a35);transition:background-color .18s ease}
+.lc-switch:hover{background:var(--bg-hover,#33333f)}
+.lc-switch.on{background:#a855f7}
+.lc-switch-knob{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .18s ease}
+.lc-switch.on .lc-switch-knob{transform:translateX(18px)}
+/* Cannot be operated yet: nothing is connected, so flipping it would grant
+   the AI zero tools. Visibly inert + cursor tells the truth before the click. */
+.lc-switch:disabled,.lc-switch.lc-switch-off{opacity:.4;cursor:not-allowed}
+.lc-switch:disabled:hover,.lc-switch.lc-switch-off:hover{background:var(--bg-active,#2a2a35)}
+/* ON while the bridge is down: the tool registry ships ZERO tools for it, so
+   it must not read as healthy. Deliberately NOT disabled — switching it OFF
+   stays available, since that is the action a worried user actually wants. */
+.lc-switch.lc-switch-stale{background:#f59e0b}
+.lc-switch.lc-switch-stale:hover{background:#fbbf24}
+.tool-badge.lc-badge-stale{background:#f59e0b;color:#1a1a21}
+[data-theme="light"] .lc-switch.lc-switch-stale{background:#b45309}
+[data-theme="light"] .lc-switch.lc-switch-stale:hover{background:#92400e}
+[data-theme="light"] .tool-badge.lc-badge-stale{background:#b45309;color:#fff}
+/* One short line per row: what the AI actually gets. Users are granting real
+   access to their browser session and machine; the row title alone is not
+   enough to make that call. */
+.lc-cap-about{font-size:12px;line-height:1.55;color:var(--text-secondary,#9898a8);margin:10px 0 0;padding-left:44px}
+
+/* The single detected-state instruction. Empty (and therefore invisible)
+   whenever the capability is already connected. */
+.lc-cap-setup:empty{display:none}
+.lc-cap-setup{margin:12px 0 0;padding-top:12px;border-top:1px dashed var(--border,#2a2a35)}
+/* Both instruction forms in this panel share ONE typography declaration.
+   .lc-substep used to set only `margin`, which looked correct by ACCIDENT:
+   each of its two uses wraps an <a class="lc-dl-link">, and that class sets
+   its own font-size — a child was covering for the parent. The first bare
+   text node placed inside it (the open-the-page result note) inherited the
+   modal's default size and rendered visibly larger than the .lc-step lines
+   beside it. One rule is what stops that recurring; .lc-substep differs in
+   MARGIN only, so only margin is overridden below. */
+.lc-step,.lc-substep{font-size:12.5px;line-height:1.6;color:var(--text-secondary,#9898a8);margin:0 0 8px}
+.lc-warn{color:#e8a13c;border:1px solid rgba(232,161,60,0.35);border-radius:6px;padding:6px 9px;background:rgba(232,161,60,0.07)}
+.lc-await{color:var(--text-secondary,#9898a8);border-left:2px solid rgba(168,85,247,0.4);padding-left:9px}
+.lc-role{border:1px solid var(--border,rgba(148,148,168,0.18));border-radius:8px;padding:10px 12px;margin:0 0 10px}
+.lc-role-primary{border-color:rgba(168,85,247,0.45);background:rgba(168,85,247,0.05)}
+.lc-role-head{font-size:13px;font-weight:600;color:var(--text-primary,#e6e6ea);margin:0 0 7px}
+.lc-role-note{font-weight:400;font-size:12.5px;color:var(--text-secondary,#9898a8);line-height:1.6}
+.lc-copy{position:relative;display:block;padding:8px 10px;border-radius:6px;word-break:break-all;font-size:12px;font-family:'JetBrains Mono',monospace;color:#a855f7;cursor:pointer;border:1px dashed rgba(168,85,247,0.4);background:rgba(168,85,247,0.06);transition:background-color .2s ease,box-shadow .2s ease}
+.lc-copy:hover{background:rgba(168,85,247,0.14);box-shadow:0 0 0 2px rgba(168,85,247,0.18)}
+.lc-copy::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 6px);left:8px;font-size:11px;padding:3px 8px;border-radius:5px;background:#1e293b;color:#e2e8f0;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s}
+.lc-copy:hover::after{opacity:1}
+.lc-copy.copied{background:rgba(34,197,94,0.16);color:#22c55e;border-color:rgba(34,197,94,0.4)}
+/* ── Pairing code display (P2) ──
+   The 6-digit code is the panel's primary action, so it gets the biggest
+   type in the dialog: wide-tracked JetBrains Mono digits next to a copy
+   button, inside a purple-tinted card that matches .lc-copy's family. */
+.lc-pair-code{display:flex;align-items:center;gap:12px;margin:2px 0 6px;padding:10px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.4);background:rgba(168,85,247,0.07)}
+.lc-pair-digits{font-family:'JetBrains Mono',monospace;font-size:26px;font-weight:700;letter-spacing:.18em;color:#c084fc;user-select:all}
+[data-theme="light"] .lc-pair-digits{color:#7e22ce}
+.lc-perm-note{font-size:11.5px;line-height:1.55;color:var(--text-tertiary,#6a6a7a);margin:10px 0 0}
+.lc-substep{margin:0 0 10px}
+.lc-dl-link{font-size:12.5px;color:#a855f7;text-decoration:none;border-bottom:1px solid rgba(168,85,247,0.35);padding-bottom:1px;transition:color .15s ease,border-color .15s ease}
+.lc-dl-link:hover{color:#c084fc;border-bottom-color:#c084fc}
+[data-theme="light"] .lc-dl-link{color:#7e22ce;border-bottom-color:rgba(126,34,206,0.35)}
+[data-theme="light"] .lc-dl-link:hover{color:#6b21a8;border-bottom-color:#6b21a8}
+/* ── Per-platform download links ──
+   The row can legitimately hold TWO links: on macOS the CPU architecture is
+   unknowable from the UA (Apple Silicon reports "Intel Mac OS X"), so when the
+   browser will not disclose it the backend returns both DMGs rather than guess
+   — a wrong guess is a download that refuses to open. Hence a wrapping flex row
+   instead of a single inline link.
+   The direct links are the PRIMARY action, so they are buttons rather than
+   underlined text; the releases-page link below them keeps the plain
+   .lc-dl-link treatment as the secondary "all downloads" escape hatch. */
+.lc-dl-row{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 8px}
+.lc-dl-direct{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;font-size:12.5px;font-weight:600;border:1px solid rgba(168,85,247,0.45);border-bottom:1px solid rgba(168,85,247,0.45);border-radius:7px;background:rgba(168,85,247,0.10);white-space:nowrap;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
+.lc-dl-direct:hover{background:rgba(168,85,247,0.20);border-color:#c084fc;border-bottom-color:#c084fc}
+[data-theme="light"] .lc-dl-direct{border-color:rgba(126,34,206,0.4);border-bottom-color:rgba(126,34,206,0.4);background:rgba(126,34,206,0.08)}
+[data-theme="light"] .lc-dl-direct:hover{background:rgba(126,34,206,0.16);border-color:#6b21a8;border-bottom-color:#6b21a8}
+/* Provenance badge: marks an artifact served by THIS server (mirrored or
+   built on-box) rather than fetched from the public GitHub network — the
+   fast/reliable path, so it gets the success hue, not the accent one. */
+.lc-dl-hosted{display:inline-flex;align-items:center;padding:3px 8px;font-size:10.5px;font-weight:600;border-radius:999px;white-space:nowrap;color:#15803d;border:1px solid rgba(22,163,74,0.35);background:rgba(22,163,74,0.08)}
+[data-theme="light"] .lc-dl-hosted{color:#166534;border-color:rgba(21,128,61,0.4);background:rgba(21,128,61,0.10)}
+/* ── Collapsed secondary download (the full desktop app in the remote
+   branch). The agent is the primary action there; the full installer must
+   stay one line away WITHOUT competing for attention — a zero-JS <details>
+   keeps it discoverable but out of the numbered flow. */
+.lc-details{margin:0 0 8px;font-size:12.5px;color:var(--text-secondary,#9898a8)}
+.lc-details>summary{cursor:pointer;list-style:none;outline:none}
+.lc-details>summary::-webkit-details-marker{display:none}
+.lc-details>summary::before{content:'▸\00a0';color:#a855f7}
+.lc-details[open]>summary::before{content:'▾\00a0'}
+.lc-details>summary:hover{color:var(--text-primary,#e8e8f0)}
+.lc-details[open]>summary{margin-bottom:6px}
+
+/* ── Agent diagnostics inbox (2026-08-06) — the paste box for the
+   agent's「复制诊断信息」bundle; monospace because it is log text. */
+.lc-diag-text{width:100%;box-sizing:border-box;font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.5;color:var(--text-primary,#e6e6ea);background:rgba(0,0,0,0.18);border:1px solid var(--border,rgba(148,148,168,0.18));border-radius:8px;padding:8px 10px;margin:2px 0 8px;resize:vertical}
+[data-theme="light"] .lc-diag-text{background:rgba(0,0,0,0.03)}
+.lc-diag-actions{display:flex;align-items:center;gap:10px}
+.lc-diag-hint{font-size:12px;color:var(--text-secondary,#9898a8)}
+.lc-diag-recent{margin:8px 0 0}
+.lc-diag-recent-head{font-size:11px;font-weight:600;color:var(--text-tertiary,#6a6a7a);margin:0 0 3px}
+.lc-diag-row{font-size:11.5px;color:var(--text-secondary,#9898a8);line-height:1.6}
+
+[data-theme="light"] .lc-cap{border-color:rgba(0,0,0,0.09);background:rgba(0,0,0,0.012)}
+[data-theme="light"] .lc-cap-icon{background:rgba(126,34,206,0.1);color:#7e22ce}
+[data-theme="light"] .lc-switch.on{background:#7e22ce}
+[data-theme="light"] .lc-copy{color:#7e22ce;border-color:rgba(126,34,206,0.35);background:rgba(126,34,206,0.05)}
+
+/* ═══════════════════════════════════════════
+   ★ Memory Modal — v7 Tofu Unified Design
+   Matches the Settings panel "tofu block" aesthetic:
+   cream bg, thick ink borders, box-shadow, gold kintsugi
+   ═══════════════════════════════════════════ */
+
+/* ── Design tokens (same as settings-panel for consistency) ── */
+.memory-modal{
+  --m-white:     #faf8f3;
+  --m-cream:     #f2ecda;
+  --m-skin:      #e4d6bf;
+  --m-board:     #35302a;
+  --m-board-lit: #443c32;
+  --m-gold:      #c9993f;
+  --m-gold-dim:  #a87d2e;
+  --m-gold-glow: rgba(201,153,63,0.18);
+  --m-ink:       #1a1814;
+  --m-ink-soft:  #3d362c;
+  --m-ink-faint: #6b6050;
+  --m-done:      #4ade80;
+  --m-blocked:   #f87171;
+  --m-accent:    #6e56cf;
+  --m-shadow:    6px 6px 0 var(--m-ink);
+  --m-shadow-sm: 3px 3px 0 var(--m-ink);
+  --m-shadow-xs: 2px 2px 0 var(--m-ink);
+  --m-border:    2.5px solid var(--m-ink);
+  --m-border-sm: 1.5px solid var(--m-ink);
+  --m-radius:    0px;
+}
+
+/* ── Modal shell — tofu block ── */
+.memory-modal{
+  width:620px;
+  max-width:95vw;
+  padding:0;
+  border-radius:var(--m-radius);
+  display:flex;
+  flex-direction:column;
+  max-height:85vh;
+  max-height:calc(var(--vh100,100vh)*0.85);
+  overflow:hidden;
+  background:var(--m-white);
+  border:3px solid var(--m-ink);
+  box-shadow:var(--m-shadow);
+  color:var(--m-ink);
+  font-family:'Inter','SF Pro',-apple-system,system-ui,sans-serif;
+  animation:memorySlam .22s cubic-bezier(.2,1.2,.4,1) both;
+}
+@keyframes memorySlam{
+  from{transform:translateY(16px) scale(.97);opacity:0}
+  to{transform:none;opacity:1}
+}
+
+/* Override base .modal input/select bleed */
+.memory-modal input,
+.memory-modal select,
+.memory-modal textarea{
+  margin:0;padding:0;font-family:inherit;border:none;background:none;color:var(--m-ink);
+}
+
+/* ── Header — thick bottom border with gold kintsugi line ── */
+.memory-modal-header{
+  padding:18px 22px 14px;
+  border-bottom:3px solid var(--m-ink);
+  background:var(--m-cream);
+  flex-shrink:0;
+  position:relative;
+}
+/* Gold kintsugi line under header */
+.memory-modal-header::after{
+  content:'';
+  position:absolute;
+  bottom:-2px;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent 0%,var(--m-gold) 15%,var(--m-gold) 50%,var(--m-gold-dim) 85%,transparent 100%);
+  opacity:.55;
+}
+.memory-modal-title{
+  margin:0 0 2px;
+  font-size:18px;font-weight:900;
+  color:var(--m-ink);
+  letter-spacing:-.02em;
+  text-transform:uppercase;
+}
+.memory-modal-subtitle{
+  font-size:11px;color:var(--m-ink-faint);line-height:1.4;font-weight:500;
+}
+.memory-modal-close{
+  position:absolute;top:14px;right:14px;
+  width:30px;height:30px;
+  background:var(--m-white);
+  border:var(--m-border-sm);
+  box-shadow:var(--m-shadow-xs);
+  color:var(--m-ink);cursor:pointer;
+  padding:0;border-radius:var(--m-radius);
+  display:flex;align-items:center;justify-content:center;
+  transition:transform .1s,box-shadow .1s,background .1s;
+}
+.memory-modal-close:hover{
+  transform:translate(1px,1px);
+  box-shadow:1px 1px 0 var(--m-ink);
+  background:var(--m-blocked);color:var(--m-white);
+}
+.memory-modal-status{
+  padding:4px 22px 0;font-size:11px;color:var(--m-gold-dim);min-height:0;font-weight:600;
+}
+
+/* ── Stats — tofu chips with ink borders ── */
+.memory-stats{
+  display:flex;align-items:center;justify-content:center;
+  gap:8px;padding:12px 22px;
+  border-bottom:2px dashed var(--m-ink-soft);
+  background:var(--m-white);
+  flex-shrink:0;
+}
+.memory-stat{
+  display:flex;align-items:baseline;gap:4px;
+  padding:4px 12px;
+  background:var(--m-cream);
+  border:var(--m-border-sm);
+  box-shadow:var(--m-shadow-xs);
+}
+.memory-stat + .memory-stat{
+  border-left:var(--m-border-sm);
+}
+.memory-stat-num{
+  font-size:15px;font-weight:900;
+  color:var(--m-ink);
+  line-height:1;font-variant-numeric:tabular-nums;
+}
+.memory-stat-num.memory-stat-active{color:#16a34a}
+.memory-stat-label{
+  font-size:10px;color:var(--m-ink-soft);font-weight:700;
+  text-transform:uppercase;letter-spacing:.04em;
+}
+
+/* ── Toolbar: tabs + search ── */
+.memory-toolbar{
+  padding:10px 22px;
+  display:flex;align-items:center;gap:10px;
+  border-bottom:1.5px solid rgba(26,24,20,0.1);
+  background:var(--m-white);
+  flex-shrink:0;
+}
+.memory-tabs{
+  display:flex;gap:0;
+  flex-shrink:0;
+}
+.memory-tab{
+  padding:5px 14px;
+  border:var(--m-border-sm);
+  background:var(--m-white);
+  color:var(--m-ink-soft);
+  font-size:11px;font-weight:700;
+  cursor:pointer;transition:background .15s,color .15s;
+  white-space:nowrap;line-height:1.4;
+  text-transform:uppercase;letter-spacing:.03em;
+}
+.memory-tab + .memory-tab{border-left:none}
+.memory-tab.active{
+  background:var(--m-gold);color:var(--m-ink);
+  box-shadow:inset 0 -2px 0 var(--m-gold-dim);
+}
+.memory-tab:hover:not(.active){background:var(--m-cream)}
+.memory-search-box{
+  flex:1;position:relative;min-width:0;max-width:200px;
+}
+.memory-modal .memory-search-input{
+  display:block;
+  width:100%;
+  height:30px;
+  padding:0 10px 0 28px;
+  border:var(--m-border-sm);
+  background:var(--m-white);
+  color:var(--m-ink);
+  font-size:12px;font-weight:500;
+  line-height:30px;
+  outline:none;
+  transition:border-color .15s,box-shadow .15s;
+  box-sizing:border-box;
+  border-radius:0;
+}
+.memory-modal .memory-search-input:focus{
+  border-color:var(--m-gold);
+  box-shadow:0 0 0 2px var(--m-gold-glow);
+}
+.memory-modal .memory-search-input::placeholder{
+  color:var(--m-ink-faint);font-weight:500;
+}
+.memory-search-icon{
+  position:absolute;left:8px;top:50%;transform:translateY(-50%);
+  color:var(--m-ink-faint);pointer-events:none;
+}
+
+/* ── List container — stable scrollbar ── */
+.memory-list{
+  flex:1;
+  overflow-y:scroll;
+  padding:12px 22px;
+  display:flex;flex-direction:column;gap:6px;
+  min-height:100px;
+  isolation:isolate;
+  background:linear-gradient(180deg,var(--m-white) 0%,#f5f2ea 100%);
+}
+@supports(scrollbar-gutter:stable){
+  .memory-list{overflow-y:auto;scrollbar-gutter:stable}
+}
+.memory-list::-webkit-scrollbar{width:5px}
+.memory-list::-webkit-scrollbar-track{background:transparent}
+.memory-list::-webkit-scrollbar-thumb{background:var(--m-skin);border-radius:0}
+.memory-list::-webkit-scrollbar-thumb:hover{background:var(--m-board-lit)}
+
+/* ── Loading ── */
+.memory-loading{
+  padding:32px 20px;display:flex;align-items:center;justify-content:center;gap:6px;
+  color:var(--m-ink-soft);font-size:12px;font-weight:600;
+}
+.memory-loading-dot{
+  width:6px;height:6px;border-radius:0;
+  background:var(--m-gold);
+  animation:memoryDotPulse .8s ease-in-out infinite alternate;
+}
+.memory-loading-dot:nth-child(2){animation-delay:.15s}
+.memory-loading-dot:nth-child(3){animation-delay:.3s}
+@keyframes memoryDotPulse{from{opacity:.3}to{opacity:1}}
+
+/* ── Skeleton ── */
+@keyframes skeletonShimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+/* ── Empty / Error ── */
+.memory-empty{text-align:center;padding:40px 20px;color:var(--m-ink-soft)}
+.memory-empty-icon{margin-bottom:8px;display:block}
+.memory-empty-icon svg{opacity:.35;stroke:var(--m-ink-soft)}
+.memory-empty-title{font-size:13px;font-weight:800;color:var(--m-ink);margin-bottom:4px;text-transform:uppercase;letter-spacing:.03em}
+.memory-empty-hint{font-size:11px;color:var(--m-ink-faint);margin-top:4px;line-height:1.7}
+.memory-card-error{text-align:center;padding:20px;color:var(--m-blocked);font-size:12px;font-weight:600;background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.15)}
+.memory-retry-btn{
+  margin-top:10px;padding:5px 14px;
+  border:var(--m-border-sm);
+  background:var(--m-white);color:var(--m-ink);
+  font-size:11px;font-weight:700;cursor:pointer;
+  box-shadow:var(--m-shadow-xs);
+  transition:transform .1s,box-shadow .1s,background .1s;
+}
+.memory-retry-btn:hover{
+  transform:translate(1px,1px);
+  box-shadow:1px 1px 0 var(--m-ink);
+  background:var(--m-cream);
+}
+
+/* ═══════════════════════════════════════════
+   Memory Card — tofu block card style
+   ═══════════════════════════════════════════ */
+.memory-card{
+  background:var(--m-white);
+  border:1.5px solid var(--m-ink);
+  box-shadow:2px 2px 0 rgba(26,24,20,0.12);
+  transition:background .15s,box-shadow .15s;
+}
+.memory-card:hover{
+  background:var(--m-cream);
+  box-shadow:3px 3px 0 rgba(26,24,20,0.18);
+}
+.memory-card.is-disabled{opacity:.4}
+
+/* Header: [expand 16px] [10px gap] [name flex] [scope] [toggle] [delete] */
+.memory-card-header{
+  display:flex;align-items:center;gap:10px;
+  padding:9px 12px;
+  cursor:pointer;user-select:none;
+}
+
+/* Expand chevron */
+.memory-card-expand-icon{
+  width:16px;height:16px;flex-shrink:0;
+  display:inline-flex;align-items:center;justify-content:center;
+  color:var(--m-ink-faint);
+  transition:transform .2s ease,color .2s;
+}
+.memory-card-expand-icon.expanded{
+  transform:rotate(90deg);color:var(--m-ink);
+}
+
+/* Name */
+.memory-card-name{
+  flex:1;min-width:0;
+  font-size:12px;font-weight:700;color:var(--m-ink);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4;
+  letter-spacing:-.01em;
+}
+
+/* Scope badge — tofu style */
+.memory-card-scope{
+  font-size:9px;padding:2px 8px;
+  font-weight:800;letter-spacing:.05em;flex-shrink:0;line-height:1.4;
+  text-transform:uppercase;
+  border:1px solid var(--m-ink);
+}
+.memory-card-scope.project{background:rgba(110,86,207,0.1);color:#5b3fb5}
+.memory-card-scope.global{background:rgba(34,197,94,0.1);color:#147a3e}
+
+/* Actions container */
+.memory-card-actions{display:flex;gap:4px;align-items:center;flex-shrink:0}
+
+/* Toggle switch — tofu style */
+.memory-toggle-switch{display:inline-flex;align-items:center;cursor:pointer;flex-shrink:0}
+.memory-toggle-track{
+  width:30px;height:16px;
+  background:var(--m-skin);
+  border:1px solid var(--m-ink);
+  position:relative;
+  transition:background .25s;
+}
+.memory-toggle-thumb{
+  position:absolute;top:2px;left:2px;
+  width:10px;height:10px;
+  background:var(--m-ink-faint);
+  transition:left .25s,background .25s;
+}
+.memory-toggle-switch.on .memory-toggle-track{background:rgba(74,222,128,0.35);border-color:var(--m-ink)}
+.memory-toggle-switch.on .memory-toggle-thumb{left:16px;background:#16a34a}
+
+/* Delete */
+.memory-delete-btn{
+  background:none;border:none;cursor:pointer;
+  padding:2px;
+  color:var(--m-ink-faint);opacity:.3;
+  transition:opacity .15s,color .15s;
+  display:inline-flex;align-items:center;justify-content:center;
+  width:20px;height:20px;flex-shrink:0;
+}
+.memory-delete-btn:hover{opacity:1;color:var(--m-blocked)}
+
+/*
+ * Sub-header content left-padding = 12px pad + 16px icon + 10px gap = 38px
+ */
+
+/* Description */
+.memory-card-desc{
+  font-size:11px;color:var(--m-ink-faint);line-height:1.5;
+  padding:0 12px 6px 38px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden;word-break:break-word;
+}
+
+/* Tags */
+.memory-card-tags{display:flex;gap:3px;flex-wrap:wrap;padding:0 12px 8px 38px}
+.memory-card-tag{
+  font-size:9px;padding:1px 6px;
+  border:1px solid rgba(26,24,20,0.15);
+  background:var(--m-cream);color:var(--m-ink-soft);
+  white-space:nowrap;font-family:'JetBrains Mono','SF Mono',Monaco,Consolas,monospace;
+  font-weight:600;
+}
+
+/* ── Body — expanded content ── */
+.memory-card-body{
+  display:none;
+  margin:0 12px 10px 38px;padding:10px 12px;
+  background:rgba(26,24,20,0.03);
+  border:1px solid rgba(26,24,20,0.1);
+  font-size:12px;line-height:1.6;color:var(--m-ink-soft);
+  word-break:break-word;
+  max-height:280px;overflow-y:auto;overflow-x:hidden;
+}
+.memory-card-body.open{
+  display:block;
+  animation:memoryBodyFadeIn .15s ease-out;
+}
+@keyframes memoryBodyFadeIn{from{opacity:0}to{opacity:1}}
+.memory-card-body::-webkit-scrollbar{width:3px}
+.memory-card-body::-webkit-scrollbar-thumb{background:var(--m-skin);border-radius:0}
+
+/* Body inner markdown */
+.memory-card-body-inner{line-height:1.6;overflow-wrap:break-word;color:var(--m-ink-soft)}
+.memory-card-body-inner h1,.memory-card-body-inner h2,.memory-card-body-inner h3{color:var(--m-ink);margin:10px 0 5px;font-size:13px;font-weight:800}
+.memory-card-body-inner h1{font-size:15px}
+.memory-card-body-inner h2{font-size:14px}
+.memory-card-body-inner p{margin:5px 0}
+.memory-card-body-inner ul,.memory-card-body-inner ol{margin:5px 0;padding-left:18px}
+.memory-card-body-inner li{margin:2px 0}
+.memory-card-body-inner code{font-family:'JetBrains Mono','SF Mono',Monaco,Consolas,monospace;font-size:11px;background:rgba(26,24,20,0.06);padding:1px 5px;border:1px solid rgba(26,24,20,0.08)}
+.memory-card-body-inner pre{background:rgba(26,24,20,0.04);border:1px solid rgba(26,24,20,0.08);padding:10px;overflow-x:auto;margin:6px 0;max-width:100%}
+.memory-card-body-inner pre code{background:none;padding:0;font-size:11px;line-height:1.5;border:none}
+.memory-card-body-inner blockquote{border-left:3px solid var(--m-gold);padding-left:10px;margin:6px 0;color:var(--m-ink-faint)}
+.memory-card-body-inner a{color:var(--m-accent);text-decoration:underline}
+
+/* ── Add-memory form ── */
+.memory-add-section{
+  padding:14px 14px;
+  background:var(--m-cream);
+  border:1.5px solid var(--m-ink);
+  box-shadow:var(--m-shadow-xs);
+  margin:0 22px 10px;flex-shrink:0;
+}
+.memory-add-header{
+  margin:0 0 10px;font-size:11px;font-weight:800;color:var(--m-ink);
+  display:flex;align-items:center;gap:6px;
+  text-transform:uppercase;letter-spacing:.04em;
+}
+.memory-modal .memory-input{
+  display:block;width:100%;padding:7px 10px;
+  border:var(--m-border-sm);
+  background:var(--m-white);
+  color:var(--m-ink);font-size:12px;margin-bottom:6px;
+  outline:none;box-sizing:border-box;transition:border-color .15s,box-shadow .15s;
+  border-radius:0;
+}
+.memory-modal .memory-input:focus{border-color:var(--m-gold);box-shadow:0 0 0 2px var(--m-gold-glow)}
+.memory-modal .memory-textarea{
+  display:block;width:100%;padding:7px 10px;
+  border:var(--m-border-sm);
+  background:var(--m-white);
+  color:var(--m-ink);font-size:12px;
+  font-family:'JetBrains Mono',monospace;margin-bottom:6px;
+  outline:none;resize:vertical;box-sizing:border-box;
+  transition:border-color .15s,box-shadow .15s;min-height:72px;
+  border-radius:0;
+}
+.memory-modal .memory-textarea:focus{border-color:var(--m-gold);box-shadow:0 0 0 2px var(--m-gold-glow)}
+.memory-modal .memory-select{
+  padding:7px 10px;
+  border:var(--m-border-sm);
+  background:var(--m-white);
+  color:var(--m-ink);font-size:12px;
+  outline:none;transition:border-color .15s;
+  border-radius:0;
+}
+.memory-modal .memory-select:focus{border-color:var(--m-gold)}
+.memory-field-label{
+  display:block;margin:2px 0 4px;font-size:11px;font-weight:700;
+  color:var(--m-ink);letter-spacing:.02em;
+}
+.memory-field-hint{
+  margin:0 0 8px;font-size:10.5px;line-height:1.5;color:var(--m-ink-faint);
+}
+.memory-add-row{display:flex;gap:6px;align-items:center}
+.btn-sm{padding:7px 16px !important;font-size:12px !important;border-radius:0 !important}
+#memoryToggle.active{background:rgba(201,153,63,0.15);color:#a87d2e;border-color:rgba(201,153,63,0.3)}
+
+/* ── Modal footer — tofu block actions ── */
+.memory-modal-footer{
+  padding:12px 22px;
+  border-top:2px solid var(--m-ink);
+  background:var(--m-cream);
+  display:flex;align-items:center;gap:8px;flex-shrink:0;
+  position:relative;
+}
+/* Gold kintsugi line above footer */
+.memory-modal-footer::before{
+  content:'';position:absolute;
+  top:-1px;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent 0%,var(--m-gold) 20%,var(--m-gold-dim) 80%,transparent 100%);
+  opacity:.45;
+}
+.memory-action-btn{
+  padding:6px 14px;
+  border:var(--m-border-sm);
+  font-size:11px;font-weight:700;cursor:pointer;
+  box-shadow:var(--m-shadow-xs);
+  transition:transform .1s,box-shadow .1s,background .1s;
+  display:inline-flex;align-items:center;gap:5px;
+  text-transform:uppercase;letter-spacing:.02em;
+  background:var(--m-white);color:var(--m-ink);
+}
+.memory-action-btn:hover{
+  transform:translate(1px,1px);
+  box-shadow:1px 1px 0 var(--m-ink);
+}
+.memory-btn-on{background:var(--m-gold);color:var(--m-ink)}
+.memory-btn-on:hover{background:var(--m-gold-dim);transform:translate(1px,1px);box-shadow:1px 1px 0 var(--m-ink)}
+.memory-btn-off{background:var(--m-blocked);color:var(--m-white)}
+.memory-btn-off:hover{background:#ef4444;transform:translate(1px,1px);box-shadow:1px 1px 0 var(--m-ink)}
+.memory-btn-add{background:var(--m-accent);color:var(--m-white);border-color:var(--m-ink)}
+.memory-btn-add:hover{background:#5b3fb5;transform:translate(1px,1px);box-shadow:1px 1px 0 var(--m-ink)}
+
+/* ── Skill-package badge on memory cards ── */
+.memory-card-pkg{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border:1px solid var(--m-ink);border-radius:3px;background:var(--m-skin);color:var(--m-ink);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.memory-card-pkg svg{display:block}
+@keyframes skillsToastIn{from{opacity:0;transform:translate(-50%,10px)}to{opacity:1;transform:translate(-50%,0)}}
+
+/* ── Drag-and-drop overlay (skill package install) ── */
+.memory-modal{position:relative}
+.memory-drop-overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(26,24,20,0.78);backdrop-filter:blur(4px);z-index:50;border-radius:inherit;pointer-events:none}
+.memory-modal.is-dragging .memory-drop-overlay{display:flex}
+.memory-drop-card{padding:28px 36px;border:2px dashed var(--m-gold);border-radius:8px;background:var(--m-cream);color:var(--m-ink);text-align:center;display:flex;flex-direction:column;align-items:center;gap:10px;box-shadow:4px 4px 0 var(--m-ink);max-width:380px}
+.memory-drop-title{font-weight:600;font-size:15px}
+.memory-drop-hint{font-size:12px;opacity:.75}
+.memory-install-toast{position:absolute;left:50%;bottom:64px;transform:translateX(-50%);padding:10px 16px;background:var(--m-ink);color:var(--m-white);border-radius:4px;font-size:13px;box-shadow:2px 2px 0 var(--m-gold);z-index:60;max-width:80%;animation:memorySlam .25s cubic-bezier(.2,1,.3,1)}
+.memory-install-toast.is-error{background:#b91c1c}
+
+/* ── Light theme — already matches since memory-modal uses its own tokens ── */
+[data-theme="light"] .memory-modal{border-color:rgba(26,24,20,0.15) !important;box-shadow:4px 4px 16px rgba(0,0,0,0.08) !important}
+[data-theme="light"] .memory-modal-header{border-bottom-color:rgba(0,0,0,0.1)}
+[data-theme="light"] .memory-modal-footer{border-top-color:rgba(0,0,0,0.1)}
+[data-theme="light"] .memory-card{border-color:rgba(0,0,0,0.12);box-shadow:1px 1px 0 rgba(0,0,0,0.05)}
+[data-theme="light"] .memory-card:hover{box-shadow:2px 2px 0 rgba(0,0,0,0.08)}
+[data-theme="light"] .memory-retry-btn{border-color:rgba(0,0,0,0.15)}
+[data-theme="light"] #memoryToggle.active{background:rgba(201,153,63,0.12);color:#a87d2e;border-color:rgba(201,153,63,0.25)}
+
+/* ── Lazy-load sentinel ── */
+.lazy-sentinel{display:flex;align-items:center;justify-content:center;padding:18px 0 12px;opacity:.55;transition:opacity .2s}
+.lazy-sentinel:hover{opacity:.85}
+.lazy-sentinel-text{font-size:12px;color:var(--text-tertiary);letter-spacing:.3px;display:flex;align-items:center;gap:6px}
+@keyframes lazyDots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}}
+
+/* ══════════════════════════════════════════
+   Branch Conversations — 分支对话 (Neural Dendrite)
+   ══════════════════════════════════════════ */
+
+/* ── Branch container underneath an assistant message ── */
+.branch-zone{margin-top:12px;position:relative;padding-left:0}
+
+/* ── "Add branch" (分支) — now a unified `.msg-action-btn` in the bottom
+      action bar (see chat_render.js). Its hover accent matches the branch
+      theme colour. ── */
+.msg-branch-btn:hover{color:var(--accent);background:var(--accent-subtle)}
+
+/* ── Branch node pills ── */
+.branch-nodes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.branch-node{
+  position:relative;display:inline-flex;align-items:center;gap:6px;
+  padding:6px 14px 6px 10px;
+  background:var(--bg-tertiary);border:1px solid var(--border);border-radius:20px;
+  font-size:12px;color:var(--text-secondary);cursor:pointer;
+  transition:background-color .3s cubic-bezier(.4,0,.2,1),border-color .3s cubic-bezier(.4,0,.2,1),color .3s cubic-bezier(.4,0,.2,1),transform .3s cubic-bezier(.4,0,.2,1),box-shadow .3s cubic-bezier(.4,0,.2,1);
+  max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.branch-node:hover{background:var(--bg-hover);border-color:var(--accent);color:var(--text-primary);transform:translateY(-1px);box-shadow:0 2px 8px rgba(110,86,207,0.15)}
+.branch-node.active{background:var(--accent-subtle);border-color:var(--accent);color:var(--accent)}
+.branch-node-icon{font-size:13px;flex-shrink:0}
+.branch-node-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.branch-node-count{font-size:10px;opacity:0.6;margin-left:2px}
+.branch-node-close{
+  margin-left:4px;padding:0 2px;font-size:14px;line-height:1;
+  color:var(--text-tertiary);cursor:pointer;opacity:0;transition:opacity .2s;
+  border:none;background:none;
+}
+.branch-node:hover .branch-node-close{opacity:0.7}
+.branch-node-close:hover{opacity:1;color:var(--error-border)}
+
+/* Pulse dot for active streaming branch */
+.branch-node-pulse{
+  width:6px;height:6px;border-radius:50%;background:var(--accent);
+  animation:branchPulse 1.5s ease-in-out infinite;margin-right:2px;flex-shrink:0;
+}
+.branch-node.streaming{border-color:var(--accent);box-shadow:0 0 8px rgba(110,86,207,0.3)}
+@keyframes branchPulse{0%,100%{opacity:.4;transform:scale(.8)}50%{opacity:1;transform:scale(1.2)}}
+
+/* ── Expanded branch conversation panel ── */
+.branch-panel{
+  margin-top:8px;
+  border:1px solid var(--border);border-radius:var(--radius-sm);
+  background:var(--bg-secondary);overflow:hidden;
+  animation:branchSlideIn .3s cubic-bezier(.4,0,.2,1);
+  box-shadow:0 2px 12px rgba(0,0,0,0.15);
+}
+@keyframes branchSlideIn{from{opacity:0;max-height:0;transform:translateY(-8px)}to{opacity:1;max-height:2000px;transform:translateY(0)}}
+
+.branch-panel-header{
+  display:flex;align-items:center;gap:8px;
+  padding:8px 14px;
+  background:linear-gradient(135deg,var(--accent-subtle),transparent);
+  border-bottom:1px solid var(--border);
+  font-size:12px;color:var(--text-secondary);
+}
+.branch-panel-icon{font-size:14px;flex-shrink:0}
+.branch-panel-title{font-weight:600;color:var(--text-primary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.branch-panel-back{
+  background:none;border:none;color:var(--text-tertiary);cursor:pointer;
+  font-size:11px;padding:2px 8px;border-radius:12px;transition:color .2s,background-color .2s;
+  display:flex;align-items:center;gap:3px;
+}
+.branch-panel-back:hover{color:var(--text-primary);background:var(--bg-hover)}
+.branch-panel-count{font-size:11px;color:var(--text-tertiary);margin-left:auto;margin-right:4px}
+.branch-panel-close{
+  background:none;border:none;color:var(--text-tertiary);cursor:pointer;
+  font-size:14px;padding:2px 6px;border-radius:var(--radius-xs);transition:color .2s,background-color .2s;line-height:1;
+}
+.branch-panel-close:hover{color:var(--text-primary);background:var(--bg-hover)}
+
+/* Collapse button (replaces close) */
+.branch-panel-collapse{
+  background:none;border:1px solid var(--border);color:var(--text-secondary);cursor:pointer;
+  font-size:11px;padding:2px 10px;border-radius:12px;transition:color .2s,background-color .2s,border-color .2s;line-height:1.4;
+  margin-left:auto;
+}
+.branch-panel-collapse:hover{color:var(--text-primary);background:var(--bg-hover);border-color:var(--text-tertiary)}
+
+/* Stop button in panel header (during streaming) */
+.branch-panel-stop{
+  background:none;border:1px solid var(--error-border,#ff5050);color:var(--error,#ff5050);cursor:pointer;
+  font-size:11px;padding:2px 10px;border-radius:12px;transition:background-color .2s,border-color .2s;line-height:1.4;
+  animation:branchStopPulse 2s ease-in-out infinite;
+}
+.branch-panel-stop:hover{background:rgba(255,80,80,0.15);border-color:var(--error,#ff5050)}
+@keyframes branchStopPulse{0%,100%{opacity:1}50%{opacity:0.7}}
+
+/* Delete button in panel header */
+.branch-panel-delete{
+  background:none;border:none;color:var(--text-tertiary);cursor:pointer;
+  font-size:13px;padding:2px 6px;border-radius:var(--radius-xs);transition:color .2s,opacity .2s,background-color .2s;line-height:1;
+  opacity:0.5;
+}
+.branch-panel-delete:hover{color:var(--error);opacity:1;background:rgba(255,80,80,0.1)}
+
+/* ── Messages inside branch ── */
+.branch-messages{max-height:500px;overflow-y:auto;padding:8px 12px;scroll-behavior:smooth}
+.conversation-lane--branch .conversation-turn.message>.message-avatar,
+.conversation-lane--branch .conversation-turn.message>.turn-ctx{display:none!important}
+.conversation-lane--branch .conversation-turn.message>.message-content{
+  max-width:none;overflow:visible;contain:none;background:transparent;
+  border:0;border-radius:0;padding:0;box-shadow:none
+}
+.branch-messages::-webkit-scrollbar{width:4px}
+.branch-messages::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+
+.branch-msg{margin-bottom:8px;padding:6px 10px;border-radius:var(--radius-xs);font-size:13px;line-height:1.6}
+.branch-msg.user{background:var(--bg-tertiary);border-left:2px solid var(--user-bubble);color:var(--text-primary)}
+.branch-msg.assistant{background:transparent;color:var(--text-primary)}
+.branch-msg .branch-msg-header{margin-bottom:2px}
+.branch-msg .branch-msg-role{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-tertiary);margin-bottom:2px}
+.branch-msg .branch-msg-body{font-size:13px;line-height:1.6}
+.branch-msg .md-content{font-size:13px}
+.branch-msg .md-content p{margin:4px 0}
+.branch-msg .md-content pre{font-size:12px}
+
+/* Thinking inside branch */
+.branch-thinking{
+  margin:4px 0 6px;padding:6px 10px;
+  border-left:2px solid var(--thinking-border);
+  background:var(--thinking-bg);border-radius:0 var(--radius-xs) var(--radius-xs) 0;
+  font-size:11.5px;color:var(--thinking-text);
+  max-height:120px;overflow-y:auto;
+}
+.branch-thinking summary{cursor:pointer;font-size:11px;opacity:0.8}
+
+/* ── Branch message content ── */
+.branch-empty{
+  padding:24px 16px;text-align:center;
+  color:var(--text-tertiary);font-size:12px;font-style:italic;
+}
+.branch-selection-ctx{
+  margin-bottom:8px;padding:8px 12px;
+  background:var(--bg-tertiary);border-radius:6px;
+  color:var(--text-secondary);font-size:11.5px;font-style:normal;
+  text-align:left;line-height:1.5;word-break:break-word;
+}
+
+/* ── Branch typing indicator ── */
+@keyframes branchTyping{0%,100%{opacity:.3}50%{opacity:1}}
+
+/* ── Branch streaming message ── */
+.branch-streaming-msg{opacity:0.9}
+
+/* ── Branch mode banner above main input ── */
+.branch-mode-banner{
+  display:flex;align-items:center;gap:8px;
+  padding:6px 16px;
+  background:linear-gradient(135deg,var(--accent-subtle),rgba(110,86,207,0.05));
+  border-top:1px solid var(--accent);
+  font-size:12px;color:var(--accent);
+  animation:branchBannerIn .3s ease;
+}
+@keyframes branchBannerIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.branch-mode-banner-icon{font-size:16px}
+.branch-mode-banner-text{font-weight:500;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.branch-mode-banner-text strong{font-weight:700}
+.branch-mode-banner-exit{
+  background:none;border:1px solid var(--border);color:var(--text-secondary);
+  padding:3px 10px;border-radius:4px;cursor:pointer;font-size:11px;
+  transition:background-color .2s,color .2s,border-color .2s;white-space:nowrap;font-family:inherit;
+}
+.branch-mode-banner-exit:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+/* streaming dot on branch node pill */
+
+/* branch streaming body inside panel */
+.branch-streaming-body{padding:8px 0}
+
+/* ── Branch input hint (shown in panel) ── */
+.branch-input-hint{
+  padding:8px 14px;text-align:center;
+  color:var(--text-tertiary);font-size:11px;
+  border-top:1px solid var(--border);
+  background:var(--bg-tertiary);
+}
+.branch-input-hint span{opacity:0.7}
+
+/* ── Streaming zones inside branch panel ── */
+
+/* ── Search/tool rounds inside branch ── */
+
+/* ── Branch tool approval buttons ── */
+.branch-approve-btn,.branch-reject-btn{
+  padding:2px 10px;border-radius:10px;font-size:10px;
+  cursor:pointer;border:1px solid;transition:background-color .2s,color .2s;
+}
+.branch-approve-btn{border-color:var(--success-border);color:var(--success-border);background:transparent}
+.branch-approve-btn:hover{background:var(--success-border);color:#fff}
+.branch-reject-btn{border-color:var(--error-border);color:var(--error-border);background:transparent}
+.branch-reject-btn:hover{background:var(--error-border);color:#fff}
+.branch-approval{display:flex;gap:8px;margin-top:6px;padding:4px 0}
+.branch-approval button{padding:4px 12px;border-radius:12px;font-size:11px;cursor:pointer;border:1px solid var(--border);background:var(--bg-tertiary);color:var(--text-secondary);transition:background-color .15s,color .15s,border-color .15s}
+.branch-approval button:hover{background:var(--accent-subtle);color:var(--accent);border-color:var(--accent)}
+
+/* ── Branch input area (legacy — kept for compat) ── */
+.branch-input{
+  flex:1;padding:6px 12px;
+  background:var(--bg-primary);border:1px solid var(--border);border-radius:16px;
+  color:var(--text-primary);font-size:12.5px;font-family:inherit;
+  outline:none;resize:none;min-height:32px;max-height:80px;line-height:1.4;
+}
+.branch-input:focus{border-color:var(--accent)}
+.branch-input::placeholder{color:var(--text-tertiary)}
+
+/* ── Streaming indicator inside branch ── */
+.branch-streaming{
+  padding:8px 12px;display:flex;align-items:center;gap:8px;
+  font-size:11.5px;color:var(--text-tertiary);
+}
+.branch-streaming .pulse{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:branchPulse 1.5s ease-in-out infinite}
+
+/* ── Connection line from node to panel (visual dendrite) ── */
+
+/* ── Light theme overrides ── */
+[data-theme="light"] .branch-node{background:rgba(0,0,0,0.03);border-color:rgba(0,0,0,0.08)}
+[data-theme="light"] .branch-node:hover{background:rgba(110,86,207,0.06);border-color:var(--accent)}
+[data-theme="light"] .branch-panel{background:#fff;box-shadow:0 2px 12px rgba(0,0,0,0.08)}
+[data-theme="light"] .branch-msg.user{background:rgba(0,0,0,0.03);border-left-color:var(--user-bubble)}
+[data-theme="light"] .branch-input{background:#fff}
+
+/* ── Text Selection Popup (Branch / Reply) ── */
+.selection-popup{
+  position:fixed;z-index:9999;
+  display:flex;gap:0;
+  background:var(--bg-secondary);border:1px solid var(--border);
+  border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.25);
+  overflow:hidden;animation:selPopIn .15s ease;
+  pointer-events:auto;
+}
+@keyframes selPopIn{from{opacity:0;transform:scale(.9) translateY(4px)}to{opacity:1;transform:scale(1) translateY(0)}}
+.selection-popup-btn{
+  display:flex;align-items:center;gap:5px;
+  padding:7px 14px;font-size:12px;font-weight:500;
+  color:var(--text-primary);background:transparent;
+  border:none;cursor:pointer;transition:background-color .15s,color .15s;
+  white-space:nowrap;font-family:inherit;
+}
+.selection-popup-btn:hover{background:var(--accent-subtle);color:var(--accent)}
+.selection-popup-btn:first-child{border-right:1px solid var(--border)}
+
+/* ── Reply Quote — in user message ── */
+/* ── Reply Quote Badge — in-message (looks like file upload badge) ── */
+.reply-quote-badge{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:7px 12px;margin-bottom:8px;
+  background:var(--thinking-bg);
+  border:1px solid var(--thinking-border);
+  border-radius:var(--radius-sm);
+  max-width:360px;cursor:default;
+  transition:border-color .2s;
+}
+.reply-quote-badge:hover{border-color:var(--accent)}
+.reply-quote-badge-icon{font-size:18px;flex-shrink:0}
+.reply-quote-badge-info{display:flex;flex-direction:column;gap:1px;min-width:0;overflow:hidden}
+.reply-quote-badge-name{font-size:12.5px;font-weight:500;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.reply-quote-badge-meta{font-size:11px;color:var(--text-tertiary)}
+
+/* ── Reply Quote Container (multi-quote) ── */
+.reply-quote-container{
+  display:flex;flex-wrap:wrap;gap:6px;
+  padding:6px 14px 2px;
+}
+.reply-quote-container:empty{display:none}
+/* ── Reply Quote Chip — floating above input (same file-badge look) ── */
+.reply-quote-chip{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:4px 10px;
+  background:var(--thinking-bg);
+  border:1px solid var(--thinking-border);
+  border-radius:6px;
+  max-width:320px;
+  font-size:12px;
+  animation:quoteChipIn .2s ease;
+}
+@keyframes quoteChipIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.reply-quote-chip-meta{font-size:10.5px;color:var(--text-tertiary)}
+.reply-quote-chip-close{
+  background:none;border:none;color:var(--text-tertiary);cursor:pointer;
+  padding:2px 4px;font-size:14px;line-height:1;transition:color .15s;flex-shrink:0;
+  border-radius:4px;
+}
+.reply-quote-chip-close:hover{color:var(--text-primary);background:var(--bg-tertiary)}
+
+/* ── @ button active state in input toolbar ── */
+#convRefBtn.has-refs{
+  color:#c792ea !important;
+  background:rgba(199,146,234,.15);
+}
+#convRefBtn.has-refs span{
+  text-shadow:0 0 6px rgba(199,146,234,.4);
+}
+
+/* ── Conversation Reference @ button (sidebar) ── */
+.conv-ref{
+  color:var(--text-tertiary);transition:color .15s, background .15s;
+  font-weight:700;font-size:14px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;
+  line-height:1;
+}
+.conv-ref:hover{
+  color:#c792ea;background:rgba(199,146,234,.14);
+}
+
+/* ── Conversation Reference Chip Container ── */
+.conv-ref-container{
+  display:flex;flex-wrap:wrap;gap:6px;
+  padding:6px 14px 2px;
+}
+.conv-ref-container:empty{display:none}
+
+/* ── Conversation Reference Chip ── */
+@keyframes convRefChipIn{
+  from{opacity:0;transform:translateY(6px) scale(.96)}
+  to{opacity:1;transform:translateY(0) scale(1)}
+}
+.conv-ref-chip{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:4px 10px;
+  background:rgba(199,146,234,.08);
+  border:1px solid rgba(199,146,234,.45);
+  border-radius:6px;
+  font-size:12px;line-height:1.3;
+  max-width:280px;min-width:0;
+  animation:convRefChipIn .2s ease-out;
+  transition:border-color .15s, box-shadow .15s;
+}
+.conv-ref-chip:hover{
+  border-color:rgba(199,146,234,.7);
+  box-shadow:0 0 0 2px rgba(199,146,234,.1);
+}
+.conv-ref-chip-icon{
+  font-size:14px;line-height:1;
+  color:#c792ea;
+  flex-shrink:0;
+}
+.conv-ref-chip-info{
+  display:flex;flex-direction:column;gap:1px;min-width:0;overflow:hidden;
+}
+.conv-ref-chip-title{
+  font-size:12px;font-weight:500;color:var(--text-primary);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.conv-ref-chip-id{
+  font-size:10px;color:var(--text-tertiary);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.conv-ref-chip-remove{
+  background:none;border:none;color:var(--text-tertiary);cursor:pointer;
+  padding:2px 4px;font-size:14px;line-height:1;transition:color .15s, background .15s;flex-shrink:0;
+  border-radius:4px;margin-left:auto;
+}
+.conv-ref-chip-remove:hover{color:#c792ea;background:rgba(199,146,234,.15)}
+
+/* ── Conversation Reference badge (in chat messages) ── */
+.conv-ref-badge{
+  border-color:rgba(199,146,234,.35) !important;
+  background:rgba(199,146,234,.06) !important;
+}
+.conv-ref-badge:hover{border-color:#c792ea !important}
+.conv-ref-badge .reply-quote-badge-icon{filter:none}
+
+/* ── Peer-message provenance banner (chat_render.js) ── */
+/* An advisory turn injected by a sibling conversation of the same project. */
+.peer-msg-banner{
+  display:inline-flex;align-items:center;gap:6px;
+  margin:0 0 8px 0;padding:4px 10px;
+  border:1px solid rgba(130,170,255,.35);
+  background:rgba(130,170,255,.08);
+  border-radius:8px;font-size:12px;line-height:1.3;
+  color:var(--text-secondary, #9aa4b2);
+}
+.peer-msg-banner .peer-msg-icon{display:inline-flex;color:#82aaff}
+.peer-msg-banner .peer-msg-from{color:#82aaff;font-weight:600}
+/* Operator nudge (from the Team panel) — distinct from an agent peer note. */
+.peer-msg-banner.peer-msg-banner-operator{border-color:rgba(126,231,135,.4);background:rgba(126,231,135,.09)}
+.peer-msg-banner.peer-msg-banner-operator .peer-msg-icon,
+.peer-msg-banner.peer-msg-banner-operator .peer-msg-from{color:#7ee787}
+
+/* ── Brain-dispatch provenance card (chat_render.js _renderBrainDispatchCard)
+   A Project-Brain kickoff turn: the card carries WHICH epic / WHO posted it /
+   HOW+WHY it was routed here, so the raw English instruction wall can stay
+   collapsed behind .brain-kickoff-raw. Brain-purple accent (same family as
+   the conv-ref badge) — distinct from the peer banner's blue. */
+.brain-dispatch-card{
+  margin:0 0 10px 0;padding:10px 14px 11px;
+  border:1px solid rgba(199,146,234,.35);
+  background:linear-gradient(135deg, rgba(199,146,234,.10), rgba(130,170,255,.05));
+  border-radius:10px;font-size:12.5px;line-height:1.5;
+  color:var(--text-secondary, #9aa4b2);
+}
+.brain-dispatch-card .bdc-head{
+  display:flex;align-items:center;gap:6px;margin-bottom:4px;
+  font-size:11.5px;font-weight:600;letter-spacing:.03em;color:#c792ea;
+}
+.brain-dispatch-card .bdc-icon{display:inline-flex}
+.brain-dispatch-card .bdc-epic-id{
+  margin-left:auto;font-family:var(--font-mono, ui-monospace, monospace);
+  font-size:11px;font-weight:400;color:var(--text-tertiary, #6b7280);
+}
+.brain-dispatch-card .bdc-answered{
+  display:inline-flex;align-items:center;padding:1px 8px;border-radius:999px;
+  background:rgba(126,231,135,.12);border:1px solid rgba(126,231,135,.35);
+  color:#7ee787;font-size:11px;font-weight:600;letter-spacing:0;
+}
+.brain-dispatch-card .bdc-epic-title{
+  font-size:13px;font-weight:600;color:var(--text-primary, #e6e9ee);
+  cursor:pointer;line-height:1.4;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.brain-dispatch-card .bdc-epic-title:hover{color:#c792ea;text-decoration:underline}
+.brain-dispatch-card .bdc-meta{
+  display:flex;flex-wrap:wrap;gap:3px 16px;margin-top:7px;font-size:12px;
+}
+.brain-dispatch-card .bdc-meta-label{
+  color:var(--text-tertiary, #6b7280);margin-right:5px;
+}
+.brain-dispatch-card .bdc-conv-link{
+  color:#82aaff;font-weight:600;text-decoration:none;
+}
+.brain-dispatch-card .bdc-conv-link:hover{text-decoration:underline}
+.brain-dispatch-card .bdc-this{font-weight:600;color:var(--text-primary, #e6e9ee)}
+/* The raw engine kickoff text — collapsed by default; the card above is the
+   human-facing summary. Dashed frame reads as "machinery, not prose". */
+.brain-kickoff-raw{
+  margin:0 0 8px 0;padding:5px 12px;
+  border:1px dashed var(--border, #333);border-radius:8px;
+}
+.brain-kickoff-raw>summary{
+  cursor:pointer;padding:2px 0;user-select:none;
+  font-size:12px;color:var(--text-tertiary, #6b7280);
+}
+.brain-kickoff-raw>summary:hover{color:var(--text-secondary, #9aa4b2)}
+.brain-kickoff-raw[open]>summary{margin-bottom:6px}
+.brain-kickoff-raw .user-content{font-size:12px;opacity:.85;white-space:pre-wrap}
+
+/* ── Conversation Reference Picker Popover ── */
+.conv-ref-picker{
+  position:fixed;z-index:10000;
+  display:flex;flex-direction:column;
+  background:var(--bg-secondary);
+  border:1px solid var(--border);
+  border-radius:var(--radius-md, 12px);
+  box-shadow:0 12px 40px rgba(0,0,0,.5), 0 0 0 1px rgba(199,146,234,.15);
+  overflow:hidden;
+  animation:convRefPickerIn .18s ease-out;
+}
+@keyframes convRefPickerIn{
+  from{opacity:0;transform:translateY(8px) scale(.97)}
+  to{opacity:1;transform:translateY(0) scale(1)}
+}
+.conv-ref-picker-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px 14px 8px;
+  border-bottom:1px solid var(--border);
+}
+.conv-ref-picker-title{
+  font-size:13px;font-weight:600;color:#c792ea;
+}
+.conv-ref-picker-close{
+  background:none;border:none;color:var(--text-tertiary);
+  font-size:20px;line-height:1;cursor:pointer;padding:0 4px;
+  transition:color .15s;
+}
+.conv-ref-picker-close:hover{color:var(--text-primary)}
+.conv-ref-picker-search{
+  padding:8px 12px;
+}
+.conv-ref-picker-search input{
+  width:100%;box-sizing:border-box;
+  padding:8px 12px;
+  background:var(--bg-primary);
+  border:1px solid var(--border);border-radius:var(--radius-sm, 8px);
+  color:var(--text-primary);font-size:13px;
+  outline:none;transition:border-color .2s;
+}
+.conv-ref-picker-search input:focus{
+  border-color:#c792ea;
+  box-shadow:0 0 0 2px rgba(199,146,234,.15);
+}
+.conv-ref-picker-search input::placeholder{color:var(--text-tertiary)}
+.conv-ref-picker-list{
+  flex:1;overflow-y:auto;padding:4px 6px 8px;
+  max-height:280px;
+}
+.conv-ref-picker-item{
+  padding:9px 10px;margin:2px 0;
+  border-radius:var(--radius-sm, 8px);
+  cursor:pointer;transition:background .15s;
+}
+.conv-ref-picker-item:hover{background:rgba(199,146,234,.08)}
+.conv-ref-picker-item-main{
+  display:flex;align-items:center;gap:6px;
+}
+.conv-ref-picker-item-title{
+  font-size:13px;font-weight:500;color:var(--text-primary);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  flex:1;min-width:0;
+}
+.conv-ref-picker-item-check{
+  font-size:13px;color:#c792ea;font-weight:700;flex-shrink:0;
+}
+.conv-ref-picker-item-meta{
+  display:flex;gap:4px;margin-top:3px;
+  font-size:11px;color:var(--text-tertiary);
+}
+.conv-ref-picker-empty{
+  padding:24px 12px;text-align:center;
+  font-size:13px;color:var(--text-tertiary);
+}
+
+/* Scrollbar for picker list */
+.conv-ref-picker-list::-webkit-scrollbar{width:4px}
+.conv-ref-picker-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.conv-ref-picker-list::-webkit-scrollbar-thumb:hover{background:var(--text-tertiary)}
+
+/* old .edit-reply-quote removed — replaced by .edit-rq-chip */
+
+/* ── Inline branch node (anchored inside content) ── */
+.branch-node.inline{
+  display:flex;font-size:12px;padding:5px 12px;margin:0;
+  width:100%;justify-content:flex-start;box-sizing:border-box;
+  max-width:none;border-radius:var(--radius-sm);
+}
+.branch-anchor-inline{
+  display:flex;flex-direction:column;gap:4px;
+  margin:8px 0;
+  padding:6px 0 6px 10px;
+  border-left:2px solid var(--accent);
+}
+
+/* ── Reply quote inside branch message ── */
+
+[data-theme="light"] .selection-popup{background:#fff;box-shadow:0 4px 20px rgba(0,0,0,0.12)}
+[data-theme="light"] .reply-quote-badge{background:rgba(0,0,0,0.03);border-color:rgba(0,0,0,0.08)}
+[data-theme="light"] .reply-quote-chip{background:#f8f8f8;border-color:rgba(0,0,0,0.08)}
+
+/* ══════════════════════════════════════════
+   Trading Advisor 投资持仓顾问
+   ══════════════════════════════════════════ */
+
+/* Iteration banner inside streaming message */
+.ep-iter-banner{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:4px 12px;
+  margin-bottom:8px;
+  background:rgba(245,158,11,0.08);
+  border:1px solid rgba(245,158,11,0.2);
+  border-radius:20px;
+  font-size:11px;
+  font-weight:700;
+  font-family:'JetBrains Mono',monospace;
+  color:#f59e0b;
+  letter-spacing:.02em;
+}
+/* Review score display */
+/* Endpoint result tag on rendered messages */
+
+/* ── Critic verdict badges ── */
+.ep-verdict-badge{
+  display:inline-flex;
+  align-items:center;
+  gap:3px;
+  padding:2px 8px;
+  border-radius:10px;
+  font-size:10px;
+  font-weight:700;
+  font-family:'JetBrains Mono',monospace;
+  margin-left:6px;
+  vertical-align:middle;
+}
+.ep-verdict-stop{background:rgba(34,197,94,0.10);color:#22c55e;border:1px solid rgba(34,197,94,0.25)}
+.ep-verdict-continue{background:rgba(245,158,11,0.10);color:#f59e0b;border:1px solid rgba(245,158,11,0.25)}
+.ep-verdict-stuck{background:rgba(239,68,68,0.10);color:#ef4444;border:1px solid rgba(239,68,68,0.25)}
+.ep-verdict-planner{background:rgba(99,102,241,0.10);color:#6366f1;border:1px solid rgba(99,102,241,0.25)}
+.ep-verdict-replan{background:rgba(217,119,6,0.12);color:#d97706;border:1px solid rgba(217,119,6,0.30)}
+/* Planner message styling — indigo accent to distinguish from worker */
+.ep-planner-msg{
+  border-left:2px solid rgba(99,102,241,0.35);
+}
+.ep-planner-msg .message-avatar{
+  color:#6366f1;
+  width:40px;height:40px;
+}
+.ep-planner-msg .message-role{
+  color:#6366f1;
+}
+.ep-planner-msg .md-content{
+  color:var(--text-secondary);
+}
+/* Planner iteration banner variant */
+.ep-iter-banner-planner{
+  background:rgba(99,102,241,0.08);
+  border-color:rgba(99,102,241,0.2);
+  color:#6366f1;
+}
+/* Critic message styling — slightly different background to distinguish from user */
+.ep-critic-msg{
+  border-left:2px solid rgba(245,158,11,0.35);
+}
+.ep-critic-msg .message-avatar{
+  color:#f59e0b;
+  width:40px;height:40px;
+}
+.ep-critic-msg .md-content{
+  color:var(--text-secondary);
+}
+/* Worker message styling — green accent */
+.ep-worker-msg .message-avatar{
+  width:40px;height:40px;
+}
+/* Autopilot virtual user — distinguishable from a real user message but
+ * still rendered in the user lane.  Dashed border + cool indigo accent. */
+.vu-user-msg{
+  opacity:.94;
+}
+.vu-user-msg .message-avatar{
+  color:#f59e0b;
+  width:40px;height:40px;
+}
+.vu-user-msg .message-role{
+  color:#f59e0b;
+  font-style:italic;
+}
+/* Header above the autopilot's investigation tool panel inside a VU
+ * message.  Tells the user "this isn't normal user content — it's the
+ * tool calls Autopilot ran before composing the reply". */
+/* Provenance boundary header above the VU's REPLY text.  The
+ * investigation (indigo, above) + thinking (below) are display-only; only
+ * this reply is fed to the agent as its next message.  Green "sent" accent
+ * contrasts with the indigo "private process" accent so the human reads the
+ * boundary at a glance. */
+/* ── VU provenance: PRIVATE zone (collapsible) ──
+ * Wraps the autopilot's investigation tool panel + private reasoning into a
+ * single default-collapsed container. The dashed indigo frame + "Private ·
+ * not sent" summary make it unmistakable that NONE of this reaches the agent
+ * (only the reply below does — see conv_message_builder._build_user_message).*/
+/* ── VU provenance: SENT zone (the reply that reaches the agent) ──
+ * Bounds the handoff header + reply markdown in a green-accented block so the
+ * "this is what's sent" region is visually separate from the private zone. */
+/* ── Autopilot run fold ──────────────────────────────────────────────
+ * Collapses a concluded autopilot run's VU<->agent transcript into one
+ * <details>, leaving [human msg → summary report] as the visible spine. */
+.autopilot-run-fold{
+  margin:8px 0;
+  border:1px solid rgba(129,140,248,0.30);
+  border-radius:10px;
+  background:rgba(129,140,248,0.045);
+  overflow:hidden;
+}
+/* "View report" button — opens the close-out debrief in a sub-window. Shares
+ * the summarize button's visual language plus a leading document glyph. */
+
+/* Light theme: the base indigo hex values are light-on-light over the cream
+ * --bg-primary (#f4f2ed) — swap to dark indigo (matches --accent #6366f1). */
+[data-theme="light"] .autopilot-run-fold{
+  border-color:rgba(99,102,241,0.35);
+  background:rgba(99,102,241,0.05);
+}
+/* Tofu theme: indigo clashes with the warm cream palette and is unreadable on
+ * --bg-primary (#F5F3ED) — use the kinako ink/accent (#BB9572) family. */
+[data-theme="tofu"] .autopilot-run-fold{
+  border-color:rgba(187,149,114,0.4);
+  background:rgba(187,149,114,0.07);
+}
+/* Inner turns get a subtle inset so the fold boundary reads clearly. */
+.autopilot-run-fold > .message{margin-left:6px;margin-right:6px;}
+.autopilot-run-fold[open]{padding-bottom:4px;}
+/* ── Autopilot run-tail notice ────────────────────────────────────────
+ * Shown when a run ended WITHOUT answering (yielded to a human / aborted /
+ * superseded / hit a safety cap). Amber rather than the indigo run-fold
+ * palette: this is an unfinished outcome, not a clean conclusion, and it must
+ * not read as a normal turn. Any preserved-but-unsent VU text sits behind the
+ * <details> inside. */
+.ap-run-notice{
+  margin:6px 0 10px;
+  padding:8px 12px;
+  border:1px dashed rgba(245,158,11,0.42);
+  border-radius:10px;
+  background:rgba(245,158,11,0.06);
+  font-size:12.5px;
+  line-height:1.5;
+}
+.ap-run-notice-label{color:#f59e0b;font-style:italic;}
+.ap-run-notice-unsent{margin-top:6px;}
+.ap-run-notice-unsent > summary{
+  cursor:pointer;
+  color:var(--text-secondary);
+  font-size:12px;
+}
+/* Plain text, deliberately NOT rendered markdown — it never became a turn. */
+.ap-run-notice-text{
+  margin:6px 0 0;
+  padding:8px 10px;
+  max-height:320px;
+  overflow:auto;
+  white-space:pre-wrap;
+  word-break:break-word;
+  border-radius:8px;
+  background:var(--bg-tertiary);
+  color:var(--text-secondary);
+  font-size:12px;
+}
+/* Light / tofu: the dark-theme amber is washed out on the cream surfaces —
+ * darken to keep the label legible (mirrors the run-fold theme overrides). */
+[data-theme="light"] .ap-run-notice,
+[data-theme="tofu"] .ap-run-notice{
+  border-color:rgba(180,83,9,0.42);
+  background:rgba(180,83,9,0.06);
+}
+[data-theme="light"] .ap-run-notice-label,
+[data-theme="tofu"] .ap-run-notice-label{color:#b45309;}
+/* The close-out report banner (legacy: visible tail of a pre-sidecar run). */
+
+/* Live status chip while the autopilot virtual-user is thinking /
+ * running tools.  Indigo accent matches the VU message styling. */
+/* Turn nav dot for critic turns */
+.turn-dot-critic{
+  background:rgba(245,158,11,0.15) !important;
+  color:#f59e0b !important;
+  border-color:rgba(245,158,11,0.3) !important;
+  font-size:9px !important;
+}
+/* ── Turn dot: file-write indicator ──
+ * Circle = conversation turn, Rounded-square = code-edit turn.
+ * Shape contrast is immediately recognizable; green tint reinforces "diff" semantics. */
+.turn-dot-writes{border-radius:6px;border-color:rgba(52,211,153,0.45);color:#34d399;background:rgba(52,211,153,0.08)}
+.turn-dot-writes:hover{border-color:#34d399;color:#34d399;background:rgba(52,211,153,0.18)}
+.turn-dot-writes.active{background:#34d399;color:#fff;border-color:#34d399}
+
+/* (Swarm Panel styles consolidated in main swarm section above) */
+
+/* ── Toast Notifications ── */
+.toast-container {
+  position: fixed;
+  bottom: 22px;
+  right: 22px;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: flex-end;
+  gap: 12px;
+  pointer-events: none;
+}
+
+.toast {
+  --toast-accent: #60a5fa;
+  pointer-events: auto;
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 13px 14px 13px 16px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-secondary) 88%, transparent);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(14px) saturate(160%);
+  border: 1px solid var(--border-light);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  box-shadow:
+    0 10px 30px -8px rgba(0, 0, 0, 0.45),
+    0 2px 8px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  opacity: 0;
+  transform: translateX(120%) scale(0.96);
+  animation: toastSlideIn 0.42s cubic-bezier(0.21, 1.02, 0.45, 1) forwards;
+  max-width: 360px;
+  min-width: 220px;
+  overflow: hidden;
+}
+
+/* Accent rail down the left edge, tinted per type */
+.toast::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--toast-accent);
+  border-radius: 12px 0 0 12px;
+}
+
+.toast.removing {
+  animation: toastSlideOut 0.28s cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+
+/* Type icon circle */
+.toast-icon-wrap {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--toast-accent);
+  background: color-mix(in srgb, var(--toast-accent) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--toast-accent) 30%, transparent);
+}
+.toast-icon-wrap svg { display: block; }
+
+.toast.t-success, .toast-icon-wrap.t-success { --toast-accent: #34d399; }
+.toast.t-error,   .toast-icon-wrap.t-error   { --toast-accent: #f87171; }
+.toast.t-warning, .toast-icon-wrap.t-warning { --toast-accent: #fbbf24; }
+.toast.t-info,    .toast-icon-wrap.t-info    { --toast-accent: #60a5fa; }
+
+.toast-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+  padding-top: 4px;
+}
+
+.toast-title {
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.toast-detail {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+/* Source-conversation badge — names WHICH conversation triggered a
+   background/async toast, and (when navigable) jumps there on click. */
+.toast-conv-src {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  max-width: 100%;
+  margin-bottom: 3px;
+  padding: 1px 7px 1px 5px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--toast-accent);
+  background: color-mix(in srgb, var(--toast-accent) 13%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--toast-accent) 26%, transparent);
+}
+.toast-conv-src svg { flex-shrink: 0; opacity: 0.9; }
+.toast-conv-src-label { opacity: 0.75; }
+.toast-conv-src-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+.toast-clickable .toast-conv-src[role="button"] { cursor: pointer; }
+.toast-clickable .toast-conv-src[role="button"]:hover {
+  background: color-mix(in srgb, var(--toast-accent) 24%, transparent);
+}
+.toast-conv-src[role="button"]:focus-visible {
+  outline: 2px solid var(--toast-accent);
+  outline-offset: 1px;
+}
+
+/* Quieter "what can you do?" guidance line under the detail. */
+.toast-hint {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border-light);
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+/* A navigable toast reads as actionable (the close button stays a plain
+   cursor via its own rule). */
+.toast-clickable { cursor: pointer; }
+.toast-clickable .toast-close { cursor: pointer; }
+
+.toast-close {
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 6px;
+  line-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, background 0.15s;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.toast-close svg { display: block; }
+.toast-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+/* Undo action button (delete-conversation recovery toast) */
+.toast-undo-btn {
+  align-self: center;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--toast-accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--toast-accent) 40%, transparent);
+  color: var(--toast-accent);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.toast-undo-btn:hover {
+  background: color-mix(in srgb, var(--toast-accent) 28%, transparent);
+  border-color: var(--toast-accent);
+}
+
+/* Timer progress bar at bottom */
+.toast-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: var(--toast-accent);
+  opacity: 0.7;
+}
+
+@keyframes toastSlideIn {
+  to { opacity: 1; transform: translateX(0) scale(1); }
+}
+@keyframes toastSlideOut {
+  from { opacity: 1; transform: translateX(0) scale(1); }
+  to   { opacity: 0; transform: translateX(120%) scale(0.96); }
+}
+@keyframes toastTimer {
+  from { width: 100%; }
+  to   { width: 0%; }
+}
+
+/* ── Thinking Depth Bar (standalone sub-bar below preset toggle) ── */
+/* ── Thinking Depth (inline pill bar) ── */
+.thinking-depth-bar{display:none;align-items:center;gap:2px;margin-top:0;padding:2px;border-radius:var(--radius-sm);background:var(--bg-primary);border:1px solid var(--border-light);opacity:0;pointer-events:none;transition:opacity .2s ease;flex-shrink:0}
+.thinking-depth-bar.visible{display:flex;opacity:1;pointer-events:auto}
+/* ── Thinking-depth footer, folded into the model dropdown ──
+ * The depth bar used to be a sibling row in the toolbar. It now lives at the
+ * bottom of #presetDropdown so the toolbar has one fewer cluster. Inside this
+ * wrapper the bar is ALWAYS visible (the wrapper's display is JS-toggled by
+ * model thinking-capability), so neutralize the legacy display:none/opacity
+ * gate that the old toolbar-row fade relied on. */
+/* The depth footer is the LAST child of the scrollable (`max-height:50vh`)
+ * model dropdown. On a short viewport (landscape phone/tablet, 50vh ≈ 200px)
+ * it was stranded below a long model list and could not be scrolled into view
+ * — the "can't adjust thinking depth in landscape" regression. Pin it as a
+ * sticky footer so it stays visible while the model list scrolls under it, on
+ * every viewport. Its opaque background (dropdown bg) + border-top keep the
+ * scrolled list from bleeding through; the negative bottom margin swallows the
+ * dropdown's own 5px bottom padding so it sits flush to the rounded edge. */
+.ps-dd-depth-wrap{margin-top:5px;padding-top:8px;border-top:1px solid var(--border);position:sticky;bottom:-5px;margin-bottom:-5px;padding-bottom:5px;background:var(--bg-secondary);z-index:2}
+.ps-dd-depth-title{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-tertiary);opacity:0.6;padding:0 4px 6px;user-select:none}
+.ps-dd-depth-wrap .thinking-depth-bar{display:flex;opacity:1;pointer-events:auto;background:none;border:none;padding:0;gap:3px;justify-content:space-between}
+.ps-dd-depth-wrap .depth-btn{flex:1;padding:5px 4px}
+.depth-btn{padding:3px 8px;border:none;border-radius:calc(var(--radius-sm) - 2px);background:transparent;color:var(--text-secondary);font-size:11px;font-weight:500;cursor:pointer;transition:color .15s ease,background-color .15s ease,box-shadow .15s ease;text-align:center;font-family:inherit;white-space:nowrap;line-height:1.2}
+.depth-btn:hover{color:var(--text-primary);background:var(--bg-tertiary)}
+.depth-btn.active{background:var(--accent);color:#fff;box-shadow:0 1px 4px rgba(99,102,241,.3)}
+.depth-btn[data-depth="off"].active{background:var(--text-tertiary);box-shadow:none}

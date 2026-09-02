@@ -12,19 +12,20 @@ packaged desktop app already pins for itself in ``desktop/launcher.py``.
 Pinned:
   1. ``server.py``'s argparse ``--host`` default is ``0.0.0.0``.
   2. All three production launchers (restart_15000.sh, deploy/tofu_guard.sh,
-     deploy/supervisor/tofu.conf) default BIND_HOST to ``0.0.0.0`` — an
+     and the rendered supervisor program) default BIND_HOST to ``0.0.0.0`` — an
      OOM-respawned server must not silently narrow the bind.
   3. The packaged DESKTOP app keeps its explicit loopback pin (a laptop app
      must not start serving the LAN just because the server default moved).
-  4. The open-auth + non-loopback loud banner still exists in its boot-report
-     owner —
-     the security tripwire that makes the wider default acceptable.
+  4. The open-auth + non-loopback warning is exercised behaviorally by
+     ``tests/test_server_boot_report.py``.
 
 Run:  pytest tests/test_bind_lan_default.py -q -p no:napari -o addopts=
 """
 
 import os
 import re
+from pathlib import Path
+import sys
 
 import pytest
 
@@ -61,20 +62,30 @@ class TestBindLanDefault:
             'tofu_guard.sh must default BIND_HOST to 0.0.0.0 — an '
             'OOM-respawned server must not come back loopback-only')
 
-    def test_supervisor_conf_binds_all_interfaces(self):
-        src = _src('deploy/supervisor/tofu.conf')
-        assert 'BIND_HOST="0.0.0.0"' in src, (
-            'deploy/supervisor/tofu.conf must bind 0.0.0.0')
+    @pytest.mark.skipif(os.name == 'nt', reason='system supervisord is Unix-only')
+    def test_supervisor_conf_binds_all_interfaces(self, tmp_path):
+        import importlib.util
+        import pwd
+
+        renderer_path = Path(REPO) / 'deploy' / 'supervisor' / 'render_config.py'
+        spec = importlib.util.spec_from_file_location(
+            'tofu_bind_default_renderer', renderer_path)
+        assert spec is not None and spec.loader is not None
+        renderer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(renderer)
+        home = tmp_path / 'home'
+        home.mkdir()
+        rendered = renderer.render_config(
+            project_root=Path(REPO),
+            python_executable=Path(sys.executable),
+            user_name=pwd.getpwuid(os.getuid()).pw_name,
+            home_directory=home,
+            port=15000,
+        )
+        assert 'BIND_HOST="0.0.0.0"' in rendered
 
     def test_packaged_desktop_app_keeps_its_loopback_pin(self):
         src = _src('desktop/launcher.py')
         assert "env['BIND_HOST'] = '127.0.0.1'" in src, (
             'the packaged desktop app MUST keep binding loopback — a '
             'laptop app must not inherit the LAN default')
-
-    def test_open_auth_non_loopback_banner_survives(self):
-        src = _src('lib/server_boot_report.py')
-        assert 'API is reachable on the LAN' in src, (
-            'the loud open-auth + non-loopback boot banner is the security '
-            'tripwire that makes the wider default acceptable — do not '
-            'remove it')

@@ -19,9 +19,9 @@ Endpoints:
   POST /api/daily-report/generate                 — Start async generation
   GET  /api/daily-report/status/<date>            — Poll generation status
 
-Background: ``start_report_scheduler()`` (re-exported from
-``lib.daily_report.scheduler``) is invoked from ``register_all`` to
-auto-backfill yesterday on boot + every 6 h.
+Background: the owner-scoped ``Daily Report Backfill`` built-in runs through
+the durable scheduler and auto-backfills yesterday on startup when missing,
+then at a six-hour cron cadence.
 
 Back-compat: ``invalidate_day_cost_cache`` is imported from this module
 by ``routes/conversations.py``; the symbol is re-exported here so that
@@ -38,64 +38,41 @@ import time
 from quart import Blueprint
 
 from lib.api_response import api_bad_request, api_error, api_not_found, api_ok
-from lib.daily_report import (  # noqa: F401  — back-compat re-exports
-    DEFAULT_USER_ID,
-    _ANALYSIS_SYSTEM,
-    _CALENDAR_CACHE_TTL,
-    _LEGACY_PRESET_TO_MODEL,
-    _QUOTES,
-    _REPORTS_DIR,
-    _TODO_TOOL_DEFAULTS,
-    _TODO_TOOL_MAP,
-    _active_jobs,
-    _activity_counts_for_range,
-    _analyse_conversations,
-    _backfill_yesterday_if_missing,
-    _build_transcript_from_messages,
-    _calc_msg_cost_cny,
-    _calendar_cache,
-    _clear_job,
-    _close_yesterday_remaining_todos,
-    _count_convs_for_date,
-    _extract_convs_for_date,
-    _extract_json_result,
-    _fuzzy_todo_match,
-    _generate_in_background,
-    _get_job,
-    _get_monthly_costs,
-    _get_today_inherited_todos,
-    _get_yesterday_carryover,
-    _get_yesterday_todo_accountability,
-    _jobs_lock,
-    _is_report_date,
-    _load_cached_day_costs,
-    _load_report,
-    _mark_yesterday_todos_done,
-    _normalize_todo_text,
-    _persist_day_cost,
-    _pick_persona,
-    _qwen_cny,
-    _report_path,
-    _run_llm_analysis,
-    _safe_int_ts,
-    _save_generated_report,
-    _save_report,
-    _scan_costs_in_range,
-    _scheduler_loop,
-    _update_report,
-    _update_job,
-    invalidate_day_cost_cache,
-    start_report_scheduler,
-)
+import lib.daily_report as _daily_report
 from lib.log import get_logger
 from lib.request_parser import async_parse_body
 from routes.common import _db_safe
 
-from .auth import require_auth
+from .auth import request_user_id, require_auth
 
 logger = get_logger(__name__)
 
 api_v1_daily_report_bp = Blueprint('api_v1_daily_report', __name__)
+
+
+def invalidate_day_cost_cache(*args, **kwargs):
+    """Lazy compatibility seam for historical route-level imports."""
+    return _daily_report.invalidate_day_cost_cache(*args, **kwargs)
+
+
+def _get_today_inherited_todos(*args, **kwargs):
+    """Patchable lazy seam for owner-scoped TODO inheritance."""
+    return _daily_report._get_today_inherited_todos(*args, **kwargs)
+
+
+def _load_report(*args, **kwargs):
+    """Patchable lazy seam for owner-scoped report reads."""
+    return _daily_report._load_report(*args, **kwargs)
+
+
+def _update_report(*args, **kwargs):
+    """Patchable lazy seam for atomic owner-scoped report mutations."""
+    return _daily_report._update_report(*args, **kwargs)
+
+
+def _request_owner_user_id() -> int:
+    """Resolve the authenticated report owner once at the HTTP boundary."""
+    return int(request_user_id())
 
 
 # ═════════════════════════════════════════════════════════════
@@ -118,13 +95,15 @@ async def generate_daily_report():
 
     logger.info('[DailyReport] POST request: date=%s, force=%s', target_date, force)
 
-    if not _is_report_date(target_date):
+    if not _daily_report._is_report_date(target_date):
         logger.warning('[DailyReport] Invalid date format: %s', target_date)
         return api_bad_request('Invalid date format')
+    owner_user_id = _request_owner_user_id()
 
     # Return cached report unless force regenerate
     if not force:
-        existing = _load_report(target_date)
+        existing = _load_report(
+            target_date, owner_user_id=owner_user_id)
         if existing and (existing.get('streams') or existing.get('tasks')):
             n = len(existing.get('streams', existing.get('tasks', [])))
             logger.info('[DailyReport] POST %s: returning cached (%d items)',
@@ -133,13 +112,15 @@ async def generate_daily_report():
     # Extract conversations from DB. Off-loop: the scan fetches + json.loads-es
     # every in-window conversation's messages blob (hundreds of MB on an active
     # day) — synchronous here it stalls the event loop (LoopWatch 5s trips).
-    convs = await asyncio.to_thread(_extract_convs_for_date, target_date)
+    convs = await asyncio.to_thread(
+        _daily_report._extract_convs_for_date, target_date,
+        owner_user_id=owner_user_id)
     if not convs:
         # Still create an empty report so manual tasks can be added
         empty_result = {
             'ok': True, 'tasks': [],
-            'quote': random.choice(_QUOTES),
-            'persona': _pick_persona({}),
+            'quote': random.choice(_daily_report._QUOTES),
+            'persona': _daily_report._pick_persona({}),
             'stats': {'totalConversations': 0},
         }
         return api_ok(empty_result)
@@ -148,11 +129,13 @@ async def generate_daily_report():
     # against the newest on-disk version after this potentially long analysis.
     # Off-loop: _run_llm_analysis inside is a synchronous LLM call.
     result = await asyncio.to_thread(
-        _analyse_conversations, convs, target_date, preserve_manual=False)
+        _daily_report._analyse_conversations, convs, target_date,
+        owner_user_id=owner_user_id, preserve_manual=False)
 
     # Persist if analysis succeeded
     if (result.get('streams') or result.get('tomorrow')) and not result.get('error'):
-        result = _save_generated_report(target_date, result)
+        result = _daily_report._save_generated_report(
+            target_date, result, owner_user_id=owner_user_id)
 
     elapsed = time.monotonic() - t0
     stream_count = len(result.get('streams', []))
@@ -168,26 +151,30 @@ async def generate_daily_report():
 @require_auth
 async def get_cached_report(date_str):
     """Get a previously generated report for a specific date."""
-    if not _is_report_date(date_str):
+    if not _daily_report._is_report_date(date_str):
         return api_bad_request('Invalid date format')
+    owner_user_id = _request_owner_user_id()
 
-    today_todos = _get_today_inherited_todos(date_str)
+    today_todos = _get_today_inherited_todos(
+        date_str, owner_user_id=owner_user_id)
 
-    report = _load_report(date_str)
+    report = _load_report(date_str, owner_user_id=owner_user_id)
     if report is None:
         # No report — check if previous day has tomorrow items to inherit
         if today_todos:
             logger.debug('[DailyReport] GET %s: no report, inheriting %d todos from prev day',
                          date_str, len(today_todos))
             # Off-loop: full-day messages scan + json.loads (see get_conv_count).
-            conv_count = await asyncio.to_thread(_count_convs_for_date, date_str)
+            conv_count = await asyncio.to_thread(
+                _daily_report._count_convs_for_date, date_str,
+                owner_user_id=owner_user_id)
             return api_ok({
                 'streams': [], 'tomorrow': [],
                 'today_todos': today_todos,
                 'tasks': [],
                 'stats': {'totalConversations': conv_count},
                 '_inherited': True,
-                'quote': random.choice(_QUOTES),
+                'quote': random.choice(_daily_report._QUOTES),
             })
         logger.debug('[DailyReport] GET %s: no cached report', date_str)
         return api_not_found('No report for this date')
@@ -206,11 +193,12 @@ async def backfill_report(date_str):
     Used for past days when the frontend didn't generate a report.
     Also callable from the calendar UI.
     """
-    if not _is_report_date(date_str):
+    if not _daily_report._is_report_date(date_str):
         return api_bad_request('Invalid date format')
+    owner_user_id = _request_owner_user_id()
 
     # Don't re-generate if cached
-    existing = _load_report(date_str)
+    existing = _load_report(date_str, owner_user_id=owner_user_id)
     if existing and (existing.get('streams') or existing.get('tasks')):
         n = len(existing.get('streams', existing.get('tasks', [])))
         logger.info('[DailyReport] Backfill %s: already cached (%d items)',
@@ -218,18 +206,22 @@ async def backfill_report(date_str):
         return api_ok({**existing})
     t0 = time.monotonic()
     # Off-loop: heavy messages scan/parse + synchronous LLM analysis (see POST).
-    convs = await asyncio.to_thread(_extract_convs_for_date, date_str)
+    convs = await asyncio.to_thread(
+        _daily_report._extract_convs_for_date, date_str,
+        owner_user_id=owner_user_id)
     if not convs:
         return api_ok({'tasks': [],
-                       'quote': random.choice(_QUOTES),
-                       'persona': _pick_persona({}),
+                       'quote': random.choice(_daily_report._QUOTES),
+                       'persona': _daily_report._pick_persona({}),
                        'stats': {'totalConversations': 0}})
 
     result = await asyncio.to_thread(
-        _analyse_conversations, convs, date_str, preserve_manual=False)
+        _daily_report._analyse_conversations, convs, date_str,
+        owner_user_id=owner_user_id, preserve_manual=False)
 
     if result.get('streams') and not result.get('error'):
-        result = _save_generated_report(date_str, result)
+        result = _daily_report._save_generated_report(
+            date_str, result, owner_user_id=owner_user_id)
 
     elapsed = time.monotonic() - t0
     stream_count = len(result.get('streams', []))
@@ -245,11 +237,12 @@ async def get_calendar_month(year, month):
     """Month overview: which days have cached reports + task counts."""
     if month < 1 or month > 12:
         return api_bad_request('Invalid month')
+    owner_user_id = _request_owner_user_id()
 
     prefix = f'{year:04d}-{month:02d}-'
-    cache_key = (year, month)
-    cached = _calendar_cache.get(cache_key)
-    cache_fresh = cached and (time.monotonic() - cached['ts']) < _CALENDAR_CACHE_TTL
+    cache_key = (owner_user_id, year, month)
+    cached = _daily_report._calendar_cache.get(cache_key)
+    cache_fresh = cached and (time.monotonic() - cached['ts']) < _daily_report._CALENDAR_CACHE_TTL
 
     # ── Per-day report summary: reuse the cached parse when fresh ──
     # Quick-win: previously we re-listed + re-parsed every YYYY-MM-*.json on
@@ -263,7 +256,9 @@ async def get_calendar_month(year, month):
     if days is None:
         days = {}
         try:
-            for fname in os.listdir(_REPORTS_DIR):
+            reports_dir = _daily_report._reports_dir_for_owner(
+                owner_user_id=owner_user_id)
+            for fname in os.listdir(reports_dir):
                 if not (fname.startswith(prefix) and fname.endswith('.json')):
                     continue
                 try:
@@ -272,7 +267,9 @@ async def get_calendar_month(year, month):
                     logger.debug('[DailyReport] Skipping non-day filename %r: %s',
                                  fname, e)
                     continue
-                report = _load_report(fname.replace('.json', ''))
+                report = _load_report(
+                    fname.replace('.json', ''),
+                    owner_user_id=owner_user_id)
                 if not report or not ('streams' in report or 'tasks' in report):
                     continue
                 streams = report.get('streams', [])
@@ -317,18 +314,21 @@ async def get_calendar_month(year, month):
             # timestamp scalar per message after an exact batch mirror gate.
             # A verified-stale conversation alone falls back to its blob.
             conv_days = await asyncio.to_thread(
-                _activity_counts_for_range, ms_start, ms_end,
+                _daily_report._activity_counts_for_range, ms_start, ms_end,
+                owner_user_id=owner_user_id,
                 bound_created_end=True)
         except Exception as e:
             logger.warning('[DailyReport] Calendar conv-days %d-%02d: %s', year, month, e)
 
         # ── Server-side per-day cost calculation ──
-        # _get_monthly_costs does synchronous DB scans that can take several
+        # _daily_report._get_monthly_costs does synchronous DB scans that can take several
         # seconds on a cache-cold month; run it in a worker thread so it does
         # NOT block the event loop (and every other in-flight request).
         cost_days = {}
         try:
-            raw_costs = await asyncio.to_thread(_get_monthly_costs, year, month)
+            raw_costs = await asyncio.to_thread(
+                _daily_report._get_monthly_costs, year, month,
+                owner_user_id=owner_user_id)
             for day_num, day_data in raw_costs.items():
                 cost_days[day_num] = {
                     'cost': day_data['cost'],
@@ -339,7 +339,7 @@ async def get_calendar_month(year, month):
 
         # Store in cache (including the parsed per-day report summaries so
         # subsequent hits skip both the DB scans and the filesystem walk).
-        _calendar_cache[cache_key] = {
+        _daily_report._calendar_cache[cache_key] = {
             'days': days,
             'conv_days': conv_days,
             'cost_days': cost_days,
@@ -397,8 +397,9 @@ async def update_task_status():
     valid_statuses = ('done', 'in_progress', 'blocked', 'incomplete')
     if not cycle and new_status not in valid_statuses:
         return api_error(f'Invalid status — must be one of {valid_statuses}', status=400)
-    if not _is_report_date(date_str):
+    if not _daily_report._is_report_date(date_str):
         return api_bad_request('Invalid date format')
+    owner_user_id = _request_owner_user_id()
 
     def _apply(item) -> str:
         old_status = item.get('status', '?')
@@ -438,7 +439,8 @@ async def update_task_status():
                 return report
         return None
 
-    _update_report(date_str, _mutate)
+    _update_report(
+        date_str, _mutate, owner_user_id=owner_user_id)
     if outcome['missing']:
         return api_not_found('No report for this date')
     if not outcome['found']:
@@ -461,8 +463,9 @@ async def toggle_tomorrow_todo():
 
     if not date_str or not todo_id:
         return api_bad_request('Missing date or todo_id')
-    if not _is_report_date(date_str):
+    if not _daily_report._is_report_date(date_str):
         return api_bad_request('Invalid date format')
+    owner_user_id = _request_owner_user_id()
 
     outcome = {'missing': False, 'found': False}
 
@@ -477,7 +480,8 @@ async def toggle_tomorrow_todo():
                 return report
         return None
 
-    _update_report(date_str, _mutate)
+    _update_report(
+        date_str, _mutate, owner_user_id=owner_user_id)
     if outcome['missing']:
         return api_not_found('No report for this date')
     if not outcome['found']:
@@ -505,8 +509,9 @@ async def toggle_inherited_todo():
 
     if not origin_date or not todo_id:
         return api_bad_request('Missing origin_date or todo_id')
-    if not _is_report_date(origin_date):
+    if not _daily_report._is_report_date(origin_date):
         return api_bad_request('Invalid date format')
+    owner_user_id = _request_owner_user_id()
 
     outcome = {'missing': False, 'found': False}
 
@@ -521,7 +526,8 @@ async def toggle_inherited_todo():
                 return report
         return None
 
-    _update_report(origin_date, _mutate)
+    _update_report(
+        origin_date, _mutate, owner_user_id=owner_user_id)
     if outcome['missing']:
         return api_not_found('No report for origin date')
     if not outcome['found']:
@@ -548,8 +554,9 @@ async def delete_inherited_todo():
 
     if not origin_date or not todo_id:
         return api_bad_request('Missing origin_date or todo_id')
-    if not _is_report_date(origin_date):
+    if not _daily_report._is_report_date(origin_date):
         return api_bad_request('Invalid date format')
+    owner_user_id = _request_owner_user_id()
 
     outcome = {'missing': False, 'found': False}
 
@@ -570,7 +577,8 @@ async def delete_inherited_todo():
         report['tomorrow'] = new_tomorrow
         return report
 
-    _update_report(origin_date, _mutate)
+    _update_report(
+        origin_date, _mutate, owner_user_id=owner_user_id)
     if outcome['missing']:
         return api_not_found('No report for origin date')
     if not outcome['found']:
@@ -586,14 +594,17 @@ async def get_conv_count(date_str):
 
     Queries the database directly — reliable count regardless of frontend state.
     """
-    if not _is_report_date(date_str):
+    if not _daily_report._is_report_date(date_str):
         return api_bad_request('Invalid date format')
+    owner_user_id = _request_owner_user_id()
 
-    # Off-loop: _count_convs_for_date fetches + json.loads-es EVERY in-window
+    # Off-loop: _daily_report._count_convs_for_date fetches + json.loads-es EVERY in-window
     # conversation's full messages blob just to count (measured ~300 MB on an
     # active day) — synchronous here it stalls the event loop past the 5s
     # LoopWatch threshold (real stalls on 2026-08-01 traced to this call).
-    count = await asyncio.to_thread(_count_convs_for_date, date_str)
+    count = await asyncio.to_thread(
+        _daily_report._count_convs_for_date, date_str,
+        owner_user_id=owner_user_id)
     logger.debug('[DailyReport] conv-count %s: %d conversations', date_str, count)
     return api_ok({'count': count, 'date': date_str})
 
@@ -613,8 +624,9 @@ async def add_manual_task():
 
     if not date_str or not task_text:
         return api_bad_request('Missing date or task')
-    if not _is_report_date(date_str):
+    if not _daily_report._is_report_date(date_str):
         return api_bad_request('Invalid date format')
+    owner_user_id = _request_owner_user_id()
 
     from lib.ids import short_id
     todo_id = short_id('todo-', 8)
@@ -622,7 +634,7 @@ async def add_manual_task():
     default_report = {
         'streams': [], 'tomorrow': [], 'tasks': [],
         'stats': {'totalConversations': 0},
-        'quote': random.choice(_QUOTES),
+        'quote': random.choice(_daily_report._QUOTES),
     }
 
     def _mutate(report):
@@ -636,7 +648,9 @@ async def add_manual_task():
         })
         return report
 
-    report = _update_report(date_str, _mutate, default=default_report)
+    report = _update_report(
+        date_str, _mutate, owner_user_id=owner_user_id,
+        default=default_report)
     logger.info('[DailyReport] TODO added to %s: %s (id=%s)', date_str, task_text[:60], todo_id)
     return api_ok({'task_id': todo_id, 'report': report})
 
@@ -655,8 +669,9 @@ async def delete_manual_task():
 
     if not date_str or not task_id:
         return api_bad_request('Missing date or task_id')
-    if not _is_report_date(date_str):
+    if not _daily_report._is_report_date(date_str):
         return api_bad_request('Invalid date format')
+    owner_user_id = _request_owner_user_id()
 
     outcome = {'missing': False, 'found': False}
 
@@ -677,7 +692,8 @@ async def delete_manual_task():
         report['tomorrow'] = new_tomorrow
         return report
 
-    report = _update_report(date_str, _mutate)
+    report = _update_report(
+        date_str, _mutate, owner_user_id=owner_user_id)
     if outcome['missing']:
         return api_not_found('No report for this date')
     if not outcome['found']:
@@ -699,11 +715,12 @@ async def start_generation():
     target_date = data.get('date', _dt.date.today().isoformat())
     force = data.get('force', False)
 
-    if not _is_report_date(target_date):
+    if not _daily_report._is_report_date(target_date):
         return api_bad_request('Invalid date format')
+    owner_user_id = _request_owner_user_id()
 
     # Already generating?
-    job = _get_job(target_date)
+    job = _daily_report._get_job(target_date, owner_user_id=owner_user_id)
     if job and job.get('status') == 'generating':
         logger.debug('[DailyReport] Generate %s: already running', target_date)
         return api_ok({'status': 'generating',
@@ -711,15 +728,17 @@ async def start_generation():
 
     # Check cache (unless forced)
     if not force:
-        existing = _load_report(target_date)
+        existing = _load_report(
+            target_date, owner_user_id=owner_user_id)
         if existing and (existing.get('streams') or existing.get('tasks')):
             return api_ok({'status': 'done', 'report': existing})
     # Launch background thread
-    _update_job(target_date, 'generating',
+    _daily_report._update_job(target_date, 'generating', owner_user_id=owner_user_id,
                 progress={'stage': 'starting', 'message': '正在启动…'})
     t = threading.Thread(
-        target=_generate_in_background,
+        target=_daily_report._generate_in_background,
         args=(target_date, force),
+        kwargs={'owner_user_id': owner_user_id},
         daemon=True,
         name=f'report-gen-{target_date}',
     )
@@ -742,23 +761,27 @@ async def get_generation_status(date_str):
       ``{status: 'done', report: {…}}``                   — finished
       ``{status: 'error', error: '…'}``                   — failed
     """
-    if not _is_report_date(date_str):
+    if not _daily_report._is_report_date(date_str):
         return api_bad_request('Invalid date format')
+    owner_user_id = _request_owner_user_id()
 
-    job = _get_job(date_str)
+    job = _daily_report._get_job(date_str, owner_user_id=owner_user_id)
 
-    today_todos = _get_today_inherited_todos(date_str)
+    today_todos = _get_today_inherited_todos(
+        date_str, owner_user_id=owner_user_id)
 
     if not job:
         # No active job — check disk cache
-        existing = _load_report(date_str)
+        existing = _load_report(date_str, owner_user_id=owner_user_id)
         if existing and (existing.get('streams') is not None or existing.get('tasks') is not None):
             existing['today_todos'] = today_todos
             return api_ok({'status': 'done', 'report': existing})
         # Check if previous day has inherited todos
         if today_todos:
             # Off-loop: full-day messages scan + json.loads (see get_conv_count).
-            conv_count = await asyncio.to_thread(_count_convs_for_date, date_str)
+            conv_count = await asyncio.to_thread(
+                _daily_report._count_convs_for_date, date_str,
+                owner_user_id=owner_user_id)
             return api_ok({
                 'status': 'done',
                 'report': {
@@ -766,20 +789,21 @@ async def get_generation_status(date_str):
                     'today_todos': today_todos,
                     'stats': {'totalConversations': conv_count},
                     '_inherited': True,
-                    'quote': random.choice(_QUOTES),
+                    'quote': random.choice(_daily_report._QUOTES),
                 },
             })
         return api_ok({'status': 'idle'})
     status = job.get('status', 'idle')
 
     if status == 'done':
-        _clear_job(date_str)
-        report = _load_report(date_str) or {'tasks': []}
+        _daily_report._clear_job(date_str, owner_user_id=owner_user_id)
+        report = _load_report(
+            date_str, owner_user_id=owner_user_id) or {'tasks': []}
         report['today_todos'] = today_todos
         return api_ok({'status': 'done', 'report': report})
     if status == 'error':
         error_msg = job.get('error', 'Unknown error')
-        _clear_job(date_str)
+        _daily_report._clear_job(date_str, owner_user_id=owner_user_id)
         return api_ok({'status': 'error', 'error': error_msg})
     # Still generating
     return api_ok({'status': 'generating',

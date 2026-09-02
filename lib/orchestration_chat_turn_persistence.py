@@ -25,14 +25,10 @@ class OrchestrationChatTurnPersistence:
         *,
         store_turns: Callable[[dict, list[dict]], None],
         sync_turns: Callable[[dict, list[dict]], int | None],
-        translate_turn: Callable[[dict, dict, int | None], None],
-        translate_final: Callable[[dict, list[dict]], None],
     ):
         self._task = task
         self._store_turns = store_turns
         self._sync_turns = sync_turns
-        self._translate_turn = translate_turn
-        self._translate_final = translate_final
         self._messages: list[dict] | None = None
 
     def bind(self, messages: list[dict]) -> None:
@@ -46,26 +42,25 @@ class OrchestrationChatTurnPersistence:
     def messages(self) -> list[dict]:
         return self._messages if self._messages is not None else []
 
-    def __call__(self, message: dict) -> bool:
-        """Persist one completed turn and trigger pipelined translation."""
+    def __call__(self, _message: dict) -> bool:
+        """Persist one completed turn snapshot."""
         turns = self.messages()
         if not turns:
             return False
         try:
             self._store_turns(self._task, turns)
-            message_index = self._sync_turns(self._task, turns)
-            self._translate_turn(self._task, message, message_index)
+            self._sync_turns(self._task, turns)
             return True
         except Exception as exc:
             logger.warning(
-                '[FlowChat] per-turn DB sync/translate failed '
+                '[FlowChat] per-turn DB sync failed '
                 '(non-fatal) task=%s: %s',
                 str(self._task.get('id') or '')[:8], exc,
             )
             return False
 
     def finalize(self) -> bool:
-        """Run the final DB snapshot and auto-translation safety net."""
+        """Persist the final turn snapshot before the terminal event."""
         turns = self.messages()
         if not turns:
             return False
@@ -77,14 +72,6 @@ class OrchestrationChatTurnPersistence:
             synced = False
             logger.warning(
                 '[FlowChat] final DB sync failed (non-fatal) task=%s: %s',
-                str(self._task.get('id') or '')[:8], exc,
-            )
-        try:
-            self._translate_final(self._task, turns)
-        except Exception as exc:
-            logger.warning(
-                '[FlowChat] safety-net auto-translate failed '
-                '(non-fatal) task=%s: %s',
                 str(self._task.get('id') or '')[:8], exc,
             )
         return synced

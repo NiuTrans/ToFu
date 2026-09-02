@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Incident anchor: born in commit b3a2b2c9 — fix(llm): state every effort rung, and pin the two outbound paths tog...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """tests/test_claude_effort_rung_parity.py — every rung is SAID, and both outbound paths say it identically.
 
 Regression class pinned

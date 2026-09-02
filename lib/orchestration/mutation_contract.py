@@ -17,10 +17,6 @@ from lib.orchestration.mutation_result import (
     MUTATION_ACTIVE,
     MUTATION_CONFLICT,
     MUTATION_FORMAT,
-    MUTATION_LEGACY_GATE_ID_FIELD,
-    MUTATION_LEGACY_RUN_ID_FIELD,
-    MUTATION_LEGACY_RUN_STATUS_FIELD,
-    MUTATION_LEGACY_STATUS_FIELD,
     MUTATION_NOT_FOUND,
     MUTATION_PERSISTENCE_FAILED,
     MUTATION_RETRYABLE_REASONS,
@@ -67,14 +63,6 @@ def mutation_contract() -> dict:
         'targetExistsField': payload_fields['targetExists']['name'],
         'resourceTerminalField': payload_fields['resourceTerminal']['name'],
         'payloadFields': payload_fields,
-        'legacyTargetFields': [
-            MUTATION_LEGACY_RUN_ID_FIELD,
-            MUTATION_LEGACY_GATE_ID_FIELD,
-        ],
-        'legacyStatusFields': [
-            MUTATION_LEGACY_RUN_STATUS_FIELD,
-            MUTATION_LEGACY_STATUS_FIELD,
-        ],
     }
 
 
@@ -111,11 +99,9 @@ def mutation_payload_schema(
 def mutation_response_schema(
     action: str,
     reasons: list[str],
-    compatibility: dict | None = None,
 ) -> dict:
     accepted = reasons == [MUTATION_ACCEPTED]
     properties = {
-        **dict(compatibility or {}),
         'ok': {'type': 'boolean', 'const': accepted},
         'request_id': {'type': 'string'},
         'mutation': mutation_payload_schema(action, reasons),
@@ -123,8 +109,7 @@ def mutation_response_schema(
     }
     return {
         'type': 'object',
-        'required': ['ok', 'mutation', *list(compatibility or {})]
-        + ([] if accepted else ['error']),
+        'required': ['ok', 'mutation'] + ([] if accepted else ['error']),
         'properties': properties,
     }
 

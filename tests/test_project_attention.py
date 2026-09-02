@@ -35,32 +35,22 @@ import lib.presence.registry as reg
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _ATTN_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_attention.py')
 _BOARD_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_board.py')
 
 
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
-
-
 @pytest.fixture(autouse=True)
-def _clean(flask_app, monkeypatch):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_tasks')
-        db.execute('DELETE FROM project_events')
-        db.execute('DELETE FROM project_charter')
-        db.commit()
+def _clean(chat_sidecar, monkeypatch):
+    # Every test uses a distinct project path, so the module-scoped sidecar
+    # needs no per-test storage cleanup; keep only the in-process stubs.
     monkeypatch.setattr(reg, '_state', {})
     monkeypatch.setattr(reg, '_sweeper_started', True)
-    import lib.push as push_mod
+    import lib.agent_core.push as push_mod
     monkeypatch.setattr(push_mod, 'push_event', lambda *a, **k: None)
     monkeypatch.setattr('lib.agent_core.push.push_event', lambda *a, **k: None)
     yield
@@ -70,7 +60,7 @@ def _block_with_question(path, conv, task_id, question, options=None):
     """Put an epic into the pending-question state via the REAL block path."""
     from lib.conversations.project_board import block_task
     return block_task(path, conv, task_id, '[human-gated] needs a call',
-                      question=question, options=options or [])
+                      question=question, options=options or [], user_id=TEST_OWNER_USER_ID)
 
 
 # ── Board questions: the only genuinely blocking item ──
@@ -80,10 +70,10 @@ def test_board_question_is_a_blocking_item(flask_app):
     from lib.conversations.project_board import post_task
     p = os.path.abspath('/tmp/attn-q')
     with flask_app.app_context():
-        t = post_task(p, 'cA', 'Migrate the schema')['id']
+        t = post_task(p, 'cA', 'Migrate the schema', user_id=TEST_OWNER_USER_ID)['id']
         _block_with_question(p, 'cA', t, 'Postgres or SQLite for the primary?',
                              [{'label': 'Postgres'}, {'label': 'SQLite'}])
-        a = build_attention_items(p)
+        a = build_attention_items(p, user_id=TEST_OWNER_USER_ID)
     assert a['blocking'] == 1, a
     assert a['needsYou'] == 1
     item = a['items'][0]
@@ -101,11 +91,11 @@ def test_answered_question_drops_out(flask_app):
     from lib.conversations.project_board import answer_task, post_task
     p = os.path.abspath('/tmp/attn-answered')
     with flask_app.app_context():
-        t = post_task(p, 'cA', 'Pick a store')['id']
+        t = post_task(p, 'cA', 'Pick a store', user_id=TEST_OWNER_USER_ID)['id']
         _block_with_question(p, 'cA', t, 'Which store?', [{'label': 'PG'}])
-        assert build_attention_items(p)['blocking'] == 1
-        answer_task(p, 'cA', t, 'PG')
-        a = build_attention_items(p)
+        assert build_attention_items(p, user_id=TEST_OWNER_USER_ID)['blocking'] == 1
+        answer_task(p, 'cA', t, 'PG', user_id=TEST_OWNER_USER_ID)
+        a = build_attention_items(p, user_id=TEST_OWNER_USER_ID)
     assert a['blocking'] == 0 and a['needsYou'] == 0
 
 
@@ -119,9 +109,9 @@ def test_cooldown_block_is_not_an_item_but_is_counted_as_waiting(flask_app):
     from lib.conversations.project_board import block_task, post_task
     p = os.path.abspath('/tmp/attn-cooldown')
     with flask_app.app_context():
-        t = post_task(p, 'cA', 'Waits on CI')['id']
-        block_task(p, 'cA', t, '[sibling] waiting on the parser commit')
-        a = build_attention_items(p)
+        t = post_task(p, 'cA', 'Waits on CI', user_id=TEST_OWNER_USER_ID)['id']
+        block_task(p, 'cA', t, '[sibling] waiting on the parser commit', user_id=TEST_OWNER_USER_ID)
+        a = build_attention_items(p, user_id=TEST_OWNER_USER_ID)
     assert a['needsYou'] == 0, 'a self-expiring cooldown needs no human'
     assert a['items'] == []
     assert a['waiting'] == 1, 'but it IS reported as waiting-on-a-gate'
@@ -134,8 +124,8 @@ def test_charter_proposal_is_advisory_not_blocking(flask_app):
     from lib.conversations.project_charter import propose_amendment
     p = os.path.abspath('/tmp/attn-proposal')
     with flask_app.app_context():
-        propose_amendment(p, 'cA', 'Adopt the new parser')
-        a = build_attention_items(p)
+        propose_amendment(p, 'cA', 'Adopt the new parser', user_id=TEST_OWNER_USER_ID)
+        a = build_attention_items(p, user_id=TEST_OWNER_USER_ID)
     assert a['advisory'] == 1
     assert a['blocking'] == 0, (
         'a proposal must NOT be blocking — agents self-commit decisions since '
@@ -151,12 +141,12 @@ def test_committed_proposal_drops_out(flask_app):
     )
     p = os.path.abspath('/tmp/attn-committed')
     with flask_app.app_context():
-        res = propose_amendment(p, 'cA', 'Adopt the new parser')
-        assert build_attention_items(p)['advisory'] == 1
+        res = propose_amendment(p, 'cA', 'Adopt the new parser', user_id=TEST_OWNER_USER_ID)
+        assert build_attention_items(p, user_id=TEST_OWNER_USER_ID)['advisory'] == 1
         commit_charter(p, add_decision='Adopt the new parser',
                        updated_by_conv='cA',
-                       resolves_proposal=res['proposalId'])
-        a = build_attention_items(p)
+                       resolves_proposal=res['proposalId'], user_id=TEST_OWNER_USER_ID)
+        a = build_attention_items(p, user_id=TEST_OWNER_USER_ID)
     assert a['advisory'] == 0 and a['needsYou'] == 0
 
 
@@ -172,11 +162,11 @@ def test_blocking_sorts_ahead_of_advisory(flask_app):
     with flask_app.app_context():
         # Two advisories created FIRST, so insertion order would put them
         # ahead if severity were not the sort key.
-        propose_amendment(p, 'cA', 'Adopt X')
-        propose_amendment(p, 'cB', 'Adopt Y')
-        t = post_task(p, 'cA', 'Halted epic')['id']
+        propose_amendment(p, 'cA', 'Adopt X', user_id=TEST_OWNER_USER_ID)
+        propose_amendment(p, 'cB', 'Adopt Y', user_id=TEST_OWNER_USER_ID)
+        t = post_task(p, 'cA', 'Halted epic', user_id=TEST_OWNER_USER_ID)['id']
         _block_with_question(p, 'cA', t, 'Which way?')
-        a = build_attention_items(p)
+        a = build_attention_items(p, user_id=TEST_OWNER_USER_ID)
     assert a['needsYou'] == 3
     assert a['items'][0]['severity'] == 'blocking', \
         'blocking must lead regardless of creation order'
@@ -198,11 +188,17 @@ def test_conflict_overlap_is_not_an_attention_item(flask_app):
     from lib.conversations.project_attention import build_attention_items
     p = os.path.abspath('/tmp/attn-conflict')
     with flask_app.app_context():
-        reg.announce(p, 'convA', task_id='tA', title='A')
-        reg.announce(p, 'convB', task_id='tB', title='B')
-        reg.record_files(p, 'convA', [{'path': 'src/shared.py', 'action': 'edit'}])
-        reg.record_files(p, 'convB', [{'path': 'src/shared.py', 'action': 'edit'}])
-        a = build_attention_items(p)
+        reg.announce(p, 'convA', task_id='tA', title='A', user_id=TEST_OWNER_USER_ID)
+        reg.announce(p, 'convB', task_id='tB', title='B', user_id=TEST_OWNER_USER_ID)
+        reg.record_files(
+            p, 'convA', [{'path': 'src/shared.py', 'action': 'edit'}],
+            user_id=TEST_OWNER_USER_ID,
+        )
+        reg.record_files(
+            p, 'convB', [{'path': 'src/shared.py', 'action': 'edit'}],
+            user_id=TEST_OWNER_USER_ID,
+        )
+        a = build_attention_items(p, user_id=TEST_OWNER_USER_ID)
     assert a['items'] == [], \
         'a live conflict must never be an attention item'
     assert a['needsYou'] == 0 and a['advisory'] == 0
@@ -218,9 +214,9 @@ def test_conv_id_marks_mine_but_never_filters(flask_app):
     from lib.conversations.project_charter import propose_amendment
     p = os.path.abspath('/tmp/attn-mine')
     with flask_app.app_context():
-        propose_amendment(p, 'convA', 'From A')
-        propose_amendment(p, 'convB', 'From B')
-        a = build_attention_items(p, 'convA')
+        propose_amendment(p, 'convA', 'From A', user_id=TEST_OWNER_USER_ID)
+        propose_amendment(p, 'convB', 'From B', user_id=TEST_OWNER_USER_ID)
+        a = build_attention_items(p, 'convA', user_id=TEST_OWNER_USER_ID)
     assert a['needsYou'] == 2, 'conv_id must not filter items out'
     mine = {i['text']: i.get('mine') for i in a['items']}
     assert mine['From A'] is True and mine['From B'] is False
@@ -231,9 +227,9 @@ def test_conv_id_marks_mine_but_never_filters(flask_app):
 def test_empty_project_and_blank_path(flask_app):
     from lib.conversations.project_attention import build_attention_items
     with flask_app.app_context():
-        a = build_attention_items(os.path.abspath('/tmp/attn-empty'))
+        a = build_attention_items(os.path.abspath('/tmp/attn-empty'), user_id=TEST_OWNER_USER_ID)
     assert a['items'] == [] and a['needsYou'] == 0 and a['waiting'] == 0
-    blank = build_attention_items('')
+    blank = build_attention_items('', user_id=TEST_OWNER_USER_ID)
     assert blank['items'] == [] and blank['needsYou'] == 0
 
 
@@ -250,9 +246,9 @@ def test_one_failing_source_does_not_blank_the_surface(flask_app, monkeypatch):
 
     monkeypatch.setattr(attn, '_charter_proposals', _boom)
     with flask_app.app_context():
-        t = post_task(p, 'cA', 'Still visible')['id']
+        t = post_task(p, 'cA', 'Still visible', user_id=TEST_OWNER_USER_ID)['id']
         _block_with_question(p, 'cA', t, 'Which way?')
-        a = attn.build_attention_items(p)
+        a = attn.build_attention_items(p, user_id=TEST_OWNER_USER_ID)
     assert a['blocking'] == 1, 'a failing source must not blank the others'
 
 
@@ -264,7 +260,7 @@ def test_route_brain_attention(flask_app, flask_client):
     from lib.conversations.project_board import post_task
     p = os.path.abspath('/tmp/attn-route')
     with flask_app.app_context():
-        t = post_task(p, 'cA', 'Routed halt')['id']
+        t = post_task(p, 'cA', 'Routed halt', user_id=TEST_OWNER_USER_ID)['id']
         _block_with_question(p, 'cA', t, 'Which way?', [{'label': 'Left'}])
     r = flask_client.get('/api/v1/project/brain/attention?path=' + p)
     assert r.status_code == 200, r.get_data(as_text=True)
@@ -286,10 +282,10 @@ def test_summary_carries_attention_counts(flask_app):
     from lib.conversations.project_charter import propose_amendment
     p = os.path.abspath('/tmp/attn-summary')
     with flask_app.app_context():
-        t = post_task(p, 'cA', 'Halted')['id']
+        t = post_task(p, 'cA', 'Halted', user_id=TEST_OWNER_USER_ID)['id']
         _block_with_question(p, 'cA', t, 'Which way?')
-        propose_amendment(p, 'cA', 'Adopt X')
-        s = build_brain_summary(p)
+        propose_amendment(p, 'cA', 'Adopt X', user_id=TEST_OWNER_USER_ID)
+        s = build_brain_summary(p, user_id=TEST_OWNER_USER_ID)
     assert s['blocking'] == 1, 'a halted epic must be visible on the bar'
     assert s['advisory'] == 1
     assert s['needsYou'] == 2
@@ -306,8 +302,8 @@ def test_summary_advisory_only_reports_zero_blocking(flask_app):
     from lib.conversations.project_charter import propose_amendment
     p = os.path.abspath('/tmp/attn-calm')
     with flask_app.app_context():
-        propose_amendment(p, 'cA', 'Adopt X')
-        s = build_brain_summary(p)
+        propose_amendment(p, 'cA', 'Adopt X', user_id=TEST_OWNER_USER_ID)
+        s = build_brain_summary(p, user_id=TEST_OWNER_USER_ID)
     assert s['blocking'] == 0 and s['needsYou'] == 1
 
 
@@ -335,8 +331,8 @@ def test_proposal_text_is_not_capped_at_the_display_max(flask_app):
     long_proposal = 'RULE: keep the two gates separate.\n' + ('detail ' * 300) + 'END'
     assert len(long_proposal) > _TEXT_MAX, 'fixture must exceed the display cap'
     with flask_app.app_context():
-        propose_amendment(p, 'cA', long_proposal)
-        item = build_attention_items(p)['items'][0]
+        propose_amendment(p, 'cA', long_proposal, user_id=TEST_OWNER_USER_ID)
+        item = build_attention_items(p, user_id=TEST_OWNER_USER_ID)['items'][0]
     assert item['text'] == long_proposal, (
         'the committable proposal text must not be truncated — the Needs-you '
         'tab commits THIS string as the durable decision')
@@ -356,15 +352,15 @@ def test_proposal_text_commits_whole_through_the_real_route(flask_app):
     p = os.path.abspath('/tmp/attn-commit-whole')
     long_proposal = 'RULE: never merge the gates.\n' + ('reason ' * 300) + 'END'
     with flask_app.app_context():
-        propose_amendment(p, 'cA', long_proposal)
-        item = build_attention_items(p)['items'][0]
+        propose_amendment(p, 'cA', long_proposal, user_id=TEST_OWNER_USER_ID)
+        item = build_attention_items(p, user_id=TEST_OWNER_USER_ID)['items'][0]
         res = commit_charter(
             p, add_decision=item['text'],
             summary=item['text'].split('\n', 1)[0].strip(),
-            updated_by_conv='human', resolves_proposal=item['id'])
+            updated_by_conv='human', resolves_proposal=item['id'], user_id=TEST_OWNER_USER_ID)
         assert res.get('ok'), res
-        stored = read_charter(p)['decisions'][-1]
-        assert pending_proposals(p) == [], 'the proposal must leave the queue'
+        stored = read_charter(p, user_id=TEST_OWNER_USER_ID)['decisions'][-1]
+        assert pending_proposals(p, user_id=TEST_OWNER_USER_ID) == [], 'the proposal must leave the queue'
     assert stored['text'] == long_proposal, \
         'the committed decision must be the WHOLE proposal, not a display slice'
 
@@ -392,21 +388,17 @@ def test_NC_severity_rank_is_load_bearing(flask_app):
         from lib.conversations.project_charter import propose_amendment
         p = os.path.abspath('/tmp/attn-nc')
         with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            db = get_thread_db(DOMAIN_CHAT)
-            db.execute('DELETE FROM project_tasks WHERE project_path=?', (p,))
-            db.commit()
-            propose_amendment(p, 'cA', 'Adopt X')
-            t = post_task(p, 'cA', 'Halted epic')['id']
+            propose_amendment(p, 'cA', 'Adopt X', user_id=TEST_OWNER_USER_ID)
+            t = post_task(p, 'cA', 'Halted epic', user_id=TEST_OWNER_USER_ID)['id']
             _block_with_question(p, 'cA', t, 'Which way?')
-            a = attn.build_attention_items(p)
+            a = attn.build_attention_items(p, user_id=TEST_OWNER_USER_ID)
         assert a['items'][0]['severity'] != 'blocking', \
             'NC: with the severity ranks inverted the blocking item must not lead'
 
     _patch_restore(
         _ATTN_SRC,
-        "_SEVERITY_RANK = {'blocking': 0, 'advisory': 1}",
-        "_SEVERITY_RANK = {'blocking': 1, 'advisory': 0}  # NC (ranks inverted)",
+        '_SEVERITY_RANK = {"blocking": 0, "advisory": 1}',
+        '_SEVERITY_RANK = {"blocking": 1, "advisory": 0}  # NC (ranks inverted)',
         run,
     )
 
@@ -425,16 +417,16 @@ def test_NC_proposal_text_cap_would_truncate_a_committed_decision(flask_app):
         p = os.path.abspath('/tmp/attn-nc-trunc')
         long_proposal = 'RULE: never merge the gates.\n' + ('reason ' * 300) + 'END'
         with flask_app.app_context():
-            propose_amendment(p, 'cA', long_proposal)
-            item = attn.build_attention_items(p)['items'][0]
+            propose_amendment(p, 'cA', long_proposal, user_id=TEST_OWNER_USER_ID)
+            item = attn.build_attention_items(p, user_id=TEST_OWNER_USER_ID)['items'][0]
         assert item['text'] != long_proposal, \
             'NC: with the display cap re-applied the committable text must be a slice'
         assert len(item['text']) == attn._TEXT_MAX
 
     _patch_restore(
         _ATTN_SRC,
-        "        'text': p.get('summary') or '',",
-        "        'text': (p.get('summary') or '')[:_TEXT_MAX],  # NC (cap restored)",
+        '            "text": p.get("summary") or "",',
+        '            "text": (p.get("summary") or "")[:_TEXT_MAX],  # NC (cap restored)',
         run,
     )
 
@@ -447,15 +439,10 @@ def test_NC_proposal_text_cap_would_truncate_a_committed_decision(flask_app):
 #  is not claimed.
 # ════════════════════════════════════════════════════════════════════
 
-def _insert_conv(db, conv_id, title):
+def _insert_conv(conv_id, title):
     """Minimal conversations row so the title lookup resolves for real."""
-    now = int(time.time() * 1000)
-    db.execute(
-        'INSERT INTO conversations (id, user_id, title, messages, created_at, '
-        'updated_at, settings, msg_count, search_text, rev) '
-        'VALUES (?, 1, ?, ?, ?, ?, ?, 0, ?, ?)',
-        (conv_id, title, '[]', now, now, '{}', '', 1))
-    db.commit()
+    import tests._seed as seed
+    seed.seed_conversation(conv_id, title=title)
 
 
 def test_blocked_by_is_surfaced_with_title_and_mine(flask_app):
@@ -464,14 +451,12 @@ def test_blocked_by_is_surfaced_with_title_and_mine(flask_app):
     `mine` marking exactly like a proposal's author."""
     from lib.conversations.project_attention import build_attention_items
     from lib.conversations.project_board import post_task
-    from lib.database import DOMAIN_CHAT, get_thread_db
     p = os.path.abspath('/tmp/attn-provenance')
     with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        _insert_conv(db, 'attn-asker-1', 'Egress 出口调研')
-        t = post_task(p, 'cA', 'Halted epic')['id']
+        _insert_conv('attn-asker-1', 'Egress 出口调研')
+        t = post_task(p, 'cA', 'Halted epic', user_id=TEST_OWNER_USER_ID)['id']
         _block_with_question(p, 'attn-asker-1', t, 'Which way?')
-        a = build_attention_items(p, 'attn-asker-1')
+        a = build_attention_items(p, 'attn-asker-1', user_id=TEST_OWNER_USER_ID)
     item = a['items'][0]
     assert item['askedByConvId'] == 'attn-asker-1', item
     assert item['askedByTitle'] == 'Egress 出口调研', item
@@ -483,15 +468,13 @@ def test_blocked_by_falls_back_to_created_by_conv(flask_app):
     provenance chip — from the epic's poster, never nothing."""
     from lib.conversations.project_attention import build_attention_items
     from lib.conversations.project_board import post_task
-    from lib.database import DOMAIN_CHAT, get_thread_db
     p = os.path.abspath('/tmp/attn-legacy-block')
     with flask_app.app_context():
-        t = post_task(p, 'cA', 'Halted epic')['id']
-        _block_with_question(p, 'cB', t, 'Which way?')
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute("UPDATE project_tasks SET blocked_by='' WHERE id=?", (t,))
-        db.commit()
-        item = build_attention_items(p)['items'][0]
+        t = post_task(p, 'cA', 'Halted epic', user_id=TEST_OWNER_USER_ID)['id']
+        # A pre-column row (blocked_by='') — blocking with an EMPTY conv id
+        # stores exactly that (the legacy fixture's UPDATE equivalent).
+        _block_with_question(p, '', t, 'Which way?')
+        item = build_attention_items(p, user_id=TEST_OWNER_USER_ID)['items'][0]
     assert item['askedByConvId'] == 'cA', item
     assert item['askedByTitle'] == '', 'no conv row → id-only chip, never blank id'
 
@@ -507,9 +490,9 @@ def test_reason_uses_the_background_allowance(flask_app):
     reason = ('[human-gated] needs a call. ' + ('evidence ' * 90)).strip()
     assert _TEXT_MAX < len(reason) <= 2000, 'fixture must exceed the display cap'
     with flask_app.app_context():
-        t = post_task(p, 'cA', 'Halted epic')['id']
-        block_task(p, 'cA', t, reason, question='Which way?')
-        item = build_attention_items(p)['items'][0]
+        t = post_task(p, 'cA', 'Halted epic', user_id=TEST_OWNER_USER_ID)['id']
+        block_task(p, 'cA', t, reason, question='Which way?', user_id=TEST_OWNER_USER_ID)
+        item = build_attention_items(p, user_id=TEST_OWNER_USER_ID)['items'][0]
     assert item['reason'] == reason, \
         'the background must not be truncated at the display-only cap'
 
@@ -520,13 +503,11 @@ def test_proposal_carries_author_provenance(flask_app):
     author's conv id + the resolved conversation title."""
     from lib.conversations.project_attention import build_attention_items
     from lib.conversations.project_charter import propose_amendment
-    from lib.database import DOMAIN_CHAT, get_thread_db
     p = os.path.abspath('/tmp/attn-prop-prov')
     with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        _insert_conv(db, 'attn-proposer-1', '架构决策讨论')
-        propose_amendment(p, 'attn-proposer-1', 'Adopt the new parser')
-        item = build_attention_items(p)['items'][0]
+        _insert_conv('attn-proposer-1', '架构决策讨论')
+        propose_amendment(p, 'attn-proposer-1', 'Adopt the new parser', user_id=TEST_OWNER_USER_ID)
+        item = build_attention_items(p, user_id=TEST_OWNER_USER_ID)['items'][0]
     assert item['type'] == 'charter_proposal', item
     assert item['askedByConvId'] == 'attn-proposer-1', item
     assert item['askedByTitle'] == '架构决策讨论', item
@@ -540,34 +521,29 @@ def test_NC_blocked_by_write_is_load_bearing(flask_app):
     def run(mod):
         p = os.path.abspath('/tmp/attn-nc-prov')
         with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            db = get_thread_db(DOMAIN_CHAT)
-            db.execute('DELETE FROM project_tasks WHERE project_path=?', (p,))
-            db.commit()
-            t = mod.post_task(p, 'cA', 'Halted epic')['id']
+            t = mod.post_task(p, 'cA', 'Halted epic', user_id=TEST_OWNER_USER_ID)['id']
             mod.block_task(p, 'attn-asker-2', t, '[human-gated] needs a call',
-                           question='Which way?')
+                           question='Which way?', user_id=TEST_OWNER_USER_ID)
             from lib.conversations.project_attention import build_attention_items
-            item = build_attention_items(p)['items'][0]
+            item = build_attention_items(p, user_id=TEST_OWNER_USER_ID)['items'][0]
         assert item['askedByConvId'] != 'attn-asker-2', \
             'NC: with the blocked_by write neutered the asker must be lost'
         assert item['askedByConvId'] == 'cA', \
             'NC: the fallback to the poster is what remains'
 
+    # The anchor is the SIDECAR branch's conv_id handoff (the suite runs
+    # sidecar-only; the legacy branch's blocked_by UPDATE never executes, and
+    # the op-side write lives in the sidecar process). Stripping the handoff
+    # makes the op store blocked_by='' — the exact column-loss the NC proves.
     _patch_restore(
         _BOARD_SRC,
-        "            'block_reason=?, block_question=?, human_answer=?, blocked_by=?, '\n"
-        "            'updated_at=? '\n"
-        "            'WHERE id=? AND project_path=? '\n"
-        "            'AND COALESCE(block_count,0)=?',\n"
-        "            (blocked_until, new_count, reason, question_json, '', conv_id,\n"
-        "             now, task_id, project_path, new_count - 1),\n"
-        "            return_cursor=True)",
-        "            'block_reason=?, block_question=?, human_answer=?, updated_at=? '\n"
-        "            'WHERE id=? AND project_path=? '\n"
-        "            'AND COALESCE(block_count,0)=?',\n"
-        "            (blocked_until, new_count, reason, question_json, '', now,\n"
-        "             task_id, project_path, new_count - 1),\n"
-        "            return_cursor=True)  # NC (blocked_by write stripped)",
+        '                "action": "block",\n'
+        '                "project_path": normalized_path,\n'
+        '                "user_id": int(user_id),\n'
+        '                "conv_id": conv_id,',
+        '                "action": "block",\n'
+        '                "project_path": normalized_path,\n'
+        '                "user_id": int(user_id),\n'
+        '                "conv_id": "",  # NC (blocked_by handoff stripped)',
         run,
     )

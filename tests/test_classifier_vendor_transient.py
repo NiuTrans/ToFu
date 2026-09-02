@@ -159,17 +159,26 @@ class TestRetryLabelI18nCoverage:
             catalog = json.loads(path.read_text(encoding='utf-8'))
             assert 'stream.retryReason.upstreamError' in catalog, path.name
             assert 'stream.retryReason.waitingBackoff' in catalog, path.name
+            # strict-mode gateway HUD keys (owner directive 2026-08-18)
+            assert 'stream.phase.retryGateway' in catalog, path.name
+            assert 'stream.phase.gatewayOutageFinal' in catalog, path.name
 
     def test_retry_phase_fields_maps_labels(self):
         from lib.llm_dispatch.retry_i18n import retry_phase_fields
+        # Gateway/outage token → dedicated key (owner directive 2026-08-18:
+        # strict mode waits out gateway 5xx on the PINNED model — the HUD
+        # must say "backend gateway issue, no model switch", not the generic
+        # retry shape).
         f = retry_phase_fields(model='m', attempt=1, reason='Upstream error',
                                status_code=403)
-        assert f['detailKey'] == 'stream.phase.retryReason'
-        assert f['detailArgs']['reasonKey'] == 'stream.retryReason.upstreamError'
+        assert f['detailKey'] == 'stream.phase.retryGateway'
+        assert f['detailArgs']['status'] == 403
         f = retry_phase_fields(model='m', attempt=1,
                                reason='Waiting for model (retry backoff)',
                                status_code=0)
+        assert f['detailKey'] == 'stream.phase.retryCooldownWait'
         assert f['detailArgs']['reasonKey'] == 'stream.retryReason.waitingBackoff'
+        assert 'attempt' not in f['detailArgs']
         # regression pin: a real 429 status still wins the rate-limited branch
         f = retry_phase_fields(model='m', attempt=1, reason='x', status_code=429)
         assert f['detailKey'] == 'stream.phase.retryRateLimited'

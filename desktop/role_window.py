@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """desktop/role_window.py — the startup role window + control panel.
 
-Owner directive 2026-08-03 (docs/DESKTOP_STARTUP_ROLE_UX_DESIGN.md): the
+The startup-role contract (docs/modules/remote_execution.md): the
 desktop app must SAY at startup whether this machine is the server or a
 controlled endpoint, and the client controls must not live ONLY in the
 system tray. This module is the ONE authoring consumed by BOTH launchers

@@ -19,7 +19,9 @@ from __future__ import annotations
 
 from quart import Blueprint, request
 
-from lib.api_response import api_bad_request, api_internal_error, api_ok
+from lib.api_response import (
+    api_bad_request, api_internal_error, api_ok, api_payload,
+)
 from lib.log import get_logger
 from lib.openapi import api_meta
 
@@ -55,19 +57,37 @@ def _with_egress_state(status: dict, provider: str, user_id: str) -> dict:
     return status
 
 
-def _with_quota_state(status: dict, provider: str) -> dict:
-    """Attach the latest successful Codex quota snapshot, when available."""
+def _with_quota_state(status: dict, provider: str,
+                      user_id: str = '') -> dict:
+    """Attach passive quota plus the explicit earned-reset entitlement.
+
+    This function never performs upstream I/O.  The reset owner returns its
+    last account-scoped snapshot and starts one daemon refresh when stale.
+    """
     if provider != 'codex' or not status.get('authenticated'):
         return status
+    status = dict(status)
     try:
         from lib.subscription_quota import latest_subscription_quota
         quota = latest_subscription_quota(
             provider, cache_key='oauth_codex')
         if quota:
-            status = dict(status)
             status['quota'] = quota
     except Exception as e:
         logger.debug('[OAuth.v1] quota status failed for %s: %s', provider, e)
+    try:
+        from lib.oauth.codex_usage import codex_usage_reset_status
+        status['reset_offer'] = codex_usage_reset_status(user_id=user_id)
+    except Exception as e:
+        # Failure stays explicitly unknown; it must never be projected as zero.
+        logger.debug('[OAuth.v1] reset-offer status failed for %s: %s',
+                     provider, e)
+        status['reset_offer'] = {
+            'state': 'unknown', 'available_count': None,
+            'source': 'codex_usage_api', 'captured_at': None,
+            'stale': False, 'refreshing': False,
+            'reason': 'status_unavailable',
+        }
     return status
 
 
@@ -79,7 +99,10 @@ def _with_quota_state(status: dict, provider: str) -> dict:
         'Returns ``{<provider>: {logged_in, expires_at, ...}}`` for all '
         'providers, or just the requested one when ``?provider=`` is set. '
         '"Provider" here refers to the *upstream subscription provider* '
-        '(Claude Pro, ChatGPT Codex), NOT the v1 LLM provider config.'
+        '(Claude Pro, ChatGPT Codex), NOT the v1 LLM provider config. '
+        'Authenticated Codex status also carries a non-blocking '
+        '``reset_offer`` state (available, none, or unknown); unknown is '
+        'never inferred as zero.'
     ),
     tags=['capabilities'],
 )
@@ -90,18 +113,17 @@ def oauth_status():
         from lib.oauth.manager import get_all_oauth_status, get_oauth_status
         from .auth import current_auth
         _auth = current_auth()
-        _uid = (_auth.user_id
-                if _auth and getattr(_auth, 'user_id', '') else '')
+        _uid = str(_auth.owner_user_id or '') if _auth else ''
 
         provider = request.args.get('provider', '')
         if provider:
             if provider not in ('claude', 'codex'):
                 return api_bad_request('Invalid provider', field='provider')
             return api_ok(_with_quota_state(_with_egress_state(
-                get_oauth_status(provider), provider, _uid), provider))
+                get_oauth_status(provider), provider, _uid), provider, _uid))
         all_status = get_all_oauth_status()
         return api_ok({p: _with_quota_state(
-                           _with_egress_state(s, p, _uid), p)
+                           _with_egress_state(s, p, _uid), p, _uid)
                        for p, s in all_status.items()})
     except Exception as e:
         logger.error('[OAuth.v1] status check failed: %s', e, exc_info=True)
@@ -161,6 +183,56 @@ def oauth_test():
     return api_ok(results)
 
 
+@api_v1_oauth_bp.route('/api/v1/oauth/device-login', methods=['POST', 'GET'])
+@require_auth
+@api_meta(
+    summary='Start a device-authorization login flow (Codex)',
+    description=(
+        'Mints a user code from OpenAI\'s deviceauth API and starts the '
+        'server-side poll thread. This path never touches the localhost:1455 '
+        'redirect: the user '
+        'enters the displayed code at the verification URL in ANY browser. '
+        'It requires one working server proxy/direct/desktop-agent route; a '
+        'transport outage is returned as 503 so the UI can fall back to the '
+        'browser callback-copy flow. '
+        'Completion is observed via the regular /api/v1/oauth/status '
+        'projection (device.user_code + status transitions).'
+    ),
+    tags=['capabilities'],
+)
+def oauth_device_login():
+    try:
+        from lib.oauth.manager import start_device_flow
+        from .auth import current_auth
+        _auth = current_auth()
+        _uid = str(_auth.owner_user_id or '') if _auth else ''
+
+        if request.method == 'GET':
+            provider = request.args.get('provider', '')
+        else:
+            from lib.request_parser import parse_body
+            body = parse_body(force=True)
+            provider = body.get('provider', '')
+
+        if provider != 'codex':
+            return api_bad_request(
+                'Device login is only available for provider=codex',
+                field='provider')
+
+        logger.info('[OAuth.v1] %s /api/v1/oauth/device-login from %s',
+                    request.method, request.remote_addr)
+        result = start_device_flow(provider, user_id=_uid)
+        if 'error' in result:
+            # A transport outage is not a malformed login request. Preserve
+            # the upstream status_code=0 detail and use 503 so clients can
+            # select the browser-network fallback without string matching.
+            http_status = 503 if result.get('status_code') in (0, '0') else 400
+            return api_payload(result, http_status)
+        return api_ok(result)
+    except Exception as e:
+        logger.error('[OAuth.v1] device-login failed: %s', e, exc_info=True)
+        return api_internal_error(e, source='api_v1.oauth.device_login')
+
 # ── Egress agent pin selector (multi-agent deployments) ─────────────
 
 
@@ -186,7 +258,7 @@ def oauth_egress_agent_get():
         from lib.desktop.egress import _pinned_agent
         from .auth import current_auth
         auth = current_auth()
-        uid = (auth.user_id if auth and getattr(auth, 'user_id', '') else '')
+        uid = str(auth.owner_user_id or '') if auth else ''
         pinned = _pinned_agent(uid)
         agents = [
             {'agent_id': a.get('agent_id'), 'name': a.get('name'),
@@ -218,7 +290,7 @@ def oauth_egress_agent_set():
         from lib.json_store import update_json_atomic
         from .auth import current_auth
         auth = current_auth()
-        uid = (auth.user_id if auth and getattr(auth, 'user_id', '') else '')
+        uid = str(auth.owner_user_id or '') if auth else ''
         body = _req.get_json(silent=True) or {}
         agent_id = str(body.get('agent_id') or '').strip()
         if agent_id:

@@ -25,6 +25,7 @@ same-conv tasks collapse to one entry.
 
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -48,11 +49,11 @@ def _mk(tid, conv, *, created, last_event=None, heartbeat=None,
 
 
 def _install(monkeypatch, task_list, *, max_silent=300):
-    """Point the registry's `tasks` at our synthetic set + pin the threshold."""
-    from lib.tasks_pkg.manager import _registry, _maintenance
-    fake = {t['id']: t for t in task_list}
-    monkeypatch.setattr(_registry, 'tasks', fake, raising=True)
-    monkeypatch.setattr(_registry, 'tasks_lock', threading.Lock(), raising=True)
+    """Install a public-runtime snapshot and pin the liveness threshold."""
+    import lib.tasks_pkg.manager._maintenance as _maintenance
+    import lib.tasks_pkg.manager._registry as _registry
+    runtime = SimpleNamespace(snapshot=lambda: list(task_list))
+    monkeypatch.setattr(_registry, 'chat_task_runtime', runtime, raising=True)
     monkeypatch.setattr(_maintenance, '_stuck_task_max_silent_secs',
                         lambda: max_silent, raising=True)
 

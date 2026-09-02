@@ -8,7 +8,7 @@ Two behaviours under test:
      round.  Replan / phase boundaries reset it (verified at the endpoint
      layer; here we confirm the analyser reads it correctly).
 
-  2. **Force-rotate signal on zero-byte** — the analyser writes
+  2. **Force-rotate signal on unusable streams** — the analyser writes
      ``task['_force_rotate_pair'] = (key, model)`` after a zero-byte
      retry decision.  ``stream_llm_response`` is responsible for
      consuming and clearing the signal; we test the analyser side.
@@ -28,9 +28,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.tasks_pkg.stream_handler import (  # noqa: E402
+from lib.tasks_pkg.stream_handler.api import analyse_stream_result  # noqa: E402
+from lib.tasks_pkg.stream_handler._budget import (  # noqa: E402
+    _NO_ACTIONABLE_RETRY_MAX,
     _PREMATURE_RETRY_MAX_ZERO_BYTE,
-    analyse_stream_result,
 )
 
 
@@ -197,12 +198,11 @@ def test_zero_byte_writes_force_rotate_pair():
     assert task.get('_force_rotate_pair') == ('sankuai_key_0', 'aws.claude-opus-4.7')
 
 
-def test_classic_premature_close_retries_without_rotate():
+def test_classic_premature_close_retries_on_another_slot():
     """A classic premature close (model produced thinking, then was cut
-    mid-stream) retries on the SAME slot — strict_model is on and the
-    slot already produced output, so it's likely a transient transport
-    hiccup worth retrying as-is. It does NOT write a force-rotate signal
-    (that's zero-byte-only). The retry is admitted (action=continue)."""
+    mid-stream) avoids the just-failed slot once. Strict-model authority is
+    preserved: dispatch may select only another slot for the same model, and
+    relaxes the hint if no alternative exists."""
     task = _fresh_task(phase_counter=0)
     decision = analyse_stream_result(
         assistant_msg={
@@ -225,7 +225,8 @@ def test_classic_premature_close_retries_without_rotate():
         },
     )
     assert decision['action'] == 'continue'
-    assert '_force_rotate_pair' not in task
+    assert task.get('_force_rotate_pair') == (
+        'sankuai_key_0', 'aws.claude-opus-4.7')
 
 
 def test_classic_premature_close_retries_up_to_16():
@@ -233,7 +234,7 @@ def test_classic_premature_close_retries_up_to_16():
     failing the task after 2 — a single dropped connection shouldn't
     zero out a whole SWE-bench instance. At count=15 it still retries;
     at count=16 it's exhausted."""
-    from lib.tasks_pkg.stream_handler import _PREMATURE_RETRY_MAX_CLASSIC
+    from lib.tasks_pkg.stream_handler._budget import _PREMATURE_RETRY_MAX_CLASSIC
     assert _PREMATURE_RETRY_MAX_CLASSIC == 16
 
     def _run(count):
@@ -251,6 +252,43 @@ def test_classic_premature_close_retries_up_to_16():
     assert _run(15)['action'] == 'continue'   # under cap → retry
     assert _run(16)['action'] == 'break'       # at cap → exhausted
     assert _run(16)['last_finish_reason'] == 'premature_close'
+
+
+def test_no_actionable_exhaustion_does_not_multiply_into_whole_turn_retries():
+    """A five-minute no-progress attempt gets only two alternate-slot retries.
+
+    The exhaustion envelope keeps a manual Retry affordance but tells the
+    outer auto-retry layer not to reset and replay the entire inner budget.
+    """
+    task = _fresh_task(phase_counter=_NO_ACTIONABLE_RETRY_MAX)
+    decision = analyse_stream_result(
+        assistant_msg={'role': 'assistant', 'content': '',
+                       'reasoning_content': 'x' * 200},
+        last_finish_reason='stop', task=task, tid='budget',
+        model='kimi-k3', round_num=0,
+        _premature_retry_count=_NO_ACTIONABLE_RETRY_MAX, messages=[],
+        usage={
+            '_stream_anomaly': True,
+            '_missing_done': True,
+            '_no_actionable_timeout': True,
+            '_chunks_received': 500,
+            '_failure_stage': 'no_actionable_output',
+            '_network_route': {
+                'routeId': 'direct:configured-bypass',
+                'routeMode': 'direct',
+            },
+            'stream_elapsed_ms': 300_000,
+            'trace_id': 'M-NO-PROGRESS',
+        },
+    )
+
+    assert decision['action'] == 'break'
+    assert task['error']['kind'] == 'abnormal_stop'
+    assert task['error']['retryable'] is True
+    assert task['error']['autoRetryExhausted'] is True
+    assert task['error']['failureStage'] == 'no_actionable_output'
+    from lib.tasks_pkg.turn_retry import should_auto_retry_turn
+    assert should_auto_retry_turn(task['error'], 0) == (False, 0.0)
 
 
 def test_zero_byte_without_dispatch_metadata_skips_rotate():

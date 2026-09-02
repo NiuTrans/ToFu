@@ -234,7 +234,7 @@ def main():
     except Exception as e:
         logging.getLogger(__name__).debug('auth cookie read failed: %s', e)
 
-    from lib.tasks_pkg.handlers.search import _fetch_url_one
+    from lib.tasks_pkg.handlers.search._core import _fetch_url_one
     item = _fetch_url_one(args.url, '美团模型广场 文本生成 模型列表',
                           fetch_reason='验收')
     text = item.get('page_content') or ''

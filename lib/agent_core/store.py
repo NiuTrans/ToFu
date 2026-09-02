@@ -4,13 +4,13 @@ The reusable agent base reaches all persistence through a
 :class:`~lib.protocols.ConversationStore`, obtained here via
 :func:`get_conversation_store`.  This module is part of the agent base
 (``lib.agent_core`` is in ``CORE_MODULES``), so it MUST NOT import
-``lib.database`` / ``lib.conversations`` — it only names the *default
-adapter module* (:mod:`lib.tasks_pkg.persistence_store`), which is itself
-non-core and free to bind the DB.
+``lib.storage`` / ``lib.storage_sidecar`` / ``lib.conversations``. It names
+only the default adapter module (:mod:`lib.tasks_pkg.persistence_store`),
+which is outside the reusable core and binds the host persistence seam.
 
 Hosts that embed the agent base against a different persistence backend call
 :func:`set_conversation_store` once at startup (mirroring how
-``lib.search_bridge.install_search_bridge`` injects chatui behaviour into the
+``lib.search_bridge.install_search_bridge`` injects application behaviour into the
 tofu-search seams).  When no override is installed, the chatui default
 (:class:`lib.tasks_pkg.persistence_store.DefaultConversationStore`) is lazily
 constructed on first use.
@@ -51,7 +51,8 @@ def get_conversation_store() -> 'ConversationStore':
     """Return the active ConversationStore, constructing the default if unset.
 
     The default adapter is imported lazily so this core module never pulls in
-    the DB layer at import time, and so a host can override before first use.
+    the host persistence graph at import time, and so an embedding host can
+    override it before first use.
     """
     global _store
     if _store is not None:

@@ -40,12 +40,24 @@ def tmp_project_root(tmp_path):
 
 @pytest.fixture()
 def fake_task():
-    return {
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+
+    task = {
         'id': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
         'convId': 'conv-producer',
+        '_userId': 1,
+        'status': 'running',
+        'config': {'userId': 1},
         'events': [],
         'events_lock': threading.Lock(),
     }
+    with tasks_lock:
+        tasks[task['id']] = task
+    try:
+        yield task
+    finally:
+        with tasks_lock:
+            tasks.pop(task['id'], None)
 
 
 def _last_artifact_event(task):

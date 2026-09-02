@@ -18,8 +18,8 @@ def definition_conflict_response_schema() -> dict:
     }
     write_properties = {
         spec['name']: (
-            definition_version_schema(nullable=True)
-            if spec['type'] == 'nullable_non_negative_integer'
+            definition_version_schema()
+            if spec['type'] == 'non_negative_integer'
             else {'type': spec['type']}
         )
         for spec in field_specs.values()
@@ -40,8 +40,7 @@ def definition_conflict_response_schema() -> dict:
             'conflict': {
                 'type': 'string', 'enum': [contract['conflictReason']],
             },
-            fields['currentUpdatedAt']: definition_version_schema(
-                nullable=True),
+            fields['currentUpdatedAt']: definition_version_schema(),
             'write': {
                 'type': 'object',
                 'additionalProperties': False,

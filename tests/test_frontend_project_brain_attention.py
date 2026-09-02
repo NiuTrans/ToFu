@@ -36,11 +36,12 @@ import shutil
 import subprocess
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 _ATTN_SRC = os.path.join(JS_DIR, 'project-brain-attention.js')
 _PRESENCE_SRC = os.path.join(JS_DIR, 'presence.js')
@@ -945,8 +946,9 @@ def test_reporter_is_shared_not_duplicated():
         attn = f.read()
     assert '_reportFailure: _reportFailure' in brain, \
         'project-brain.js must EXPORT the shared reporter'
-    assert 'window.ProjectBrain._reportFailure' in attn, \
-        'the Needs-you tab must delegate to the shared reporter, not fork it'
+    assert 'runtimeScope.ProjectBrain._reportFailure' in attn, \
+        ('the Needs-you tab must delegate through the runtime seam to the '
+         'shared reporter, not fork it')
 
 
 def test_charter_tab_commit_sends_no_expected_version():

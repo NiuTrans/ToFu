@@ -365,7 +365,7 @@ def _ttl_env():
     """Isolate the global CACHE_EXTENDED_TTL flag + the per-task latch table so
     the flip test can drive them without leaking into other tests."""
     import lib as _lib
-    from lib.tasks_pkg.cache_tracking import _ttl as _ttlmod
+    import lib.tasks_pkg.cache_tracking._ttl as _ttlmod
     _orig_flag = getattr(_lib, 'CACHE_EXTENDED_TTL', False)
     _orig_latch = dict(_ttlmod._ttl_latch)
     yield _lib, _ttlmod
@@ -408,7 +408,7 @@ def test_cache_ttl_stable_across_in_task_retry(_ttl_env):
     # Task starts while the global is ON → latch True for the task's life.
     _liba.CACHE_EXTENDED_TTL = True
     _ttlmod._ttl_latch.clear()
-    from lib.tasks_pkg.cache_tracking import latch_extended_ttl
+    from lib.tasks_pkg.cache_tracking._ttl import latch_extended_ttl
     latch_extended_ttl(task_id)
 
     # The orchestrator builds the body ONCE per round with _task_id set.
@@ -463,7 +463,7 @@ def test_ttl_flip_neuter_is_detected(_ttl_env):
     task_id = 'task_ttl_neuter'
     _lib.CACHE_EXTENDED_TTL = True
     _ttlmod._ttl_latch.clear()
-    from lib.tasks_pkg.cache_tracking import latch_extended_ttl
+    from lib.tasks_pkg.cache_tracking._ttl import latch_extended_ttl
     latch_extended_ttl(task_id)
     w1 = _build_translated_with_task(mlist, tools, task_id)
     _lib.CACHE_EXTENDED_TTL = False

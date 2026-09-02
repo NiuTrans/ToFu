@@ -29,6 +29,8 @@ import pytest
 import lib.browser.cookie_capture as cc
 
 pytestmark = pytest.mark.unit
+CLIENT_ID = 'test-browser'
+USER_ID = '41'
 
 
 @pytest.fixture(autouse=True)
@@ -44,8 +46,11 @@ def _isolated_state():
 
 @pytest.fixture
 def ext_online(monkeypatch):
+    def fake_connected(client_id, *, owner_user_id):
+        return client_id == CLIENT_ID and owner_user_id == USER_ID
+
     monkeypatch.setattr('lib.browser.queue.is_extension_connected',
-                        lambda *a, **k: True)
+                        fake_connected)
 
 
 @pytest.fixture
@@ -102,12 +107,22 @@ class TestCapture:
         monkeypatch.setattr('lib.auth_sources.upsert_source',
                             lambda dom, **kw: stored.update(domain=dom, **kw) or {})
         monkeypatch.setattr(cc, 'audit_log', lambda *a, **k: None)
-        monkeypatch.setattr(cc, '_probe_no_longer_walled', lambda url: True)
+        monkeypatch.setattr(
+            cc, '_probe_no_longer_walled',
+            lambda url, *, client_id, owner_user_id: (
+                client_id == CLIENT_ID and owner_user_id == USER_ID))
         monkeypatch.setattr(cc, '_fetch_cookies',
-                            lambda dom: [{'name': 'sess', 'value': 'x'}])
-        monkeypatch.setattr('lib.push.push_event', lambda *a, **k: None)
+                            lambda dom, *, client_id, owner_user_id: (
+                                [{'name': 'sess', 'value': 'x'}]
+                                if (client_id, owner_user_id)
+                                == (CLIENT_ID, USER_ID) else []))
+        monkeypatch.setattr('lib.agent_core.push.push_event', lambda *a, **k: None)
 
-        assert cc.handle_login_wall('https://walled.example.com/app') is True
+        assert cc.handle_login_wall(
+            'https://walled.example.com/app',
+            client_id=CLIENT_ID,
+            user_id=USER_ID,
+        ) is True
         assert stored.get('domain') == 'walled.example.com'
         assert stored.get('enabled') is True
         assert stored.get('cookies') == [{'name': 'sess', 'value': 'x'}]
@@ -121,16 +136,23 @@ class TestCapture:
         monkeypatch.setattr('lib.auth_sources.upsert_source',
                             lambda dom, **kw: upsert_calls.append(dom) or {})
         monkeypatch.setattr(cc, 'audit_log', lambda *a, **k: None)
-        monkeypatch.setattr(cc, '_probe_no_longer_walled', lambda url: False)
+        monkeypatch.setattr(
+            cc, '_probe_no_longer_walled',
+            lambda url, *, client_id, owner_user_id: False)
         monkeypatch.setattr(cc, '_fetch_cookies',
-                            lambda dom: [{'name': '_track', 'value': 'anon'}])
-        monkeypatch.setattr('lib.push.push_event', lambda *a, **k: None)
+                            lambda dom, *, client_id, owner_user_id: [
+                                {'name': '_track', 'value': 'anon'}])
+        monkeypatch.setattr('lib.agent_core.push.push_event', lambda *a, **k: None)
         started = []
         monkeypatch.setattr(cc.threading, 'Thread',
                             lambda **kw: started.append(kw) or
                             type('T', (), {'start': lambda self: None})())
 
-        assert cc.handle_login_wall('https://walled.example.com/app') is False
+        assert cc.handle_login_wall(
+            'https://walled.example.com/app',
+            client_id=CLIENT_ID,
+            user_id=USER_ID,
+        ) is False
         assert upsert_calls == [], 'anonymous cookies must never be stored'
         assert started, 'async capture should engage for a still-walled page'
 
@@ -139,13 +161,20 @@ class TestCapture:
         monkeypatch.setattr(cc, 'audit_log',
                             lambda event, **kw: audits.append((event, kw)))
         monkeypatch.setattr('lib.auth_sources.upsert_source', lambda dom, **kw: {})
-        monkeypatch.setattr(cc, '_probe_no_longer_walled', lambda url: True)
+        monkeypatch.setattr(
+            cc, '_probe_no_longer_walled',
+            lambda url, *, client_id, owner_user_id: True)
         monkeypatch.setattr(cc, '_fetch_cookies',
-                            lambda dom: [{'name': 'a', 'value': '1'},
-                                         {'name': 'b', 'value': '2'}])
-        monkeypatch.setattr('lib.push.push_event', lambda *a, **k: None)
+                            lambda dom, *, client_id, owner_user_id: [
+                                {'name': 'a', 'value': '1'},
+                                {'name': 'b', 'value': '2'}])
+        monkeypatch.setattr('lib.agent_core.push.push_event', lambda *a, **k: None)
 
-        assert cc.handle_login_wall('https://walled.example.com/') is True
+        assert cc.handle_login_wall(
+            'https://walled.example.com/',
+            client_id=CLIENT_ID,
+            user_id=USER_ID,
+        ) is True
         capture_events = [kw for ev, kw in audits if ev == 'cookie_capture']
         assert len(capture_events) == 1
         assert capture_events[0]['cookie_count'] == 2
@@ -157,20 +186,31 @@ class TestCapture:
         """A login tab that the user ignores must NOT re-open on every fetch
         round: within _ATTEMPT_COOLDOWN_S a second wall only logs a skip."""
         monkeypatch.setattr(cc, 'audit_log', lambda *a, **k: None)
-        monkeypatch.setattr(cc, '_probe_no_longer_walled', lambda url: False)
-        monkeypatch.setattr('lib.push.push_event', lambda *a, **k: None)
+        monkeypatch.setattr(
+            cc, '_probe_no_longer_walled',
+            lambda url, *, client_id, owner_user_id: False)
+        monkeypatch.setattr('lib.agent_core.push.push_event', lambda *a, **k: None)
         started = []
         monkeypatch.setattr(cc.threading, 'Thread',
                             lambda **kw: started.append(kw) or
                             type('T', (), {'start': lambda self: None})())
 
-        assert cc.handle_login_wall('https://walled.example.com/app') is False
+        assert cc.handle_login_wall(
+            'https://walled.example.com/app',
+            client_id=CLIENT_ID,
+            user_id=USER_ID,
+        ) is False
         assert len(started) == 1
 
         # Simulate the capture thread having exited; the cooldown remains.
         with cc._capture_lock:
-            cc._capture_threads.pop('walled.example.com', None)
-        assert cc.handle_login_wall('https://walled.example.com/app') is False
+            cc._capture_threads.pop(
+                (USER_ID, CLIENT_ID, 'walled.example.com'), None)
+        assert cc.handle_login_wall(
+            'https://walled.example.com/app',
+            client_id=CLIENT_ID,
+            user_id=USER_ID,
+        ) is False
         assert len(started) == 1, 'a second login tab must not open inside the cooldown'
 
     def test_fresh_auth_source_suppresses_recapture(
@@ -180,8 +220,12 @@ class TestCapture:
                                          'updated_at': time.time()})
         probe_calls = []
         monkeypatch.setattr(cc, '_probe_no_longer_walled',
-                            lambda url: probe_calls.append(url) or True)
-        assert cc.handle_login_wall('https://walled.example.com/') is False
+                            lambda url, **route: probe_calls.append(url) or True)
+        assert cc.handle_login_wall(
+            'https://walled.example.com/',
+            client_id=CLIENT_ID,
+            user_id=USER_ID,
+        ) is False
         assert probe_calls == []
 
     def test_offline_extension_noop(self, monkeypatch):
@@ -189,8 +233,12 @@ class TestCapture:
                             lambda *a, **k: False)
         probe_calls = []
         monkeypatch.setattr(cc, '_probe_no_longer_walled',
-                            lambda url: probe_calls.append(url) or True)
-        assert cc.handle_login_wall('https://walled.example.com/') is False
+                            lambda url, **route: probe_calls.append(url) or True)
+        assert cc.handle_login_wall(
+            'https://walled.example.com/',
+            client_id=CLIENT_ID,
+            user_id=USER_ID,
+        ) is False
         assert probe_calls == []
 
 
@@ -203,18 +251,34 @@ class TestFetchHook:
         import lib.browser.fetch as bfetch
         calls = []
 
-        def fake_send(cmd, params, timeout=30, client_id=None):
+        def fake_send(
+                cmd, params, timeout=30, client_id=None,
+                owner_user_id=None):
+            assert (client_id, owner_user_id) == (CLIENT_ID, USER_ID)
             calls.append(cmd)
             if len(calls) == 1:
                 return first_result, None
             return retry_result, None
 
         monkeypatch.setattr(bfetch, 'send_browser_command', fake_send)
-        monkeypatch.setattr(bfetch, 'is_extension_connected', lambda *a, **k: True)
-        monkeypatch.setattr(bfetch, '_get_active_client', lambda: None)
+        monkeypatch.setattr(
+            bfetch, 'is_extension_connected',
+            lambda client_id, *, owner_user_id: (
+                client_id == CLIENT_ID and owner_user_id == USER_ID))
+        monkeypatch.setattr(
+            'lib.browser.protocol.require_capabilities',
+            lambda client_id, required: {'client_id': client_id},
+        )
         engaged = []
-        monkeypatch.setattr('lib.browser.cookie_capture.handle_login_wall',
-                            lambda url, final_url='': engaged.append(url) or captured)
+
+        def fake_capture(
+                url, final_url='', *, client_id, user_id):
+            assert (client_id, user_id) == (CLIENT_ID, USER_ID)
+            engaged.append(url)
+            return captured
+
+        monkeypatch.setattr(
+            'lib.browser.cookie_capture.handle_login_wall', fake_capture)
         return bfetch, calls, engaged
 
     def test_walled_result_returns_none_and_engages_capture(self, monkeypatch):
@@ -224,7 +288,10 @@ class TestFetchHook:
             'text': '二维码登录 简体中文 登录您的账号 ' * 20,
         })
         out = bfetch.fetch_url_via_browser(
-            'https://api.openai.com/ml/modelPlaza/modelInfo')
+            'https://api.openai.com/ml/modelPlaza/modelInfo',
+            client_id=CLIENT_ID,
+            owner_user_id=USER_ID,
+        )
         assert out is None, 'wall text must not be served as content'
         assert engaged == ['https://api.openai.com/ml/modelPlaza/modelInfo']
         assert calls == ['fetch_url'], 'no inline retry when capture did not complete'
@@ -238,7 +305,10 @@ class TestFetchHook:
             retry_result={'url': 'https://api.openai.com/ml/modelPlaza/modelInfo',
                           'title': 'FRIDAY', 'text': 'real model list ' * 50})
         out = bfetch.fetch_url_via_browser(
-            'https://api.openai.com/ml/modelPlaza/modelInfo')
+            'https://api.openai.com/ml/modelPlaza/modelInfo',
+            client_id=CLIENT_ID,
+            owner_user_id=USER_ID,
+        )
         assert calls == ['fetch_url', 'fetch_url'], 'one inline retry after capture'
         assert out is not None and 'real model list' in out
 
@@ -248,6 +318,10 @@ class TestFetchHook:
             'title': 'A normal page',
             'text': 'perfectly fine content ' * 50,
         })
-        out = bfetch.fetch_url_via_browser('https://example.com/article')
+        out = bfetch.fetch_url_via_browser(
+            'https://example.com/article',
+            client_id=CLIENT_ID,
+            owner_user_id=USER_ID,
+        )
         assert out is not None
         assert engaged == []

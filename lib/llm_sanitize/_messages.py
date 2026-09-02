@@ -101,8 +101,7 @@ def _strip_empty_text_blocks(messages: list) -> list:
     and 4,337 retries burned on a deterministic rejection).
 
     Legacy producers include context-injection wrap seams
-    (``_refresh_tail_block``, ``_refresh_detail_block``,
-    ``_append_user_profile_block``) which wrap ``content`` into
+    (the Context Composer and attachment renderer) which wrap ``content`` into
     ``[{text: content}]`` unconditionally, plus any frontend-sent multimodal
     message with an empty caption block. This is the single chokepoint that
     heals EVERY producer, present and future.
@@ -230,7 +229,7 @@ def _drop_empty_assistant_messages(messages: list) -> list:
 # assembly step, not a fault (measured 2026-08-03: ~2,000 merge log lines/day,
 # 99.9% from these seams):
 #   * the CLAUDE.md ``_isMeta`` carrier at index 1
-#     (``system_context._insert_user_context_message`` — A/B-measured cache win,
+#     (Context Composer head placement — A/B-measured cache win,
 #     see ``build_user_context_reminder``);
 #   * the preference-profile blocks riding that carrier;
 #   * the per-turn "Recently Modified Files" attachment
@@ -244,8 +243,22 @@ def _drop_empty_assistant_messages(messages: list) -> list:
 # re-patched forever. Any OTHER pair is an unexpected producer (send-race
 # duplicate user rows, error-ghost adjacency, endpoint leaks) and alarms at
 # WARNING with a location + preview, so the source is one grep away.
-_SYNTHETIC_PAIR_PREFIXES = ('<system-reminder>', '<swarm-update>')
+_SYNTHETIC_PAIR_PREFIXES = (
+    '<system-reminder>',
+    '<swarm-update>',
+    # Layer-2 compaction preserves earlier user text verbatim in this _isMeta
+    # wrapper. Private fields are stripped before this seam, so its stable
+    # envelope is the only producer-owned identity left on the wire.
+    '<retained_user_messages>',
+    # Context Composer stamps ``_contextComposer`` on its managed carriers,
+    # but provider-neutral message sanitization intentionally strips private
+    # fields before this final structural merge.  Its wire-stable envelope is
+    # therefore the authoritative marker at this seam.
+    '<!-- tofu-context:',
+)
 _SYNTHETIC_PAIR_MARKERS = (
+    '[SYSTEM: TODO CONTINUATION REQUIRED]',
+    '[Project Brain — autonomous dispatch]',
     '[PROJECT CO-PILOT MODE]',
     '[USER CONTEXT]',
     '[USER PREFERENCE PROFILE]',
@@ -298,7 +311,7 @@ def _pair_preview(msg, limit: int = 60) -> str:
 def _merge_consecutive_same_role(messages: list) -> list:
     """Merge consecutive messages with the same role (except system/tool).
 
-    Endpoint mode can produce consecutive assistant messages (planner + worker)
+    A Flow can produce consecutive assistant messages (planner + worker)
     in the DB conversation.  If the frontend fails to filter the planner message,
     this backend defense-in-depth merges them by concatenating content.
 
@@ -308,7 +321,7 @@ def _merge_consecutive_same_role(messages: list) -> list:
       - user/assistant: consecutive same-role messages are merged with \\n\\n separator
       - Messages with tool_calls are never merged (they are function-call requests)
 
-    Observability (epic pt_99eeedbd): merges involving a synthetic-context
+    Observability (): merges involving a synthetic-context
     seam (``_is_synthetic_context_msg`` on either side) are BY DESIGN and go
     to DEBUG; anything else is an unexpected producer and fires ONE WARNING
     carrying each merged-away ``#index/role`` + a content preview. The merge

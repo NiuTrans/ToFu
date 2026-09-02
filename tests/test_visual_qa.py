@@ -16,8 +16,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.design_sys import visual_qa as vqa  # noqa: E402
-from lib.design_sys import temporal_qa as tqa  # noqa: E402
+import lib.design_sys.visual_qa as vqa  # noqa: E402
+import lib.design_sys.temporal_qa as tqa  # noqa: E402
 
 pytestmark = pytest.mark.unit
 

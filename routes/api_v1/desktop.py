@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 
 from quart import Blueprint
@@ -22,8 +23,10 @@ from quart import Blueprint
 from lib.api_response import (
     api_conflict, api_created, api_error, api_not_found, api_ok, api_payload,
 )
-from lib.env_compat import getenv_compat
 from lib.log import audit_log, get_logger
+from lib.log_policy import stream_backup_count, stream_max_bytes
+from lib.log_redaction import redact_text, sanitize_value
+from lib.log_retention import append_bytes_locked, copytruncate_if_oversize
 from lib.openapi import api_meta
 
 from .auth import require_auth
@@ -83,7 +86,7 @@ def _setup_state(connected: bool) -> str:
 
 
 # ── Platform/release knowledge: extracted to lib/desktop_dist/platforms ──
-# (2026-07, pt_a859c11e75d142d1). The route previously OWNED these helpers;
+# (2026-07, ). The route previously OWNED these helpers;
 # the background mirror (lib/desktop_dist/mirror.py) would have been a
 # second copy of the same rules. Re-exported here so existing callers and
 # guard suites that import them from the route see no drift.
@@ -282,7 +285,9 @@ def _host_reachability(host: str) -> str:
     return 'public'
 
 
-def _caller_bridge_token_count(uid: str) -> int:
+def _caller_bridge_token_count(
+    owner_user_id: int, tenant_id: str | None,
+) -> int:
     """How many agents:bridge tokens the caller has minted (metadata only).
 
     Feeds the panel's waiting-diagnosis: tokens issued but zero agents
@@ -292,9 +297,11 @@ def _caller_bridge_token_count(uid: str) -> int:
     """
     try:
         from lib.api_keys import list_keys
-        return sum(1 for k in list_keys()
-                   if _BRIDGE_SCOPE in (k.get('scopes') or [])
-                   and (k.get('user_id') or '') == (uid or ''))
+        return sum(
+            1 for key in list_keys(
+                owner_user_id=owner_user_id, tenant_id=tenant_id)
+            if _BRIDGE_SCOPE in (key.get('scopes') or [])
+        )
     except Exception as e:
         logger.debug('bridge token count unavailable: %s', e)
         return 0
@@ -383,15 +390,35 @@ def _agent_store_entry() -> dict | None:
     return rows[0] if rows else None
 
 
+def _visitor_os() -> str:
+    """The request visitor's OS key: 'windows' | 'macos' | 'linux' | ''.
+
+    The panel picks its primary controlled-end offer by this value: the
+    personalized one-file installer is a WINDOWS .exe by design (the NSIS
+    trailer rewrite in lib/desktop_dist/agent_installer.py), so a
+    macOS/Linux visitor must be steered to the mirrored per-platform agent
+    asset in ``agent_downloads`` — never handed a package it cannot run.
+    The rule lives server-side (one ``_detect_os`` owns it); the frontend
+    renders, it does not re-derive.
+    """
+    from quart import request
+    try:
+        ua = request.user_agent.string or ''
+    except Exception as e:
+        logger.debug('[Desktop] user-agent parse failed: %s', e)
+        ua = ''
+    return _detect_os(ua)
+
+
 @api_v1_desktop_bp.route('/api/v1/desktop/status', methods=['GET'])
 @require_auth
 @api_meta(
     summary='Desktop-agent connection status',
     description=(
         'Returns ``{connected, last_poll, pending_commands, setup_state, '
-        'download_url, downloads, agent_downloads, server_url, '
+        'visitor_os, download_url, downloads, agent_downloads, server_url, '
         'server_url_reachability, bridge_tokens_issued, '
-        'bridge_token_required, agents}`` so the UI can render a presence '
+        'agents}`` so the UI can render a presence '
         'indicator AND the single appropriate install instruction. '
         'Connection is defined as a poll within the last 15 s. '
         '``setup_state`` is one of ``connected`` / ``tray`` / '
@@ -407,19 +434,19 @@ async def desktop_status():
         list_agents,
         pending_commands_count,
     )
-    from .auth import current_auth
-    _auth = current_auth()
-    _uid = (_auth.user_id
-            if _auth and getattr(_auth, 'user_id', '') else None)
+    from .auth import request_principal
+    principal = request_principal()
+    owner_user_id = principal.require_owner(context='desktop status')
     connected = is_desktop_agent_connected()
     _last = last_poll_time()
     _arch = (request.args.get('arch') or '').strip()[:16]
     return api_ok({
         'connected': connected,
         'last_poll': _last,
+        'visitor_os': _visitor_os(),
         'secondsAgo': (round(time.time() - _last, 1) if _last else None),
         'pending_commands': pending_commands_count(),
-        'agents': _with_drift(list_agents(user_id=_uid)),
+        'agents': _with_drift(list_agents(user_id=str(owner_user_id))),
         'setup_state': _setup_state(connected),
         'download_url': _desktop_download_url(),
         'downloads': _request_platform_downloads(_arch),
@@ -427,9 +454,8 @@ async def desktop_status():
                                                        kind='agent'),
         'server_url': _agent_server_url(),
         'server_url_reachability': _host_reachability(request.host),
-        'bridge_tokens_issued': _caller_bridge_token_count(_uid),
-        'bridge_token_required': bool(
-            (getenv_compat('TOFU_BRIDGE_SECRET') or '').strip()),
+        'bridge_tokens_issued': _caller_bridge_token_count(
+            owner_user_id, principal.tenant_id),
         # One-file installer surface: the bind class lets the
         # panel WARN when a loopback bind makes remote agents unreachable
         # by construction; readiness flips the agent download from a stale
@@ -517,6 +543,103 @@ def desktop_download(filename):
 
 # ``agent-bundle`` remains a wire-compatible alias for already-cached pages,
 # but it returns the SAME .exe response. No route distributes a ZIP anymore.
+def _build_attach_bundle(
+    *,
+    owner_user_id: int,
+    account_user_id: str,
+    tenant_id: str | None,
+):
+    """The ONE attach-payload construction — Windows trailer and page push.
+
+    Both zero-config channels deliver the same record: an ordered
+    route-candidate list plus a fresh per-user ``agents:bridge`` token
+    minted at download time. The Windows channel rewrites the .exe's NSIS
+    trailer with it; the macOS/Linux channel hands it to the signed-in
+    Local Control page, which pushes it to the unattached agent's loopback
+    broker (``POST /api/v1/desktop/agent-attach-bundle`` below).
+
+    Returns ``(payload, '')`` or ``(None, 'credential_unavailable')``. A
+    device without a credential can never poll, so a package guaranteed to
+    fail must not leave this process.
+    """
+    token = ''
+    try:
+        from lib.api_keys import create_key
+        row, token = create_key(
+            'agent-attach-%s' % time.strftime('%Y%m%d-%H%M%S'),
+            scopes=[_BRIDGE_SCOPE], owner_user_id=owner_user_id,
+            account_user_id=account_user_id, tenant_id=tenant_id)
+        audit_log('desktop_agent_bundle_minted', key_id=row.get('id'),
+                  owner_user_id=owner_user_id)
+    except Exception as e:
+        logger.warning('[Desktop] attach-bundle credential mint failed: %s', e)
+        return None, 'credential_unavailable'
+
+    candidates = []
+    direct = _direct_lan_candidate()
+    if direct:
+        candidates.append(direct)
+    fallbacks = []
+    try:
+        from routes.browser import _external_base_url
+        live = (_external_base_url() or '').rstrip('/')
+        if live and live != direct:
+            fallbacks.append(live)
+    except Exception as e:
+        logger.warning('[Desktop] live-base resolution failed: %s', e)
+
+    return {
+        'v': 1,
+        'kind': 'tofu-agent-attach',
+        'minted_at': time.time(),
+        'token': token,
+        # Probe order the agent walks: direct LAN first (no SSO between),
+        # then its own ladder (loopback → LAN broadcast → ssh self-tunnel),
+        # the browser-reachable base LAST (SSO-edge risk, measured
+        # 2026-08-03).
+        'candidates': candidates,
+        'fallback_candidates': fallbacks,
+    }, ''
+
+
+@api_v1_desktop_bp.route('/api/v1/desktop/agent-attach-bundle',
+                         methods=['POST'])
+@require_auth
+@api_meta(
+    summary='Mint a fresh attach bundle for a browser-pushed agent attach',
+    description=(
+        'The macOS/Linux zero-config counterpart of the personalized '
+        'Windows installer: the signed-in Local Control page relays the '
+        'returned bundle (route candidates + a fresh per-user '
+        'agents:bridge token) to the unattached agent\'s loopback broker '
+        '(``POST /v1/attach``), which validates and persists it. '
+        '``?base=`` pins the browser-reachable fallback to the page\'s '
+        'live origin+prefix (same host-pinning rule as the installer). '
+        '503 when a gated bridge cannot mint the credential.'
+    ),
+    tags=['capabilities'],
+)
+def desktop_agent_attach_bundle():
+    """SYNC: two dict lookups and a key mint — no I/O worth a thread."""
+    from .auth import current_auth, request_principal
+    auth = current_auth()
+    principal = request_principal()
+    owner_user_id = principal.require_owner(context='desktop attach bundle')
+    payload, mint_error = _build_attach_bundle(
+        owner_user_id=owner_user_id,
+        account_user_id=(auth.account_user_id if auth else ''),
+        tenant_id=principal.tenant_id,
+    )
+    if mint_error:
+        return api_error(
+            'agent_credential_unavailable', status=503,
+            message='the attach bundle is temporarily unavailable — '
+                    'retry shortly')
+    audit_log('desktop_agent_attach_bundle_served',
+              owner_user_id=owner_user_id)
+    return api_ok(payload)
+
+
 @api_v1_desktop_bp.route('/api/v1/desktop/agent-bundle', methods=['GET'])
 @api_v1_desktop_bp.route('/api/v1/desktop/agent-installer', methods=['GET'])
 @require_auth
@@ -541,7 +664,7 @@ def desktop_download(filename):
 )
 def desktop_agent_installer():
     """SYNC on purpose: streams a ~50 MB executable without buffering it."""
-    from .auth import current_auth
+    from .auth import current_auth, request_principal
 
     entry = _agent_store_entry()
     if entry is None:
@@ -570,57 +693,22 @@ def desktop_agent_installer():
 
     # Download-time credential stays inside the installer. The user never
     # sees, copies, pastes, or reasons about it.
-    token = ''
-    try:
-        from lib.api_keys import create_key
-        auth = current_auth()
-        uid = (auth.user_id if auth and getattr(auth, 'user_id', '')
-               else '') or ''
-        row, token = create_key(
-            'agent-attach-%s' % time.strftime('%Y%m%d-%H%M%S'),
-            scopes=[_BRIDGE_SCOPE], user_id=uid)
-        audit_log('desktop_agent_bundle_minted', key_id=row.get('id'),
-                  user_id=uid)
-    except Exception as e:
-        # An open bridge can genuinely poll tokenless. A gated bridge cannot:
-        # serving an EXE that is guaranteed to fail would merely hide the auth
-        # burden until after installation. Keep it internal and ask for a
-        # plain retry while the credential store recovers.
-        if (getenv_compat('TOFU_BRIDGE_SECRET') or '').strip():
-            logger.warning('[Desktop] installer token mint failed on a '
-                           'gated bridge: %s', e)
-            return api_error(
-                'agent_credential_unavailable', status=503,
-                message='the controlled-end installer is temporarily '
-                        'unavailable — retry shortly')
-        logger.warning('[Desktop] installer token mint failed (open bridge; '
-                       'serving without one): %s', e)
-
-    candidates = []
-    direct = _direct_lan_candidate()
-    if direct:
-        candidates.append(direct)
-    fallbacks = []
-    try:
-        from routes.browser import _external_base_url
-        live = (_external_base_url() or '').rstrip('/')
-        if live and live != direct:
-            fallbacks.append(live)
-    except Exception as e:
-        logger.warning('[Desktop] live-base resolution failed: %s', e)
-
-    attach = {
-        'v': 1,
-        'kind': 'tofu-agent-attach',
-        'minted_at': time.time(),
-        'token': token,
-        # Probe order the agent walks: direct LAN first (no SSO between),
-        # then its own ladder (loopback → LAN broadcast → ssh self-tunnel),
-        # the browser-reachable base LAST (SSO-edge risk, measured
-        # 2026-08-03).
-        'candidates': candidates,
-        'fallback_candidates': fallbacks,
-    }
+    auth = current_auth()
+    principal = request_principal()
+    owner_user_id = principal.require_owner(context='desktop installer')
+    attach, mint_error = _build_attach_bundle(
+        owner_user_id=owner_user_id,
+        account_user_id=(auth.account_user_id if auth else ''),
+        tenant_id=principal.tenant_id,
+    )
+    if mint_error:
+        # Serving an EXE guaranteed to fail would hide the fault until after
+        # installation. Keep it internal and ask for a plain retry while the
+        # credential authority recovers.
+        return api_error(
+            'agent_credential_unavailable', status=503,
+            message='the controlled-end installer is temporarily '
+                    'unavailable — retry shortly')
     from quart import Response
     from lib.desktop_dist.agent_installer import iter_personalized
 
@@ -646,8 +734,8 @@ def desktop_agent_installer():
     response.headers['X-Content-Type-Options'] = 'nosniff'
     logger.info('[Desktop] personalized agent installer downloaded (%s, '
                 'candidates=%s, token=%s)', entry['filename'],
-                candidates + fallbacks,
-                'minted' if token else 'none')
+                attach['candidates'] + attach['fallback_candidates'],
+                'minted' if attach['token'] else 'none')
     return response
 
 
@@ -657,11 +745,36 @@ def desktop_agent_installer():
 # 信息」button (desktop/agent_launcher._diag_report), and the user pastes
 # the bundle HERE. The server appends it to a JSONL file the operator (or
 # the assistant) reads straight from disk; the GET lets the panel confirm
-# the paste landed. Texts are stored verbatim (the agent already redacts
-# secrets to presence+length) and capped at _DIAG_MAX_CHARS.
+# the paste landed. The agent redacts first and the server recursively redacts
+# again as mandatory defense in depth; text is capped at _DIAG_MAX_CHARS.
+# The file uses the shared
+# stream policy rather than growing once per authenticated paste forever.
 _DIAG_LOG = os.path.join(_REPO_ROOT, 'logs', 'desktop_client_diag.log')
 _DIAG_MAX_CHARS = 200_000
 _DIAG_LIST_LIMIT = 20
+_DIAG_WRITE_LOCK = threading.Lock()
+
+
+def _append_client_diag_entry(entry: dict) -> None:
+    """Append one redacted JSONL record under the shared stream ceiling."""
+    import json as _json
+
+    safe_entry = sanitize_value(
+        dict(entry), field_name='desktop_client_diagnostic', max_items=12,
+        max_string_chars=_DIAG_MAX_CHARS)
+    safe_entry = safe_entry if isinstance(safe_entry, dict) else {}
+    safe_entry['text'] = redact_text(
+        safe_entry.get('text') or '', max_chars=_DIAG_MAX_CHARS)
+    line = (_json.dumps(safe_entry, ensure_ascii=False) + '\n').encode('utf-8')
+    os.makedirs(os.path.dirname(_DIAG_LOG), exist_ok=True)
+    with _DIAG_WRITE_LOCK:
+        ceiling = stream_max_bytes('desktop_client_diag')
+        copytruncate_if_oversize(
+            _DIAG_LOG,
+            max_bytes=ceiling,
+            trigger_bytes=max(1, ceiling - len(line)),
+            backup_count=stream_backup_count('desktop_client_diag'))
+        append_bytes_locked(_DIAG_LOG, line)
 
 
 @api_v1_desktop_bp.route('/api/v1/desktop/client-diag', methods=['POST'])
@@ -678,12 +791,10 @@ _DIAG_LIST_LIMIT = 20
     tags=['capabilities'],
 )
 async def desktop_client_diag_submit():
-    import json as _json
-
     from lib.request_parser import async_parse_body
-    from .auth import current_auth
-    auth = current_auth()
-    uid = (auth.user_id if auth and getattr(auth, 'user_id', '') else '')
+    from .auth import request_principal
+    owner_user_id = request_principal().require_owner(
+        context='desktop diagnostics')
     body = await async_parse_body()
     # Manual validation (not optional_str): the refusal must ride the
     # api_error envelope, not the global BadRequest handler.
@@ -700,11 +811,9 @@ async def desktop_client_diag_submit():
         return api_error('empty_diag', status=400,
                          message='nothing to store — paste the copied '
                                  'diagnostics first')
-    entry = {'ts': time.time(), 'user_id': uid, 'text': text}
+    entry = {'ts': time.time(), 'owner_user_id': owner_user_id, 'text': text}
     try:
-        os.makedirs(os.path.dirname(_DIAG_LOG), exist_ok=True)
-        with open(_DIAG_LOG, 'a', encoding='utf-8') as f:
-            f.write(_json.dumps(entry, ensure_ascii=False) + '\n')
+        _append_client_diag_entry(entry)
     except OSError as e:
         logger.error('[Desktop] client-diag store failed: %s', e,
                      exc_info=True)
@@ -712,7 +821,7 @@ async def desktop_client_diag_submit():
                          message='could not store the diagnostics — '
                                  'see logs/error.log')
     logger.info('[Desktop] client diagnostics received (%d chars, user=%s)',
-                len(text), uid)
+                len(text), owner_user_id)
     return api_ok({'received': len(text)})
 
 
@@ -729,33 +838,45 @@ async def desktop_client_diag_submit():
 )
 async def desktop_client_diag_list():
     import json as _json
+    from .auth import current_auth
 
     entries = []
     try:
-        size = os.path.getsize(_DIAG_LOG)
-        with open(_DIAG_LOG, encoding='utf-8', errors='replace') as f:
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        descriptor = os.open(_DIAG_LOG, flags)
+        with os.fdopen(descriptor, 'rb') as f:
+            size = os.fstat(f.fileno()).st_size
             if size > 2_000_000:
                 f.seek(size - 1_000_000)
                 f.readline()  # drop the partial line the seek landed in
                 lines = f.readlines()
             else:
                 lines = f.readlines()
-        for ln in lines[-_DIAG_LIST_LIMIT:]:
+        auth = current_auth()
+        requesting_owner_user_id = str(auth.owner_user_id or '')
+        include_all_users = bool(auth and auth.has_scope('admin'))
+        for raw_line in reversed(lines):
             try:
-                e = _json.loads(ln)
+                e = _json.loads(raw_line.decode('utf-8', errors='replace'))
             except ValueError as e2:
                 logger.debug('[Desktop] diag line undecodable: %s', e2)
                 continue
             if not isinstance(e, dict):
                 continue
-            entries.append({'ts': e.get('ts'), 'user_id': e.get('user_id'),
+            entry_owner_user_id = str(e.get('owner_user_id') or '')
+            if (not include_all_users
+                    and entry_owner_user_id != requesting_owner_user_id):
+                continue
+            entries.append({'ts': e.get('ts'),
+                            'owner_user_id': e.get('owner_user_id'),
                             'chars': len(e.get('text') or ''),
                             'preview': (e.get('text') or '')[:200]})
+            if len(entries) >= _DIAG_LIST_LIMIT:
+                break
     except FileNotFoundError:
         logger.debug('[Desktop] client-diag file absent — nothing to list')
     except OSError as e:
         logger.warning('[Desktop] client-diag list failed: %s', e)
-    entries.reverse()
     return api_ok({'entries': entries})
 
 
@@ -790,19 +911,19 @@ async def desktop_devices():
     """Devices page payload: the caller's agents + their bridge tokens."""
     from lib.api_keys import list_keys
     from lib.desktop import list_agents
-    from .auth import current_auth
-    auth = current_auth()
-    uid = (auth.user_id if auth and getattr(auth, 'user_id', '') else '')
+    from .auth import request_principal
+    principal = request_principal()
+    owner_user_id = principal.require_owner(context='desktop devices')
     tokens = [
         {'id': k.get('id'), 'name': k.get('name'),
          'created_at': k.get('created_at'),
          'scopes': sorted(k.get('scopes') or [])}
-        for k in list_keys()
+        for k in list_keys(
+            owner_user_id=owner_user_id, tenant_id=principal.tenant_id)
         if _BRIDGE_SCOPE in (k.get('scopes') or [])
-        and (k.get('user_id') or '') == uid
     ]
     return api_ok({
-        'agents': _with_drift(list_agents(user_id=uid)),
+        'agents': _with_drift(list_agents(user_id=str(owner_user_id))),
         'tokens': tokens,
     })
 
@@ -826,21 +947,25 @@ async def desktop_pair_code_mint():
     to this user's account — no bearer, no bridge secret. The panel
     renders the code big with a copy button and a 5-minute countdown.
     """
-    from lib.desktop.pairing import (_CODE_TTL_S, mint_code,
-                                     pending_codes)
-    from .auth import current_auth
+    from lib.desktop.pairing import (
+        _CODE_TTL_S, PairingIdentity, mint_code, pending_codes,
+    )
+    from .auth import current_auth, request_principal
     auth = current_auth()
-    uid = (auth.user_id if auth and getattr(auth, 'user_id', '') else '')
-    if not uid:
-        return api_not_found('not_found',
-                             message='authenticated user required')
-    code, expires_at = mint_code(uid)
-    audit_log('desktop_pair_code_minted', user_id=uid)
+    principal = request_principal()
+    owner_user_id = principal.require_owner(context='desktop pairing')
+    identity = PairingIdentity(
+        owner_user_id=owner_user_id,
+        account_user_id=(auth.account_user_id if auth else ''),
+        tenant_id=principal.tenant_id,
+    )
+    code, expires_at = mint_code(identity)
+    audit_log('desktop_pair_code_minted', owner_user_id=owner_user_id)
     return api_created({
         'code': code,
         'expires_at': expires_at,
         'ttl': _CODE_TTL_S,
-        'pending': pending_codes(uid),
+        'pending': pending_codes(owner_user_id),
     })
 
 
@@ -891,8 +1016,8 @@ async def desktop_pair():
         or 'paired-agent'
     platform = optional_str(body, 'platform', default='',
                             max_len=40).strip() or 'unknown'
-    user_id = consume_code(code)
-    if user_id is None:
+    identity = consume_code(code)
+    if identity is None:
         record_pair_failure(client_ip)
         audit_log('desktop_pair_failed', code=code[:2] + '****',
                   reason='invalid_code')
@@ -901,15 +1026,21 @@ async def desktop_pair():
                                     'or already used. Generate a new one '
                                     'in the panel.')
     record_pair_success(client_ip)
-    row, token = create_key(name, scopes=[_BRIDGE_SCOPE], user_id=user_id)
+    row, token = create_key(
+        name,
+        scopes=[_BRIDGE_SCOPE],
+        owner_user_id=identity.owner_user_id,
+        account_user_id=identity.account_user_id,
+        tenant_id=identity.tenant_id,
+    )
     audit_log('desktop_pair_succeeded', key_id=row.get('id'),
-              user_id=user_id, platform=platform)
+              owner_user_id=identity.owner_user_id, platform=platform)
     return api_created({
         'id': row.get('id'),
         'name': name,
         'token': token,
         'scopes': [_BRIDGE_SCOPE],
-        'user_id': user_id,
+        'owner_id': identity.owner_user_id,
     })
 
 
@@ -928,15 +1059,22 @@ async def desktop_token_mint():
     """Mint a per-user bridge token (scope agents:bridge)."""
     from lib.api_keys import create_key
     from lib.request_parser import async_parse_body, optional_str
-    from .auth import current_auth
+    from .auth import current_auth, request_principal
     auth = current_auth()
-    uid = (auth.user_id if auth and getattr(auth, 'user_id', '') else '')
+    principal = request_principal()
+    owner_user_id = principal.require_owner(context='desktop token mint')
     body = await async_parse_body()
     name = optional_str(body, 'name', default='', max_len=80).strip() \
         or 'desktop-bridge'
-    row, token = create_key(name, scopes=[_BRIDGE_SCOPE], user_id=uid)
+    row, token = create_key(
+        name,
+        scopes=[_BRIDGE_SCOPE],
+        owner_user_id=owner_user_id,
+        account_user_id=(auth.account_user_id if auth else ''),
+        tenant_id=principal.tenant_id,
+    )
     audit_log('desktop_bridge_token_minted', key_id=row.get('id'),
-              name=name, user_id=uid)
+              name=name, owner_user_id=owner_user_id)
     return api_created({'id': row.get('id'), 'name': name,
                         'token': token, 'scopes': [_BRIDGE_SCOPE]})
 
@@ -954,16 +1092,18 @@ async def desktop_token_mint():
 async def desktop_token_revoke(key_id):
     """Revoke one of the caller's OWN bridge tokens."""
     from lib.api_keys import get_key_by_id, revoke_key
-    from .auth import current_auth
-    auth = current_auth()
-    uid = (auth.user_id if auth and getattr(auth, 'user_id', '') else '')
-    row = get_key_by_id(key_id)
-    if (not row or _BRIDGE_SCOPE not in (row.get('scopes') or [])
-            or (row.get('user_id') or '') != uid):
+    from .auth import request_principal
+    principal = request_principal()
+    owner_user_id = principal.require_owner(context='desktop token revoke')
+    row = get_key_by_id(
+        key_id, owner_user_id=owner_user_id, tenant_id=principal.tenant_id)
+    if not row or _BRIDGE_SCOPE not in (row.get('scopes') or []):
         return api_not_found('not_found',
                              message='bridge token not found')
-    revoke_key(key_id)
-    audit_log('desktop_bridge_token_revoked', key_id=key_id, user_id=uid)
+    revoke_key(
+        key_id, owner_user_id=owner_user_id, tenant_id=principal.tenant_id)
+    audit_log('desktop_bridge_token_revoked', key_id=key_id,
+              owner_user_id=owner_user_id)
     return api_ok({'revoked': key_id})
 
 

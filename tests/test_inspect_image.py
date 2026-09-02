@@ -183,7 +183,7 @@ class TestInspectImageDispatch:
 class TestInspectImageRegistration:
 
     def test_schema_exported(self):
-        from lib.tools import INSPECT_IMAGE_TOOL, IMAGE_EDIT_TOOL_NAMES
+        from lib.tools.image_edit import INSPECT_IMAGE_TOOL, IMAGE_EDIT_TOOL_NAMES
         assert INSPECT_IMAGE_TOOL['function']['name'] == 'inspect_image'
         assert 'inspect_image' in IMAGE_EDIT_TOOL_NAMES
 
@@ -199,7 +199,7 @@ class TestInspectImageRegistration:
         from lib.tasks_pkg.model_config import _assemble_tool_list
         tl, _has = _assemble_tool_list(
             {'messages': []}, None, False, 't-il', 'off', False, True,
-            False, False, False, False)
+            False, False, False)
         names = [t['function']['name'] for t in tl]
         assert 'inspect_image' in names
         assert 'read_files' in names

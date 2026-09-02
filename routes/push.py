@@ -8,6 +8,8 @@ Protocol:
     {action: 'subscribe', channel: 'chat', taskId: '<id>'}
     {action: 'unsubscribe', channel: 'chat', taskId: '<id>'}
     {action: 'abort', channel: 'chat', taskId: '<id>'}
+    {jsonrpc: '2.0', id: '<id>', method: 'project.browse', params: {...}}
+    {jsonrpc: '2.0', method: '$/cancelRequest', params: {id: '<id>'}}
 
   Server → Client:
     {channel: 'chat', taskId: '<id>', type: 'content_delta', delta: '...'}
@@ -18,8 +20,6 @@ Protocol:
 """
 
 import asyncio
-import hashlib
-import hmac
 import os
 
 from quart import Blueprint, websocket
@@ -27,8 +27,9 @@ from quart import Blueprint, websocket
 from lib.quart_sync import request_json
 
 from lib.api_response import api_error, api_ok
-from lib.log import get_logger, resolve_inbound_rid
-from lib.push import PushClient, hub
+from lib.log import get_logger, resolve_inbound_rid, set_principal
+from lib.agent_core.push import PushClient, hub
+from lib.control_rpc import ControlRpcSession
 
 logger = get_logger(__name__)
 
@@ -84,21 +85,6 @@ def _push_ws_token(headers, cookies) -> str:
     return ''
 
 
-def _legacy_ws_tunnel_ok(headers, cookies) -> bool:
-    """WebSocket twin of the HTTP gate's deprecated TUNNEL_TOKEN shim."""
-    expected_secret = os.environ.get('TUNNEL_TOKEN', '')
-    if not expected_secret:
-        return False
-    supplied = ((headers.get('X-Tunnel-Token') or '')
-                if headers is not None else '')
-    if supplied and hmac.compare_digest(supplied, expected_secret):
-        return True
-    cookie_value = ((cookies.get('_tunnel_auth') or '')
-                    if cookies is not None else '')
-    expected_cookie = hashlib.sha256(expected_secret.encode()).hexdigest()[:32]
-    return bool(cookie_value and hmac.compare_digest(cookie_value, expected_cookie))
-
-
 def _resolve_push_ws_auth(headers, cookies, peer):
     """Resolve or reject a push socket using the HTTP gate's policy.
 
@@ -106,7 +92,7 @@ def _resolve_push_ws_auth(headers, cookies, peer):
     seam over supplied transport values so the otherwise long-lived socket
     handler can be tested without accepting a connection first.
     """
-    from lib.api_keys import AuthContext, local_admin_context, touch_key, validate_token
+    from lib.api_keys import local_admin_context, validate_token
     from lib.auth_mode import requires_credential
     from routes.api_v1.auth import open_mode_peer_allowed
 
@@ -119,10 +105,6 @@ def _resolve_push_ws_auth(headers, cookies, peer):
             logger.warning('[Push] WS token validation failed closed: %s', e)
             return None, 'auth_error'
         if ctx is not None:
-            try:
-                touch_key(ctx.key_id)
-            except Exception as e:
-                logger.debug('[Push] WS key touch failed: %s', e)
             return ctx, 'token'
         # Match HTTP: a supplied invalid token is definitive in a mode that
         # requires credentials. In local open mode it may still fall back to
@@ -135,12 +117,6 @@ def _resolve_push_ws_auth(headers, cookies, peer):
         if open_mode_peer_allowed(peer):
             return local_admin_context(), 'open_local'
         return None, 'invalid_token'
-
-    if _legacy_ws_tunnel_ok(headers, cookies):
-        return AuthContext(
-            key_id='', name='tunnel', scopes=frozenset({'admin'}),
-            rate_limit_rpm=0, rate_limit_tpd=0, via_tunnel_token=True,
-        ), 'tunnel'
 
     if not requires_credential() and open_mode_peer_allowed(peer):
         return local_admin_context(), 'open_local'
@@ -173,44 +149,56 @@ def debug_presence():
     action = (body.get('action') or 'scenario').strip()
     if not root:
         return api_error('root is required', status=400)
+    from routes.api_v1.auth import request_user_id
+
+    user_id = int(request_user_id())
     from lib import presence
     if action == 'clear':
-        presence.depart(root, 'dbg-peer-1')
-        presence.depart(root, 'dbg-peer-2')
-        presence.depart(root, 'dbg-swarm', agent_id='agent-coder-1')
-        presence.depart(root, 'dbg-swarm', agent_id='agent-coder-2')
-        presence.depart(root, 'dbg-swarm')
+        presence.depart(root, 'dbg-peer-1', user_id=user_id)
+        presence.depart(root, 'dbg-peer-2', user_id=user_id)
+        presence.depart(
+            root, 'dbg-swarm', user_id=user_id, agent_id='agent-coder-1')
+        presence.depart(
+            root, 'dbg-swarm', user_id=user_id, agent_id='agent-coder-2')
+        presence.depart(root, 'dbg-swarm', user_id=user_id)
         return api_ok({'action': 'clear', 'root': root})
     if action == 'subagents':
         # ONE conversation, TWO sub-agents clobbering the SAME file → a
         # within-conversation conflict advisory + nested rows on the strip.
-        presence.announce(root, 'dbg-swarm', task_id='dbg-task-3',
+        presence.announce(root, 'dbg-swarm', user_id=user_id,
+                          task_id='dbg-task-3',
                           title='Swarm session', objective='parallel refactor',
                           phase='working')
         for aid in ('agent-coder-1', 'agent-coder-2'):
-            presence.announce(root, 'dbg-swarm', agent_id=aid, task_id='dbg-task-3',
+            presence.announce(root, 'dbg-swarm', user_id=user_id,
+                              agent_id=aid, task_id='dbg-task-3',
                               title='coder', parent_title='Swarm session',
                               phase='working')
             presence.record_files(root, 'dbg-swarm',
                                   [{'path': 'lib/llm/stream.py', 'action': 'patched'}],
+                                  user_id=user_id,
                                   agent_id=aid)
-        snap = presence.snapshot(root)
+        snap = presence.snapshot(root, user_id=user_id)
         logger.info('[Push] debug presence SUB-AGENT scenario fired root=%s peers=%d',
                     root, len(snap.get('peers') or []))
         return api_ok({'action': 'subagents', 'root': root,
                        'activePeers': len(snap.get('peers') or [])})
     # scenario: two peers, a shared-file conflict, both left active.
-    presence.announce(root, 'dbg-peer-1', task_id='dbg-task-1',
+    presence.announce(root, 'dbg-peer-1', user_id=user_id,
+                      task_id='dbg-task-1',
                       title='Refactor the parser', objective='make it ship',
                       phase='working')
-    presence.announce(root, 'dbg-peer-2', task_id='dbg-task-2',
+    presence.announce(root, 'dbg-peer-2', user_id=user_id,
+                      task_id='dbg-task-2',
                       title='Tune the LLM stream', objective='cut TTFT',
                       phase='working')
     presence.record_files(root, 'dbg-peer-1',
-                          [{'path': 'lib/llm/stream.py', 'action': 'patched'}])
+                          [{'path': 'lib/llm/stream.py', 'action': 'patched'}],
+                          user_id=user_id)
     presence.record_files(root, 'dbg-peer-2',
-                          [{'path': 'lib/llm/stream.py', 'action': 'patched'}])
-    snap = presence.snapshot(root)
+                          [{'path': 'lib/llm/stream.py', 'action': 'patched'}],
+                          user_id=user_id)
+    snap = presence.snapshot(root, user_id=user_id)
     logger.info('[Push] debug presence scenario fired root=%s peers=%d',
                 root, len(snap.get('peers') or []))
     return api_ok({'action': 'scenario', 'root': root,
@@ -233,7 +221,7 @@ async def push_ws():
     the same credential policy as HTTP.  A valid principal's ``user_id`` is
     stashed so snapshots and control frames remain owner-scoped.
     """
-    # ── Correlation id (pt_3d28727f / pt_ccaec091) ────────────────
+    # ── Correlation id ( / ) ────────────────
     # Quart's @app.before_request does NOT run on WS routes, so the HTTP
     # middleware that resolves X-Request-ID never fires here and this socket
     # would otherwise be invisible in the request-id log axis. A browser
@@ -275,14 +263,30 @@ async def push_ws():
         logger.warning('[Push] WS rejected (reason=%s, rid=%s)',
                        _auth_reason, _rid)
         abort(401)
-    _user_id = getattr(_ctx, 'user_id', '') or ''
+    _user_id = _ctx.owner_user_id
+    if not _user_id:
+        from lib.auth_mode import is_multi_user
+        if is_multi_user():
+            from quart import abort
+            logger.warning(
+                '[Push] WS rejected (reason=owner_required, rid=%s)', _rid)
+            abort(401)
+        # Composition boundary for the declared personal installation. Core
+        # push routing never knows or guesses this identity.
+        from lib.identity import PERSONAL_USER_ID
+        _user_id = PERSONAL_USER_ID
+    # Bind identity so audit_log auto-attaches it (ENTERPRISE_READINESS_AUDIT
+    # R11); the HTTP path does the same in auth_before_request.
+    set_principal(getattr(_ctx, 'key_id', '') or '', _user_id)
 
     client = PushClient(user_id=_user_id, req_id=_rid)
     hub.register(client)
+    rpc_session = ControlRpcSession(
+        client, user_id=_user_id, request_id=_rid)
     from lib.observability import connection_close, connection_open
     connection_open('ws', 'push')
     logger.info('[Push] WS connected (clients=%d, user=%s, rid=%s)',
-                hub.client_count, _user_id or '<unscoped>', _rid)
+                hub.client_count, _user_id, _rid)
 
     send_task = None
     recv_task = None
@@ -310,10 +314,12 @@ async def push_ws():
             logger.debug('[Push] Sender error (rid=%s): %s', _rid, e)
 
     async def _receiver():
-        """Receive client commands (subscribe, unsubscribe, abort, ping)."""
+        """Receive bounded RPC plus legacy push control commands."""
         try:
             while True:
                 raw = await websocket.receive_json()
+                if rpc_session.receive(raw):
+                    continue
                 _handle_client_frame(client, raw)
         except asyncio.CancelledError:
             pass
@@ -332,6 +338,7 @@ async def push_ws():
     except asyncio.CancelledError:
         pass
     finally:
+        await rpc_session.close()
         client.disconnect()
         hub.unregister(client)
         if send_task and not send_task.done():
@@ -363,27 +370,6 @@ def _handle_client_frame(client: PushClient, raw) -> None:
         hub.subscribe(client, channel, task_id)
         logger.debug('[Push] Subscribe: channel=%s taskId=%s rid=%s',
                      channel, task_id[:8], client.req_id)
-        # ── pt_conv_state_ssot P1.5: server-authoritative connect snapshot ──
-        # When a client subscribes to the notify wildcard (the sidebar's
-        # subscription) send it a one-shot snapshot of the current running-
-        # task state so it has authoritative busy info without waiting for
-        # the next notify_conv_changed frame or the 25/90s poll fallback.
-        # Delivered DIRECTLY to this client's outbound queue — never via
-        # hub.push_event, which would fan out to every subscriber (leaking
-        # snapshots into unrelated tabs/users) and cross-replica bus.
-        if channel == 'notify' and task_id == '*':
-            try:
-                from lib.agent_core.push import build_conv_state_snapshot
-                # pt_ab42421158214591: use the user_id resolved at
-                # handshake and stashed on the client. Empty string is
-                # the pre-auth default → unscoped snapshot (same as
-                # before this change for personal-install / open-mode).
-                # A real AuthContext.user_id gives a per-user scoped
-                # snapshot that cannot leak sibling tenants' tasks.
-                client.enqueue(build_conv_state_snapshot(user_id=client.user_id))
-            except Exception as e:
-                logger.debug('[Push] connect snapshot enqueue failed '
-                             '(rid=%s): %s', client.req_id, e)
     elif action == 'unsubscribe' and channel:
         hub.unsubscribe(client, channel, task_id)
     elif action == 'abort' and channel == 'chat' and task_id != '*':
@@ -399,11 +385,11 @@ def _handle_client_frame(client: PushClient, raw) -> None:
         # can interleave/corrupt frames), but a liveness answer must never
         # queue behind MBs of event frames — under loop congestion that delay
         # outlives the client's ping watchdog and it force-closes a HEALTHY
-        # socket (pt_afbaf3d7).
+        # socket ().
         client.enqueue_control({'channel': 'system', 'type': 'pong', 't': raw.get('t')})
 
 
-def _handle_abort(task_id: str, req_id: str = '', user_id: str = ''):
+def _handle_abort(task_id: str, *, user_id: int | str, req_id: str = ''):
     """Handle a client abort request for a chat task.
 
     Chat tasks predate the unified ``TaskRuntime.abort_event`` flag and
@@ -417,19 +403,22 @@ def _handle_abort(task_id: str, req_id: str = '', user_id: str = ''):
     asked — otherwise the user's id gets them only the connect/disconnect
     pair and nothing in between.
     """
-    from lib.tasks_pkg import tasks, tasks_lock
-    with tasks_lock:
-        task = tasks.get(task_id)
-        if not task:
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    try:
+        owner_user_id = int(user_id)
+    except (TypeError, ValueError):
+        outcome = 'forbidden'
+        task = None
+    else:
+        task = chat_task_runtime.get_owned(task_id, user_id=owner_user_id)
+        if task is None:
             outcome = 'missing'
-        elif user_id and str(task.get('_userId') or '') != str(user_id):
-            outcome = 'forbidden'
         else:
-            # Mutate under the same registry lock as the ownership read so a
-            # concurrent discard/replacement cannot turn the check into a
-            # time-of-check/time-of-use authorization race.
-            task['aborted'] = True
-            abort_evt = task.get('abort_event')
+            chat_task_runtime.abort_owned(task_id, user_id=owner_user_id)
+            chat_task_runtime.update_fields(
+                task_id,
+                fields={'aborted': True},
+            )
             outcome = 'aborted'
     if outcome == 'missing':
         logger.info('[Push] Client abort for unknown task %s (rid=%s)',
@@ -439,11 +428,5 @@ def _handle_abort(task_id: str, req_id: str = '', user_id: str = ''):
         logger.warning('[Push] Client abort refused for foreign task %s '
                        '(user=%s, rid=%s)', task_id[:8], user_id, req_id)
         return
-    if abort_evt is not None:
-        try:
-            abort_evt.set()
-        except Exception as e:
-            logger.debug('[Push] abort_event.set failed (rid=%s): %s',
-                         req_id, e)
     logger.info('[Push] Client abort for task %s (rid=%s)',
                 task_id[:8], req_id)

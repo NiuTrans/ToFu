@@ -24,7 +24,8 @@ import lib as _lib
 @pytest.fixture(autouse=True)
 def _clean_cache_state():
     """Reset cache state between tests."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, _ttl_latch
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._ttl import _ttl_latch
     _cache_states.clear()
     _ttl_latch.clear()
     yield
@@ -54,12 +55,14 @@ class TestConcurrentConvStateIsolation:
     worker thread sharing a conversation overwrote the same CacheState each
     round — producing the incoherent 'PREFIX MUTATION DETECTED' spam (call
     counts + message lengths jumping between threads) and cost
-    misattribution. The fix keys state by (conv_id, thread_id)."""
+    misattribution. The fix keys state by (owner, conv_id, thread_id)."""
 
     def test_two_threads_same_conv_get_distinct_state(self):
-        from lib.tasks_pkg.cache_tracking import (
-            _cache_states, _state_key, detect_cache_break,
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
         )
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
         conv = 'shared-conv'
         # Each thread walks its OWN growing message list under the SAME conv.
         results = {}
@@ -70,7 +73,7 @@ class TestConcurrentConvStateIsolation:
                 msgs.append({'role': 'user', 'content': f'{name} u{i}'})
                 msgs.append({'role': 'assistant', 'content': f'{name} a{i}'})
                 detect_cache_break(conv, msgs, None, 'model-a',
-                                   usage={'cache_read_tokens': 5000})
+                                   usage={'cache_read_tokens': 5000}, user_id=1)
             results[name] = (threading.get_ident(), len(msgs))
 
         t1 = threading.Thread(target=_worker, args=('A', 6))
@@ -78,7 +81,7 @@ class TestConcurrentConvStateIsolation:
         t1.start(); t2.start(); t1.join(); t2.join()
 
         # Both threads' states coexist under the same conv_id, keyed apart.
-        keys = [k for k in _cache_states if k[0] == conv]
+        keys = [k for k in _cache_states if k[0] == 1 and k[1] == conv]
         assert len(keys) == 2, (
             f'expected 2 thread-distinct states for one conv, got {len(keys)}: '
             f'{keys} — conv-only keying collapses concurrent loops into one')
@@ -92,9 +95,11 @@ class TestConcurrentConvStateIsolation:
         against thread A's baseline used to log PREFIX MUTATION. With
         per-thread keying, each thread only ever compares against its own
         prior round, so growth is clean (no break)."""
-        from lib.tasks_pkg.cache_tracking import (
-            _cache_states, _state_key, detect_cache_break,
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
         )
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
         conv = 'shared-conv-2'
         breaks = {}
 
@@ -102,7 +107,7 @@ class TestConcurrentConvStateIsolation:
             msgs = [{'role': 'system', 'content': 'sys'},
                     {'role': 'user', 'content': f'{name} hello'}]
             detect_cache_break(conv, msgs, None, 'model-a',
-                               usage={'cache_read_tokens': 1000})
+                               usage={'cache_read_tokens': 1000}, user_id=1)
             b = 0
             for i in range(n_msgs):
                 msgs.append({'role': 'assistant', 'content': '',
@@ -110,7 +115,7 @@ class TestConcurrentConvStateIsolation:
                                                           'arguments': '{}'}}]})
                 msgs.append({'role': 'tool', 'content': f'{name} result {i}'})
                 r = detect_cache_break(conv, msgs, None, 'model-a',
-                                       usage={'cache_read_tokens': 1000 + 100 * i})
+                                       usage={'cache_read_tokens': 1000 + 100 * i}, user_id=1)
                 if r and 'prefix_mutation' in r:
                     b += 1
             breaks[name] = b
@@ -134,40 +139,42 @@ class TestTTLDetectionFix:
 
     def test_short_gap_detected_as_server_side(self):
         """Cache drop within 5 minutes → 'likely server-side'."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'}]
 
         # Round 1: establish baseline
         detect_cache_break('ttl-1', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 50000})
+                           usage={'cache_read_tokens': 50000}, user_id=1)
 
         # Round 2: immediate cache drop (within seconds)
         result = detect_cache_break('ttl-1', msgs, None, 'claude-opus-4',
-                                    usage={'cache_read_tokens': 5000})
+                                    usage={'cache_read_tokens': 5000}, user_id=1)
         assert result is not None
         assert 'server_side' in result
         assert '<5min gap' in result['server_side'] or 'server-side' in result['server_side']
 
     def test_long_gap_detected_as_ttl_expiry(self):
         """Cache drop after >5 minutes → 'possible TTL expiry'."""
-        from lib.tasks_pkg.cache_tracking import (
-            _cache_states, _state_key, detect_cache_break,
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
         )
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'}]
 
         # Round 1: establish baseline
         detect_cache_break('ttl-2', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 50000})
+                           usage={'cache_read_tokens': 50000}, user_id=1)
 
         # ★ Simulate 6-minute gap by backdating last_update_time
-        state = _cache_states[_state_key('ttl-2')]
+        state = _cache_states[_state_key('ttl-2', user_id=1)]
         state.last_update_time = time.time() - 400  # 6min 40s ago
 
         # Round 2: cache drop after long gap
         result = detect_cache_break('ttl-2', msgs, None, 'claude-opus-4',
-                                    usage={'cache_read_tokens': 5000})
+                                    usage={'cache_read_tokens': 5000}, user_id=1)
         assert result is not None
         assert 'server_side' in result
         assert 'TTL expiry' in result['server_side']
@@ -175,24 +182,26 @@ class TestTTLDetectionFix:
 
     def test_elapsed_is_nonzero_for_normal_rounds(self):
         """Verify elapsed is computed correctly (not always 0)."""
-        from lib.tasks_pkg.cache_tracking import (
-            _cache_states, _state_key, detect_cache_break,
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
         )
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'}]
 
         detect_cache_break('ttl-3', msgs, None, 'model-a',
-                           usage={'cache_read_tokens': 10000})
+                           usage={'cache_read_tokens': 10000}, user_id=1)
 
         # Backdate by 10 seconds
-        _cache_states[_state_key('ttl-3')].last_update_time = time.time() - 10
+        _cache_states[_state_key('ttl-3', user_id=1)].last_update_time = time.time() - 10
 
         # Drop cache — should report ~10s gap in the log (not 0)
         result = detect_cache_break('ttl-3', msgs, None, 'model-a',
-                                    usage={'cache_read_tokens': 1000})
+                                    usage={'cache_read_tokens': 1000}, user_id=1)
         assert result is not None
         # Verify state was updated to now
-        assert abs(_cache_states[_state_key('ttl-3')].last_update_time - time.time()) < 2
+        assert abs(_cache_states[_state_key('ttl-3', user_id=1)].last_update_time - time.time()) < 2
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -211,14 +220,14 @@ class TestApiBreakCauseDisambiguation:
         stochastic server-side cache miss, NOT a silent byte change and NOT
         the old misleading 'breakpoint advancement' wording (disproven
         2026-06-23 by identical-prompt live replay)."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'}]
         detect_cache_break('ba-1', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 155441})
+                           usage={'cache_read_tokens': 155441}, user_id=1)
         # Round 2: read drops 155441 → 55535 (the static prefix floor remains).
         r2 = detect_cache_break('ba-1', msgs, None, 'claude-opus-4',
-                                usage={'cache_read_tokens': 55535})
+                                usage={'cache_read_tokens': 55535}, user_id=1)
         assert r2 is not None
         cause = r2['server_side']
         # No wire fingerprint was supplied → the server-side verdict must be
@@ -237,14 +246,14 @@ class TestApiBreakCauseDisambiguation:
     def test_low_read_remaining_drops_silent_byte_change(self):
         """When the prefix bytes did NOT mutate, the cause string must not
         offer 'a silent prefix byte change' even if the read fell to near 0."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'}]
         detect_cache_break('ba-2', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 50000})
+                           usage={'cache_read_tokens': 50000}, user_id=1)
         # Round 2: read collapses to below the floor; prefix bytes unchanged.
         r2 = detect_cache_break('ba-2', msgs, None, 'claude-opus-4',
-                                usage={'cache_read_tokens': 1000})
+                                usage={'cache_read_tokens': 1000}, user_id=1)
         assert r2 is not None
         cause = r2['server_side']
         assert 'silent prefix byte change' not in cause
@@ -274,14 +283,14 @@ class TestWireFingerprintVerdict:
         return canonical_messages(msgs), static_prefix_hash(msgs)
 
     def test_identical_wire_proves_server_side(self):
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
         msgs = [{'role': 'system', 'content': 'sys'}]
         wire = [{'role': 'system', 'content': 'sys'},
                 {'role': 'user', 'content': 'hello'}]
         fp, st = self._fp(wire)
         detect_cache_break('wire-1', msgs, None, 'claude-opus-4',
                            usage={'cache_read_tokens': 90000,
-                                  '_wire_fp': fp, '_wire_static': st})
+                                  '_wire_fp': fp, '_wire_static': st}, user_id=1)
         # Round 2: read DROPS but the wire bytes are IDENTICAL → THIS round is
         # not a client-side prefix change. The verdict names an upstream cache
         # MISS as a possibility WITHOUT over-claiming a single confident cause
@@ -289,7 +298,7 @@ class TestWireFingerprintVerdict:
         # and points to the client-side branches as the systemic dominant class.
         r2 = detect_cache_break('wire-1', msgs, None, 'claude-opus-4',
                                 usage={'cache_read_tokens': 40000,
-                                       '_wire_fp': fp, '_wire_static': st})
+                                       '_wire_fp': fp, '_wire_static': st}, user_id=1)
         assert r2 is not None
         cause = r2['server_side']
         assert 'byte-identical' in cause
@@ -303,7 +312,7 @@ class TestWireFingerprintVerdict:
         assert 'UNPROVEN' not in cause
 
     def test_changed_wire_names_culprit_not_server_side(self):
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
         msgs = [{'role': 'system', 'content': 'sys'}]
         wire1 = [{'role': 'system', 'content': 'sys'},
                  {'role': 'user', 'content': 'hello'},
@@ -318,11 +327,11 @@ class TestWireFingerprintVerdict:
         detect_cache_break('wire-2', msgs, None, 'claude-opus-4',
                            usage={'cache_read_tokens': 90000,
                                   'cache_creation_input_tokens': 50000,
-                                  '_wire_fp': fp1, '_wire_static': st1})
+                                  '_wire_fp': fp1, '_wire_static': st1}, user_id=1)
         r2 = detect_cache_break('wire-2', msgs, None, 'claude-opus-4',
                                 usage={'cache_read_tokens': 40000,
                                        'cache_creation_input_tokens': 50000,
-                                       '_wire_fp': fp2, '_wire_static': st2})
+                                       '_wire_fp': fp2, '_wire_static': st2}, user_id=1)
         assert r2 is not None
         # A real prefix mutation → surfaced under prefix_mutation, NOT server_side.
         assert 'prefix_mutation' in r2
@@ -338,7 +347,7 @@ class TestWireFingerprintVerdict:
         drop is then named an upstream eviction, not a client culprit. This is
         the exact false-positive the reconstruction hash and the old len-2
         probe were blind to."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
         msgs = [{'role': 'system', 'content': 'sys'}]
         # Round 1: tail tool result WRAPPED (marker landed on it).
         wire1 = [{'role': 'system', 'content': 'sys'},
@@ -356,11 +365,11 @@ class TestWireFingerprintVerdict:
         detect_cache_break('wire-3', msgs, None, 'claude-opus-4',
                            usage={'cache_read_tokens': 90000,
                                   'cache_creation_input_tokens': 50000,
-                                  '_wire_fp': fp1, '_wire_static': st1})
+                                  '_wire_fp': fp1, '_wire_static': st1}, user_id=1)
         r2 = detect_cache_break('wire-3', msgs, None, 'claude-opus-4',
                                 usage={'cache_read_tokens': 40000,
                                        'cache_creation_input_tokens': 50000,
-                                       '_wire_fp': fp2, '_wire_static': st2})
+                                       '_wire_fp': fp2, '_wire_static': st2}, user_id=1)
         assert r2 is not None
         # The wrapping flip is erased → NOT a prefix mutation → the byte-
         # identical read drop is named an upstream cache MISS possibility, not a
@@ -386,7 +395,7 @@ class TestNoReuseDetection:
 
     def test_full_write_zero_read_flagged(self):
         """Round 1 writes big, round 2 writes big + reads 0 → no_cache_reuse."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'},
                 {'role': 'user', 'content': 'hello'}]
@@ -394,59 +403,61 @@ class TestNoReuseDetection:
         # Round 1: fresh write, no read (first call — establishes prefix).
         r1 = detect_cache_break('nr-1', msgs, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 278500,
-                                       'cache_read_input_tokens': 0})
+                                       'cache_read_input_tokens': 0}, user_id=1)
         assert r1 is None  # first call never flags
 
         # Round 2: another fresh write, still zero read → the costly miss.
         r2 = detect_cache_break('nr-1', msgs, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 279200,
-                                       'cache_read_input_tokens': 0})
+                                       'cache_read_input_tokens': 0}, user_id=1)
         assert r2 is not None
         assert 'no_cache_reuse' in r2
 
     def test_no_reuse_counts_as_break(self):
         """A no-reuse miss increments total_breaks."""
-        from lib.tasks_pkg.cache_tracking import (
-            _cache_states, _state_key, detect_cache_break,
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
         )
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'},
                 {'role': 'user', 'content': 'hello'}]
         detect_cache_break('nr-2', msgs, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 100000,
-                                  'cache_read_input_tokens': 0})
+                                  'cache_read_input_tokens': 0}, user_id=1)
         detect_cache_break('nr-2', msgs, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 100000,
-                                  'cache_read_input_tokens': 0})
-        assert _cache_states[_state_key('nr-2')].total_breaks == 1
+                                  'cache_read_input_tokens': 0}, user_id=1)
+        assert _cache_states[_state_key('nr-2', user_id=1)].total_breaks == 1
 
     def test_healthy_reuse_not_flagged(self):
         """Round 2 reads back the prefix → no break."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'},
                 {'role': 'user', 'content': 'hello'}]
         detect_cache_break('nr-3', msgs, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 200000,
-                                  'cache_read_input_tokens': 0})
+                                  'cache_read_input_tokens': 0}, user_id=1)
         # Round 2 actually reuses the cache.
         r2 = detect_cache_break('nr-3', msgs, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 1000,
-                                       'cache_read_input_tokens': 200000})
+                                       'cache_read_input_tokens': 200000}, user_id=1)
         assert r2 is None
 
     def test_small_write_not_flagged(self):
         """Tiny prompts (write < threshold) must NOT trigger the alert."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'},
                 {'role': 'user', 'content': 'hi'}]
         detect_cache_break('nr-4', msgs, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 1500,
-                                  'cache_read_input_tokens': 0})
+                                  'cache_read_input_tokens': 0}, user_id=1)
         r2 = detect_cache_break('nr-4', msgs, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 1500,
-                                       'cache_read_input_tokens': 0})
+                                       'cache_read_input_tokens': 0}, user_id=1)
         assert r2 is None  # below _MIN_NO_REUSE_TOKENS
 
     def test_pinned_read_repeated_write_flagged(self):
@@ -457,51 +468,50 @@ class TestNoReuseDetection:
         blind), yet the conversation body is re-billed uncached every round.
         detect_cache_break must now flag this as a no_cache_reuse miss.
         """
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'},
                 {'role': 'user', 'content': 'hello'}]
         r1 = detect_cache_break('pnr-1', msgs, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 138694,
-                                       'cache_read_input_tokens': 55728})
+                                       'cache_read_input_tokens': 55728}, user_id=1)
         assert r1 is None  # first call never flags
         r2 = detect_cache_break('pnr-1', msgs, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 141668,
-                                       'cache_read_input_tokens': 55728})
+                                       'cache_read_input_tokens': 55728}, user_id=1)
         assert r2 is not None
         assert 'no_cache_reuse' in r2
 
     def test_pinned_read_then_healthy_growth_not_flagged(self):
         """When cache_read GROWS to absorb the prior write → no break."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'},
                 {'role': 'user', 'content': 'hello'}]
         detect_cache_break('pnr-2', msgs, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 138694,
-                                  'cache_read_input_tokens': 55728})
+                                  'cache_read_input_tokens': 55728}, user_id=1)
         # Round 2 reads back the previously-written prefix (read grows).
         r2 = detect_cache_break('pnr-2', msgs, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 3469,
-                                       'cache_read_input_tokens': 194422})
+                                       'cache_read_input_tokens': 194422}, user_id=1)
         assert r2 is None
 
     def test_no_reuse_after_compaction_not_flagged(self):
         """A cache_read=0 + big-write round right after compaction is expected."""
-        from lib.tasks_pkg.cache_tracking import (
-            detect_cache_break, notify_compaction,
-        )
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._roi import notify_compaction
 
         msgs = [{'role': 'system', 'content': 'sys'},
                 {'role': 'user', 'content': 'hello'}]
         detect_cache_break('nr-5', msgs, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 200000,
-                                  'cache_read_input_tokens': 0})
+                                  'cache_read_input_tokens': 0}, user_id=1)
         # Compaction rebuilds the prefix → next round legitimately writes fresh.
-        notify_compaction('nr-5')
+        notify_compaction('nr-5', user_id=1)
         r2 = detect_cache_break('nr-5', msgs, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 150000,
-                                       'cache_read_input_tokens': 0})
+                                       'cache_read_input_tokens': 0}, user_id=1)
         assert r2 is None
 
 
@@ -513,7 +523,7 @@ class TestPrefixMutationDetection:
     """The investigated bug: two consecutive turns full cache_write, no error.
 
     A non-idempotent history edit (the re-truncation bug in
-    server_message_store) rewrote bytes inside the cached prompt prefix
+    a history rebuild rewrote bytes inside the cached prompt prefix
     between turns. detect_cache_break already HASHED the prefix and logged
     'PREFIX MUTATION DETECTED', but never RETURNED it — so the round carried
     no cacheBreak and the cost popover showed a big write with no cause.
@@ -531,12 +541,12 @@ class TestPrefixMutationDetection:
 
     def test_prefix_byte_change_surfaced(self):
         """Round 2 mutates a prefix message + writes big → prefix_mutation."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         m1 = self._msgs('tail A')
         r1 = detect_cache_break('pm-1', m1, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 88000,
-                                       'cache_read_input_tokens': 51000})
+                                       'cache_read_input_tokens': 51000}, user_id=1)
         assert r1 is None  # first call never flags
 
         # Round 2: silently rewrite a PREFIX message (index 1), big write.
@@ -544,57 +554,57 @@ class TestPrefixMutationDetection:
         m2[1]['content'] = 'turn 1 question [EDITED non-idempotently]'
         r2 = detect_cache_break('pm-1', m2, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 89000,
-                                       'cache_read_input_tokens': 51000})
+                                       'cache_read_input_tokens': 51000}, user_id=1)
         assert r2 is not None
         assert 'prefix_mutation' in r2
         assert 'prefix' in r2['prefix_mutation'].lower()
 
     def test_prefix_mutation_counts_as_break(self):
-        from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+        from lib.tasks_pkg.cache_tracking._state import _cache_states
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         m1 = self._msgs('tail A')
         detect_cache_break('pm-2', m1, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 88000,
-                                  'cache_read_input_tokens': 51000})
+                                  'cache_read_input_tokens': 51000}, user_id=1)
         m2 = self._msgs('tail B')
         m2[1]['content'] = 'mutated prefix'
         detect_cache_break('pm-2', m2, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 89000,
-                                  'cache_read_input_tokens': 51000})
-        from lib.tasks_pkg.cache_tracking import _state_key as _sk_pm
-        assert _cache_states[_sk_pm('pm-2')].total_breaks == 1
+                                  'cache_read_input_tokens': 51000}, user_id=1)
+        from lib.tasks_pkg.cache_tracking._state import _state_key as _sk_pm
+        assert _cache_states[_sk_pm('pm-2', user_id=1)].total_breaks == 1
 
     def test_stable_prefix_not_flagged(self):
         """Prefix byte-identical between turns → no prefix_mutation break."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         m1 = self._msgs('tail A')
         detect_cache_break('pm-3', m1, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 88000,
-                                  'cache_read_input_tokens': 51000})
+                                  'cache_read_input_tokens': 51000}, user_id=1)
         # Round 2: prefix UNCHANGED, healthy reuse (read grows, tiny write).
         m2 = self._msgs('tail A')
         r2 = detect_cache_break('pm-3', m2, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 1200,
-                                       'cache_read_input_tokens': 140000})
+                                       'cache_read_input_tokens': 140000}, user_id=1)
         assert r2 is None
 
     def test_prefix_mutation_after_compaction_not_flagged(self):
         """A prefix change right after compaction is expected, not a break."""
-        from lib.tasks_pkg.cache_tracking import (
-            detect_cache_break, notify_compaction,
-        )
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._roi import notify_compaction
 
         m1 = self._msgs('tail A')
         detect_cache_break('pm-4', m1, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 88000,
-                                  'cache_read_input_tokens': 51000})
-        notify_compaction('pm-4')
+                                  'cache_read_input_tokens': 51000}, user_id=1)
+        notify_compaction('pm-4', user_id=1)
         m2 = self._msgs('tail B')
         m2[1]['content'] = 'compaction rewrote this'
         r2 = detect_cache_break('pm-4', m2, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 89000,
-                                       'cache_read_input_tokens': 51000})
+                                       'cache_read_input_tokens': 51000}, user_id=1)
         assert r2 is None  # compaction_pending suppresses the flag
 
     def test_prefix_mutation_wins_over_api_break(self):
@@ -609,20 +619,20 @@ class TestPrefixMutationDetection:
         the round fell through to {'server_side': 'breakpoint advancement…'}.
         Prefix mutation is the more CERTAIN, actionable cause and must win.
         """
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         m1 = self._msgs('tail A')
         # Round 1: establish a HIGH read so round 2 can show a real drop.
         detect_cache_break('pm-5', m1, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 10000,
-                                  'cache_read_input_tokens': 155000})
+                                  'cache_read_input_tokens': 155000}, user_id=1)
         # Round 2: mutate a prefix message AND drop cache_read (api_break)
         # while still writing a real prefix.
         m2 = self._msgs('tail B')
         m2[1]['content'] = 'turn 1 question [count hint changed: N→N+1]'
         r2 = detect_cache_break('pm-5', m2, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 60000,
-                                       'cache_read_input_tokens': 55000})
+                                       'cache_read_input_tokens': 55000}, user_id=1)
         assert r2 is not None
         # The actionable cause wins; the misleading server_side label is gone.
         assert 'prefix_mutation' in r2
@@ -632,20 +642,20 @@ class TestPrefixMutationDetection:
         """A concrete client-side change (tools/system/model) is differently
         named and the popover labels it on its own — it must still win over
         the prefix_mutation key even when the prefix also mutated."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         m1 = self._msgs('tail A')
         tools_v1 = [{'function': {'name': 'grep_search', 'description': 'v1'}}]
         detect_cache_break('pm-6', m1, tools_v1, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 10000,
-                                  'cache_read_input_tokens': 80000})
+                                  'cache_read_input_tokens': 80000}, user_id=1)
         # Round 2: prefix mutates AND the tool definitions change.
         m2 = self._msgs('tail B')
         m2[1]['content'] = 'mutated prefix bytes'
         tools_v2 = [{'function': {'name': 'grep_search', 'description': 'v2 CHANGED'}}]
         r2 = detect_cache_break('pm-6', m2, tools_v2, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 60000,
-                                       'cache_read_input_tokens': 30000})
+                                       'cache_read_input_tokens': 30000}, user_id=1)
         assert r2 is not None
         # client_changes carries the concrete 'tools' key; prefix_mutation defers.
         assert 'tools' in r2
@@ -662,59 +672,65 @@ class TestConcurrentConversationTracking:
 
     def test_no_contention_single_conversation(self):
         """Single conversation — no contention detected."""
-        from lib.tasks_pkg.cache_tracking import _count_active_on_model, detect_cache_break
+        from lib.tasks_pkg.cache_tracking._ttl import _count_active_on_model
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'}]
         detect_cache_break('solo-1', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 50000})
+                           usage={'cache_read_tokens': 50000}, user_id=1)
 
         count = _count_active_on_model('claude-opus-4', exclude_conv='solo-1')
         assert count == 0
 
     def test_contention_detected_with_concurrent_conversations(self):
         """Two conversations on the same model → contention detected."""
-        from lib.tasks_pkg.cache_tracking import _count_active_on_model, detect_cache_break
+        from lib.tasks_pkg.cache_tracking._ttl import _count_active_on_model
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'}]
 
         # Conversation A on opus
         detect_cache_break('conv-a', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 50000})
+                           usage={'cache_read_tokens': 50000}, user_id=1)
         # Conversation B on opus
         detect_cache_break('conv-b', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 30000})
+                           usage={'cache_read_tokens': 30000}, user_id=1)
 
         count = _count_active_on_model('claude-opus-4', exclude_conv='conv-a')
         assert count == 1  # conv-b is active on same model
 
     def test_no_contention_different_models(self):
         """Different models don't cause contention."""
-        from lib.tasks_pkg.cache_tracking import _count_active_on_model, detect_cache_break
+        from lib.tasks_pkg.cache_tracking._ttl import _count_active_on_model
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'}]
 
         detect_cache_break('diff-a', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 50000})
+                           usage={'cache_read_tokens': 50000}, user_id=1)
         detect_cache_break('diff-b', msgs, None, 'claude-sonnet-4',
-                           usage={'cache_read_tokens': 30000})
+                           usage={'cache_read_tokens': 30000}, user_id=1)
 
         count = _count_active_on_model('claude-opus-4', exclude_conv='diff-a')
         assert count == 0
 
     def test_stale_conversation_not_counted(self):
         """Conversations inactive for >60s are not counted."""
-        from lib.tasks_pkg.cache_tracking import (
-            _cache_states, _state_key, _count_active_on_model, detect_cache_break,
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
         )
+        from lib.tasks_pkg.cache_tracking._ttl import _count_active_on_model
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'}]
         detect_cache_break('stale-a', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 50000})
+                           usage={'cache_read_tokens': 50000}, user_id=1)
         detect_cache_break('stale-b', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 30000})
+                           usage={'cache_read_tokens': 30000}, user_id=1)
 
         # Backdate stale-b to 2 minutes ago
-        _cache_states[_state_key('stale-b')].last_update_time = time.time() - 120
+        _cache_states[_state_key('stale-b', user_id=1)].last_update_time = time.time() - 120
 
         count = _count_active_on_model('claude-opus-4', exclude_conv='stale-a')
         assert count == 0  # stale-b is too old
@@ -726,19 +742,19 @@ class TestConcurrentConversationTracking:
         does NOT exist on Anthropic. Cache is keyed on exact prefix bytes;
         different conversations cannot evict each other.
         """
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'}]
 
         # Establish two conversations on the same model
         detect_cache_break('race-a', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 50000})
+                           usage={'cache_read_tokens': 50000}, user_id=1)
         detect_cache_break('race-b', msgs, None, 'claude-opus-4',
-                           usage={'cache_read_tokens': 30000})
+                           usage={'cache_read_tokens': 30000}, user_id=1)
 
         # Cache drop on conv-a (unexplained) — should NOT blame contention
         result = detect_cache_break('race-a', msgs, None, 'claude-opus-4',
-                                    usage={'cache_read_tokens': 5000})
+                                    usage={'cache_read_tokens': 5000}, user_id=1)
         assert result is not None
         assert 'server_side' in result
         assert 'contention' not in result['server_side']
@@ -759,7 +775,7 @@ class TestRoundCacheStatsLogging:
     def test_logs_with_cache_activity(self, caplog):
         """Cache stats are logged when there's cache activity."""
         import logging
-        from lib.tasks_pkg.cache_tracking import log_round_cache_stats
+        from lib.tasks_pkg.cache_tracking._roi import log_round_cache_stats
 
         with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.cache_tracking'):
             log_round_cache_stats(
@@ -776,7 +792,7 @@ class TestRoundCacheStatsLogging:
     def test_no_log_without_cache_activity(self, caplog):
         """No log when there's no cache activity."""
         import logging
-        from lib.tasks_pkg.cache_tracking import log_round_cache_stats
+        from lib.tasks_pkg.cache_tracking._roi import log_round_cache_stats
 
         with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.cache_tracking'):
             log_round_cache_stats(
@@ -790,7 +806,7 @@ class TestRoundCacheStatsLogging:
     def test_no_log_without_usage(self, caplog):
         """No log when usage is None."""
         import logging
-        from lib.tasks_pkg.cache_tracking import log_round_cache_stats
+        from lib.tasks_pkg.cache_tracking._roi import log_round_cache_stats
 
         with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.cache_tracking'):
             log_round_cache_stats('test-conv', 0, None, model='gpt-4o')
@@ -800,7 +816,7 @@ class TestRoundCacheStatsLogging:
     def test_anthropic_key_names(self, caplog):
         """Works with Anthropic-style key names."""
         import logging
-        from lib.tasks_pkg.cache_tracking import log_round_cache_stats
+        from lib.tasks_pkg.cache_tracking._roi import log_round_cache_stats
 
         with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.cache_tracking'):
             log_round_cache_stats(
@@ -827,14 +843,14 @@ class TestTTLLatch:
 
     def test_latch_captures_initial_value(self):
         """First call latches the current CACHE_EXTENDED_TTL value."""
-        from lib.tasks_pkg.cache_tracking import latch_extended_ttl
+        from lib.tasks_pkg.cache_tracking._ttl import latch_extended_ttl
 
         _lib.CACHE_EXTENDED_TTL = True
         assert latch_extended_ttl('task-latch-1') is True
 
     def test_latch_persists_after_setting_change(self):
         """Once latched, changing CACHE_EXTENDED_TTL doesn't affect the task."""
-        from lib.tasks_pkg.cache_tracking import latch_extended_ttl
+        from lib.tasks_pkg.cache_tracking._ttl import latch_extended_ttl
 
         _lib.CACHE_EXTENDED_TTL = True
         latch_extended_ttl('task-latch-2')
@@ -847,7 +863,7 @@ class TestTTLLatch:
 
     def test_different_tasks_get_independent_latches(self):
         """Different tasks can have different latched values."""
-        from lib.tasks_pkg.cache_tracking import latch_extended_ttl
+        from lib.tasks_pkg.cache_tracking._ttl import latch_extended_ttl
 
         _lib.CACHE_EXTENDED_TTL = True
         latch_extended_ttl('task-a')
@@ -860,8 +876,10 @@ class TestTTLLatch:
 
     def test_release_latch_cleans_up(self):
         """release_ttl_latch removes the latch (memory cleanup)."""
-        from lib.tasks_pkg.cache_tracking import (
-            _ttl_latch, latch_extended_ttl, release_ttl_latch,
+        from lib.tasks_pkg.cache_tracking._ttl import (
+            _ttl_latch,
+            latch_extended_ttl,
+            release_ttl_latch,
         )
 
         _lib.CACHE_EXTENDED_TTL = True
@@ -874,7 +892,7 @@ class TestTTLLatch:
     def test_latch_used_in_add_cache_breakpoints(self):
         """add_cache_breakpoints uses latched value instead of live setting."""
         from lib.llm import add_cache_breakpoints
-        from lib.tasks_pkg.cache_tracking import latch_extended_ttl
+        from lib.tasks_pkg.cache_tracking._ttl import latch_extended_ttl
 
         # Latch with extended TTL ON
         _lib.CACHE_EXTENDED_TTL = True
@@ -939,7 +957,7 @@ class TestToolResultOrdering:
 
     def test_sorts_consecutive_tool_results(self):
         """Consecutive tool results are sorted by tool_call_id."""
-        from lib.tasks_pkg.cache_tracking import sort_tool_results
+        from lib.tasks_pkg.cache_tracking._prefix import sort_tool_results
 
         messages = [
             {'role': 'system', 'content': 'sys'},
@@ -964,7 +982,7 @@ class TestToolResultOrdering:
 
     def test_preserves_non_tool_messages(self):
         """Non-tool messages are not affected by sorting."""
-        from lib.tasks_pkg.cache_tracking import sort_tool_results
+        from lib.tasks_pkg.cache_tracking._prefix import sort_tool_results
 
         messages = [
             {'role': 'system', 'content': 'sys'},
@@ -980,7 +998,7 @@ class TestToolResultOrdering:
 
     def test_handles_multiple_tool_runs(self):
         """Multiple separate runs of tool results are each sorted independently."""
-        from lib.tasks_pkg.cache_tracking import sort_tool_results
+        from lib.tasks_pkg.cache_tracking._prefix import sort_tool_results
 
         messages = [
             {'role': 'system', 'content': 'sys'},
@@ -1006,7 +1024,7 @@ class TestToolResultOrdering:
 
     def test_single_tool_result_unchanged(self):
         """A single tool result (no consecutive run) is not moved."""
-        from lib.tasks_pkg.cache_tracking import sort_tool_results
+        from lib.tasks_pkg.cache_tracking._prefix import sort_tool_results
 
         messages = [
             {'role': 'system', 'content': 'sys'},
@@ -1022,7 +1040,7 @@ class TestToolResultOrdering:
 
     def test_empty_messages(self):
         """Empty messages list is handled gracefully."""
-        from lib.tasks_pkg.cache_tracking import sort_tool_results
+        from lib.tasks_pkg.cache_tracking._prefix import sort_tool_results
 
         empty = []
         system_only = [{'role': 'system', 'content': 'sys'}]
@@ -1033,7 +1051,7 @@ class TestToolResultOrdering:
 
     def test_tool_results_without_tool_call_id(self):
         """Tool results without tool_call_id sort by empty string."""
-        from lib.tasks_pkg.cache_tracking import sort_tool_results
+        from lib.tasks_pkg.cache_tracking._prefix import sort_tool_results
 
         messages = [
             {'role': 'tool', 'content': 'result b'},
@@ -1054,24 +1072,31 @@ class TestCleanupCacheState:
     """cleanup_cache_state removes per-conversation cache tracking."""
 
     def test_cleanup_removes_state(self):
-        from lib.tasks_pkg.cache_tracking import (
-            _cache_states, _state_key, cleanup_cache_state, detect_cache_break,
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
+            cleanup_cache_state,
         )
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         msgs = [{'role': 'system', 'content': 'sys'}]
         detect_cache_break('cleanup-1', msgs, None, 'model-a',
-                           usage={'cache_read_tokens': 5000})
-        assert _state_key('cleanup-1') in _cache_states
+                           usage={'cache_read_tokens': 5000}, user_id=1)
+        assert _state_key('cleanup-1', user_id=1) in _cache_states
 
-        cleanup_cache_state('cleanup-1')
+        cleanup_cache_state('cleanup-1', user_id=1)
         # cleanup_cache_state drops ALL thread-keyed entries for the conv.
-        assert not any(k[0] == 'cleanup-1' for k in _cache_states)
+        assert not any(k[0] == 1 and k[1] == 'cleanup-1'
+                       for k in _cache_states)
 
     def test_cleanup_nonexistent_is_noop(self):
-        from lib.tasks_pkg.cache_tracking import _cache_states, cleanup_cache_state
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            cleanup_cache_state,
+        )
 
         before = dict(_cache_states)
-        cleanup_cache_state('nonexistent-conv')
+        cleanup_cache_state('nonexistent-conv', user_id=1)
         assert _cache_states == before
 
 
@@ -1098,16 +1123,16 @@ class TestPrefixCulpritAttribution:
 
     def test_content_change_named(self):
         """A content edit on prefix msg[1] is reported as msg[1].content."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         m1 = self._msgs('turn 1 question', 'turn 1 answer', 'tail A')
         detect_cache_break('cul-1', m1, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 88000,
-                                  'cache_read_input_tokens': 51000})
+                                  'cache_read_input_tokens': 51000}, user_id=1)
         m2 = self._msgs('turn 1 question [EDITED]', 'turn 1 answer', 'tail B')
         r2 = detect_cache_break('cul-1', m2, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 89000,
-                                       'cache_read_input_tokens': 51000})
+                                       'cache_read_input_tokens': 51000}, user_id=1)
         assert r2 is not None and 'prefix_mutation' in r2
         cause = r2['prefix_mutation']
         assert 'msg[1].content' in cause, cause
@@ -1116,7 +1141,7 @@ class TestPrefixCulpritAttribution:
 
     def test_tool_calls_field_distinguished_from_content(self):
         """Mutating a tool_calls argument names msg[i].tool_calls, not content."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         def _m(args, tail):
             return [
@@ -1133,29 +1158,29 @@ class TestPrefixCulpritAttribution:
         m1 = _m('{"pattern": "foo"}', 'tail A')
         detect_cache_break('cul-2', m1, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 88000,
-                                  'cache_read_input_tokens': 51000})
+                                  'cache_read_input_tokens': 51000}, user_id=1)
         # Same content text, but tool_call arguments mutated → must be named
         # as tool_calls, not content.
         m2 = _m('{"pattern": "bar"}', 'tail B')
         r2 = detect_cache_break('cul-2', m2, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 89000,
-                                       'cache_read_input_tokens': 51000})
+                                       'cache_read_input_tokens': 51000}, user_id=1)
         assert r2 is not None and 'prefix_mutation' in r2
         cause = r2['prefix_mutation']
         assert 'tool_calls' in cause, cause
 
     def test_stable_prefix_no_culprit(self):
         """Byte-identical prefix → no break, no fabricated culprit."""
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         m1 = self._msgs('q', 'a', 'tail A')
         detect_cache_break('cul-3', m1, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 88000,
-                                  'cache_read_input_tokens': 51000})
+                                  'cache_read_input_tokens': 51000}, user_id=1)
         m2 = self._msgs('q', 'a', 'tail A')
         r2 = detect_cache_break('cul-3', m2, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 1200,
-                                       'cache_read_input_tokens': 140000})
+                                       'cache_read_input_tokens': 140000}, user_id=1)
         assert r2 is None
 
 
@@ -1180,20 +1205,22 @@ class TestL1DoesNotMaskRealBreak:
     def test_pipeline_l1_only_does_not_set_pending(self, monkeypatch):
         """saved>0 with compacted=False / adv_saved=0 must NOT notify."""
         import lib.tasks_pkg.compaction._pipeline as pl
-        from lib.tasks_pkg.cache_tracking import (
-            _cache_states, _state_key, CacheState,
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
+            CacheState,
         )
 
         # Seed a cache state so we can observe compaction_pending.
         st = CacheState()
         st.call_count = 1
-        _cache_states[_state_key('l1m-1')] = st
+        _cache_states[_state_key('l1m-1', user_id=1)] = st
 
         # L1 reports saved>0; L2/advanced do nothing.
         monkeypatch.setattr(pl, 'micro_compact', lambda *a, **k: 5000)
         monkeypatch.setattr(pl, 'force_compact_if_needed', lambda *a, **k: False)
 
-        task = {'convId': 'l1m-1', 'config': {}}
+        task = {'convId': 'l1m-1', '_userId': 1, 'config': {}}
         pl.run_compaction_pipeline(self._msgs('q', 'tail'), 1, task=task)
         assert st.compaction_pending is False, (
             'benign out-of-prefix L1 must not raise compaction_pending')
@@ -1201,21 +1228,23 @@ class TestL1DoesNotMaskRealBreak:
     def test_pipeline_l2_compaction_does_set_pending(self, monkeypatch):
         """A real L2 force-compact (compacted=True) MUST still notify."""
         import lib.tasks_pkg.compaction._pipeline as pl
-        from lib.tasks_pkg.cache_tracking import (
-            _cache_states, _state_key, CacheState,
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_states,
+            _state_key,
+            CacheState,
         )
 
         st = CacheState()
         st.call_count = 1
-        _cache_states[_state_key('l1m-2')] = st
+        _cache_states[_state_key('l1m-2', user_id=1)] = st
 
         monkeypatch.setattr(pl, 'micro_compact', lambda *a, **k: 0)
         monkeypatch.setattr(pl, 'force_compact_if_needed', lambda *a, **k: True)
         # _reinject runs after compacted=True; make it a no-op.
-        monkeypatch.setattr(pl, '_reinject_system_contexts_after_compact',
+        monkeypatch.setattr(pl, 'recompose_context_after_compaction',
                             lambda *a, **k: None)
 
-        task = {'convId': 'l1m-2', 'config': {}}
+        task = {'convId': 'l1m-2', '_userId': 1, 'config': {}}
         pl.run_compaction_pipeline(self._msgs('q', 'tail'), 1, task=task)
         assert st.compaction_pending is True
 
@@ -1223,25 +1252,25 @@ class TestL1DoesNotMaskRealBreak:
         """End-to-end: a prefix mutation on the SAME round as a benign L1
         pass must still be reported (not masked)."""
         import lib.tasks_pkg.compaction._pipeline as pl
-        from lib.tasks_pkg.cache_tracking import detect_cache_break
+        from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
         monkeypatch.setattr(pl, 'micro_compact', lambda *a, **k: 5000)
         monkeypatch.setattr(pl, 'force_compact_if_needed', lambda *a, **k: False)
-        task = {'convId': 'l1m-3', 'config': {}}
+        task = {'convId': 'l1m-3', '_userId': 1, 'config': {}}
 
         # Round 1: establish prefix.
         m1 = self._msgs('turn 1 question', 'tail A')
         pl.run_compaction_pipeline(m1, 1, task=task)
         detect_cache_break('l1m-3', m1, None, 'claude-opus-4',
                            usage={'cache_creation_input_tokens': 88000,
-                                  'cache_read_input_tokens': 51000})
+                                  'cache_read_input_tokens': 51000}, user_id=1)
 
         # Round 2: a benign L1 pass runs AND the prefix is mutated + big write.
         m2 = self._msgs('turn 1 question [EDITED]', 'tail B')
         pl.run_compaction_pipeline(m2, 2, task=task)
         r2 = detect_cache_break('l1m-3', m2, None, 'claude-opus-4',
                                 usage={'cache_creation_input_tokens': 89000,
-                                       'cache_read_input_tokens': 51000})
+                                       'cache_read_input_tokens': 51000}, user_id=1)
         assert r2 is not None and 'prefix_mutation' in r2, (
             'L1 saved>0 wrongly masked the real prefix-mutation break')
 
@@ -1255,7 +1284,7 @@ class TestSortToolResultsPrefixGate:
     only the out-of-prefix tail may be sorted."""
 
     def test_prefix_run_not_reordered(self, monkeypatch):
-        import lib.tasks_pkg.cache_tracking as ct
+        import lib.tasks_pkg.cache_tracking._prefix as ct
 
         # Pretend the first 4 messages are inside the cache prefix.
         monkeypatch.setattr(ct, 'get_cache_prefix_count',
@@ -1274,7 +1303,7 @@ class TestSortToolResultsPrefixGate:
         assert messages[3]['tool_call_id'] == 'a'
 
     def test_tail_run_still_sorted(self, monkeypatch):
-        import lib.tasks_pkg.cache_tracking as ct
+        import lib.tasks_pkg.cache_tracking._prefix as ct
 
         # No prefix tracked → sort everywhere (legacy behaviour).
         monkeypatch.setattr(ct, 'get_cache_prefix_count',

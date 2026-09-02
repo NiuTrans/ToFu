@@ -216,7 +216,7 @@ class TestEnvOverride:
 
 class TestStatusAndSharedBits:
     def test_status_payload_shape(self):
-        st = ss.status_payload()
+        st = ss.status_payload(owner_user_id=1)
         assert st['ok'] is True
         for key in ('tofu_search_version', 'searxng_instances', 'filter_mode',
                     'filter_model', 'search_deadline_secs',
@@ -231,7 +231,7 @@ class TestStatusAndSharedBits:
 
     def test_handler_roundtrip(self, cfg_file, monkeypatch):
         """The tool handler is a thin translator: args in → applied text out."""
-        from lib.tasks_pkg.handlers.search import _settings as h
+        import lib.tasks_pkg.handlers.search._settings as h
         monkeypatch.setattr(h, '_finalize_tool_round', lambda *a, **k: None)
         task, round_entry = {}, {'query': 'update_search_settings'}
         _id, content, ok = h._handle_update_search_settings(
@@ -245,7 +245,7 @@ class TestStatusAndSharedBits:
         assert saved['fetch_top_n'] == 5 and saved['max_bytes'] == 10 * 1024 * 1024
 
     def test_handler_read_mode(self, cfg_file, monkeypatch):
-        from lib.tasks_pkg.handlers.search import _settings as h
+        import lib.tasks_pkg.handlers.search._settings as h
         monkeypatch.setattr(h, '_finalize_tool_round', lambda *a, **k: None)
         _id, content, ok = h._handle_update_search_settings(
             {}, None, 'update_search_settings', 'tc1', {}, 1,

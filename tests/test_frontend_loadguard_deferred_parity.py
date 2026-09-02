@@ -1,5 +1,3 @@
-# Incident anchor: born in commit 4b7e7832 — fix(frontend): drop openDailyReport from LoadGuard stubs — deferred f...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Guards for pt_248c41b0 — LoadGuard must never pre-stub a DEFERRED
 entry point (the openDailyReport residue).
 

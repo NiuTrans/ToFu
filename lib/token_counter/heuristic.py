@@ -113,6 +113,9 @@ class HeuristicCounter(TokenCounter):
     def count(self, messages: list, *, model: str,
               system: Any = None, tools: Any = None,
               **kwargs) -> Optional[int]:
+        precomputed = kwargs.get('cheap_estimate_tokens')
+        if isinstance(precomputed, int) and precomputed >= 0:
+            return precomputed
         return cheap_estimate(messages, system=system, tools=tools)
 
 

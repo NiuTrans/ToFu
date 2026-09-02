@@ -61,7 +61,7 @@ hidden_imports += [
 ]
 
 # curl_cffi is the egress epic's planned OPTIONAL TLS-fingerprint dep
-# (docs/DESKTOP_EGRESS_DESIGN.md §5 note). Bundle it when the build
+# (docs/modules/remote_execution.md). Bundle it when the build
 # environment has it, so the packaging needs no change the day it lands.
 try:
     import curl_cffi  # noqa: F401

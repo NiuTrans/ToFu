@@ -87,7 +87,7 @@ class ResolveConvConfigTest(unittest.TestCase):
         # default of TRUE. When the task config says False yet conv settings
         # say True (or vice-versa) the incremental accumulator and the safety
         # net disagree about who owns translation; the orphan-teardown in
-        # _maybe_auto_translate_assistant's finally block must absorb that
+        # terminal translation cleanup must absorb that
         # divergence (see tests/test_auto_translate_safety_net.py). This test
         # pins the config default so the divergence can't widen silently.
         out = resolve_conv_config(conv_settings={}, overrides={}, is_active=True)
@@ -122,29 +122,6 @@ class ResolveConvConfigTest(unittest.TestCase):
         )
         self.assertIsNone(out2['browserClientId'])
 
-    def test_endpoint_mode_maps_from_endpointEnabled_inactive(self):
-        # JS: endpointMode = is_active ? endpointEnabled (override) : !!conv.endpointEnabled
-        out = resolve_conv_config(
-            conv_settings={'endpointEnabled': True},
-            overrides={'endpointMode': False},
-            is_active=False,
-        )
-        self.assertTrue(out['endpointMode'])
-
-    def test_keep_tool_history_default_true(self):
-        # JS: config.keepToolHistory !== false → true even if undefined.
-        out = resolve_conv_config(
-            conv_settings={}, overrides={}, is_active=True)
-        self.assertTrue(out['keepToolHistory'])
-
-    def test_keep_tool_history_explicit_false(self):
-        out = resolve_conv_config(
-            conv_settings={},
-            overrides={'keepToolHistory': False},
-            is_active=True,
-        )
-        self.assertFalse(out['keepToolHistory'])
-
     def test_project_paths_list_copy(self):
         paths = ['/a', '/b']
         out = resolve_conv_config(
@@ -171,6 +148,28 @@ class ResolveConvConfigTest(unittest.TestCase):
             conv_settings={}, overrides={}, is_active=True)
         self.assertEqual(out['readOnlyPaths'], [])
 
+    def test_auto_apply_defaults_true_everywhere(self):
+        # 2026-08-21 policy: no approval prompts unless the user explicitly
+        # switched this conv to Manual — an absent key resolves AUTO.
+        out = resolve_conv_config(conv_settings={}, overrides={}, is_active=True)
+        self.assertTrue(out['autoApply'])
+        out = resolve_conv_config(conv_settings={}, overrides={}, is_active=False)
+        self.assertTrue(out['autoApply'])
+
+    def test_auto_apply_conv_value_wins_inactive(self):
+        out = resolve_conv_config(
+            conv_settings={'autoApply': False},
+            overrides={'autoApply': True},
+            is_active=False)
+        self.assertFalse(out['autoApply'])
+
+    def test_auto_apply_active_falls_back_to_conv_when_override_absent(self):
+        out = resolve_conv_config(
+            conv_settings={'autoApply': False},
+            overrides={},
+            is_active=True)
+        self.assertFalse(out['autoApply'])
+
     def test_all_expected_keys_present(self):
         out = resolve_conv_config(
             conv_settings={}, overrides={}, is_active=True)
@@ -179,13 +178,14 @@ class ResolveConvConfigTest(unittest.TestCase):
             'systemPrompt', 'systemPromptMode', 'systemPromptBlocks',
             'thinkingDepth', 'temperature', 'searchMode',
             'fetchEnabled', 'codeExecEnabled', 'memoryEnabled',
-            'schedulerEnabled', 'swarmEnabled', 'projectPath',
+            'schedulerEnabled', 'projectPath',
             'projectPaths', 'readOnlyPaths', 'autoApply', 'browserEnabled',
             'desktopEnabled', 'imageGenEnabled', 'humanGuidanceEnabled',
-            'endpointMode', 'autopilot',
+            'autopilot',
             'autoTranslate', 'langCorrectionEnabled', 'uiLang',
-            'browserClientId', 'keepToolHistory',
+            'browserClientId',
             'activeFlow', 'flowBuiltin', 'flowId',
+            'planMode',
             # RWA P4b:伪路径(remote:<agent>:<root>)翻译产物,默认 None。
             'project_remote',
         }
@@ -222,7 +222,7 @@ class ResolveConvConfigTest(unittest.TestCase):
     def test_active_flow_inactive_reads_stored(self):
         out = resolve_conv_config(
             conv_settings={'activeFlow': 'orch_stored'},
-            overrides={'activeFlow': 'builtin:endpoint'},
+            overrides={'activeFlow': 'builtin:autopilot'},
             is_active=False)
         self.assertEqual(out['flowId'], 'orch_stored')
         self.assertEqual(out['flowBuiltin'], '')
@@ -294,12 +294,17 @@ class ResolveConvSettingsTest(unittest.TestCase):
             'model', 'preset', 'thinkingDepth', 'searchMode',
             'fetchEnabled', 'codeExecEnabled', 'browserEnabled',
             'desktopEnabled', 'memoryEnabled', 'schedulerEnabled',
-            'swarmEnabled', 'endpointEnabled', 'autopilotEnabled',
+            'autopilotEnabled',
             'imageGenEnabled', 'humanGuidanceEnabled', 'projectPath',
             'projectPaths', 'readOnlyPaths', 'autoTranslate', 'folderId',
-            'activeFlow', 'uiLang',
+            'activeFlow', 'uiLang', 'autoApply', 'planMode',
         }
         self.assertEqual(set(out.keys()), expected)
+
+    def test_auto_apply_default_true_and_stored_manual_preserved(self):
+        self.assertTrue(resolve_conv_settings(conv_settings={})['autoApply'])
+        out = resolve_conv_settings(conv_settings={'autoApply': False})
+        self.assertFalse(out['autoApply'])
 
 
 class CanonicaliseModelIdTest(unittest.TestCase):

@@ -1,21 +1,8 @@
-"""Post-report agentic second-pass hooks for paper report generation.
+"""Best-effort post-report passes and their durable metadata merge.
 
-Two best-effort, gated, non-destructive passes that run AFTER the fidelity
-report is DONE + persisted:
-
-* :func:`_maybe_run_insight`   — the gated insight synthesis/transfer pass
-  (delegates to ``lib.paper.insight_engine.run_report_insight``).
-* :func:`_maybe_run_termfill`  — the gated definition-backfill pass
-  (delegates to ``lib.paper.terminology_backfill.run_report_termfill``).
-
-Both are lazily-importing (``.insight_engine`` / ``.terminology_backfill`` /
-``.review`` are resolved at call time to keep the facade import cheap and avoid
-import cycles) and emit events through ``_append_report_event`` on the same
-task event log the report uses.
-
-Split out of the flat ``report_engine.py`` while preserving
-``from lib.paper.report_engine import _maybe_run_insight`` / ``_maybe_run_termfill``
-(and the ``.report_engine`` relative form) byte-for-byte via the package facade.
+The worker calls these hooks only after the canonical report is persisted.
+They own insight, terminology, and checkpoint enrichment; report lifecycle and
+event storage remain owned by ``report_runtime``.
 """
 
 import uuid
@@ -92,13 +79,15 @@ def _merge_second_pass(task, phash, name, payload, *, model=None):
     # can start as soon as the done event is visible, while these hooks are
     # still running; writing the task's older in-memory dict would erase it.
     try:
-        from lib.storage import get_storage_client
-        response = get_storage_client(write=True).command(
-            'paper.report.second_pass.merge', {
-                'paper_hash': phash, 'lang': task.get('lang') or '',
-                'name': name, 'entry': entry,
-            }, f'paper.report.second-pass:{uuid.uuid4().hex}')
-        updated = response.get('meta') if response.get('found') else None
+        from lib.paper.artifact_repository import PaperArtifactRepository
+        updated = PaperArtifactRepository(
+            int(task['_userId'])).merge_report_second_pass(
+                phash,
+                task.get('lang') or '',
+                name,
+                entry,
+                command_id=f'paper.report.second-pass:{uuid.uuid4().hex}',
+            )
         if not isinstance(updated, dict):
             logger.warning('[Paper:SecondPass] report row missing during meta '
                            'merge — hash=%s pass=%s', phash, name)
@@ -140,7 +129,8 @@ def _maybe_run_insight(task, phash, ui_lang, report_md, *, truncated_paper, mode
     cfg-builder stamps ``paperInsightPersonalContext=False`` so a BYO caller's
     analysis never gets the operator's library/memories.
     """
-    from ..insight_engine import insight_enabled, run_report_insight
+    from ..insight_engine._config import insight_enabled
+    from ..insight_engine._run import run_report_insight
     from ..review import is_review_family
 
     # Four-level enable chain (design §3.4): per-request cfg (headless stamp
@@ -175,7 +165,8 @@ def _maybe_run_insight(task, phash, ui_lang, report_md, *, truncated_paper, mode
     result = run_report_insight(
         truncated_paper, report_md, ui_lang, phash=phash, model=model,
         abort=_abort, on_tool_event=_on_tool_event,
-        allow_personal_context=allow_personal)
+        allow_personal_context=allow_personal,
+        user_id=int(task['_userId']))
 
     # Cost visibility (design §3.3): fold this pass's billed usage into the
     # report meta's secondPasses breakdown, re-persist the row's meta, and
@@ -244,7 +235,7 @@ def _maybe_run_checkpoints(task, phash, ui_lang, report_md, *, model):
     logger.info('[Paper:Checkpoints] Starting gated pass — hash=%s ui_lang=%s',
                 phash, ui_lang)
     result = run_report_checkpoints(report_md, ui_lang, phash=phash, model=model,
-                                    abort=_abort)
+                                    abort=_abort, user_id=int(task['_userId']))
     _merge_second_pass(task, phash, 'checkpoints', {
         'cards': len(result.get('items') or []),
         'usage': result.get('usage'),
@@ -298,7 +289,7 @@ def _maybe_run_termfill(task, phash, ui_lang, report_md, report_meta, *, model):
     logger.info('[Paper:TermFill] Starting gated backfill — hash=%s ui_lang=%s '
                 'gaps=%s', phash, ui_lang, audit.get('counts'))
     result = run_report_termfill(report_md, ui_lang, phash=phash, model=model,
-                                 audit=audit)
+                                 audit=audit, user_id=int(task['_userId']))
     _merge_second_pass(task, phash, 'termfill', {
         'closed': result.get('closed', False),
         'usage': result.get('usage'),

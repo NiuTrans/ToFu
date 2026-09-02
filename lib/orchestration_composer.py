@@ -1,4 +1,4 @@
-"""Stable LLM-backed facade for natural-language graph composition.
+"""LLM-backed application boundary for natural-language graph composition.
 
 Prompt/catalogue policy lives in :mod:`lib.orchestration.composer_prompt`;
 this module owns the external model call and the validated result boundary.
@@ -7,20 +7,14 @@ this module owns the external model call and the validated result boundary.
 from __future__ import annotations
 
 from lib.log import get_logger
-from lib.orchestration import layout_definition, validate_definition
+from lib.orchestration._layout import layout_definition
+from lib.orchestration._validate import validate_definition
 from lib.orchestration._definition_contract import SCHEMA_ID
 from lib.orchestration.composer_prompt import (
     build_composer_messages,
-    composer_catalogue,
 )
 
 logger = get_logger(__name__)
-
-# Compatibility aliases for existing focused tests and internal tooling. New
-# consumers should depend on ``composer_prompt`` when they only need policy.
-_build_messages = build_composer_messages
-_catalogue = composer_catalogue
-
 
 def _extract_json(text: str) -> dict | None:
     """Best-effort parse through the shared model-JSON boundary."""
@@ -48,7 +42,7 @@ def compose(requirement: str, *, current: dict | None = None,
     if not requirement:
         return _failure('empty requirement')
 
-    messages = _build_messages(requirement, current, history)
+    messages = build_composer_messages(requirement, current, history)
     try:
         if llm_override is not None:
             content, usage = llm_override(messages)

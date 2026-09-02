@@ -1,14 +1,13 @@
-"""Rubric critic — the measurement instrument.
+"""Score reports on the four deterministic insight-rubric axes.
 
 Scores any report on the four INSIGHT axes and returns strict JSON so one-pass
 vs two-pass reports are a numeric diff, not a vibe. A single no-tool dispatch at
 temp=0 (a judgement, not a creative act).
 
-``dispatch_stream`` is resolved THROUGH the package facade at call time so a
-test patching ``ie.dispatch_stream`` bites here exactly as in the flat module.
 """
 
 from lib.agent_loop import AbortSignal
+from lib.llm_dispatch.api import dispatch_stream
 from lib.llm_errors import AbortedError
 from lib.log import get_logger
 
@@ -46,9 +45,6 @@ def score_report_rubric(report_md, *, model=None, abort=None):
         }
         or None on dispatch/parse failure (logged).
     """
-    import lib.paper.insight_engine as _pkg
-    dispatch_stream = _pkg.dispatch_stream
-
     report_md = (report_md or '').strip()
     if not report_md:
         logger.warning('[Paper:Insight:Rubric] Empty report — nothing to score')
@@ -62,7 +58,8 @@ def score_report_rubric(report_md, *, model=None, abort=None):
         buf['content'] += text
 
     try:
-        msg, finish, usage = dispatch_stream(
+        from lib.llm.stream_result import require_verified_provider_stream_result
+        stream_result = require_verified_provider_stream_result(dispatch_stream(
             messages,
             on_content=_on_content,
             abort_check=abort_signal.is_set,
@@ -73,7 +70,9 @@ def score_report_rubric(report_md, *, model=None, abort=None):
             temperature=_RUBRIC_TEMPERATURE,
             thinking_enabled=False,
             log_prefix='[Paper:Insight:Rubric]',
-        )
+        ), context='paper insight rubric')
+        msg = stream_result.message
+        usage = stream_result.usage
     except AbortedError:
         logger.info('[Paper:Insight:Rubric] Scoring aborted')
         return None

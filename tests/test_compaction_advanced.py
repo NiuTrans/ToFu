@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 @pytest.mark.unit
 def test_kinds_and_needs_registered():
-    from lib.tasks_pkg.compaction import get_step_spec, list_steps
+    from lib.tasks_pkg.compaction.api import get_step_spec, list_steps
     assert 'drop_superseded_turns' in list_steps()
     assert 'summarize_oldest_turn' in list_steps()
 
@@ -46,7 +46,7 @@ def test_kinds_and_needs_registered():
 def test_l1_host_rejects_structural_and_llm_steps():
     """The transform-only host (run_steps defaults) must SKIP a structural
     or LLM step rather than run it — keeping L1 cheap + LLM-free."""
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
 
     # Naming an advanced step in the L1 'steps' list must be a safe no-op.
     msgs = [{'role': 'user', 'content': 'hi'},
@@ -60,9 +60,9 @@ def test_l1_host_rejects_structural_and_llm_steps():
 # ── MessageEditor ────────────────────────────────────────────────────────
 
 def _mk_ctx(messages, *, cache_prefix_count=0, ignore_cache_prefix=False):
-    from lib.tasks_pkg.compaction import CompactionContext, MessageEditor
-    import lib.tasks_pkg.compaction as pkg
-    ctx = CompactionContext(messages=messages, conv_id='t', constants=pkg,
+    from lib.tasks_pkg.compaction.api import CompactionContext, MessageEditor
+    import lib.tasks_pkg.compaction._constants as constants
+    ctx = CompactionContext(messages=messages, conv_id='t', constants=constants,
                             cache_prefix_count=cache_prefix_count,
                             ignore_cache_prefix=ignore_cache_prefix)
     ctx.edit = MessageEditor(ctx)
@@ -121,7 +121,7 @@ def test_editor_respects_cache_prefix():
 
 @pytest.mark.unit
 def test_drop_superseded_turns_drops_pure_tool_turns():
-    from lib.tasks_pkg.compaction import advanced_compact
+    from lib.tasks_pkg.compaction.api import advanced_compact
 
     msgs = [{'role': 'system', 'content': 'sys'}]
     # Turn 1: pure tool activity (no prose) → droppable.
@@ -162,7 +162,7 @@ def test_drop_superseded_turns_drops_pure_tool_turns():
 
 @pytest.mark.unit
 def test_summarize_oldest_turn_uses_granted_llm(monkeypatch):
-    from lib.tasks_pkg.compaction import _advanced
+    import lib.tasks_pkg.compaction._advanced as _advanced
 
     # Stub the cheap-model summary so the test is hermetic + LLM-free.
     monkeypatch.setattr(_advanced, '_make_summarize_fn',
@@ -193,9 +193,9 @@ def test_summarize_oldest_turn_uses_granted_llm(monkeypatch):
 def test_summarize_raises_without_grant():
     """ctx.summarize must raise when the host didn't grant the llm cap —
     proves the capability is opt-in by construction."""
-    from lib.tasks_pkg.compaction import CompactionContext
-    import lib.tasks_pkg.compaction as pkg
-    ctx = CompactionContext(messages=[], constants=pkg)
+    from lib.tasks_pkg.compaction.api import CompactionContext
+    import lib.tasks_pkg.compaction._constants as constants
+    ctx = CompactionContext(messages=[], constants=constants)
     with pytest.raises(RuntimeError):
         ctx.summarize('anything')
 
@@ -204,7 +204,7 @@ def test_summarize_raises_without_grant():
 
 @pytest.mark.unit
 def test_pipeline_runs_advanced_steps_from_config():
-    from lib.tasks_pkg.compaction import run_compaction_pipeline
+    from lib.tasks_pkg.compaction.api import run_compaction_pipeline
 
     msgs = [{'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'explore'},
@@ -215,7 +215,8 @@ def test_pipeline_runs_advanced_steps_from_config():
              'content': 'x' * 500},
             {'role': 'user', 'content': 'now fix'},
             {'role': 'assistant', 'content': 'on it'}]
-    task = {'convId': '', 'config': {'model': 'gpt-4', 'compaction': {
+    task = {'convId': '', '_userId': 1,
+            'config': {'model': 'gpt-4', 'compaction': {
         'advanced_steps': ['drop_superseded_turns']}}}
     run_compaction_pipeline(msgs, current_round=2, task=task)
     assert 'explore' not in [m.get('content') for m in msgs]
@@ -224,7 +225,7 @@ def test_pipeline_runs_advanced_steps_from_config():
 @pytest.mark.unit
 def test_pipeline_default_no_advanced():
     """No advanced_steps ⇒ no structural change from Stage B."""
-    from lib.tasks_pkg.compaction import run_compaction_pipeline
+    from lib.tasks_pkg.compaction.api import run_compaction_pipeline
 
     msgs = [{'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'explore'},
@@ -236,6 +237,6 @@ def test_pipeline_default_no_advanced():
             {'role': 'user', 'content': 'now'},
             {'role': 'assistant', 'content': 'ok'}]
     before = len(msgs)
-    task = {'convId': '', 'config': {'model': 'gpt-4'}}
+    task = {'convId': '', '_userId': 1, 'config': {'model': 'gpt-4'}}
     run_compaction_pipeline(msgs, current_round=2, task=task)
     assert len(msgs) == before  # Stage B did not run

@@ -14,10 +14,10 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-from lib.browser import preview as pv
+import lib.browser.preview as pv
 from lib.browser.dispatch import BROWSER_HANDLERS, normalize_browser_args
 from lib.browser.handlers._interact import _trusted_suffix
-from lib.tools import BROWSER_TOOL_NAMES, PAGE_PREVIEW_TOOL_NAMES
+from lib.tools.browser import BROWSER_TOOL_NAMES, PAGE_PREVIEW_TOOL_NAMES
 
 
 # ── arg validation ──────────────────────────────────────────────────

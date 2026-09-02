@@ -71,9 +71,9 @@ const now = Date.now();
 // while folders have NOT loaded yet.
 global.activeConvId = window.activeConvId = null;
 global.conversations = window.conversations = [
-  { id: 'foldered', title: 'In a folder', messages: [{ role: 'user' }],
+  { id: 'foldered', title: 'In a folder', _serverTurnCount: 1,
     folderId: 'fold-1', updatedAt: now - 1000 },
-  { id: 'plain', title: 'No folder', messages: [{ role: 'user' }],
+  { id: 'plain', title: 'No folder', _serverTurnCount: 1,
     updatedAt: now - 2000 },
 ];
 window._lastConvListHash = '';

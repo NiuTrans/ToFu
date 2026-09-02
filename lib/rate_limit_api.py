@@ -4,10 +4,9 @@ Two independent buckets per key:
   - **rpm**: requests per minute   (refill rate = limit/60 tokens/sec)
   - **tpd**: tokens per day        (refill rate = limit/86400 tokens/sec)
 
-Both buckets are checked on every request that has been authenticated
-via an API key. ``TUNNEL_TOKEN``-authenticated requests bypass the
-limiter entirely (the UI is local; the user already has cookie/header
-access and we don't want to disrupt the browser).
+Both buckets are checked on every request authenticated with an API key.
+Open-mode requests use their own peer-address bucket when the operator
+explicitly admits remote peers.
 
 Usage
 -----
@@ -83,6 +82,9 @@ class RateDecision:
     tpd_remaining: int = 0
 
 
+# TODO(enterprise, R5): per-process token buckets make every quota ×N behind
+# replicas; re-key onto lib.runtime_state_store counters.
+# docs/ENTERPRISE_READINESS_AUDIT.md
 # ── Storage: per-key bucket pair, keyed by key_id ──
 _lock = threading.Lock()
 _state: dict[str, dict] = {}
@@ -173,8 +175,8 @@ def _open_mode_rpm() -> int:
     bucket: the cap protects nothing and purely throttles the owner (owner
     incident 2026-08-14: ambient UI polling ate 120/min → 606 self-429s/day).
     Behind a same-host tunnel the cap has no discriminating power either
-    (every public request presents as loopback) — the documented protection
-    there is TUNNEL_TOKEN / private mode, never IP throttling.
+    (every public request presents as loopback). Such deployments must use
+    private mode; IP throttling is not an authentication boundary.
     """
     import os
     raw = (os.environ.get('TOFU_OPEN_MODE_RPM', '') or '').strip()
@@ -233,15 +235,11 @@ def check_request(auth_ctx, *, request_cost: int = 1) -> RateDecision:
     if auth_ctx is not None and getattr(auth_ctx, 'via_open_mode', False):
         # Open-mode synthetic context: no real principal, so key a coarse
         # per-IP RPM bucket instead of bypassing entirely. This closes the
-        # "open+remote = unauthenticated AND unthrottled" hole. The tunnel /
-        # cookie-UI paths (below) remain uncapped — they are the operator's
-        # own local surface.
+        # "open+remote = unauthenticated AND unthrottled" hole.
         return check_open_mode_request(request_cost=request_cost)
-    if (auth_ctx is None or auth_ctx.via_tunnel_token
-            or not auth_ctx.key_id):
-        # Bypass for unauthenticated (rejected upstream) and the UI cookie /
-        # tunnel path (no real principal to rate-limit). Anything that gets
-        # here is "no limit configured".
+    if auth_ctx is None or not auth_ctx.key_id:
+        # Unauthenticated requests are rejected upstream. Anything that gets
+        # here without a key has no configured principal bucket.
         return RateDecision(allowed=True)
     rpm = max(0, int(auth_ctx.rate_limit_rpm or 0))
     tpd = max(0, int(auth_ctx.rate_limit_tpd or 0))

@@ -34,6 +34,9 @@ _COST_BUCKETS = (0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 20.0)
 _METHODS = frozenset({'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'})
 _TRANSPORTS = frozenset({'sse', 'ws'})
 _CONNECTION_OUTCOMES = frozenset({'completed', 'disconnected', 'error'})
+_STREAM_ADMISSION_OUTCOMES = frozenset({
+    'admitted', 'capacity', 'evicted', 'stale', 'superseded',
+})
 _BACKGROUND_JOB_KINDS = frozenset({'pricing_refresh'})
 _BACKGROUND_JOB_OUTCOMES = frozenset({'success', 'error', 'cancelled'})
 _RUNTIME_PROBE_SOURCES = frozenset({'loadavg', 'cgroup_memory'})
@@ -276,6 +279,18 @@ def record_replay(transport: str, kind: Any, count: int, *, reset: bool = False)
     _STORE.inc('tofu_stream_replayed_events_total', max(0, int(count)), **labels)
 
 
+def record_stream_admission(channel: Any, outcome: str, count: int = 1) -> None:
+    """Count bounded stream ownership/admission decisions without IDs."""
+    normalized_outcome = (
+        outcome if outcome in _STREAM_ADMISSION_OUTCOMES else 'capacity')
+    _STORE.inc(
+        'tofu_stream_admission_total',
+        max(0, int(count)),
+        channel=_bounded(channel, limit=48),
+        outcome=normalized_outcome,
+    )
+
+
 def record_registry_eviction(kind: Any, reason: str, count: int = 1) -> None:
     """Count bounded task-registry removals without labeling task ids."""
     reason_label = reason if reason in {'ttl', 'discard', 'capacity', 'pressure'} \
@@ -346,18 +361,57 @@ async def instrument_sse(generator: Any, channel: str = 'task') -> AsyncIterator
 
 
 class InstrumentedThreadPoolExecutor(ThreadPoolExecutor):
-    """Thread pool that exposes queue wait, active work and rejections."""
+    """Thread pool with metrics and an explicit idle-retirement contract.
 
-    def __init__(self, *args: Any, metric_pool: str, **kwargs: Any) -> None:
+    CPython workers never expire after a burst.  The serving-loop owner can
+    replace this executor once work above ``idle_retain_threads`` has been
+    quiet for a bounded window. Local pending/active accounting is independent
+    of the metrics store and balances futures cancelled before worker entry.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        metric_pool: str,
+        idle_retain_threads: int = 0,
+        **kwargs: Any,
+    ) -> None:
         self.metric_pool = _bounded(metric_pool, limit=32)
+        self._lifecycle_lock = threading.Lock()
+        self._pending_jobs = 0
+        self._active_jobs = 0
+        self._last_excess_activity = time.monotonic()
         super().__init__(*args, **kwargs)
+        self._idle_retain_threads = max(
+            0, min(self._max_workers, int(idle_retain_threads)))
         _STORE.set('tofu_executor_workers', self._max_workers,
+                   pool=self.metric_pool)
+        _STORE.set('tofu_executor_resident_threads', 0,
                    pool=self.metric_pool)
 
     def submit(self, fn: Any, /, *args: Any, **kwargs: Any):
         queued_at = time.monotonic()
+        state = {
+            'started': False,
+            'pending_accounted': True,
+            'excess_work': False,
+        }
+
+        with self._lifecycle_lock:
+            self._pending_jobs += 1
+            state['excess_work'] = bool(
+                self._pending_jobs + self._active_jobs
+                > self._idle_retain_threads)
+            if state['excess_work']:
+                self._last_excess_activity = queued_at
 
         def measured(*call_args: Any, **call_kwargs: Any):
+            with self._lifecycle_lock:
+                state['started'] = True
+                if state['pending_accounted']:
+                    self._pending_jobs = max(0, self._pending_jobs - 1)
+                    state['pending_accounted'] = False
+                self._active_jobs += 1
             wait = max(0.0, time.monotonic() - queued_at)
             _STORE.observe('tofu_executor_queue_wait_seconds', wait,
                            _WAIT_BUCKETS, pool=self.metric_pool)
@@ -371,21 +425,85 @@ class InstrumentedThreadPoolExecutor(ThreadPoolExecutor):
             try:
                 return fn(*call_args, **call_kwargs)
             finally:
+                with self._lifecycle_lock:
+                    self._active_jobs = max(0, self._active_jobs - 1)
+                    if state['excess_work']:
+                        self._last_excess_activity = time.monotonic()
                 _STORE.add_gauge('tofu_executor_active', -1,
                                  pool=self.metric_pool)
 
         try:
             future = super().submit(measured, *args, **kwargs)
-        except RuntimeError:
-            _STORE.inc('tofu_executor_rejected_total', pool=self.metric_pool)
+        except BaseException as exc:
+            with self._lifecycle_lock:
+                if state['pending_accounted']:
+                    self._pending_jobs = max(0, self._pending_jobs - 1)
+                    state['pending_accounted'] = False
+            if isinstance(exc, RuntimeError):
+                _STORE.inc('tofu_executor_rejected_total',
+                           pool=self.metric_pool)
             raise
+
+        def _balance_cancelled_before_entry(done_future) -> None:
+            if not done_future.cancelled():
+                return
+            with self._lifecycle_lock:
+                if not state['started'] and state['pending_accounted']:
+                    self._pending_jobs = max(0, self._pending_jobs - 1)
+                    state['pending_accounted'] = False
+                    if state['excess_work']:
+                        self._last_excess_activity = time.monotonic()
+
+        future.add_done_callback(_balance_cancelled_before_entry)
         try:
             depth = self._work_queue.qsize()  # CPython's executor queue.
         except (AttributeError, NotImplementedError) as exc:
             logger.debug('executor queue depth unavailable after submit: %s', exc)
             depth = 0
         _STORE.set('tofu_executor_queued', depth, pool=self.metric_pool)
+        _STORE.set('tofu_executor_resident_threads', len(self._threads),
+                   pool=self.metric_pool)
         return future
+
+    def idle_retirement_snapshot(
+        self,
+        idle_seconds: float,
+        *,
+        now: float | None = None,
+    ) -> dict[str, int | float | bool]:
+        """Return bounded state used by the serving-loop retirement owner."""
+        observed_at = time.monotonic() if now is None else float(now)
+        with self._lifecycle_lock:
+            pending = self._pending_jobs
+            active = self._active_jobs
+            quiet_for = max(0.0, observed_at - self._last_excess_activity)
+            resident = len(self._threads)
+            due = bool(
+                idle_seconds > 0
+                and not self._shutdown
+                and pending == 0
+                and active == 0
+                and resident > self._idle_retain_threads
+                and quiet_for >= idle_seconds
+            )
+        return {
+            'due': due,
+            'pending': pending,
+            'active': active,
+            'resident_threads': resident,
+            'retain_threads': self._idle_retain_threads,
+            'quiet_for_seconds': quiet_for,
+        }
+
+    def record_idle_retirement(self, resident_threads: int) -> None:
+        """Publish one owner-approved retirement after replacement is live."""
+        retired = max(0, int(resident_threads))
+        _STORE.inc('tofu_executor_idle_retirements_total',
+                   pool=self.metric_pool)
+        _STORE.inc('tofu_executor_idle_retired_threads_total', retired,
+                   pool=self.metric_pool)
+        _STORE.set('tofu_executor_resident_threads', 0,
+                   pool=self.metric_pool)
 
 
 _HELP = {
@@ -409,13 +527,17 @@ _HELP = {
     'tofu_stream_connections_active': 'Currently open SSE and WebSocket connections.',
     'tofu_stream_disconnects_total': 'Stream connection terminal outcomes.',
     'tofu_stream_replayed_events_total': 'Events replayed after reconnect.',
+    'tofu_stream_admission_total': 'Bounded stream admission and ownership decisions.',
     'tofu_task_registry_evictions_total': 'Tasks removed from an in-process registry.',
     'tofu_task_event_evictions_total': 'Task replay events removed at the retention limit.',
     'tofu_executor_workers': 'Configured executor worker capacity.',
+    'tofu_executor_resident_threads': 'Currently materialized executor worker threads.',
     'tofu_executor_active': 'Executor jobs currently running.',
     'tofu_executor_queued': 'Executor jobs waiting to start.',
     'tofu_executor_rejected_total': 'Executor submissions rejected during shutdown.',
     'tofu_executor_queue_wait_seconds': 'Executor queue wait before work starts.',
+    'tofu_executor_idle_retirements_total': 'Idle executor generations retired.',
+    'tofu_executor_idle_retired_threads_total': 'Worker threads released by idle retirement.',
     'tofu_background_jobs_started_total': 'Owned process-local background jobs started.',
     'tofu_background_jobs_active': 'Owned process-local background jobs currently active.',
     'tofu_background_jobs_completed_total': 'Owned background job terminal outcomes.',
@@ -480,6 +602,7 @@ __all__ = [
     'instrument_sse', 'normalize_route_template', 'prometheus_lines',
     'record_http_request', 'record_llm_first_token', 'record_llm_task',
     'record_registry_eviction', 'record_replay', 'record_task_event_eviction',
+    'record_stream_admission',
     'record_runtime_probe_failure',
     'record_task_queue_wait', 'reset_for_tests', 'route_template_for_request',
     'set_event_loop_lag',

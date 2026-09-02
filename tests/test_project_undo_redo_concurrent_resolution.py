@@ -232,6 +232,29 @@ def test_redo_resolves_project_via_pin_not_ui_focus():
         _cleanup()
 
 
+def test_redo_resolver_survives_pending_modification_removal():
+    """The v3 turn command can resolve redo after an Undo + page reload."""
+    from lib import file_history
+
+    dir_a, dir_b, task_a, task_b = _seed_two_projects()
+    try:
+        snapshot_id = file_history.make_snapshot(
+            dir_a,
+            task_id=task_a,
+            conv_id=f"conv-for-{task_a}",
+            rel_paths=["a.txt"],
+        )
+        assert snapshot_id
+        result = undo_task_modifications(resolve_base_path(task_id=task_a), task_a)
+        assert result["ok"] and result["undone"] == 1
+
+        _focus_ui_on(dir_b)
+        resolved = resolve_base_path(task_id=task_a)
+        assert os.path.abspath(resolved) == os.path.abspath(dir_a)
+    finally:
+        _cleanup()
+
+
 def test_NC_redo_against_ui_focus_wrong_project():
     """NEGATIVE CONTROL: redoing task-a against the UI-focused project (B) —
     the OLD ``_active_project_path('')`` → ``_state['path']`` behaviour — can

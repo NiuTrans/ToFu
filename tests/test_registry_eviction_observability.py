@@ -14,7 +14,11 @@ import time
 import pytest
 
 from lib.agent_core.task_runtime import TaskRuntime
-from lib.tasks_pkg.manager import _registry as reg
+import lib.tasks_pkg.manager._registry as reg
+from tests.support.chat_tasks import (
+    chat_task_fixture_guard,
+    chat_task_registry,
+)
 
 
 @pytest.mark.unit
@@ -25,8 +29,8 @@ class TestDiscardTaskLeavesAFingerprint:
 
         reset_for_tests()
         tid = 'obs-evict-test-0001'
-        with reg.tasks_lock:
-            reg.tasks[tid] = {'id': tid, 'convId': 'convObs1',
+        with chat_task_fixture_guard:
+            chat_task_registry[tid] = {'id': tid, 'convId': 'convObs1',
                               'status': 'done', 'created_at': time.time()}
         try:
             with caplog.at_level(logging.INFO, logger=reg.logger.name):
@@ -44,8 +48,8 @@ class TestDiscardTaskLeavesAFingerprint:
             assert 'tofu_task_registry_evictions_total' in metrics
             assert 'kind="chat",reason="discard"' in metrics
         finally:
-            with reg.tasks_lock:
-                reg.tasks.pop(tid, None)
+            with chat_task_fixture_guard:
+                chat_task_registry.pop(tid, None)
 
 
 @pytest.mark.unit
@@ -56,7 +60,7 @@ class TestCleanupStaleLeavesAFingerprint:
 
         reset_for_tests()
         rt = TaskRuntime('obs-kind', ttl=1)
-        tid = rt.create(task_id='obs-evict-test-0002')['id']
+        tid = rt.create(user_id=1, task_id='obs-evict-test-0002')['id']
         with rt._lock:
             rt._tasks[tid]['status'] = 'done'
             rt._tasks[tid]['finished_at'] = time.time() - 10

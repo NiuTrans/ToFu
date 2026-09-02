@@ -1,13 +1,14 @@
 """Premature-close → per-upstream health-scoring edge (lib/llm_dispatch/api.py).
 
-``lib/llm/_sse_core.py::SSEAccumulator.finalize`` DETECTS a gateway closing the
-SSE stream before ``[DONE]`` (sets ``usage['_missing_done']`` — but only when
-the close was neither a client abort nor a clean finish). Historically that was
-only *logged*, so the offending upstream kept getting re-picked. This suite pins
-the fix: ``dispatch_stream`` / ``async_dispatch_stream`` now route that anomaly
-through ``slot.record_truncation`` (the SAME soft-failure path the translate
-retry loop uses), so after 3 consecutive premature closes the slot is cooled
-with the existing exponential-backoff / 300s cap — no new hyperparameter.
+``lib/llm/_sse_core.py::SSEAccumulator.finalize`` retains missing-``[DONE]`` as
+a compatibility diagnostic while the closed stream state decides whether the
+result is usable. Historically premature closes were only *logged*, so the
+offending upstream kept getting re-picked. This suite pins the fix:
+``dispatch_stream`` / ``async_dispatch_stream`` route unusable states through
+``slot.record_truncation`` (the SAME soft-failure path the translate retry loop
+uses), so after three consecutive premature closes the slot is cooled with the
+existing exponential-backoff/300s cap. A verified provider finish without
+``[DONE]`` remains healthy.
 
 Triple-neuter (baseline → negative → restore):
   - POSITIVE   : 3 premature closes → consecutive_errors bumps + cooldown set,
@@ -140,6 +141,57 @@ class TestOverCoolGuard:
         aborted_usage = {'_chunks_received': 5, 'stream_elapsed_ms': 900}
         for _ in range(4):
             _run_sync_stream(monkeypatch, slot, aborted_usage)
+        assert slot.consecutive_errors == 0
+        assert slot.cooldown_until <= time.time()
+
+    def test_verified_finish_without_done_does_not_cool(self, monkeypatch):
+        """Typed provider finish outranks the legacy missing-DONE diagnostic."""
+        from lib.llm.stream_result import (
+            ProviderStreamResult,
+            ProviderStreamState,
+        )
+        from lib.llm_dispatch import api
+
+        slot = _make_slot()
+        disp = _FakeDispatcher([slot])
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+
+        def _fake_stream(body, **kwargs):
+            return ProviderStreamResult(
+                message={'role': 'assistant', 'content': 'complete'},
+                compatibility_finish_reason='stop',
+                usage={
+                    '_stream_state': 'provider_finished',
+                    '_missing_done': True,
+                    '_chunks_received': 3,
+                },
+                state=ProviderStreamState.PROVIDER_FINISHED,
+                provider_finish_reason='stop',
+                saw_finish_reason=True,
+                saw_done=False,
+            )
+
+        import lib.llm as llm_mod
+        monkeypatch.setattr(llm_mod, 'stream_chat', _fake_stream)
+
+        api.dispatch_stream(
+            [{'role': 'user', 'content': 'hi'}], log_prefix='[t]')
+
+        assert slot.consecutive_errors == 0
+        assert slot.cooldown_until <= time.time()
+
+    def test_legacy_finish_without_done_is_adapted_before_health_scoring(
+            self, monkeypatch):
+        """The tuple adapter projects its inferred closed state into usage."""
+        slot = _make_slot()
+        usage = {
+            '_missing_done': True,
+            '_chunks_received': 3,
+            'stream_elapsed_ms': 25,
+        }
+
+        _run_sync_stream(monkeypatch, slot, usage)
+
         assert slot.consecutive_errors == 0
         assert slot.cooldown_until <= time.time()
 

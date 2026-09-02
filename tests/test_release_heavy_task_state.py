@@ -4,7 +4,7 @@
 Root cause (measured 2026-07-11): essentially all of the server's ~3.3 GB
 private-dirty heap is per-task state, not import baseline. Each finished chat
 task pins its full API-message context (``task['messages']``) and per-turn
-endpoint snapshots (``task['_endpoint_turns']``) for the ttl=3600s retention
+endpoint snapshots (``task['_flow_turns']``) for the ttl=3600s retention
 window — and forever for never-finalized carriers. Those fields have NO reader
 after the turn reaches a terminal state: every post-terminal consumer
 (chat_poll DB path, killed-recovery, reconcile) rebuilds from the DB.
@@ -12,7 +12,7 @@ after the turn reaches a terminal state: every post-terminal consumer
 ``lib.tasks_pkg.manager._release_heavy_task_state`` nulls those fields on a
 terminal task. This suite asserts, against the REAL function:
 
-  * terminal task → messages + _endpoint_turns are released (set None);
+  * terminal task → messages + _flow_turns are released (set None);
   * ``events`` / ``content`` / ``thinking`` are KEPT (a reconnecting SSE client
     replays the retained absolute-cursor tail; content/thinking are thin and
     read by pollers);
@@ -53,7 +53,7 @@ def _big_task(status='done'):
         'convId': 'cv-heavy',
         'status': status,
         'messages': messages,
-        '_endpoint_turns': [{'content': 'y' * 20000} for _ in range(8)],
+        '_flow_turns': [{'content': 'y' * 20000} for _ in range(8)],
         'events': [{'type': 'delta', 'seq': i, 'content': 'd' * 500}
                    for i in range(30)],
         'content': 'final answer',
@@ -62,17 +62,17 @@ def _big_task(status='done'):
 
 
 def test_terminal_task_releases_heavy_fields():
-    from lib.tasks_pkg.manager import _release_heavy_task_state
+    from lib.tasks_pkg.manager._persist import _release_heavy_task_state
     task = _big_task('done')
     n = _release_heavy_task_state(task)
     assert n == 2, f'expected 2 fields released, got {n}'
     assert task['messages'] is None, 'task["messages"] not released'
-    assert task['_endpoint_turns'] is None, 'task["_endpoint_turns"] not released'
-    _ok('terminal task → messages + _endpoint_turns released')
+    assert task['_flow_turns'] is None, 'task["_flow_turns"] not released'
+    _ok('terminal task → messages + _flow_turns released')
 
 
 def test_lightweight_fields_are_kept():
-    from lib.tasks_pkg.manager import _release_heavy_task_state
+    from lib.tasks_pkg.manager._persist import _release_heavy_task_state
     task = _big_task('done')
     _release_heavy_task_state(task)
     # events MUST survive — reconnect replays the retained absolute-cursor tail.
@@ -84,7 +84,7 @@ def test_lightweight_fields_are_kept():
 
 
 def test_running_task_untouched():
-    from lib.tasks_pkg.manager import _release_heavy_task_state
+    from lib.tasks_pkg.manager._persist import _release_heavy_task_state
     task = _big_task('running')
     n = _release_heavy_task_state(task)
     assert n == 0, f'running task released {n} fields — must be 0'
@@ -94,12 +94,30 @@ def test_running_task_untouched():
 
 
 def test_error_and_aborted_also_release():
-    from lib.tasks_pkg.manager import _release_heavy_task_state
+    from lib.tasks_pkg.manager._persist import _release_heavy_task_state
     for st in ('error', 'aborted'):
         task = _big_task(st)
         _release_heavy_task_state(task)
         assert task['messages'] is None, f'{st} task did not release messages'
     _ok('error + aborted terminal states also release heavy fields')
+
+
+def test_terminal_releases_coalesce_one_maintenance_heap_trim(monkeypatch):
+    """Freed terminal inputs must become lower RSS without trimming per task."""
+    from lib.tasks_pkg.manager import _maintenance as maintenance
+    from lib.tasks_pkg.manager._persist import _release_heavy_task_state
+
+    maintenance._released_task_heap_trim_requested.clear()
+    trim_calls = []
+    monkeypatch.setattr(
+        maintenance, '_malloc_trim', lambda: trim_calls.append(True) or True)
+
+    _release_heavy_task_state(_big_task('done'))
+    _release_heavy_task_state(_big_task('done'))
+
+    assert maintenance.trim_released_task_heap() is True
+    assert maintenance.trim_released_task_heap() is False
+    assert trim_calls == [True]
 
 
 _POSITIVE = [
@@ -127,15 +145,15 @@ def _neuter_and_check():
     """NC: replace _release_heavy_task_state with a no-op and confirm a
     terminal task then RETAINS its heavy fields → the leak returns, proving
     the real release is load-bearing."""
-    import lib.tasks_pkg.manager as mgr
+    import lib.tasks_pkg.manager._persist as mgr
     task = _big_task('done')
     orig = mgr._release_heavy_task_state
     try:
         mgr._release_heavy_task_state = lambda _t: 0   # neutered
         mgr._release_heavy_task_state(task)
-        leaked = task['messages'] is not None and task['_endpoint_turns'] is not None
+        leaked = task['messages'] is not None and task['_flow_turns'] is not None
         return leaked, ('messages retained=%s turns retained=%s' % (
-            task['messages'] is not None, task['_endpoint_turns'] is not None))
+            task['messages'] is not None, task['_flow_turns'] is not None))
     finally:
         mgr._release_heavy_task_state = orig
 

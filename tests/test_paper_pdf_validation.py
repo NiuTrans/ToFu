@@ -49,7 +49,7 @@ def _make_real_pdf(pages: int = 2, text: str = 'Hello world this is a real paper
 # ── The validity gate ────────────────────────────────────────────────────
 
 def test_validate_accepts_a_real_text_pdf():
-    from lib.pdf_parser import validate_pdf_bytes
+    from lib.pdf_parser.text import validate_pdf_bytes
     pdf = _make_real_pdf(pages=3)
     ok, pages, err = validate_pdf_bytes(pdf)
     assert ok is True, f'real PDF rejected: {err}'
@@ -59,7 +59,7 @@ def test_validate_accepts_a_real_text_pdf():
 
 def test_validate_rejects_the_15_byte_pdf_header_stub():
     """The exact shape of the 89 ghosts on disk: `%PDF-1.4` and nothing else."""
-    from lib.pdf_parser import validate_pdf_bytes
+    from lib.pdf_parser.text import validate_pdf_bytes
     stub = b'%PDF-1.4\n'  # header line only — no objects, no xref, no body
     assert len(stub) < 20
     ok, pages, err = validate_pdf_bytes(stub)
@@ -69,7 +69,7 @@ def test_validate_rejects_the_15_byte_pdf_header_stub():
 
 
 def test_validate_rejects_empty_and_truncated():
-    from lib.pdf_parser import validate_pdf_bytes
+    from lib.pdf_parser.text import validate_pdf_bytes
     for bad in (b'', b'   ', b'not a pdf at all', b'%PDF-1.5\n%\xe2\xe3\xcf\xd3\n1 0 obj'):
         ok, pages, err = validate_pdf_bytes(bad)
         assert ok is False, f'invalid bytes validated: {bad[:20]!r}'
@@ -78,7 +78,7 @@ def test_validate_rejects_empty_and_truncated():
 
 def test_real_pdf_parses_to_nonempty_text():
     """The recovery objective: reparse of a genuine PDF yields real text."""
-    from lib.pdf_parser import parse_pdf
+    from lib.pdf_parser.core import parse_pdf
     pdf = _make_real_pdf(pages=2)
     result = parse_pdf(pdf, max_text_chars=0, max_images=0)
     text = result.get('text') or ''
@@ -90,7 +90,8 @@ def test_validate_is_the_gate_between_them():
     """Cross-check: exactly the bytes that fail validation are the ones that
     parse to empty — so gating on validity is equivalent to gating on
     recoverability, which is what the ingest path needs."""
-    from lib.pdf_parser import validate_pdf_bytes, parse_pdf
+    from lib.pdf_parser.core import parse_pdf
+    from lib.pdf_parser.text import validate_pdf_bytes
     real = _make_real_pdf(pages=1)
     stub = b'%PDF-1.4\n'
 
@@ -120,7 +121,7 @@ def test_validate_is_the_gate_between_them():
 def test_ghost_row_flags_present_but_invalid_pdf(monkeypatch):
     """A library row whose on-disk PDF is a 15-byte stub must be classified as a
     ghost (so it's skipped from listings) even though the file EXISTS."""
-    import routes.paper as rp
+    import routes.paper_pkg._library as rp
 
     with tempfile.TemporaryDirectory() as d:
         monkeypatch.setattr(rp, 'PAPER_DIR', d)
@@ -143,7 +144,7 @@ def test_ghost_row_flags_present_but_invalid_pdf(monkeypatch):
 
 def test_missing_and_empty_filename_still_ghosts(monkeypatch):
     """Regression guard: the ORIGINAL ghost conditions still hold."""
-    import routes.paper as rp
+    import routes.paper_pkg._library as rp
     with tempfile.TemporaryDirectory() as d:
         monkeypatch.setattr(rp, 'PAPER_DIR', d)
         assert rp._is_ghost_library_row({'id': 'e', 'pdfFilename': '', 'arxivId': ''}) is True
@@ -157,7 +158,7 @@ def test_broken_stub_row_is_narrower_than_ghost(monkeypatch):
     """The prune predicate hard-deletes ONLY a proven stub: present + small +
     unopenable. A MISSING file (possible FUSE hiccup) and a real PDF are NOT
     prune-eligible even though a missing file is a (non-destructive) ghost."""
-    import routes.paper as rp
+    import routes.paper_pkg._library as rp
     with tempfile.TemporaryDirectory() as d:
         monkeypatch.setattr(rp, 'PAPER_DIR', d)
         with open(os.path.join(d, 'stub.pdf'), 'wb') as f:

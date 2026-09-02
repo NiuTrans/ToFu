@@ -11,7 +11,8 @@ from lib.storage.manifest import ManifestError, validate_manifest
 from lib.storage.runtime import StorageRuntime
 from lib.storage.supervisor import StorageSupervisor
 from lib.storage.service import (
-    get_storage_client, start_storage, stop_storage, storage_status,
+    get_storage_client, start_storage, stop_storage, storage_authority_status,
+    storage_status,
 )
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     'StorageRuntime',
     'StorageSupervisor',
     'get_storage_client',
+    'storage_authority_status',
     'start_storage',
     'stop_storage',
     'storage_status',

@@ -1,6 +1,6 @@
 """Modification history, undo/redo, and session tracking.
 
-★ 2026-04-22 — Per-session-dir storage (multi-project concurrency safe)
+2026-04-22 — Per-session-dir storage (multi-project concurrency safe)
 ────────────────────────────────────────────────────────────────────────
 Previously this module kept a *single* global list ``_state['modifications']``.
 When the UI switched active projects, ``_start_new_session()`` wiped that
@@ -22,6 +22,7 @@ roots cannot interfere with each other, and concurrent tasks on the
 sake of ``get_state()`` / UI badges; nothing writes through them.
 """
 import base64
+from collections import OrderedDict
 import hashlib
 import json
 import os
@@ -36,6 +37,7 @@ from lib.project_mod.config import (
     _roots,
     _state,
 )
+from runtime_guards import resolve_resource_budget
 
 logger = get_logger(__name__)
 
@@ -43,14 +45,11 @@ logger = get_logger(__name__)
 # ═══════════════════════════════════════════════════════════════════
 #  Per-session-dir in-memory cache
 # ═══════════════════════════════════════════════════════════════════
-# Maps absolute session_dir → list[mod dict].  Loaded on demand from
-# the session's modifications.json.  All access is guarded by _lock.
-_mods_cache: dict[str, list] = {}
-
-# Tracks session_dirs we have already loaded from disk in this process
-# (even if the resulting list was empty).  Prevents redundant disk reads
-# while still allowing a cold-path load for fresh session_dirs.
-_loaded_dirs: set[str] = set()
+# Maps absolute session_dir → list[mod dict]. Disk remains authoritative, so an
+# LRU eviction only trades a later read for bounded resident memory.
+_MODS_CACHE_CAPACITY = resolve_resource_budget(
+    'TOFU_PROJECT_UNDO_CACHE_CAPACITY', maximum=2048)
+_mods_cache: OrderedDict[str, list] = OrderedDict()
 
 
 def _atomic_json_write(filepath, data):
@@ -77,6 +76,22 @@ def _atomic_json_write(filepath, data):
         raise
 
 
+def _remember_project_root(session_dir, base_path):
+    """Persist the server-resolved root independently of pending changes."""
+    marker_file = os.path.join(session_dir, 'project.json')
+    normalized = os.path.abspath(base_path)
+    try:
+        if os.path.isfile(marker_file):
+            with open(marker_file) as f:
+                if json.load(f).get('basePath') == normalized:
+                    return
+        _atomic_json_write(marker_file, {'basePath': normalized})
+    except Exception as e:
+        # A modification record also carries basePath, so a marker failure
+        # must not turn an otherwise valid project write into an exception.
+        logger.debug('[Modifications] project marker write failed: %s', e)
+
+
 def _nudge_vscode(filepath):
     """Bump mtime so VS Code's file watcher detects the restored file."""
     try:
@@ -93,6 +108,7 @@ def _get_session_dir(base_path):
     session_id = hashlib.md5(base_path.encode()).hexdigest()[:12]
     session_dir = os.path.join(SESSIONS_DIR, session_id)
     os.makedirs(session_dir, exist_ok=True)
+    _remember_project_root(session_dir, base_path)
     return session_dir
 
 
@@ -118,8 +134,17 @@ def resolve_base_path(task_id=None, conv_id=None):
         logger.debug('[Modifications] resolve_base_path: cannot list %s: %s',
                      SESSIONS_DIR, e)
         return None
+    history_roots = []
     for name in names:
         session_dir = os.path.join(SESSIONS_DIR, name)
+        marker_file = os.path.join(session_dir, 'project.json')
+        try:
+            with open(marker_file) as f:
+                marker_root = str(json.load(f).get('basePath') or '')
+            if marker_root:
+                history_roots.append(marker_root)
+        except (OSError, TypeError, ValueError):
+            pass
         session_file = os.path.join(session_dir, 'modifications.json')
         if not os.path.isfile(session_file):
             continue
@@ -134,13 +159,23 @@ def resolve_base_path(task_id=None, conv_id=None):
                 return m['basePath']
             if conv_id and not task_id and m.get('convId') == conv_id and m.get('basePath'):
                 return m['basePath']
+    # Undo removes completed task records from modifications.json. The root
+    # marker plus append-only file history keeps redo resolvable after reload
+    # without accepting a filesystem path from the browser.
+    if history_roots:
+        try:
+            from lib import file_history
+
+            for base_path in history_roots:
+                for entry in file_history.list_history(base_path, limit=2000):
+                    if task_id and entry.get('taskId') == task_id:
+                        return base_path
+                    if conv_id and not task_id and entry.get('convId') == conv_id:
+                        return base_path
+        except Exception as e:
+            logger.debug('[Modifications] history path resolution failed: %s', e)
     return None
 
-
-# Session dirs whose stale-tmp sweep has already run in this process.
-# We only clean at cold-load time so an in-flight _atomic_json_write
-# from a concurrent thread cannot have its .tmp rug-pulled.
-_stale_cleaned: set[str] = set()
 
 # Only remove .tmp files older than this — crash artifacts are much
 # older; in-flight atomic writes are sub-second.
@@ -151,17 +186,14 @@ def _clean_stale_tmp(session_dir):
     """Remove leftover atomic-write temp files from previous crashes.
 
     Safety rails:
-      - Only runs **once per session_dir per process** (see ``_stale_cleaned``).
-      - Only deletes files older than :data:`_STALE_TMP_AGE_SECONDS` so a
+      - Runs only on a bounded-cache cold load.
+      - Deletes only files older than :data:`_STALE_TMP_AGE_SECONDS` so a
         concurrent in-flight :func:`_atomic_json_write` on the same
         session_dir cannot have its fresh .tmp file deleted before
         ``os.replace`` runs.
 
-    Caller must hold ``_lock`` (we touch the shared ``_stale_cleaned`` set).
+    Caller must hold ``_lock`` so it cannot race this module's writer.
     """
-    if session_dir in _stale_cleaned:
-        return
-    _stale_cleaned.add(session_dir)
     try:
         now = time.time()
         for name in os.listdir(session_dir):
@@ -215,15 +247,35 @@ def _cache_get(session_dir):
     Caller must hold ``_lock``.  Returns a *live* reference to the cached
     list — callers that mutate it must also call ``_flush_to_disk``.
     """
-    if session_dir in _loaded_dirs:
-        return _mods_cache.setdefault(session_dir, [])
+    cached = _mods_cache.get(session_dir)
+    if cached is not None:
+        _mods_cache.move_to_end(session_dir)
+        return cached
+    _clean_stale_tmp(session_dir)
     mods = _load_from_disk(session_dir)
     _mods_cache[session_dir] = mods
-    _loaded_dirs.add(session_dir)
+    while len(_mods_cache) > _MODS_CACHE_CAPACITY:
+        evicted_dir, evicted_mods = _mods_cache.popitem(last=False)
+        logger.debug(
+            '[Modifications] evicted undo cache session=%s records=%d '
+            '(capacity=%d; disk remains authoritative)',
+            os.path.basename(evicted_dir), len(evicted_mods),
+            _MODS_CACHE_CAPACITY,
+        )
     if mods:
         logger.info('[Modifications] loaded %d pending records from %s',
                     len(mods), os.path.basename(session_dir))
     return mods
+
+
+def modification_cache_snapshot() -> dict[str, int]:
+    """Return bounded, content-free cache telemetry for diagnostics/tests."""
+    with _lock:
+        return {
+            'entries': len(_mods_cache),
+            'capacity': _MODS_CACHE_CAPACITY,
+            'pendingRecords': sum(len(mods) for mods in _mods_cache.values()),
+        }
 
 
 def _flush_to_disk(session_dir, mods):
@@ -276,6 +328,7 @@ def _locked_rmw(session_dir, mutator):
         # (in-place mutation).
         if ret is not None and isinstance(ret, list) and ret is not mods:
             _mods_cache[session_dir] = ret
+            _mods_cache.move_to_end(session_dir)
             mods = ret
         _flush_to_disk(session_dir, mods)
         # Keep the primary-root view fresh if this session_dir happens to
@@ -296,7 +349,6 @@ def _start_new_session(base_path):
     if not session_dir:
         return None
     with _lock:
-        _clean_stale_tmp(session_dir)    # safe: one-shot + age-gated
         _cache_get(session_dir)          # force load if cold
         _sync_primary_view(session_dir)
     return session_dir
@@ -346,7 +398,7 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
         'path': path,
         'timestamp': time.time(),
     }
-    # ★ Record the absolute base_path so undo can recover WHICH project a
+    # Record the absolute base_path so undo can recover WHICH project a
     #   round belongs to from a taskId/convId alone — without trusting the
     #   globally-active UI project (_state['path']), which may point at a
     #   different project when conversations are edited concurrently.
@@ -359,7 +411,7 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
     if task_id:
         mod['taskId'] = task_id
 
-    # ★ Record workspace-root name so the frontend can display a
+    # Record workspace-root name so the frontend can display a
     #   'rootname:path' prefix for modifications made outside the primary
     #   root in multi-root workspaces.  base_path is the absolute root
     #   path the tool was actually executed against (result of

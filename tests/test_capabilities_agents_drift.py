@@ -1,5 +1,3 @@
-# Incident anchor: born in commit 71ed6b71 — wip: snapshot served working tree before integration merge
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """tests/test_capabilities_agents_drift.py — Drift guard for the
 hand-maintained ``_agents_summary()`` literal in
 ``routes/api_v1/capabilities.py``.

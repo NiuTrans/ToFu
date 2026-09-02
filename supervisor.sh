@@ -38,6 +38,7 @@
 #    TOFU_SUPERVISOR_PYTHON    interpreter used to launch server.py
 
 set -euo pipefail
+umask 077  # manager/worker logs are owner-only by logging contract
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 PY="${TOFU_SUPERVISOR_PYTHON:-$(command -v python3)}"

@@ -2,8 +2,8 @@
 
 Extracted verbatim from the former flat ``write_tools.py``. This holds the
 tightly-coupled cluster every write/edit operation depends on: temp-dir
-detection, the workspace-root auto-registration signal, ``create_project``, and
-the path-resolution / modification-attribution helpers. These functions call
+detection, the workspace-root auto-registration signal, and the
+path-resolution / modification-attribution helpers. These functions call
 one another densely (``_resolve_write_path`` → ``_enforce_not_readonly`` /
 ``_is_temp_path`` / ``_signal_root_added`` / ``_nearest_existing_dir``), so they
 stay in ONE module; ``_ops`` imports them from here.
@@ -19,8 +19,8 @@ import os
 import tempfile
 import threading
 
-from lib.log import audit_log, get_logger
-from lib.project_mod.config import _lock, _roots, _state
+from lib.log import get_logger
+from lib.project_mod.config import _lock, _roots
 from lib.project_mod.scanner import _safe_path, add_project_root
 
 logger = get_logger(__name__)
@@ -128,33 +128,8 @@ def drain_root_added_signals():
     return pending
 
 
-def _save_model_added_root_to_recent(abs_path):
-    """Persist a model-registered workspace root into the recent-projects list.
-
-    The interactive UI already saves every folder the user opens (see
-    static/js/project.js), but a root the ASSISTANT registers itself —
-    ``create_project`` or the absolute-path-write auto-register (§2 of
-    _resolve_write_path) — never went through that path, so it never appeared
-    in "recent". Save it server-side here so it shows up regardless of whether
-    the emitting conversation is the active one (the frontend
-    ``workspace_root_added`` handler only refreshes for the ACTIVE conv).
-
-    Temp-dir scratch paths are skipped — they are ephemeral and must not
-    pollute the recent list (mirrors the untracked-root policy). Best-effort:
-    a persistence failure is a debug-level, self-recovering fallback.
-    """
-    if not abs_path or _is_temp_path(abs_path):
-        return
-    try:
-        from lib.project_mod.config import save_recent_project
-        save_recent_project(abs_path)
-    except Exception as e:
-        logger.debug('[WriteTools] save_recent_project failed for %s: %s',
-                     abs_path, e)
-
-
 # ═══════════════════════════════════════════════════════
-#  create_project — bootstrap a new workspace root
+#  Forbidden project-creation roots (shared safety policy)
 # ═══════════════════════════════════════════════════════
 
 # System paths where a user-facing project MUST NOT be created.  These are
@@ -213,141 +188,6 @@ def _is_forbidden_create_path(abs_path):
     return False
 
 
-def tool_create_project(path, name=None, overwrite=False, conv_id=None, task_id=None):
-    """Create a new project directory and register it as an extra workspace root.
-
-    After this call, the new path can be addressed with the ``<name>:<rel>``
-    prefix in any path-taking tool (``write_file``, ``apply_diff``,
-    ``read_files``, ``run_command``, …), or by the absolute path directly.
-
-    Args:
-        path: Target directory (may start with ``~``).  Created if missing.
-        name: Short root name used as the ``name:`` prefix.  Defaults to
-            the directory basename; collisions get a numeric suffix.
-        overwrite: If True, accept a non-empty existing directory (files are
-            NOT deleted — only the "non-empty" guard is bypassed so the root
-            can still be registered).
-        conv_id: Conversation ID (for audit log only).
-        task_id: Task ID (for audit log only).
-
-    Returns:
-        dict with keys: ok, action, path, rootName, created, message, error.
-    """
-    if not path or not isinstance(path, str):
-        return {'ok': False, 'error': 'path is required (non-empty string)',
-                'action': 'create_project', 'path': path}
-
-    # Normalise & expand.  abspath(expanduser(...)) handles '~/foo', relative
-    # paths resolved against CWD, and trailing separators.
-    try:
-        abs_path = os.path.abspath(os.path.expanduser(path.strip()))
-    except Exception as e:
-        logger.warning('[Project] create_project: invalid path %r: %s', path, e)
-        return {'ok': False, 'action': 'create_project', 'path': path,
-                'error': f'Invalid path: {e}'}
-
-    # ── Safety gate: forbid system paths ──
-    if _is_forbidden_create_path(abs_path):
-        msg = (f'Refusing to create a project at system path: {abs_path}. '
-               f'Choose a user-writable location (e.g. under ~/projects or '
-               f'a sibling of the current project).')
-        logger.warning('[Project] create_project blocked (system path): %s', abs_path)
-        return {'ok': False, 'action': 'create_project', 'path': abs_path, 'error': msg}
-
-    # ── Require an active project session (for audit context & session dir) ──
-    with _lock:
-        primary = _state.get('path')
-    if not primary:
-        return {'ok': False, 'action': 'create_project', 'path': abs_path,
-                'error': 'No primary project is set. Open a project before calling create_project.'}
-
-    # ── Read-only guard: refuse to scaffold inside a read-only root ──
-    from lib.project_mod.config import is_readonly_path
-    if is_readonly_path(abs_path, conv_id=conv_id):
-        return {'ok': False, 'action': 'create_project', 'path': abs_path,
-                'error': (f'Refusing to create a project at {abs_path}: it is '
-                          f'inside a READ-ONLY workspace root. Choose a '
-                          f'writable location.')}
-
-    # ── Create or verify directory ──
-    already_existed = os.path.exists(abs_path)
-    if already_existed:
-        if not os.path.isdir(abs_path):
-            return {'ok': False, 'action': 'create_project', 'path': abs_path,
-                    'error': f'Path exists but is not a directory: {abs_path}'}
-        try:
-            has_entries = any(True for _ in os.scandir(abs_path))
-        except OSError as e:
-            logger.warning('[Project] create_project scandir failed %s: %s', abs_path, e)
-            return {'ok': False, 'action': 'create_project', 'path': abs_path,
-                    'error': f'Cannot inspect directory: {e}'}
-        if has_entries and not overwrite:
-            return {'ok': False, 'action': 'create_project', 'path': abs_path,
-                    'error': (f'Directory exists and is not empty: {abs_path}. '
-                              f'Set overwrite=true to register it as a workspace root anyway '
-                              f'(existing files are NOT deleted).')}
-        created = False
-    else:
-        try:
-            os.makedirs(abs_path, exist_ok=True)
-        except OSError as e:
-            logger.error('[Project] create_project makedirs failed for %s: %s',
-                         abs_path, e, exc_info=True)
-            return {'ok': False, 'action': 'create_project', 'path': abs_path,
-                    'error': f'Cannot create directory: {e}'}
-        created = True
-
-    # ── Register as extra root (never replace primary) ──
-    # add_project_root auto-handles name collisions by appending a suffix
-    # and is a no-op if an existing root already maps to the same path.
-    try:
-        add_project_root(abs_path, name=name)
-    except Exception as e:
-        logger.error('[Project] create_project: add_project_root failed for %s: %s',
-                     abs_path, e, exc_info=True)
-        # Don't try to rm_rf the directory we just made — user may want it.
-        return {'ok': False, 'action': 'create_project', 'path': abs_path,
-                'error': f'Directory ready but failed to register as workspace root: {e}'}
-
-    # Look up the actually-assigned root name (may differ from `name` on collision).
-    root_name = None
-    with _lock:
-        for rn, rs in _roots.items():
-            if rs['path'] == abs_path:
-                root_name = rn
-                break
-    if not root_name:
-        # Shouldn't happen — add_project_root always adds or finds the entry.
-        root_name = (name or os.path.basename(abs_path) or 'root')
-        logger.warning('[Project] create_project: root lookup fell through for %s, '
-                       'using fallback name %s', abs_path, root_name)
-
-    audit_log('project_create',
-              path=abs_path, root_name=root_name,
-              created=created, overwrite=bool(overwrite),
-              conv_id=conv_id, task_id=task_id)
-    logger.info('[Project] create_project: path=%s root=%s created=%s overwrite=%s',
-                abs_path, root_name, created, bool(overwrite))
-
-    _save_model_added_root_to_recent(abs_path)
-
-    hint = (f'Use path prefix "{root_name}:<rel>" (e.g. '
-            f'write_file(path=\'{root_name}:README.md\', ...)) or absolute paths '
-            f'under {abs_path} for subsequent write operations.')
-    msg = (f'{"Created" if created else "Registered existing directory"} "{abs_path}" '
-           f'as workspace root "{root_name}". {hint}')
-
-    return {
-        'ok': True,
-        'action': 'create_project',
-        'path': abs_path,
-        'rootName': root_name,
-        'created': created,
-        'overwrite': bool(overwrite),
-        'message': msg,
-    }
-
-
 # ═══════════════════════════════════════════════════════
 #  Absolute-path write safety
 # ═══════════════════════════════════════════════════════
@@ -397,9 +237,8 @@ def _resolve_write_path(base, rel_path, conv_id=None):
          path (``/etc``, ``/usr``, ``$HOME`` itself, …), auto-register the
          deepest existing ancestor directory as an extra workspace root and
          allow the write.  This makes absolute-path writes "just work" the
-         same way absolute-path reads already do — without forcing the model
-         to call ``create_project`` first.
-      3. Forbidden system paths are still rejected outright.
+          same way absolute-path reads already do — no separate scaffold step.
+       3. Forbidden system paths are still rejected outright.
 
     Raises ``ValueError`` on rejection so callers can surface the error
     consistently with the existing ``_safe_path`` code path.
@@ -434,7 +273,7 @@ def _resolve_write_path(base, rel_path, conv_id=None):
                          'registered): %s', abs_path)
             return abs_path
 
-        # 3) Refuse system paths (same policy as create_project).
+        # 3) Refuse system paths (the shared forbidden-create policy).
         if _is_forbidden_create_path(abs_path) or _is_forbidden_create_path(os.path.dirname(abs_path)):
             raise ValueError(
                 f'Refusing to write to system path {abs_path}. '
@@ -446,7 +285,7 @@ def _resolve_write_path(base, rel_path, conv_id=None):
         if anchor and not _is_forbidden_create_path(anchor):
             try:
                 _anchor_norm = os.path.abspath(anchor).rstrip(os.sep) or anchor
-                # ★ 2026-07-12 — scope the auto-register to the CALLER.
+                # 2026-07-12 — scope the auto-register to the CALLER.
                 #   A background run_task (conv_id present) MUST NOT mutate the
                 #   process-global _state/_roots (committed 2026-06-22
                 #   invariant): the global registry is the UI-facing "active
@@ -515,7 +354,7 @@ def _resolve_write_path(base, rel_path, conv_id=None):
                             if (os.path.abspath(rs['path']).rstrip(os.sep) or rs['path']) == _anchor_norm:
                                 _new_name = rn
                                 break
-                    # ★ If the anchor is NOT already a registered root, actually
+                    # If the anchor is NOT already a registered root, actually
                     #   REGISTER it globally so the interactive absolute-path
                     #   write expands the shared workspace (the project bar's
                     #   extraRoots). Gated on ``not conv_id`` so a background
@@ -538,7 +377,7 @@ def _resolve_write_path(base, rel_path, conv_id=None):
                         except Exception as e:
                             logger.warning('[WriteTools] global add_project_root '
                                            'failed for %s: %s', anchor, e)
-                    # ★ Also register the new root into THIS conversation's own
+                    # Also register the new root into THIS conversation's own
                     #   scoped registry (not just the global _roots). Without
                     #   this, a subsequent ``newroot:rel/path`` namespaced write
                     #   in the SAME task hits the conv-scoped resolver, which —
@@ -557,7 +396,6 @@ def _resolve_write_path(base, rel_path, conv_id=None):
                                          'anchor=%s (non-fatal): %s',
                                          conv_id[:12] if conv_id else '?', anchor, e)
                     _signal_root_added(_new_name or os.path.basename(anchor), anchor)
-                    _save_model_added_root_to_recent(anchor)
                 _enforce_not_readonly(abs_path, conv_id=conv_id)
                 return abs_path
             except Exception as e:
@@ -569,8 +407,9 @@ def _resolve_write_path(base, rel_path, conv_id=None):
 
         raise ValueError(
             f'Absolute path {abs_path} could not be resolved to a writable '
-            f'workspace location. Use a "rootname:relative" prefix or call '
-            f'create_project(path=...).'
+            f'workspace location. Use a "rootname:relative" prefix for a '
+            f'registered root, or choose a writable absolute location whose '
+            f'containing directory can auto-register on first write.'
         )
     target = _safe_path(base, rel_path)
     _enforce_not_readonly(target, conv_id=conv_id)

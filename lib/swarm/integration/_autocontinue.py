@@ -1,19 +1,8 @@
-"""lib/swarm/integration/_autocontinue.py — Phase-2 auto-continue helpers.
+"""Turn-native continuation after a conversation-owned swarm settles.
 
-Wakes the main agent when a swarm settles with pending ``<swarm-update>``s but
-no live turn to drain them.
-
-The auto-continue *state* (``_autocontinue_chain`` / ``_autocontinue_inflight`` /
-``_autocontinue_lock``) lives in ``_state`` and is imported BY REFERENCE — these
-dicts/set must be the same objects the rest of the package (and tests, which do
-``integ._autocontinue_chain[...]``) mutate.
-
-Patchability note: the swarm-async tests do ``patch.object(integ,
-'_key_is_live' / '_start_autocontinue_turn' / 'SWARM_AUTOCONTINUE_ENABLED')`` on
-the FACADE package and then call ``integ._maybe_autocontinue(...)``. So
-``_maybe_autocontinue`` resolves those three names through the
-``lib.swarm.integration`` package namespace at call time (via ``_pkg``), NOT via
-a fixed local binding — otherwise the monkeypatch would be a no-op.
+This module owns only the unattended-loop policy. Durable conversation and
+executor creation are delegated to the shared scheduled-turn command service;
+it never edits a transcript document or mirrors ``activeTaskId`` settings.
 """
 
 from __future__ import annotations
@@ -28,226 +17,178 @@ from lib.swarm.integration._state import (
     _autocontinue_lock,
 )
 
+
 logger = get_logger(__name__)
 
 
 def reset_autocontinue_chain(swarm_key: str) -> None:
-    """Reset the consecutive-auto-continue counter for a conversation.
-
-    Called by the orchestrator at the start of a HUMAN-initiated turn so the
-    chain ceiling only bounds *unattended* auto-continue loops, not normal
-    back-and-forth conversation.
-    """
+    """Reset the unattended-chain counter when a human starts a new turn."""
     if not swarm_key:
         return
     with _autocontinue_lock:
         _autocontinue_chain.pop(swarm_key, None)
 
 
-def _maybe_autocontinue(swarm_key: str) -> None:
-    """Wake the main agent if a settled swarm left unread <swarm-update>s.
+def _maybe_autocontinue(
+    swarm_key: str,
+    user_id: int,
+    *,
+    source_id: str,
+) -> None:
+    """Start one owner-scoped continuation when settled swarm output is unread."""
+    import lib.swarm.integration as integration
 
-    Fired from the swarm driver's ``on_settled`` hook (master.py) when the
-    whole swarm terminates. Without this, a swarm that finishes AFTER the
-    spawning turn ended leaves its <swarm-update>s in the inbox until the
-    user happens to send another message — so the sub-agents' work sits
-    unseen (the wasted-inbox half of the Phase-2 design).
-
-    Guardrails (this spends tokens unprompted, so be conservative):
-      * disabled unless ``SWARM_AUTOCONTINUE_ENABLED``;
-      * no-op when a turn is already live for this conv (``_key_is_live``) —
-        that turn will drain the inbox naturally;
-      * no-op when the inbox is empty (nothing to deliver);
-      * latch + per-conv chain ceiling so near-simultaneous settles and
-        auto-continued-turns-that-spawn-more can't runaway-loop;
-      * skipped when the conversation has no connected browser client AND
-        no other reason to run — handled by the caller via push presence.
-    """
-    # Resolve patchable knobs/functions through the facade package so
-    # ``patch.object(lib.swarm.integration, ...)`` in tests takes effect.
-    import lib.swarm.integration as _pkg
-    if not _pkg.SWARM_AUTOCONTINUE_ENABLED or not swarm_key:
+    if not integration.SWARM_AUTOCONTINUE_ENABLED or not swarm_key:
         return
+    owner_id = int(user_id)
+    if owner_id < 1:
+        raise ValueError("Swarm auto-continuation requires an authenticated owner")
+    if not source_id:
+        raise ValueError("Swarm auto-continuation requires a stable source id")
+
     try:
-        # A live turn (the spawning turn hasn't ended yet, or a user just
-        # sent another message) will drain the inbox itself — don't race it.
-        if _pkg._key_is_live(swarm_key):
-            logger.debug('[Swarm:%s] autocontinue skipped — conversation still live',
-                         swarm_key)
+        if integration._key_is_live(swarm_key):
+            logger.debug(
+                "[Swarm:%s] auto-continuation skipped: conversation is live",
+                swarm_key,
+            )
             return
         if not agent_inbox.has_pending(swarm_key):
-            logger.debug('[Swarm:%s] autocontinue skipped — inbox empty', swarm_key)
+            logger.debug(
+                "[Swarm:%s] auto-continuation skipped: inbox is empty",
+                swarm_key,
+            )
             return
 
         with _autocontinue_lock:
             if swarm_key in _autocontinue_inflight:
-                logger.debug('[Swarm:%s] autocontinue already in flight', swarm_key)
                 return
             chain = _autocontinue_chain.get(swarm_key, 0)
-            if chain >= _pkg.SWARM_AUTOCONTINUE_MAX_CHAIN:
+            if chain >= integration.SWARM_AUTOCONTINUE_MAX_CHAIN:
                 logger.warning(
-                    '[Swarm:%s] autocontinue chain ceiling reached (%d) — '
-                    'leaving %d update(s) for the next human turn',
-                    swarm_key, _pkg.SWARM_AUTOCONTINUE_MAX_CHAIN,
-                    agent_inbox.peek(swarm_key))
+                    "[Swarm:%s] auto-continuation ceiling reached (%d); "
+                    "leaving %d update(s) for the next human turn",
+                    swarm_key,
+                    integration.SWARM_AUTOCONTINUE_MAX_CHAIN,
+                    agent_inbox.peek(swarm_key),
+                )
                 return
             _autocontinue_inflight.add(swarm_key)
             _autocontinue_chain[swarm_key] = chain + 1
 
-        # ``swarm_key`` is the conversation id (Option A) except in
-        # standalone/test contexts where it's a bare task id. Auto-continue
-        # only makes sense for a real conversation row, so bail otherwise.
-        conv_id = swarm_key
         try:
-            n_pending = agent_inbox.peek(swarm_key)
-            logger.info('[Swarm:%s] auto-continuing main agent — %d pending '
-                        'swarm-update(s), chain=%d',
-                        swarm_key, n_pending, _autocontinue_chain.get(swarm_key, 0))
-            started = _pkg._start_autocontinue_turn(conv_id)
+            started = integration._start_autocontinue_turn(
+                swarm_key,
+                owner_id,
+                command_id=f"swarm-autocontinue:{source_id}",
+            )
             if not started:
-                # Failed to start — release the chain increment so a later
-                # settle (or human turn) can retry rather than being blocked.
                 with _autocontinue_lock:
-                    cur = _autocontinue_chain.get(swarm_key, 0)
-                    if cur > 0:
-                        _autocontinue_chain[swarm_key] = cur - 1
+                    current = _autocontinue_chain.get(swarm_key, 0)
+                    if current > 0:
+                        _autocontinue_chain[swarm_key] = current - 1
         finally:
             with _autocontinue_lock:
                 _autocontinue_inflight.discard(swarm_key)
-    except Exception as e:
-        logger.error('[Swarm:%s] autocontinue error: %s', swarm_key, e, exc_info=True)
+    except Exception:
+        logger.error(
+            "[Swarm:%s] auto-continuation failed", swarm_key, exc_info=True
+        )
         with _autocontinue_lock:
             _autocontinue_inflight.discard(swarm_key)
 
 
-def _start_autocontinue_turn(conv_id: str) -> bool:
-    """Start a backend-initiated chat turn that drains the swarm inbox.
-
-    Mirrors the proactive-agent path (``lib.scheduler._shared.inject_and_run_task``)
-    but injects NO user message — the orchestrator's between-round inbox
-    drain hook prepends the pending <swarm-update>s as the turn's first user
-    message, exactly as it would on a human "continue" turn. We only need to
-    create + spawn an agentic task whose config matches the conversation's.
-
-    Returns True if a task was created and spawned, else False.
-    """
+def _start_autocontinue_turn(
+    conversation_id: str,
+    user_id: int,
+    *,
+    command_id: str,
+) -> bool:
+    """Dispatch an honest virtual-user/assistant pair through turn authority."""
     try:
-        import json as _json
+        from lib.turn_initiation import (
+            INITIATOR_SWARM,
+            stamp_initiator,
+        )
+        from lib.scheduler.conversation_dispatch import dispatch_scheduled_turn
+        from lib.turn_lifecycle import list_turns
 
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        from lib.tasks_pkg import spawn_task
-        from lib.tasks_pkg.manager import create_task as _create_task
+        owner_id = int(user_id)
+        page = list_turns(
+            conversation_id,
+            user_id=owner_id,
+            lane_id="main",
+            limit=2000,
+            light=True,
+        )
+        turns = list(page.get("turns") or [])
+        parent_turn_id = turns[-1]["turnId"] if turns else None
 
-        db = get_thread_db(DOMAIN_CHAT)
-        from lib.database.conversation_repository import load_conversation
-        snapshot = load_conversation(
-            db, conv_id, metadata_columns=('settings',))
-        if snapshot is None:
-            logger.warning('[Swarm:%s] autocontinue: conversation not found', conv_id)
+        input_projection = {
+            "content": "Continue by integrating the completed swarm results.",
+            "thinking": "",
+            "segments": [],
+            "toolRounds": [],
+            "timestamp": int(time.time() * 1000),
+            "_swarmAutoContinue": True,
+        }
+        stamp_initiator(input_projection, INITIATOR_SWARM)
+        dispatch = dispatch_scheduled_turn(
+            conversation_id,
+            input_projection,
+            {},
+            user_id=owner_id,
+            command_id=command_id,
+            log_prefix=f"[Swarm:{conversation_id[:12]}]",
+            input_actor="virtual_user",
+            input_kind="swarm_autocontinue_input",
+            turn_kind="swarm_autocontinue_reply",
+            parent_turn_id=parent_turn_id,
+            require_parent_is_lane_tail=parent_turn_id is not None,
+            config_overrides={
+                "_swarmAutoContinue": True,
+                "schedulerEnabled": False,
+            },
+        )
+        if dispatch.disposition != "started":
+            logger.info(
+                "[Swarm:%s] auto-continuation stood down: %s",
+                conversation_id,
+                dispatch.disposition,
+            )
             return False
-        messages = snapshot.messages
-        try:
-            settings = _json.loads(snapshot.get('settings') or '{}')
-        except (ValueError, TypeError) as e:
-            logger.debug('[Swarm:%s] autocontinue: bad settings json: %s', conv_id, e)
-            settings = {}
 
-        # Append a placeholder assistant message so the frontend (and the
-        # result-sync path) has a bubble to stream into — tagged so the UI
-        # can badge it as an automatic continuation.
-        assistant_msg = {
-            'role': 'assistant',
-            'content': '',
-            'thinking': '',
-            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
-            '_swarmAutoContinue': True,
-        }
-        from lib.conversations.turn_initiation import (INITIATOR_SWARM,
-                                                       stamp_initiator)
-        stamp_initiator(assistant_msg, INITIATOR_SWARM)
-        messages.append(assistant_msg)
-
-        from lib.conversations import build_search_text
-        search_text = build_search_text(messages)
-        now_ms = int(time.time() * 1000)
-        from lib.database.conversation_repository import replace_messages
-        write_result = replace_messages(
-            db, conv_id, messages,
-            metadata={
-                'updated_at': now_ms,
-                'msg_count': len(messages),
-                'search_text': search_text,
-            })
-
-        # Event-driven cross-device sync: a brand-new assistant turn was
-        # appended, so push the post-write rev → a sibling tab with this conv
-        # open shows the new (streaming) bubble without a manual refresh.
-        try:
-            from lib.conversations import notify_conv_changed
-            notify_conv_changed(conv_id, rev=write_result.rev)
-        except Exception as _ne:
-            logger.debug('[Swarm:%s] autocontinue conv-changed notify skipped: %s',
-                         conv_id, _ne)
-
-        # Build a task config from the conversation's own settings so the
-        # continuation runs with the SAME model / tools / swarm-enabled the
-        # user had configured. Keep swarm enabled so the model can await /
-        # fetch results it was notified about.
-        config = {
-            'model':            settings.get('model', ''),
-            'preset':           settings.get('model', ''),
-            'thinkingEnabled':  settings.get('thinkingEnabled', True),
-            'searchMode':       settings.get('searchMode', 'multi'),
-            'fetchEnabled':     settings.get('fetchEnabled', True),
-            'projectPath':      settings.get('projectPath', ''),
-            'projectEnabled':   settings.get('projectEnabled', False),
-            'codeExecEnabled':  settings.get('codeExecEnabled', False),
-            'browserEnabled':   settings.get('browserEnabled', False),
-            'memoryEnabled':    settings.get('memoryEnabled', True),
-            'swarmEnabled':     settings.get('swarmEnabled', True),
-            'imageGenEnabled':  settings.get('imageGenEnabled', False),
-            'schedulerEnabled': settings.get('schedulerEnabled', False),
-            '_swarmAutoContinue': True,
-        }
-
-        task = _create_task(conv_id, messages, config)
-        task_id = task['id']
-
-        try:
-            # Serialized read-merge-write (settings_store) so this activeTaskId
-            # stamp doesn't clobber a concurrent tool-state / autopilot settings
-            # write on the same row (reuses this thread's `db`).
-            from lib.conversations import set_conversation_settings
-            # notify=False: notify_conv_changed already emitted after the
-            # messages write above (no double push); gate invalidates cache.
-            set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db,
-                                      notify=False)
-        except Exception as e:
-            logger.debug('[Swarm:%s] autocontinue activeTaskId persist failed: %s',
-                         conv_id, e)
-
-        # Notify any connected browser tab so it attaches to this turn it
-        # didn't POST (opens the SSE stream + renders the continuation
-        # bubble). Best-effort — headless API clients just see the result
-        # land in the conversation on next load.
         try:
             from lib.agent_core.push import push_event
-            # NOTE: do NOT put a 'taskId' key in the payload — the hub frame
-            # is {'channel', 'taskId': <routing id = conv_id>, **payload}, so
-            # a payload 'taskId' would clobber the routing field the
-            # subscriber reads as convId. Use 'newTaskId' for the task id.
-            push_event('swarm', conv_id, {
-                'type': 'swarm_autocontinue_started',
-                'convId': conv_id,
-                'newTaskId': task_id,
-            })
-        except Exception as e:
-            logger.debug('[Swarm:%s] autocontinue push notify failed: %s', conv_id, e)
 
-        logger.info('[Swarm:%s] autocontinue task %s spawned', conv_id, task_id[:8])
-        spawn_task(task)
+            push_event(
+                "swarm",
+                conversation_id,
+                {
+                    "type": "swarm_autocontinue_started",
+                    "convId": conversation_id,
+                    "newTaskId": dispatch.task_id,
+                },
+                user_id=owner_id,
+            )
+        except Exception:
+            logger.debug(
+                "[Swarm:%s] start notification failed",
+                conversation_id,
+                exc_info=True,
+            )
         return True
-    except Exception as e:
-        logger.error('[Swarm:%s] autocontinue task start failed: %s',
-                     conv_id, e, exc_info=True)
+    except Exception:
+        logger.error(
+            "[Swarm:%s] auto-continuation dispatch failed",
+            conversation_id,
+            exc_info=True,
+        )
         return False
+
+
+__all__ = [
+    "reset_autocontinue_chain",
+    "_maybe_autocontinue",
+    "_start_autocontinue_turn",
+]

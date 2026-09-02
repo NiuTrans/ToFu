@@ -22,18 +22,28 @@ from quart import Blueprint, request
 from lib.api_response import (
     api_bad_request, api_internal_error, api_not_found, api_ok, safe_route,
 )
+from lib.identity import PrincipalContext
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
-from lib.optimizer import run_once as _run_once
 from lib.optimizer import storage as _storage
-from lib.optimizer.actions import ACTION_REGISTRY
+from lib.optimizer.actions import (
+    ACTION_REGISTRY,
+    action_available_in_this_deployment,
+)
 from lib.request_parser import optional_bool, optional_int, optional_str, parse_body
 
-from .auth import require_auth, require_scope
+from .auth import request_principal, require_auth, require_scope
 
 logger = get_logger(__name__)
 
 api_v1_optimizer_bp = Blueprint('api_v1_optimizer', __name__)
+
+
+def _run_once(*args, **kwargs):
+    """Load analysis/proposal/application only for an explicit run."""
+    from lib.optimizer.orchestrator import run_once
+
+    return run_once(*args, **kwargs)
 
 
 def _disabled_response():
@@ -55,6 +65,13 @@ def _decode_json_columns(row, *cols):
                 row[col] = json.loads(raw)
             except (json.JSONDecodeError, TypeError) as e:
                 logger.debug('[Optimizer.v1] decode %s failed: %s', col, e)
+
+
+def _request_optimizer_owner() -> tuple[PrincipalContext, int]:
+    """Return the authenticated principal and its explicit durable owner."""
+    principal = request_principal()
+    owner_user_id = principal.require_owner(context='optimizer request')
+    return principal, owner_user_id
 
 
 # ── Reads ────────────────────────────────────────────────────────────
@@ -85,7 +102,9 @@ def list_proposals():
     except (TypeError, ValueError) as e:
         logger.debug('[Optimizer.v1] bad limit arg, defaulting to 50: %s', e)
         limit = 50
-    rows = _storage.list_proposals(status=status, limit=limit)
+    _, owner_user_id = _request_optimizer_owner()
+    rows = _storage.list_proposals(
+        owner_user_id=owner_user_id, status=status, limit=limit)
     for r in rows:
         _decode_json_columns(r, 'action_args', 'evidence')
     return api_ok({'proposals': rows})
@@ -109,14 +128,17 @@ def get_proposal(proposal_id):
     fail (warning + None fallback + return the proposal anyway); that
     non-fatal path cannot be expressed via @safe_route.
     """
-    prop = _storage.get_proposal(proposal_id)
+    _, owner_user_id = _request_optimizer_owner()
+    prop = _storage.get_proposal(
+        proposal_id, owner_user_id=owner_user_id)
     if not prop:
         return api_not_found('Proposal not found')
 
     _decode_json_columns(prop, 'action_args', 'evidence')
 
     try:
-        action_log = _storage.get_action_log_for_proposal(proposal_id)
+        action_log = _storage.get_action_log_for_proposal(
+            proposal_id, owner_user_id=owner_user_id)
     except Exception as e:
         logger.warning('[Optimizer.v1] action_log lookup failed: %s', e)
         action_log = None
@@ -147,7 +169,9 @@ def approve_proposal(proposal_id):
     if blocked is not None:
         return blocked
 
-    prop = _storage.get_proposal(proposal_id)
+    _, owner_user_id = _request_optimizer_owner()
+    prop = _storage.get_proposal(
+        proposal_id, owner_user_id=owner_user_id)
     if not prop:
         return api_not_found('Proposal not found')
     if prop.get('status') == 'applied':
@@ -159,9 +183,14 @@ def approve_proposal(proposal_id):
                        'auto-apply whitelist', action_type)
         _storage.update_proposal_status(
             proposal_id, 'rejected',
-            reason='manual approve blocked: action_type not in auto-apply whitelist')
+            reason='manual approve blocked: action_type not in auto-apply whitelist',
+            owner_user_id=owner_user_id)
         return api_bad_request(
             f'action_type {action_type} is not in the auto-apply whitelist',
+            field='action_type')
+    if not action_available_in_this_deployment(entry):
+        return api_bad_request(
+            'action is unavailable in this deployment mode',
             field='action_type')
 
     try:
@@ -173,24 +202,33 @@ def approve_proposal(proposal_id):
     ttl_days = int(args.get('ttl_days') or 7)
 
     try:
-        detail = entry['apply'](args) or {}
+        detail = entry['apply'](
+            args, owner_user_id=owner_user_id) or {}
     except Exception as e:
         logger.error('[Optimizer.v1] approve apply failed: %s', e,
                      exc_info=True)
         _storage.update_proposal_status(
             proposal_id, 'rejected',
-            reason=f'manual approve failed: {type(e).__name__}: {str(e)[:120]}')
+            reason=f'manual approve failed: {type(e).__name__}: {str(e)[:120]}',
+            owner_user_id=owner_user_id)
         audit_log('optimizer_action_failed',
+                  user_id=owner_user_id,
                   proposal_id=proposal_id, action_type=action_type,
                   error=str(e)[:200], path='manual_approve')
         return api_internal_error(e, context='approve.apply',
                                   source='api_v1.optimizer.approve')
 
     _storage.update_proposal_status(proposal_id, 'applied',
-                                     reason='manual approve')
-    _storage.record_applied(proposal_id=proposal_id, ttl_days=ttl_days,
-                             pre_metric={})
+                                     reason='manual approve',
+                                     owner_user_id=owner_user_id)
+    _storage.record_applied(
+        owner_user_id=owner_user_id,
+        proposal_id=proposal_id,
+        ttl_days=ttl_days,
+        pre_metric={},
+    )
     audit_log('optimizer_action_manual_approve',
+              user_id=owner_user_id,
               proposal_id=proposal_id, action_type=action_type,
               ttl_days=ttl_days, detail=detail)
     return api_ok({'status': 'applied', 'detail': detail})
@@ -210,14 +248,18 @@ def reject_proposal(proposal_id):
     if blocked is not None:
         return blocked
 
-    prop = _storage.get_proposal(proposal_id)
+    _, owner_user_id = _request_optimizer_owner()
+    prop = _storage.get_proposal(
+        proposal_id, owner_user_id=owner_user_id)
     if not prop:
         return api_not_found('Proposal not found')
     body = parse_body()
     reason = optional_str(body, 'reason', default='', max_len=400)
     _storage.update_proposal_status(proposal_id, 'rejected',
-                                     reason=reason or 'manual reject')
+                                     reason=reason or 'manual reject',
+                                     owner_user_id=owner_user_id)
     audit_log('optimizer_proposal_reject',
+              user_id=owner_user_id,
               proposal_id=proposal_id, reason=reason[:200])
     return api_ok({'status': 'rejected'})
 
@@ -237,7 +279,9 @@ def revert_proposal(proposal_id):
     if blocked is not None:
         return blocked
 
-    prop = _storage.get_proposal(proposal_id)
+    _, owner_user_id = _request_optimizer_owner()
+    prop = _storage.get_proposal(
+        proposal_id, owner_user_id=owner_user_id)
     if not prop:
         return api_not_found('Proposal not found')
     if prop.get('status') != 'applied':
@@ -251,6 +295,10 @@ def revert_proposal(proposal_id):
     if not entry or not callable(entry.get('revert')):
         return api_bad_request(f'no revert handler for {action_type}',
                                field='action_type')
+    if not action_available_in_this_deployment(entry):
+        return api_bad_request(
+            'action is unavailable in this deployment mode',
+            field='action_type')
 
     try:
         args = json.loads(prop.get('action_args') or '{}')
@@ -259,18 +307,24 @@ def revert_proposal(proposal_id):
                        proposal_id, e)
         args = {}
     try:
-        detail = entry['revert'](args) or {}
+        detail = entry['revert'](
+            args, owner_user_id=owner_user_id) or {}
     except Exception as e:
         logger.error('[Optimizer.v1] revert failed: %s', e, exc_info=True)
         return api_internal_error(e, context='revert.apply',
                                   source='api_v1.optimizer.revert')
 
-    action_log = _storage.get_action_log_for_proposal(proposal_id)
+    action_log = _storage.get_action_log_for_proposal(
+        proposal_id, owner_user_id=owner_user_id)
     if action_log and not action_log.get('reverted_at'):
-        _storage.mark_reverted(action_log['id'], reason='manual revert')
+        _storage.mark_reverted(
+            action_log['id'], reason='manual revert',
+            owner_user_id=owner_user_id)
     _storage.update_proposal_status(proposal_id, 'reverted',
-                                     reason='manual revert')
+                                     reason='manual revert',
+                                     owner_user_id=owner_user_id)
     audit_log('optimizer_revert_manual',
+              user_id=owner_user_id,
               proposal_id=proposal_id, action_type=action_type, detail=detail)
     return api_ok({'status': 'reverted', 'detail': detail})
 
@@ -309,7 +363,12 @@ def run_now():
     window_hours = optional_int(body, 'window_hours', default=24,
                                  min=1, max=24 * 14)
 
-    summary = _run_once(dry_run=dry_run, window_hours=window_hours)
+    principal, _ = _request_optimizer_owner()
+    summary = _run_once(
+        principal=principal,
+        dry_run=dry_run,
+        window_hours=window_hours,
+    )
     return api_ok({'summary': summary})
 
 

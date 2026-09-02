@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -107,4 +108,93 @@ def test_websocket_reuses_response_id_and_sends_only_new_tool_output(
     assert [item['type'] for item in second_request['input']] == [
         'function_call_output']
     assert second_request['input'][0]['call_id'] == 'call_1'
+    assert connection.closed is True
+
+
+def test_websocket_protocol_activity_outlives_stream_idle_window(
+        monkeypatch):
+    from lib.llm._sse_core import prepare_request
+    from lib.llm import responses_websocket as ws
+    from lib.llm.stream_result import ProviderStreamState
+
+    class ProtocolActivityConnection:
+        def __init__(self):
+            self.events = []
+            self.closed = False
+
+        def send(self, _payload):
+            self.events = [
+                {'type': 'response.in_progress'}
+                for _ in range(21)
+            ] + [
+                {'type': 'response.output_text.delta', 'delta': 'done'},
+                {'type': 'response.completed', 'response': {
+                    'id': 'resp-long', 'status': 'completed', 'output': [],
+                    'usage': {'input_tokens': 4, 'output_tokens': 21}}},
+            ]
+
+        def recv(self, timeout=None):
+            time.sleep(0.02)
+            if self.events:
+                return json.dumps(self.events.pop(0))
+            raise TimeoutError
+
+        def close(self):
+            self.closed = True
+
+    ws._sessions().clear()
+    connection = ProtocolActivityConnection()
+    monkeypatch.setattr(
+        'websockets.sync.client.connect', lambda *args, **kwargs: connection)
+    monkeypatch.setattr(
+        'lib.llm._transport.IDLE_STREAM_TIMEOUT_S', 0.15)
+    plan = prepare_request(
+        _canonical_body(with_tool_output=False), api_key='key',
+        base_url='https://api.openai.com/v1', api_protocol='responses')
+
+    result = ws.stream_responses_websocket(plan)
+
+    assert result.state is ProviderStreamState.PROVIDER_FINISHED
+    assert result.message['content'] == 'done'
+    assert result.message.get('reasoning_content', '') == ''
+    assert '_no_actionable_timeout' not in result.usage
+    assert '_semantic_progress_timeout' not in result.usage
+
+
+def test_websocket_transport_silence_finalizes_as_premature_close(monkeypatch):
+    from lib.llm._sse_core import prepare_request
+    from lib.llm import responses_websocket as ws
+    from lib.llm.stream_result import ProviderStreamState
+
+    class SilentConnection:
+        def __init__(self):
+            self.closed = False
+
+        def send(self, _payload):
+            return None
+
+        def recv(self, timeout=None):
+            time.sleep(float(timeout or 0))
+            raise TimeoutError
+
+        def close(self):
+            self.closed = True
+
+    ws._sessions().clear()
+    connection = SilentConnection()
+    monkeypatch.setattr(
+        'websockets.sync.client.connect', lambda *args, **kwargs: connection)
+    monkeypatch.setattr(
+        'lib.llm._transport.IDLE_STREAM_TIMEOUT_S', 0.08)
+    plan = prepare_request(
+        _canonical_body(with_tool_output=False), api_key='key',
+        base_url='https://api.openai.com/v1', api_protocol='responses')
+
+    started = time.monotonic()
+    result = ws.stream_responses_websocket(plan)
+
+    assert time.monotonic() - started < 1.0
+    assert result.state is ProviderStreamState.PREMATURE_CLOSE
+    assert result.usage['_failure_stage'] == 'midstream_close'
+    assert result.usage['_missing_done'] is True
     assert connection.closed is True

@@ -20,7 +20,6 @@ class TestFromCfg(unittest.TestCase):
             self.assertEqual(opts.search_mode, 'multi')
             self.assertTrue(opts.fetch_enabled)
             self.assertTrue(opts.memory_enabled)
-            self.assertFalse(opts.swarm_enabled)
             self.assertEqual(opts.extras, {})
 
     def test_non_dict_input(self):
@@ -37,7 +36,6 @@ class TestFromCfg(unittest.TestCase):
             'searchMode': 'multi',
             'fetchEnabled': False,
             'projectPath': '/tmp/proj',
-            'swarmEnabled': True,
             'mcpEnabled': False,
         }
         opts = TofuOptions.from_cfg(cfg)
@@ -49,7 +47,6 @@ class TestFromCfg(unittest.TestCase):
         self.assertEqual(opts.search_mode, 'multi')
         self.assertFalse(opts.fetch_enabled)
         self.assertEqual(opts.project_path, '/tmp/proj')
-        self.assertTrue(opts.swarm_enabled)
         self.assertFalse(opts.mcp_enabled)
 
     def test_legacy_effort_alias(self):
@@ -76,11 +73,9 @@ class TestFromCfg(unittest.TestCase):
         opts = TofuOptions.from_cfg({
             'fetchEnabled': 'false',
             'memoryEnabled': 1,
-            'swarmEnabled': 'yes',
         })
         self.assertFalse(opts.fetch_enabled)
         self.assertTrue(opts.memory_enabled)
-        self.assertTrue(opts.swarm_enabled)
 
     def test_int_coercion_from_string(self):
         opts = TofuOptions.from_cfg({'maxTokens': '50000'})
@@ -140,10 +135,10 @@ class TestToCfg(unittest.TestCase):
         for key in [
             'model', 'maxTokens', 'temperature', 'searchMode',
             'fetchEnabled', 'projectPath', 'memoryEnabled',
-            'browserEnabled', 'swarmEnabled', 'imageGenEnabled',
+            'browserEnabled', 'imageGenEnabled',
             'humanGuidanceEnabled', 'schedulerEnabled', 'mcpEnabled',
             'codeExecEnabled', 'desktopEnabled',
-            'autoApply', 'keepToolHistory',
+            'autoApply',
             'disableModelFallback',
         ]:
             self.assertIn(key, d, f'orchestrator-read key missing: {key}')
@@ -152,10 +147,10 @@ class TestToCfg(unittest.TestCase):
 class TestReplace(unittest.TestCase):
 
     def test_replace_overrides_fields(self):
-        a = TofuOptions(model='m', endpoint_mode=True, autopilot=True)
-        b = a.replace(endpoint_mode=False, autopilot=False)
-        self.assertTrue(a.endpoint_mode)
-        self.assertFalse(b.endpoint_mode)
+        a = TofuOptions(model='m', autopilot=True)
+        b = a.replace(autopilot=False)
+        self.assertTrue(a.autopilot)
+        self.assertFalse(b.autopilot)
         self.assertEqual(b.model, 'm')
 
     def test_replace_preserves_extras(self):

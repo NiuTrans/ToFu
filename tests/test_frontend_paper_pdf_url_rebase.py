@@ -43,7 +43,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 VIEWER_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'pdf-viewer.ts')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 def _node_deps_available() -> bool:
@@ -131,7 +131,7 @@ def _assert_url_rebase(proc):
 
 
 @pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
-                    reason='node + jsdom + esbuild dev-deps not installed')
+                    reason='node + jsdom + vite test bundler dev-deps not installed')
 def test_vite_pdf_url_rebased_onto_live_base_path(tmp_path):
     built = tmp_path / 'paper-pdf-viewer.js'
     compiled = compile_feature_owner(ESBUILD, VIEWER_TS, built, tmp_path)

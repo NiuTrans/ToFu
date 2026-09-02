@@ -771,7 +771,8 @@ def test_spawn_specs_with_blank_ids_get_distinct_ids():
                 {'id': '', 'objective': 'audit TEST SUITE health', 'role': 'coder'},
                 {'id': '', 'objective': 'triage untracked ORPHANS', 'role': 'coder'},
             ]},
-            task_id='t-blank-ids', task={'id': 't-blank-ids'}, cfg={},
+            task_id='t-blank-ids',
+            task={'id': 't-blank-ids', '_userId': 1}, cfg={},
             all_tools=[], model='m', thinking_enabled=False,
             project_path='', abort_check=None, on_event=None,
         )
@@ -819,7 +820,8 @@ def test_explicit_spawn_ids_are_preserved():
                 {'id': 'tests', 'objective': 'o1', 'role': 'coder'},
                 {'id': 'orphans', 'objective': 'o2', 'role': 'coder'},
             ]},
-            task_id='t-real-ids', task={'id': 't-real-ids'}, cfg={},
+            task_id='t-real-ids',
+            task={'id': 't-real-ids', '_userId': 1}, cfg={},
             all_tools=[], model='m', thinking_enabled=False,
             project_path='', abort_check=None, on_event=None,
         )
@@ -927,6 +929,7 @@ def _drive_stalled_master(stall_timeout=0.5, shutdown_timeout=2.0):
         return a
 
     m = MasterOrchestrator(task_id='t-stall-snap', conv_id='c1',
+                           user_id=1,
                            specs=[_spec('wedged')])
     # Small stall window BEFORE the scheduler is built (run_in_background reads
     # self._beacon when constructing it).

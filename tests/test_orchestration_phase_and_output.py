@@ -6,21 +6,29 @@ Covers:
     the flow's opening role node and the chat phase it maps to (so a
     plannerless autopilot flow never advertises 'planning').
   * The engine now carries the FULL turn output on ``step_complete`` (not
-    just the 200-char preview), and ``EndpointEventAdapter`` consumes it —
+    just the 200-char preview), and ``FlowEventAdapter`` consumes it —
     so a long worker/VU/critic turn is no longer truncated to 200 chars.
 """
 
 import unittest
 from pathlib import Path
 
-from lib.orchestration import (
-    build_autopilot_definition, build_endpoint_definition,
+import pytest
+
+from lib.orchestration._builtin_definitions import (
+    build_autopilot_definition,
+)
+from lib.orchestration._execution_projection import (
     first_executed_role, initial_phase_for_flow,
 )
-from lib.orchestration_endpoint_adapter import EndpointEventAdapter
+from lib.orchestration_chat_flow_adapter import FlowEventAdapter
+from tests.support.orchestration_definitions import (
+    build_verifier_loop_definition,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+pytestmark = pytest.mark.unit
 
 
 class ExecutionProjectionOwnershipTest(unittest.TestCase):
@@ -29,7 +37,8 @@ class ExecutionProjectionOwnershipTest(unittest.TestCase):
         validator = (ROOT / 'lib/orchestration/_validate.py').read_text()
         engine = (ROOT / 'lib/orchestration_engine.py').read_text()
         replan = (ROOT / 'lib/orchestration_replan_runtime.py').read_text()
-        adapter = (ROOT / 'lib/orchestration_endpoint_adapter.py').read_text()
+        adapter = (
+            ROOT / 'lib/orchestration_chat_flow_adapter.py').read_text()
         inspection = (ROOT / 'lib/orchestration/definition_inspection.py').read_text()
 
         self.assertIn('def render_role_brief(', projection)
@@ -54,8 +63,8 @@ class ExecutionProjectionOwnershipTest(unittest.TestCase):
 
 
 class FirstRoleTest(unittest.TestCase):
-    def test_endpoint_opens_on_planner(self):
-        defn = build_endpoint_definition()
+    def test_planner_flow_opens_on_planner(self):
+        defn = build_verifier_loop_definition()
         node = first_executed_role(defn)
         self.assertIsNotNone(node)
         self.assertEqual(node.get('role'), 'planner')
@@ -94,7 +103,7 @@ class FirstRoleTest(unittest.TestCase):
 class FullOutputAdapterTest(unittest.TestCase):
     def test_full_output_not_truncated(self):
         long = 'X' * 5000
-        adapter = EndpointEventAdapter()
+        adapter = FlowEventAdapter()
         adapter.on_event({'type': 'step_complete', 'role': 'worker',
                           'preview': long[:200], 'output': long,
                           'emits': 'assistant', 'state_changing': 1})
@@ -103,14 +112,14 @@ class FullOutputAdapterTest(unittest.TestCase):
 
     def test_preview_fallback_for_old_engine(self):
         # An un-upgraded engine that omits 'output' falls back to preview.
-        adapter = EndpointEventAdapter()
+        adapter = FlowEventAdapter()
         adapter.on_event({'type': 'step_complete', 'role': 'worker',
                           'preview': 'only-preview', 'emits': 'assistant'})
         self.assertEqual(adapter.messages[0]['content'], 'only-preview')
 
     def test_empty_output_is_honored_over_preview(self):
         # output='' is an explicit empty turn — must NOT fall back to preview.
-        adapter = EndpointEventAdapter()
+        adapter = FlowEventAdapter()
         adapter.on_event({'type': 'step_complete', 'role': 'worker',
                           'preview': 'stale', 'output': '',
                           'emits': 'assistant'})
@@ -127,7 +136,7 @@ class RunTraceTest(unittest.TestCase):
         return result, ex
 
     def test_trace_captures_brief_input_output_per_node(self):
-        defn = build_endpoint_definition(max_iterations=3)
+        defn = build_verifier_loop_definition(max_iterations=3)
         seq = {'w': 0}
 
         def runner(node, ctx, it):
@@ -192,7 +201,7 @@ class LiveStreamingTest(unittest.TestCase):
 
     def test_step_start_opens_bubble_before_deltas(self):
         sse = []
-        adapter = EndpointEventAdapter(on_stream=sse.append)
+        adapter = FlowEventAdapter(on_stream=sse.append)
         # Worker node: start → two deltas → complete.
         adapter.on_event({'type': 'step_start', 'role': 'worker',
                           'emits': 'assistant', 'node_id': 'w'})
@@ -205,7 +214,7 @@ class LiveStreamingTest(unittest.TestCase):
                           'state_changing': 0})
         types = [e['type'] for e in sse]
         # iteration FIRST (bubble), then deltas, NO finalize for a worker turn.
-        self.assertEqual(types[0], 'endpoint_iteration')
+        self.assertEqual(types[0], 'flow_iteration')
         self.assertEqual(sse[0]['phase'], 'working')
         self.assertEqual(sse[0]['iteration'], 1)
         self.assertEqual(types[1:], ['delta', 'delta'])
@@ -214,7 +223,7 @@ class LiveStreamingTest(unittest.TestCase):
 
     def test_planner_finalizes_with_planner_done(self):
         sse = []
-        adapter = EndpointEventAdapter(on_stream=sse.append)
+        adapter = FlowEventAdapter(on_stream=sse.append)
         adapter.on_event({'type': 'step_start', 'role': 'planner',
                           'emits': 'assistant', 'node_id': 'p'})
         adapter.on_event({'type': 'step_delta', 'role': 'planner',
@@ -222,28 +231,28 @@ class LiveStreamingTest(unittest.TestCase):
         adapter.on_event({'type': 'step_complete', 'role': 'planner',
                           'emits': 'assistant', 'output': 'PLAN', 'preview': 'PLAN'})
         types = [e['type'] for e in sse]
-        self.assertEqual(types[0], 'endpoint_iteration')
+        self.assertEqual(types[0], 'flow_iteration')
         self.assertEqual(sse[0]['phase'], 'planning')
         self.assertIn('delta', types)
-        self.assertEqual(types[-1], 'endpoint_planner_done')
+        self.assertEqual(types[-1], 'flow_planner_done')
         self.assertEqual(sse[-1]['content'], 'PLAN')
 
     def test_verifier_finalizes_with_critic_msg(self):
         sse = []
-        adapter = EndpointEventAdapter(on_stream=sse.append)
+        adapter = FlowEventAdapter(on_stream=sse.append)
         adapter.on_event({'type': 'step_start', 'role': 'virtual_user',
                           'emits': 'user', 'node_id': 'vu'})
         adapter.on_event({'type': 'step_complete', 'role': 'virtual_user',
                           'emits': 'user', 'output': 'keep going', 'preview': 'keep going'})
         types = [e['type'] for e in sse]
-        self.assertEqual(types[0], 'endpoint_iteration')
+        self.assertEqual(types[0], 'flow_iteration')
         self.assertEqual(sse[0]['phase'], 'reviewing')
-        self.assertEqual(types[-1], 'endpoint_critic_msg')
+        self.assertEqual(types[-1], 'flow_critic_msg')
         self.assertEqual(sse[-1]['next_phase'], 'worker')
 
     def test_thinking_delta_routed_as_thinking(self):
         sse = []
-        adapter = EndpointEventAdapter(on_stream=sse.append)
+        adapter = FlowEventAdapter(on_stream=sse.append)
         adapter.on_event({'type': 'step_start', 'role': 'worker',
                           'emits': 'assistant', 'node_id': 'w'})
         adapter.on_event({'type': 'step_delta', 'role': 'worker',
@@ -254,7 +263,7 @@ class LiveStreamingTest(unittest.TestCase):
 
     def test_emit_and_stream_are_independent_channels(self):
         msgs, sse = [], []
-        adapter = EndpointEventAdapter(emit=msgs.append, on_stream=sse.append)
+        adapter = FlowEventAdapter(emit=msgs.append, on_stream=sse.append)
         adapter.on_event({'type': 'step_start', 'role': 'worker',
                           'emits': 'assistant', 'node_id': 'w'})
         adapter.on_event({'type': 'step_complete', 'role': 'worker',
@@ -262,7 +271,7 @@ class LiveStreamingTest(unittest.TestCase):
         # emit fired once (DB) with the message; stream carries the iteration.
         self.assertEqual(len(msgs), 1)
         self.assertEqual(msgs[0]['content'], 'done')
-        self.assertTrue(any(e['type'] == 'endpoint_iteration' for e in sse))
+        self.assertTrue(any(e['type'] == 'flow_iteration' for e in sse))
 
 
 if __name__ == '__main__':

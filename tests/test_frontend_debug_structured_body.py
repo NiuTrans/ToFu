@@ -89,7 +89,7 @@ global.t = win.t = (k, a) => {
 global.activeConvId = win.activeConvId = 'conv-1';
 global.debugVisible = win.debugVisible = false;
 global._featureFlags = win._featureFlags = { debug_mode: true };
-global.conversations = win.conversations = [{ id: 'conv-1', messages: [] }];
+global.conversations = win.conversations = [{ id: 'conv-1' }];
 
 /* The wire shape the owner screenshotted: an assistant turn whose tool_call
  * arguments are a JSON STRING holding a multi-line write_file content arg,

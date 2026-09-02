@@ -67,17 +67,18 @@ import pytest
 import lib.message_queue as mq
 from lib.agent_verdict import is_incomplete_stop
 from lib.tasks_pkg import autopilot as ap
+from tests._seed import seed_conversation
 
-pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._chat_sidecar',)
+pytestmark = [pytest.mark.unit, pytest.mark.usefixtures('chat_sidecar')]
+
+USER_ID = 1
 
 
 def _cid():
-    return f'test-yield-{time.time_ns()}'
-
-
-def _db():
-    mq._maybe_ensure_table()
-    return mq.get_thread_db(mq.DOMAIN_CHAT)
+    conversation_id = f'test-yield-{time.time_ns()}'
+    seed_conversation(conversation_id, user_id=USER_ID, title='Yield test')
+    return conversation_id
 
 
 def _queue_brain_kickoff(conv_id, board_task_id, project_path='/proj'):
@@ -87,15 +88,16 @@ def _queue_brain_kickoff(conv_id, board_task_id, project_path='/proj'):
         {'text': 'go work this epic', 'boardTaskId': board_task_id,
          'timestamp': 1000},
         {'model': 'm', 'projectPath': project_path},
-        kind=mq.KIND_WORKFLOW)['queueId']
+        kind=mq.KIND_WORKFLOW, user_id=USER_ID)['queueId']
 
 
 def _board_says(monkeypatch, status):
     """Point the board lookup at a single epic with ``status``."""
     monkeypatch.setattr(
         'lib.conversations.project_board.read_board',
-        lambda project_path: {'tasks': [{'id': 'pt_epic', 'status': status,
-                                         'owner_conv_id': ''}]})
+        lambda project_path, *, user_id: {
+            'tasks': [{'id': 'pt_epic', 'status': status,
+                       'owner_conv_id': ''}]})
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -113,10 +115,10 @@ def test_stale_kickoff_does_not_destroy_vu_output(monkeypatch):
     _queue_brain_kickoff(conv_id, 'pt_epic')
     _board_says(monkeypatch, 'done')
 
-    assert mq.has_pending_human_turn(conv_id) is False, (
+    assert mq.has_pending_human_turn(conv_id, user_id=USER_ID) is False, (
         'a stale brain kickoff must NOT read as "a human is waiting" — that '
         'reading is what destroyed a finished VU turn on 2026-07-28')
-    assert mq.next_dispatchable_turn(conv_id) is None, (
+    assert mq.next_dispatchable_turn(conv_id, user_id=USER_ID) is None, (
         'nothing here will become a turn, so there is nobody to yield to')
 
 
@@ -132,23 +134,21 @@ def test_dispatch_and_yield_gate_agree_on_the_same_row(monkeypatch):
     _board_says(monkeypatch, 'done')
 
     # What the yield gate believes.
-    gate_sees_a_turn = mq.next_dispatchable_turn(conv_id) is not None
+    gate_sees_a_turn = (
+        mq.next_dispatchable_turn(conv_id, user_id=USER_ID) is not None
+    )
 
     # What the dispatcher actually DOES (stub the spawn pipeline).
-    spawned = []
-    monkeypatch.setattr(mq, '_append_user_msg_with_cas',
-                        lambda db, cid, msg: True)
+    submitted = []
     monkeypatch.setattr(
-        'lib.tasks_pkg.conv_message_builder.build_api_messages_from_db',
-        lambda cid, cfg: [{'role': 'user', 'content': 'x'}])
-    monkeypatch.setattr(
-        'lib.tasks_pkg.create_task',
-        lambda cid, msgs, cfg: {'id': 't-1', 'convId': cid, 'status': 'running',
-                                'config': cfg, 'created_at': time.time()})
-    monkeypatch.setattr('lib.tasks_pkg.spawn_task',
-                        lambda task: spawned.append(task['id']))
-    mq.dispatch_next_queued(conv_id)
-    dispatcher_made_a_turn = bool(spawned)
+        mq,
+        '_submit_queued_turn_command',
+        lambda cid, uid, body: submitted.append((cid, uid, body)) or {
+            'attempt': {'attemptId': 'attempt-1'},
+        },
+    )
+    dispatched = mq.dispatch_next_queued(conv_id, user_id=USER_ID)
+    dispatcher_made_a_turn = bool(dispatched)
 
     assert gate_sees_a_turn == dispatcher_made_a_turn, (
         f'the two queue readers DISAGREED about the same row '
@@ -171,11 +171,11 @@ def test_machine_work_items_do_not_preempt(kind):
     """
     conv_id = _cid()
     mq.enqueue_message(conv_id, {'text': 'machine work', 'timestamp': 1000},
-                       {'model': 'm'}, kind=kind)
+                       {'model': 'm'}, kind=kind, user_id=USER_ID)
 
-    assert mq.has_pending_human_turn(conv_id) is False, (
+    assert mq.has_pending_human_turn(conv_id, user_id=USER_ID) is False, (
         f'{kind} is machine work — it must not preempt a working autopilot run')
-    nxt = mq.next_dispatchable_turn(conv_id)
+    nxt = mq.next_dispatchable_turn(conv_id, user_id=USER_ID)
     assert nxt is not None and nxt['kind'] == kind, (
         f'{kind} must still be dispatchable later (the idle drain picks it up)')
     assert nxt['isHuman'] is False
@@ -189,11 +189,12 @@ def test_human_message_still_preempts():
     """
     conv_id = _cid()
     mq.enqueue_message(conv_id, {'text': 'stop, do this instead',
-                                 'timestamp': 1000}, {'model': 'm'})
+                                 'timestamp': 1000}, {'model': 'm'},
+                       user_id=USER_ID)
 
-    assert mq.has_pending_human_turn(conv_id) is True, (
+    assert mq.has_pending_human_turn(conv_id, user_id=USER_ID) is True, (
         'a queued HUMAN message must always preempt autopilot')
-    nxt = mq.next_dispatchable_turn(conv_id)
+    nxt = mq.next_dispatchable_turn(conv_id, user_id=USER_ID)
     assert nxt is not None and nxt['isHuman'] is True
 
 
@@ -201,11 +202,12 @@ def test_human_wins_even_when_queued_behind_machine_work(monkeypatch):
     """The answer must not depend on which row happens to sort first."""
     conv_id = _cid()
     mq.enqueue_message(conv_id, {'text': 'machine', 'timestamp': 1000},
-                       {'model': 'm'}, kind=mq.KIND_WORKFLOW)
+                       {'model': 'm'}, kind=mq.KIND_WORKFLOW,
+                       user_id=USER_ID)
     mq.enqueue_message(conv_id, {'text': 'human', 'timestamp': 1001},
-                       {'model': 'm'})
+                       {'model': 'm'}, user_id=USER_ID)
 
-    assert mq.has_pending_human_turn(conv_id) is True, (
+    assert mq.has_pending_human_turn(conv_id, user_id=USER_ID) is True, (
         'the human row must be found wherever it sits in the queue')
 
 
@@ -240,9 +242,9 @@ def _wire_preserve(monkeypatch):
     monkeypatch.setattr('lib.tasks_pkg.manager.append_event',
                         lambda task, ev: seen['events'].append(ev))
     monkeypatch.setattr(ap, '_clear_run_id',
-                        lambda cid: seen['cleared_run'].append(cid))
+                        lambda cid, *, user_id: seen['cleared_run'].append(cid))
     monkeypatch.setattr('lib.message_queue.clear_autopilot_marker',
-                        lambda cid: seen['disarmed'].append(cid))
+                        lambda cid, *, user_id: seen['disarmed'].append(cid))
     return seen
 
 
@@ -258,7 +260,10 @@ def test_yield_preserves_output_and_concludes_the_run(monkeypatch):
     terminal fact is why a client held dead task ids for 2h12m.
     """
     seen = _wire_preserve(monkeypatch)
-    task = {'id': 'task-abc12345', 'convId': 'conv-1', 'config': {}}
+    task = {
+        'id': 'task-abc12345', 'convId': 'conv-1', '_userId': 1,
+        'config': {},
+    }
 
     ap._preserve_unsent_vu_and_conclude(
         task, 'conv-1', 'ar-run-1', 'vu-msg-1', _VU_TEXT,
@@ -291,11 +296,12 @@ def test_preserved_reply_never_enters_conversation_history(monkeypatch):
     """
     seen = _wire_preserve(monkeypatch)
     appended = []
-    monkeypatch.setattr(ap, '_append_vu_message_to_conv',
+    monkeypatch.setattr(ap, '_append_conversation_autopilot_turns',
                         lambda *a, **k: appended.append(a))
 
     ap._preserve_unsent_vu_and_conclude(
-        {'id': 'task-abc12345', 'convId': 'conv-1', 'config': {}},
+        {'id': 'task-abc12345', 'convId': 'conv-1', '_userId': 1,
+         'config': {}},
         'conv-1', 'ar-run-1', 'vu-msg-1', _VU_TEXT, reason='yielded_to_human')
 
     assert appended == [], (
@@ -314,7 +320,8 @@ def test_yield_does_not_disarm_autopilot(monkeypatch):
     seen = _wire_preserve(monkeypatch)
 
     ap._preserve_unsent_vu_and_conclude(
-        {'id': 'task-abc12345', 'convId': 'conv-1', 'config': {}},
+        {'id': 'task-abc12345', 'convId': 'conv-1', '_userId': 1,
+         'config': {}},
         'conv-1', 'ar-run-1', 'vu-msg-1', _VU_TEXT, reason='yielded_to_human')
 
     assert seen['disarmed'] == [], (

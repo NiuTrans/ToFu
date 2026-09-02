@@ -40,6 +40,9 @@ from tests._nc_harness import patch_restore as _patch_restore
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _CHARTER_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_charter.py')
@@ -62,24 +65,13 @@ _LESSON_C = ('MCP 传输判定必须显式 is_stdio():实测 `!= "sse"` 这类�
              '本地命令拉起);新增传输类型时只需扩 REMOTE_TRANSPORTS。')
 
 
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
-
-
 @pytest.fixture(autouse=True)
-def _clean(flask_app):
+def _clean(chat_sidecar):
     shutil.rmtree(_PROJ, ignore_errors=True)
     os.makedirs(_PROJ, exist_ok=True)
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_charter')
-        db.execute('DELETE FROM project_events')
-        db.commit()
+    import tests._seed as seed
+    seed.clear_records('project_charter')
+    seed.clear_events()
     yield
     shutil.rmtree(_PROJ, ignore_errors=True)
 
@@ -117,7 +109,7 @@ def _commit(flask_app, args):
                              decision_kind='invariant',
                              summary=args.get('summary', ''),
                              updated_by_conv='conv-test',
-                             resolves_proposal=args.get('resolves_proposal', ''))
+                             resolves_proposal=args.get('resolves_proposal', ''), user_id=TEST_OWNER_USER_ID)
     if res.get('ok'):
         return f'committed to the charter (version {res.get("version")})'
     return f'Error: {res.get("error", "unknown")}'
@@ -129,19 +121,19 @@ def _agent_commit_attempt(flask_app, args):
     with flask_app.app_context():
         return execute_charter_tool('project_charter_commit', args,
                                     current_conv_id='conv-test',
-                                    project_path=_PROJ)
+                                    project_path=_PROJ, user_id=TEST_OWNER_USER_ID)
 
 
 def _decisions(flask_app):
     from lib.conversations.project_charter import read_charter
     with flask_app.app_context():
-        return read_charter(_PROJ)['decisions']
+        return read_charter(_PROJ, user_id=TEST_OWNER_USER_ID)['decisions']
 
 
 def _injection(flask_app):
     from lib.conversations.project_charter import render_charter_injection_block
     with flask_app.app_context():
-        return render_charter_injection_block(_PROJ)
+        return render_charter_injection_block(_PROJ, user_id=TEST_OWNER_USER_ID)
 
 
 def _tool_read(flask_app):
@@ -149,7 +141,7 @@ def _tool_read(flask_app):
     with flask_app.app_context():
         return execute_charter_tool('project_charter_read', {},
                                     current_conv_id='conv-test',
-                                    project_path=_PROJ)
+                                    project_path=_PROJ, user_id=TEST_OWNER_USER_ID)
 
 
 def _project_memories():
@@ -201,7 +193,7 @@ def test_read_with_index_returns_one_entry_full_text(flask_app):
     with flask_app.app_context():
         out = execute_charter_tool('project_charter_read', {'index': 0},
                                    current_conv_id='conv-test',
-                                   project_path=_PROJ)
+                                   project_path=_PROJ, user_id=TEST_OWNER_USER_ID)
     assert _EVIDENCE_TAIL in out, 'index read must return the full evidence'
     assert _RULE in out, 'index read carries the entry summary as header'
     assert '第二条决策' not in out, 'index read must NOT drag in other entries'
@@ -209,7 +201,7 @@ def test_read_with_index_returns_one_entry_full_text(flask_app):
     with flask_app.app_context():
         out_neg = execute_charter_tool('project_charter_read', {'index': -1},
                                        current_conv_id='conv-test',
-                                       project_path=_PROJ)
+                                       project_path=_PROJ, user_id=TEST_OWNER_USER_ID)
     assert '第二条决策' in out_neg and _EVIDENCE_TAIL not in out_neg
 
 
@@ -220,7 +212,7 @@ def test_read_index_out_of_range_is_an_error_not_a_dump(flask_app):
     with flask_app.app_context():
         out = execute_charter_tool('project_charter_read', {'index': 9},
                                    current_conv_id='conv-test',
-                                   project_path=_PROJ)
+                                   project_path=_PROJ, user_id=TEST_OWNER_USER_ID)
     assert 'out of range' in out, out
     assert _EVIDENCE_TAIL not in out
 
@@ -232,7 +224,7 @@ def test_a_legacy_decision_without_summary_still_renders_a_headline(flask_app):
     with flask_app.app_context():
         commit_charter(_PROJ, add_decision=('旧条目第一行是规则本体\n'
                                             '第二行开始是两千字考古 ' + 'x' * 600),
-                       updated_by_conv='agent')
+                       updated_by_conv='agent', user_id=TEST_OWNER_USER_ID)
     inj = _injection(flask_app)
     assert '旧条目第一行是规则本体' in inj
     assert 'x' * 600 not in inj
@@ -297,7 +289,7 @@ def test_NC3_stripping_the_index_branch_breaks_per_entry_read(flask_app):
         with flask_app.app_context():
             out = execute_charter_tool('project_charter_read', {'index': 0},
                                        current_conv_id='conv-test',
-                                       project_path=_PROJ)
+                                       project_path=_PROJ, user_id=TEST_OWNER_USER_ID)
         assert _EVIDENCE_TAIL not in out, (
             'NC-3 did not bite: the evidence still returned after the index '
             'branch was neutered')

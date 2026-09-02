@@ -17,6 +17,7 @@ logger = get_logger(__name__)
 
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round
 from lib.tasks_pkg.executor import tool_registry
+from lib.tasks_pkg.manager._registry import task_user_id
 from lib.tools.motion_video import MOTION_VIDEO_TOOL_NAMES
 from lib.tools.produce import (EDIT_SLIDES_TOOL_NAME,
                                PRODUCE_REPORT_TOOL_NAME,
@@ -269,7 +270,8 @@ def _handle_produce_video(task, tc, fn_name, tc_id, fn_args, rn,
             job = _new_motion_task(
                 job_id, srt_path='', workdir=workdir, voice='', speed=None,
                 alignment='loose', narration=narration, quality='standard',
-                parallel=2, width=width, height=height, scenes_path='')
+                parallel=2, width=width, height=height, scenes_path='',
+                user_id=task_user_id(task))
             job['topic'] = topic
             job['lang'] = lang
             job['max_scenes'] = max_scenes
@@ -352,7 +354,8 @@ def _handle_produce_report(task, tc, fn_name, tc_id, fn_args, rn,
             if isinstance(task, dict):
                 conv_id = task.get('conv_id') or task.get('convId') or ''
             started = start_report_job(topic, lang=lang, depth=depth,
-                                       conv_id=conv_id)
+                                       conv_id=conv_id,
+                                       user_id=task_user_id(task))
             tid = started['task_id']
             result = {'ok': True, 'task_id': tid, 'topic': topic,
                       'lang': lang, 'depth': depth,
@@ -418,7 +421,8 @@ def _handle_produce_slides(task, tc, fn_name, tc_id, fn_args, rn,
                 conv_id = task.get('conv_id') or task.get('convId') or ''
             started = start_slides_job(topic, lang=lang, style=style,
                                        max_pages=max_pages, size=size,
-                                       conv_id=conv_id, model=model)
+                                       conv_id=conv_id, model=model,
+                                       user_id=task_user_id(task))
             tid = started['task_id']
             result = {'ok': True, 'task_id': tid, 'topic': topic,
                       'lang': lang, 'style': style, 'max_pages': max_pages,
@@ -535,7 +539,7 @@ def _handle_produce_research(task, tc, fn_name, tc_id, fn_args, rn,
         badge = 'failed'
     else:
         try:
-            from lib.research import produce_research
+            from lib.research.api import produce_research
 
             lang = 'zh' if str(fn_args.get('lang') or 'en').strip() == 'zh' else 'en'
             try:
@@ -551,7 +555,8 @@ def _handle_produce_research(task, tc, fn_name, tc_id, fn_args, rn,
             if isinstance(task, dict):
                 conv_id = task.get('conv_id') or task.get('convId') or ''
             started = produce_research(direction, lang=lang, n_ideas=n_ideas,
-                                       conv_id=conv_id, seed_arxiv_ids=seeds)
+                                       conv_id=conv_id, seed_arxiv_ids=seeds,
+                                       user_id=task_user_id(task))
             tid = started['task_id']
             result = {'ok': True, 'task_id': tid, 'direction': direction,
                       'lang': lang, 'n_ideas': n_ideas,

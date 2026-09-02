@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import socket
@@ -14,7 +15,14 @@ from pathlib import Path
 
 
 _MAX_RESPONSE_BYTES = 24 * 1024 * 1024
-_FILE_CHUNK_BYTES = 32 * 1024
+_FILE_CHUNK_BYTES = 128 * 1024
+
+
+def _remaining_transfer_time(deadline: float, label: str) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"guest file {label} exceeded its total time limit")
+    return max(0.05, remaining)
 
 
 class GuestAgentError(RuntimeError):
@@ -174,12 +182,17 @@ class GuestAgent:
                 )
             time.sleep(0.05)
 
-    def upload(self, source: Path, target: str, *, timeout: float = 120.0) -> None:
+    def upload(self, source: Path, target: str, *, timeout: float = 1200.0) -> None:
         source = source.expanduser().resolve(strict=True)
         if not source.is_file():
             raise ValueError(f"upload source must be a regular file: {source}")
+        if timeout <= 0:
+            raise ValueError("upload timeout must be positive")
+        deadline = time.monotonic() + timeout
         handle = self.request(
-            "guest-file-open", {"path": target, "mode": "w"}, timeout=timeout
+            "guest-file-open",
+            {"path": target, "mode": "w"},
+            timeout=_remaining_transfer_time(deadline, "upload"),
         )
         if not isinstance(handle, int):
             raise GuestAgentError(f"invalid guest-file-open response: {handle!r}")
@@ -189,13 +202,31 @@ class GuestAgent:
                     result = self.request(
                         "guest-file-write",
                         {"handle": handle, "buf-b64": base64.b64encode(chunk).decode()},
-                        timeout=timeout,
+                        timeout=_remaining_transfer_time(deadline, "upload"),
                     )
                     if not isinstance(result, dict) or result.get("count") != len(chunk):
                         raise GuestAgentError(f"short guest file write: {result!r}")
-            self.request("guest-file-flush", {"handle": handle}, timeout=timeout)
-        finally:
-            self.request("guest-file-close", {"handle": handle}, timeout=timeout)
+            self.request(
+                "guest-file-flush",
+                {"handle": handle},
+                timeout=_remaining_transfer_time(deadline, "upload"),
+            )
+        except BaseException:
+            # Preserve the transfer failure even if the untrusted guest also
+            # refuses the best-effort handle cleanup after the deadline.
+            with contextlib.suppress(Exception):
+                self.request(
+                    "guest-file-close",
+                    {"handle": handle},
+                    timeout=max(0.05, min(5.0, deadline - time.monotonic())),
+                )
+            raise
+        else:
+            self.request(
+                "guest-file-close",
+                {"handle": handle},
+                timeout=max(0.05, min(5.0, deadline - time.monotonic())),
+            )
 
     def download(
         self,
@@ -203,10 +234,15 @@ class GuestAgent:
         target: Path,
         *,
         max_bytes: int = 64 * 1024 * 1024,
-        timeout: float = 120.0,
+        timeout: float = 1200.0,
     ) -> None:
+        if timeout <= 0:
+            raise ValueError("download timeout must be positive")
+        deadline = time.monotonic() + timeout
         handle = self.request(
-            "guest-file-open", {"path": source, "mode": "r"}, timeout=timeout
+            "guest-file-open",
+            {"path": source, "mode": "r"},
+            timeout=_remaining_transfer_time(deadline, "download"),
         )
         if not isinstance(handle, int):
             raise GuestAgentError(f"invalid guest-file-open response: {handle!r}")
@@ -219,7 +255,7 @@ class GuestAgent:
                     result = self.request(
                         "guest-file-read",
                         {"handle": handle, "count": _FILE_CHUNK_BYTES},
-                        timeout=timeout,
+                        timeout=_remaining_transfer_time(deadline, "download"),
                     )
                     if not isinstance(result, dict):
                         raise GuestAgentError(f"invalid guest file read: {result!r}")
@@ -233,8 +269,18 @@ class GuestAgent:
                     stream.write(chunk)
                     if result.get("eof"):
                         break
-        except Exception:
+        except BaseException:
             target.unlink(missing_ok=True)
+            with contextlib.suppress(Exception):
+                self.request(
+                    "guest-file-close",
+                    {"handle": handle},
+                    timeout=max(0.05, min(5.0, deadline - time.monotonic())),
+                )
             raise
-        finally:
-            self.request("guest-file-close", {"handle": handle}, timeout=timeout)
+        else:
+            self.request(
+                "guest-file-close",
+                {"handle": handle},
+                timeout=max(0.05, min(5.0, deadline - time.monotonic())),
+            )

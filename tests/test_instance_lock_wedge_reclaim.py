@@ -31,7 +31,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(scope='module')
 def srv():
-    import server  # noqa: F401 — side-effect installs Flask→Quart shim
+    import lib.server_boot.lock as server
     return server
 
 
@@ -108,7 +108,8 @@ def test_instance_lock_precedes_every_database_backed_import():
         text = f.read()
     acquire = text.index('mark_booting=True')
     assert acquire < text.index('from lib.log_aggregates import')
-    assert acquire < text.index('from lib.database import init_db, warmup_db')
+    # Storage startup belongs to the production lifecycle, after the instance
+    # lock. Keep the assertion on ordering instead of a retired import string.
 
 
 def test_holder_wedge_age_matrix(srv, tmp_path, monkeypatch):

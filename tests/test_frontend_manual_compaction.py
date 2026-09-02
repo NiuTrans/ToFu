@@ -1,23 +1,10 @@
-"""Frontend behavior tests for the manual /compact button (§8 steps 4-5).
+"""Manual-compaction closure and context-gauge contracts.
 
-Drives the REAL shipped static/js under node (no jsdom needed — a tiny DOM
-stub is enough) and asserts the three closure-critical behaviors the design
-requires, each with a NEUTER that proves the guard has teeth:
-
-  1. GAUGE SCHEME B — context-bar `_lastUsageTokens` falls back to the summary
-     message's `_estimatedPromptTokens` when there is no real usage, so the
-     liquid drops immediately after compaction. Neuter: strip the fallback →
-     the level stays pinned at the old (pre-compaction) size.
-  2. IDLE GUARD — `runManualCompaction` on a conversation with an active task
-     must NOT POST. Neuter: force `_convHasLiveTask=false` → it POSTs.
-  3. SUCCESS CLOSURE — a 200 response triggers cache-invalidate + message
-     reload + renderChat + flashGaugeForArchive (so the card actually appears).
-  4. CARD RENDER — a `_isCompactionSummary` message renders the collapsed
-     boundary card (chat_render.js), not a plain md body.
-
-Follows the project i18n identity-function convention (t() returns a
-placeholder so a missing key never fails the assertion) and skips cleanly when
-node is not installed.
+The retained context-bar owner is exercised with small Node harnesses: idle
+guarding, authoritative Turn hydration, one terminal toast, live summary
+progress, and post-compaction usage selection. The typed ConversationSurface
+suite separately owns compaction-card rendering; this file only pins the
+adapter's request-render and gauge-refresh seams.
 """
 from __future__ import annotations
 
@@ -92,12 +79,10 @@ global.Api = { compactions: {
     msgsBefore: 40, msgsAfter: 5, reductionPct: 84 }; },
 }};
 global.ConvCache = { remove: async () => { cacheRemoved = true; } };
-global.loadConversationMessages = async () => { reloaded = true; };
-global.renderChat = () => { rendered = true; };
+global.convIsBusy = (conv) => Boolean(conv && conv.activeTaskId);
+global.hydrateConversationRuntime = async () => { reloaded = true; };
 global.showToast = () => {};
-
-// context-bar.js:648 closure re-renders via ConvView.replaceAll (renderChat retired).
-global.ConvView = { replaceAll: () => { rendered = true; return true; } };
+global.requestAuthoritativeConversationRender = () => { rendered = true; };
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));   // context-bar.js
 
@@ -118,14 +103,14 @@ function check(n, c) { out.push((c ? 'PASS ' : 'FAIL ') + n); }
 
   // ── (2) IDLE GUARD: task active → no POST ──
   CONV = { id: 'c1', model: 'm', activeTaskId: 'task-1',
-           messages: [{ role:'assistant', _isCompactionSummary:true, _estimatedPromptTokens: 8000 }] };
+           _testTurns: [{ role:'assistant', _isCompactionSummary:true, _estimatedPromptTokens: 8000 }] };
   posted = null;
   await window.runManualCompaction('c1');
   check('idle_guard_no_post_when_task_active', posted === null);
 
   // ── (3) SUCCESS CLOSURE: idle conv → POST + full closure fires ──
   CONV = { id: 'c1', model: 'm', activeTaskId: null,
-           messages: [{ role:'user', content:'go' },
+           _testTurns: [{ role:'user', content:'go' },
                       { role:'assistant', content:'x', usage:{ prompt_tokens: 20000 } }] };
   posted = null; reloaded = false; rendered = false; flashed = null; cacheRemoved = false;
   await window.runManualCompaction('c1');
@@ -133,7 +118,7 @@ function check(n, c) { out.push((c ? 'PASS ' : 'FAIL ') + n); }
   check('closure_cache_removed', cacheRemoved === true);
   check('closure_reloaded_messages', reloaded === true);
   check('closure_rerendered', rendered === true);
-  check('closure_needs_load_set', CONV._needsLoad === true);
+  check('closure_needs_load_set', CONV._turnSnapshotRequired === true);
 
   console.log(out.join('\n'));
 })();
@@ -296,7 +281,22 @@ global._contextPolicy={default_limit:LIMIT,output_reserve:8000,compaction_reserv
   summary_trigger_ratio:0.9,min_usable_ratio:0.5,per_model:{}};
 global.t=(k)=>k;
 let CONV=null; global.activeConvId='c1'; global.getConvById=(id)=>((CONV&&CONV.id===id)?CONV:null);
-global.ConvView={replaceAll:()=>true};
+global.ConversationTurnRead = {
+  ordered(conv) { return (conv && conv._testTurns || []).map((projection, index) => ({
+    turnId: projection._turnId || 't' + index,
+    actor: projection.role === 'user' ? 'human' : projection.role,
+    projection, updatedAt: projection.timestamp || 0,
+  })); },
+  state(conv) {
+    const liveRoundUsageByTurn = {};
+    this.ordered(conv).forEach((turn) => {
+      if (turn.projection._liveLastRoundUsage) {
+        liveRoundUsageByTurn[turn.turnId] = turn.projection._liveLastRoundUsage;
+      }
+    });
+    return { liveRoundUsageByTurn };
+  },
+};
 eval(fs.readFileSync(process.argv[2],'utf8'));   // context-bar.js
 const out=[];
 function check(n,c){out.push((c?'PASS ':'FAIL ')+n);}
@@ -307,7 +307,7 @@ function renderedUsed(){ ARC_PCT=null; window.updateContextBar();
 // (A) Just-compacted conv: summary (ts=5000, newest) + a preserved reserve
 //     assistant (ts=2001) still carrying its STALE 180k pre-compaction usage.
 //     The rendered `used` MUST be the 8k post-compaction estimate, NOT 180k.
-CONV = { id:'c1', model:'m', messages: [
+CONV = { id:'c1', model:'m', _testTurns: [
   { role:'user', content:'goal', timestamp: 1000 },
   { role:'assistant', _isCompactionSummary:true, _estimatedPromptTokens:8000,
     content:'summary', timestamp: 5000 },
@@ -319,13 +319,13 @@ check('reserve_stale_usage_does_not_shadow_summary', renderedUsed() === 8000);
 
 // (B) After a genuinely NEW post-compaction turn (ts newer than the summary),
 //     its fresh usage must take over — the summary is not sticky forever.
-CONV.messages.push({ role:'user', content:'next', timestamp: 6000 });
-CONV.messages.push({ role:'assistant', content:'y', timestamp: 6001,
+CONV._testTurns.push({ role:'user', content:'next', timestamp: 6000 });
+CONV._testTurns.push({ role:'assistant', content:'y', timestamp: 6001,
   apiRounds:[{ usage:{ prompt_tokens:12000 } }] });
 check('fresh_post_compaction_turn_takes_over', renderedUsed() === 12000);
 
 // (C) No compaction at all → unchanged behavior: newest real usage wins.
-CONV = { id:'c1', model:'m', messages: [
+CONV = { id:'c1', model:'m', _testTurns: [
   { role:'user', content:'q', timestamp: 1000 },
   { role:'assistant', content:'a', timestamp: 1001,
     apiRounds:[{ usage:{ prompt_tokens:33000 } }] },
@@ -351,6 +351,133 @@ def test_gauge_reserve_stale_usage_does_not_shadow_summary():
                  'PASS no_compaction_newest_usage_unchanged'):
         assert want in output, f'missing {want}\n{output}'
 
+
+# ── Gauge legacy-path honesty (2026-08-20 fake 100% bug) ──
+# A reloaded v2 message carries the turn's ACCUMULATED usage (tokens billed
+# across every round). When apiRounds is absent the divisor is unknown, so
+# the legacy fallback MUST NOT present the bill as the last round's prompt —
+# ÷1 showed "1.3M / 1.1M = 100%" on a conv whose real prompt was ~170k.
+# The discriminator is PROVENANCE: turn-native messages carry `_turnId`
+# (operations.py:_turn_to_legacy_message) — for them, missing apiRounds
+# means the projection dropped the rounds, so no reading beats a fake one.
+# A genuinely legacy (pre-turn-protocol) message keeps its ÷1 reading. ──
+_GAUGE_LEGACY_HARNESS = r"""
+const fs = require('fs');
+global.window = global;
+function _mkEl() {
+  const el = { _children: [], classList: { add(){}, remove(){}, toggle(){} },
+    dataset: {}, attributes: {},
+    style: { setProperty(){} },
+    setAttribute(k,v){ this.attributes[k]=v; }, getAttribute(k){ return this.attributes[k]; },
+    appendChild(c){ this._children.push(c); return c; },
+    prepend(c){ this._children.unshift(c); return c; },
+    removeChild(){}, remove(){},
+    querySelector(){ return _mkEl(); }, querySelectorAll(){ return []; },
+    addEventListener(){}, removeEventListener(){},
+    getBoundingClientRect(){ return { left:0, right:0, top:0, bottom:0 }; },
+    get isConnected(){ return true; }, set innerHTML(v){}, get innerHTML(){ return ''; },
+    set textContent(v){}, get textContent(){ return ''; } };
+  return el;
+}
+const STRIP = _mkEl();
+global.document = {
+  getElementById(sel){ return sel === 'convStatusStrip' ? STRIP : null; },
+  querySelector(){ return null; },
+  createElement(){ return _mkEl(); }, body: _mkEl(),
+  addEventListener(){}, removeEventListener(){}, readyState:'complete',
+};
+global.requestAnimationFrame=(fn)=>{fn();return 0;};
+global.setTimeout=()=>0; global.clearTimeout=()=>{};
+global.config={model:'m'}; global.serverModel='m'; global.activeStreams=new Map();
+global._contextPolicy={default_limit:200000,output_reserve:8000,compaction_reserve:4000,
+  summary_trigger_ratio:0.9,min_usable_ratio:0.5,per_model:{}};
+global.t=(k)=>k;
+let CONV=null; global.activeConvId='c1'; global.getConvById=(id)=>((CONV&&CONV.id===id)?CONV:null);
+global.ConversationTurnRead = {
+  ordered(conv) { return (conv && conv._testTurns || []).map((projection, index) => ({
+    turnId: projection._turnId || 't' + index,
+    actor: projection.role === 'user' ? 'human' : projection.role,
+    projection, updatedAt: projection.timestamp || 0,
+  })); },
+  state() { return { liveRoundUsageByTurn: {} }; },
+};
+eval(fs.readFileSync(process.argv[2],'utf8'));   // context-bar.js
+const out=[];
+function check(n,c){out.push((c?'PASS ':'FAIL ')+n);}
+function used(){ return window.contextUsageSummary().used; }
+
+// (A) v2-reloaded message (turn-native `_turnId`, projection dropped the
+//     rounds): accumulated usage, NO apiRounds → NO reading.
+CONV = { id:'c1', model:'m', _testTurns: [
+  { role:'user', content:'q', timestamp: 1000 },
+  { role:'assistant', content:'a', timestamp: 1001, _turnId:'t1',
+    usage:{ prompt_tokens: 1300000 } },
+] };
+check('accumulated_bill_without_round_count_is_not_a_prompt_size', used() === 0);
+
+// (B) Same bill WITH a known round count (two zero-usage anomaly rounds) →
+//     averaged, not raw.
+CONV._testTurns[1].apiRounds = [ { usage:{} }, { usage:{}} ];
+check('known_round_count_averages_the_bill', used() === 650000);
+
+// (C) apiRounds with real per-round usage → the exact last round wins
+//     (path 2, unchanged behavior).
+CONV._testTurns[1].apiRounds = [ { usage:{ prompt_tokens: 168000 } } ];
+check('per_round_reading_wins_over_average', used() === 168000);
+
+// (D) Every retained conversation is now projected as Turns. Without a known
+//     round count an accumulated bill remains unknown, even if a test fixture
+//     omits the old compatibility `_turnId` marker.
+delete CONV._testTurns[1]._turnId;
+delete CONV._testTurns[1].apiRounds;
+CONV._testTurns[1].usage = { prompt_tokens: 50000 };
+check('turn_projection_without_round_count_stays_unknown', used() === 0);
+console.log(out.join('\n'));
+"""
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_gauge_never_presents_accumulated_bill_as_prompt_size():
+    """The 2026-08-20 fake-100% bug: a reloaded v2 message has the turn's
+    accumulated usage but no apiRounds; the gauge must show no reading rather
+    than divide the bill by one and call it the last round's prompt."""
+    proc = _run(_GAUGE_LEGACY_HARNESS, os.path.join(JS_DIR, 'context-bar.js'),
+                '_gauge_legacy_harness.js')
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'gauge legacy-path honesty regression:\n' + output
+    for want in ('PASS accumulated_bill_without_round_count_is_not_a_prompt_size',
+                 'PASS known_round_count_averages_the_bill',
+                 'PASS per_round_reading_wins_over_average',
+                 'PASS turn_projection_without_round_count_stays_unknown'):
+        assert want in output, f'missing {want}\n{output}'
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_gauge_legacy_path_neuter(tmp_path):
+    """NEUTER: drop the known-round-count guard → the accumulated bill is
+    presented raw again (the fake-100% bug returns). Proves the guard is
+    load-bearing."""
+    src = open(os.path.join(JS_DIR, 'context-bar.js'), encoding='utf-8').read()
+    anchor = ('        const n = (Array.isArray(m.apiRounds) && m.apiRounds.length)\n'
+              '                  || 0;\n'
+              '        if (t > 0 && n > 0) return n > 1 ? Math.round(t / n) : t;')
+    assert anchor in src, 'legacy-path guard anchor not found (fix regressed?)'
+    neutered = src.replace(
+        anchor,
+        ('        const n = (Array.isArray(m.apiRounds) && m.apiRounds.length)\n'
+         '                  || 1;  // NEUTER\n'
+         '        if (t > 0 && n > 0) return n > 1 ? Math.round(t / n) : t;'), 1)
+    assert neutered != src
+    nfile = tmp_path / 'context-bar-legacy-neutered.js'
+    nfile.write_text(neutered, encoding='utf-8')
+    proc = _run(_GAUGE_LEGACY_HARNESS, str(nfile), '_gauge_legacy_neuter_harness.js')
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    assert 'FAIL accumulated_bill_without_round_count_is_not_a_prompt_size' in output, (
+        'NEUTER did not bite — the guard is not actually gating the legacy path:\n'
+        + output)
 
 # ── B: live-streaming summary overlay. runManualCompaction must subscribe to
 #    the ('compaction', convId) push channel BEFORE the POST, grow a live card
@@ -423,18 +550,16 @@ global.Api = { compactions: { compactNow: async (cid) => {
   return { ok: true, archiveId: 3, tokensBefore: 50000, tokensAfter: 8000, reductionPct: 84 };
 }}};
 global.ConvCache = { remove: async () => {} };
-global.loadConversationMessages = async () => {};
-global.renderChat = () => {};
+global.hydrateConversationRuntime = async () => {};
 global.showToast = () => {};
-
-global.ConvView = { replaceAll: () => true };   // context-bar.js:648 replaceAll on compaction closure
+global.requestAuthoritativeConversationRender = () => {};
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));   // context-bar.js
 
 const out = [];
 function check(n, c) { out.push((c ? 'PASS ' : 'FAIL ') + n); }
 (async () => {
-  CONV = { id:'c1', model:'m', activeTaskId:null, messages:[
+  CONV = { id:'c1', model:'m', activeTaskId:null, _testTurns:[
     { role:'user', content:'go' },
     { role:'assistant', content:'x', usage:{ prompt_tokens: 20000 } } ] };
   await window.runManualCompaction('c1');
@@ -490,90 +615,6 @@ def test_manual_compaction_streaming_absent_push_is_safe(tmp_path):
         'compaction broke when pushSubscribe was undefined:\n' + output)
 
 
-# ── Card render: chat_render buildCompactionCardHtml (standalone, testable) ──
-_CARD_HARNESS = r"""
-const fs = require('fs');
-global.window = global;
-global.t = (k, vars) => k;                       // identity i18n
-global.activeConvId = 'c1';
-global.escapeHtml = (s) => String(s == null ? '' : s);
-global.renderMarkdown = (s) => '<p>' + String(s || '') + '</p>';
-
-eval(fs.readFileSync(process.argv[2], 'utf8'));   // ui/chat_render.js
-
-const out = [];
-function check(n, c) { out.push((c ? 'PASS ' : 'FAIL ') + n); }
-
-if (typeof buildCompactionCardHtml !== 'function') {
-  console.log('FAIL fn_exists buildCompactionCardHtml missing'); process.exit(0);
-}
-check('fn_exists', true);
-
-const summaryMsg = {
-  role: 'assistant',
-  _isCompactionSummary: true,
-  _compactionArchiveId: 42,
-  content: '## 上下文已压缩（主动 /compact）\n\nThis is the summary body.',
-  _compactions: [{ archiveId: 42, trigger: 'manual', convId: 'c1',
-                   tokensBefore: 50000, tokensAfter: 8000,
-                   msgsBefore: 40, msgsAfter: 5, reductionPct: 84 }],
-};
-
-let html = '';
-try { html = String(buildCompactionCardHtml(summaryMsg)); }
-catch (e) { console.log('FAIL render_threw ' + e.message + '\n' + e.stack); process.exit(0); }
-
-check('renders_compact_card', html.indexOf('compact-card') >= 0);
-check('card_is_collapsed_by_default', html.indexOf('data-collapsed="1"') >= 0);
-check('card_shows_token_stat', html.indexOf('50k') >= 0 && html.indexOf('8.0k') >= 0 && html.indexOf('-84%') >= 0);
-check('card_has_view_snapshot_btn', html.indexOf('openCompactionViewer') >= 0 && html.indexOf('data-archive-id="42"') >= 0);
-check('card_body_has_summary', html.indexOf('This is the summary body.') >= 0);
-// the header line must be STRIPPED from the card body (card has its own title)
-check('card_strips_header_line', html.indexOf('## ') < 0);
-console.log(out.join('\n'));
-"""
-
-
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_compaction_summary_card_renders():
-    proc = _run(_CARD_HARNESS, os.path.join(JS_DIR, 'ui', 'chat_render.js'),
-                '_card_harness.js')
-    output = proc.stdout.strip()
-    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
-    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
-    assert not fails, 'boundary-card render regression:\n' + output
-    for want in ('PASS renders_compact_card', 'PASS card_is_collapsed_by_default',
-                 'PASS card_shows_token_stat', 'PASS card_has_view_snapshot_btn',
-                 'PASS card_body_has_summary'):
-        assert want in output, f'missing {want}\n{output}'
-
-
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_compaction_summary_card_neuter(tmp_path):
-    """NEUTER: break the token-stat computation in buildCompactionCardHtml (drop
-    the backend marker read) → the card no longer shows the -84% / token stats.
-    Proves the card is a real render of the backend fact, not a hard-coded shell.
-    Also assert the branch wiring: renderMessage must call the fn."""
-    src = open(os.path.join(JS_DIR, 'ui', 'chat_render.js'), encoding='utf-8').read()
-    # Wiring guard: the _isCompactionSummary branch must delegate to the fn.
-    assert 'buildCompactionCardHtml(msg)' in src, 'branch no longer calls the card fn'
-
-    # Neuter: force the marker to empty so the stats vanish.
-    anchor = "  const _cm = (Array.isArray(msg._compactions) && msg._compactions[0]) || {};"
-    assert anchor in src, 'card fn marker-read anchor not found'
-    neutered = src.replace(anchor, anchor + "\n  return '<div class=\"compact-card\"></div>';  // NEUTER", 1)
-    assert neutered != src
-    nfile = tmp_path / 'chat_render_neutered.js'
-    nfile.write_text(neutered, encoding='utf-8')
-    proc = _run(_CARD_HARNESS, str(nfile), '_card_neuter_harness.js')
-    output = proc.stdout.strip()
-    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
-    # With the marker read + body neutered, the token-stat + summary-body checks FAIL.
-    assert 'FAIL card_shows_token_stat' in output and 'FAIL card_body_has_summary' in output, (
-        'NEUTER did not bite — the card still showed backend stats / summary body '
-        'after the marker read was removed:\n' + output)
-
-
 # ══════════════════════════════════════════════════════════════════════════
 #  SINGLE-TOAST CONTRACT (the screenshot bug: "正在压缩" + "无需压缩" stacked)
 #
@@ -616,8 +657,8 @@ global.t = (k, vars) => k;   // identity i18n → toast msg === the i18n KEY
 let TOASTS = [];
 global.showToast = (msg, level) => { TOASTS.push({ msg, level }); };
 global.ConvCache = { remove: async () => {} };
-global.loadConversationMessages = async () => {};
-global.renderChat = () => {};
+global.hydrateConversationRuntime = async () => {};
+global.requestAuthoritativeConversationRender = () => {};
 
 // compactNow behavior is swapped per-case via global.__mode.
 global.__mode = 'nothing';
@@ -628,15 +669,13 @@ global.Api = { compactions: { compactNow: async (cid) => {
   const e = new Error('boom'); throw e;
 }}};
 
-global.ConvView = { replaceAll: () => true };   // context-bar.js:648 replaceAll on compaction closure
-
 eval(fs.readFileSync(process.argv[2], 'utf8'));   // context-bar.js
 
 const out = [];
 function check(n, c) { out.push((c ? 'PASS ' : 'FAIL ') + n); }
 
 (async () => {
-  CONV = { id: 'c1', model: 'm', activeTaskId: null, messages: [] };
+  CONV = { id: 'c1', model: 'm', activeTaskId: null, _testTurns: [] };
 
   // Case 1: nothing_to_compact (thrown) → EXACTLY ONE toast, level=info,
   //         and the "running" key must NEVER be present.
@@ -666,49 +705,6 @@ function check(n, c) { out.push((c ? 'PASS ' : 'FAIL ') + n); }
 })();
 """
 
-
-# ── 档B card variant: "folded N tool rounds" instead of "N → M msgs" ──
-_CARD_INTRA_HARNESS = r"""
-const fs = require('fs');
-global.window = global;
-global.t = (k, vars) => {
-  if (k === 'compactCard.rounds' && vars) return 'folded ' + vars.n + ' tool rounds';
-  if (k === 'compactCard.msgs' && vars) return vars.before + ' -> ' + vars.after + ' msgs';
-  return k;
-};
-global.activeConvId = 'c1';
-global.escapeHtml = (s) => String(s == null ? '' : s);
-global.renderMarkdown = (s) => '<p>' + String(s || '') + '</p>';
-eval(fs.readFileSync(process.argv[2], 'utf8'));   // ui/chat_render.js
-const out = [];
-function check(n, c) { out.push((c ? 'PASS ' : 'FAIL ') + n); }
-// intra-turn (档B) message: folded rounds, msgsBefore==msgsAfter (no whole msgs removed)
-const intraMsg = {
-  role: 'assistant', _isCompactionSummary: true, _compactionArchiveId: 9,
-  _foldedToolRounds: 52,
-  content: '## 上下文已压缩（主动 /compact）\n\nfolded summary body.',
-  _compactions: [{ archiveId: 9, trigger: 'manual', convId: 'c1',
-                   tokensBefore: 900000, tokensAfter: 120000, reductionPct: 87,
-                   foldedToolRounds: 52 }],
-};
-let html = String(buildCompactionCardHtml(intraMsg));
-check('shows_folded_rounds', html.indexOf('folded 52 tool rounds') >= 0);
-check('does_not_show_msgs_variant', html.indexOf(' msgs') < 0);
-check('still_shows_token_stat', html.indexOf('900k') >= 0 && html.indexOf('120k') >= 0);
-console.log(out.join('\n'));
-"""
-
-
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_compaction_card_intra_turn_variant():
-    """档B card: a single-giant-turn compaction folds tool rounds inside one
-    message, so the card must read 'folded N tool rounds', NOT 'N → M msgs'."""
-    proc = _run(_CARD_INTRA_HARNESS, os.path.join(JS_DIR, 'ui', 'chat_render.js'),
-                '_card_intra_harness.js')
-    output = proc.stdout.strip()
-    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
-    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
-    assert not fails, '档B card variant regression:\n' + output
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
@@ -757,3 +753,151 @@ def test_manual_compaction_single_toast_neuter(tmp_path):
             or 'FAIL nothing_and_running_never_coexist' in output), (
         'NEUTER did not bite — re-adding the running toast did not break the '
         'single-toast contract:\n' + output)
+
+
+# ── Gauge v2 live feed (2026-08-23 "context sphere frozen during generation"
+#    root fix). Under turns-protocol v2 the v1 SSE lane never runs, so the
+#    per-round reading now rides the durable turn projection as
+#    `lastRoundUsage` (lib/turn_lifecycle.py::_task_projection, stashed by
+#    llm_fallback._emit_round_usage). `_lastUsageTokens` reads it as path 1b —
+#    after `_liveLastRoundUsage` (v1 session reading), before `apiRounds`
+#    (which only lands at finalize). ──
+_GAUGE_V2_LIVE_HARNESS = r"""
+const fs = require('fs');
+global.window = global;
+function _mkEl() {
+  const el = { _children: [], classList: { add(){}, remove(){}, toggle(){} },
+    dataset: {}, attributes: {},
+    style: { setProperty(){} },
+    setAttribute(k,v){ this.attributes[k]=v; }, getAttribute(k){ return this.attributes[k]; },
+    appendChild(c){ this._children.push(c); return c; },
+    prepend(c){ this._children.unshift(c); return c; },
+    removeChild(){}, remove(){},
+    querySelector(){ return _mkEl(); }, querySelectorAll(){ return []; },
+    addEventListener(){}, removeEventListener(){},
+    getBoundingClientRect(){ return { left:0, right:0, top:0, bottom:0 }; },
+    get isConnected(){ return true; }, set innerHTML(v){}, get innerHTML(){ return ''; },
+    set textContent(v){}, get textContent(){ return ''; } };
+  return el;
+}
+const STRIP = _mkEl();
+global.document = {
+  getElementById(sel){ return sel === 'convStatusStrip' ? STRIP : null; },
+  querySelector(){ return null; },
+  createElement(){ return _mkEl(); }, body: _mkEl(),
+  addEventListener(){}, removeEventListener(){}, readyState:'complete',
+};
+global.requestAnimationFrame=(fn)=>{fn();return 0;};
+global.setTimeout=()=>0; global.clearTimeout=()=>{};
+global.config={model:'m'}; global.serverModel='m'; global.activeStreams=new Map();
+global._contextPolicy={default_limit:200000,output_reserve:8000,compaction_reserve:4000,
+  summary_trigger_ratio:0.9,min_usable_ratio:0.5,per_model:{}};
+global.t=(k)=>k;
+let CONV=null; global.activeConvId='c1'; global.getConvById=(id)=>((CONV&&CONV.id===id)?CONV:null);
+global.ConversationTurnRead = {
+  ordered(conv) { return (conv && conv._testTurns || []).map((projection, index) => ({
+    turnId: projection._turnId || 't' + index,
+    actor: projection.role === 'user' ? 'human' : projection.role,
+    projection, updatedAt: projection.timestamp || 0,
+  })); },
+  state(conv) {
+    const liveRoundUsageByTurn = {};
+    this.ordered(conv).forEach((turn) => {
+      if (turn.projection._liveLastRoundUsage) {
+        liveRoundUsageByTurn[turn.turnId] = turn.projection._liveLastRoundUsage;
+      }
+    });
+    return { liveRoundUsageByTurn };
+  },
+};
+eval(fs.readFileSync(process.argv[2],'utf8'));   // context-bar.js
+const out=[];
+function check(n,c){out.push((c?'PASS ':'FAIL ')+n);}
+function used(){ return window.contextUsageSummary().used; }
+
+// (A) THE REGRESSION PIN — a mid-turn v2 message: turn-native, NO apiRounds
+//     (they land at finalize), NO accumulated usage yet, but the projection
+//     carries lastRoundUsage. The gauge MUST render it (before the fix this
+//     read 0 — the frozen sphere).
+CONV = { id:'c1', model:'m', _testTurns: [
+  { role:'user', content:'q', timestamp: 1000 },
+  { role:'assistant', content:'', timestamp: 1001, _turnId:'t1',
+    lastRoundUsage:{ round:3, model:'m', tag:'R3', tokensIn:47000, tokensOut:300 } },
+] };
+check('v2_live_lastRoundUsage_drives_gauge', used() === 47000);
+
+// (B) Per-round freshness: lastRoundUsage is rewritten EVERY round, so it
+//     wins over an apiRounds snapshot that predates the latest round.
+CONV._testTurns[1].apiRounds = [ { usage:{ prompt_tokens: 30000 } } ];
+check('v2_lastRoundUsage_beats_stale_apiRounds', used() === 47000);
+
+// (C) v1 parity: a session-only _liveLastRoundUsage (v1 SSE lane) still
+//     outranks the projection-carried reading.
+CONV._testTurns[1]._liveLastRoundUsage = { tokensIn: 60000 };
+check('v1_live_reading_outranks_projection_reading', used() === 60000);
+delete CONV._testTurns[1]._liveLastRoundUsage;
+
+// (D) Zero readings are skipped (the in-flight bubble must not shadow the
+//     previous turn's number): tokensIn 0 falls through to apiRounds.
+CONV._testTurns[1].lastRoundUsage = { round:0, model:'', tag:'', tokensIn:0, tokensOut:0 };
+check('zero_tokensIn_falls_through_to_apiRounds', used() === 30000);
+console.log(out.join('\n'));
+"""
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_gauge_v2_live_last_round_usage():
+    """v2 turn lane: the projection-carried lastRoundUsage must drive the
+    gauge between tool rounds (the frozen-sphere regression pin)."""
+    proc = _run(_GAUGE_V2_LIVE_HARNESS, os.path.join(JS_DIR, 'context-bar.js'),
+                '_gauge_v2_live_harness.js')
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'gauge v2 live-feed regression:\n' + output
+    for want in ('PASS v2_live_lastRoundUsage_drives_gauge',
+                 'PASS v2_lastRoundUsage_beats_stale_apiRounds',
+                 'PASS v1_live_reading_outranks_projection_reading',
+                 'PASS zero_tokensIn_falls_through_to_apiRounds'):
+        assert want in output, f'missing {want}\n{output}'
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_gauge_v2_live_neuter(tmp_path):
+    """NEUTER: drop the path-1b branch → the mid-turn v2 message reads 0
+    again (the frozen sphere returns). Proves the branch is load-bearing."""
+    src = open(os.path.join(JS_DIR, 'context-bar.js'), encoding='utf-8').read()
+    anchor = ("      if (m.lastRoundUsage && m.lastRoundUsage.tokensIn > 0) {\n"
+              "        return m.lastRoundUsage.tokensIn;\n"
+              "      }")
+    assert anchor in src, 'path-1b anchor not found (fix regressed?)'
+    neutered = src.replace(anchor, '', 1)
+    assert neutered != src
+    nfile = tmp_path / 'context-bar-v2live-neutered.js'
+    nfile.write_text(neutered, encoding='utf-8')
+    proc = _run(_GAUGE_V2_LIVE_HARNESS, str(nfile), '_gauge_v2live_neuter_harness.js')
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    assert 'FAIL v2_live_lastRoundUsage_drives_gauge' in output, (
+        'NEUTER did not bite — path 1b is not actually feeding the gauge:\n'
+        + output)
+
+
+# The typed ConversationSurface commit is now the single repaint seam.
+def test_turn_surface_commit_refreshes_context_gauge():
+    adapter = open(
+        os.path.join(JS_DIR, 'main', 'conversation_turn_store.js'),
+        encoding='utf-8',
+    ).read()
+    start = adapter.index('  afterConversationCommit(')
+    end = adapter.index('\n  },\n});', start)
+    commit = adapter[start:end]
+    assert "typeof _cvRefreshContextGauge === 'function'" in commit
+    assert '_cvRefreshContextGauge();' in commit
+
+    owner = open(
+        os.path.join(JS_DIR, 'ui', 'stream_lifecycle.js'),
+        encoding='utf-8',
+    ).read()
+    assert 'function _cvRefreshContextGauge()' in owner
+    assert 'runtimeScope.updateContextBar();' in owner

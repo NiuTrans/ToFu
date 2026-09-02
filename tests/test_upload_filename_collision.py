@@ -5,10 +5,8 @@ Root cause of the "select two images, only one uploads" bug: the frontend now
 fires image uploads in PARALLEL (handleFileUpload → Promise.allSettled). The
 base64 upload route minted ``filename = f"{int(time.time()*1000)}{ext}"``. Two
 images that hit the SAME millisecond generated the SAME filename → the second
-write overwrote the first file, and because the persisted/reloaded message
-keeps only ``url`` (base64 is stripped server-side, re-hydrated from url — see
-static/js/core/conversations.js:_hydrateImageBase64), BOTH message rows ended
-up pointing at the one surviving file → the user saw a single image for two
+write overwrote the first file. Both authoritative attachment references then
+pointed at the one surviving file, so the user saw a single image for two
 attachments.
 
 The fix (routes/upload.py) appends ``os.urandom(4).hex()`` to the filename so a

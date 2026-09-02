@@ -43,7 +43,12 @@ pytestmark = pytest.mark.unit
 REPO = Path(__file__).resolve().parents[1]
 PIPELINE = REPO / "static" / "icons" / "_gen" / "tofu-pet" / "process_ai_frames.py"
 FRAME_DIR = REPO / "static" / "icons" / "pet" / "tofu"
-PET_JS = REPO / "static" / "js" / "tofu-pet.js"
+sys.path.insert(0, str(REPO))
+from tests._runtime_sections import runtime_section_path
+
+# The classic js tree is gone; sections materialize from the retained
+# runtime (lazy chunks are concatenated back into the virtual view).
+PET_JS = Path(runtime_section_path('tofu-pet.js'))
 CSS = REPO / "static" / "styles.css"
 
 WALK_FRAMES = ["walk1", "walk2", "walk3", "walk4", "walk5", "walk6", "walk7", "walk8"]

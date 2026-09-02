@@ -55,7 +55,10 @@ sys.path.insert(0, HERE)
 from _runtime_sections import runtime_section_path  # noqa: E402
 
 KNOWLEDGE = runtime_section_path('knowledge.js')
-STYLES = os.path.join(ROOT, 'static', 'styles.css')
+STYLES = os.path.join(
+    ROOT, 'frontend', 'src', 'styles', 'application',
+    '21-local-knowledge-plan-mode.css',
+)
 
 
 def _node_deps_available() -> bool:
@@ -177,7 +180,9 @@ def test_render_wraps_both_asset_urls():
 # ── C. the footer-overlap layout fix stays ────────────────────────────────
 
 def _results_rule(css: str) -> str:
-    match = re.search(r'\.kb-search-results\s*\{([^}]*)\}', css)
+    match = re.search(
+        r'(?m)^\s*\.kb-search-results\s*\{([^}]*)\}', css,
+    )
     assert match, '.kb-search-results rule not found in styles.css'
     return match.group(1)
 

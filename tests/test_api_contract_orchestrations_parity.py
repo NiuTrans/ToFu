@@ -32,6 +32,7 @@ import subprocess
 import sys
 
 import pytest
+from tests._runtime_sections import runtime_section
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -81,11 +82,7 @@ pytestmark = pytest.mark.unit
 
 
 def _migrated_source(name: str) -> str:
-    source = open(_API_JS, encoding='utf-8').read()
-    marker = f'/* ===== migrated source: {name} ===== */'
-    start = source.index(marker)
-    end = source.find('/* ===== migrated source:', start + len(marker))
-    return source[start:end if end >= 0 else len(source)]
+    return runtime_section(name, scope_prelude=False)
 
 
 def _make_app():
@@ -123,16 +120,6 @@ def _sites():
          lambda: api_ok(dict(entry, warnings=[])), False),
         ('builtin', {'ok': True, 'definition': {'nodes': []}}, 200,
          lambda: api_ok({'definition': {'nodes': []}}), False),
-        ('role-schema-one', {'ok': True, 'role': 'coder', 'fields': [],
-                             'persona': 'p'}, 200,
-         lambda: api_ok({'role': 'coder', 'fields': [], 'persona': 'p'}),
-         False),
-        ('role-schema-all', {'ok': True, 'roles': {}, 'generic': [],
-                             'personas': {}, 'kinds': [], 'ioTypes': [],
-                             'defaultOutput': 'out'}, 200,
-         lambda: api_ok({'roles': {}, 'generic': [], 'personas': {},
-                         'kinds': [], 'ioTypes': [], 'defaultOutput': 'out'}),
-         False),
         ('layout', {'ok': True, 'definition': {'nodes': []}}, 200,
          lambda: api_ok({'definition': {'nodes': []}}), False),
         ('plan', dict(plan), 200, lambda: api_ok(dict(plan)), False),
@@ -224,7 +211,7 @@ def test_bare_array_coordinated_migration():
     assert 'Object.keys(contracts).forEach((endpoint)' in src
     assert http_contract.count(
         '/api/v1/orchestrations/authoring-contract') == 1
-    assert http_contract.count('/api/v1/orchestrations/role-schema') == 1
+    assert '/api/v1/orchestrations/role-schema' not in http_contract
     assert '/api/v1/orchestrations' not in endpoints
     assert re.search(
         r'\bsave\s*:\s*\(id, definition, expectedUpdatedAt, '
@@ -252,7 +239,6 @@ def _normalise_route(path: str) -> str:
 
 
 def _frontend_endpoint_contracts() -> dict[str, dict]:
-    source = open(_API_JS, encoding='utf-8').read()
     names = (
         'api/orchestration-http-contract.generated.js',
         'api/orchestration-response-contracts.js',
@@ -260,12 +246,7 @@ def _frontend_endpoint_contracts() -> dict[str, dict]:
         'api/orchestration-endpoint-transport.js',
         'api/orchestration-endpoints.js',
     )
-    sections = []
-    for name in names:
-        marker = f'/* ===== migrated source: {name} ===== */'
-        start = source.index(marker)
-        end = source.find('/* ===== migrated source:', start + len(marker))
-        sections.append(source[start:end if end >= 0 else len(source)])
+    sections = [runtime_section(name, scope_prelude=False) for name in names]
     script = """
 global.window=global;
 global.runtimeScope=global;
@@ -283,14 +264,14 @@ process.stdout.write(JSON.stringify(runtimeScope.ApiOrchestrationEndpoints.contr
 
 
 def test_endpoint_registry_exactly_matches_live_backend(flask_app):
-    """The 23 frontend endpoint IDs are an exact route/verb view of the
+    """The frontend endpoint IDs are an exact route/verb view of the
     registered backend orchestration surface, not a hand-maintained subset."""
     contracts = _frontend_endpoint_contracts()
     from lib.orchestration.http_endpoint_contract import (
         orchestration_http_endpoint_dicts,
     )
     backend_contracts = orchestration_http_endpoint_dicts()
-    assert len(contracts) == len(backend_contracts) == 23
+    assert len(contracts) == len(backend_contracts) == 22
     assert {
         name: {'route': contract['route'], 'method': contract['method']}
         for name, contract in contracts.items()
@@ -405,7 +386,7 @@ def test_backend_route_adapters_consume_canonical_registry():
     }
     joined = '\n'.join(sources.values())
     assert '@blueprint.route' not in joined
-    assert joined.count('@orchestration_route(') == 21
+    assert joined.count('@orchestration_route(') == 20
     assert "orchestration_endpoint_path('run-poll', method='GET')" \
         in sources['orchestration_runtime_routes.py']
     assert "orchestration_endpoint_path('run-abort', method='POST')" \
@@ -416,7 +397,7 @@ def test_backend_route_adapters_consume_canonical_registry():
         orchestration_http_endpoints,
     )
     registry = orchestration_http_endpoints()
-    assert len(registry) == 23
+    assert len(registry) == 22
     for contract in registry.values():
         placeholders = tuple(re.findall(
             r'<(?:[^:<>]+:)?([^<>]+)>', contract.route))
@@ -435,14 +416,13 @@ def test_shared_request_schemas_reach_live_openapi(flask_app):
     paths = build_spec(flask_app)['paths']
     from routes.api_v1.orchestration_authoring_openapi import (
         authoring_contract_response_schema,
-        role_contract_response_schema,
     )
 
     def schema(path: str, method: str = 'post') -> dict:
         return paths[path][method]['requestBody']['content'][
             'application/json']['schema']
 
-    from lib.orchestration.definition_wire_contracts import (
+    from lib.orchestration.definition_contract_schema import (
         definition_candidate_schema,
         definition_request_schema,
     )
@@ -580,13 +560,6 @@ def test_shared_request_schemas_reach_live_openapi(flask_app):
         '/api/v1/orchestrations/run/abort/{task_id}']['post'][
             'responses'] == mutation_responses['run-abort']
 
-    role_parameters = {
-        parameter['name']: parameter
-        for parameter in paths[
-            '/api/v1/orchestrations/role-schema']['get']['parameters']
-    }
-    assert role_parameters['role']['schema'] == {'type': 'string'}
-
     authoring_response = paths[
         '/api/v1/orchestrations/authoring-contract']['get']['responses'][
             '200']['content']['application/json']['schema']
@@ -594,10 +567,7 @@ def test_shared_request_schemas_reach_live_openapi(flask_app):
     assert 'contractSections' in authoring_response['required']
     assert 'requestLimits' in authoring_response['required']
 
-    role_response = paths[
-        '/api/v1/orchestrations/role-schema']['get']['responses']['200'][
-            'content']['application/json']['schema']
-    assert role_response == role_contract_response_schema()
+    assert '/api/v1/orchestrations/role-schema' not in paths
 
     live_replay_parameters = {
         parameter['name']: parameter

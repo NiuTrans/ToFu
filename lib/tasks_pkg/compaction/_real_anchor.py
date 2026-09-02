@@ -50,8 +50,7 @@ def real_prompt_anchor(conv_id: str, task: dict | None = None) -> tuple[int, str
 
     Args:
         conv_id: Conversation id (empty → ``(0, 'none')``).
-        task:    Unused today; kept in the signature so callers can pass the
-                 gate's task dict without a second call shape.
+        task:    Owning task. Required for owner-scoped durable state.
 
     Returns:
         ``(tokens, source)`` where source is ``'usage_cache'`` (in-memory,
@@ -75,7 +74,9 @@ def real_prompt_anchor(conv_id: str, task: dict | None = None) -> tuple[int, str
     try:
         from lib.tasks_pkg.cache_tracking._persist import (
             read_last_turn_cache_read)
-        durable = read_last_turn_cache_read(conv_id)
+        from lib.tasks_pkg.manager import task_user_id
+        durable = read_last_turn_cache_read(
+            conv_id, user_id=task_user_id(task))
         if durable > 0:
             return int(durable), 'durable:lastTurnCacheRead'
     except Exception as e:

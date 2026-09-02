@@ -19,6 +19,7 @@ class OrchestrationTaskRuntimePort(Protocol):
     def create(
         self,
         *,
+        user_id: int,
         task_id: str = '',
         meta: dict | None = None,
     ) -> dict: ...

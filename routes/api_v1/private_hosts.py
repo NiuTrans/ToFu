@@ -112,13 +112,14 @@ def delete_private_host(host):
 
 
 def _resync():
-    """Push the updated allowlist into tofu-search immediately.
+    """Push the updated allowlist into an already-active tofu-search runtime.
 
-    Without this the change would only land on the next config reload or
-    restart, and the user would reasonably conclude the setting is broken.
+    Before first search use there is no runtime to update; its activation reads
+    the persisted store. Avoid loading the whole optional graph just because a
+    user prepared an allowlist entry.
     """
     try:
-        from lib.search_bridge import sync_search_config
-        sync_search_config()
+        from lib.search_runtime import sync_search_config_if_loaded
+        sync_search_config_if_loaded()
     except Exception as e:
         logger.warning('[PrivHosts] search-config resync failed: %s', e)

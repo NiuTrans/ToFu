@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import type { I18nKey } from '../../i18n';
 type LooseObject = Record<string, any>;
 type PaperSessionWindow = Window & Record<string, any>;
 
@@ -12,9 +13,9 @@ let tabGeneration = 0;
 const BACK_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>';
 const PAPER_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="14" y2="11"/></svg>';
 
-function translate(key: string, fallback: string): string {
+function translate(key: I18nKey, fallback: string): string {
   const value = globals().t?.(key);
-  return typeof value === 'string' && value ? value : fallback;
+  return typeof value === 'string' && value && value !== key ? value : fallback;
 }
 
 function escape(value: unknown): string {
@@ -98,6 +99,7 @@ export async function enterPaperMode(
   const state = globals();
   const generation = ++enterGeneration;
   if (state.imageGenMode) state.exitImageGenMode?.();
+  state.exitResearchMode?.();
   state.paperMode = true;
 
   // This must stay before the first await: a slow library request must never
@@ -165,7 +167,9 @@ function restoreChatTitle(): void {
   const conversation = state.activeConvId
     ? conversations.find((item: LooseObject) => item?.id === state.activeConvId)
     : null;
-  topbar.textContent = conversation?.title || 'New Chat';
+  const title = conversation?.title;
+  topbar.textContent = !title || title === 'New Chat'
+    ? translate('chat.newConversation', 'New Chat') : title;
   topbar.title = '';
 }
 

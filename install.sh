@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-#  Tofu (豆腐) — Conda-based One-Command Installer (Linux / macOS)
+#  Tofu (豆腐) — One-Command Installer (Linux / macOS)
 # ═══════════════════════════════════════════════════════════════
 #
 #  Usage:
 #    curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh | bash
 #
 #  With options:
-#    curl -fsSL ... | bash -s -- --port 8080 --api-key sk-xxx
+#    curl -fsSL ... | bash -s -- --port 8080 --api-key-file /secure/key-file
 #
 #  Options:
 #    --dir <path>          Install directory (default: ~/tofu)
 #    --env <name>          Conda env name (default: tofu)
 #    --port <n>            Server port (default: 15000)
-#    --api-key <key>       Pre-configure LLM API key
+#    --api-key-file <path> Read one LLM API key from a local secret file
+#    --api-key <key>       Legacy compatibility; exposes the key in argv/history
 #    --no-launch           Install only, don't start
 #    --skip-playwright     Skip Playwright browser install
 #    --skip-node           Legacy no-op. Release installs always consume the
@@ -21,31 +22,13 @@
 #    --no-update-conda     Skip conda self-update (only relevant when we
 #                          install our OWN sibling Miniforge — we never
 #                          touch a pre-existing conda the user owns)
-#    --reset-env           Delete the existing conda env and recreate from scratch
-#                          (⚠️  DESTRUCTIVE: removes ANY extra packages the user
-#                           installed into this env. Only use for your own env.)
+#    --reset-env           Recreate the selected environment from scratch
+#                          (⚠️  DESTRUCTIVE: uv requires installer ownership
+#                           proof; conda removes the named env.)
 #    --use-conda           Force the legacy conda install path, skipping the
 #                          default uv fast path. Use on very old systems
 #                          (glibc < 2.28) if auto-detection misfires, or when
 #                          you specifically want the conda-forge toolchain.
-#    --with-postgres       Install + bootstrap PostgreSQL (opt-in). WITHOUT this
-#                          flag the installer selects SQLite by default. Both
-#                          backends implement the same capacity and durability
-#                          contract; this flag only provisions PG binaries. PG install
-#                          is the slowest install step
-#                          (icu/libxml2/PG-major solve + initdb), so it is no
-#                          longer done by default.
-#    --force-sqlite        Force SQLite even if --with-postgres was also passed
-#                          (SQLite wins). Also leaves any existing pgdata in
-#                          place, unused. Historically used when the host's
-#                          conda-forge snapshot couldn't satisfy PG deps.
-#    --pg-major <N>        Force a specific PG major version (e.g. 17). Default
-#                          tries 18 → 17 → 16 in order, picking the first one
-#                          whose solve succeeds on this host.
-#    --reinit-pgdata       If data/pgdata exists but was created by a different
-#                          PG major than the one we install, back it up and
-#                          re-initdb. WITHOUT this flag we auto-detect the
-#                          mismatch and fail closed (data preserved).
 #    --min-conda <N>       Minimum acceptable conda MAJOR version (default 24).
 #                          If the user's conda is older we install a private
 #                          sibling Miniforge instead of touching theirs.
@@ -78,18 +61,21 @@
 #     when the user runs `python server.py` from a shell where the Tofu env
 #     wasn't `conda activate`d. This avoids any need to mutate ~/.bashrc.
 #
-#  This script relies ENTIRELY on conda (conda-forge). It:
+#  The legacy compatibility path below relies on conda-forge. It:
 #    1. Locates an acceptable conda OR installs a sibling Miniforge
 #    2. (Sibling installs only) updates conda itself for solver fixes
 #    3. Clones the repo if needed
-#    4. Creates a fresh conda env with Python 3.10+
+#    4. Creates a fresh conda env with Python 3.12
 #    5. Installs ALL Python dependencies from conda-forge (no pip)
 #    6. Installs ripgrep, fd-find, and Chromium shared libs from conda-forge
-#    7. When selected, installs PostgreSQL (tries majors 18 → 17 → 16)
-#    8. Validates data/pgdata/ matches installed PG major (auto-heals)
-#    9. Installs the Playwright Chromium browser binary
-#   10. Writes .tofu_env.json marker so server.py/bootstrap.py auto-activate
-#   11. Launches the server
+#    7. Installs the Playwright Chromium browser binary
+#    8. Writes .tofu_env.json marker so server.py/bootstrap.py auto-activate
+#    9. Joins the personal-mode configure/verify/launch tail
+#
+#  BOTH paths (shared tail, Step 8.45) also install the modern text tools
+#  sd / goawk / miller into the env's bin/ — a standard part of every
+#  install, since the model-facing run_command guidance relies on them
+#  being on PATH (server.py/bootstrap.py prepend env bin on every boot).
 #
 #  For Windows, download the .exe installer from the GitHub release page.
 # ═══════════════════════════════════════════════════════════════
@@ -104,6 +90,17 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Keep terminals readable while producing plain CI/model logs. NO_COLOR is the
+# cross-tool opt-out; non-interactive captures should never need ANSI stripping.
+if [[ ! -t 1 || -n "${NO_COLOR+x}" ]]; then
+    RED=''
+    GREEN=''
+    YELLOW=''
+    CYAN=''
+    BOLD=''
+    NC=''
+fi
+
 info()  { echo -e "  ${CYAN}ℹ${NC}  $*"; }
 ok()    { echo -e "  ${GREEN}✓${NC}  $*"; }
 warn()  { echo -e "  ${YELLOW}!${NC}  $*"; }
@@ -111,76 +108,215 @@ fail()  { echo -e "  ${RED}✗${NC}  $*"; exit 1; }
 step()  { echo ""; echo -e "  ${BOLD}${CYAN}▸${NC}  ${BOLD}$*${NC}"; }
 
 # ── Defaults ────────────────────────────────────────────────
-INSTALL_DIR="${HOME}/tofu"
+INSTALL_DIR=""
+if [[ -n "${HOME:-}" ]]; then
+    INSTALL_DIR="${HOME}/tofu"
+fi
+DIR_EXPLICIT=0
 ENV_NAME="tofu"
+ENV_EXPLICIT=0
 PY_VER="3.12"
-PORT="15000"
+PYTHON_EXPLICIT=0
+PORT_FROM_ENV=0
+if [[ -n "${PORT:-}" ]]; then
+    PORT_FROM_ENV=1
+else
+    PORT="15000"
+fi
+PORT_EXPLICIT=0
 API_KEY=""
+API_KEY_FILE=""
+API_KEY_SOURCE="not-configured"
 NO_LAUNCH=0
 SKIP_PLAYWRIGHT=0
 SKIP_NODE=0
 NO_UPDATE_CONDA=0
 RESET_ENV=0
-FORCE_SQLITE=0
-WITH_POSTGRES=0     # 0 = SQLite default (PG opt-in); 1 = install+bootstrap PG
 USE_CONDA=0        # 1 = force the legacy conda path, skip the uv fast path
-PG_MAJOR=""         # empty = auto-pick from PG_MAJOR_CANDIDATES
-REINIT_PGDATA=0
-PG_MAJOR_CANDIDATES=(18 17 16)
 MIN_CONDA_MAJOR=24          # minimum acceptable major version of an existing conda
 FORCE_SIBLING_CONDA=0       # 1 = always install our own sibling Miniforge
 WITH_DOCLING=0              # 1 = also install the optional `docling` package
 
+usage() {
+    cat <<'EOF'
+Usage: install.sh [OPTIONS]
+
+Install Tofu into a self-contained uv environment (with automatic conda
+fallback on older systems), configure it, start it, and verify it is usable.
+
+Common options:
+  --dir PATH              Install directory (default: ~/tofu)
+  --port N                Server port, 1-65535 (default: PORT or 15000)
+  --api-key-file PATH     Read one LLM API key from a local secret file
+  --no-launch             Install only; do not start or probe the server
+  --use-conda             Force the conda install path
+  -h, --help              Show this help without downloading or changing files
+
+Advanced options:
+  --env NAME              Conda environment name; selects conda (default: tofu)
+  --python VERSION        Python version (default: 3.12)
+  --skip-playwright       Skip the optional browser-engine download
+  --skip-node             Legacy no-op (frontend bundles are prebuilt)
+  --no-update-conda       Select conda; do not update installer-owned conda
+  --reset-env             Recreate the selected env (destructive; ownership-gated)
+  --min-conda N           Minimum existing conda major (default: 24)
+  --force-sibling-conda   Select conda and use a private sibling Miniforge
+  --with-docling          Select conda and install PDF parsing (~2 GB)
+  --api-key KEY           Legacy compatibility only; leaks into argv/history
+
+Examples:
+  curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh | bash
+  curl -fsSL .../install.sh | bash -s -- --port 8080 --no-launch
+
+Troubleshooting: docs/INSTALL.md
+EOF
+}
+
+usage_error() {
+    echo "install.sh: $*" >&2
+    echo "Try 'bash install.sh --help' for supported options." >&2
+    exit 2
+}
+
+require_option_value() {
+    local option="$1"
+    local remaining="$2"
+    local candidate="${3-}"
+    if [[ "$remaining" -lt 2 || -z "$candidate" || "$candidate" == --* ]]; then
+        usage_error "${option} requires a value"
+    fi
+}
+
 # ── Parse arguments ─────────────────────────────────────────
-FORWARD_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --dir)              INSTALL_DIR="$2"; shift 2 ;;
-        --env)               ENV_NAME="$2"; shift 2 ;;
-        --python)           PY_VER="$2"; shift 2 ;;
-        --port)             PORT="$2"; FORWARD_ARGS+=("--port" "$2"); shift 2 ;;
-        --api-key)          API_KEY="$2"; FORWARD_ARGS+=("--api-key" "$2"); shift 2 ;;
+        -h|--help)          usage; exit 0 ;;
+        --dir)              require_option_value "$1" "$#" "${2-}"; INSTALL_DIR="$2"; DIR_EXPLICIT=1; shift 2 ;;
+        --dir=*)            INSTALL_DIR="${1#*=}"; [[ -n "$INSTALL_DIR" ]] || usage_error "--dir requires a value"; DIR_EXPLICIT=1; shift ;;
+        --env)              require_option_value "$1" "$#" "${2-}"; ENV_NAME="$2"; ENV_EXPLICIT=1; USE_CONDA=1; shift 2 ;;
+        --env=*)            ENV_NAME="${1#*=}"; [[ -n "$ENV_NAME" ]] || usage_error "--env requires a value"; ENV_EXPLICIT=1; USE_CONDA=1; shift ;;
+        --python)           require_option_value "$1" "$#" "${2-}"; PY_VER="$2"; PYTHON_EXPLICIT=1; shift 2 ;;
+        --python=*)         PY_VER="${1#*=}"; [[ -n "$PY_VER" ]] || usage_error "--python requires a value"; PYTHON_EXPLICIT=1; shift ;;
+        --port)             require_option_value "$1" "$#" "${2-}"; PORT="$2"; PORT_EXPLICIT=1; shift 2 ;;
+        --port=*)           PORT="${1#*=}"; [[ -n "$PORT" ]] || usage_error "--port requires a value"; PORT_EXPLICIT=1; shift ;;
+        --api-key)          require_option_value "$1" "$#" "${2-}"; API_KEY="$2"; API_KEY_SOURCE="command-line"; shift 2 ;;
+        --api-key=*)        API_KEY="${1#*=}"; [[ -n "$API_KEY" ]] || usage_error "--api-key requires a value"; API_KEY_SOURCE="command-line"; shift ;;
+        --api-key-file)     require_option_value "$1" "$#" "${2-}"; API_KEY_FILE="$2"; shift 2 ;;
+        --api-key-file=*)   API_KEY_FILE="${1#*=}"; [[ -n "$API_KEY_FILE" ]] || usage_error "--api-key-file requires a value"; shift ;;
         --no-launch)        NO_LAUNCH=1; shift ;;
         --skip-playwright)  SKIP_PLAYWRIGHT=1; shift ;;
         --skip-node)        SKIP_NODE=1; shift ;;
-        --no-update-conda)  NO_UPDATE_CONDA=1; shift ;;
+        --no-update-conda)  NO_UPDATE_CONDA=1; USE_CONDA=1; shift ;;
         --reset-env)        RESET_ENV=1; shift ;;
-        --force-sqlite)     FORCE_SQLITE=1; shift ;;
-        --with-postgres)    WITH_POSTGRES=1; shift ;;
+        --force-sqlite|--with-postgres|--pg-major|--reinit-pgdata)
+            usage_error "$1 was removed; install.sh supports personal SQLite only; deploy distributed PostgreSQL with Kubernetes" ;;
+        --pg-major=*)
+            usage_error "--pg-major was removed; PostgreSQL is externally managed" ;;
         --use-conda)        USE_CONDA=1; shift ;;
-        --pg-major)         PG_MAJOR="$2"; shift 2 ;;
-        --reinit-pgdata)    REINIT_PGDATA=1; shift ;;
-        --min-conda)        MIN_CONDA_MAJOR="$2"; shift 2 ;;
-        --force-sibling-conda) FORCE_SIBLING_CONDA=1; shift ;;
-        --with-docling)     WITH_DOCLING=1; shift ;;
-        *)  FORWARD_ARGS+=("$1"); shift ;;
+        --min-conda)        require_option_value "$1" "$#" "${2-}"; MIN_CONDA_MAJOR="$2"; USE_CONDA=1; shift 2 ;;
+        --min-conda=*)      MIN_CONDA_MAJOR="${1#*=}"; [[ -n "$MIN_CONDA_MAJOR" ]] || usage_error "--min-conda requires a value"; USE_CONDA=1; shift ;;
+        --force-sibling-conda) FORCE_SIBLING_CONDA=1; USE_CONDA=1; shift ;;
+        --with-docling)     WITH_DOCLING=1; USE_CONDA=1; shift ;;
+        *)                  usage_error "unknown option: $1" ;;
     esac
 done
 
+if [[ -z "${HOME:-}" ]]; then
+    usage_error "HOME is not set; set HOME to a writable directory before installing"
+fi
+if [[ -n "$API_KEY" && -n "$API_KEY_FILE" ]]; then
+    usage_error "--api-key and --api-key-file cannot be combined"
+fi
+if [[ -n "$API_KEY_FILE" ]]; then
+    [[ -f "$API_KEY_FILE" && -r "$API_KEY_FILE" ]] \
+        || usage_error "--api-key-file must name a readable regular file (got: ${API_KEY_FILE})"
+    _API_KEY_FILE_BYTES="$(wc -c < "$API_KEY_FILE" 2>/dev/null)" \
+        || usage_error "could not read --api-key-file: ${API_KEY_FILE}"
+    [[ "$_API_KEY_FILE_BYTES" =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]] \
+        || usage_error "could not measure --api-key-file: ${API_KEY_FILE}"
+    (( _API_KEY_FILE_BYTES <= 8192 )) \
+        || usage_error "--api-key-file must be 8192 bytes or smaller"
+    API_KEY="$(< "$API_KEY_FILE")"
+    # Command substitution removes LF but retains the CR from a normal Windows
+    # CRLF line ending. Accept that one terminator without accepting embedded
+    # newlines or carriage returns in the credential itself.
+    API_KEY="${API_KEY%$'\r'}"
+    [[ -n "$API_KEY" ]] || usage_error "--api-key-file is empty: ${API_KEY_FILE}"
+    API_KEY_SOURCE="file"
+fi
+if [[ "$API_KEY" == *$'\n'* || "$API_KEY" == *$'\r'* || ${#API_KEY} -gt 8192 ]]; then
+    usage_error "LLM API key must be one non-empty line no longer than 8192 characters"
+fi
+if [[ -n "$API_KEY" ]]; then
+    case "$API_KEY" in
+        [[:space:]]*|*[[:space:]]|\'*|*\'|\"*|*\")
+            usage_error "LLM API key cannot start/end with whitespace or quotes (it would change when .env is parsed)"
+            ;;
+    esac
+    [[ "$API_KEY" != *,* ]] \
+        || usage_error "--api-key-file must contain exactly one key; commas delimit multiple LLM_API_KEYS"
+fi
+
+if [[ ! "$PORT" =~ ^[0-9]+$ || ${#PORT} -gt 5 ]] \
+        || (( 10#$PORT < 1 || 10#$PORT > 65535 )); then
+    usage_error "--port must be an integer from 1 to 65535 (got: ${PORT})"
+fi
+if [[ ! "$MIN_CONDA_MAJOR" =~ ^[0-9]+$ || ${#MIN_CONDA_MAJOR} -gt 3 ]] \
+        || (( 10#$MIN_CONDA_MAJOR < 1 )); then
+    usage_error "--min-conda must be a positive integer (got: ${MIN_CONDA_MAJOR})"
+fi
+if [[ ! "$ENV_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+    usage_error "--env must use 1-128 letters, numbers, dots, underscores, or hyphens"
+fi
+if [[ ! "$PY_VER" =~ ^[0-9]{1,2}\.[0-9]{1,2}(\.[0-9]{1,3})?$ ]]; then
+    usage_error "--python must be a concrete version such as 3.12"
+fi
+_PYTHON_MAJOR="${PY_VER%%.*}"
+_PYTHON_REMAINDER="${PY_VER#*.}"
+_PYTHON_MINOR="${_PYTHON_REMAINDER%%.*}"
+if (( 10#$_PYTHON_MAJOR != 3 || 10#$_PYTHON_MINOR < 12 )); then
+    usage_error "--python must select Python 3.12 or newer within the 3.x series"
+fi
 # ── Banner ──────────────────────────────────────────────────
 echo ""
 echo -e "  ${BOLD}🧈 Tofu (豆腐) — Self-Hosted AI Assistant${NC}"
 echo -e "  ─────────────────────────────────────────"
-echo -e "  Conda-based installer"
+echo -e "  uv installer with automatic conda fallback"
 echo ""
 
 # ── Tee ALL output (stdout + stderr) into a log file ──
 # Everything printed from this point onward ends up in
-# <INSTALL_DIR>/logs/install-YYYYMMDD_HHMMSS.log — makes it easy to
+# <INSTALL_DIR>/logs/install-YYYYMMDD_HHMMSS-PID.log — makes it easy to
 # attach the full transcript when reporting an issue.
 #
-# We respect --dir here but fall back to the CWD if the dir doesn't exist
-# yet (e.g. first-ever clone). The log is re-linked to the final path
-# once the install directory is known for sure.
-_TOFU_LOG_ROOT="${INSTALL_DIR}"
-[[ -d "$_TOFU_LOG_ROOT" ]] || _TOFU_LOG_ROOT="$(pwd)"
-_TOFU_LOG_DIR="${_TOFU_LOG_ROOT}/logs"
-mkdir -p "$_TOFU_LOG_DIR" 2>/dev/null || _TOFU_LOG_DIR="/tmp"
-TOFU_INSTALL_LOG="${_TOFU_LOG_DIR}/install-$(date +%Y%m%d_%H%M%S).log"
-# Use `tee` via process substitution so the log captures the raw
-# (ANSI-coloured) output that the user sees. Colours are fine in the
-# log — most tools that read it (pagers, chat UI) handle them, and you
-# can strip them later with `sed -r 's/\x1b\[[0-9;]*m//g'` if you want.
+# Never create logs inside an empty --dir target before `git clone`: doing so
+# makes that directory non-empty and causes Git to reject an otherwise valid
+# install destination. A new checkout stages its log beside the target, then
+# hard-links the still-open file into <INSTALL_DIR>/logs after source exists.
+_TOFU_INSTALL_LOG_BASENAME="install-$(date +%Y%m%d_%H%M%S)-${BASHPID}.log"
+if [[ -f "${INSTALL_DIR}/server.py" ]]; then
+    _TOFU_LOG_DIR="${INSTALL_DIR}/logs"
+    mkdir -p "$_TOFU_LOG_DIR" 2>/dev/null || _TOFU_LOG_DIR="/tmp"
+    TOFU_INSTALL_LOG="${_TOFU_LOG_DIR}/${_TOFU_INSTALL_LOG_BASENAME}"
+elif [[ -f "server.py" ]]; then
+    _TOFU_LOG_DIR="$(pwd)/logs"
+    mkdir -p "$_TOFU_LOG_DIR" 2>/dev/null || _TOFU_LOG_DIR="/tmp"
+    TOFU_INSTALL_LOG="${_TOFU_LOG_DIR}/${_TOFU_INSTALL_LOG_BASENAME}"
+else
+    _TOFU_LOG_PARENT="$(dirname "$INSTALL_DIR")"
+    if mkdir -p "$_TOFU_LOG_PARENT" 2>/dev/null && [[ -w "$_TOFU_LOG_PARENT" ]]; then
+        TOFU_INSTALL_LOG="${_TOFU_LOG_PARENT}/.${_TOFU_INSTALL_LOG_BASENAME}.pending"
+    else
+        TOFU_INSTALL_LOG="/tmp/${_TOFU_INSTALL_LOG_BASENAME}"
+    fi
+fi
+# Installer output can contain host paths and third-party tool diagnostics.
+# Pre-create it privately before process-substitution writers open it.
+(umask 077; set -o noclobber; : > "$TOFU_INSTALL_LOG") \
+    || { echo "install.sh: cannot create private log ${TOFU_INSTALL_LOG}" >&2; exit 1; }
+chmod 600 "$TOFU_INSTALL_LOG" \
+    || { echo "install.sh: cannot protect log ${TOFU_INSTALL_LOG}" >&2; exit 1; }
+# Use `tee` via process substitution so the terminal keeps receiving output.
 # stdbuf -oL keeps stdout line-buffered so progress shows up immediately
 # even when piped to tee (solves the "nothing prints for 30s" issue
 # during long conda solves).
@@ -212,13 +348,18 @@ fi
     echo "tofu install.sh — $(date -Iseconds 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "host:    $(hostname 2>/dev/null || echo unknown)"
     echo "user:    $(whoami 2>/dev/null || echo unknown)"
-    echo "args:    $0 $*"
+    echo "options: dir=${INSTALL_DIR} env=${ENV_NAME} python=${PY_VER} port=${PORT}"
+    echo "modes:   no_launch=${NO_LAUNCH} use_conda=${USE_CONDA} deployment=personal"
+    echo "api key: ${API_KEY_SOURCE} (value redacted)"
     echo "pwd:     $(pwd)"
     echo "bash:    ${BASH_VERSION:-unknown}"
     echo "which conda (pre-locate): $(command -v conda 2>/dev/null || echo none)"
     echo "──────────────────────────────────────────────"
 } >&2
 info "Install log: $TOFU_INSTALL_LOG"
+if [[ "$API_KEY_SOURCE" == "command-line" ]]; then
+    warn "--api-key is visible in shell history/process lists; use --api-key-file or Settings → Providers next time"
+fi
 
 # On any non-zero exit (error, Ctrl-C, set -e trigger), remind the user
 # where the log is so they can grab it for bug reports.
@@ -228,10 +369,36 @@ _tofu_exit_reminder() {
         echo "" >&2
         echo -e "  ${YELLOW}!${NC}  install.sh exited with code ${rc}" >&2
         echo -e "  ${YELLOW}!${NC}  Full transcript saved to: ${TOFU_INSTALL_LOG}" >&2
-        echo -e "  ${YELLOW}!${NC}  Copy it when filing a bug:  cat \"${TOFU_INSTALL_LOG}\"" >&2
+        echo -e "  ${YELLOW}!${NC}  Review the transcript for host paths or secrets before sharing it." >&2
     fi
 }
 trap _tofu_exit_reminder EXIT
+
+_finalize_install_log_location() {
+    local _final_dir="${INSTALL_DIR}/logs"
+    local _final_log="${_final_dir}/${_TOFU_INSTALL_LOG_BASENAME}"
+    [[ "$TOFU_INSTALL_LOG" == "$_final_log" ]] && return 0
+    if ! mkdir -p "$_final_dir" 2>/dev/null; then
+        warn "Could not create ${_final_dir}; keeping install log at ${TOFU_INSTALL_LOG}"
+        return 0
+    fi
+    if [[ -e "$_final_log" || -L "$_final_log" ]]; then
+        warn "Refusing to replace existing ${_final_log}; keeping install log at ${TOFU_INSTALL_LOG}"
+        return 0
+    fi
+    # A hard link keeps tee/sed's already-open descriptor attached to the final
+    # filename. It also fails safely rather than copying a partial live log
+    # across filesystems or replacing an existing file.
+    if ln "$TOFU_INSTALL_LOG" "$_final_log" 2>/dev/null; then
+        if ! rm -f "$TOFU_INSTALL_LOG"; then
+            warn "Install log also remains at ${TOFU_INSTALL_LOG}"
+        fi
+        TOFU_INSTALL_LOG="$_final_log"
+        info "Install log moved to: $TOFU_INSTALL_LOG"
+    else
+        warn "Could not move the live install log safely; keeping it at ${TOFU_INSTALL_LOG}"
+    fi
+}
 
 # ── Platform check ──────────────────────────────────────────
 OS="$(uname -s)"
@@ -251,25 +418,73 @@ info "Platform: $OS $ARCH"
 #  system git. If a clone is required but git is missing, we force the conda
 #  path (which can install git from conda-forge).
 # ═══════════════════════════════════════════════════════════════
-step "Getting Tofu source code"
-if [[ -f "${INSTALL_DIR}/server.py" ]]; then
-    ok "Existing installation found at ${INSTALL_DIR}"
-    if [[ -d "${INSTALL_DIR}/.git" ]] && command -v git &>/dev/null; then
-        info "Updating via git pull..."
-        (cd "$INSTALL_DIR" && git pull --ff-only) || warn "git pull failed — continuing with existing code"
+_prepare_source_checkout() {
+    if [[ -f "${INSTALL_DIR}/server.py" ]]; then
+        ok "Existing installation found at ${INSTALL_DIR}"
+        if [[ -d "${INSTALL_DIR}/.git" ]] && command -v git &>/dev/null; then
+            info "Updating via git pull..."
+            if ! (cd "$INSTALL_DIR" && git pull --ff-only); then
+                _SOURCE_UPDATE_FAILED=1
+                warn "git pull failed — continuing with the existing checkout"
+                printf '  Retry update: git -C %q pull --ff-only\n' "$INSTALL_DIR"
+            fi
+        fi
+    elif [[ "$DIR_EXPLICIT" -eq 0 && -f "server.py" ]]; then
+        INSTALL_DIR="$(pwd)"
+        ok "Running from project directory: $INSTALL_DIR"
+    elif [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR" ]]; then
+        fail "Install target exists but is not a directory: ${INSTALL_DIR}"
+    elif [[ -d "$INSTALL_DIR" && -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]]; then
+        fail "Install target is non-empty but is not a Tofu checkout: ${INSTALL_DIR}. Choose an empty --dir or the existing Tofu directory."
+    elif command -v git &>/dev/null; then
+        info "Cloning https://github.com/rangehow/ToFu.git → ${INSTALL_DIR}"
+        git clone https://github.com/rangehow/ToFu.git "$INSTALL_DIR" \
+            || fail "git clone failed; see the install log at ${TOFU_INSTALL_LOG}"
+        ok "Repository cloned"
+    else
+        return 1
     fi
-elif [[ -f "server.py" ]]; then
-    INSTALL_DIR="$(pwd)"
-    ok "Running from project directory: $INSTALL_DIR"
-elif command -v git &>/dev/null; then
-    info "Cloning https://github.com/rangehow/ToFu.git → ${INSTALL_DIR}"
-    git clone https://github.com/rangehow/ToFu.git "$INSTALL_DIR"
-    ok "Repository cloned"
+
+    INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd -P)" \
+        || fail "Could not resolve install directory: ${INSTALL_DIR}"
+    REQ_FILE="${INSTALL_DIR}/requirements.txt"
+    [[ -f "$REQ_FILE" ]] || fail "requirements.txt not found at $REQ_FILE"
+    _finalize_install_log_location
+}
+
+step "Getting Tofu source code"
+_SOURCE_CHECKOUT_READY=0
+_SOURCE_UPDATE_FAILED=0
+if _prepare_source_checkout; then
+    _SOURCE_CHECKOUT_READY=1
 else
     warn "git not found and a clone is required — forcing the conda path (it installs git)"
     USE_CONDA=1
 fi
-REQ_FILE="${INSTALL_DIR}/requirements.txt"
+
+# A destructive reset applies to the environment already bound to this
+# checkout unless the user explicitly selects another backend/name.  This
+# prevents a historical conda install from silently becoming a new uv install
+# while leaving the environment the user asked to reset untouched.
+if [[ "$RESET_ENV" -eq 1 && -f "${INSTALL_DIR}/.tofu_env.json" ]]; then
+    _EXISTING_ENV_MARKER="${INSTALL_DIR}/.tofu_env.json"
+    if grep -qE '"backend"[[:space:]]*:[[:space:]]*"uv"' \
+            "$_EXISTING_ENV_MARKER"; then
+        info "--reset-env: existing checkout uses uv"
+    elif grep -qE '"backend"[[:space:]]*:[[:space:]]*"conda"|"conda_base"' \
+            "$_EXISTING_ENV_MARKER"; then
+        USE_CONDA=1
+        if [[ "$ENV_EXPLICIT" -eq 0 ]]; then
+            _MARKER_ENV_NAME="$(sed -nE \
+                's/^[[:space:]]*"env_name"[[:space:]]*:[[:space:]]*"([A-Za-z0-9._-]+)"[,]?[[:space:]]*$/\1/p' \
+                "$_EXISTING_ENV_MARKER" | head -n 1)"
+            if [[ "$_MARKER_ENV_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+                ENV_NAME="$_MARKER_ENV_NAME"
+            fi
+        fi
+        info "--reset-env: preserving existing conda backend (env ${ENV_NAME})"
+    fi
+fi
 
 # ═══════════════════════════════════════════════════════════════
 #  Step 0.6: Choose install backend — uv fast path vs legacy conda
@@ -288,6 +503,8 @@ REQ_FILE="${INSTALL_DIR}/requirements.txt"
 #  A clean fallback to conda is the compatibility floor and must never break.
 # ═══════════════════════════════════════════════════════════════
 _FAST_PATH_DONE=0
+_UV_RESET_REFUSED=0
+_UV_CONFIG_CONFLICT=0
 
 # ═══════════════════════════════════════════════════════════════
 #  Step 0.55: Download accelerants — MUST precede the backend fork
@@ -359,18 +576,106 @@ _ensure_uv() {
     command -v uv &>/dev/null
 }
 
+
+_python_matches_request() {
+    local executable="$1"
+    local requested="$2"
+    [[ -x "$executable" ]] || return 1
+    "$executable" - "$requested" <<'PYEOF' >/dev/null 2>&1
+import sys
+
+requested = tuple(int(part) for part in sys.argv[1].split('.'))
+actual = sys.version_info[:len(requested)]
+raise SystemExit(0 if actual == requested else 1)
+PYEOF
+}
+
+
+_uv_env_matches_install_marker() {
+    local venv="$1"
+    local marker="${INSTALL_DIR}/.tofu_env.json"
+    [[ -x "${venv}/bin/python" && -f "$marker" ]] || return 1
+    "${venv}/bin/python" - "$marker" "$venv" <<'PYEOF' >/dev/null 2>&1
+import json
+import os
+import sys
+
+try:
+    with open(sys.argv[1], encoding='utf-8') as handle:
+        marker = json.load(handle)
+    matches = (
+        marker.get('backend') == 'uv'
+        and marker.get('owned_by_tofu_install') is True
+        and os.path.realpath(str(marker.get('env_prefix') or ''))
+            == os.path.realpath(sys.argv[2])
+    )
+except (OSError, TypeError, ValueError):
+    matches = False
+raise SystemExit(0 if matches else 1)
+PYEOF
+}
+
+
+_uv_env_owned_by_installer() {
+    local venv="$1"
+    [[ -f "${venv}/.tofu-install-owned" ]] \
+        && grep -qxF 'tofu-install-owned-v1' "${venv}/.tofu-install-owned" \
+        && return 0
+    _uv_env_matches_install_marker "$venv"
+}
+
+
+_reset_uv_env_if_requested() {
+    local venv="$1"
+    [[ "$RESET_ENV" -eq 1 ]] || return 0
+    [[ -e "$venv" || -L "$venv" ]] || return 0
+
+    # Recursive deletion is gated by explicit intent, an exact checkout-local
+    # target, a no-symlink check, and installer ownership proof.
+    if [[ -z "$INSTALL_DIR" || "$INSTALL_DIR" == "/" \
+            || "$venv" != "${INSTALL_DIR%/}/.venv" || -L "$venv" \
+            || ! -d "$venv" ]]; then
+        warn "Refusing --reset-env for unverified uv environment: ${venv}"
+        warn "Expected an installer ownership marker; move the directory aside manually if it is yours."
+        _UV_RESET_REFUSED=1
+        return 1
+    fi
+    if ! _uv_env_owned_by_installer "$venv"; then
+        warn "Refusing --reset-env for unverified uv environment: ${venv}"
+        warn "Expected an installer ownership marker; move the directory aside manually if it is yours."
+        _UV_RESET_REFUSED=1
+        return 1
+    fi
+    warn "--reset-env: removing installer-owned uv environment ${venv}"
+    if ! rm -rf -- "$venv"; then
+        warn "Could not remove ${venv}"
+        _UV_RESET_REFUSED=1
+        return 1
+    fi
+    ok "Installer-owned uv environment removed; rebuilding from scratch"
+}
+
+
 # The uv fast path. Sets ENV_PYTHON / ENV_PREFIX and writes .tofu_env.json on
 # success and returns 0; returns non-zero on ANY failure so the caller falls
 # back to conda. Never calls fail() — a failure here is recoverable.
 _try_uv_install() {
+    local _venv="${INSTALL_DIR}/.venv"
+    _reset_uv_env_if_requested "$_venv" || return 1
     _ensure_uv || { warn "Could not obtain uv — falling back to conda"; return 1; }
 
-    local _venv="${INSTALL_DIR}/.venv"
     # Idempotent re-run: `uv venv` refuses to overwrite an existing venv (it
     # errors "use --clear"), which would spuriously drop a good install into the
     # conda fallback on every re-run. If a usable interpreter is already present,
     # reuse it — the `uv pip install` below is itself idempotent and fast.
     if [[ -x "${_venv}/bin/python" ]]; then
+        if [[ "$PYTHON_EXPLICIT" -eq 1 ]] \
+                && ! _python_matches_request "${_venv}/bin/python" "$PY_VER"; then
+            warn "Existing uv environment does not satisfy --python ${PY_VER}: ${_venv}"
+            warn "Re-run with --python ${PY_VER} --reset-env to rebuild it explicitly."
+            _UV_CONFIG_CONFLICT=1
+            return 1
+        fi
         info "Reusing existing uv virtualenv at ${_venv}"
     else
         info "Creating uv virtualenv at ${_venv} (Python ${PY_VER})..."
@@ -382,6 +687,11 @@ _try_uv_install() {
         # collision with the interpreter the user later launches from.
         uv venv "$_venv" --python "${PY_VER}" --python-preference only-managed 2>&1 || {
             warn "uv venv failed — falling back to conda"; return 1; }
+        (umask 077; printf '%s\n' 'tofu-install-owned-v1' \
+            > "${_venv}/.tofu-install-owned") || {
+            warn "Could not record uv environment ownership — falling back to conda"
+            return 1
+        }
     fi
 
     local _uvpy="${_venv}/bin/python"
@@ -399,7 +709,7 @@ _try_uv_install() {
     # broken wheel) surfaces HERE as an ImportError / GLIBC_x-not-found, and we
     # fall back to conda cleanly. This is the belt-and-braces the owner required.
     info "Verifying the wheel stack imports (fitz/PIL are the glibc-floor canaries)..."
-    if ! "$_uvpy" -c 'import lxml.etree, fitz, PIL, cryptography, quart, hypercorn, orjson, sqlalchemy, playwright' 2>&1; then
+    if ! "$_uvpy" -c 'import lxml.etree, fitz, PIL, cryptography, quart, hypercorn, orjson, playwright' 2>&1; then
         warn "uv-installed wheels failed the import smoke-test (likely glibc too old) — falling back to conda"
         return 1
     fi
@@ -476,7 +786,7 @@ PYEOF
         fi
     fi
 
-    # Publish the env for the shared downstream steps (.env, launch, pgdata probe).
+    # Publish the env for the shared downstream steps (.env and launch).
     ENV_PREFIX="$_venv"
     ENV_PYTHON="$_uvpy"
     # Write the .tofu_env.json marker with backend='uv'. server.py keys off this
@@ -505,10 +815,6 @@ PYEOF
 
 if [[ "$USE_CONDA" -eq 1 ]]; then
     info "Using the conda install path (--use-conda)."
-elif [[ "$WITH_POSTGRES" -eq 1 ]]; then
-    info "PostgreSQL requested (--with-postgres) — PG binaries live in the conda"
-    info "environment, so switching to the conda install path automatically."
-    USE_CONDA=1
 elif ! _glibc_ge_228; then
     info "Host glibc < 2.28 (or undetectable) — using the conda path for maximum"
     info "compatibility (PyMuPDF/Pillow ship no manylinux2014 wheel for old glibc)."
@@ -517,6 +823,10 @@ else
     step "Installing via uv (fast path; falls back to conda on any failure)"
     if _try_uv_install; then
         _FAST_PATH_DONE=1
+    elif [[ "$_UV_RESET_REFUSED" -eq 1 ]]; then
+        fail "--reset-env was refused because .venv ownership could not be proven; no alternate environment was changed"
+    elif [[ "$_UV_CONFIG_CONFLICT" -eq 1 ]]; then
+        fail "--python conflicts with the existing uv environment; no alternate environment was changed"
     else
         warn "uv fast path did not complete — continuing with the conda install path"
     fi
@@ -535,12 +845,6 @@ fi
 # ═══════════════════════════════════════════════════════════════
 CONDA_BASE="${CONDA_BASE:-}"
 CONDA_OWNED_BY_US="${CONDA_OWNED_BY_US:-0}"
-# PG_INSTALLED_MAJOR is normally set inside the conda block (Step 5). On the uv
-# fast path that block is skipped, so pre-seed it empty here — the shared
-# pgdata-validation tail (Step 8.5+) reads it under `set -u` and would otherwise
-# crash with "PG_INSTALLED_MAJOR: unbound variable". Empty = "no PG installed",
-# which the tail handles as the default SQLite selection.
-PG_INSTALLED_MAJOR="${PG_INSTALLED_MAJOR:-}"
 if [[ "$_FAST_PATH_DONE" -ne 1 ]]; then
 
 # ═══════════════════════════════════════════════════════════════
@@ -592,7 +896,8 @@ CONDA_OWNED_BY_US=0   # 1 = we installed this conda (sibling); we may update it.
 #    the existing env's packages unused and cause pip to fall back to
 #    --user when its newly-created site-packages isn't ready yet).
 _TOFU_ENV_MARKER="${INSTALL_DIR}/.tofu_env.json"
-if [[ -f "$_TOFU_ENV_MARKER" ]] && command -v python3 &>/dev/null; then
+if [[ "$FORCE_SIBLING_CONDA" -ne 1 && -f "$_TOFU_ENV_MARKER" ]] \
+        && command -v python3 &>/dev/null; then
     _MARKER_BASE="$(python3 -c "import json,sys
 try:
     print(json.load(open(sys.argv[1])).get('conda_base',''))
@@ -628,10 +933,13 @@ for _cand in \
     [[ -x "$_cand" ]] && _existing_conda_candidates+=("$_cand")
 done
 
-if [[ -n "$CONDA_BIN" ]]; then
+if [[ "$FORCE_SIBLING_CONDA" -eq 1 ]]; then
+    # Explicit user intent outranks a prior marker that may point at a borrowed
+    # conda. Step 2 below may still reuse the installer-owned sibling itself.
+    CONDA_BIN=""
+    info "--force-sibling-conda: ignoring marker and user-owned conda installations"
+elif [[ -n "$CONDA_BIN" ]]; then
     : # already resolved from .tofu_env.json marker
-elif [[ "$FORCE_SIBLING_CONDA" -eq 1 ]]; then
-    info "--force-sibling-conda: ignoring any pre-existing conda"
 else
     for _cand in "${_existing_conda_candidates[@]}"; do
         _ver_raw="$(_probe_conda_version "$_cand")"
@@ -895,37 +1203,52 @@ elif [[ "$NO_UPDATE_CONDA" -eq 1 ]]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════
-#  Step 3: Check git and clone repo if needed
+#  Step 3: Complete a source checkout deferred until conda supplied git
 # ═══════════════════════════════════════════════════════════════
-step "Getting Tofu source code"
-
-if ! command -v git &>/dev/null; then
-    info "git not found — installing via conda-forge..."
-    conda install -n base -c conda-forge --override-channels -y git
-fi
-
-if [[ -f "${INSTALL_DIR}/server.py" ]]; then
-    ok "Existing installation found at ${INSTALL_DIR}"
-    if [[ -d "${INSTALL_DIR}/.git" ]]; then
-        info "Updating via git pull..."
-        (cd "$INSTALL_DIR" && git pull --ff-only) || warn "git pull failed — continuing with existing code"
+if [[ "$_SOURCE_CHECKOUT_READY" -ne 1 ]]; then
+    step "Completing deferred Tofu source checkout"
+    if ! command -v git &>/dev/null; then
+        info "git not found — installing via conda-forge..."
+        conda install -n base -c conda-forge --override-channels -y git
     fi
-elif [[ -f "server.py" ]]; then
-    INSTALL_DIR="$(pwd)"
-    ok "Running from project directory: $INSTALL_DIR"
-else
-    info "Cloning https://github.com/rangehow/ToFu.git → ${INSTALL_DIR}"
-    git clone https://github.com/rangehow/ToFu.git "$INSTALL_DIR"
-    ok "Repository cloned"
+    _prepare_source_checkout \
+        || fail "git is still unavailable after conda setup; cannot clone Tofu"
+    _SOURCE_CHECKOUT_READY=1
 fi
-
-REQ_FILE="${INSTALL_DIR}/requirements.txt"
-[[ -f "$REQ_FILE" ]] || fail "requirements.txt not found at $REQ_FILE"
 
 # ═══════════════════════════════════════════════════════════════
 #  Step 4: Create / reuse conda env
 # ═══════════════════════════════════════════════════════════════
 step "Creating conda environment: ${ENV_NAME}"
+
+CONDA_ENV_PREFIX="${CONDA_BASE}/envs/${ENV_NAME}"
+
+_conda_env_matches_install_marker() {
+    local marker="${INSTALL_DIR}/.tofu_env.json"
+    [[ -x "${CONDA_BASE}/bin/python" && -f "$marker" ]] || return 1
+    "${CONDA_BASE}/bin/python" - "$marker" "$CONDA_BASE" \
+            "$ENV_NAME" "$CONDA_ENV_PREFIX" <<'PYEOF' >/dev/null 2>&1
+import json
+import os
+import sys
+
+try:
+    with open(sys.argv[1], encoding='utf-8') as handle:
+        marker = json.load(handle)
+    backend = marker.get('backend')
+    matches = (
+        backend in (None, '', 'conda')
+        and str(marker.get('env_name') or '') == sys.argv[3]
+        and os.path.realpath(str(marker.get('conda_base') or ''))
+            == os.path.realpath(sys.argv[2])
+        and os.path.realpath(str(marker.get('env_prefix') or ''))
+            == os.path.realpath(sys.argv[4])
+    )
+except (OSError, TypeError, ValueError):
+    matches = False
+raise SystemExit(0 if matches else 1)
+PYEOF
+}
 
 ENV_EXISTS=0
 if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
@@ -933,6 +1256,8 @@ if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
 fi
 
 if [[ "$ENV_EXISTS" -eq 1 && "$RESET_ENV" -eq 1 ]]; then
+    _conda_env_matches_install_marker || fail \
+        "Refusing --reset-env for conda env '${ENV_NAME}': this checkout has no matching ownership marker. Choose another --env or move/remove the env manually."
     warn "--reset-env: removing existing env '${ENV_NAME}' (this deletes ALL packages in it)"
     conda env remove -n "$ENV_NAME" -y
     ENV_EXISTS=0
@@ -955,6 +1280,10 @@ set +u
 conda activate "$ENV_NAME"
 set -u
 PY="$(command -v python)"
+if [[ "$PYTHON_EXPLICIT" -eq 1 ]] \
+        && ! _python_matches_request "$PY" "$PY_VER"; then
+    fail "Existing conda env '${ENV_NAME}' does not satisfy --python ${PY_VER}. Re-run with --python ${PY_VER} --reset-env to rebuild the marker-owned env."
+fi
 ok "Using Python: $PY ($(python --version 2>&1))"
 
 # ─────────────────────────────────────────────────────────────
@@ -975,7 +1304,7 @@ ok "Using Python: $PY ($(python --version 2>&1))"
 #    • multiple Tofu checkouts on the same machine each get their own
 #      independent marker pointing at their own env
 # ─────────────────────────────────────────────────────────────
-ENV_PREFIX="${CONDA_BASE}/envs/${ENV_NAME}"
+ENV_PREFIX="$CONDA_ENV_PREFIX"
 ENV_PYTHON="${ENV_PREFIX}/bin/python"
 [[ -x "$ENV_PYTHON" ]] || fail "Env python not found at $ENV_PYTHON after conda activate"
 
@@ -987,6 +1316,7 @@ install_dir, conda_base, env_name, env_prefix, env_python, owned = sys.argv[1:7]
 marker = {
     'schema': 1,
     'created_at': int(time.time()),
+    'backend':     'conda',
     'conda_base':   conda_base,
     'env_name':     env_name,
     'env_prefix':   env_prefix,
@@ -1073,9 +1403,10 @@ CONDA_PKGS=(
     # orjson — fast JSON encoder; imported by routes/chat.py for chat
     # snapshot serialisation. Hard dep: the server won't boot without it.
     "orjson>=3.9"
-    # sqlalchemy Core — lib/database/_core_schema.py builds the chat
-    # persistence schema with it. Hard dep: imported at server boot.
-    "sqlalchemy>=2.0"
+    # Psycopg 3 is the external PostgreSQL client. The standalone installer
+    # never installs PostgreSQL server binaries; conda supplies libpq.
+    "psycopg>=3.2"
+    "psycopg-pool>=3.2"
     # markdown — server-side Markdown rendering. Hard dep at import time.
     "markdown>=3.4"
     # tiktoken — exact BPE tokenizer tier for lib/token_counter.
@@ -1091,9 +1422,9 @@ CONDA_PKGS=(
 # Pip-installed deps.
 #
 # trafilatura + htmldate are pure-Python packages; installing them via pip
-# lets us get htmldate 1.9.4+ (no "lxml<6" upper bound), which in turn lets
-# the conda env install PG 18 + icu 78 + lxml 6 cleanly. This is NOT a
-# downgrade — it's the opposite: pip gives us NEWER htmldate than conda has.
+# lets us get htmldate 1.9.4+ (no "lxml<6" upper bound) while retaining the
+# current conda lxml stack. This is not a downgrade: pip provides a newer
+# htmldate than the affected conda snapshots.
 #
 # We ALSO list trafilatura's other pure-Python deps explicitly here
 # (justext, courlan, dateparser, charset-normalizer) because we install
@@ -1329,6 +1660,8 @@ _IMPORT_CHECK_PKGS=(
     "docx:python-docx"
     "openpyxl:openpyxl"
     "mcp:mcp"
+    "psycopg:psycopg"
+    "psycopg_pool:psycopg-pool"
     "fitz:pymupdf"
 )
 _MISSING_PKGS=()
@@ -1597,107 +1930,11 @@ if [[ "$WITH_DOCLING" -eq 1 ]]; then
     fi
 fi
 
-# ── Install PostgreSQL + psycopg2 from conda-forge (explicit equal backend) ──
-# SQLite and PostgreSQL share one Sidecar contract. PostgreSQL provisioning is
-# opt-in, and a failed explicit selection aborts instead of switching engines.
-#
-# Within the selected PostgreSQL backend, try majors 18 → 17 → 16. Different conda-forge
-# snapshots pin icu/libxml2 in ways that conflict with trafilatura/lxml
-# (we saw this on hosts where PG 18 requires icu>=78 but trafilatura needs
-# icu<76). Trying older majors often succeeds because their icu pins are
-# looser. The first major whose solve succeeds wins.
-PG_INSTALLED_MAJOR=""   # set to the major we successfully installed, empty if we gave up
-if [[ "$WITH_POSTGRES" -ne 1 ]]; then
-    # ── SQLite is the default (2026-07). PostgreSQL is opt-in via
-    #    --with-postgres because its install (icu/libxml2/PG-major solve +
-    #    initdb + smoke-test) is the slowest, most failure-prone step and
-    #    single-user setups don't need it. Leaving PG_INSTALLED_MAJOR empty
-    #    makes the pgdata-validation + smoke-test steps below no-op cleanly
-    #    and pins the default TOFU_DB_BACKEND=sqlite in .env.
-    if [[ "$FORCE_SQLITE" -eq 1 ]]; then
-        info "--force-sqlite: using SQLite (PostgreSQL not installed)"
-    else
-        info "Using SQLite (default, zero-config). Pass --with-postgres to install"
-        info "PostgreSQL instead (equal storage contract; adds server binaries)."
-    fi
-elif [[ "$FORCE_SQLITE" -eq 1 ]]; then
-    info "--force-sqlite overrides --with-postgres: skipping PostgreSQL install entirely"
-else
-    # If user pinned a specific major, only try that one.
-    if [[ -n "$PG_MAJOR" ]]; then
-        _PG_TRY=("$PG_MAJOR")
-    else
-        _PG_TRY=("${PG_MAJOR_CANDIDATES[@]}")
-    fi
-
-    info "Installing PostgreSQL + psycopg2 from conda-forge (trying majors: ${_PG_TRY[*]})"
-    # ── Pre-clean prior PG remnants from the env ──
-    # A previous run may have left a different PG major installed. Its
-    # history pin will fight any attempt to install a different major.
-    # --force remove clears the package files; the history pin is cleared
-    # later by --prune-deps if needed.
-    conda remove -n "$ENV_NAME" -y --force postgresql libpq psycopg2 >/dev/null 2>&1 || true
-
-    _PG_BIN_DIR="${CONDA_BASE}/envs/${ENV_NAME}/bin"
-    _PG_LAST_LOG=""
-
-    # Install strategy: try the requested major with a plain spec first.
-    # Since trafilatura/htmldate are now pip-installed (see Step 5 above),
-    # nothing in the env forces a libxml2 version, so the solver is free to
-    # pick whichever icu/libxml2 combination matches the PG major chosen.
-    #
-    # If the first attempt still fails (e.g. conda-forge snapshot is mid-
-    # migration and PG's icu-78 libpq build isn't fully propagated to this
-    # arch yet), we fall back to the next major in the list.
-    for _try_major in "${_PG_TRY[@]}"; do
-        info "  Trying PostgreSQL ${_try_major}.x ..."
-        _PG_LAST_LOG="/tmp/tofu_pg_install_${_try_major}.log"
-
-        set +e
-        conda install -n "$ENV_NAME" -c conda-forge --override-channels -y \
-            "postgresql=${_try_major}" 'psycopg2>=2.9' 2>&1 | tee "$_PG_LAST_LOG"
-        _rc="${PIPESTATUS[0]}"
-        set -e
-
-        if [[ "$_rc" -eq 0 && -x "${_PG_BIN_DIR}/postgres" ]]; then
-            _got_major="$("${_PG_BIN_DIR}/postgres" --version 2>/dev/null \
-                | awk '{print $3}' | cut -d. -f1)"
-            if [[ "$_got_major" == "$_try_major" ]]; then
-                PG_INSTALLED_MAJOR="$_got_major"
-                ok "PostgreSQL ${PG_INSTALLED_MAJOR}.x installed + psycopg2"
-                break
-            fi
-            warn "  Installed postgres reports major=${_got_major}, expected ${_try_major}"
-        elif [[ "$_rc" -ne 0 ]]; then
-            warn "  PG ${_try_major}.x solve failed (rc=${_rc}) — see ${_PG_LAST_LOG}"
-        else
-            warn "  conda returned 0 but ${_PG_BIN_DIR}/postgres missing"
-        fi
-
-        # Ensure next attempt starts clean (important: leftover libpq/history
-        # pins can make the next major fail for unrelated reasons).
-        conda remove -n "$ENV_NAME" -y --force postgresql libpq psycopg2 >/dev/null 2>&1 || true
-    done
-
-    if [[ -z "$PG_INSTALLED_MAJOR" ]]; then
-        warn "All PG majors failed to install on this host"
-        [[ -n "$_PG_LAST_LOG" ]] && warn "Last conda log: ${_PG_LAST_LOG}"
-        warn ""
-        warn "Diagnosis checklist (from the conda solver output above):"
-        warn "  1. Is the conda-forge snapshot mid-migration for your arch?"
-        warn "     → Run: conda search -c conda-forge --override-channels 'postgresql=18' --info | head -40"
-        warn "       and check whether libpq-18.x builds exist for your platform."
-        warn "  2. Does something in the env still pin icu/libxml2 to an old side?"
-        warn "     → Run: conda list -n ${ENV_NAME} | grep -E '(icu|libxml2|lxml)'"
-        warn "     → If you see 'icu 75' but PG needs 78 (or vice-versa), inspect the"
-        warn "       'history' file: \$CONDA_PREFIX/conda-meta/history"
-        warn "  3. Is conda itself outdated?"
-        warn "     → Re-run WITHOUT --no-update-conda"
-        warn ""
-        fail "PostgreSQL was explicitly selected but could not be installed; refusing backend fallback"
-    fi
-fi
-
+# ── Storage deployment ──────────────────────────────────────
+# The standalone installer intentionally provisions only personal SQLite.
+# Distributed PostgreSQL is externally managed and delivered by Kubernetes;
+# the Psycopg client dependency is already part of the frozen Python project.
+info "Using personal deployment mode with project-local SQLite"
 # ── Verify the full HTML-fetch stack imports (no hidden missing deps) ──
 # This runs the same chain that server.py will run at startup, so any
 # ModuleNotFoundError here surfaces BEFORE the user hits it.
@@ -1993,224 +2230,136 @@ rm -rf "$_FRONTEND_TMP"
     fail "Downloaded frontend manifest or chunks are incomplete"
 ok "Prebuilt frontend ${_FRONTEND_VERSION} installed (Node/npm not required)"
 
-
 # ═══════════════════════════════════════════════════════════════
-#  Step 8.5: Validate data/pgdata/ matches installed PG major
+#  Step 8.45: Modern text tools — sd / goawk / miller (BOTH paths)
 #
-#  Catches: "unrecognized configuration parameter 'autovacuum_worker_slots'"
-#  (PG 18 data dir running under PG 17 binary) and similar version skews
-#  that make the scheduler spin forever on "connection refused".
+#  The run_command tool description (lib/tools/project.py) tells the model
+#  to prefer `sd` over sed for substitutions, `mlr` over hand-rolled awk
+#  for CSV/TSV/JSON column work, and `goawk -i csv` for awk-with-CSV — so
+#  these binaries are a standard part of every install, not optional
+#  extras. They land in the env's bin/, which server.py / bootstrap.py
+#  prepend to PATH on every boot, so run_command subprocesses always
+#  resolve them.
 #
-#  Policy:
-#    - No pgdata/ yet           → nothing to check, PG bootstrap will initdb later.
-#    - pgdata major == installed major → OK, reuse.
-#    - mismatch + --reinit-pgdata     → back up pgdata, let PG bootstrap re-initdb.
-#    - mismatch without --reinit-pgdata → fail closed (data preserved).
-#    - pgdata exists but no PG installed locally → fail if PostgreSQL selected.
+#  Two sources, one result: conda-forge when this env is conda-managed
+#  (the legacy path — also the only route that works through corp conda
+#  mirrors on air-gapped hosts), otherwise pinned static release archives
+#  (single self-contained binaries — sd is musl-linked, goawk/miller are
+#  Go — so they run on any glibc, CentOS-7-era hosts included). A tool
+#  that cannot be installed from either source is warned about once;
+#  GNU sed/awk remain the universal fallback the model can use.
 # ═══════════════════════════════════════════════════════════════
-step "Validating PostgreSQL data directory (version compatibility)"
+step "Installing modern text tools (sd, goawk, miller)"
 
-# storage.v1 permanently owns a project-local cluster. No resolver, local-disk
-# split, or temporary-directory fallback may move live data out of the project.
-PGDATA_DIR="${INSTALL_DIR}/data/pgdata"
-PGDATA_LEGACY="$PGDATA_DIR"
-PGDATA_SPLIT="0"
+_SD_VER="1.0.0"        # chmln/sd
+_GOAWK_VER="1.29.0"    # benhoyt/goawk
+_MILLER_VER="6.13.0"   # johnkerl/miller
+_TEXT_TOOL_DIR="${ENV_PREFIX}/bin"
+# Prefix-style mirror override for ALL GitHub release fetches below
+# (e.g. "https://ghproxy.net/https://github.com"). Empty = upstream.
+_GH_REL="${TOFU_GH_RELEASE_BASE:-https://github.com}"
 
-PGDATA_MAJOR=""
-if [[ -f "${PGDATA_DIR}/PG_VERSION" ]]; then
-    PGDATA_MAJOR="$(tr -d '[:space:]' < "${PGDATA_DIR}/PG_VERSION" | cut -d. -f1)"
-    info "Found existing pgdata (PG ${PGDATA_MAJOR})"
-fi
-
-# The installer makes one exact choice. There is no auto-detection/fallback.
-DB_BACKEND_CHOICE="sqlite"
-if [[ "$WITH_POSTGRES" -eq 1 && "$FORCE_SQLITE" -ne 1 ]]; then
-    DB_BACKEND_CHOICE="postgres"
-fi
-
-if [[ "$FORCE_SQLITE" -eq 1 ]]; then
-    DB_BACKEND_CHOICE="sqlite"
-    if [[ -n "$PGDATA_MAJOR" ]]; then
-        info "--force-sqlite: leaving pgdata in place but using SQLite"
-    fi
-elif [[ -z "$PG_INSTALLED_MAJOR" ]]; then
-    # PG never got installed
-    if [[ -n "$PGDATA_MAJOR" ]]; then
-        warn "pgdata exists (PG ${PGDATA_MAJOR}) but no PG binaries installed in env"
-        warn "Your existing PostgreSQL data is not modified."
+# conda-forge carries all three and integrates with the env's solver —
+# use it whenever this env is conda-managed. A missing feedstock or a
+# solver failure just drops through to the static-binary fallback per
+# tool (the presence checks below decide).
+if [[ "$_FAST_PATH_DONE" -ne 1 ]]; then
+    if conda install -n "$ENV_NAME" -c conda-forge --override-channels -y sd goawk miller; then
+        ok "sd + goawk + miller installed from conda-forge"
     else
-        info "No PG installed \u2014 tofu will use SQLite"
+        warn "conda-forge text-tool install failed — falling back to static binaries"
     fi
-    if [[ "$DB_BACKEND_CHOICE" == "postgres" ]]; then
-        fail "PostgreSQL was selected but no compatible PostgreSQL binaries are installed"
-    fi
-elif [[ -n "$PGDATA_MAJOR" && "$PGDATA_MAJOR" != "$PG_INSTALLED_MAJOR" ]]; then
-    warn "pgdata major (${PGDATA_MAJOR}) differs from installed PG (${PG_INSTALLED_MAJOR})"
-    warn "Running pgdata under a mismatched major will cause FATAL config-param errors"
-    if [[ "$REINIT_PGDATA" -eq 1 ]]; then
-        _BAK="${PGDATA_DIR}.bak.$(date +%Y%m%d_%H%M%S)"
-        info "--reinit-pgdata: backing up existing pgdata \u2192 ${_BAK}"
-        mv "$PGDATA_DIR" "$_BAK"
-        ok "pgdata moved aside; PG bootstrap will initdb fresh under PG ${PG_INSTALLED_MAJOR}"
-        # Also nuke the SQLite db if we want a totally clean slate? No \u2014
-        # SQLite is independent, leave it alone.
-    else
-        fail "PostgreSQL data major mismatch; install the matching major or rerun with --reinit-pgdata after verifying a backup"
-    fi
-elif [[ -n "$PGDATA_MAJOR" ]]; then
-    ok "pgdata (PG ${PGDATA_MAJOR}) matches installed PG (${PG_INSTALLED_MAJOR}) \u2014 reusing"
-else
-    ok "PG ${PG_INSTALLED_MAJOR} ready; bootstrap will initdb on first server.py run"
 fi
 
-# ═══════════════════════════════════════════════════════════════
-#  Step 8.6: Smoke-test PG startup (best-effort, don't block install)
-#
-#  If we chose to use PG, try `pg_ctl start` once under a timeout so
-#  config-file errors surface NOW instead of during first /api call.
-# ═══════════════════════════════════════════════════════════════
-# ── PG recovery helpers (borrowed/user-owned env with a broken PostgreSQL) ──
-# Step 7 already (re)installs postgresql into the env, but a corrupt shared dep
-# (icu / libpq) can survive a plain remove+install because conda deems it
-# "satisfied" and never re-fetches it — so initdb/pg_ctl can still hang or fail
-# on a borrowed env (owned_by_tofu_install=false). When the bootstrap/smoke-test
-# below fails on such an env we try ONE --force-reinstall of the PG stack (which
-# re-fetches even satisfied builds) and retry; if it STILL fails the reliable
-# remedy is a clean Tofu-owned env, which _pg_broken_env_advice prints. We only
-# touch PG packages here (never the base conda), consistent with Step 7 which
-# already installs postgresql into the same env.
-_pg_force_reinstall() {
-    warn "Recovery: force-reinstalling PostgreSQL stack in env '${ENV_NAME}' (postgresql=${PG_INSTALLED_MAJOR} + libpq + icu)"
-    conda install -n "$ENV_NAME" -c conda-forge --override-channels -y \
-        --force-reinstall "postgresql=${PG_INSTALLED_MAJOR}" libpq icu 'psycopg2>=2.9'
-}
-
-_pg_broken_env_advice() {
-    warn ""
-    if [[ "$CONDA_OWNED_BY_US" -eq 0 ]]; then
-        warn "The conda env '${ENV_NAME}' is a pre-existing / borrowed conda"
-        warn "(owned_by_tofu_install=false) and its PostgreSQL build appears broken"
-        warn "(initdb/pg_ctl failed even after a force-reinstall)."
-        warn "For a reliable PG cluster, re-run with a clean Tofu-owned env:"
-        warn "    bash install.sh --force-sibling-conda --reset-env"
-        warn "or repair PG in the current env yourself:"
-        warn "    conda install -n ${ENV_NAME} -c conda-forge --force-reinstall postgresql=${PG_INSTALLED_MAJOR} libpq icu"
+_tofu_dl() {
+    local url="$1" dest="$2"
+    if command -v curl &>/dev/null; then
+        curl -4 -fsSL --connect-timeout 15 --max-time 300 -o "$dest" "$url"
+    elif command -v wget &>/dev/null; then
+        wget -4 -q --timeout=300 -O "$dest" "$url"
+    else
+        return 1
     fi
-    warn ""
 }
 
-# Delegated runtime bootstrap (initdb + start-verify) — factored into a function
-# so the borrowed-env recovery path can retry it after a force-reinstall. Reads
-# the global $_PG_BOOTSTRAP_TIMEOUT wrapper set by the caller. Returns the
-# delegate's rc (124/137 = outer hard-timeout fired).
-_run_pg_bootstrap_delegate() {
-    local _rc=0
-    (cd "$INSTALL_DIR" && $_PG_BOOTSTRAP_TIMEOUT "$ENV_PYTHON" - <<'PYEOF'
-import sys
-from lib.runtime_paths import data_root
-from lib.database.db_paths import resolve_pgdata_dir
-from lib.database._core import (
-    BASE_DIR, PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DBNAME)
-from lib.database._bootstrap import _ensure_pg_running, _stop_local_pg_quietly
-pgdata = resolve_pgdata_dir(data_root())
-res = _ensure_pg_running(pgdata, BASE_DIR, PG_HOST, PG_PORT,
-                         PG_USER, PG_PASSWORD, PG_DBNAME)
-if not res:
-    print('ensure_pg_running returned no result', file=sys.stderr)
-    sys.exit(1)
-# Leave the cluster the way the server expects to find it on first boot.
-try:
-    _stop_local_pg_quietly(pgdata)
-except Exception as e:
-    print(f'(non-fatal) stop after bootstrap failed: {e}', file=sys.stderr)
-print(f"OK pgdata={pgdata} port={res.get('PG_PORT')}")
-PYEOF
-    ) || _rc=$?
-    return $_rc
-}
-
-# pg_ctl smoke-test of an EXISTING cluster — factored so the recovery path can
-# retry it after a force-reinstall. Returns 0 if PG started (then stopped) OK.
-_run_pg_ctl_smoke() {
-    local _pgctl="${CONDA_BASE}/envs/${ENV_NAME}/bin/pg_ctl"
-    local _logdir="${INSTALL_DIR}/logs"
-    mkdir -p "$_logdir"
-    "$_pgctl" -D "$PGDATA_DIR" stop -m fast >/dev/null 2>&1 || true
-    rm -f "${PGDATA_DIR}/postmaster.pid" 2>/dev/null || true
-    if "$_pgctl" -D "$PGDATA_DIR" -l "${_logdir}/postgresql.log" -w -t 15 start >/dev/null 2>&1; then
-        "$_pgctl" -D "$PGDATA_DIR" stop -m fast >/dev/null 2>&1 || true
+# Fetch+install ONE tool from a release tarball unless it already
+# resolves. $1=display name, $2=binary name, rest=candidate URLs tried
+# in order (archive layouts differ between projects — locate the binary
+# after extraction rather than assuming a fixed path inside the tar).
+_tofu_install_text_tool() {
+    local name="$1" bin="$2"; shift 2
+    if command -v "$bin" &>/dev/null; then
+        ok "$name already present ($(command -v "$bin"))"
         return 0
     fi
-    return 1
+    if [[ -x "${_TEXT_TOOL_DIR}/${bin}" ]]; then
+        ok "$name already installed in the env"
+        return 0
+    fi
+    local tmp url found
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/tofu-${name}.XXXXXX")"
+    for url in "$@"; do
+        info "Downloading ${name}: ${url}"
+        if _tofu_dl "$url" "${tmp}/pkg.tgz" && tar xzf "${tmp}/pkg.tgz" -C "$tmp" 2>/dev/null; then
+            found=""
+            found="$(find "$tmp" -type f -name "$bin" 2>/dev/null | head -1 || true)"
+            if [[ -n "$found" ]]; then
+                mkdir -p "$_TEXT_TOOL_DIR"
+                cp "$found" "${_TEXT_TOOL_DIR}/${bin}"
+                chmod 0755 "${_TEXT_TOOL_DIR}/${bin}"
+                if "${_TEXT_TOOL_DIR}/${bin}" --version >/dev/null 2>&1; then
+                    ok "$name installed → ${_TEXT_TOOL_DIR}/${bin}"
+                    rm -rf "$tmp"
+                    return 0
+                fi
+                warn "$name binary failed its --version smoke test"
+                rm -f "${_TEXT_TOOL_DIR}/${bin}"
+            fi
+        fi
+        # Drop the failed/partial archive before the next candidate.
+        rm -f "${tmp}/pkg.tgz"
+    done
+    rm -rf "$tmp"
+    warn "$name could not be installed (no reachable source) — GNU sed/awk fallback remains"
+    return 0   # an accelerant never aborts the install
 }
 
-if [[ "$DB_BACKEND_CHOICE" == "postgres" && -n "$PG_INSTALLED_MAJOR" && "$PGDATA_SPLIT" == "1" && ! -d "$PGDATA_DIR" ]]; then
-    # ── Split engaged + resolved cluster not yet created ──
-    # The bash pg_ctl smoke-test below can only START an EXISTING cluster; it
-    # cannot fulfil the "bootstrap will initdb on first server.py run" promise
-    # for the local-disk path. So DELEGATE the real initdb + start-verify to the
-    # runtime's own bootstrap (_ensure_pg_running) against the RESOLVED path —
-    # install.sh and server.py then run the identical code, so a config-file
-    # error surfaces NOW instead of at the first API call. This is exactly what
-    # the runtime does on first boot; doing it here just moves it earlier.
-    step "Bootstrapping PostgreSQL at ${PGDATA_DIR} (initdb via runtime)"
-    # Portable hard-timeout wrapper for the delegated bootstrap: GNU `timeout`,
-    # macOS `gtimeout`, else none.
-    # The runtime bootstrap it delegates to is ALREADY internally bounded
-    # (initdb 60s / pg_ctl 30s / createdb 15s ≈ 2min worst case), so this outer
-    # ceiling is pure defense-in-depth: subprocess's SIGKILL cannot reap a
-    # D-state (uninterruptible-sleep) process wedged on a hung FUSE mount, and
-    # without an outer wrapper such a process would hang the whole installer.
-    # `-k` escalates TERM→KILL; 300s is well above the internal budget so a
-    # slow-but-progressing initdb is never killed prematurely.
-    _PG_BOOTSTRAP_TIMEOUT=""
-    if command -v timeout >/dev/null 2>&1; then
-        _PG_BOOTSTRAP_TIMEOUT="timeout -k 10 300"
-    elif command -v gtimeout >/dev/null 2>&1; then
-        _PG_BOOTSTRAP_TIMEOUT="gtimeout -k 10 300"
-    fi
-    _pg_boot_rc=0
-    _run_pg_bootstrap_delegate || _pg_boot_rc=$?
-    # If a borrowed env's corrupt PG stack made the delegate fail (but NOT a
-    # FUSE-wedge hard-timeout — force-reinstall can't fix a hung mount), try one
-    # force-reinstall of the PG stack and retry the delegate once.
-    if [[ "$_pg_boot_rc" -ne 0 && "$_pg_boot_rc" -ne 124 && "$_pg_boot_rc" -ne 137 ]]; then
-        warn "Runtime PG bootstrap failed (rc=${_pg_boot_rc}) \u2014 attempting PG stack recovery"
-        if _pg_force_reinstall; then
-            _pg_boot_rc=0
-            _run_pg_bootstrap_delegate || _pg_boot_rc=$?
-        else
-            warn "PG force-reinstall itself failed"
-        fi
-    fi
-    if [[ "$_pg_boot_rc" -eq 0 ]]; then
-        ok "PostgreSQL cluster initialized + start-verified at ${PGDATA_DIR}"
-    else
-        if [[ "$_pg_boot_rc" -eq 124 || "$_pg_boot_rc" -eq 137 ]]; then
-            warn "Runtime PG bootstrap exceeded the 300s hard timeout (possible wedged FUSE mount) \u2014 aborted"
-        else
-            warn "Runtime PG bootstrap failed even after force-reinstall \u2014 see ${INSTALL_DIR}/logs/postgresql.log"
-            _pg_broken_env_advice
-        fi
-        fail "Selected PostgreSQL backend failed project-local bootstrap; refusing backend fallback"
-    fi
-elif [[ "$DB_BACKEND_CHOICE" == "postgres" && -n "$PG_INSTALLED_MAJOR" && -d "$PGDATA_DIR" ]]; then
-    step "Smoke-testing PostgreSQL startup"
-    if _run_pg_ctl_smoke; then
-        ok "PostgreSQL started successfully (smoke test)"
-    else
-        # A borrowed env's corrupt PG binary can fail to start an otherwise-valid
-        # cluster. Try one force-reinstall of the PG stack and re-smoke-test.
-        warn "PG failed to start during smoke test \u2014 attempting PG stack recovery"
-        if _pg_force_reinstall && _run_pg_ctl_smoke; then
-            ok "PostgreSQL started successfully after force-reinstall"
-        else
-            warn "PG still fails to start after force-reinstall \u2014 see ${INSTALL_DIR}/logs/postgresql.log"
-            _pg_broken_env_advice
-            fail "Selected PostgreSQL backend failed startup after repair; refusing backend fallback"
-        fi
-    fi
+# Release-asset naming differs per project and arch — encode the matrix
+# once. Miller's macOS archives have shipped under both 'macos' and
+# 'darwin' spellings across releases; both are listed as candidates.
+case "${OS}/${ARCH}" in
+    Linux/x86_64)   _SD_T="x86_64-unknown-linux-musl";  _GA_T="linux_amd64";  _ML_T=("linux-amd64") ;;
+    Linux/aarch64)  _SD_T="aarch64-unknown-linux-musl"; _GA_T="linux_arm64";  _ML_T=("linux-arm64") ;;
+    MacOSX/x86_64)  _SD_T="x86_64-apple-darwin";        _GA_T="darwin_amd64"; _ML_T=("macos-amd64" "darwin-amd64") ;;
+    MacOSX/arm64)   _SD_T="aarch64-apple-darwin";       _GA_T="darwin_arm64"; _ML_T=("macos-arm64" "darwin-arm64") ;;
+    *)              _SD_T=""; _GA_T=""; _ML_T=() ;;
+esac
+
+if [[ -n "$_SD_T" ]]; then
+    _tofu_install_text_tool "sd" "sd" \
+        "${_GH_REL}/chmln/sd/releases/download/v${_SD_VER}/sd-v${_SD_VER}-${_SD_T}.tar.gz"
+    _tofu_install_text_tool "goawk" "goawk" \
+        "${_GH_REL}/benhoyt/goawk/releases/download/v${_GOAWK_VER}/goawk_v${_GOAWK_VER}_${_GA_T}.tar.gz"
+    _ml_urls=()
+    for _t in "${_ML_T[@]}"; do
+        _ml_urls+=("${_GH_REL}/johnkerl/miller/releases/download/v${_MILLER_VER}/miller-${_MILLER_VER}-${_t}.tar.gz")
+    done
+    _tofu_install_text_tool "miller" "mlr" "${_ml_urls[@]}"
+else
+    warn "No prebuilt text-tool archives for ${OS}/${ARCH} — GNU sed/awk remain"
 fi
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Step 8.5: Select the standalone personal storage topology
+# ═══════════════════════════════════════════════════════════════
+step "Selecting personal SQLite storage"
+DB_BACKEND_CHOICE="sqlite"
+if [[ -d "${INSTALL_DIR}/data/pgdata" ]]; then
+    warn "A legacy project-local PostgreSQL directory was found and left untouched."
+    warn "Verify a backup, then use the documented stopped-writer migration before removing it."
+fi
+ok "Personal deployment selected; no database server process is installed or started"
 
 # ═══════════════════════════════════════════════════════════════
 #  Step 9: Configure .env
@@ -2220,6 +2369,8 @@ step "Configuring .env"
 ENV_FILE="${INSTALL_DIR}/.env"
 ENV_EXAMPLE="${INSTALL_DIR}/.env.example"
 
+_ENV_FILE_EXISTED=0
+[[ -f "$ENV_FILE" ]] && _ENV_FILE_EXISTED=1
 if [[ ! -f "$ENV_FILE" ]]; then
     if [[ -f "$ENV_EXAMPLE" ]]; then
         cp "$ENV_EXAMPLE" "$ENV_FILE"
@@ -2232,39 +2383,100 @@ EOF
         info "Created minimal .env"
     fi
 fi
+# Provider credentials may be written below or added through the UI later.
+# Never leave this file readable by other users merely because the caller's
+# umask was permissive.
+chmod 600 "$ENV_FILE" \
+    || fail "Could not restrict ${ENV_FILE} to owner-only access (chmod 600)"
 
 # Update/insert a key in .env
 _set_env_var() {
     local key="$1" value="$2" file="$3"
+    # sed replacement strings interpret backslash, ampersand, and the chosen
+    # delimiter. Escape all three so a credential can never corrupt adjacent
+    # .env lines or turn into replacement syntax.
+    local escaped_value="$value"
+    escaped_value="${escaped_value//\\/\\\\}"
+    escaped_value="${escaped_value//&/\\&}"
+    escaped_value="${escaped_value//|/\\|}"
     if grep -qE "^[#[:space:]]*${key}=" "$file" 2>/dev/null; then
         # Portable sed -i (macOS requires a backup ext)
         if [[ "$OS" == "Darwin" ]]; then
-            sed -i '' -E "s|^[#[:space:]]*${key}=.*|${key}=${value}|" "$file"
+            sed -i '' -E "s|^[#[:space:]]*${key}=.*|${key}=${escaped_value}|" "$file"
         else
-            sed -i -E "s|^[#[:space:]]*${key}=.*|${key}=${value}|" "$file"
+            sed -i -E "s|^[#[:space:]]*${key}=.*|${key}=${escaped_value}|" "$file"
         fi
     else
         printf '%s=%s\n' "$key" "$value" >> "$file"
     fi
 }
 
-_set_env_var "PORT" "$PORT" "$ENV_FILE"
+# Delete a retired key without interpreting its former value. The key names
+# below are code-owned constants, so the sed expression never includes user
+# input.
+_unset_env_var() {
+    local key="$1" file="$2"
+    if [[ "$OS" == "Darwin" ]]; then
+        sed -i '' -E "/^[#[:space:]]*${key}=.*/d" "$file"
+    else
+        sed -i -E "/^[#[:space:]]*${key}=.*/d" "$file"
+    fi
+}
+
+if [[ "$_ENV_FILE_EXISTED" -eq 0 || "$PORT_EXPLICIT" -eq 1 ]]; then
+    _set_env_var "PORT" "$PORT" "$ENV_FILE"
+elif [[ "$PORT_FROM_ENV" -eq 1 ]]; then
+    info "Using explicit environment PORT=${PORT}; leaving existing .env unchanged"
+elif ! _EXISTING_ENV_PORT="$(
+        PYTHONPATH="$INSTALL_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        "$ENV_PYTHON" - "$ENV_FILE" <<'PYEOF'
+import sys
+from tofu_dotenv import read_dotenv_values
+
+print(read_dotenv_values(sys.argv[1]).get('PORT', ''))
+PYEOF
+    )"; then
+    fail "Could not read PORT from existing ${ENV_FILE}"
+elif [[ -z "$_EXISTING_ENV_PORT" ]]; then
+    _set_env_var "PORT" "$PORT" "$ENV_FILE"
+    info "Existing .env had no PORT; added default PORT=${PORT}"
+elif [[ ! "$_EXISTING_ENV_PORT" =~ ^[0-9]+$ \
+        || ${#_EXISTING_ENV_PORT} -gt 5 ]] \
+        || (( 10#$_EXISTING_ENV_PORT < 1 || 10#$_EXISTING_ENV_PORT > 65535 )); then
+    fail "Existing ${ENV_FILE} has invalid PORT; set an integer from 1 to 65535 or pass --port"
+else
+    PORT="$_EXISTING_ENV_PORT"
+    info "Preserving existing PORT=${PORT} (pass --port to change it)"
+fi
 if [[ -n "$API_KEY" ]]; then
     _set_env_var "LLM_API_KEYS" "$API_KEY" "$ENV_FILE"
     ok "API key configured"
 fi
 
-# Write DB backend decision into .env so server.py knows exactly which
-# backend to use (no silent PG-then-fallback retry storms at startup).
-if [[ "$DB_BACKEND_CHOICE" == "sqlite" ]]; then
-    _set_env_var "TOFU_DB_BACKEND" "sqlite" "$ENV_FILE"
-    info "TOFU_DB_BACKEND=sqlite pinned in .env"
-elif [[ "$DB_BACKEND_CHOICE" == "postgres" && -n "$PG_INSTALLED_MAJOR" ]]; then
-    _set_env_var "TOFU_DB_BACKEND" "postgres" "$ENV_FILE"
-    info "TOFU_DB_BACKEND=postgres pinned in .env (PG ${PG_INSTALLED_MAJOR})"
-fi
+# Publish only the current standalone deployment contract. Retired selectors
+# from an existing .env must be removed because the production boot gate rejects
+# them rather than guessing the operator's intended authority.
+for retired_key in \
+        TOFU_REQUIRE_PG TOFU_REPLICA_RING TOFU_STORAGE_MODE \
+        CHATUI_STORAGE_MODE \
+        TOFU_PG_PORT TOFU_PG_HOST TOFU_PG_REQUIRE_FLOCK \
+        TOFU_STOP_PG_ON_EXIT TOFU_STORAGE_PG_PORT; do
+    _unset_env_var "$retired_key" "$ENV_FILE"
+done
+while IFS= read -r retired_key; do
+    _unset_env_var "$retired_key" "$ENV_FILE"
+done < <(sed -nE \
+    's/^[#[:space:]]*((TOFU|CHATUI)_DB_[A-Za-z0-9_]+)=.*/\1/p' \
+    "$ENV_FILE")
+_set_env_var "TOFU_DEPLOYMENT_MODE" "personal" "$ENV_FILE"
+_set_env_var "TOFU_PROCESS_ROLE" "all" "$ENV_FILE"
+info "TOFU_DEPLOYMENT_MODE=personal and TOFU_PROCESS_ROLE=all pinned in .env"
 
 ok ".env ready (PORT=${PORT})"
+# sed -i implementations may replace the inode. Reassert the credential-file
+# boundary after every update instead of assuming they preserve its mode.
+chmod 600 "$ENV_FILE" \
+    || fail "Could not restrict ${ENV_FILE} to owner-only access (chmod 600)"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2281,14 +2493,14 @@ ok ".env ready (PORT=${PORT})"
 # ═══════════════════════════════════════════════════════════════
 step "Verifying the storage Sidecar works (write → read → delete)"
 
-# Mirror the .env backend decision: sqlite unless a PG major was installed
-# AND we didn't pin sqlite.
-_SMOKE_BACKEND="$DB_BACKEND_CHOICE"
+_SMOKE_BACKEND="sqlite"
 
 _SMOKE_TIMEOUT=""
 command -v timeout >/dev/null 2>&1 && _SMOKE_TIMEOUT="timeout -k 5 60"
 
-if (cd "$INSTALL_DIR" && TOFU_DB_BACKEND="$_SMOKE_BACKEND" $_SMOKE_TIMEOUT "$ENV_PYTHON" - <<'PYEOF'
+if (cd "$INSTALL_DIR" \
+        && TOFU_DEPLOYMENT_MODE=personal TOFU_PROCESS_ROLE=all \
+        $_SMOKE_TIMEOUT "$ENV_PYTHON" - <<'PYEOF'
 import sys
 import uuid
 try:
@@ -2324,62 +2536,89 @@ PYEOF
 ); then
     ok "Storage Sidecar verified (${_SMOKE_BACKEND}): semantic write/read/delete passed"
 else
-    if [[ "$_SMOKE_BACKEND" == "sqlite" ]]; then
-        fail "SQLite backend failed its post-install smoke test — check project disk space/write permissions. Refusing backend fallback. Full log: ${TOFU_INSTALL_LOG}"
-    else
-        fail "PostgreSQL backend failed its post-install smoke test — see ${INSTALL_DIR}/logs/storage-postgresql.log. Refusing backend fallback. Full log: ${TOFU_INSTALL_LOG}"
-    fi
+    fail "SQLite backend failed its post-install smoke test — check project disk space/write permissions. Full log: ${TOFU_INSTALL_LOG}"
 fi
 
 # ═══════════════════════════════════════════════════════════════
 #  Step 10: Launch or print completion
 # ═══════════════════════════════════════════════════════════════
 echo ""
-ok "Installation complete!"
-echo ""
-echo "  To start Tofu later, any of these work (.tofu_env.json auto-activates):"
-echo "    cd ${INSTALL_DIR} && python server.py"
-if [[ "$_FAST_PATH_DONE" -eq 1 ]]; then
-    echo ""
-    echo "  (Optional, to explicitly activate the uv venv — not required thanks to .tofu_env.json:)"
-    echo "    source \"${ENV_PREFIX}/bin/activate\""
-elif [[ "$CONDA_OWNED_BY_US" -eq 1 ]]; then
-    echo ""
-    echo "  (Optional, if you want the env on your PATH for other tools too:)"
-    echo "    source \"${CONDA_BASE}/etc/profile.d/conda.sh\" && conda activate ${ENV_NAME}"
-else
-    echo ""
-    echo "  (Optional, to explicitly activate — not required thanks to .tofu_env.json:)"
-    echo "    conda activate ${ENV_NAME}"
-fi
-echo ""
+ok "Files and environment installed successfully."
 info "Full install log: $TOFU_INSTALL_LOG"
+if [[ "$_SOURCE_UPDATE_FAILED" -eq 1 ]]; then
+    warn "Source update was not applied; this run repaired the existing checkout only."
+    printf '  Retry update after resolving network/local changes: git -C %q pull --ff-only\n' \
+        "$INSTALL_DIR"
+fi
 echo ""
 
 if [[ "$NO_LAUNCH" -eq 1 ]]; then
-    info "Install-only mode — not launching server."
-    info "After starting, verify the install any time with: python healthcheck.py --runtime"
+    ok "Installation complete (install-only mode; server not started)."
+    echo "  Start later (.tofu_env.json selects the installed interpreter):"
+    printf '    cd %q && %q server.py\n' "$INSTALL_DIR" "$ENV_PYTHON"
+    if [[ "$_FAST_PATH_DONE" -eq 1 ]]; then
+        echo "  Optional explicit activation: source \"${ENV_PREFIX}/bin/activate\""
+    elif [[ "$CONDA_OWNED_BY_US" -eq 1 ]]; then
+        echo "  Optional explicit activation: source \"${CONDA_BASE}/etc/profile.d/conda.sh\" && conda activate ${ENV_NAME}"
+    else
+        echo "  Optional explicit activation: conda activate ${ENV_NAME}"
+    fi
+    printf '  After starting, verify with: %q healthcheck.py --runtime\n' \
+        "$ENV_PYTHON"
     exit 0
 fi
 
 step "Starting Tofu server"
 echo ""
 echo -e "  ${BOLD}🧈 Tofu is starting on port ${PORT}...${NC}"
-echo -e "  Open ${BOLD}http://localhost:${PORT}${NC} in your browser"
-echo ""
-echo "  Press Ctrl+C to stop the server"
 echo ""
 
 cd "$INSTALL_DIR"
 
-# Post-install runtime self-check: server boot (imports + DB init + first
-# bundle build) takes a few seconds, so `healthcheck.py --runtime --wait`
-# polls /api/health until the server answers, then prints a green "you're
-# good" table — or a precise diagnosis (DB down, no LLM key, browser engine
-# missing) — instead of leaving a fresh user to guess from raw startup logs.
-# Backgrounded: the subshell survives the exec below as an orphan and its
-# output interleaves with the server logs. A probe FAILURE never fails the
-# install — the server itself is already starting.
-( python healthcheck.py --runtime --port "${PORT}" --wait 90 || true ) &
+# Use the interpreter we just installed and verified. The uv path intentionally
+# does not activate its venv, and some hosts have only `python3` (or no system
+# Python at all); relying on a bare `python` here either fails or runs the
+# healthcheck outside the environment that owns Playwright and the app.
+# Managed startup returns after the one worker is healthy, so keep this sequence
+# foreground and deterministic and let scripts receive the real verdict.
+if ! "$ENV_PYTHON" server.py; then
+    echo "" >&2
+    echo -e "  ${RED}✗${NC}  Tofu was installed, but managed startup failed." >&2
+    printf '  Diagnose: %q serverctl.py doctor\n' "$ENV_PYTHON" >&2
+    printf '  Logs:     %q serverctl.py logs\n' "$ENV_PYTHON" >&2
+    echo "  Install:  ${TOFU_INSTALL_LOG}" >&2
+    exit 1
+fi
 
-exec python server.py
+step "Verifying the running installation"
+_RUNTIME_BROWSER_ARGS=()
+if [[ "$SKIP_PLAYWRIGHT" -eq 0 ]]; then
+    _RUNTIME_BROWSER_ARGS+=(--require-browser)
+fi
+if "$ENV_PYTHON" healthcheck.py --runtime --port "${PORT}" --wait 15 \
+        "${_RUNTIME_BROWSER_ARGS[@]}"; then
+    :
+else
+    echo "" >&2
+    echo -e "  ${RED}✗${NC}  Tofu started, but required runtime validation failed." >&2
+    printf '  Re-run:   %q healthcheck.py --runtime --port %q\n' \
+        "$ENV_PYTHON" "$PORT" >&2
+    printf '  Diagnose: %q serverctl.py doctor\n' "$ENV_PYTHON" >&2
+    printf '  Logs:     %q serverctl.py logs\n' "$ENV_PYTHON" >&2
+    exit 1
+fi
+
+_RUNTIME_URL="$(
+    "$ENV_PYTHON" serverctl.py status --json 2>/dev/null \
+        | "$ENV_PYTHON" -c \
+            'import json,sys; print(json.load(sys.stdin).get("applicationUrl") or "")' \
+            2>/dev/null
+)" || _RUNTIME_URL=""
+[[ -n "$_RUNTIME_URL" ]] || _RUNTIME_URL="http://localhost:${PORT}"
+
+echo ""
+ok "Installation complete — Tofu is ready: ${_RUNTIME_URL}"
+echo "  Open:     ${_RUNTIME_URL}"
+printf '  Status:   %q serverctl.py status\n' "$ENV_PYTHON"
+printf '  Stop:     %q serverctl.py stop\n' "$ENV_PYTHON"
+printf '  Restart:  %q serverctl.py restart\n' "$ENV_PYTHON"

@@ -6,7 +6,7 @@ OFF-loop worker thread and then tails the task's event buffer), this handler
 drives ``lib.llm_dispatch.async_dispatch_stream`` **directly on the event
 loop** — the httpx streaming call never occupies a thread-pool worker. This is
 the production home that finally makes the native-async streaming path live
-(see docs/FOLLOWUPS_ASYNC_MIGRATION.md §9).
+(see docs/API_CONTRACT.md §9).
 
 How the on-loop bridge works
 ----------------------------
@@ -39,17 +39,30 @@ import time
 from quart import Blueprint
 
 from lib.agent_core.admission import controller
+from lib.agent_core.sse_limit import limiter as sse_limiter
 from lib.api_response import api_bad_request, api_error, sse_response
 from lib.idempotency import idempotent_post
 from lib.ids import short_id
+from lib.llm.stream_result import (
+    ProviderStreamResult,
+    ensure_provider_stream_result,
+)
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import (
     async_parse_body, optional_dict, optional_str, require_list,
 )
+from lib.turn_verdict import (
+    TerminalTaskFailure,
+    derive_provider_stream_verdict,
+)
 
 from .auth import current_auth, require_scope
-from .chat import _validate_messages  # shared message sanity-check
+from .chat import (  # shared message and stream-cap boundaries
+    _openai_finish_reason,
+    _try_acquire_sse_slot,
+    _validate_messages,
+)
 
 logger = get_logger(__name__)
 
@@ -91,8 +104,12 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
     Contract of ``dispatch_fn`` (mirrors ``async_dispatch_stream``):
         ``await dispatch_fn(messages, on_content=..., on_thinking=...,
         max_tokens=..., temperature=..., prefer_model=..., capability=...,
-        log_prefix=...)`` → ``(msg, finish_reason, usage)``; the sync
+        log_prefix=...)`` → ``ProviderStreamResult``; the sync
         ``on_content(str)`` / ``on_thinking(str)`` callbacks fire ON the loop.
+
+    A historical three-tuple is accepted only at the named adapter seam. Its
+    explicit finish reason is converted to the same typed result before any
+    terminal decision is made.
 
     Yields OpenAI ``chat.completion.chunk`` SSE frames, then a terminal frame
     (with ``finish_reason`` + ``usage``), then ``data: [DONE]``.
@@ -165,34 +182,53 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
                 yield _chunk_frame(completion_id, model, thinking=text)
 
         # Dispatch finished — surface its result (finish_reason + usage) or error.
-        finish_reason = 'stop'
-        usage = None
+        stream_result: ProviderStreamResult | None = None
         err = None
+        failure_cause = 'generation_error'
         try:
-            _msg, finish_reason, usage = drive_task.result()
+            stream_result = ensure_provider_stream_result(drive_task.result())
+            if not stream_result.is_verified_complete:
+                verdict = derive_provider_stream_verdict(stream_result)
+                raise TerminalTaskFailure(verdict)
         except Exception as e:  # dispatch raised (exhausted slots, etc.)
             err = e
+            if isinstance(e, TerminalTaskFailure):
+                failure_cause = e.verdict.cause
             logger.warning('[chat_direct] dispatch failed: %s', e)
 
+        if err is not None:
+            from lib.error_envelope import make_envelope
+            envelope = make_envelope(
+                'internal', detail=str(err)[:300], model=model,
+                context='chat_direct', source='routes.api_v1.chat_direct')
+            yield f'data: {json.dumps({
+                "error": {
+                    "message": str(err),
+                    "type": "server_error",
+                    "code": failure_cause,
+                },
+                "tofu_error": envelope,
+            }, ensure_ascii=False)}\n\n'
+            yield 'data: [DONE]\n\n'
+            return
+
+        assert stream_result is not None
         if not emitted_role:
-            # Zero deltas (e.g. immediate error) — still emit the role frame
-            # so a generic client gets a well-formed (empty) assistant turn.
+            # A verified zero-delta completion still needs a role frame.
             yield _chunk_frame(completion_id, model, role=True)
+
+        provider_finish = stream_result.provider_finish_reason
+        assert provider_finish is not None
 
         final = {
             'id': completion_id, 'object': 'chat.completion.chunk',
             'created': int(time.time()), 'model': model,
             'choices': [{'index': 0, 'delta': {},
-                         'finish_reason': finish_reason or 'stop'}],
+                         'finish_reason': _openai_finish_reason(
+                             provider_finish)}],
         }
-        if usage:
-            final['usage'] = usage
-        if err is not None:
-            from lib.error_envelope import make_envelope
-            final['finish_reason'] = 'stop'
-            final['tofu_error'] = make_envelope(
-                'internal', detail=str(err)[:300], model=model,
-                context='chat_direct', source='routes.api_v1.chat_direct')
+        if stream_result.usage:
+            final['usage'] = stream_result.usage
         yield f'data: {json.dumps(final, ensure_ascii=False)}\n\n'
         yield 'data: [DONE]\n\n'
     except (GeneratorExit, asyncio.CancelledError):
@@ -254,24 +290,30 @@ async def chat_stream_direct():
               key_id=(auth.key_id if auth else ''),
               model=cfg.get('model', '?'), n_messages=len(messages))
 
+    inner = run_direct_stream(messages, model=cfg.get('model', model or '?'),
+                              cfg=cfg, completion_id=completion_id)
+
     # Admission control: shared backpressure with the rest of the headless
     # surface. Unlike the task path there is no spawn_task; the dispatch runs
     # inline on the loop, so we release the instant the generator finishes.
+    sse_slot_token, sse_rejection = _try_acquire_sse_slot(auth)
+    if sse_rejection is not None:
+        return sse_rejection
     if not controller.try_acquire():
+        sse_limiter.release(sse_slot_token)
         logger.warning('[chat_direct] admission refused (in_flight=%d/%d)',
                        controller.in_flight, controller.capacity)
         return api_error('Server at capacity; retry shortly.', status=503,
                          error_kind='overloaded', retry_after=5)
 
-    inner = run_direct_stream(messages, model=cfg.get('model', model or '?'),
-                              cfg=cfg, completion_id=completion_id)
-
     async def _gen():
         try:
             async for frame in inner:
+                sse_limiter.refresh(sse_slot_token)
                 yield frame
         finally:
             controller.release()
+            sse_limiter.release(sse_slot_token)
 
     return sse_response(_gen())
 

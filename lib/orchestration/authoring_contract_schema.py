@@ -10,12 +10,10 @@ from lib.orchestration._definition_contract import SCHEMA_ID
 from lib.orchestration.field_spec_contract import (
     field_spec_list_schema,
     field_spec_registry_schema,
-    field_spec_schema,
 )
 from lib.orchestration.field_values import field_value_contract_schema
 from lib.orchestration.io_contract import (
     io_contract_document_schema,
-    io_contract_schema,
 )
 from lib.orchestration._role_axes import EXECUTION_OPTION_ORDER, KNOWN_ROLES
 from lib.orchestration._role_specs import VALID_PARAM_KINDS
@@ -33,7 +31,7 @@ from lib.orchestration.authoring_contract_sections import (
 )
 from lib.orchestration._runtime_params import node_runtime_defaults
 from lib.orchestration.contract_schema import contract_snapshot_schema
-from lib.orchestration.definition_wire_contracts import (
+from lib.orchestration.definition_contract_schema import (
     definition_entry_contract_schema,
     definition_list_contract_schema,
     definition_write_contract_schema,
@@ -151,7 +149,6 @@ def authoring_object_section_schemas() -> dict[str, dict]:
 def authoring_contract_response_schema() -> dict:
     """Describe the capability response from its live section registries."""
     authoring_names = list(AUTHORING_OBJECT_SECTION_NAMES)
-    io_contract = io_contract_schema()
     properties = authoring_object_section_schemas()
     properties.update({
         'ok': {'type': 'boolean', 'const': True},
@@ -165,50 +162,19 @@ def authoring_contract_response_schema() -> dict:
         'kinds': contract_snapshot_schema(sorted(VALID_PARAM_KINDS)),
         'controls': contract_snapshot_schema(CONTROL_KINDS),
         'builtins': contract_snapshot_schema(list(builtin_names())),
-        'ioTypes': contract_snapshot_schema(list(io_contract['types'])),
-        'defaultOutput': contract_snapshot_schema(
-            io_contract['defaultOutput']['name']),
         'contractSections': contract_section_registry_schema(),
     })
     return {
         'type': 'object',
         'required': [
             'ok', 'format', 'schema', 'roleNames', 'generic', 'controls',
-            'kinds', 'builtins', 'contractSections', 'ioTypes',
-            'defaultOutput', *authoring_names,
+            'kinds', 'builtins', 'contractSections', *authoring_names,
         ],
         'properties': properties,
     }
 
 
-def role_contract_response_schema() -> dict:
-    """Describe the compatibility endpoint's full or single-role result."""
-    role_schema = {
-        'type': 'object',
-        'required': ['ok', 'role', 'fields', 'persona'],
-        'properties': {
-            'ok': {'type': 'boolean', 'const': True},
-            'request_id': {'type': 'string'},
-            'role': {'type': 'string'},
-            'fields': {
-                'type': 'array',
-                'items': field_spec_schema(),
-            },
-            'persona': {
-                'type': 'object',
-                'required': ['prompt', 'whenToUse', 'tier'],
-                'properties': {
-                    'prompt': {'type': 'string'},
-                    'whenToUse': {'type': 'string'},
-                    'tier': {'type': 'string'},
-                },
-            },
-        },
-    }
-    return {'oneOf': [authoring_contract_response_schema(), role_schema]}
-
-
 __all__ = [
     'authoring_contract_response_schema', 'authoring_object_section_schemas',
-    'node_authoring_defaults_schema', 'role_contract_response_schema',
+    'node_authoring_defaults_schema',
 ]

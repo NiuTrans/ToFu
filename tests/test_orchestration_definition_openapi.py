@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from lib.orchestration.definition_wire_contracts import (
-    definition_delete_response_schema,
+from lib.orchestration.definition_contract_registry import (
     definition_entry_contract,
     definition_list_contract,
     definition_write_contract,
+)
+from lib.orchestration.definition_contract_schema import (
+    definition_delete_response_schema,
 )
 from lib.orchestration.inspection_wire_contract import (
     inspection_response_schema,
@@ -27,7 +29,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_definition_success_schemas_derive_formats_and_field_registries():
-    import lib.orchestration.definition_wire_contracts as wire_module
+    import lib.orchestration.definition_contract_schema as schema_module
     import routes.api_v1.orchestration_definition_openapi as openapi_module
 
     listed = definition_list_response_schema()
@@ -47,11 +49,11 @@ def test_definition_success_schemas_derive_formats_and_field_registries():
     assert written['properties']['inspection'] == inspection_response_schema()
     assert deleted['required'] == ['ok']
     assert openapi_module.definition_list_response_schema is \
-        wire_module.definition_list_response_schema
+        schema_module.definition_list_response_schema
     assert openapi_module.definition_entry_response_schema is \
-        wire_module.definition_entry_response_schema
+        schema_module.definition_entry_response_schema
     assert openapi_module.definition_delete_response_schema is \
-        wire_module.definition_delete_response_schema
+        schema_module.definition_delete_response_schema
     source = open(openapi_module.__file__, encoding='utf-8').read()
     assert 'def definition_list_response_schema' not in source
     assert 'def definition_entry_response_schema' not in source
@@ -59,7 +61,7 @@ def test_definition_success_schemas_derive_formats_and_field_registries():
 
 
 def test_definition_write_docs_share_version_and_conflict_contract():
-    import lib.orchestration.definition_wire_contracts as wire_module
+    import lib.orchestration.definition_conflict_schema as conflict_module
     import routes.api_v1.orchestration_definition_openapi as openapi_module
 
     contract = definition_write_contract()
@@ -67,7 +69,7 @@ def test_definition_write_docs_share_version_and_conflict_contract():
     conflict = definition_conflict_response_schema()
 
     assert parameter['name'] == contract['preconditionHeader']
-    assert parameter['required'] is not contract['legacyUnguarded']
+    assert parameter['required'] is True
     assert conflict['properties']['conflict']['enum'] == [
         contract['conflictReason'],
     ]
@@ -80,10 +82,10 @@ def test_definition_write_docs_share_version_and_conflict_contract():
     assert conflict['properties']['write']['additionalProperties'] is False
     assert write['format']['enum'] == [contract['format']]
     assert write['operation']['enum'] == contract['operations']
-    assert write['expectedUpdatedAt']['type'] == ['integer', 'null']
-    assert write['currentUpdatedAt']['type'] == ['integer', 'null']
+    assert write['expectedUpdatedAt']['type'] == 'integer'
+    assert write['currentUpdatedAt']['type'] == 'integer'
     assert openapi_module.definition_conflict_response_schema is \
-        wire_module.definition_conflict_response_schema
+        conflict_module.definition_conflict_response_schema
     assert 'def definition_conflict_response_schema' not in open(
         openapi_module.__file__, encoding='utf-8').read()
 

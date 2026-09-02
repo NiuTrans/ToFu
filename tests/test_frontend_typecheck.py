@@ -58,7 +58,7 @@ ROOT = os.path.normpath(os.path.join(HERE, '..'))
 # The recorded 464 had drifted below the actual count (494). Rather than just
 # bump it, we drove the count DOWN by ~440 by attacking root causes:
 #   • Fixed genuine bugs / false-positives in source: em-dash-in-JSDoc parse
-#     errors (TS1127/1016) in conv_view.js + streaming_render.js; pdfProcessing
+#     errors (TS1127/1016) in the pre-Turn renderer + streaming_render.js; pdfProcessing
 #     boolean→counter init (core.js); _streamZoneCache reset shape mismatch
 #     (health_stream_timer.js); undocumented optional @param on
 #     _streamingBubbleHTML / getMessages (TS2554/1016); _i18nLang union type.

@@ -4,4 +4,3 @@ export function getRuntimeService(name: string): unknown;
 export function setRuntimeService(name: string, value: unknown): void;
 export const runtimeReady: Promise<void>;
 export function loadFeatureFlags(): Promise<void>;
-export const runtimeSourceCount: number;

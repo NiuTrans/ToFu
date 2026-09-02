@@ -51,6 +51,7 @@ class _Runtime(_Owner):
 
 
 def _install_fakes(monkeypatch, calls, runtime, *, fail_watchdog=False):
+    import lib.auto_restart as auto_restart
     import lib.serving_loop_lifecycle as lifecycle
 
     monkeypatch.setattr(
@@ -63,6 +64,7 @@ def _install_fakes(monkeypatch, calls, runtime, *, fail_watchdog=False):
     def watchdog(*_args, **_kwargs):
         if fail_watchdog:
             raise RuntimeError('watchdog failed')
+        calls.append(('watchdog-start', _kwargs))
         return _Watchdog('watchdog', calls)
 
     monkeypatch.setattr(lifecycle, '_create_watchdog', watchdog)
@@ -70,27 +72,31 @@ def _install_fakes(monkeypatch, calls, runtime, *, fail_watchdog=False):
         lifecycle, '_load_write_freshness_snapshot',
         lambda: calls.append(('snapshot', {})))
     monkeypatch.setattr(
-        lifecycle, '_start_auto_restart',
-        lambda _event: calls.append(('auto-start', {})) or True)
+        auto_restart, 'maybe_start_auto_restart_watch',
+        lambda *, shutdown_requested: calls.append(
+            ('auto-start', {'shutdown_requested': shutdown_requested})) or True)
     monkeypatch.setattr(
-        lifecycle, '_stop_auto_restart',
-        lambda: calls.append(('auto-stop', {})))
-    monkeypatch.setattr(
-        lifecycle, '_run_deferred_dispatch',
-        lambda descriptor, _event: calls.append(('deferred', descriptor)))
+        auto_restart, 'stop_auto_restart_watch',
+        lambda *, timeout: calls.append(('auto-stop', {'timeout': timeout})))
     monkeypatch.setattr(
         lifecycle, '_redispatch_orphaned_queue',
         lambda: calls.append(('orphan', {})) or ['task-1'])
+    monkeypatch.setattr(
+        lifecycle, '_turn_recovery_backstop_body',
+        lambda stop_event, gate_open_ms, _logger: calls.append((
+            'turn-recovery', {
+                'stop_event': stop_event,
+                'gate_open_ms': gate_open_ms,
+            })))
 
 
-def test_loop_owners_start_on_serving_loop_and_recovery_reads_after_gate(
+def test_loop_owners_start_then_gate_recovery_and_shutdown_every_owner(
         monkeypatch):
     app = create_base_app('serving-loop-lifecycle', {'TESTING': True})
     calls = []
     runtime = _Runtime(calls)
     _install_fakes(monkeypatch, calls, runtime)
     stop = threading.Event()
-    descriptor = {'value': 'before-db'}
 
     assert register_serving_loop_lifecycle(
         app,
@@ -98,7 +104,6 @@ def test_loop_owners_start_on_serving_loop_and_recovery_reads_after_gate(
         host='127.0.0.1',
         port=16000,
         hooks=object(),
-        deferred_dispatch_provider=lambda: descriptor['value'],
         logger=logging.getLogger('test.serving-loop'),
         environ={},
     ) is True
@@ -114,23 +119,36 @@ def test_loop_owners_start_on_serving_loop_and_recovery_reads_after_gate(
             assert state['gate'] is app.extensions[
                 'tofu_production_startup_gate']
             assert loop.get_exception_handler() is state['exception_handler']
-            assert not any(name == 'deferred' for name, _ in calls)
-            descriptor['value'] = 'after-db'
+            assert state['auto_restart_started'] is True
+            assert ('auto-start', {'shutdown_requested': stop}) in calls
+            watchdog_start = next(
+                details for name, details in calls
+                if name == 'watchdog-start')
+            assert watchdog_start['host'] == '127.0.0.1'
+            assert watchdog_start['port'] == 16000
+            assert watchdog_start['ready_event'] is state['gate']
+            assert not any(
+                name in {'orphan', 'turn-recovery'} for name, _ in calls)
             state['gate'].set()
             for _ in range(50):
-                if any(name == 'orphan' for name, _ in calls) and any(
-                        name == 'deferred' for name, _ in calls):
+                if all(any(name == expected for name, _ in calls)
+                       for expected in ('orphan', 'turn-recovery')):
                     break
                 await asyncio.sleep(0.01)
-            assert ('deferred', 'after-db') in calls
             assert ('orphan', {}) in calls
+            recovery = next(
+                details for name, details in calls
+                if name == 'turn-recovery')
+            assert recovery['stop_event'] is stop
+            assert isinstance(recovery['gate_open_ms'], int)
         assert loop.get_exception_handler() is previous
 
     asyncio.run(exercise())
     assert stop.is_set()
     assert app.extensions['tofu_serving_loop_lifecycle']['status'] == 'stopped'
-    assert ('task', 'tofu-deferred-boot-dispatch') in calls
     assert ('task', 'tofu-orphan-queue-redispatch') in calls
+    assert ('task', 'tofu-turn-recovery-backstop') in calls
+    assert ('auto-stop', {'timeout': 2.0}) in calls
     stop_names = [name for name, _ in calls if name.endswith('-stop')]
     assert stop_names == [
         'auto-stop', 'watchdog-stop', 'runtime-stop', 'debug-stop']
@@ -164,9 +182,8 @@ def test_partial_loop_startup_rolls_back_started_owners(monkeypatch):
     assert app.extensions['tofu_lifecycle']['status'] == 'startup_failed'
 
 
-def test_server_runtime_factory_shares_one_event_and_handler_order():
+def test_server_runtime_factory_shares_one_event_and_handler_order(monkeypatch):
     import server
-
     app = server.create_production_app({'TESTING': True})
     event = app.extensions['tofu_shutdown_requested']
     assert event is app.extensions['tofu_production_lifecycle'][

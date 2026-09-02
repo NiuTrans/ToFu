@@ -1,6 +1,6 @@
 """Static guard for the Request Inspector snapshot contract.
 
-Design: docs/DEBUG_PANEL_REDESIGN.md §3 (frozen). Every
+Design: docs/FRONTEND_ARCHITECTURE.md §3 (frozen). Every
 ``build_event(EventType.MESSAGES_SNAPSHOT, ...)`` emission site MUST carry an
 explicit ``kind=`` classifying it:
 
@@ -37,7 +37,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 LIB = os.path.join(ROOT, 'lib')
 
-# Frozen emission-site table (docs/DEBUG_PANEL_REDESIGN.md §3.1). Adding a
+# Frozen emission-site table (docs/FRONTEND_ARCHITECTURE.md §3.1). Adding a
 # fifth site must update this table deliberately; removing one likewise.
 EXPECTED_SITES = {
     # The request site moved out of _run.py into its own HOT_PATH helper
@@ -175,7 +175,7 @@ def _validate(sites: list) -> list:
             problems.append(
                 f'{rel}:{lineno} snapshot emission missing kind= '
                 f"(got {kind!r}) — 'request' or 'state' required "
-                f'(docs/DEBUG_PANEL_REDESIGN.md §3)')
+                f'(docs/FRONTEND_ARCHITECTURE.md §3)')
             continue
         expected = EXPECTED_SITES.get(rel)
         if expected and kind != expected:

@@ -4,6 +4,8 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+
 
 def test_meter_accumulates_vendor_shapes_and_uses_dispatch_pricing(monkeypatch):
     import lib.research.telemetry as tm
@@ -100,28 +102,29 @@ def test_llm_evaluation_usage_is_part_of_the_run_total():
 
 def test_usage_survives_task_ttl_via_research_artifact_store(
         tmp_path, monkeypatch):
-    from lib.database import reset_sqlite_for_tests, restore_db_state
     import lib.research.persistence as persistence
     from lib.research.persistence import (load_research_artifacts,
                                           persist_ideate, persist_survey)
     from lib.storage import StorageSupervisor
 
-    snapshot = reset_sqlite_for_tests(str(tmp_path / 'usage.db'))
     supervisor = StorageSupervisor(
-        project_root=tmp_path / 'sidecar', backend='sqlite', startup_timeout=20)
+        project_root=tmp_path / 'sidecar', backend='sqlite', startup_timeout=60)
     supervisor.start()
     monkeypatch.setattr(
         persistence, '_storage', lambda **_kwargs: supervisor.client)
     try:
         persist_survey('direction', 'en', '# survey', {'open_gaps': []},
                        usage={'calls': 2, 'prompt_tokens': 100,
-                              'completion_tokens': 10, 'cost_cny': 0.2})
+                              'completion_tokens': 10, 'cost_cny': 0.2},
+                       user_id=TEST_OWNER_USER_ID)
         persist_ideate('direction', 'en', {
             'accepted': [], 'rejected': [{'reject_stage': 'rubric'}],
             'threshold': 4.0, 'gate_reached': 'rubric',
             'usage': {'calls': 3, 'prompt_tokens': 80,
-                      'completion_tokens': 20, 'cost_cny': 0.3}})
-        got = load_research_artifacts('direction', 'en')['usage']
+                      'completion_tokens': 20, 'cost_cny': 0.3}},
+            user_id=TEST_OWNER_USER_ID)
+        got = load_research_artifacts(
+            'direction', 'en', user_id=TEST_OWNER_USER_ID)['usage']
         assert got['total']['calls'] == 5
         assert got['total']['prompt_tokens'] == 180
         assert got['total']['cost_cny'] == 0.5
@@ -129,4 +132,3 @@ def test_usage_survives_task_ttl_via_research_artifact_store(
         assert got['stages']['ideate']['calls'] == 3
     finally:
         supervisor.stop()
-        restore_db_state(snapshot)

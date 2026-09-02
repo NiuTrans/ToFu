@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import socket
 import struct
@@ -13,12 +14,43 @@ from lib.storage.errors import StorageError
 
 
 PROTOCOL_VERSION = 'storage.v1'
-MAX_FRAME_BYTES = 8 * 1024 * 1024
+# Must fit the largest legitimate conversation document: the production
+# authority holds transcripts up to ~46 MiB, and every checkpoint sync ships
+# the full document. The historical 8 MiB cap silently rejected those writes
+# (import + live sync). 64 MiB leaves headroom without dropping the anti-abuse
+# bound (loopback + token-authenticated; rpc slots cap concurrency).
+MAX_FRAME_BYTES = 64 * 1024 * 1024
 _HEADER = struct.Struct('!I')
 _OPERATION = re.compile(r'^[a-z][a-z0-9_.:-]{0,191}$')
 
 
+def validate_finite_json_numbers(value: Any) -> None:
+    """Reject values that JSON cannot represent without silent coercion."""
+    pending = [value]
+    visited_containers: set[int] = set()
+    while pending:
+        item = pending.pop()
+        if isinstance(item, float) and not math.isfinite(item):
+            raise StorageError(
+                'database_protocol_error',
+                'Storage value contains a non-finite JSON number',
+            )
+        if isinstance(item, Mapping):
+            identity = id(item)
+            if identity in visited_containers:
+                continue
+            visited_containers.add(identity)
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            identity = id(item)
+            if identity in visited_containers:
+                continue
+            visited_containers.add(identity)
+            pending.extend(item)
+
+
 def canonical_json(value: Any) -> bytes:
+    validate_finite_json_numbers(value)
     return orjson.dumps(value, option=orjson.OPT_SORT_KEYS)
 
 
@@ -31,6 +63,7 @@ def validate_operation(operation: Any) -> str:
 
 
 def encode_frame(message: Mapping[str, Any]) -> bytes:
+    validate_finite_json_numbers(message)
     try:
         body = orjson.dumps(message)
     except (TypeError, orjson.JSONEncodeError) as exc:
@@ -48,8 +81,16 @@ def _recv_exact(sock: socket.socket, size: int) -> bytes:
     while remaining:
         block = sock.recv(remaining)
         if not block:
+            # EOF before a complete frame means the PEER went away — an
+            # overload close, a crash, or a supervised restart — which is
+            # transport unavailability, not a framing violation.  The
+            # previous 'database_protocol_error' classification was
+            # non-retryable, so a transient blip killed idempotent reads
+            # that the client retry loop exists to absorb (2026-08-19: 181
+            # SSE streams died on a sidecar capacity/restart window).
             raise StorageError(
-                'database_protocol_error', 'Storage connection closed mid-frame')
+                'database_unavailable', 'Storage connection closed mid-frame',
+                True, 100)
         chunks.append(block)
         remaining -= len(block)
     return b''.join(chunks)
@@ -78,5 +119,6 @@ def send_frame(sock: socket.socket, message: Mapping[str, Any]) -> None:
 
 __all__ = [
     'MAX_FRAME_BYTES', 'PROTOCOL_VERSION', 'canonical_json', 'encode_frame',
-    'recv_frame', 'send_frame', 'validate_operation',
+    'recv_frame', 'send_frame', 'validate_finite_json_numbers',
+    'validate_operation',
 ]

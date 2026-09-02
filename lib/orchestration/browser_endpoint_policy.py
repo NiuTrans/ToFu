@@ -44,7 +44,6 @@ ORCHESTRATION_CLIENT_METHODS: Mapping[
     'builtin': ('builtinResult', 'builtin'),
     'layout': ('layoutResult', 'layout'),
     'authoring-contract': ('authoringContractResult', 'authoringContract'),
-    'role-schema': ('roleSchemaResult', 'roleSchema'),
     'plan': ('planResult', 'plan'),
     'run-start': ('runResult', 'run'),
     'run-poll': ('runPollResult', 'runPoll'),

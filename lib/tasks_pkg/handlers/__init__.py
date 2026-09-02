@@ -18,32 +18,34 @@ from lib.tasks_pkg.handlers import (  # noqa: F401
     code_exec,
     mcp,
     memory,
-    misc,
     motion_video,
     project,
     skills,
     tool_gateway,
 )
 
-# ``search`` is imported SEPARATELY and degradably. Its three modules import
-# tofu_search at module level, which pulls trafilatura → lxml → libicuuc; on
-# 2026-07-31 that chain raised
-#   ImportError: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found
-# eight times. This package sits on the boot chain, so a bare import made a
-# fault confined to WEB SEARCH kill the entire server — chat, projects, the
-# scheduler and everything else died with it.
-#
-# Degrading here means the web_search / fetch_url handlers are simply not
-# registered: calling them returns an unknown-tool error while every other
-# tool and subsystem works normally. That is the correct blast radius for one
-# optional capability. Guarded at the package seam rather than per-symbol
-# because all three modules under handlers/search/ share the same dependency.
+# Miscellaneous handlers are split by capability; import the concrete owners
+# explicitly so registration never depends on package-root side effects.
+from lib.tasks_pkg.handlers.misc import (  # noqa: F401
+    _agents as _misc_agents,
+    _brain as _misc_brain,
+    _human as _misc_human,
+)
+
+# Large tool-result continuation is a durable-storage capability.  The public
+# ``tofu-agent`` wheel deliberately excludes ``lib.storage``; keep the common
+# handler graph importable there while preserving fail-loud behavior for every
+# unrelated import error.  The full application still registers these handlers
+# because its declared storage package is present.
 try:
-    from lib.tasks_pkg.handlers import search  # noqa: F401
-except ImportError as _search_err:
-    from lib.log import get_logger as _get_logger
-    _get_logger(__name__).error(
-        'Web search/fetch handlers are NOT registered — the search handler '
-        'package could not be imported: %s. web_search/fetch_url will report '
-        'an unknown tool; all other tools are unaffected.',
-        _search_err, exc_info=True)
+    from lib.tasks_pkg.handlers import tool_result_artifacts  # noqa: F401
+except ModuleNotFoundError as _artifact_storage_err:
+    if not str(_artifact_storage_err.name or '').startswith('lib.storage'):
+        raise
+
+# Registration modules are dependency-light. The optional tofu-search graph is
+# activated inside a handler only after its inputs pass validation, so every
+# tool name remains discoverable and an unavailable search dependency produces
+# a typed per-call failure instead of an opaque unknown-tool result.
+from lib.tasks_pkg.handlers.search import _handlers as _search_handlers  # noqa: F401
+from lib.tasks_pkg.handlers.search import _settings as _search_settings  # noqa: F401

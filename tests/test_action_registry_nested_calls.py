@@ -3,20 +3,15 @@
 The action interpreter (frontend/src/action-registry.ts) replaced inline
 ``onclick`` eval with an allowlist grammar. Its ``resolveValue`` originally
 recognised only literals / ``event`` / ``this`` / property paths / registered
-bare names — so a CALL-SHAPED argument such as ``_msgElIndex(this)`` fell
-through to the raw-string passthrough and reached the handler as the literal
-string ``"_msgElIndex(this)"``. Every message-action button
-(``copyMessage(_msgElIndex(this))`` family, 18 sites in app-runtime.js)
-then hit the handler's ``conv.messages[idx]`` guard and silently no-opped:
-zero console output, nothing clickable. (Same disease family as the
-cmd-display ``var`` refusal fixed in a3058b3e, but silent instead of loud.)
+bare names — so a call-shaped argument such as ``_elementOrdinal(this)`` fell
+through as raw source text instead of invoking the registered selector.
 
 Pinned behaviours (real jsdom click through the REAL registry source):
 
-  1. Nested call args resolve to their return value: ``copyMessage(_msgElIndex(this))``
+  1. Nested call args resolve to their return value: ``captureValue(_elementOrdinal(this))``
      receives ``7`` (number), never the raw source string.
-  2. Multi-arg mixed nesting works: ``_takeTwo(_msgElIndex(this), 3)`` → ``[7, 3]``.
-  3. Assignment RHS nesting works: ``this.dataset.idx=_msgElIndex(this)`` → ``"7"``.
+  2. Multi-arg mixed nesting works: ``_takeTwo(_elementOrdinal(this), 3)`` → ``[7, 3]``.
+  3. Assignment RHS nesting works: ``this.dataset.idx=_elementOrdinal(this)`` → ``"7"``.
   4. ``event.target.closest('.x')`` inside an ``if`` condition now CALLS the
      method (bilingual-header guard form) instead of resolving to undefined.
   5. Unknown nested names refuse LOUDLY: console.error ``[actions] refused``,
@@ -30,6 +25,7 @@ test_frontend_cmd_collapse.py).
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -59,14 +55,14 @@ const require = createRequire(import.meta.url);
 const ROOT = process.argv[2];
 const { JSDOM } = require(require('path').join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM(`<!DOCTYPE html><html><body>
-  <div id="m1" class="message"><button id="b1" data-tofu-action="event.stopPropagation();copyMessage(_msgElIndex(this))">Copy</button></div>
-  <div id="m2" class="message"><button id="b2" data-tofu-action="_takeTwo(_msgElIndex(this), 3)">Two</button></div>
-  <div id="m3" class="message"><button id="b3" data-tofu-action="this.dataset.idx=_msgElIndex(this)">Assign</button></div>
+  <div id="m1" class="item"><button id="b1" data-tofu-action="event.stopPropagation();captureValue(_elementOrdinal(this))">Capture</button></div>
+  <div id="m2" class="item"><button id="b2" data-tofu-action="_takeTwo(_elementOrdinal(this), 3)">Two</button></div>
+  <div id="m3" class="item"><button id="b3" data-tofu-action="this.dataset.idx=_elementOrdinal(this)">Assign</button></div>
   <div id="h1" data-tofu-action="if(event.target.closest('.keep'))return;this.dataset.hit='1'">
     <span id="k1" class="keep">keep</span><span id="p1" class="plain">plain</span>
   </div>
-  <div id="m4" class="message"><button id="b4" data-tofu-action="copyMessage(_nope(this))">Unknown</button></div>
-  <div id="m5" class="message"><button id="b5" data-tofu-action="copyMessage(7,'x')">Control</button></div>
+  <div id="m4" class="item"><button id="b4" data-tofu-action="captureValue(_nope(this))">Unknown</button></div>
+  <div id="m5" class="item"><button id="b5" data-tofu-action="captureValue(7,'x')">Control</button></div>
 </body></html>`, { url: 'http://localhost/' });
 globalThis.window = dom.window;
 globalThis.document = dom.window.document;
@@ -80,10 +76,10 @@ const registry = await import(pathToFileURL(process.argv[3]).href);
 
 const received = { copy: [], two: [] };
 const resolve = (name) => {
-  if (name === 'copyMessage') return (...a) => { received.copy.push(a); };
+  if (name === 'captureValue') return (...a) => { received.copy.push(a); };
   if (name === '_takeTwo') return (...a) => { received.two.push(a); };
-  if (name === '_msgElIndex') return (el) =>
-    (el && el.closest && el.closest('.message')) ? 7 : -1;
+  if (name === '_elementOrdinal') return (el) =>
+    (el && el.closest && el.closest('.item')) ? 7 : -1;
   return undefined;  // _nope → unknown, on purpose
 };
 registry.installActionRegistry(resolve);
@@ -100,7 +96,7 @@ function realClick(el) {
   return stopped;
 }
 
-// ── 1. message-action compound: nested arg + stopPropagation prefix ──
+// ── 1. action compound: nested arg + stopPropagation prefix ──
 const stopped1 = realClick(document.getElementById('b1'));
 check('nested_call_arg_resolved', JSON.stringify(received.copy[0]) === '[7]');
 check('nested_call_arg_is_number', typeof received.copy[0]?.[0] === 'number');
@@ -186,6 +182,62 @@ def test_registry_grammar_pins_no_eval_and_recursion():
     property_paths = source.index("value.startsWith('event.')")
     assert call_branch < property_paths
 
+
+# ── 2026-08-21 incident anchor: swarm panel dead clicks ──
+# The freshly-built swarm panel header used
+#   data-tofu-action="this.closest('.sw-panel').classList.toggle('sw-collapsed')"
+# The interpreter's method-call branch resolves the receiver
+# ``this.closest('.sw-panel').classList`` — a CALL chained into a PROPERTY —
+# through the property-path fast path, which yields undefined, so the click
+# was refused with ``Unknown action method: toggle`` (console-only) and the
+# panel never opened. Same for the agent card's ``sw-a-open`` toggle.
+# Grammar rule: ``call(...).method(...)`` is supported (receiver ends in
+# ``)``), but ``call(...).property.anything`` is NOT. Guard: no
+# data-tofu-action value anywhere may chain a property off a call result.
+_ACTION_ATTR = re.compile(r'data-tofu-action(?:-[a-z]+)?\s*=\s*(["\'])(.*?)\1')
+_PROPERTY_AFTER_CALL = re.compile(r'\)\s*\.[A-Za-z_$][\w$]*\.')
+
+# Bite-proof: the detector must catch the exact historical expressions.
+_HISTORICAL_BROKEN = [
+    "this.closest('.sw-panel').classList.toggle('sw-collapsed')",
+    "this.closest('.sw-agent').classList.toggle('sw-a-open')",
+]
+# …and must NOT flag the supported call-receiver form.
+_HISTORICAL_OK = ["this.closest('.stg-mx-editor').remove()"]
+
+
+@pytest.mark.unit
+def test_no_property_chain_after_call_in_actions():
+    for expr in _HISTORICAL_BROKEN:
+        assert _PROPERTY_AFTER_CALL.search(expr), f'detector blind to: {expr}'
+    for expr in _HISTORICAL_OK:
+        assert not _PROPERTY_AFTER_CALL.search(expr), f'detector over-fires: {expr}'
+
+    scanned = [os.path.join(ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js'),
+               os.path.join(ROOT, 'index.html')]
+    html_directories = (
+        os.path.join(ROOT, 'static', 'settings_panels'),
+        os.path.join(
+            ROOT, 'frontend', 'src', 'application-shell', 'fragments'),
+    )
+    for directory in html_directories:
+        if os.path.isdir(directory):
+            scanned.extend(
+                os.path.join(directory, name)
+                for name in sorted(os.listdir(directory))
+                if name.endswith('.html'))
+    offenders = []
+    for path in scanned:
+        with open(path, encoding='utf-8') as f:
+            source = f.read()
+        for match in _ACTION_ATTR.finditer(source):
+            value = match.group(2)
+            if _PROPERTY_AFTER_CALL.search(value):
+                offenders.append(f'{os.path.relpath(path, ROOT)}: {value}')
+    assert not offenders, (
+        'data-tofu-action chains a property off a call result — the action '
+        'interpreter refuses it and the click silently dies. Use a named '
+        'action instead (see _swarmToggleClass):\n' + '\n'.join(offenders))
 
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-v']))

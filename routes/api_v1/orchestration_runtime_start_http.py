@@ -16,6 +16,7 @@ from .orchestration_run_http import (
 )
 from .orchestration_request_http import orchestration_request_response
 from .orchestration_service_http import orchestration_service_response
+from .auth import request_user_id
 
 
 logger = get_logger(__name__)
@@ -50,6 +51,7 @@ def runtime_start_request_response(
             lambda: runtime_start_service().start(
                 kind,
                 definition,
+                owner_user_id=int(request_user_id()),
                 input_text=prepared.input_text,
                 orchestration_id=prepared.orchestration_id,
                 created_by=created_by,

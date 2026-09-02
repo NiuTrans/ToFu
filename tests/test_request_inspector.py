@@ -1,6 +1,6 @@
 """Request Inspector server fold (P2) — pytest suite.
 
-Design: docs/DEBUG_PANEL_REDESIGN.md §3.3 (frozen row schemas). Verifies
+Design: docs/FRONTEND_ARCHITECTURE.md §3.3 (frozen row schemas). Verifies
 ``lib/tasks_pkg/request_inspector.py`` against REAL seeded ``task_events``
 rows (unique task ids in the dev DB, cleaned up after):
 
@@ -11,7 +11,7 @@ rows (unique task ids in the dev DB, cleaned up after):
      flagged ``legacy:true``.
   3. ``round_usage`` events join as ``attempts`` per round — MULTIPLE per
      round (R1 + R1-FALLBACK = 2 real HTTP calls, the fallback case).
-  4. ``coverage`` flips to ``'partial'`` when the task drove endpoint mode
+  4. ``coverage`` flips to ``'partial'`` when the task drove Flow execution
      (Planner/Critic calls not captured — the honest chip).
   5. Unknown/expired task → ``eventsAvailable:false``, empty lists.
   6. ``get_request_payload`` serves the full payload per round, last
@@ -31,7 +31,8 @@ import uuid
 
 import pytest
 
-pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._chat_sidecar',)
+pytestmark = [pytest.mark.unit, pytest.mark.usefixtures('chat_sidecar')]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
@@ -49,14 +50,33 @@ def _seed(task_id, events):
 
 def _cleanup(*task_ids):
     try:
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        db = get_thread_db(DOMAIN_CHAT)
-        for tid in task_ids:
-            db.execute('DELETE FROM task_events WHERE task_id=?', (tid,))
-            db.execute('DELETE FROM task_results WHERE task_id=?', (tid,))
-        db.commit()
+        from lib.storage import get_storage_client
+        client = get_storage_client(write=True)
+        for task_id in task_ids:
+            client.command(
+                'record.delete', {
+                    'namespace': 'task_results', 'key': task_id,
+                }, f'request-inspector-cleanup:{task_id}')
     except Exception:
         pass
+
+
+def _seed_task_result(task_id, conv_id, created_at, *, user_id=1):
+    from lib.storage import get_storage_client
+    get_storage_client(write=True).command(
+        'task_results.checkpoint', {
+            'key': task_id,
+            'expected_version': 0,
+            'value': {
+                'task_id': task_id,
+                'conv_id': conv_id,
+                'user_id': user_id,
+                'content': '',
+                'status': 'done',
+                'created_at': created_at,
+                'completed_at': created_at,
+            },
+        }, None)
 
 
 def _snap(kind=None, round_num=1, label='', n_msgs=3, tools=2):
@@ -115,10 +135,10 @@ def task_legacy():
 
 
 @pytest.fixture()
-def task_endpoint():
+def task_flow():
     tid = f'ri-e-{uuid.uuid4().hex[:8]}'
     _seed(tid, [
-        ('endpoint_iteration', {'iteration': 1, 'phase': 'working'}),
+        ('flow_iteration', {'iteration': 1, 'phase': 'working'}),
         ('messages_snapshot', _snap('request', 1, n_msgs=3)),
     ])
     yield tid
@@ -144,6 +164,54 @@ def test_request_rows_metadata_only_and_split(task_a):
     assert len(fold['states']) == 1
     assert fold['states'][0]['roundNum'] == 'final'
     assert fold['coverage'] == 'full'
+
+
+def test_final_wire_projection_replaces_assembled_tool_count_honestly():
+    tid = f'ri-wire-{uuid.uuid4().hex[:8]}'
+    _seed(tid, [
+        ('messages_snapshot', _snap('request', 1, n_msgs=2, tools=46)),
+        ('tool_wire_projection', {
+            'roundNum': 1,
+            'model': 'kimi-k3',
+            'backend': 'local',
+            'toolNames': ['read_files', 'edit_file', 'run_command',
+                          'search_tools', 'execute_tools'],
+            'toolCount': 5,
+            'schemaTokens': 3978,
+            'schemaFingerprint': 'wire-schema-fingerprint-1',
+            'schemaBudgetTokens': 4000,
+            'budgetDroppedNames': ['write_file'],
+            'compactedNames': ['execute_tools'],
+            'executableToolCount': 46,
+        }),
+    ])
+    try:
+        from lib.tasks_pkg.request_inspector import (
+            fold_request_log, get_request_payload)
+
+        row = fold_request_log(tid)['requests'][0]
+        assert row['toolsCount'] == 46
+        assert row['wireToolsCount'] == 5
+        assert row['wireSchemaTokens'] == 3978
+        assert row['wireSchemaFingerprint'] == 'wire-schema-fingerprint-1'
+        assert row['budgetDroppedCount'] == 1
+
+        payload = get_request_payload(tid, 1)
+        assert len(payload['tools']) == 46
+        assert payload['wireProjection'] == {
+            'backend': 'local',
+            'toolNames': ['read_files', 'edit_file', 'run_command',
+                          'search_tools', 'execute_tools'],
+            'toolCount': 5,
+            'schemaTokens': 3978,
+            'schemaFingerprint': 'wire-schema-fingerprint-1',
+            'schemaBudgetTokens': 4000,
+            'budgetDroppedNames': ['write_file'],
+            'compactedNames': ['execute_tools'],
+            'executableToolCount': 46,
+        }
+    finally:
+        _cleanup(tid)
 
 
 def test_attempts_join_multi_call_round(task_a):
@@ -193,7 +261,7 @@ def test_operation_count_dedupes_cumulative_snapshots():
         _cleanup(tid)
 
 
-def test_operation_count_dedupes_same_id_across_endpoint_turns():
+def test_operation_count_dedupes_same_id_across_flow_turns():
     """A historical call copied into another phase is still one operation."""
     tid = f'ri-ops-turn-{uuid.uuid4().hex[:8]}'
     planner = _snap('request', 1, n_msgs=0, tools=0)
@@ -247,7 +315,7 @@ def test_operation_count_supports_anthropic_and_marks_missing_ids():
 def test_operation_count_is_unavailable_without_message_snapshots():
     """Structural lifecycle events alone cannot prove that zero tools ran."""
     tid = f'ri-ops-none-{uuid.uuid4().hex[:8]}'
-    _seed(tid, [('endpoint_phase', {'phase': 'working'})])
+    _seed(tid, [('flow_iteration', {'phase': 'working', 'iteration': 1})])
     try:
         from lib.tasks_pkg.request_inspector import fold_request_log
         fold = fold_request_log(tid)
@@ -270,9 +338,9 @@ def test_legacy_rows_classified_by_shim(task_legacy):
     assert all(s['legacy'] for s in fold['states'])
 
 
-def test_coverage_partial_for_endpoint_task(task_endpoint):
+def test_coverage_partial_for_flow_task(task_flow):
     from lib.tasks_pkg.request_inspector import fold_request_log
-    fold = fold_request_log(task_endpoint)
+    fold = fold_request_log(task_flow)
     assert fold['coverage'] == 'partial'
     assert fold['requestCount'] == 1
 
@@ -292,23 +360,27 @@ def test_streaming_noise_never_hides_recent_rounds():
     dominated by streaming noise — measured on a real 51,754-row task, the
     inspector's first-10000-rows read cut EVERY snapshot past round 6 and
     rounds 7+ all reported 'mirror expired'. The read must filter to the
-    structural slice it renders (snapshots / round_usage / endpoint_*);
+    structural slice it renders (snapshots / round_usage / flow_*);
     with the filter, the same cap spans thousands of rounds.
 
     Seeds 10,300 noise rows BEFORE the structural rows of a late round
     (their event_ids sit beyond the first-10000 window): unfiltered, the
     round vanishes; filtered, both axes resolve."""
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib.storage import get_storage_client
     from lib.tasks_pkg.event_log import append_persistent_event
     from lib.tasks_pkg.request_inspector import (
         _read_events, fold_request_log, get_request_payload)
     tid = f'ri-n-{uuid.uuid4().hex[:8]}'
-    db = get_thread_db(DOMAIN_CHAT)
-    noise = [(tid, i, 1, 'delta', '{}') for i in range(10300)]
-    db.executemany(
-        'INSERT INTO task_events (task_id, event_id, ts_ms, type, payload) '
-        'VALUES (?, ?, ?, ?, ?)', noise)
-    db.commit()
+    client = get_storage_client(write=True)
+    noise = [
+        {'task_id': tid, 'sequence': i,
+         'event': {'type': 'delta', 'content': 'x'}}
+        for i in range(10300)
+    ]
+    for offset in range(0, len(noise), 500):
+        client.command(
+            'event.append_batch', {'events': noise[offset:offset + 500]},
+            None, priority='event')
     base = 10300
     append_persistent_event(
         tid, base,
@@ -321,14 +393,14 @@ def test_streaming_noise_never_hides_recent_rounds():
         tid, base + 2,
         _usage_event(88, 'R88')[1] | {'type': 'round_usage'})
     from lib.tasks_pkg.event_log import flush_pending
-    flush_pending(tid)  # write-behind lane: drain before asserting
+    flush_pending(tid)
     try:
         rows = _read_events(tid)
         assert rows, 'no rows returned'
         leaked = sorted({r['type'] for r in rows} -
                         {'messages_snapshot', 'round_usage', 'round_start',
                          'round_end'} - {r['type'] for r in rows
-                                         if r['type'].startswith('endpoint_')})
+                                         if r['type'].startswith('flow_')})
         assert not leaked, (
             f'streaming noise leaked into the inspector read: {leaked}')
         fold = fold_request_log(tid)
@@ -403,22 +475,13 @@ def test_payload_kind_state_same_round_axis():
 
 
 def test_list_conv_tasks_exact_tallies(task_a, task_legacy):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    from lib.database._core_schema import TASK_RESULTS, upsert
     conv = f'ri-conv-{uuid.uuid4().hex[:8]}'
-    db = get_thread_db(DOMAIN_CHAT)
     now = int(time.time() * 1000)
     for tid, ts in ((task_a, now), (task_legacy, now - 1000)):
-        upsert(db, TASK_RESULTS,
-               {'task_id': tid, 'conv_id': conv, 'content': '',
-                'status': 'done', 'created_at': ts, 'completed_at': ts},
-               conflict_cols=['task_id'],
-               insert_cols=['task_id', 'conv_id', 'content', 'status',
-                            'created_at', 'completed_at'],
-               update_cols=[], commit=True, retry=False)
+        _seed_task_result(tid, conv, ts)
     try:
         from lib.tasks_pkg.request_inspector import list_conv_tasks
-        out = list_conv_tasks(conv)
+        out = list_conv_tasks(conv, user_id=1)
         rows = {t['taskId']: t for t in out['tasks']}
         assert task_a in rows and task_legacy in rows
         ra = rows[task_a]
@@ -430,7 +493,8 @@ def test_list_conv_tasks_exact_tallies(task_a, task_legacy):
         # newest first
         assert out['tasks'][0]['taskId'] == task_a
         # unknown conv → empty
-        assert list_conv_tasks(f'ri-noconv-{uuid.uuid4().hex[:6]}')['tasks'] == []
+        assert list_conv_tasks(
+            f'ri-noconv-{uuid.uuid4().hex[:6]}', user_id=1)['tasks'] == []
     finally:
         _cleanup(task_a, task_legacy)
 
@@ -476,10 +540,10 @@ def _snap_turn(turn, round_num=1, n_msgs=3, content='x' * 100, **extra):
 
 @pytest.fixture()
 def task_turns():
-    """Endpoint-shaped task: same-numbered rounds across two phases."""
+    """Flow-shaped task: same-numbered rounds across two phases."""
     tid = f'ri-t-{uuid.uuid4().hex[:8]}'
     _seed(tid, [
-        ('endpoint_iteration', {'iteration': 0, 'phase': 'planning'}),
+        ('flow_iteration', {'iteration': 0, 'phase': 'planning'}),
         ('messages_snapshot', _snap_turn('working', 1, content='worker-body')),
         ('round_usage', {'roundNum': 1, 'model': 'm-w', 'tag': 'R1',
                          'turn': 'working', 'tokensIn': 100, 'tokensOut': 10,
@@ -505,16 +569,16 @@ def test_turn_tagged_rounds_stay_distinct(task_turns):
     by_turn = {r['turn']: r for r in fold['requests']}
     assert [a['traceId'] for a in by_turn['working']['attempts']] == ['tr-w']
     assert [a['traceId'] for a in by_turn['reviewing']['attempts']] == ['tr-c']
-    # endpoint + turn tags → fully covered, chip removed
+    # Flow events + turn tags → fully covered, chip removed
     assert fold['coverage'] == 'full'
     assert 'coverageReason' not in fold
 
 
-def test_endpoint_untagged_is_ambiguous_not_uncovered(task_endpoint):
+def test_flow_untagged_is_ambiguous_not_uncovered(task_flow):
     from lib.tasks_pkg.request_inspector import fold_request_log
-    fold = fold_request_log(task_endpoint)
+    fold = fold_request_log(task_flow)
     assert fold['coverage'] == 'partial'
-    assert fold['coverageReason'] == 'endpoint-untagged'
+    assert fold['coverageReason'] == 'flow-untagged'
 
 
 def test_payload_turn_disambiguation(task_turns):
@@ -531,7 +595,7 @@ def test_payload_turn_disambiguation(task_turns):
     assert get_request_payload(task_turns, 1, turn='planning') is None
 
 
-def test_swarm_agent_emission_end_to_end():
+def test_swarm_agent_emission_end_to_end(chat_sidecar):
     """The agent.py helper persists under '{parent}#agent:{id}' with
     kind='request' + turn='swarm-agent' — and the PARENT's own log stays
     clean (suppression contract intact)."""
@@ -573,7 +637,7 @@ def test_swarm_agent_emission_end_to_end():
         _cleanup(iid, parent_id)
 
 
-def test_swarm_agent_emission_continues_after_persisted_tail():
+def test_swarm_agent_emission_continues_after_persisted_tail(chat_sidecar):
     """A rehydrated agent must append, not restart at event id zero."""
     from types import SimpleNamespace
 
@@ -607,19 +671,10 @@ def test_swarm_agent_emission_continues_after_persisted_tail():
 
 
 def test_list_conv_tasks_includes_swarm_agents():
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    from lib.database._core_schema import TASK_RESULTS, upsert
     conv = f'ri-sc-{uuid.uuid4().hex[:8]}'
     parent = f'ri-sp-{uuid.uuid4().hex[:8]}'
-    db = get_thread_db(DOMAIN_CHAT)
     now = int(time.time() * 1000)
-    upsert(db, TASK_RESULTS,
-           {'task_id': parent, 'conv_id': conv, 'content': '',
-            'status': 'done', 'created_at': now, 'completed_at': now},
-           conflict_cols=['task_id'],
-           insert_cols=['task_id', 'conv_id', 'content', 'status',
-                        'created_at', 'completed_at'],
-           update_cols=[], commit=True, retry=False)
+    _seed_task_result(parent, conv, now)
     agent_tid = f'{parent}#agent:agent-research-x1'
     _seed(parent, [('messages_snapshot', _snap('request', 1, n_msgs=2))])
     _seed(agent_tid, [
@@ -629,7 +684,7 @@ def test_list_conv_tasks_includes_swarm_agents():
     ])
     try:
         from lib.tasks_pkg.request_inspector import list_conv_tasks
-        out = list_conv_tasks(conv)
+        out = list_conv_tasks(conv, user_id=1)
         rows = {t['taskId']: t for t in out['tasks']}
         assert agent_tid in rows, f'swarm agent row missing: {list(rows)}'
         arow = rows[agent_tid]
@@ -670,35 +725,132 @@ def test_neuter_state_split_is_load_bearing(task_a):
             'shipped request_inspector.py must be byte-identical')
 
 
-def test_neuter_structural_filter_is_load_bearing():
-    """NC: make the WHERE clause always-true (keep the parameter list valid)
-    → the seeded streaming-noise rows leak back into the inspector read and
-    the no-leak assertion flips red, proving the structural filter — not
-    the fold's type routing — is what keeps delta noise out."""
-    from tests._nc_harness import neutered_source
-    fixed = "f'WHERE task_id=? AND (type IN ({_struct_ph}) '"
-    broken = "f'WHERE task_id=? AND (type=type OR type IN ({_struct_ph}) '"
-    with open(_TARGET, encoding='utf-8') as f:
-        src = f.read()
-    assert fixed in src, 'NC anchor drifted — update the neuter'
-    tid = f'ri-nc-{uuid.uuid4().hex[:8]}'
-    _seed(tid, [
-        ('delta', {'text': 'chunk'}),
-        ('messages_snapshot', _snap('request', 1, n_msgs=2)),
-    ])
+class _FakeSidecarClient:
+    """Minimal `event.list` server semantics: sequence > after, ASC, limit."""
+
+    def __init__(self, rows):
+        self._rows = rows  # [{'sequence', 'event', 'created_at_ms'}]
+
+    def query(self, operation, payload):
+        assert operation == 'event.list'
+        after = int(payload.get('after_sequence', -1))
+        limit = int(payload.get('limit', 500))
+        out = [r for r in self._rows if int(r['sequence']) > after]
+        return out[:limit]
+
+
+def test_sidecar_read_rebuilds_delta_snapshots_and_paginates(monkeypatch):
+    """Sidecar-mode regression (2026-08-17): `_read_events_uncached`'s sidecar
+    branch returned stored rows RAW — but snapshots persist in delta form
+    (§10: prefixLen + newMessages, no messages array), so every fold row
+    rendered messageCount=0 / approxTokens=0 ("技术详情全是0条"). It also read
+    a single 1000-row page, so streaming deltas (one row per SSE token) cut
+    every round past the first few. The fold must rebuild deltas AND paginate.
+    """
+    from lib.tasks_pkg.snapshot_delta import SnapshotProjector
+    tid = f'ri-sc-{uuid.uuid4().hex[:8]}'
+    projector = SnapshotProjector()
+    rows = []
+
+    def _push(etype, payload):
+        projected = projector.project(tid, payload | {'type': etype})
+        rows.append({'sequence': len(rows) + 1, 'event': projected,
+                     'created_at_ms': 1_700_000_000_000 + len(rows)})
+
+    # Round 1 snapshot FIRST, then >1000 rows of streaming noise, then
+    # round 2: the single-page read used to drop round 2 entirely.
+    _push('messages_snapshot', _snap('request', 1, n_msgs=3))
+    for i in range(1500):
+        _push('delta', {'content': f'chunk-{i}'})
+    _push('messages_snapshot', _snap('request', 2, n_msgs=5))
+    _push('messages_snapshot', _snap('state', 'final', label='最终回复后 · 6条',
+                                     n_msgs=6, tools=0))
+
+    monkeypatch.setattr('lib.storage.get_storage_client',
+                        lambda *, write=False: _FakeSidecarClient(rows))
+    from lib.tasks_pkg import request_inspector as ri
+    ri._EVENTS_CACHE.pop(tid, None)
     try:
-        with neutered_source(_TARGET, fixed, broken) as mod:
-            rows = mod._read_events(tid)
-            assert any(r['type'] == 'delta' for r in rows), (
-                'expected delta noise to leak into the read under NC')
-        # Post-restore: the canonical module filters again.
-        from lib.tasks_pkg.request_inspector import _read_events
-        assert all(r['type'] != 'delta' for r in _read_events(tid))
+        fold = ri.fold_request_log(tid)
+        assert fold['requestCount'] == 2
+        by_round = {r['roundNum']: r for r in fold['requests']}
+        assert by_round[1]['messageCount'] == 3
+        assert by_round[1]['toolsCount'] == 2
+        assert by_round[1]['approxTokens'] > 0
+        # Round 2 lives past the first raw page — pagination must reach it.
+        assert by_round[2]['messageCount'] == 5
+        assert [s['roundNum'] for s in fold['states']] == ['final']
+        assert fold['states'][0]['messageCount'] == 6
+        # The on-demand payload endpoint serves rebuilt messages, not deltas.
+        payload = ri.get_request_payload(tid, 2)
+        assert payload is not None and len(payload['messages']) == 5
+        assert len(payload['tools']) == 2
     finally:
-        _cleanup(tid)
-    with open(_TARGET, encoding='utf-8') as f:
-        assert 'type=type' not in f.read(), (
-            'shipped request_inspector.py must be byte-identical')
+        ri._EVENTS_CACHE.pop(tid, None)
+
+
+def test_sidecar_list_conv_tasks_probe_sets_has_events(monkeypatch):
+    """The compact Sidecar summary distinguishes structural logs from noise."""
+    conv = f'ri-sc-conv-{uuid.uuid4().hex[:8]}'
+    tid_full = f'ri-sc-full-{uuid.uuid4().hex[:8]}'
+    tid_noise = f'ri-sc-noise-{uuid.uuid4().hex[:8]}'
+    tid_none = f'ri-sc-none-{uuid.uuid4().hex[:8]}'
+
+    def ev_rows(task_id, events):
+        return [{'sequence': i + 1, 'event': e,
+                 'created_at_ms': 1_700_000_000_000 + i}
+                for i, e in enumerate(events)]
+
+    class _Client:
+        def __init__(self):
+            self._events = {
+                tid_full: ev_rows(tid_full, [
+                    {'type': 'delta', 'content': 'x'},
+                    {'type': 'round_start', 'roundNum': 1},
+                ]),
+                # streaming noise only — never ran a structural round
+                tid_noise: ev_rows(tid_noise,
+                                   [{'type': 'delta', 'content': 'y'}] * 3),
+                tid_none: [],
+            }
+
+        def query(self, operation, payload, deadline=None):
+            if operation == 'task_results.summary_list':
+                assert payload.get('conv_id') == conv
+                now = 1_700_000_000_000
+                return {'records': [
+                    {'key': tid_full,
+                     'conv_id': conv, 'status': 'done',
+                     'created_at': now, 'completed_at': now},
+                    {'key': tid_noise,
+                     'conv_id': conv, 'status': 'done',
+                     'created_at': now - 1, 'completed_at': now},
+                    {'key': tid_none,
+                     'conv_id': conv, 'status': 'done',
+                     'created_at': now - 2, 'completed_at': now},
+                ], 'capped': False}
+            if operation == 'event.inspector_summary':
+                assert set(payload['task_ids']) == {
+                    tid_full, tid_noise, tid_none}
+                return {'records': [{
+                    'task_id': tid_full,
+                    'request_count': 0,
+                    'state_count': 0,
+                    'legacy_count': 0,
+                    'event_count': 1,
+                    'first_event_at_ms': 1_700_000_000_001,
+                }]}
+            raise AssertionError(f'unexpected op {operation}')
+
+    monkeypatch.setattr('lib.storage.get_storage_client',
+                        lambda *, write=False: _Client())
+    from lib.tasks_pkg import request_inspector as ri
+    out = ri.list_conv_tasks(conv, user_id=1)
+    by_id = {t['taskId']: t for t in out['tasks']}
+    assert set(by_id) == {tid_full, tid_noise, tid_none}
+    assert by_id[tid_full]['hasEvents'] is True
+    assert by_id[tid_noise]['hasEvents'] is False
+    assert by_id[tid_none]['hasEvents'] is False
 
 
 if __name__ == '__main__':

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
 import re
@@ -17,6 +18,8 @@ from types import SimpleNamespace
 import pytest
 
 from rootless_vm import (
+    LockedDownload,
+    LoopbackServiceForward,
     HarborRunSpec,
     NetworkMode,
     PreparedImageCache,
@@ -27,18 +30,83 @@ from rootless_vm import (
     SandboxSpec,
     snapshot_tree,
     harbor_argv,
+    load_base_disk_lock,
+    write_offline_seed_iso,
 )
 from rootless_vm.egress_proxy import (
     EgressProxy,
     _global_connection_slot,
     _is_global_address,
+    _send_with_backpressure,
 )
 from rootless_vm.guest_agent import GuestAgent
-from rootless_vm.image_store import resolve_image_store
-from rootless_vm import qemu_launcher
+from rootless_vm.loopback_service import LoopbackServiceRelay
+from rootless_vm.image_store import resolve_image_store, resolve_image_store_entry
+from rootless_vm import pdeath_exec, qemu_launcher
 
 
 pytestmark = pytest.mark.unit
+
+
+def test_base_disk_lock_pins_official_image_and_packages():
+    lock = load_base_disk_lock(
+        Path(__file__).parents[1]
+        / "rootless_vm"
+        / "alpine_3_24_x86_64.lock.json"
+    )
+
+    assert lock.image.name == (
+        "generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2"
+    )
+    assert lock.image.url.startswith("https://dl-cdn.alpinelinux.org/")
+    assert len(lock.packages) == 37
+    assert len(lock.digest) == 64
+    assert {row.name for row in lock.packages} >= {
+        "docker-engine-29.5.3-r0.apk",
+        "qemu-guest-agent-11.0.1-r0.apk",
+        "runc-1.4.3-r0.apk",
+    }
+
+
+def test_offline_seed_contains_only_locked_local_install_inputs(tmp_path):
+    pycdlib = pytest.importorskip("pycdlib")
+    package = tmp_path / "example-1.0-r0.apk"
+    package.write_bytes(b"locked apk")
+    source = LockedDownload(
+        name=package.name,
+        url=f"https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/{package.name}",
+        digest=hashlib.sha256(package.read_bytes()).hexdigest(),
+        algorithm="sha256",
+        size=package.stat().st_size,
+    )
+    output = tmp_path / "seed.iso"
+
+    write_offline_seed_iso(
+        output,
+        ((source, package),),
+        instance_id="rootless-vm-test",
+    )
+
+    image = pycdlib.PyCdlib()
+    image.open(str(output))
+    try:
+        user_data = io.BytesIO()
+        sums = io.BytesIO()
+        apk = io.BytesIO()
+        image.get_file_from_iso_fp(user_data, rr_path="/user-data")
+        image.get_file_from_iso_fp(sums, rr_path="/packages/SHA256SUMS")
+        image.get_file_from_iso_fp(apk, rr_path=f"/packages/{package.name}")
+    finally:
+        image.close()
+    rendered = user_data.getvalue().decode()
+    assert "apk add --no-network" in rendered
+    assert "rc-update add docker default" in rendered
+    assert "cloud-init-local cloud-init cloud-config cloud-final" in rendered
+    assert "rc-service docker start" not in rendered
+    assert "poweroff -f" in rendered
+    assert "http://" not in rendered and "https://" not in rendered
+    assert source.digest in sums.getvalue().decode()
+    assert apk.getvalue() == package.read_bytes()
 
 
 def _executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> Path:
@@ -182,6 +250,105 @@ def test_public_network_only_exposes_authenticated_restricted_proxy(
         session.delete()
 
 
+def test_control_plane_forward_keeps_host_destination_out_of_qemu_command(
+    tmp_path, monkeypatch
+):
+    qemu = _executable(tmp_path / "qemu-system-x86_64")
+    kernel = tmp_path / "vmlinuz"
+    kernel.write_bytes(b"kernel")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    monkeypatch.setattr(QemuRuntime, "supports_user_network", lambda self: True)
+    monkeypatch.setattr(QemuRuntime, "supports_sandbox", lambda self: True)
+    service = LoopbackServiceForward(
+        name="benchmark-proxy",
+        guest_port=8765,
+        host_port=48123,
+        maximum_bytes=1024 * 1024,
+        maximum_connections=2,
+    )
+    session = SandboxSession(
+        SandboxSpec(
+            runtime=QemuRuntime(qemu=qemu),
+            state_root=state,
+            kernel=kernel,
+            loopback_services=(service,),
+            require_qemu_sandbox=False,
+        )
+    )
+    try:
+        rendered = " ".join(session.command())
+        assert "user,id=egress,restrict=on,ipv6=off" in rendered
+        assert "guestfwd=tcp:10.0.2.101:8765-cmd:" in rendered
+        assert "control-0.sock" in rendered
+        assert "48123" not in rendered
+        assert "spawn=allow" in rendered
+        assert "-nic none" not in rendered
+        assert session.egress_proxy is None
+        assert len(session.loopback_service_relays) == 1
+    finally:
+        session.delete()
+
+
+def test_loopback_service_forward_rejects_unowned_guest_endpoints(tmp_path):
+    qemu = _executable(tmp_path / "qemu-system-x86_64")
+    kernel = tmp_path / "vmlinuz"
+    kernel.write_bytes(b"kernel")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    runtime = QemuRuntime(qemu=qemu)
+
+    with pytest.raises(ValueError, match="guest_host"):
+        SandboxSpec(
+            runtime=runtime,
+            state_root=state,
+            kernel=kernel,
+            loopback_services=(LoopbackServiceForward(
+                name="bad", guest_host="10.0.2.2",
+                guest_port=8765, host_port=48123),),
+            require_qemu_sandbox=False,
+        ).validate()
+
+
+def test_loopback_service_relay_reaches_only_fixed_host_port(tmp_path):
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    received: list[bytes] = []
+
+    def serve_once() -> None:
+        connection, _address = listener.accept()
+        with connection:
+            payload = connection.recv(1024)
+            received.append(payload)
+            connection.sendall(b"reply:" + payload)
+
+    server_thread = threading.Thread(target=serve_once, daemon=True)
+    server_thread.start()
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    relay = LoopbackServiceRelay(
+        socket_path=private / "control.sock",
+        host_port=listener.getsockname()[1],
+        maximum_bytes=1024 * 1024,
+        maximum_connections=1,
+    )
+    relay.start()
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(3)
+            client.connect(str(relay.socket_path))
+            client.sendall(b"fixture")
+            client.shutdown(socket.SHUT_WR)
+            assert client.recv(1024) == b"reply:fixture"
+    finally:
+        relay.stop()
+        listener.close()
+        server_thread.join(timeout=2)
+    assert received == [b"fixture"]
+    assert not relay.socket_path.exists()
+
+
 def test_egress_gate_caps_connections_across_workers(tmp_path):
     gate = tmp_path / "egress-gate"
     state = {"active": 0, "peak": 0}
@@ -230,6 +397,14 @@ def test_harbor_network_environment_retries_transient_package_downloads():
     assert variables["GIT_CONFIG_KEY_0"] == "http.proxyAuthMethod"
     assert variables["GIT_CONFIG_VALUE_0"] == "basic"
 
+    verifier_variables = environment._command_network_environment(is_verifier=True)
+    assert verifier_variables["UV_CONCURRENT_DOWNLOADS"] == "2"
+    assert verifier_variables["UV_HTTP_RETRIES"] == "20"
+    assert verifier_variables["UV_HTTP_TIMEOUT"] == "60"
+    assert verifier_variables["PIP_RETRIES"] == "20"
+    assert verifier_variables["PIP_DEFAULT_TIMEOUT"] == "60"
+    assert environment._command_network_environment(is_verifier=False) == variables
+
 
 def test_harbor_container_timeout_owns_the_command_process_group():
     try:
@@ -244,6 +419,18 @@ def test_harbor_container_timeout_owns_the_command_process_group():
     assert "exec timeout -s TERM -k 5 13 /bin/bash -lc" in rendered
     assert "printf" in rendered
     assert "else exec /bin/bash" in rendered
+
+
+def test_verifier_guest_watchdog_finishes_before_harbor_phase_deadline():
+    try:
+        from rootless_vm.harbor_environment import _verifier_exec_timeout
+    except ModuleNotFoundError as exc:
+        if exc.name == "harbor":
+            pytest.skip("Harbor is installed only in the evaluation environment")
+        raise
+
+    assert _verifier_exec_timeout(14_400, 900, 4) == 3570
+    assert _verifier_exec_timeout(900, 14_400, 4) == 900
 
 
 def test_runc_config_binds_runtime_owned_localhost_file():
@@ -301,6 +488,57 @@ def test_guest_agent_maps_signal_only_status_to_shell_return_code(
     result = agent.execute("ignored", timeout=1)
 
     assert result.return_code == 143
+
+
+def test_guest_file_download_has_one_total_deadline(tmp_path, monkeypatch):
+    agent = GuestAgent(tmp_path / "unused.sock")
+    clock = iter([0.0, 0.0, 0.5, 1.1, 1.1])
+    monkeypatch.setattr("rootless_vm.guest_agent.time.monotonic", lambda: next(clock))
+    calls = []
+
+    def request(command, arguments=None, *, timeout):
+        calls.append((command, arguments, timeout))
+        if command == "guest-file-open":
+            return 7
+        if command == "guest-file-read":
+            return {"buf-b64": base64.b64encode(b"partial").decode(), "eof": False}
+        assert command == "guest-file-close"
+        return None
+
+    monkeypatch.setattr(agent, "request", request)
+
+    with pytest.raises(TimeoutError, match="total time limit"):
+        agent.download("/guest/file", tmp_path / "result", timeout=1.0)
+
+    assert [call[0] for call in calls] == [
+        "guest-file-open",
+        "guest-file-read",
+        "guest-file-close",
+    ]
+    assert not (tmp_path / "result").exists()
+
+
+def test_guest_file_upload_uses_tcg_safe_chunks(tmp_path, monkeypatch):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"x" * (300 * 1024))
+    agent = GuestAgent(tmp_path / "unused.sock")
+    writes = []
+
+    def request(command, arguments=None, *, timeout):
+        if command == "guest-file-open":
+            return 7
+        if command == "guest-file-write":
+            chunk = base64.b64decode(arguments["buf-b64"], validate=True)
+            writes.append(len(chunk))
+            return {"count": len(chunk)}
+        assert command in {"guest-file-flush", "guest-file-close"}
+        return None
+
+    monkeypatch.setattr(agent, "request", request)
+
+    agent.upload(source, "/guest/file")
+
+    assert writes == [128 * 1024, 128 * 1024, 44 * 1024]
 
 
 def test_qemu_launcher_sets_no_new_privileges():
@@ -366,6 +604,17 @@ def test_parent_death_wrapper_does_not_leave_orphaned_process(tmp_path):
         time.sleep(0.05)
     if status.exists():
         assert "State:\tZ" in status.read_text(encoding="utf-8", errors="replace")
+
+
+def test_parent_death_wrapper_rejects_process_already_adopted_by_init(monkeypatch):
+    monkeypatch.setattr(pdeath_exec.os, "getppid", lambda: 1)
+    monkeypatch.setattr(
+        pdeath_exec.os,
+        "execve",
+        lambda *_args: pytest.fail("orphaned wrapper must not exec the sandbox"),
+    )
+
+    assert pdeath_exec.main(["/usr/bin/true"]) == 143
 
 
 def test_confined_command_arms_parent_death_inside_pid_namespace(
@@ -462,6 +711,8 @@ def test_overlay_never_shrinks_below_backing_disk(tmp_path):
     )
     try:
         assert "10G" not in captured.read_text().splitlines()
+        expected_limit = (20 + 2) * 1024**3
+        assert f"--fsize={expected_limit}:{expected_limit}" in session.command()
     finally:
         session.delete()
 
@@ -555,6 +806,48 @@ def test_prepared_image_cache_is_content_addressed_and_validated(tmp_path):
     assert changed.recipe.digest != cache.recipe.digest
 
 
+def test_prepared_image_waits_for_docker_after_guest_agent_is_ready(tmp_path):
+    qemu = _executable(tmp_path / "qemu-system-x86_64")
+    base = tmp_path / "base.qcow2"
+    payload = tmp_path / "payload.iso"
+    base.write_bytes(b"base")
+    payload.write_bytes(b"payload")
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir(mode=0o700)
+    cache = PreparedImageCache(
+        PreparedImageSpec(
+            runtime=QemuRuntime(qemu=qemu),
+            cache_root=cache_root,
+            base_disk=base,
+            payload_iso=payload,
+            task_image="example/task:pinned",
+        )
+    )
+    commands = []
+
+    class FakeGuestAgent:
+        def execute(self, command, timeout):
+            commands.append((command, timeout))
+            stdout = b""
+            if (
+                command.startswith("docker image inspect rootless-prepared:")
+                and ">/dev/null" not in command
+            ):
+                stdout = json.dumps(
+                    [{"Config": {"Env": ["A=B"], "WorkingDir": "/work"}}]
+                ).encode()
+            return SimpleNamespace(return_code=0, stdout=stdout, stderr=b"")
+
+    config = cache._prepare_guest(
+        SimpleNamespace(guest_agent=FakeGuestAgent(), egress_proxy=None)
+    )
+
+    assert config == {"env": ["A=B"], "workdir": "/work"}
+    assert "until docker info" in commands[0][0]
+    assert "docker load" in commands[1][0]
+    assert commands[0][1] == 210.0
+
+
 def test_prepared_image_schema_invalidates_pre_confinement_cache(tmp_path):
     qemu = _executable(tmp_path / "qemu-system-x86_64")
     base = tmp_path / "base.qcow2"
@@ -577,6 +870,86 @@ def test_prepared_image_schema_invalidates_pre_confinement_cache(tmp_path):
     assert cache.recipe.schema == 4
 
 
+def test_prepared_image_dockerfile_context_is_content_addressed(tmp_path):
+    qemu = _executable(tmp_path / "qemu-system-x86_64")
+    base = tmp_path / "base.qcow2"
+    payload = tmp_path / "payload.iso"
+    base.write_bytes(b"base")
+    payload.write_bytes(b"payload")
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir(mode=0o700)
+    context = tmp_path / "context"
+    context.mkdir()
+    dockerfile = context / "Dockerfile"
+    dockerfile.write_text("FROM example/base:pinned\nRUN mkdir -p /logs\n")
+
+    first = PreparedImageCache(
+        PreparedImageSpec(
+            runtime=QemuRuntime(qemu=qemu),
+            cache_root=cache_root,
+            base_disk=base,
+            payload_iso=payload,
+            task_image="example/base:pinned",
+            build_context=context,
+        )
+    )
+    assert first.recipe.schema == 5
+    assert first.recipe.build_context_sha256
+    assert first._marker_payload("disk", {"env": [], "workdir": "/"})["schema"] == 5
+
+    dockerfile.write_text("FROM example/base:pinned\nRUN mkdir -p /different\n")
+    changed = PreparedImageCache(
+        PreparedImageSpec(
+            runtime=QemuRuntime(qemu=qemu),
+            cache_root=cache_root,
+            base_disk=base,
+            payload_iso=payload,
+            task_image="example/base:pinned",
+            build_context=context,
+        )
+    )
+    assert changed.recipe.digest != first.recipe.digest
+
+    (context / "host-link").symlink_to(tmp_path / "outside")
+    with pytest.raises(ValueError, match="symlinks"):
+        PreparedImageCache(
+            PreparedImageSpec(
+                runtime=QemuRuntime(qemu=qemu),
+                cache_root=cache_root,
+                base_disk=base,
+                payload_iso=payload,
+                task_image="example/base:pinned",
+                build_context=context,
+            )
+        )
+
+
+def test_rootless_qemu_dockerfile_base_is_literal_and_single_stage(tmp_path):
+    try:
+        from rootless_vm.harbor_environment import _dockerfile_base_image
+    except ModuleNotFoundError as exc:
+        if exc.name == "harbor":
+            pytest.skip("Harbor is installed only in the evaluation environment")
+        raise
+
+    environment = tmp_path / "environment"
+    environment.mkdir()
+    dockerfile = environment / "Dockerfile"
+    dockerfile.write_text(
+        "# comment\nFROM --platform=linux/amd64 example/base:pinned AS task\n"
+        "RUN mkdir -p /logs\n"
+    )
+    assert _dockerfile_base_image(environment) == "example/base:pinned"
+
+    dockerfile.write_text("FROM example/one\nFROM example/two\n")
+    with pytest.raises(ValueError, match="exactly one"):
+        _dockerfile_base_image(environment)
+
+    dockerfile.write_text("ARG BASE=example/base\nFROM $BASE\n")
+    with pytest.raises(ValueError, match="literal"):
+        _dockerfile_base_image(environment)
+
+
 def test_image_store_resolves_only_digest_pinned_files_below_private_root(tmp_path):
     store = tmp_path / "images"
     store.mkdir(mode=0o700)
@@ -592,6 +965,9 @@ def test_image_store_resolves_only_digest_pinned_files_below_private_root(tmp_pa
                 "iso": "regex-log/task-image.iso",
                 "sha256": digest,
                 "loaded_image_reference": "sha256:" + "a" * 64,
+                "task": "regex-log",
+                "agent_timeout_sec": 900,
+                "verifier_timeout_sec": 1200,
             }
         },
     }
@@ -600,6 +976,11 @@ def test_image_store_resolves_only_digest_pinned_files_below_private_root(tmp_pa
     resolved = resolve_image_store(store, "example/regex-log:pinned")
 
     assert resolved == (payload.resolve(), digest, "sha256:" + "a" * 64)
+    assert resolve_image_store_entry(store, "example/regex-log:pinned")[3] == {
+        "task": "regex-log",
+        "agent_timeout_sec": 900,
+        "verifier_timeout_sec": 1200,
+    }
     index["images"]["example/regex-log:pinned"]["iso"] = "../outside.iso"
     (store / "index.json").write_text(json.dumps(index), encoding="utf-8")
     with pytest.raises(ValueError, match="must not contain"):
@@ -667,6 +1048,33 @@ def test_egress_proxy_rejects_host_and_private_destinations(tmp_path, monkeypatc
         assert response.startswith(b"HTTP/1.1 403")
     finally:
         proxy.stop()
+
+
+def test_egress_relay_allows_slow_guest_backpressure_and_restores_socket_state():
+    class Target:
+        def __init__(self):
+            self.calls = []
+
+        def setblocking(self, enabled):
+            self.calls.append(("blocking", enabled))
+
+        def settimeout(self, timeout):
+            self.calls.append(("timeout", timeout))
+
+        def sendall(self, chunk):
+            self.calls.append(("send", chunk))
+
+    target = Target()
+
+    _send_with_backpressure(target, b"payload")
+
+    assert target.calls == [
+        ("blocking", True),
+        ("timeout", 120.0),
+        ("send", b"payload"),
+        ("timeout", None),
+        ("blocking", False),
+    ]
 
 
 def test_session_requires_qemu_seccomp_sandbox_by_default(tmp_path):

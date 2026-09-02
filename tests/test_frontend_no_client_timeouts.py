@@ -66,6 +66,9 @@ except ImportError:  # pragma: no cover - path-layout fallback
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JS = runtime_sections_dir()
 PAPER_FEATURES = os.path.join(ROOT, 'frontend', 'src', 'features', 'paper')
+TYPED_TRANSPORT = os.path.join(ROOT, 'frontend', 'src', 'api', 'transport.ts')
+CONVERSATION_SYNC = os.path.join(
+    ROOT, 'frontend', 'src', 'core', 'conversation-sync.ts')
 
 
 def _src(*parts):
@@ -84,6 +87,11 @@ def _live_paper_ts(name: str) -> str:
         return strip_comments(source.read(), lang='js')
 
 
+def _live_native(path: str) -> str:
+    with open(path, encoding='utf-8') as source:
+        return strip_comments(source.read(), lang='js')
+
+
 # ═════════════════════════════════════════════════════════════════════
 #  A. api.js — the default must be "no timeout"
 # ═════════════════════════════════════════════════════════════════════
@@ -96,7 +104,7 @@ class TestApiDefaultIsUnbounded:
     def test_default_timeout_is_zero(self):
         """The request() default must be 0 (no ceiling). NEUTER target: put
         30000 back and this goes RED."""
-        live = _live('api.js')
+        live = _live_native(TYPED_TRANSPORT)
         m = _DEFAULT_RE.search(live)
         assert m, 'could not locate the `const timeout = …` default in api.js'
         expr = m.group(1)
@@ -120,20 +128,19 @@ class TestApiDefaultIsUnbounded:
         worse than an honest structural assertion. The pairing below (default
         is 0 AND the >0 branch still arms) is what makes both directions
         non-vacuous."""
-        live = _live('api.js')
-        assert re.search(r'if\s*\(\s*timeout\s*>\s*0\s*\)', live), (
+        live = _live_native(TYPED_TRANSPORT)
+        assert re.search(r'if\s*\(\s*timeout\s*>\s*0\b', live), (
             'the `timeout > 0` arming branch is gone — an explicit probe '
             'budget would now be silently ignored')
-        assert re.search(r'timeoutId\s*=\s*setTimeout\s*\(', live), \
+        assert re.search(
+            r'timeoutId\s*=\s*(?:globalThis\.)?setTimeout\s*\(', live), \
             'the arming setTimeout is gone — explicit budgets no longer abort'
 
     def test_probe_call_sites_still_pass_their_own_budget(self):
         """The probes must not have been silently un-bounded by the default
         change — they carry their own budgets, so they are unaffected."""
         for rel, needle in (
-            ('core/health_stream_timer.js', 'AbortSignal.timeout('),
             ('core/backend_offline_monitor.js', 'AbortSignal.timeout('),
-            ('core/cross_tab_sync.js', 'AbortSignal.timeout('),
         ):
             assert needle in _live(rel), \
                 f'{rel} lost its explicit probe budget'
@@ -182,9 +189,9 @@ def _run_node(harness_src, *argv):
 @pytest.mark.unit
 class TestGenerationPathsHaveNoTimer:
     def test_branch_sse_has_no_first_byte_abort(self):
-        live = _live('branch_stream.js')
+        live = _live_native(CONVERSATION_SYNC)
         assert '45000' not in live, (
-            'branch_stream.js still carries the 45s first-byte abort — that '
+            'conversation-sync.ts still carries the 45s first-byte abort — that '
             'is the TTFT kill we removed from the transport, re-implemented '
             'in the browser')
         assert 'sseTimeout' not in live
@@ -192,9 +199,9 @@ class TestGenerationPathsHaveNoTimer:
     def test_branch_sse_keeps_its_poll_fallback(self):
         """Removing the timer must NOT remove the real error path: an SSE
         failure still falls back to polling."""
-        live = _live('branch_stream.js')
-        assert '_branchStreamPoll' in live
-        assert 'catch' in live
+        live = _live_native(CONVERSATION_SYNC)
+        assert 'new EventSource' in live
+        assert 'this.recover(' in live
 
     def test_image_gen_has_no_watchdog_abort(self):
         live = _live('image-gen.js')
@@ -244,8 +251,7 @@ class TestGenerationPathsHaveNoTimer:
 _PROBE_FILES = frozenset({
     'core/backend_offline_monitor.js',   # offline detection probe
     'core/health_stream_timer.js',       # per-stream health check
-    'core/cross_tab_sync.js',            # cross-tab reconcile probes
-    'core/conversations.js',             # conv-list load probes
+    'core/conversation_catalog.js',      # bounded catalog liveness/retry probe
     'core/pending_sync.js',              # queued-write flush probe
     'main/main_send_pipeline.js',        # chat-START handshake (not the stream)
     'local-control.js',                  # loopback relay discovery/long-poll;

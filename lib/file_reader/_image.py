@@ -347,7 +347,7 @@ def _compress_image(raw: bytes, max_kb: int = 1024) -> tuple:
         bg.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
         img = bg
 
-    # ★ Strip ICC profile / EXIF — they bloat the JPEG encoder buffer
+    # Strip ICC profile / EXIF — they bloat the JPEG encoder buffer
     #   and cause "encoder error -2" on small outputs (Pillow#5448).
     #   Not needed for API image uploads.
     img.info.pop('icc_profile', None)

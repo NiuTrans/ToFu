@@ -87,13 +87,9 @@ def prepare_human_input_request(
 
 def mutation_http_response(
     result: OrchestrationMutationResultPort,
-    *,
-    compatibility: dict | None = None,
 ):
     """Project every mutation result through one wire/status boundary."""
-    payload, status = mutation_response(
-        result, compatibility=compatibility,
-    )
+    payload, status = mutation_response(result)
     return api_payload(payload, status)
 
 

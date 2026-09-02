@@ -19,7 +19,7 @@ agentic tool loop:
      load-bearing, not decorative.
 
 Runs fully offline: ``dispatch_stream`` is faked to emit a web_search call on
-round 0 and the final JSON on round 1, and ``_execute_report_tool`` +
+round 0 and the final JSON on round 1, and ``execute_paper_tool`` +
 ``search_arxiv`` are faked so grounding resolves without a network.
 
 Run standalone: ``python3 tests/test_paper_recommend_agentic.py``
@@ -33,7 +33,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault('TRADING_ENABLED', '0')
 
-import lib.paper.recommend_engine as re_mod  # noqa: E402
+import lib.paper.recommend_engine._events as re_mod  # noqa: E402
+import lib.paper.recommend_engine._ground as ground_mod  # noqa: E402
+import lib.paper.recommend_engine._research as research_mod  # noqa: E402
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -78,15 +80,15 @@ class _Patched:
     def __init__(self, *, break_loop=False):
         self.break_loop = break_loop
         self._orig = {}
-        self.executed_tools = []      # names actually run via _execute_report_tool
+        self.executed_tools = []      # names actually run via execute_paper_tool
         self.dispatched_rounds = []   # (round_index, had_tools) per dispatch
         self.systems_seen = []        # system prompt of each dispatch
 
     def __enter__(self):
-        self._orig['dispatch_stream'] = re_mod.dispatch_stream
-        self._orig['_execute_report_tool'] = re_mod._execute_report_tool
-        self._orig['search_arxiv'] = re_mod.search_arxiv
-        self._orig['fetch_arxiv_title'] = re_mod.fetch_arxiv_title
+        self._orig['dispatch_stream'] = research_mod.dispatch_stream
+        self._orig['execute_paper_tool'] = research_mod.execute_paper_tool
+        self._orig['search_arxiv'] = ground_mod.search_arxiv
+        self._orig['fetch_arxiv_title'] = ground_mod.fetch_arxiv_title
         rec = self
 
         # dispatch_stream is called per round with the *current* messages list.
@@ -113,7 +115,7 @@ class _Patched:
             return ({'role': 'assistant', 'content': body, 'tool_calls': None},
                     'stop', {'prompt_tokens': 1, 'completion_tokens': 1})
 
-        def _fake_execute_report_tool(name, args_str, user_question='', abort=None,
+        def _fakeexecute_paper_tool(name, args_str, user_question='', abort=None,
                                       force_vertical=None):
             rec.executed_tools.append(name)
             return ('SEARCH RESULT: Large Language Diffusion Models (arXiv:2502.09992) '
@@ -122,15 +124,21 @@ class _Patched:
         def _fake_search(query, max_results=10):
             return _fake_search_by_title(query)[:max_results]
 
-        re_mod.dispatch_stream = _fake_dispatch_stream
-        re_mod._execute_report_tool = _fake_execute_report_tool
-        re_mod.search_arxiv = _fake_search
-        re_mod.fetch_arxiv_title = lambda _id: ''
+        research_mod.dispatch_stream = _fake_dispatch_stream
+        research_mod.execute_paper_tool = _fakeexecute_paper_tool
+        ground_mod.search_arxiv = _fake_search
+        ground_mod.fetch_arxiv_title = lambda _id: ''
         return self
 
     def __exit__(self, *exc):
+        owners = {
+            'dispatch_stream': research_mod,
+            'execute_paper_tool': research_mod,
+            'search_arxiv': ground_mod,
+            'fetch_arxiv_title': ground_mod,
+        }
         for k, v in self._orig.items():
-            setattr(re_mod, k, v)
+            setattr(owners[k], k, v)
         return False
 
 

@@ -272,7 +272,7 @@ def _tool_display_project(fn_name, fn_args, tc_id, tc_args_str):
 
 def _tool_display_browser(fn_name, fn_args, tc_id, tc_args_str):
     """Build display info for browser tool calls (basic + advanced)."""
-    from lib.browser import browser_tool_display
+    from lib.browser.display import browser_tool_display
     display = browser_tool_display(fn_name, fn_args)
     return display, {'toolName': fn_name}
 
@@ -307,8 +307,18 @@ def _tool_display_skills(fn_name, fn_args, tc_id, tc_args_str):
     """
     args = fn_args if isinstance(fn_args, dict) else {}
     skill = args.get('skill_id') or args.get('skill') or '?'
-    verb = 'Loaded' if fn_name == 'load_skill' else 'Previously activated'
-    return f'{verb} skill: {skill}', {'toolName': fn_name}
+    if fn_name == 'search_skills':
+        display = f'Searched skills: {str(args.get("query") or "")[:80]}'
+    elif fn_name == 'load_skill':
+        display = f'Loaded skill: {skill}'
+    elif fn_name == 'read_skill_resource':
+        resource = str(args.get('resource') or '')[:100]
+        display = f'Read skill resource: {resource or skill}'
+    elif fn_name == 'request_skill_install':
+        display = f'Installed skill: {args.get("catalog_id") or "?"}'
+    else:
+        display = f'Previously activated skill: {skill}'
+    return display, {'toolName': fn_name}
 
 
 def _tool_display_conv_ref(fn_name, fn_args, tc_id, tc_args_str):
@@ -354,12 +364,40 @@ def _tool_display_brain(fn_name, fn_args, tc_id, tc_args_str):
         hard = bool(args.get('hard_abort'))
         kind = 'Hard intervene' if hard else 'Advisory intervene'
         display = f'{kind} → conv {to[:8]}' if to else kind
+    elif fn_name == 'integration_status':
+        display = 'Check Git integration status'
+    elif fn_name == 'integration_checkpoint':
+        summary = str(args.get('summary') or '').strip()
+        display = (f'Checkpoint Git integration: {summary}' if summary
+                   else 'Checkpoint Git integration')
+    elif fn_name == 'integration_submit':
+        summary = str(args.get('summary') or '').strip()
+        display = (f'Submit Git integration: {summary}' if summary
+                   else 'Submit Git integration')
     elif fn_name.startswith('project_board_'):
         verb = fn_name.replace('project_board_', '', 1)
         tid = (args.get('task_id') or '').strip()
         display = f'Board {verb}: {tid}' if tid else f'Board {verb}'
     else:
         display = fn_name
+    return display, {'toolName': fn_name}
+
+
+def _tool_display_artifact(fn_name, fn_args, tc_id, tc_args_str):
+    """Label bounded continuation/search over a prior large tool result."""
+    args = fn_args if isinstance(fn_args, dict) else {}
+    artifact_ref = str(args.get('artifact_ref') or '').strip()
+    short_ref = artifact_ref[:16]
+    if fn_name == 'search_tool_artifact':
+        query = str(args.get('query') or '').strip()
+        target = f' in {short_ref}' if short_ref else ''
+        display = f'Search tool result{target}: {query}' if query \
+            else f'Search tool result{target}'
+    else:
+        cursor = str(args.get('cursor') or '').strip()
+        target = f': {short_ref}' if short_ref else ''
+        suffix = f' from {cursor}' if cursor and cursor != '0' else ''
+        display = f'Read tool result{target}{suffix}'
     return display, {'toolName': fn_name}
 
 
@@ -452,7 +490,7 @@ def _tool_display_compact(fn_name, fn_args, tc_id, tc_args_str):
 def _tool_display_image_gen(fn_name, fn_args, tc_id, tc_args_str):
     """Build display info for image generation tool calls.
 
-    ★ No hard 80-char cap on the prompt — the frontend word-wraps the
+    No hard 80-char cap on the prompt — the frontend word-wraps the
     title line and users explicitly requested "do not truncate". A very
     generous soft cap (2000 chars) still protects against a pathological
     prompt bloating every SSE event. The full prompt is also exposed via
@@ -635,7 +673,7 @@ def _tool_display_search_settings(fn_name, fn_args, tc_id, tc_args_str):
 def _tool_display_human_guidance(fn_name, fn_args, tc_id, tc_args_str):
     """Build display info for ask_human tool calls.
 
-    ★ No hard 80-char cap on the question text — the frontend word-wraps
+    No hard 80-char cap on the question text — the frontend word-wraps
     and users explicitly requested "incomplete displays are not allowed".
     A very generous soft cap (2000 chars) still protects against a
     pathological 100 KB prompt bloating every SSE event.

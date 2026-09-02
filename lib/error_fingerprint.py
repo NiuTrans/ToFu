@@ -3,7 +3,7 @@
 A single, dependency-free primitive shared by the two ends of Tofu's
 self-diagnosis feedback loop:
 
-  * ``lib/tasks_pkg/executor.py`` stamps a ``fingerprint`` onto every
+  * ``lib/tasks_pkg/executor/_execute.py`` stamps a ``fingerprint`` onto every
     structured ``tool_error`` audit event at the moment a tool fails.
   * ``lib/optimizer/analyzer.py`` groups those events (and raw error-log
     lines) by fingerprint to surface *recurring / unresolved* issues —

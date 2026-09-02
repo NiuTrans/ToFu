@@ -1,15 +1,38 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import { build } from 'vite';
 import {
   copyFile, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile,
 } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
+import { composeRuntime } from './compose_frontend_runtime.mjs';
+import { checkLazyRuntimeBindings } from './check_lazy_runtime_bindings.mjs';
+import { composeStyles } from './compose_frontend_styles.mjs';
+import {
+  generateI18nContract,
+  readI18nCatalog,
+} from './gen_i18n_contract.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const liveDir = join(root, 'static', 'vite');
 const assetsDir = join(liveDir, 'assets');
 const requiredEntries = ['frontend/src/main.ts', 'frontend/src/admin.ts'];
+const authoringDigestField = 'tofuAuthoringSha256';
+const authoringConfigPaths = [
+  'package.json',
+  'package-lock.json',
+  'tsconfig.json',
+  'tsconfig.vite.json',
+  'vite.config.mjs',
+  'scripts/build_frontend.mjs',
+  'scripts/compose_frontend_runtime.mjs',
+  'scripts/compose_frontend_styles.mjs',
+  'scripts/gen_i18n_contract.mjs',
+];
+const authoringSuffixes = new Set([
+  '.css', '.html', '.js', '.json', '.ts', '.ttf', '.woff', '.woff2',
+]);
 
 function safeAsset(value) {
   if (typeof value !== 'string' || !value.startsWith('assets/') || value.includes('\\')) return '';
@@ -99,7 +122,45 @@ async function listFiles(directory, prefix = '') {
   return output;
 }
 
+async function readViteAuthoringDigest() {
+  const inputs = [];
+  for (const relativePath of authoringConfigPaths) {
+    try {
+      const info = await stat(join(root, ...relativePath.split('/')));
+      if (info.isFile()) inputs.push(relativePath);
+    } catch (error) {
+      if (!error || error.code !== 'ENOENT') throw error;
+    }
+  }
+  for (const relativePath of await listFiles(join(root, 'frontend', 'src'))) {
+    const basename = relativePath.slice(relativePath.lastIndexOf('/') + 1);
+    const dot = basename.lastIndexOf('.');
+    const suffix = dot >= 0 ? basename.slice(dot).toLowerCase() : '';
+    if (authoringSuffixes.has(suffix)) {
+      inputs.push(`frontend/src/${relativePath}`);
+    }
+  }
+  inputs.sort();
+  const digest = createHash('sha256');
+  digest.update(Buffer.from('tofu-vite-authoring-v1\0', 'utf8'));
+  for (const relativePath of inputs) {
+    digest.update(Buffer.from(relativePath, 'utf8'));
+    digest.update(Buffer.from([0]));
+    digest.update(await readFile(join(root, ...relativePath.split('/'))));
+    digest.update(Buffer.from([0]));
+  }
+  return digest.digest('hex');
+}
+
 async function main() {
+  // The retained runtime is a delivery artifact. Compose it before Vite so a
+  // clean checkout and every direct build entry point consume the section
+  // manifest rather than depending on an accidentally fresh generated file.
+  await composeRuntime();
+  checkLazyRuntimeBindings();
+  await composeStyles();
+  const i18nCatalog = await generateI18nContract();
+  const authoringDigest = await readViteAuthoringDigest();
   await mkdir(dirname(liveDir), { recursive: true });
   // Snapshot the live graph before invoking Vite. This also protects against
   // build-tool configuration drift that might otherwise touch the live outDir.
@@ -117,7 +178,21 @@ async function main() {
   try {
     process.env.TOFU_VITE_OUT_DIR = temporaryDir;
     await build({ configFile: join(root, 'vite.config.mjs') });
+    const catalogAfterBuild = await readI18nCatalog();
+    if (catalogAfterBuild.digest !== i18nCatalog.digest) {
+      throw new Error('i18n locale sources changed during the frontend build; retry the build');
+    }
+    const authoringDigestAfterBuild = await readViteAuthoringDigest();
+    if (authoringDigestAfterBuild !== authoringDigest) {
+      throw new Error('frontend authoring inputs changed during the frontend build; retry the build');
+    }
     const nextManifest = await readJson(join(temporaryDir, 'manifest.json'));
+    // Keep source and deployable locale chunks in one atomic generation. The
+    // server validates this digest before serving any Vite entry, so editing a
+    // locale without rebuilding fails closed instead of silently serving the
+    // previous language chunks.
+    nextManifest[requiredEntries[0]].tofuI18nCatalogSha256 = i18nCatalog.digest;
+    nextManifest[requiredEntries[0]][authoringDigestField] = authoringDigest;
     const nextAssets = await validateManifest(nextManifest, temporaryDir);
 
     await mkdir(assetsDir, { recursive: true });

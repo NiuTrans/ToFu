@@ -352,7 +352,7 @@ def _extract_xlsx(file_bytes: bytes, limit: int, *, robust: bool = False) -> dic
         current_block = []
         empty_run = 0
         truncated_rows = False
-        # ★ Every cut must be able to report its DENOMINATOR. A warning that
+        # Every cut must be able to report its DENOMINATOR. A warning that
         # says "truncated at 1000 rows" without saying "of 5000" gives the
         # model a numerator with no scale — it cannot tell 20% from 99%.
         rows_scanned = 0          # data rows actually walked (excl. blanks)

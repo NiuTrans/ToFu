@@ -169,7 +169,7 @@ def test_NC_anthropic_boundary_without_sniff_leaks_declared_type():
 # reconciliations are then belt-and-suspenders).
 
 def _built_user_image_url(media_type, raw):
-    from lib.tasks_pkg.conv_message_builder import _build_user_message
+    from lib.tasks_pkg.conv_message_builder._transform import _build_user_message
     msg = {'role': 'user', 'content': 'hi',
            'images': [{'base64': base64.b64encode(raw).decode(),
                        'mediaType': media_type}]}

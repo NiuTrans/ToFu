@@ -1,6 +1,6 @@
 """orchestrator/_vu_startup.py — VU startup + external-edit probe (run_task slice).
 
-**Extraction context** (board epic ``pt_03f4cdf1``, slice 2, FIRST source
+**Extraction context** (board epic ```, slice 2, FIRST source
 extraction from the 1813-line ``run_task``):
 
 Two self-contained helpers that ``run_task`` previously carried as nested
@@ -9,7 +9,7 @@ on any local variable OTHER than what they explicitly closed over) so they
 translate 1:1 to module-level functions taking their captures as arguments.
 
   * :func:`_vu_phase` — emit a PHASE event during the VU sub-task's
-    startup window (silent no-op on ordinary worker/endpoint turns).
+    startup window (silent no-op on ordinary non-VU turns).
   * :func:`_probe_external_edits` — the daemon-thread target that runs
     the FUSE external-edit probe after ``ensure_project_state``; on
     detection of committed off-Tofu edits, snapshots them into
@@ -51,8 +51,8 @@ def _vu_phase(
 ) -> None:
     """Emit a PHASE event during the VU sub-task's startup window.
 
-    The VU sub-task carries ``_vu_event_transform`` (the append_event
-    facade seam), so any PHASE emitted here is wrapped as
+    The VU sub-task carries ``_vu_event_transform`` (the event-transform
+    seam), so any PHASE emitted here is wrapped as
     ``autopilot_vu_event`` and lands in the synthetic-user bubble on BOTH
     the carrier's own stream and the parent's. The
     pre-stream prep window (tool assembly → tool-history rebuild → system-
@@ -61,7 +61,7 @@ def _vu_phase(
     typical, ~26s on a 3000-event conv), leaving the bubble on a vague
     placeholder. Naming each real sub-step keeps the display honest.
 
-    Gated on ``vu_startup`` so the ordinary worker/endpoint startup path
+    Gated on ``vu_startup`` so the ordinary non-VU startup path
     stays byte-identical (no new events).
 
     Args:
@@ -115,12 +115,8 @@ def _probe_external_edits(task: dict[str, Any], project_path: str) -> None:
         # edit — the former must NOT surface as an "edited outside
         # Tofu" toast.
         try:
-            from lib.tasks_pkg.manager import (
-                tasks as _known_tasks,
-                tasks_lock as _known_tasks_lock,
-            )
-            with _known_tasks_lock:
-                _known_task_ids = set(_known_tasks.keys())
+            from lib.tasks_pkg.manager.runtime import chat_task_runtime
+            _known_task_ids = set(chat_task_runtime.task_ids())
         except Exception as _kte:
             logger.debug('[Task:%s] known-task-id snapshot failed: %s',
                          task['id'][:8], _kte)
@@ -211,28 +207,28 @@ def setup_project_context(
     if not (project_enabled and project_path):
         return
 
-    # ★ Extract extra root paths from projectPaths (frontend sends all roots).
+    # Extract extra root paths from projectPaths (frontend sends all roots).
     #   projectPaths[0] = primary (same as projectPath), rest are extras.
     _all_paths = cfg.get('projectPaths') or []
     _extra_paths = (
         [p for p in _all_paths[1:] if p and p != project_path]
         if len(_all_paths) > 1 else [])
-    # ★ Read-only roots: a subset of the configured paths the user
-    #   attached for reference only. Writes/edits/create_project and
-    #   destructive run_command targeting these are refused; reads are
+    # Read-only roots: a subset of the configured paths the user
+    #   attached for reference only. Writes/edits and destructive
+    #   run_command targeting these are refused; reads are
     #   always allowed. Empty list = today's all-writable behaviour.
     _readonly_paths = [p for p in (cfg.get('readOnlyPaths') or []) if p]
     logger.info('[Task:%s] project_path=%s extra_roots=%d readonly=%d',
                 task['id'], project_path, len(_extra_paths),
                 len(_readonly_paths))
-    # ★ Ensure the server's global project state matches this task's
+    # Ensure the server's global project state matches this task's
     #   project path + extras. Another conversation may have switched
     #   the server to a different project, causing
     #   get_context_for_prompt to miss the file tree (path mismatch →
     #   no tree in system prompt → LLM doesn't know the project
     #   structure → "backend cannot use tools").
     from lib.project_mod import ensure_project_state
-    # ★ Pass conv_id for per-conversation root isolation (2026-05-05).
+    # Pass conv_id for per-conversation root isolation (2026-05-05).
     #   Prevents concurrent tasks from clobbering each other's
     #   workspace-root namespace when they call set_project with
     #   different primary paths. See lib/project_mod/config.py
@@ -248,8 +244,10 @@ def setup_project_context(
     if task.get('convId'):
         try:
             from lib.presence import announce as _presence_announce
+            from lib.tasks_pkg.manager import task_user_id
             _presence_announce(
                 project_path, task['convId'],
+                user_id=int(task_user_id(task)),
                 task_id=task['id'],
                 run_id=cfg.get('autopilotRunId') or '',
                 title=cfg.get('convTitle') or '',
@@ -275,7 +273,7 @@ def setup_project_context(
 def make_vu_phase(task: dict[str, Any]):
     """Bind the VU-startup flag + task into the closure-style phase emitter.
 
-    Extracted 2026-08-01 (pt_03f4cdf1 slice 37) from ``run_task``'s inline
+    Extracted 2026-08-01 ( slice 37) from ``run_task``'s inline
     attribution + closure block. The captured ``task`` + ``_vu_startup``
     are stable across the whole invocation (no rebind), so binding them
     once at factory time is semantically identical to the inline

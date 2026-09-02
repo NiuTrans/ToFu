@@ -5,7 +5,7 @@ Pins the contract that lets tools be added/removed as drop-in
 orchestration code (``lib/tasks_pkg/model_config.py``).
 
 Covered:
-  * Tool ordering matches the cache-stable legacy layout.
+  * Tool ordering matches the cache-stable canonical layout.
   * ``has_real_tools`` snapshot semantics (base vs capability phase).
   * Caller-supplied ``cfg['tools']`` override short-circuits assembly.
   * Memory attaches iff a base tool exists; swarm/mcp do NOT need base tools.
@@ -17,8 +17,20 @@ from __future__ import annotations
 
 import unittest
 
+import pytest
+
 from lib.tasks_pkg.model_config import _assemble_tool_list
-from lib.tools import ToolContext, ToolSpec, all_specs, assemble_tool_list, register_tool_spec
+from lib.tools.registry import (
+    ToolContext,
+    ToolSpec,
+    all_specs,
+    assemble_tool_list,
+    build_tool_result_meta,
+    register_tool_spec,
+)
+
+
+pytestmark = pytest.mark.unit
 
 
 def _names(tool_list):
@@ -31,7 +43,7 @@ def _ctx(**overrides):
         project_path='', project_enabled=False,
         search_mode='off', search_enabled=False, fetch_enabled=False,
         code_exec_enabled=False, browser_enabled=False, desktop_enabled=False,
-        swarm_enabled=False, image_gen_enabled=False,
+        image_gen_enabled=False,
         human_guidance_enabled=False, scheduler_enabled=False, messages=[],
     )
     base.update(overrides)
@@ -47,10 +59,11 @@ class TestOrdering(unittest.TestCase):
         names = _names(tl)
         self.assertTrue(hr)
         # search → fetch → read_files → inspect_image → project tools → memory (end)
-        self.assertEqual(names[:7], [
+        self.assertEqual(names[:6], [
             'web_search', 'fetch_url', 'read_files', 'inspect_image',
-            'list_dir', 'grep_search', 'find_files',
+            'grep_search', 'find_files',
         ])
+        self.assertNotIn('list_dir', names)
         # memory tools always come last (capability phase)
         self.assertIn('create_memory', names)
         self.assertLess(names.index('run_command'), names.index('create_memory'),
@@ -62,13 +75,86 @@ class TestOrdering(unittest.TestCase):
         tl, _ = assemble_tool_list(_ctx(search_mode='single', search_enabled=True))
         self.assertEqual(_names(tl)[0], 'web_search')
 
+    def test_skill_install_schema_is_deferred_but_remains_discoverable(self):
+        from lib.tools.gateway import local_wire_tools
+
+        ctx = _ctx(
+            project_path='/tmp/x', project_enabled=True,
+            search_mode='multi', search_enabled=True, fetch_enabled=True,
+        )
+        assembled, _ = assemble_tool_list(ctx)
+        self.assertEqual(
+            ctx.discovery_policy_by_name['request_skill_install'],
+            'searchable')
+        self.assertIn(
+            'request_skill_install',
+            {tool['function']['name']
+             for tool in ctx.executable_tool_catalog})
+        projected = local_wire_tools(
+            assembled,
+            discovery_policy_by_name=ctx.discovery_policy_by_name,
+            discovery_catalog_size=len(ctx.executable_tool_catalog),
+            searchable_count=sum(
+                policy == 'searchable'
+                for policy in ctx.discovery_policy_by_name.values()),
+        )
+        projected_names = set(_names(projected))
+        self.assertNotIn('request_skill_install', projected_names)
+        self.assertTrue({
+            'search_skills', 'load_skill', 'read_skill_resource',
+            'search_tools', 'execute_tools',
+        } <= projected_names)
+
+
+class TestResultMetadataSeam(unittest.TestCase):
+    def test_project_metadata_is_built_by_the_owning_spec(self):
+        meta = build_tool_result_meta(
+            'write_file',
+            {'path': 'notes.txt', 'description': 'save notes'},
+            'File updated: notes.txt',
+        )
+        self.assertEqual(meta['source'], 'Project')
+        self.assertEqual(meta['badge'], 'updated')
+        self.assertTrue(meta['writeOk'])
+
+    def test_unowned_tool_uses_bounded_neutral_metadata(self):
+        content = 'unknown plugin result\n' + ('x' * 200)
+        meta = build_tool_result_meta('plugin__unknown', {}, content)
+        self.assertEqual(meta['title'], 'plugin__unknown')
+        self.assertEqual(meta['fetchedChars'], len(content))
+        self.assertEqual(meta['snippet'], content[:120].replace('\n', ' '))
+        self.assertEqual(meta['badge'], '')
+
 
 class TestPhaseSemantics(unittest.TestCase):
+    def test_every_executable_tool_has_one_v2_contract_document(self):
+        contexts = [
+            _ctx(),
+            _ctx(
+                project_path='/tmp/x', project_enabled=True,
+                search_mode='multi', search_enabled=True,
+                fetch_enabled=True, code_exec_enabled=True,
+                browser_enabled=True, scheduler_enabled=True,
+            ),
+        ]
+        for ctx in contexts:
+            assemble_tool_list(ctx)
+            executable = set(_names(ctx.executable_tool_catalog))
+            documents = ctx.tool_contract_documents_by_name
+            self.assertEqual(executable, set(documents))
+            for name in executable:
+                self.assertEqual(
+                    documents[name].get('contractVersion'),
+                    'tofu.tool-contract/v2')
+                self.assertEqual(documents[name].get('name'), name)
+                self.assertIsInstance(
+                    documents[name].get('arguments_schema'), dict)
+
     def test_available_scope_keeps_hidden_tool_executable_not_on_wire(self):
         ctx = _ctx()
         tl, _ = assemble_tool_list(ctx)
         self.assertNotIn('run_command', _names(tl))
-        self.assertIn('run_command', _names(ctx.enabled_tool_catalog))
+        self.assertIn('run_command', _names(ctx.executable_tool_catalog))
         self.assertEqual(
             ctx.discovery_policy_by_name['run_command'], 'searchable')
 
@@ -76,7 +162,69 @@ class TestPhaseSemantics(unittest.TestCase):
         ctx = _ctx(cfg={'tools': {'executionScope': 'selected_only'}})
         tl, _ = assemble_tool_list(ctx)
         self.assertNotIn('run_command', _names(tl))
-        self.assertNotIn('run_command', _names(ctx.enabled_tool_catalog))
+        self.assertNotIn('run_command', _names(ctx.executable_tool_catalog))
+
+    def test_memory_write_scope_matches_project_context(self):
+        no_project_tools, _ = assemble_tool_list(_ctx(
+            cfg={'memoryEnabled': True}))
+        no_project = {
+            tool['function']['name']: tool for tool in no_project_tools}
+        for name in ('create_memory', 'merge_memories'):
+            scope = no_project[name]['function']['parameters']['properties']['scope']
+            self.assertEqual(scope['enum'], ['global'])
+            self.assertIn('Default: global', scope['description'])
+
+        project_tools, _ = assemble_tool_list(_ctx(
+            cfg={'memoryEnabled': True}, project_path='/tmp/project',
+            project_enabled=True))
+        project = {tool['function']['name']: tool for tool in project_tools}
+        for name in ('create_memory', 'merge_memories'):
+            scope = project[name]['function']['parameters']['properties']['scope']
+            self.assertEqual(scope['enum'], ['global', 'project'])
+
+        # Context specialization must never mutate the module-level schemas.
+        from lib.memory.tools import CREATE_MEMORY_TOOL
+        static_scope = (CREATE_MEMORY_TOOL['function']['parameters']
+                        ['properties']['scope'])
+        self.assertEqual(static_scope['enum'], ['global', 'project'])
+
+
+class TestMemoryExecutionDefaults(unittest.TestCase):
+    def test_omitted_scope_uses_global_without_project(self):
+        from unittest.mock import patch
+        from lib.tasks_pkg.handlers.memory import _memory_create
+
+        seen = {}
+
+        def _create_memory(**kwargs):
+            seen.update(kwargs)
+            return {'name': kwargs['name'], 'id': 'm1',
+                    'scope': kwargs['scope']}
+
+        with patch('lib.memory.storage.create_memory', _create_memory):
+            content, badge, _title = _memory_create(
+                {'name': 'N', 'description': 'D', 'body': 'B'}, None)
+        self.assertEqual(seen['scope'], 'global')
+        self.assertIsNone(seen['project_path'])
+        self.assertIn('scope: global', content)
+        self.assertEqual(badge, '💡 saved')
+
+    def test_omitted_scope_keeps_project_default_with_project(self):
+        from unittest.mock import patch
+        from lib.tasks_pkg.handlers.memory import _memory_create
+
+        seen = {}
+
+        def _create_memory(**kwargs):
+            seen.update(kwargs)
+            return {'name': kwargs['name'], 'id': 'm2',
+                    'scope': kwargs['scope']}
+
+        with patch('lib.memory.storage.create_memory', _create_memory):
+            _memory_create(
+                {'name': 'N', 'description': 'D', 'body': 'B'}, '/tmp/p')
+        self.assertEqual(seen['scope'], 'project')
+        self.assertEqual(seen['project_path'], '/tmp/p')
 
     def test_read_files_always_on_and_pulls_memory(self):
         # Even bare (no project/search), read_files is on → counts as a base
@@ -94,7 +242,7 @@ class TestPhaseSemantics(unittest.TestCase):
         for flag in (False, True):
             ctx = _ctx(scheduler_enabled=flag)
             assemble_tool_list(ctx)
-            names = _names(ctx.enabled_tool_catalog)
+            names = _names(ctx.executable_tool_catalog)
             for n in ('schedule_create', 'schedule_list', 'schedule_manage'):
                 self.assertIn(n, names,
                               f'{n} must remain executable regardless of scheduler_enabled={flag}')
@@ -103,7 +251,7 @@ class TestPhaseSemantics(unittest.TestCase):
     def test_swarm_without_base_tools(self):
         # Swarm is NOT gated on has_base_tools — but read_files is always on,
         # so assert the three swarm tools are present regardless.
-        tl, _ = assemble_tool_list(_ctx(swarm_enabled=True))
+        tl, _ = assemble_tool_list(_ctx())
         names = _names(tl)
         for n in ('spawn_agents', 'await_agents', 'get_agent_result'):
             self.assertIn(n, names)
@@ -133,7 +281,7 @@ class TestPhaseSemantics(unittest.TestCase):
         # conv-ref tools — present in project mode, absent otherwise.
         ctx_proj = _ctx(project_path='/tmp/x', project_enabled=True)
         assemble_tool_list(ctx_proj)
-        names = _names(ctx_proj.enabled_tool_catalog)
+        names = _names(ctx_proj.executable_tool_catalog)
         self.assertIn('project_charter_read', names)
         self.assertIn('project_charter_propose', names)
         # Drift note: this test used to assert project_charter_commit WAS in
@@ -145,7 +293,7 @@ class TestPhaseSemantics(unittest.TestCase):
         # legacy/hallucinated call with an explanation rather than an opaque
         # unknown-tool error — pin both halves of that contract.
         self.assertNotIn('project_charter_commit', names)
-        from lib.tools import conversation as _conv_tools
+        import lib.tools.conversation as _conv_tools
         self.assertIn('project_charter_commit', _conv_tools.CHARTER_TOOL_NAMES)
         self.assertEqual(
             _conv_tools.CHARTER_COMMIT_TOOL['function']['name'],
@@ -168,13 +316,97 @@ class TestPhaseSemantics(unittest.TestCase):
         self.assertNotIn('get_conversation', _names(tl))
 
 
+class TestProjectBrainSurface(unittest.TestCase):
+    """The 2026-08-19 brain-surface restructure (owner-directed):
+
+    * The brain READ tools (charter/board/peer-status/feed) are EAGER and
+      resident on every plain project turn — the per-turn injections name
+      them, and a keyword-triggered searchable family meant the model never
+      learned the cross-conversation mechanism existed.
+    * The brain ADVISORY-WRITE tools are searchable: off the resident wire,
+      still in the executable catalog and discoverable via Tool Search.
+    * create_project is removed from the model-facing catalog entirely: the
+      absolute-path-write auto-register made the schema near-dead weight, and
+      a half-designed scaffold tool should not keep occupying the surface.
+    """
+
+    _READ = ('project_charter_read', 'project_board_read',
+             'project_peer_status', 'project_feed_read')
+    _WRITE = ('project_charter_propose', 'project_board_post',
+              'project_board_claim', 'project_board_complete',
+              'project_board_block', 'project_message', 'project_intervene')
+
+    def test_brain_reads_eager_on_plain_project_turn(self):
+        # A plain coding request (no coordination keywords) must still see
+        # the read surface — visibility must not depend on routing luck.
+        ctx = _ctx(project_path='/tmp/x', project_enabled=True,
+                   messages=[{'role': 'user', 'content': 'fix the login bug'}])
+        tl, _ = assemble_tool_list(ctx)
+        names = _names(tl)
+        for n in self._READ:
+            self.assertIn(n, names)
+            self.assertEqual(ctx.discovery_policy_by_name[n], 'eager')
+        # conv_ref rides the same project gate: the sibling digest names
+        # list_conversations/get_conversation on every project turn, so the
+        # schemas must be resident, not deferred (the phantom-tool gap the
+        # project-mode branch was added to close).
+        for n in ('list_conversations', 'get_conversation'):
+            self.assertIn(n, names)
+            self.assertEqual(ctx.discovery_policy_by_name[n], 'eager')
+
+    def test_brain_writes_searchable_but_executable(self):
+        ctx = _ctx(project_path='/tmp/x', project_enabled=True,
+                   messages=[{'role': 'user', 'content': 'fix the login bug'}])
+        tl, _ = assemble_tool_list(ctx)
+        catalog = _names(ctx.executable_tool_catalog)
+        for n in self._WRITE:
+            self.assertIn(n, catalog)
+            self.assertEqual(ctx.discovery_policy_by_name[n], 'searchable')
+
+    def test_create_project_removed_from_model_catalog(self):
+        # Neither the resident project wire nor the searchable/executable
+        # catalog may still carry create_project — otherwise the model keeps
+        # discovering a scaffold tool we deliberately retired.
+        ctx = _ctx(project_path='/tmp/x', project_enabled=True)
+        tl, _ = assemble_tool_list(ctx)
+        self.assertNotIn('create_project', _names(tl))
+        self.assertNotIn(
+            'create_project', _names(ctx.executable_tool_catalog))
+        self.assertNotIn('create_project', ctx.discovery_policy_by_name)
+        self.assertFalse(any('create_project' in spec.provides
+                             for spec in all_specs()))
+        ctx_none = _ctx()
+        assemble_tool_list(ctx_none)
+        self.assertNotIn('create_project',
+                         _names(ctx_none.executable_tool_catalog))
+
+    def test_brain_absent_without_project(self):
+        ctx = _ctx()
+        assemble_tool_list(ctx)
+        catalog = _names(ctx.executable_tool_catalog)
+        for n in self._READ + self._WRITE:
+            self.assertNotIn(n, catalog)
+
+    def test_read_schemas_point_at_write_tools(self):
+        # The discovery loop closes in the schema text itself: each resident
+        # read tool names the advisory-write tools that act on its surface.
+        from lib.tools.conversation import BRAIN_READ_TOOLS
+        descs = {t['function']['name']: t['function']['description']
+                 for t in BRAIN_READ_TOOLS}
+        self.assertIn('project_board_claim', descs['project_board_read'])
+        self.assertIn('project_charter_propose',
+                      descs['project_charter_read'])
+        self.assertIn('project_message', descs['project_peer_status'])
+        self.assertIn('project_message', descs['project_feed_read'])
+
+
 class TestLegacyShim(unittest.TestCase):
     def test_caller_supplied_tools_override(self):
         tl, hr = _assemble_tool_list(
             cfg={'tools': [{'type': 'function', 'function': {'name': 'foo'}}]},
             project_path='', project_enabled=False, task_id='t', search_mode='multi',
             search_enabled=True, fetch_enabled=True, code_exec_enabled=False,
-            browser_enabled=False, desktop_enabled=False, swarm_enabled=False,
+            browser_enabled=False, desktop_enabled=False,
             messages=[])
         self.assertEqual(_names(tl), ['foo'])
         self.assertTrue(hr)
@@ -189,24 +421,27 @@ class TestLegacyShim(unittest.TestCase):
         self.assertIsNotNone(tl)
         self.assertTrue(hr)
 
-    def test_frontend_enabled_families_are_stamped_as_tool_search_pins(self):
+    def test_eager_families_are_not_misclassified_as_explicit_pins(self):
         cfg = {'memoryEnabled': True, 'mcpEnabled': False}
         tl, _ = _assemble_tool_list(
             cfg=cfg, project_path='/tmp/x', project_enabled=True,
             task_id='t', search_mode='multi', search_enabled=True,
             fetch_enabled=True, code_exec_enabled=False,
             browser_enabled=False, desktop_enabled=False,
-            swarm_enabled=False, image_gen_enabled=False,
+            image_gen_enabled=False,
             messages=[])
-        names = set(_names(tl))
         pins = set(cfg['_frontendSelectedToolNames'])
-        assert {'web_search', 'fetch_url', 'read_files', 'list_dir',
-                'run_command', 'create_memory',
-                'todo_write'} <= pins <= names
-        assert 'load_skill' not in names  # no skill is installed in this fixture
+        names = set(_names(tl))
+        assert pins == set()
+        assert 'list_dir' not in names
+        # The compact skills surface stays callable with zero installed packs:
+        # search_skills is how the model discovers the verified catalog, and
+        # load_skill must remain authorized for an approved same-turn install.
+        assert 'search_skills' in names
+        assert 'load_skill' in names
         # High-level production tools merely ride the search gate; the human
         # did not explicitly select them, so they remain eligible for search.
-        assert 'produce_report' in _names(cfg['_enabledToolCatalog'])
+        assert 'produce_report' in _names(cfg['_executableToolCatalog'])
         assert 'produce_report' not in pins
 
 
@@ -223,18 +458,19 @@ class TestPluginRegistration(unittest.TestCase):
             self.assertIn(spec, all_specs())
             ctx = _ctx(cfg={'weatherEnabled': True})
             assemble_tool_list(ctx)
-            self.assertIn('_test_weather_tool', _names(ctx.enabled_tool_catalog))
+            self.assertIn(
+                '_test_weather_tool', _names(ctx.executable_tool_catalog))
             # Gate off → absent.
             tl_off, _ = assemble_tool_list(_ctx(cfg={}))
             self.assertNotIn('_test_weather_tool', _names(tl_off))
         finally:
             # Clean up so the global registry isn't polluted for other tests.
-            from lib.tools import registry as _reg
+            import lib.tools.registry as _reg
             _reg._TOOL_SPECS[:] = [s for s in _reg._TOOL_SPECS if s.key != '_test_weather']
             _reg._REGISTERED_KEYS.discard('_test_weather')
 
     def test_duplicate_key_ignored_without_replace(self):
-        from lib.tools import registry as _reg
+        import lib.tools.registry as _reg
         spec = ToolSpec(key='_dup_test', build=lambda ctx: [], phase='base')
         try:
             register_tool_spec(spec)
@@ -265,7 +501,7 @@ class TestHandlerSync(unittest.TestCase):
         ), _h
 
     def _cleanup(self, key):
-        from lib.tools import registry as _reg
+        import lib.tools.registry as _reg
         _reg._TOOL_SPECS[:] = [s for s in _reg._TOOL_SPECS if s.key != key]
         _reg._REGISTERED_KEYS.discard(key)
         # Dropping the ToolSpec does NOT unbind the handler its registration
@@ -308,7 +544,7 @@ class TestHandlerSync(unittest.TestCase):
 
     def test_startup_sync_is_idempotent(self):
         # Re-running sync_spec_handlers must not raise and must keep bindings.
-        from lib.tools import sync_spec_handlers
+        from lib.tools.registry import sync_spec_handlers
         from lib.tasks_pkg.executor import tool_registry
         n = sync_spec_handlers(tool_registry)
         self.assertGreaterEqual(n, 0)
@@ -316,7 +552,7 @@ class TestHandlerSync(unittest.TestCase):
 
 class TestConcurrencyFlagSync(unittest.TestCase):
     def test_write_and_idempotent_sets_reflect_specs(self):
-        from lib.tasks_pkg.tool_dispatch import _IDEMPOTENT_TOOLS, _WRITE_TOOLS
+        from lib.tasks_pkg.tool_dispatch._flags import _IDEMPOTENT_TOOLS, _WRITE_TOOLS
         # Project write tools.
         self.assertIn('run_command', _WRITE_TOOLS)
         self.assertIn('write_file', _WRITE_TOOLS)
@@ -326,7 +562,7 @@ class TestConcurrencyFlagSync(unittest.TestCase):
         self.assertIn('web_search', _IDEMPOTENT_TOOLS)
         self.assertIn('grep_search', _IDEMPOTENT_TOOLS)
         # Base-set-only browser internals still present.
-        self.assertIn('browser_read_tab', _IDEMPOTENT_TOOLS)
+        self.assertIn('browser_read_page', _IDEMPOTENT_TOOLS)
 
 
 if __name__ == '__main__':

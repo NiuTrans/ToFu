@@ -277,14 +277,12 @@ def test_every_inplace_shipped_source_writer_is_registered():
     guarded = set(_load_guarded_registry())
     writers = _discover_inplace_shipped_writers()
 
-    # Sanity: the scanner must find the orphan-classifier reconcile.py writer,
+    # Sanity: the scanner must find at least one currently registered writer,
     # else the AST heuristic silently regressed and this test passes vacuously.
-    # Frontend sources are now a Vite graph and their former in-place writers
-    # were retired with static/js; current frontend tests use temp artifacts.
     all_targets = {t for hits in writers.values() for t in hits}
-    assert 'lib/conversations/reconcile.py' in all_targets, (
-        'scanner did not detect the reconcile.py in-place writer '
-        '(test_orphan_resumable_classifier) — heuristic regressed. '
+    assert 'static/styles.css' in all_targets, (
+        'scanner did not detect the retained stylesheet writers — heuristic '
+        'regressed. '
         f'Detected: {writers}')
 
     unregistered = []
@@ -355,36 +353,43 @@ def test_scanner_ignores_tmp_path_and_copy_writers(tmp_path):
 # quiet when every guarded file is clean.
 
 def test_session_start_poison_detector_flags_drift_from_head(tmp_path, monkeypatch):
-    """Simulate a leftover neuter: point the detector at a guarded file, poison
-    it on disk, and assert it is reported as drifted-from-HEAD (a possible
-    prior-crash poison), then restore byte-identical."""
+    """Detect a simulated leftover neuter in an isolated Git repository.
+
+    This used to poison a real guarded source in the shared working tree.  In
+    an xdist run, the syntax smoke test could read that file inside the brief
+    write/restore window and report a spurious production SyntaxError.  A tiny
+    temporary repository exercises the same real ``git diff`` boundary without
+    exposing any shipped source to another worker.
+    """
     import importlib
     import subprocess
     conftest = importlib.import_module('tests.conftest')
-    # Pick a guarded file that is CLEAN vs HEAD right now (so our poison is the
-    # only drift we introduce). Fall back to the first guarded file otherwise.
-    victim = None
-    for rel in conftest._NC_GUARDED_SOURCES:
-        r = subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--', rel],
-                           cwd=conftest._ROOT_DIR, capture_output=True)
-        if r.returncode == 0:
-            victim = rel
-            break
-    if victim is None:
-        pytest.skip('no clean guarded file to use for the drift probe')
-    p = os.path.join(conftest._ROOT_DIR, victim)
-    original = open(p, encoding='utf-8').read()
-    try:
-        with open(p, 'w', encoding='utf-8') as f:
-            f.write(original + '\n/* SIMULATED LEFTOVER NEUTER */\n')
-        drifted = conftest.warn_on_nc_source_poison_at_session_start()
-        assert victim in drifted, (
-            f'session-start detector failed to flag a poisoned guarded file: '
-            f'{victim} not in {drifted}')
-    finally:
-        with open(p, 'w', encoding='utf-8') as f:
-            f.write(original)
-    assert open(p, encoding='utf-8').read() == original
+    repo = tmp_path / 'isolated_repo'
+    repo.mkdir()
+    victim = 'lib/conversations/project_board.py'
+    guarded = repo / victim
+    guarded.parent.mkdir(parents=True)
+    guarded.write_text('BASELINE = True\n', encoding='utf-8')
+    subprocess.run(['git', 'init', '-q'], cwd=repo, check=True)
+    subprocess.run(['git', 'add', victim], cwd=repo, check=True)
+    subprocess.run(
+        ['git', '-c', 'user.name=NC Guard', '-c', 'user.email=nc@example.invalid',
+         'commit', '-q', '-m', 'baseline'],
+        cwd=repo, check=True,
+    )
+
+    guarded.write_text(
+        'BASELINE = True\n# NC-SIMULATED-LEFTOVER-NEUTER\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(conftest, '_ROOT_DIR', str(repo))
+    monkeypatch.setattr(conftest, '_NC_GUARDED_SOURCES', (victim,))
+
+    drifted = conftest.warn_on_nc_source_poison_at_session_start()
+
+    assert drifted == [victim], (
+        f'session-start detector failed to flag the isolated poisoned source: '
+        f'{victim} not in {drifted}')
 
 
 def test_session_start_detector_is_quiet_when_clean(monkeypatch):

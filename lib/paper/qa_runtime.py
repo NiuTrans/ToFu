@@ -12,10 +12,10 @@ recent task so a reattach after refresh can find an in-flight answer.
 """
 
 import threading
-import time
 
 from lib.log import get_logger
-from lib.task_runtime import TaskRuntime
+from lib.agent_core.task_runtime import TaskRuntime
+from lib.paper.request_policy import paper_request_policy_telemetry
 
 logger = get_logger(__name__)
 
@@ -25,46 +25,60 @@ _qa_runtime = TaskRuntime(
     push_channel='paper',
     error_source='routes.paper:qa',
 )
-# paper_hash → most-recent qa task_id (for reattach after refresh).
-_qa_latest_index: dict[str, str] = {}
+# (owner, paper_hash) → most-recent qa task_id (for reattach after refresh).
+_qa_latest_index: dict[tuple[int, str], str] = {}
 _qa_index_lock = threading.Lock()
 _QA_TASK_TTL = 1800
 
 
-def _qa_latest_for(phash: str) -> dict | None:
+def _qa_latest_for(phash: str, *, user_id: int) -> dict | None:
     """Return the most recent Q&A task for a paper hash, or None."""
     with _qa_index_lock:
-        tid = _qa_latest_index.get(phash)
+        tid = _qa_latest_index.get((user_id, phash))
     if not tid:
         return None
-    return _qa_runtime.get(tid)
+    return _qa_runtime.get_owned(tid, user_id=user_id)
 
 
-def _qa_register_latest(phash: str, task_id: str) -> None:
+def _qa_register_latest(phash: str, task_id: str, *, user_id: int) -> None:
     with _qa_index_lock:
-        _qa_latest_index[phash] = task_id
+        _qa_latest_index[(user_id, phash)] = task_id
 
 
-def _new_qa_task(task_id, phash, lang, model, *, question='', client_title=''):
+def _new_qa_task(
+    task_id, phash, lang, model, *, user_id: int, question='', client_title='',
+    config=None,
+):
     """Create a fresh Q&A task. Registers it as the paper's latest."""
+    detached_config = dict(config or {})
+    request_policy = paper_request_policy_telemetry(
+        model=model, config=detached_config)
     task = _qa_runtime.create(
+        user_id=user_id,
         task_id=task_id,
-        meta={'paper_hash': phash, 'lang': lang, 'model': model},
+        meta={
+            'paper_hash': phash,
+            'lang': lang,
+            'model': model,
+            'execution_fingerprint': request_policy[
+                'executionFingerprint'],
+        },
     )
-    task.update({
+    _qa_runtime.update_fields(task_id, fields={
         'task_id': task_id,
         'paper_hash': phash,
         'lang': lang,
         'model': model,
         'question': question,
         'client_title': client_title,
-        'status': 'pending',
-        'finished_at': None,
+        'config': detached_config,
+        'execution_fingerprint': request_policy['executionFingerprint'],
+        'requestPolicyV1': request_policy,
         'full_text': '',
         'tool_rounds': [],
         'round_counter': 0,
     })
-    _qa_register_latest(phash, task_id)
+    _qa_register_latest(phash, task_id, user_id=user_id)
     return task
 
 
@@ -75,21 +89,14 @@ def _append_qa_event(task, event):
 
 def _cleanup_stale_qa_tasks():
     """Drop finished Q&A tasks older than TTL and prune the latest index."""
-    finished_ids: set = set()
-    with _qa_runtime._lock:
-        for tid, t in _qa_runtime._tasks.items():
-            if t['status'] in ('done', 'error', 'aborted') and t.get('finished_at'):
-                if time.time() - t['finished_at'] > _QA_TASK_TTL:
-                    finished_ids.add(tid)
     n = _qa_runtime.cleanup_stale()
     if n:
+        live_task_ids = _qa_runtime.task_ids()
         with _qa_index_lock:
-            stale = [k for k, tid in _qa_latest_index.items() if tid in finished_ids]
+            stale = [
+                key for key, task_id in _qa_latest_index.items()
+                if task_id not in live_task_ids
+            ]
             for k in stale:
                 _qa_latest_index.pop(k, None)
         logger.debug('[Paper:QA] Cleaned %d stale task(s)', n)
-
-
-# Compatibility aliases (tests / introspection).
-_qa_tasks = _qa_runtime._tasks       # type: ignore[attr-defined]
-_qa_tasks_lock = _qa_runtime._lock   # type: ignore[attr-defined]

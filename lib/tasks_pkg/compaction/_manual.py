@@ -1,23 +1,25 @@
 """Layer 2 (manual) — user-triggered active context compaction (`/compact`).
 
 Unlike the automatic L2 path (``_layer2.execute_compact_tool``), which is
-*ephemeral* — it rewrites the in-flight request ``messages`` list once per
-round and the raw ``conversations.messages`` in the DB is never shrunk — this
-module implements the **persistent** manual compaction the user asks for with
-a button: it replaces the old history in ``conversations.messages`` itself with
-a single summary message, so every subsequent turn loads a small context.
+*ephemeral* and rewrites only the in-flight request, this module implements the
+**persistent** manual compaction the user asks for with a button. It rewrites
+the conversation's actual transcript authority so every subsequent turn loads
+a small context: a legacy conversation uses a message-aggregate revision CAS;
+a turn-native conversation compiles the before/after projections into the
+receipt-backed atomic ``turn.compact`` command. It never overwrites the frozen
+legacy placeholder after Turn rows become authoritative.
 
 It REUSES the L2 summary engine verbatim (``_generate_query_aware_summary`` +
-the 9-section system prompt + objective-anchor protection + recently-accessed
-files). It does NOT rewrite any summary logic.
+the compact state-receipt prompt + objective-anchor protection +
+recently-accessed files). It does NOT rewrite any summary logic.
 
 ────────────────────────────────────────────────────────────────────────────
-⚠️  HARD CONSTRAINT (see docs/MANUAL_COMPACTION_DESIGN.md §4.1): boundary
+⚠️  HARD CONSTRAINT (see docs/modules/context_engineering.md): boundary
     computation and application MUST stay in the SAME index space.
 
     ``_transform_messages`` (the api-form projection) is length/order-changing:
     one raw assistant row with N ``toolRounds`` expands into many api messages,
-    endpoint sessions collapse, same-role rows merge.  So an index computed on
+    Flow sessions collapse, same-role rows merge. So an index computed on
     the api-form list CANNOT be mapped 1:1 back to the raw
     ``conversations.messages`` list.  Slicing the raw list with an api-space
     index would split a tool round → orphan ``tool`` messages / a broken
@@ -36,8 +38,9 @@ files). It does NOT rewrite any summary logic.
         is never used to slice the raw list.
 
 Public surface:
-  * ``compact_conversation_now`` — DB orchestrator (load → plan → archive →
-    summarize → rewrite → persist).  Idle-only (caller gates on activeTaskId).
+  * ``compact_conversation_now`` — authority-aware orchestrator (load → plan →
+    archive → summarize → atomic persist). Idle-only (caller gates on
+    activeTaskId).
   * ``plan_manual_compaction``   — pure: computes system_end / boundary /
     anchor / old-region / reserve-region.  No DB, no LLM.
   * ``apply_manual_compaction``  — pure: rebuilds the raw message list.
@@ -47,6 +50,7 @@ Public surface:
 from __future__ import annotations
 
 import time
+import uuid
 
 from lib.log import audit_log, get_logger
 from lib.agent_core.push import push_event
@@ -73,6 +77,7 @@ from lib.tasks_pkg.compaction._tokens import (
     _get_context_limit,
     _usable_context,
 )
+from lib.tasks_pkg.compaction._receipt import build_compaction_receipt
 
 logger = get_logger(__name__)
 
@@ -86,14 +91,14 @@ _SUMMARY_HEADER = '## 上下文已压缩（主动 /compact）'
 _COMPACTION_CHANNEL = 'compaction'
 
 
-def _push_compaction(conv_id: str, payload: dict) -> None:
+def _push_compaction(conv_id: str, payload: dict, *, user_id) -> None:
     """Best-effort push on the compaction channel (never breaks compaction).
 
     The DB rewrite is the source of truth; the live card is a cosmetic overlay.
     A missing subscriber / hub error must never surface as a compaction
     failure, so every exception is swallowed at debug level."""
     try:
-        push_event(_COMPACTION_CHANNEL, conv_id, payload)
+        push_event(_COMPACTION_CHANNEL, conv_id, payload, user_id=user_id)
     except Exception as e:
         logger.debug('[ManualCompact] conv=%s push %s skipped: %s',
                      conv_id[:8] if conv_id else '?', payload.get('type'), e)
@@ -128,7 +133,7 @@ def _project(raw_slice: list, config: dict | None = None) -> list:
     is injected into the counted slice.  The returned list's indices are NEVER
     used to slice the raw list (see the module-level hard constraint).
     """
-    from lib.tasks_pkg.conv_message_builder import _transform_messages
+    from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
     try:
         return _transform_messages(list(raw_slice), {})
     except Exception as e:
@@ -218,23 +223,27 @@ def _raw_turn_boundary(
     return boundary
 
 
-def _collect_reserve_folds(reserve_raw: list) -> list:
+def _collect_reserve_folds(
+    reserve_raw: list,
+    *,
+    config: dict | None = None,
+    hot_budget_tokens: int | None = None,
+) -> list:
     """档B — intra-turn fold plan for the RESERVE region.
 
-    Scans EVERY assistant in the preserved (reserve) region and, for each whose
-    ``toolRounds`` count exceeds the hot-tail threshold, splits its rounds into
-    COLD (to summarize + drop) + HOT (keep verbatim).  Returns a list of fold
-    dicts (possibly empty), one per foldable assistant, in reserve order:
+    Scans every assistant in the preserved (reserve) region and splits complete
+    rounds into COLD (summarize + drop) and one newest chronological HOT suffix
+    (keep verbatim). The hot-round count is a maximum; the planner's token
+    budget may fold a short but oversized suffix. Returns a list of fold dicts
+    (possibly empty), one per folded assistant, in reserve order:
 
       ``asst_idx``     — index (within ``reserve_raw``) of the heavy assistant
       ``cold_rounds``  — the older ``toolRounds`` to summarize + drop
       ``hot_rounds``   — the most-recent ``toolRounds`` kept verbatim
 
-    TRADEOFF (multiple heavy turns): we fold ALL foldable reserve assistants,
-    not just the heaviest.  A single giant turn can fill the window on its own,
-    so folding only one would leave the "one click → total must drop
-    significantly" contract broken whenever ≥2 reserve turns are heavy.  Folding
-    every giant turn makes that user-visible contract robust for any shape.
+    Multiple heavy turns share the same chronological suffix budget, matching
+    automatic L2. Older assistants may therefore retain no raw tool round; their
+    prose remains and every removed complete round enters the summary source.
 
     HARD CONSTRAINT: each round is self-contained (its own ``toolCallId`` +
     ``toolContent``), so dropping WHOLE cold rounds from one assistant's
@@ -242,18 +251,74 @@ def _collect_reserve_folds(reserve_raw: list) -> list:
     tool_call/result pair.  We edit ONLY that message's ``toolRounds`` list —
     never slice across messages (design §4.1).
     """
-    folds = []
+    # The legacy/no-budget helper keeps its original per-assistant behavior for
+    # compatibility with direct callers. The real planner supplies a budget and
+    # uses one chronological round sequence across the entire reserve, matching
+    # the automatic api-form fold.
+    if hot_budget_tokens is None:
+        folds = []
+        for i, m in enumerate(reserve_raw):
+            if not isinstance(m, dict) or m.get('role') != 'assistant':
+                continue
+            rounds = m.get('toolRounds') or []
+            cold, hot = _split_cold_rounds(
+                rounds, _MANUAL_INTRA_TURN_HOT_ROUNDS)
+            if cold:
+                folds.append({
+                    'asst_idx': i,
+                    'cold_rounds': cold,
+                    'hot_rounds': hot,
+                })
+        return folds
+
+    descriptors = []
+    reserve_without_rounds = []
     for i, m in enumerate(reserve_raw):
-        if not isinstance(m, dict) or m.get('role') != 'assistant':
-            continue
-        rounds = m.get('toolRounds') or []
-        # SHARED fold-boundary policy (``_split_cold_rounds``) — identical cut
-        # the automatic L2 path uses on api-form round spans, so the keep-vs-
-        # fold decision can never drift between the two compaction paths.
-        cold, hot = _split_cold_rounds(rounds, _MANUAL_INTRA_TURN_HOT_ROUNDS)
-        if not cold:
-            continue
-        folds.append({'asst_idx': i, 'cold_rounds': cold, 'hot_rounds': hot})
+        copied = dict(m) if isinstance(m, dict) else m
+        if isinstance(copied, dict) and copied.get('role') == 'assistant':
+            rounds = copied.get('toolRounds') or []
+            if isinstance(rounds, list):
+                descriptors.extend(
+                    {'asst_idx': i, 'round': round_value}
+                    for round_value in rounds
+                )
+                copied['toolRounds'] = []
+        reserve_without_rounds.append(copied)
+
+    if not descriptors:
+        return []
+    base_tokens = _raw_estimate_tokens(reserve_without_rounds, config)
+
+    def _round_cost(descriptor: dict) -> int:
+        return _raw_estimate_tokens([{
+            'role': 'assistant',
+            'content': '',
+            'toolRounds': [descriptor['round']],
+        }], config)
+
+    cold_descriptors, hot_descriptors = _split_cold_rounds(
+        descriptors,
+        _MANUAL_INTRA_TURN_HOT_ROUNDS,
+        hot_budget_tokens=hot_budget_tokens,
+        base_tokens=base_tokens,
+        token_cost=_round_cost,
+    )
+    cold_by_assistant: dict[int, list] = {}
+    hot_by_assistant: dict[int, list] = {}
+    for descriptor in cold_descriptors:
+        cold_by_assistant.setdefault(descriptor['asst_idx'], []).append(
+            descriptor['round'])
+    for descriptor in hot_descriptors:
+        hot_by_assistant.setdefault(descriptor['asst_idx'], []).append(
+            descriptor['round'])
+
+    folds = []
+    for assistant_index in sorted(cold_by_assistant):
+        folds.append({
+            'asst_idx': assistant_index,
+            'cold_rounds': cold_by_assistant[assistant_index],
+            'hot_rounds': hot_by_assistant.get(assistant_index, []),
+        })
     return folds
 
 
@@ -306,8 +371,11 @@ def plan_manual_compaction(
     if total_tokens < _MANUAL_COMPACT_MIN_TOKENS:
         return None
 
+    usable = _usable_context(_get_context_limit(task))
+    preserve_budget_tokens = max(1, int(usable * _PRESERVE_BUDGET_RATIO))
     boundary = _raw_turn_boundary(
-        raw_messages, config=config, task=task, max_turns=resolved_max)
+        raw_messages, config=config, task=task, max_turns=resolved_max,
+        budget_tokens=preserve_budget_tokens)
 
     anchor_idx = _objective_anchor_index(raw_messages)
     anchor_msg = None
@@ -324,7 +392,11 @@ def plan_manual_compaction(
     # 档B: fold every giant turn PRESERVED in the reserve (composable with the
     # old-region summary below). This is what stops a giant CURRENT turn from
     # surviving turns-mode whole.
-    intra_folds = _collect_reserve_folds(reserve_raw)
+    intra_folds = _collect_reserve_folds(
+        reserve_raw,
+        config=config,
+        hot_budget_tokens=preserve_budget_tokens,
+    )
 
     # ── turns mode: a genuine OLD region exists (reserve folds may also apply) ──
     if old_raw:
@@ -361,14 +433,19 @@ def plan_manual_compaction(
 def _build_summary_message(
     summary_text: str,
     *,
-    archive_id: int | None,
+    archive_id: str | None,
     tokens_after: int,
 ) -> dict:
     """Build the C1 summary message: a plain assistant row marked as a
     compaction boundary so the frontend renders it as a fold card and headless
     consumers see it as ordinary assistant text."""
-    marker = {'archiveId': archive_id, 'trigger': 'manual',
-              'ts': int(time.time())}
+    marker = {
+        'archiveId': archive_id,
+        'trigger': 'manual',
+        'tokenCountKind': 'estimated',
+        'snapshotKind': 'pre_compaction_transcript',
+        'ts': int(time.time()),
+    }
     return {
         'role': 'assistant',
         'content': f'{_SUMMARY_HEADER}\n\n{summary_text}',
@@ -387,7 +464,7 @@ def apply_manual_compaction(
     plan: dict,
     summary_text: str,
     *,
-    archive_id: int | None = None,
+    archive_id: str | None = None,
     tokens_after: int = 0,
 ) -> list:
     """Rebuild the RAW message list from a plan + summary (pure).
@@ -461,19 +538,20 @@ def _fold_watermark(plan: dict) -> int:
 def compact_conversation_now(
     conv_id: str,
     *,
+    user_id,
     config: dict | None = None,
     task: dict | None = None,
     keep_recent_turns: int | None = None,
 ) -> dict:
     """User-triggered persistent compaction of a conversation.
 
-    Reuses the L2 summary engine but writes the result back to
-    ``conversations.messages`` so subsequent turns start from a small context.
+    Reuses the L2 summary engine and commits one semantic ``turn.compact``
+    command so subsequent turns start from a small context.
     Idle-only — the caller (REST route) MUST refuse when a task is running.
 
     Returns a dict: ``{ok, ...}`` on success or ``{ok: False, error}``.
     Error codes: ``not_found`` / ``nothing_to_compact`` / ``summary_failed`` /
-    ``stale``.
+    ``turn_protocol_unsupported`` / ``stale``.
 
     CONCURRENCY: the summary LLM call is slow; a sibling agent turn can write
     the conversation TAIL meanwhile. Such a write only extends the PRESERVED
@@ -492,11 +570,18 @@ def compact_conversation_now(
     _audit_config_once()
     store = get_conversation_store()
 
-    loaded = store.load_conversation_messages(conv_id)
+    loaded = store.load_transcript(conv_id, user_id=user_id)
     if loaded is None:
         logger.warning('[ManualCompact] conv=%s not found', log_id)
         return {'ok': False, 'error': 'not_found'}
     raw_messages, updated_at, _load_rev = loaded
+    turn_native = bool(raw_messages) and all(
+        isinstance(message, dict) and bool(message.get('_turnId'))
+        for message in raw_messages)
+    if raw_messages and not turn_native:
+        logger.error('[ManualCompact] conv=%s transcript contains a row '
+                     'without turn identity', log_id)
+        return {'ok': False, 'error': 'turn_protocol_unsupported'}
 
     # Project the WHOLE raw conversation to api-form exactly ONCE — this is the
     # dominant CPU cost of a manual /compact on a multi-MB conversation. Reuse
@@ -522,6 +607,7 @@ def compact_conversation_now(
     # (design test 3). trigger='manual'; no SSE event (no live task to carry it).
     archive_id = _archive_transcript(
         conv_id, raw_messages,
+        user_id=user_id,
         trigger='manual', task=task, round_num=0,
         tokens_before=int(tokens_before), msgs_before=int(msgs_before),
         reason='manual /compact', emit_event=False)
@@ -535,21 +621,71 @@ def compact_conversation_now(
     # reserve is folded here even when there is also an old region to summarize.
     fold_input = list(plan.get('old_raw') or [])
     for fold in plan.get('intra_folds', []):
-        heavy_src = plan['reserve_raw'][fold['asst_idx']]
+        # The assistant prose stays verbatim in ``reserve_raw``. Feed only the
+        # removed rounds to the lossy summary so the resulting receipt does not
+        # duplicate already-preserved conclusions.
         fold_input.append({'role': 'assistant',
-                           'content': heavy_src.get('content') or '',
+                           'content': '',
                            'toolRounds': list(fold['cold_rounds'])})
     old_api = _project(fold_input, config)
     current_query = _extract_current_query(_project(plan['reserve_raw'], config))
+    _folded_rounds = sum(len(f['cold_rounds'])
+                         for f in plan.get('intra_folds', []))
+    _preserved_turns = sum(
+        1 for message in plan.get('reserve_raw', [])
+        if isinstance(message, dict) and message.get('role') == 'user')
+    recent_files = _extract_recently_accessed_files(full_api)
+    _summary_usage: dict = {}
+    _summarize_ms = 0.0
+    _turn_diff_included = False
+
+    def _manual_receipt(
+        status: str,
+        *,
+        summary_value: str = '',
+        summary_generated: bool = False,
+        outcome_reason: str = '',
+        reconcile_attempts: int = 0,
+    ) -> dict:
+        return build_compaction_receipt(
+            trigger='manual',
+            status=status,
+            strategy='selective_summary',
+            implementation='model_summary',
+            mode=plan.get('mode') or 'turns',
+            continuation_format=(
+                'durable_summary_turn' if status == 'completed' else 'none'),
+            summary_generated=summary_generated,
+            summary_text=summary_value,
+            summary_usage=_summary_usage,
+            summary_duration_ms=_summarize_ms,
+            summarized_messages=len(old_api),
+            preserved_turns=_preserved_turns,
+            folded_tool_rounds=_folded_rounds,
+            objective_anchored=plan.get('anchor_msg') is not None,
+            retained_user_messages=0,
+            recent_files=recent_files,
+            turn_diff_included=_turn_diff_included,
+            reconcile_attempts=reconcile_attempts,
+            outcome_reason=outcome_reason,
+        )
     # B — stream the summary to the compaction card. summary_start tells the
     # frontend to show a live-growing card; each on_delta pushes the next chunk;
     # summary_done (below, after persist) carries the final stats. All pushes are
     # best-effort (see _push_compaction) so a dead channel never breaks compaction.
-    _push_compaction(conv_id, {'type': 'summary_start', 'archiveId': archive_id})
+    _push_compaction(
+        conv_id,
+        {'type': 'summary_start', 'archiveId': archive_id},
+        user_id=user_id,
+    )
 
     def _on_summary_delta(chunk: str) -> None:
-        _push_compaction(conv_id, {'type': 'summary_delta', 'text': chunk,
-                                   'archiveId': archive_id})
+        _push_compaction(
+            conv_id,
+            {'type': 'summary_delta', 'text': chunk,
+             'archiveId': archive_id},
+            user_id=user_id,
+        )
 
     # Phase timing: the summary LLM call dominates a manual /compact's wall clock
     # (measured ~96% on a 3 MB conv — the projection/reconcile CPU is <5%). This
@@ -558,7 +694,7 @@ def compact_conversation_now(
     _summarize_t0 = time.monotonic()
     summary_text = _generate_query_aware_summary(
         old_api, current_query, '[ManualCompact]', conv_id=conv_id, task=task,
-        on_delta=_on_summary_delta)
+        on_delta=_on_summary_delta, usage_out=_summary_usage)
     _summarize_ms = (time.monotonic() - _summarize_t0) * 1000
     logger.info('[ManualCompact] conv=%s summary LLM call: %.0f ms  '
                 '(fold_msgs=%d, fold_tokens≈%d) — dominant cost of /compact',
@@ -567,16 +703,65 @@ def compact_conversation_now(
     if not summary_text:
         logger.warning('[ManualCompact] conv=%s summary generation failed — '
                        'leaving conversation intact', log_id)
-        _push_compaction(conv_id, {'type': 'summary_failed', 'archiveId': archive_id})
-        return {'ok': False, 'error': 'summary_failed', 'archiveId': archive_id}
+        failure_receipt = _manual_receipt(
+            'failed', outcome_reason='summary_failed')
+        if archive_id is not None:
+            try:
+                store.update_archive_summary(
+                    archive_id, '', int(tokens_before), int(msgs_before),
+                    user_id=user_id, receipt=failure_receipt)
+            except Exception as e:
+                logger.debug('[ManualCompact] failed receipt update skipped: %s',
+                             e)
+        _push_compaction(
+            conv_id,
+            {'type': 'summary_failed', 'archiveId': archive_id,
+             'receipt': failure_receipt},
+            user_id=user_id,
+        )
+        return {'ok': False, 'error': 'summary_failed', 'archiveId': archive_id,
+                'receipt': failure_receipt}
 
-    recent_files = _extract_recently_accessed_files(full_api)
     if recent_files:
         file_list = '\n'.join(f'  - {f}' for f in recent_files)
         summary_text += (
             '\n\n### Recently Accessed Files\n'
             'Use read_files to review current state if needed:\n'
             f'{file_list}')
+
+    # Same turn-diff enrichment as the automatic L2 path (Codex-inspired
+    # turn_diff_tracker.rs analogue) — one builder, no drift.
+    try:
+        from lib.tasks_pkg.commit_round._turn_diff import build_turn_diff_block
+        _diff_block = build_turn_diff_block(
+            task, config.get('projectPath') or '',
+            config.get('projectPaths') or None)
+        if _diff_block:
+            summary_text += f'\n\n{_diff_block}'
+            _turn_diff_included = True
+    except Exception as e:
+        logger.debug('[ManualCompact] turn-diff block failed: %s', e)
+
+    def _settle_aborted_archive(outcome_reason: str, attempts: int) -> dict:
+        receipt = _manual_receipt(
+            'aborted', summary_value=summary_text,
+            summary_generated=True, outcome_reason=outcome_reason,
+            reconcile_attempts=attempts)
+        if archive_id is not None:
+            try:
+                store.update_archive_summary(
+                    archive_id, summary_text, int(tokens_before),
+                    int(msgs_before), user_id=user_id, receipt=receipt)
+            except Exception as e:
+                logger.debug('[ManualCompact] aborted receipt update skipped: %s',
+                             e)
+        _push_compaction(
+            conv_id,
+            {'type': 'summary_failed', 'archiveId': archive_id,
+             'reason': outcome_reason, 'receipt': receipt},
+            user_id=user_id,
+        )
+        return receipt
 
     # ── RECONCILE + PERSIST ──
     # Root cause of the "manual /compact always 409 on an active conversation":
@@ -603,8 +788,6 @@ def compact_conversation_now(
     boundary = plan['boundary']
     watermark = _fold_watermark(plan)
     folded_prefix_fp = _msgs_fingerprint(raw_messages[:watermark])
-    _folded_rounds = sum(len(f['cold_rounds'])
-                         for f in plan.get('intra_folds', []))
 
     budget_sec = manual_reconcile_budget_sec()
     deadline = time.monotonic() + budget_sec
@@ -613,13 +796,17 @@ def compact_conversation_now(
     msgs_after = 0
     reduction_pct = 0.0
     attempts = 0
+    compact_command_root = str(uuid.uuid4())
     while True:
         attempts += 1
-        reloaded = store.load_conversation_messages(conv_id)
+        reloaded = store.load_transcript(conv_id, user_id=user_id)
         if reloaded is None:
             logger.warning('[ManualCompact] conv=%s vanished during compaction '
                            '(archive %s kept)', log_id, archive_id)
-            return {'ok': False, 'error': 'not_found', 'archiveId': archive_id}
+            aborted_receipt = _settle_aborted_archive(
+                'conversation_not_found', attempts)
+            return {'ok': False, 'error': 'not_found', 'archiveId': archive_id,
+                    'receipt': aborted_receipt}
         cur_messages, _cur_updated_at, cur_rev = reloaded
 
         # RECONCILE gate: the folded region MUST be byte-identical. A concurrent
@@ -628,7 +815,10 @@ def compact_conversation_now(
             logger.warning('[ManualCompact] conv=%s folded region changed under '
                            'us (real conflict) — aborting stale (archive %s kept)',
                            log_id, archive_id)
-            return {'ok': False, 'error': 'stale', 'archiveId': archive_id}
+            aborted_receipt = _settle_aborted_archive(
+                'folded_region_changed', attempts)
+            return {'ok': False, 'error': 'stale', 'archiveId': archive_id,
+                    'receipt': aborted_receipt}
 
         # Rebuild over the CURRENT tail so any turn appended during the summary
         # window is preserved. The folded prefix is proven byte-unchanged above,
@@ -644,7 +834,7 @@ def compact_conversation_now(
         reduction_pct = round((1 - tokens_after / max(1, tokens_before)) * 100, 1)
         # Stamp the full stats onto the summary message + its compaction marker so
         # the frontend card is a PURE render of a backend-downloaded fact (never a
-        # client-side inference). See docs/MANUAL_COMPACTION_DESIGN.md §5.3.
+        # client-side inference). See docs/modules/context_engineering.md.
         for m in new_messages:
             if isinstance(m, dict) and m.get('_isCompactionSummary'):
                 m['_estimatedPromptTokens'] = int(tokens_after)
@@ -672,8 +862,11 @@ def compact_conversation_now(
         # would get a 409. Token is ``rev``, not ``updated_at``: the latter is
         # supplied by the writer itself, so a clock that fails to advance lets
         # the predicate pass while the data has already changed.
-        affected = store.cas_sync_conversation_with_search(
-            conv_id, new_messages, cur_rev)
+        affected = store.compact_turn_transcript(
+            conv_id, cur_messages, new_messages, cur_rev,
+            command_id=(f'manual-compact:{conv_id}:'
+                        f'{compact_command_root}:{cur_rev}'),
+            user_id=user_id)
         if affected:
             break
         # Lost the reload→CAS race to a fresh tail write. Retry against the
@@ -684,15 +877,22 @@ def compact_conversation_now(
             logger.warning('[ManualCompact] conv=%s CAS lost %d× within the '
                            '%.1fs reconcile budget — aborting stale (archive %s '
                            'kept)', log_id, attempts, budget_sec, archive_id)
-            return {'ok': False, 'error': 'stale', 'archiveId': archive_id}
+            aborted_receipt = _settle_aborted_archive(
+                'reconcile_budget_exhausted', attempts)
+            return {'ok': False, 'error': 'stale', 'archiveId': archive_id,
+                    'receipt': aborted_receipt}
         logger.info('[ManualCompact] conv=%s reload→CAS raced (attempt %d, '
                     '%.2fs left) — reconciling against fresher tail',
                     log_id, attempts, max(0.0, deadline - time.monotonic()))
 
+    receipt = _manual_receipt(
+        'completed', summary_value=summary_text, summary_generated=True,
+        reconcile_attempts=attempts)
     if archive_id is not None:
         try:
             store.update_archive_summary(
-                archive_id, summary_text, int(tokens_after), int(msgs_after))
+                archive_id, summary_text, int(tokens_after), int(msgs_after),
+                user_id=user_id, receipt=receipt)
         except Exception as e:
             logger.debug('[ManualCompact] archive row update failed: %s', e)
 
@@ -700,7 +900,7 @@ def compact_conversation_now(
     # post-write rev → a sibling tab with this conv open refetches without a
     # manual refresh (mirrors the L1-persist path). Best-effort.
     try:
-        store.notify_conversation_changed(conv_id)
+        store.notify_conversation_changed(conv_id, user_id=user_id)
     except Exception as e:
         logger.debug('[ManualCompact] conv=%s conv-changed notify skipped: %s',
                      log_id, e)
@@ -720,18 +920,22 @@ def compact_conversation_now(
         'archiveId': archive_id,
         'tokensBefore': int(tokens_before),
         'tokensAfter': int(tokens_after),
+        'tokenCountKind': 'estimated',
         'msgsBefore': int(msgs_before),
         'msgsAfter': int(msgs_after),
         'reductionPct': reduction_pct,
-    })
+        'receipt': receipt,
+    }, user_id=user_id)
 
     return {
         'ok': True,
         'archiveId': archive_id,
         'tokensBefore': int(tokens_before),
         'tokensAfter': int(tokens_after),
+        'tokenCountKind': 'estimated',
         'msgsBefore': int(msgs_before),
         'msgsAfter': int(msgs_after),
         'reductionPct': reduction_pct,
         'summaryPreview': summary_text[:500],
+        'receipt': receipt,
     }

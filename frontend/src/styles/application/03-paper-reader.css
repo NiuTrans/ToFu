@@ -1,0 +1,908 @@
+/* ═══════════════════════════════════════════════════
+   ★ Paper Reading Mode v3
+     Layout: Sidebar = paper library (persistent, like conversations)
+             Main Left = PDF (largest, vertical scroll)
+             Main Right = Q&A / Report / Babel PDF tabs
+   ═══════════════════════════════════════════════════ */
+
+/* ── Sidebar: hide conv list, show paper library ── */
+.paper-sidebar-overlay{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+.sidebar.paper-active .paper-sidebar-overlay{display:flex}
+.sidebar.paper-active .sidebar-action-row,
+.sidebar.paper-active .sidebar-search-wrapper,
+.sidebar.paper-active .folder-quickadd,
+.sidebar.paper-active .sidebar-body,
+.sidebar.paper-active .conversations-list{display:none!important}
+.sidebar.paper-active .sidebar-header h1{display:none!important}
+.sidebar.paper-active .sidebar-header .action-btn{display:none!important}
+.sidebar.paper-active .sidebar-header a.action-btn{display:none!important}
+.sidebar.paper-active .sidebar-header #paperModeBtn{display:flex!important;color:var(--accent);background:var(--accent-subtle)}
+
+/* Current paper info card */
+.paper-sidebar-current{display:flex;align-items:center;gap:11px;padding:14px 16px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,var(--bg-tertiary),var(--bg-secondary))}
+.paper-sidebar-current-icon{flex-shrink:0;display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:9px;background:var(--accent-subtle);opacity:1}
+.paper-sidebar-current-meta{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
+.paper-sidebar-title{font-size:13px;font-weight:600;color:var(--text-primary);word-break:break-word;line-height:1.4;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.paper-sidebar-title.paper-sidebar-title-empty{color:var(--text-tertiary);font-weight:500;font-style:italic}
+.paper-sidebar-pages{font-size:11px;color:var(--text-tertiary);font-variant-numeric:tabular-nums}
+.paper-sidebar-pages:empty{display:none}
+
+/* Inline "New Paper" button in library header */
+.paper-sidebar-new-inline-btn{display:flex;align-items:center;justify-content:center;width:24px;height:24px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--text-tertiary);cursor:pointer;transition:all .15s;flex-shrink:0}
+.paper-sidebar-new-inline-btn:hover{background:var(--accent-subtle);color:var(--accent);border-color:var(--accent)}
+
+/* Paper library section */
+.paper-sidebar-lib-header{display:flex;align-items:center;justify-content:space-between;padding:10px 16px 6px;font-size:11px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.06em}
+.paper-sidebar-lib-count{font-size:10px;min-width:18px;height:18px;line-height:18px;text-align:center;border-radius:9px;background:var(--bg-hover);color:var(--text-tertiary);padding:0 5px}
+.paper-library-list{flex:1;overflow-y:auto;padding:4px 8px 12px}
+
+/* Paper library item — like conversation item */
+.paper-lib-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;cursor:pointer;transition:all .15s;position:relative}
+.paper-lib-item:hover{background:var(--bg-hover)}
+.paper-lib-item.active{background:var(--accent-subtle)}
+.paper-lib-item-icon{flex-shrink:0;color:var(--text-tertiary);opacity:0.6}
+.paper-lib-item.active .paper-lib-item-icon{color:var(--accent);opacity:1}
+.paper-lib-item-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.paper-lib-item-title{font-size:13px;font-weight:500;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.paper-lib-item.active .paper-lib-item-title{color:var(--accent);font-weight:600}
+.paper-lib-item-meta{font-size:11px;color:var(--text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.paper-lib-rec-badge{display:inline-block;margin-right:6px;padding:0 5px;border-radius:4px;font-size:10px;font-weight:600;line-height:15px;color:var(--accent);background:var(--accent-bg,rgba(120,120,120,.12))}
+.paper-lib-item-del{display:none;position:absolute;right:8px;top:50%;transform:translateY(-50%);width:22px;height:22px;border:none;background:var(--bg-hover);border-radius:6px;color:var(--text-tertiary);cursor:pointer;align-items:center;justify-content:center;transition:all .15s}
+.paper-lib-item:hover .paper-lib-item-del{display:flex}
+.paper-lib-item-del:hover{background:var(--error-bg);color:var(--error-text)}
+
+/* ── Paper library folders (Reading-mode; mirrors chat folders) ── */
+.paper-folder-bar{display:flex;align-items:center;justify-content:flex-end;padding:2px 8px 6px}
+.paper-folder-new-btn{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border:1px solid var(--border-light);background:var(--bg-secondary);border-radius:8px;color:var(--text-secondary);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s}
+.paper-folder-new-btn:hover{background:var(--bg-hover);color:var(--text-primary)}
+.paper-folder-new-btn>svg{display:block}
+.paper-folder-group{margin-bottom:2px}
+.paper-folder-head{display:flex;align-items:center;gap:7px;padding:7px 10px;border-radius:9px;cursor:pointer;color:var(--text-secondary);font-size:12px;font-weight:600;transition:background .15s;position:relative}
+.paper-folder-head:hover{background:var(--bg-hover)}
+.paper-folder-caret{flex-shrink:0;transition:transform .15s;color:var(--text-tertiary)}
+.paper-folder-group:not(.collapsed) .paper-folder-caret{transform:rotate(90deg)}
+.paper-folder-ic{flex-shrink:0;color:var(--text-tertiary)}
+.paper-folder-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.paper-folder-count{flex-shrink:0;font-size:10px;font-weight:700;color:var(--text-tertiary);background:var(--bg-secondary);border-radius:9px;padding:1px 7px}
+.paper-folder-open,.paper-folder-rename,.paper-folder-del{display:none;flex-shrink:0;align-items:center;justify-content:center;width:20px;height:20px;border-radius:6px;color:var(--text-tertiary);cursor:pointer}
+.paper-folder-head:hover .paper-folder-open,.paper-folder-head:hover .paper-folder-rename,.paper-folder-head:hover .paper-folder-del{display:inline-flex}
+.paper-folder-open:hover,.paper-folder-rename:hover{background:var(--bg-active);color:var(--text-primary)}
+.paper-folder-del:hover{background:var(--error-bg);color:var(--error-text)}
+.paper-folder-open>svg,.paper-folder-rename>svg,.paper-folder-del>svg{display:block}
+.paper-folder-body{padding-left:8px}
+.paper-folder-group.collapsed .paper-folder-body{display:none}
+/* Folder view (drilled into one folder): a back crumb above a flat list */
+.paper-folder-crumb{display:flex;align-items:center;gap:6px;padding:8px 10px;margin-bottom:2px;border-radius:9px;cursor:pointer;color:var(--text-secondary);font-size:12px;font-weight:600;transition:background .15s}
+.paper-folder-crumb:hover{background:var(--bg-hover)}
+.paper-folder-crumb>svg{flex-shrink:0}
+.paper-folder-crumb-name{color:var(--text-primary);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Per-item "move to folder" select — hidden until the row is hovered, sits
+   left of the (absolute) delete button so the two never overlap. */
+.paper-lib-item-folder{display:none;flex-shrink:0;max-width:96px;margin-right:24px;font-size:10px;padding:2px 4px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-secondary);color:var(--text-secondary);cursor:pointer}
+.paper-lib-item:hover .paper-lib-item-folder{display:block}
+
+/* Paper library empty state */
+.paper-lib-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:40px 16px;color:var(--text-tertiary);text-align:center;font-size:12px}
+.paper-lib-empty-hint{font-size:11px;opacity:0.6}
+
+/* Paper library loading state (bookshelf fetch in flight) */
+.paper-lib-loading{display:flex;align-items:center;justify-content:center;gap:8px;padding:32px 16px;color:var(--text-tertiary);font-size:12px}
+.paper-lib-loading-spinner{width:14px;height:14px;border:2px solid var(--border-color);border-top-color:var(--text-secondary);border-radius:50%;animation:paper-lib-spin 0.7s linear infinite}
+@keyframes paper-lib-spin{to{transform:rotate(360deg)}}
+
+/* ── Main: full-page split ── */
+.paper-mode-container{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;background:var(--bg-primary)}
+
+/* Body: horizontal split */
+.paper-body{display:flex;flex:1;min-height:0;overflow:hidden}
+
+/* ── Left: PDF viewer ── */
+.paper-left{flex:1;display:flex;flex-direction:column;min-width:0;position:relative;border-right:1px solid var(--border)}
+.paper-pdf-toolbar{display:flex;align-items:center;justify-content:center;gap:5px;padding:7px 12px;background:var(--bg-secondary);border-bottom:1px solid var(--border);flex-shrink:0}
+.paper-toolbar-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:28px;padding:0;background:none;border:1px solid var(--border);border-radius:8px;color:var(--text-secondary);cursor:pointer;font-size:15px;transition:background .15s,color .15s,border-color .15s,transform .1s;line-height:1;font-weight:600}
+.paper-toolbar-btn:hover{background:var(--bg-hover);color:var(--text-primary);border-color:var(--border-light)}
+.paper-toolbar-btn:active{transform:translateY(1px)}
+.paper-toolbar-zoom-input{font-size:11px;color:var(--text-primary);font-weight:600;width:50px;text-align:center;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;padding:4px;font-family:inherit;outline:none;transition:border-color .15s,box-shadow .15s}
+.paper-toolbar-zoom-input:hover{border-color:var(--border-light)}
+.paper-toolbar-zoom-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-subtle)}
+.paper-zoom-slider{-webkit-appearance:none;appearance:none;width:110px;height:4px;background:var(--border);border-radius:3px;outline:none;cursor:pointer;transition:background .15s}
+.paper-zoom-slider:hover{background:var(--border-light)}
+.paper-zoom-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer;border:2px solid var(--bg-secondary);box-shadow:0 1px 3px rgba(0,0,0,0.3);transition:transform .12s,box-shadow .12s}
+.paper-zoom-slider::-webkit-slider-thumb:hover{transform:scale(1.18);box-shadow:0 2px 8px rgba(0,0,0,0.35)}
+.paper-zoom-slider::-webkit-slider-thumb:active{transform:scale(1.08)}
+.paper-zoom-slider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer;border:2px solid var(--bg-secondary);box-shadow:0 1px 3px rgba(0,0,0,0.3);transition:transform .12s}
+.paper-zoom-slider::-moz-range-thumb:hover{transform:scale(1.18)}
+.paper-pdf-container{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;align-items:safe center;gap:12px;background:var(--bg-tertiary)}
+.paper-pdf-container.paper-drag-over{outline:3px dashed var(--accent);outline-offset:-3px;background:rgba(110,86,207,0.06)}
+.paper-sidebar-overlay.paper-drag-over{outline:3px dashed var(--accent);outline-offset:-3px;background:rgba(110,86,207,0.04)}
+
+/* Page rendering — sharp on HiDPI + selectable text */
+.paper-page-wrapper{position:relative;box-shadow:0 2px 12px rgba(0,0,0,0.3);border-radius:4px;overflow:hidden;background:white;flex-shrink:0}
+.paper-pdf-canvas{display:block;height:auto}
+
+/* Placeholder shown in a virtualized page wrapper before/while it rasterizes
+   (and again after it scrolls far off-screen and its canvas is released). The
+   wrapper keeps its width/aspect-ratio, so this just fills that box with a soft
+   shimmer — layout + scroll position stay stable. */
+.paper-page-placeholder{position:absolute;inset:0;background:linear-gradient(100deg,#f4f4f6 30%,#ececf0 50%,#f4f4f6 70%);background-size:220% 100%;animation:paperPagePh 1.4s ease-in-out infinite}
+@keyframes paperPagePh{from{background-position:180% 0}to{background-position:-40% 0}}
+@media(prefers-reduced-motion:reduce){.paper-page-placeholder{animation:none}}
+/* Text layer: absolute overlay matching canvas CSS size, fully transparent text
+   that becomes visible only on selection. Must NOT clip or reduce opacity. */
+.paper-text-layer{position:absolute;top:0;left:0;line-height:1;overflow:hidden;z-index:2;transform-origin:0 0}
+.paper-text-layer span{position:absolute;color:transparent;white-space:pre;cursor:text;transform-origin:0 0}
+.paper-text-layer ::selection{background:rgba(110,86,207,0.35);color:transparent}
+.paper-text-layer span::selection{background:rgba(110,86,207,0.35);color:transparent}
+.paper-page-label{position:absolute;bottom:6px;right:10px;font-size:10px;color:#999;background:rgba(255,255,255,0.85);padding:2px 6px;border-radius:4px;font-weight:600;pointer-events:none}
+.paper-page-error{padding:20px;color:var(--text-tertiary);font-size:12px;text-align:center}
+
+/* Floating selection toolbar (alphaxiv-style) */
+.paper-selection-bar{position:absolute;z-index:10;display:flex;align-items:center;gap:0;padding:3px;background:rgba(20,20,28,0.95);border:1px solid rgba(255,255,255,0.12);border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,0.5);backdrop-filter:blur(8px);font-family:inherit;animation:paperSelIn .15s cubic-bezier(.2,.9,.3,1.1)}
+@keyframes paperSelIn{from{opacity:0;transform:translateY(4px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}
+.paper-sel-btn{display:flex;align-items:center;gap:5px;padding:6px 12px;background:transparent;color:#e2e8f0;border:none;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;transition:background .15s,color .15s;font-family:inherit;white-space:nowrap}
+.paper-sel-btn:hover{background:var(--accent);color:white}
+.paper-sel-divider{width:1px;height:20px;background:rgba(255,255,255,0.12);flex-shrink:0}
+
+/* Divider (resize handle) */
+.paper-divider{width:6px;background:var(--border);cursor:col-resize;flex-shrink:0;transition:background .18s;position:relative}
+.paper-divider:hover,.paper-divider.dragging{background:var(--accent)}
+.paper-divider::after{content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:4px;height:30px;border-radius:3px;background:radial-gradient(circle,var(--text-tertiary) 1.3px,transparent 1.6px);background-size:4px 7px;opacity:0.45;transition:opacity .18s,height .18s}
+.paper-divider:hover::after,.paper-divider.dragging::after{opacity:0.8;height:46px}
+
+/* Mobile-only PDF⇄Reader view switcher — hidden on desktop (see @media ≤768px) */
+.paper-mobile-switch{display:none}
+
+/* Coarse-pointer divider hardening: where the side-by-side split IS shown on a
+ * touch device (landscape tablet / wide foldable, >1024px so it escaped the
+ * single-pane predicate above), the visual 6px line is too thin to grab with a
+ * finger. A transparent ::before overlay widens the touch hit target to ~28px
+ * WITHOUT changing the visible line or the layout width of .paper-divider. */
+@media(pointer:coarse){
+  .paper-divider::before{content:'';position:absolute;top:0;bottom:0;left:50%;
+    transform:translateX(-50%);width:28px;background:transparent;z-index:1}
+}
+
+/* ── Right: tabs panel (equal width with PDF) ── */
+.paper-right{flex:1;min-width:300px;display:flex;flex-direction:column;min-height:0;background:var(--bg-primary)}
+
+/* Tab bar */
+.paper-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--bg-secondary)}
+.paper-tab-btn{flex:1;display:flex;align-items:center;justify-content:center;gap:7px;padding:11px 12px;border:none;background:none;color:var(--text-tertiary);font-size:13px;font-weight:600;cursor:pointer;transition:color .18s,background .18s,border-color .18s;border-bottom:2px solid transparent;font-family:inherit}
+.paper-tab-btn:hover{color:var(--text-secondary);background:var(--bg-hover)}
+.paper-tab-btn.active{color:var(--accent);border-bottom-color:var(--accent)}
+.paper-tab-btn svg{flex-shrink:0;transition:transform .18s}
+.paper-tab-btn:hover svg{transform:scale(1.08)}
+.paper-tab-btn.active svg{transform:scale(1.05)}
+
+/* Tab panels */
+.paper-tab-panel{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+
+/* ── QA Panel ── */
+.paper-qa-messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;scroll-behavior:smooth}
+.paper-qa-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;color:var(--text-tertiary);text-align:center;gap:10px;padding:40px 20px}
+.paper-qa-empty-icon{font-size:30px;width:72px;height:72px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:var(--bg-tertiary);border:1px solid var(--border);box-shadow:0 6px 18px -10px rgba(0,0,0,.45)}
+/* Refined thin scrollbars for paper panels */
+.paper-qa-messages::-webkit-scrollbar,.paper-report-content::-webkit-scrollbar,.paper-report-body::-webkit-scrollbar,.paper-pdf-container::-webkit-scrollbar,.paper-library-list::-webkit-scrollbar{width:10px;height:10px}
+.paper-qa-messages::-webkit-scrollbar-thumb,.paper-report-content::-webkit-scrollbar-thumb,.paper-report-body::-webkit-scrollbar-thumb,.paper-pdf-container::-webkit-scrollbar-thumb,.paper-library-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:6px;border:2px solid transparent;background-clip:content-box}
+.paper-qa-messages::-webkit-scrollbar-thumb:hover,.paper-report-content::-webkit-scrollbar-thumb:hover,.paper-report-body::-webkit-scrollbar-thumb:hover,.paper-pdf-container::-webkit-scrollbar-thumb:hover,.paper-library-list::-webkit-scrollbar-thumb:hover{background:var(--text-tertiary);background-clip:content-box}
+.paper-qa-messages::-webkit-scrollbar-track,.paper-report-content::-webkit-scrollbar-track,.paper-report-body::-webkit-scrollbar-track,.paper-pdf-container::-webkit-scrollbar-track,.paper-library-list::-webkit-scrollbar-track{background:transparent}
+.paper-qa-empty p{margin:0;font-size:13px}
+.paper-qa-hint{font-size:12px!important;opacity:0.7}
+.paper-qa-msg{padding:10px 14px;border-radius:12px;max-width:90%;animation:paperMsgIn .2s ease}
+@keyframes paperMsgIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.paper-qa-user{background:var(--accent-subtle);color:var(--text-primary);align-self:flex-end;border-bottom-right-radius:4px}
+.paper-qa-assistant{background:var(--bg-tertiary);color:var(--text-primary);align-self:flex-start;border-bottom-left-radius:4px}
+.paper-qa-msg-content{font-size:13px;line-height:1.6;word-break:break-word}
+.paper-qa-msg-content blockquote{border-left:3px solid var(--accent);padding-left:10px;margin:4px 0;color:var(--text-secondary);font-style:italic}
+.paper-qa-msg-content pre{background:var(--bg-secondary);padding:8px;border-radius:6px;overflow-x:auto;font-size:12px;margin:6px 0}
+.paper-qa-msg-content code{background:var(--bg-secondary);padding:1px 4px;border-radius:3px;font-size:12px}
+/* Agentic Q&A: tool-activity panel (web_search/fetch_url) above the answer. */
+.paper-qa-tools{margin-bottom:8px}
+.paper-qa-msg:has(.paper-qa-tools){max-width:98%}
+.paper-qa-thinking{display:flex;align-items:center;min-height:18px}
+.paper-qa-thinking .thinking-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);animation:pulse 1.2s ease-in-out infinite}
+.paper-qa-input-area{display:flex;gap:8px;padding:12px;border-top:1px solid var(--border);background:var(--bg-secondary);flex-shrink:0;align-items:flex-end}
+#paperQAInput{flex:1;resize:none;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--text-primary);font-family:inherit;font-size:13px;line-height:1.5;min-height:40px;max-height:120px;outline:none;transition:border-color .15s,box-shadow .15s}
+#paperQAInput:hover{border-color:var(--border-light)}
+#paperQAInput:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-subtle)}
+.paper-qa-send-btn{width:38px;height:38px;border-radius:10px;border:none;background:var(--accent);color:white;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s,transform .12s,box-shadow .15s;flex-shrink:0}
+.paper-qa-send-btn:hover{background:var(--accent-hover);transform:translateY(-1px) scale(1.05);box-shadow:0 6px 16px -6px var(--accent)}
+.paper-qa-send-btn:active{transform:translateY(0) scale(.97)}
+.paper-qa-send-btn svg{transition:transform .15s}
+.paper-qa-send-btn:hover svg{transform:translateX(1px) translateY(-1px)}
+
+/* ── Report Panel ── */
+.paper-report-toolbar{display:flex;gap:6px;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--bg-secondary);flex-shrink:0;flex-wrap:wrap;align-items:center}
+.paper-report-btn{display:flex;align-items:center;gap:5px;padding:6px 11px;border:1px solid var(--border);border-radius:8px;background:none;color:var(--text-secondary);font-size:11.5px;font-weight:600;cursor:pointer;transition:background .15s,color .15s,border-color .15s,transform .1s;font-family:inherit}
+.paper-report-btn:hover{background:var(--bg-hover);color:var(--text-primary);border-color:var(--border-light)}
+.paper-report-btn:active{transform:translateY(1px)}
+/* EN/中 segmented language toggle (report generation lang + review reading lang) */
+.paper-report-lang-toggle{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;flex-shrink:0}
+.paper-report-lang-opt{padding:6px 10px;border:none;background:none;color:var(--text-secondary);font-size:11.5px;font-weight:700;cursor:pointer;transition:background .15s,color .15s;min-width:30px;font-family:inherit}
+.paper-report-lang-opt+.paper-report-lang-opt{border-left:1px solid var(--border)}
+.paper-report-lang-opt:hover:not(:disabled){background:var(--bg-hover);color:var(--text-primary)}
+.paper-report-lang-opt.active{background:var(--accent,#b08d57);color:#fff}
+.paper-report-lang-opt:disabled{opacity:.5;cursor:default}
+.paper-report-lang-opt.loading{opacity:.7;cursor:progress}
+/* Reader comfort controls: text-size A−/A+ steppers + reading-width cycle.
+ * Reuses the segmented-toggle chrome so it reads as a sibling of the EN/中
+ * control. SVG glyphs only (§3.4). */
+.paper-reader-settings{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:8px;overflow:hidden;flex-shrink:0}
+.paper-reader-set-btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;min-width:32px;height:30px;padding:0 8px;border:none;background:none;color:var(--text-secondary);cursor:pointer;transition:background .15s,color .15s;font-family:inherit;font-weight:700;font-size:11.5px}
+.paper-reader-set-btn+.paper-reader-set-btn{border-left:1px solid var(--border)}
+.paper-reader-set-btn:hover:not(:disabled){background:var(--bg-hover);color:var(--text-primary)}
+.paper-reader-set-btn:active{transform:translateY(1px)}
+.paper-reader-set-btn:disabled{opacity:.4;cursor:default}
+.paper-reader-set-btn:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.paper-reader-set-btn svg{display:block}
+/* the width-cycle button shows its current label (Narrow/Comfortable/Wide) */
+.paper-reader-set-width{font-size:11px;letter-spacing:.01em;min-width:44px}
+.paper-report-stop-btn{color:var(--error-text);border-color:var(--error-border);background:var(--error-bg)}
+.paper-report-stop-btn:hover{color:#fff;background:var(--error-text);border-color:var(--error-text)}
+.paper-report-stop-btn:disabled{opacity:.6;cursor:default;pointer-events:none}
+.paper-report-stop-btn svg{animation:paperReportStopPulse 1.4s ease-in-out infinite}
+@keyframes paperReportStopPulse{0%,100%{opacity:1}50%{opacity:.45}}
+.paper-report-stopped-banner{display:flex;align-items:center;gap:8px;padding:9px 14px;margin:0 0 14px;border:1px solid var(--error-border);border-radius:10px;background:var(--error-bg);color:var(--error-text);font-size:12.5px;font-weight:600}
+.paper-report-stopped-banner svg{flex-shrink:0}
+/* Model picker */
+.paper-report-model-picker{position:relative}
+/* max-width holds the longest real model short-name (measured: 30 chars,
+ * e.g. gemini-3.1-flash-image-preview) without ellipsis; the toolbar wraps,
+ * so a wider button costs a row, never a clipped neighbour. */
+.paper-report-model-btn{display:flex;align-items:center;gap:4px;padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--text-secondary);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit;white-space:nowrap;max-width:300px;min-width:0}
+.paper-report-model-btn svg{flex-shrink:0}
+.paper-report-model-btn:hover{background:var(--bg-hover);color:var(--text-primary);border-color:var(--border-light)}
+.paper-report-model-btn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.paper-report-model-dropdown{display:none;position:absolute;top:100%;left:0;margin-top:4px;min-width:200px;max-width:300px;max-height:340px;overflow-y:auto;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.3);z-index:100;padding:4px}
+.paper-report-model-dropdown.open{display:block;animation:paperDropIn .16s cubic-bezier(.2,.9,.3,1.1)}
+@keyframes paperDropIn{from{opacity:0;transform:translateY(-6px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
+.paper-report-model-dropdown-item{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:5px;font-size:12px;cursor:pointer;color:var(--text-secondary);transition:all .1s}
+.paper-report-model-dropdown-item:hover{background:var(--bg-hover);color:var(--text-primary)}
+.paper-report-model-dropdown-item.active{background:rgba(99,102,241,.12);color:var(--accent)}
+.paper-report-model-dropdown-section{font-size:10px;font-weight:700;color:var(--text-tertiary);padding:6px 10px 2px;text-transform:uppercase;letter-spacing:.5px}
+.paper-report-export{position:relative;margin-left:auto}
+.paper-report-export-dropdown{display:none;position:absolute;top:100%;right:0;margin-top:4px;min-width:200px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.3);z-index:100;padding:4px;flex-direction:column}
+.paper-report-export-dropdown.open{display:flex;animation:paperDropIn .16s cubic-bezier(.2,.9,.3,1.1)}
+.paper-report-export-item{display:block;width:100%;text-align:left;padding:8px 12px;border:none;background:none;color:var(--text-secondary);font-size:12px;font-family:inherit;cursor:pointer;border-radius:5px;transition:all .1s}
+.paper-report-export-item:hover{background:var(--bg-hover);color:var(--text-primary)}
+/* Tool activity indicator */
+.paper-report-tools{padding:8px 14px 0;flex-shrink:0}
+.paper-report-tools .ptool-panel{margin:0 0 6px}
+
+/* Reasoning / thinking panel (streams before content begins) */
+.paper-report-thinking{margin:8px 14px;padding:0;border:1px solid var(--border);border-radius:6px;background:rgba(99,102,241,.04);font-size:12px;color:var(--text-secondary);flex-shrink:0;overflow:hidden}
+.paper-report-thinking>summary{list-style:none;cursor:pointer;padding:8px 12px;display:flex;align-items:center;gap:8px;font-weight:600;color:var(--text-secondary);user-select:none}
+.paper-report-thinking>summary::-webkit-details-marker{display:none}
+.paper-report-thinking>summary::before{content:"▸";display:inline-block;transition:transform .15s;opacity:.6;font-size:10px}
+.paper-report-thinking[open]>summary::before{transform:rotate(90deg)}
+.paper-report-thinking .thinking-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+.paper-report-thinking-body{padding:0 14px 10px 14px;max-height:180px;overflow-y:auto;white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;line-height:1.5;color:var(--text-tertiary)}
+.paper-report-hint{font-size:11px;color:var(--text-quaternary);margin-top:4px}
+@keyframes spin{to{transform:rotate(360deg)}}
+/* ── Unified reading prose ──────────────────────────────────────────────
+ * Applies to BOTH reading surfaces — the generated-report pane
+ * (.paper-report-content) and the review pane (.paper-report-body) — which
+ * previously carried two near-duplicate rule blocks that had already drifted
+ * (only -body had table styling). Merged so every reading-comfort improvement
+ * lands on both and can't drift again. Per-theme overrides (light/tofu at
+ * ~1644/1957) still layer on top via their own selectors. */
+
+/* READING MEASURE: cap the text column at a comfortable line length and centre
+ * it, in BOTH the enhanced (TOC-grid) and plain (no-TOC) final layouts — the
+ * <article> is the text column in each (_renderFinalReport wraps prose in
+ * .paper-report-article whether or not a TOC is built). Without this, prose ran
+ * edge-to-edge (~130–160 chars) on a wide reader pane; ~60–80ch is the
+ * sustained-reading optimum. Tunable per-theme via --reader-measure. */
+/* Reader comfort controls (see _applyReaderPrefs in paper-reader.js): two CSS
+ * custom properties the reader toolbar drives + persists to localStorage.
+ *   --reader-measure   : text-column width (Narrow 60ch / Comfortable 68ch / Wide 78ch)
+ *   --reader-font-scale: multiplies the base reading size (A−/A+, ~0.85–1.3)
+ * Both live on the container and INHERIT, so every re-render + all three themes
+ * pick them up with no per-element rewrite. */
+.paper-report-content,.paper-report-body{--reader-measure:68ch;--reader-font-scale:1}
+.paper-report-article{max-width:var(--reader-measure);margin-inline:auto;width:100%}
+/* Streaming frames render prose FLAT into #…BodyContent.paper-report-body (no
+ * .paper-report-article wrapper yet), so centre those flat flow children to the
+ * same measure — otherwise streaming text runs full-width then snaps to 720px
+ * when the final enhanced render mounts. Scoped to the NON-enhanced body so the
+ * TOC-grid final layout (.paper-report-doc, capped at 1180px) is untouched. */
+.paper-report-body:not(.paper-report-enhanced) > :not(.paper-report-doc):not(.paper-report-article):not(.paper-read-time){max-width:var(--reader-measure);margin-inline:auto}
+
+.paper-report-content h2,.paper-report-body h2{font-size:18px;line-height:1.3;margin:26px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+.paper-report-content h2:first-child,.paper-report-body h2:first-child{margin-top:0}
+.paper-report-content h3,.paper-report-body h3{font-size:15.5px;line-height:1.35;margin:20px 0 7px}
+.paper-report-content p,.paper-report-body p{margin:0 0 1em}
+.paper-report-content ul,.paper-report-content ol,.paper-report-body ul,.paper-report-body ol{padding-left:22px;margin:8px 0}
+.paper-report-content li,.paper-report-body li{margin:5px 0}
+.paper-report-content strong,.paper-report-body strong{color:var(--text-primary)}
+.paper-report-content a,.paper-report-body a{color:var(--accent);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--accent) 35%,transparent);transition:border-color .15s,color .15s}
+.paper-report-content a:hover,.paper-report-body a:hover{border-bottom-color:var(--accent)}
+.paper-report-content code,.paper-report-body code{background:var(--bg-tertiary);padding:1px 5px;border-radius:3px;font-size:.86em;font-family:'JetBrains Mono',ui-monospace,monospace}
+.paper-report-content pre,.paper-report-body pre{margin:12px 0;padding:12px 14px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;overflow-x:auto;font-size:12.5px;line-height:1.55}
+.paper-report-content pre code,.paper-report-body pre code{background:none;padding:0;font-size:inherit}
+.paper-report-content blockquote,.paper-report-body blockquote{border-left:3px solid var(--accent);padding:2px 0 2px 14px;margin:12px 0;color:var(--text-secondary)}
+.paper-report-content table,.paper-report-body table{border-collapse:collapse;margin:14px 0;font-size:13px;width:100%}
+.paper-report-content th,.paper-report-content td,.paper-report-body th,.paper-report-body td{border:1px solid var(--border);padding:6px 10px;text-align:left}
+.paper-report-content th,.paper-report-body th{background:var(--bg-secondary);font-weight:600}
+.paper-report-content tbody tr:nth-child(even),.paper-report-body tbody tr:nth-child(even){background:color-mix(in srgb,var(--text-primary) 3%,transparent)}
+
+/* ── Reading-experience rail (native Paper reading-XP owner) ──
+ * Anchored insight cards (distributed after section headings), the rebuilt
+ * end insight section, and the 📦 recap card. Cards share one surface; the
+ * left border color distinguishes connections (accent) from provocations
+ * (amber) — quiet, inline, never a modal. */
+.paper-xp-card{border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;background:var(--bg-secondary);margin:10px 0 14px;padding:10px 14px;font-size:13.5px;line-height:1.65}
+.paper-xp-card.xp-prov{border-left-color:#d29922;background:color-mix(in srgb,#d29922 6%,var(--bg-secondary))}
+.paper-xp-card-head{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+.paper-xp-card-title{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-tertiary)}
+.paper-xp-card-body{color:var(--text-secondary)}
+.paper-xp-card-body a{color:var(--accent);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--accent) 35%,transparent)}
+.paper-xp-card-body a:hover{border-bottom-color:var(--accent)}
+.paper-xp-section{margin-top:8px}
+.paper-xp-recap{border:1px solid color-mix(in srgb,var(--accent) 40%,var(--border));border-radius:12px;background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 8%,var(--bg-secondary)),var(--bg-secondary));margin:22px 0 10px;padding:14px 16px}
+.paper-xp-recap-head{font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:8px;letter-spacing:.02em}
+.paper-xp-recap-row{font-size:13px;line-height:1.65;color:var(--text-secondary);margin:5px 0}
+.paper-xp-recap-row b{color:var(--text-primary)}
+.paper-xp-actions{margin-top:8px;display:flex;gap:8px}
+.paper-xp-act{padding:4px 12px;border:1px solid color-mix(in srgb,var(--accent) 35%,var(--border));border-radius:8px;background:transparent;color:var(--accent);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:background .12s,border-color .12s}
+.paper-xp-act:hover{background:color-mix(in srgb,var(--accent) 12%,transparent);border-color:var(--accent)}
+/* Checkpoint flip cards (P2): one box, two faces; .is-flipped swaps them. */
+.paper-xp-flip{border:1px solid var(--border);border-left:3px solid var(--success-color,#22c55e);border-radius:10px;background:var(--bg-secondary);margin:12px 0;padding:10px 14px;cursor:pointer;user-select:none;transition:border-color .15s}
+.paper-xp-flip:hover{border-color:color-mix(in srgb,var(--success-color,#22c55e) 60%,var(--border))}
+.paper-xp-flip-hint{margin-left:auto;font-size:11px;color:var(--text-quaternary);font-weight:400;text-transform:none;letter-spacing:0}
+.paper-xp-flip-q{font-size:13.5px;line-height:1.65;color:var(--text-primary);font-weight:600}
+.paper-xp-flip-a{font-size:13.5px;line-height:1.65;color:var(--text-secondary)}
+.paper-xp-flip .paper-xp-flip-back{display:none}
+.paper-xp-flip.is-flipped .paper-xp-flip-front{display:none}
+.paper-xp-flip.is-flipped .paper-xp-flip-back{display:block}
+/* Deepen (P3): heading ghost buttons + the drawer. */
+.paper-deepen-btn{display:inline-block;margin-left:6px;padding:1px 8px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text-quaternary);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;vertical-align:middle;opacity:0;transition:opacity .15s,color .12s,border-color .12s}
+.paper-deepen-btn::after{content:attr(data-label);margin-left:3px}
+.paper-deepen-btn svg{vertical-align:-1px}
+h2:hover .paper-deepen-btn,h3:hover .paper-deepen-btn,.paper-deepen-btn:focus{opacity:1}
+.paper-deepen-btn:hover{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 35%,var(--border))}
+.katex-display + .paper-deepen-btn{opacity:.6}
+.paper-deepen-drawer{border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;background:var(--bg-secondary);margin:8px 0 14px;padding:12px 16px;font-size:14px;line-height:1.7}
+.paper-deepen-status{color:var(--text-tertiary);font-size:13px}
+.paper-deepen-error{color:#ef4444}
+.paper-deepen-meta{margin-top:10px;font-size:11px;color:var(--text-quaternary)}
+.paper-deepen-stop{margin-top:8px;padding:3px 10px;border:1px solid var(--border);border-radius:7px;background:transparent;color:var(--text-tertiary);font-size:12px;cursor:pointer;font-family:inherit}
+.paper-deepen-stop:hover{color:#ef4444;border-color:#ef4444}
+/* Margin notes (P4) */
+.paper-note-mark{background:color-mix(in srgb,var(--accent) 18%,transparent);border-bottom:2px solid var(--accent);border-radius:2px;cursor:pointer}
+.paper-note-mark:hover{background:color-mix(in srgb,var(--accent) 28%,transparent)}
+.paper-note-chip{margin-left:6px;padding:0 4px;border:none;background:transparent;cursor:pointer;font-size:12px;opacity:.55;transition:opacity .12s}
+.paper-note-chip:hover{opacity:1}
+.paper-note-tray{border:1px dashed var(--border);border-radius:10px;margin:16px 0 6px;padding:10px 14px}
+.paper-note-tray-head{font-size:12px;font-weight:700;color:var(--text-tertiary);margin-bottom:6px}
+.paper-note-tray-row{font-size:13px;color:var(--text-secondary);padding:5px 0;border-top:1px solid var(--border);cursor:pointer}
+.paper-note-tray-row:hover{color:var(--text-primary)}
+.paper-note-editor{position:fixed;z-index:10000;width:288px;background:var(--bg-primary);border:1px solid var(--border-light);border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.35);padding:10px}
+.paper-note-editor-quote{font-size:11.5px;color:var(--text-quaternary);border-left:3px solid var(--border);padding-left:8px;margin-bottom:8px;max-height:52px;overflow:hidden}
+.paper-note-editor-input{width:100%;box-sizing:border-box;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-family:inherit;font-size:13px;padding:8px;resize:vertical}
+.paper-note-editor-input:focus{outline:none;border-color:var(--accent)}
+.paper-note-editor-actions{display:flex;gap:8px;margin-top:8px}
+.paper-note-editor-actions button{padding:4px 12px;border-radius:7px;border:1px solid var(--border);background:transparent;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;color:var(--text-secondary)}
+.paper-note-editor-actions .paper-note-save{background:var(--accent);border-color:var(--accent);color:#fff}
+.paper-note-editor-actions .paper-note-del:hover{color:#ef4444;border-color:#ef4444}
+.paper-report-content img,.paper-report-body img{display:block;max-width:100%;height:auto;margin:14px auto;border:1px solid var(--border);border-radius:6px;background:#fff;padding:4px;box-shadow:0 2px 8px rgba(0,0,0,.15);cursor:zoom-in}
+.paper-report-content p:has(> img:only-child),.paper-report-body p:has(> img:only-child){text-align:center;margin:14px 0}
+.paper-report-content p > img + em,.paper-report-body p > img + em{display:block;text-align:center;font-size:12px;color:var(--text-tertiary);margin-top:4px}
+.paper-report-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;color:var(--text-tertiary);font-size:13px;gap:6px;text-align:center;padding:40px 28px;line-height:1.6}
+.paper-report-empty b{color:var(--text-secondary)}
+.paper-report-generate-btn{display:inline-flex;align-items:center;gap:8px;margin-top:16px;padding:10px 22px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;box-shadow:0 2px 10px rgba(110,86,207,.28);transition:transform .12s ease,box-shadow .12s ease,filter .12s ease}
+.paper-report-generate-btn:hover{filter:brightness(1.06);box-shadow:0 4px 16px rgba(110,86,207,.4);transform:translateY(-1px)}
+.paper-report-generate-btn:active{transform:translateY(0)}
+.paper-report-generate-btn svg{flex-shrink:0}
+/* ── Review-tab segmented sub-view (Review | Rebuttal) ──
+ * Two MUTUALLY-EXCLUSIVE full-height segments. Only the shown
+ * .paper-review-seg-panel is in layout (the other is display:none), so the two
+ * long documents never compete for the same flex-column height — the fix for
+ * the old stacked-<details> bug where an expanded rebuttal squeezed the review
+ * report to 0. Each panel is flex:1 + min-height:0 so its inner scroller
+ * (.paper-report-content) fills the column and scrolls independently. */
+.paper-review-seg{display:flex;gap:4px;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--bg-secondary);flex-shrink:0}
+.paper-review-seg-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--text-secondary);font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;transition:background .12s,color .12s}
+.paper-review-seg-btn:hover{color:var(--text-primary);background:var(--bg-hover)}
+.paper-review-seg-btn.active{color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent);border-color:color-mix(in srgb,var(--accent) 30%,transparent)}
+.paper-review-seg-panel{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+/* ── Rebuttal follow-up sub-panel (inside the Review tab) ── */
+.paper-rebuttal-body{flex:1;min-height:0;display:flex;flex-direction:column;padding:16px 16px 0}
+.paper-rebuttal-body .paper-report-hint{flex-shrink:0}
+.paper-rebuttal-body #paperRebuttalContent{padding:16px 0 20px}
+.paper-rebuttal-input{flex-shrink:0;width:100%;box-sizing:border-box;margin-top:8px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-secondary);color:var(--text-primary);font-family:inherit;font-size:13px;line-height:1.5;resize:vertical}
+.paper-rebuttal-input:focus{outline:none;border-color:var(--accent)}
+.paper-rebuttal-actions{flex-shrink:0;display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}
+.paper-rebuttal-actions .paper-report-generate-btn{margin-top:0;padding:8px 16px}
+/* Score-decision card — prepended to the reviewer's follow-up reply. */
+.paper-rebuttal-decision{border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin:0 0 16px;background:var(--bg-secondary)}
+.paper-rebuttal-decision.rd-yes{border-left:3px solid var(--accent)}
+.paper-rebuttal-decision.rd-no{border-left:3px solid var(--text-quaternary)}
+.paper-rebuttal-decision .rd-head{display:flex;align-items:center;margin-bottom:8px}
+.paper-rebuttal-decision .rd-badge{font-size:12px;font-weight:700;letter-spacing:.02em;padding:3px 10px;border-radius:20px;color:#fff}
+.paper-rebuttal-decision.rd-yes .rd-badge{background:var(--accent)}
+.paper-rebuttal-decision.rd-no .rd-badge{background:var(--text-tertiary)}
+.paper-rebuttal-decision .rd-metrics{display:flex;flex-wrap:wrap;gap:18px}
+.paper-rebuttal-decision .rd-metric{display:flex;align-items:center;gap:8px;font-size:14px}
+.paper-rebuttal-decision .rd-label{font-size:11px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.03em}
+.paper-rebuttal-decision .rd-from{color:var(--text-tertiary);text-decoration:line-through}
+.paper-rebuttal-decision .rd-arrow{color:var(--accent);font-weight:700}
+.paper-rebuttal-decision .rd-to{color:var(--accent);font-weight:700}
+.paper-rebuttal-decision .rd-metric.rd-changed .rd-to{font-size:16px}
+.paper-rebuttal-decision .rd-same{color:var(--text-secondary);font-weight:600}
+.paper-rebuttal-decision .rd-reason{margin-top:10px;font-size:12.5px;line-height:1.55;color:var(--text-secondary)}
+
+/* ── Report section progress chips ── */
+.report-section-chip{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:12px;font-size:11px;font-weight:500;color:var(--text-tertiary);background:var(--bg-tertiary);border:1px solid transparent;transition:all .3s}
+.report-section-chip.running{border-color:var(--accent)}
+.report-section-chip-dot{width:7px;height:7px;border-radius:50%;background:var(--text-quaternary);transition:all .3s;flex-shrink:0}
+.report-section-chip.running{color:var(--accent);background:rgba(99,102,241,.1)}
+.report-section-chip.running .report-section-chip-dot{background:var(--accent);animation:reportChipPulse 1.2s ease-in-out infinite}
+.report-section-chip.done{color:var(--success-color,#22c55e);background:rgba(34,197,94,.1)}
+.report-section-chip.done .report-section-chip-dot{background:var(--success-color,#22c55e)}
+.report-section-chip.error{color:#ef4444;background:rgba(239,68,68,.1)}
+.report-section-chip.error .report-section-chip-dot{background:#ef4444}
+@keyframes reportChipPulse{0%,100%{opacity:.5;transform:scale(.9)}50%{opacity:1;transform:scale(1.2)}}
+/* Container rules only — element/prose styling lives in the unified block above.
+ * Base reading size is 15px/1.75 (long-form comfort; was 14px/1.7 = chat size).
+ * The light/tofu themes bump further; dark now inherits this larger base
+ * instead of the old cramped 14px. */
+.paper-report-content{flex:1;overflow-y:auto;overflow-x:hidden;padding:20px;font-size:calc(15px * var(--reader-font-scale,1));line-height:1.75;color:var(--text-primary)}
+.paper-report-body{flex:1;overflow-y:auto;overflow-x:hidden;padding:20px;font-size:calc(15px * var(--reader-font-scale,1));line-height:1.75;color:var(--text-primary)}
+.paper-report-body table{border-collapse:collapse;margin:8px 0;font-size:13px;width:100%}
+.paper-report-body th,.paper-report-body td{border:1px solid var(--border);padding:6px 10px;text-align:left}
+.paper-report-body th{background:var(--bg-secondary);font-weight:600}
+
+/* ── Babel PDF Module ── */
+.paper-translate-content{flex:1;display:flex;flex-direction:column;overflow:hidden}
+
+/* ── Media studio console (podcast + video tabs, 2026-07 redesign) ──
+ * One shared design system: rich option cards + segmented controls write
+ * into visually-hidden <select> elements (the generate path still reads
+ * them); toggles are pure-CSS switches over the real checkboxes. The
+ * pinned contract classes (.paper-stepper / .paper-step.is-* /
+ * .paper-media-activity / .paper-video-cell.is-pending …) are kept. */
+.paper-podcast-content,.paper-video-content{flex:1;display:flex;flex-direction:column;overflow-y:auto;padding:18px 18px 26px}
+.paper-podcast-card{display:flex;flex-direction:column;gap:14px}
+.pm-studio,.pm-console{padding:18px;border:1px solid var(--border);border-radius:18px;background:linear-gradient(180deg,var(--bg-secondary),color-mix(in srgb,var(--bg-secondary) 55%,transparent));box-shadow:0 20px 44px -34px rgba(0,0,0,.6)}
+.pm-studio-head{display:flex;align-items:center;gap:14px}
+.pm-studio-badge{flex-shrink:0;width:54px;height:54px;border-radius:17px;display:flex;align-items:center;justify-content:center;color:#fff;background:linear-gradient(135deg,#7c5cf0,#a855f7);box-shadow:0 12px 26px -12px rgba(139,92,246,.65)}
+.pm-studio-badge.is-video{background:linear-gradient(135deg,#0ea5e9,#6366f1);box-shadow:0 12px 26px -12px rgba(14,165,233,.6)}
+.pm-studio-head-text{min-width:0}
+.pm-studio-title{font-size:15px;font-weight:700;color:var(--text-primary);letter-spacing:.01em}
+.pm-studio-sub{font-size:12.5px;color:var(--text-tertiary);line-height:1.55;margin-top:2px}
+.paper-podcast-banner{display:flex;align-items:flex-start;gap:8px;padding:9px 12px;border-radius:12px;background:rgba(210,153,34,.08);border:1px solid rgba(210,153,34,.3);border-left:3px solid #d29922;color:var(--text-secondary);font-size:12px;line-height:1.55}
+.paper-podcast-banner svg{flex-shrink:0;margin-top:1px;color:#d29922}
+.paper-podcast-banner-warn{background:rgba(210,153,34,.06)}
+.pm-field{display:flex;flex-direction:column;gap:8px}
+.pm-field-label{font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--text-tertiary)}
+.pm-field-opt{margin-left:6px;font-weight:500;letter-spacing:.02em;text-transform:none;opacity:.65}
+.pm-options{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.pm-options.cols-3{grid-template-columns:repeat(3,1fr)}
+.pm-opt{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:12px 13px;border:1px solid var(--border);border-radius:14px;background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-family:inherit;text-align:left;transition:border-color .16s,box-shadow .16s,transform .16s,background .16s}
+.pm-opt:hover{transform:translateY(-1px);border-color:var(--border-light)}
+.pm-opt-icon{display:flex;color:var(--text-tertiary);margin-bottom:3px}
+.pm-opt-title{font-size:13px;font-weight:700}
+.pm-opt-sub{font-size:11px;color:var(--text-tertiary);line-height:1.4}
+.pm-opt.is-selected{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg-secondary));box-shadow:0 0 0 1px var(--accent),0 12px 24px -18px var(--accent)}
+.pm-opt.is-selected .pm-opt-icon{color:var(--accent)}
+.pm-options.cols-3 .pm-opt{padding:10px 11px}
+.pm-seg{display:inline-flex;align-self:flex-start;padding:3px;gap:3px;border:1px solid var(--border);border-radius:12px;background:var(--bg-tertiary)}
+.pm-seg-btn{padding:7px 18px;border:none;border-radius:9px;background:transparent;color:var(--text-secondary);font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;transition:background .16s,color .16s,box-shadow .16s}
+.pm-seg-btn:hover{color:var(--text-primary)}
+.pm-seg-btn.is-selected{background:var(--bg-secondary);color:var(--text-primary);box-shadow:0 2px 8px rgba(0,0,0,.28)}
+.pm-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.pm-voice-wrap{display:flex;align-items:center;gap:9px;padding:0 12px;border:1px solid var(--border);border-radius:12px;background:var(--bg-secondary);color:var(--text-tertiary);transition:border-color .16s,box-shadow .16s,color .16s}
+.pm-voice-wrap:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent)}
+.pm-voice-wrap svg{flex-shrink:0}
+.pm-voice-wrap input{flex:1;min-width:0;border:none;background:none;padding:10px 0;color:var(--text-primary);font-size:13px;font-family:inherit;outline:none}
+.pm-voice-wrap input::placeholder{color:var(--text-tertiary)}
+/* model picker (podcast + video studio cards, and the done-card inline
+ * variant next to Regenerate). The dropdown LIST reuses the report picker's
+ * .paper-report-model-dropdown styles — one list design across paper mode. */
+.pm-model{position:relative}
+.pm-model-btn{display:flex;align-items:center;gap:9px;width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:12px;background:var(--bg-secondary);color:var(--text-primary);font-size:13px;font-family:inherit;cursor:pointer;transition:border-color .16s,box-shadow .16s,color .16s}
+.pm-model-btn:hover{border-color:var(--border-light)}
+.pm-model-btn:focus-visible{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent);outline:none}
+.pm-model-btn svg{flex-shrink:0;color:var(--text-tertiary)}
+.pm-model-btn .pm-model-label{flex:1;min-width:0;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pm-model-inline{position:relative}
+.pm-model-inline-btn span{max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pm-model .paper-report-model-dropdown,
+.pm-model-inline .paper-report-model-dropdown{left:0;min-width:230px;z-index:120}
+.pm-toggles{display:flex;flex-direction:column;gap:8px}
+.pm-toggle{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--border);border-radius:12px;background:var(--bg-secondary);cursor:pointer;transition:border-color .16s}
+.pm-toggle:hover{border-color:var(--border-light)}
+.pm-toggle input{position:absolute;opacity:0;width:0;height:0}
+.pm-toggle-track{flex-shrink:0;position:relative;width:36px;height:20px;border-radius:999px;background:var(--bg-tertiary);border:1px solid var(--border);transition:background .18s,border-color .18s}
+.pm-toggle-thumb{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--text-tertiary);transition:transform .18s,background .18s}
+.pm-toggle input:checked ~ .pm-toggle-track{background:var(--accent);border-color:var(--accent)}
+.pm-toggle input:checked ~ .pm-toggle-track .pm-toggle-thumb{transform:translateX(16px);background:#fff}
+.pm-toggle input:focus-visible ~ .pm-toggle-track{box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 25%,transparent)}
+.pm-toggle-text{display:flex;flex-direction:column;gap:1px}
+.pm-toggle-text b{font-size:13px;font-weight:600;color:var(--text-primary)}
+.pm-toggle-text small{font-size:11px;color:var(--text-tertiary)}
+.paper-podcast-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border:none;border-radius:8px;background:var(--accent);color:#fff;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;text-decoration:none;transition:filter .15s}
+.paper-podcast-btn:hover{filter:brightness(1.08)}
+.paper-podcast-btn-ghost{background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border)}
+.paper-podcast-btn.pm-cta{justify-content:center;width:100%;padding:12px 18px;font-size:13.5px;border-radius:13px;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent) 62%,#a855f7));box-shadow:0 14px 28px -14px var(--accent);letter-spacing:.03em;transition:filter .15s,transform .15s,box-shadow .15s}
+.paper-podcast-btn.pm-cta:hover{filter:brightness(1.07);transform:translateY(-1px);box-shadow:0 18px 32px -14px var(--accent)}
+.paper-podcast-btn.pm-cta:active{transform:translateY(0)}
+/* generating: production console (EQ bars for podcast, scanline for video) */
+.pm-console-head{display:flex;align-items:center;gap:11px}
+.pm-console-title{flex:1;min-width:0;font-size:14px;font-weight:700;color:var(--text-primary)}
+.pm-console-abort{flex-shrink:0}
+.pm-eq{display:inline-flex;align-items:flex-end;gap:2.5px;height:16px}
+.pm-eq i{width:3px;height:100%;border-radius:2px;background:linear-gradient(180deg,#a855f7,var(--accent));transform-origin:bottom;animation:pmEq 1.15s ease-in-out infinite}
+.pm-eq i:nth-child(2){animation-delay:.14s}
+.pm-eq i:nth-child(3){animation-delay:.28s}
+.pm-eq i:nth-child(4){animation-delay:.42s}
+@keyframes pmEq{0%,100%{transform:scaleY(.35)}50%{transform:scaleY(1)}}
+.pm-clap{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:10px;color:#fff;background:linear-gradient(135deg,#0ea5e9,#6366f1);box-shadow:0 8px 18px -8px rgba(14,165,233,.7)}
+.pm-renderbar{position:relative;height:4px;border-radius:2px;background:var(--bg-tertiary);overflow:hidden}
+.pm-renderbar::after{content:'';position:absolute;top:0;bottom:0;left:-40%;width:40%;border-radius:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);animation:pmScan 1.7s ease-in-out infinite}
+@keyframes pmScan{0%{left:-40%}100%{left:100%}}
+.paper-podcast-progress{display:flex;align-items:center;gap:10px;padding:2px;font-size:13px;color:var(--text-secondary);min-height:20px}
+.paper-podcast-spinner{width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:paperPodcastSpin 1s linear infinite;flex-shrink:0}
+@keyframes paperPodcastSpin{to{transform:rotate(360deg)}}
+.paper-podcast-error{font-size:12.5px;color:#f85149;line-height:1.5}
+/* P-UX2 阶段步进器 + 活性行(docs/modules/ingest_media.md §3.4) */
+.paper-stepper{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:2px 0}
+.paper-step{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--text-tertiary);padding:3px 8px;border-radius:8px;border:1px solid transparent}
+.paper-step-mark{font-size:10px;line-height:1}
+.paper-step.is-done{color:var(--text-secondary)}
+.paper-step.is-done .paper-step-mark{color:#3fb950}
+.paper-step.is-active{color:var(--text-primary);background:color-mix(in srgb,var(--accent) 10%,var(--bg-tertiary));border-color:color-mix(in srgb,var(--accent) 35%,var(--border));font-weight:600}
+.paper-step.is-active .paper-step-mark{color:var(--accent);animation:pmStepPulse 1.4s ease-in-out infinite}
+@keyframes pmStepPulse{0%,100%{opacity:1}50%{opacity:.35}}
+.paper-step-sep{flex:0 0 14px;height:1px;background:var(--border)}
+.paper-media-activity{font-size:11.5px;color:var(--text-tertiary);padding:0 2px;font-variant-numeric:tabular-nums;min-height:15px}
+.paper-media-activity.is-stale{color:#d29922}
+/* done: title row + badges */
+.paper-podcast-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.paper-podcast-title{font-size:14.5px;font-weight:700;color:var(--text-primary)}
+.paper-podcast-badge{padding:2px 9px;border-radius:999px;background:var(--bg-tertiary);border:1px solid var(--border);font-size:11px;color:var(--text-tertiary);font-variant-numeric:tabular-nums}
+/* podcast done: now-playing bar (vinyl spins while the audio plays) */
+.pm-player{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:14px;border:1px solid color-mix(in srgb,var(--accent) 30%,var(--border));background:color-mix(in srgb,var(--accent) 7%,var(--bg-secondary))}
+.pm-player-disc{flex-shrink:0;display:flex;color:var(--accent)}
+.pm-player.is-playing .pm-player-disc svg{animation:pmSpin 3.2s linear infinite;transform-origin:center}
+@keyframes pmSpin{to{transform:rotate(360deg)}}
+#podcastAudio{flex:1;min-width:0;height:38px;border-radius:10px}
+.paper-podcast-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.paper-podcast-sleep{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-tertiary)}
+.paper-podcast-sleep-note{font-variant-numeric:tabular-nums}
+.paper-podcast-sel{padding:6px 9px;border:1px solid var(--border);border-radius:8px;background:var(--bg-secondary);color:var(--text-primary);font-size:12px;font-family:inherit;cursor:pointer}
+.pm-transcript-head{font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--text-tertiary);border-top:1px solid var(--border);padding-top:12px}
+.paper-podcast-transcript{display:flex;flex-direction:column;gap:3px;max-height:46vh;overflow-y:auto}
+.paper-podcast-seg{display:flex;gap:10px;padding:8px 10px 8px 12px;border-radius:10px;border-left:2px solid transparent;cursor:pointer;transition:background .12s,border-color .12s}
+.paper-podcast-seg:hover{background:var(--bg-secondary)}
+.paper-podcast-seg.active{background:var(--accent-subtle,rgba(110,86,207,.14));border-left-color:var(--accent)}
+.paper-podcast-seg-time{flex-shrink:0;width:38px;font-size:11px;color:var(--text-tertiary);font-variant-numeric:tabular-nums;padding-top:2px}
+.paper-podcast-seg.active .paper-podcast-seg-time{color:var(--accent);font-weight:700}
+.paper-podcast-seg p{margin:0;font-size:13px;line-height:1.65;color:var(--text-primary)}
+/* hero empty/terminal states: vertically + horizontally centered inside the
+ * flex content pane (report_required / lookup_failed / lost / interrupted). */
+.paper-podcast-hero{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:48px 28px;gap:12px;min-height:320px}
+.paper-podcast-hero-icon{display:flex;align-items:center;justify-content:center;width:84px;height:84px;border-radius:26px;background:linear-gradient(135deg,#7c5cf0,#a855f7);color:#fff;box-shadow:0 18px 38px -16px rgba(139,92,246,.7)}
+.paper-podcast-hero-icon.is-warn{background:linear-gradient(135deg,#d29922,#b45309);box-shadow:0 18px 38px -16px rgba(210,153,34,.55)}
+.paper-podcast-hero-icon svg{display:block}
+.paper-podcast-hero-title{font-size:16px;font-weight:700;color:var(--text-primary)}
+.paper-podcast-hero-sub{font-size:13px;color:var(--text-tertiary);line-height:1.7;max-width:420px}
+.paper-podcast-hero-steps{display:flex;align-items:center;gap:10px;margin-top:2px}
+.paper-podcast-hero-step{display:inline-flex;align-items:center;padding:5px 12px;border-radius:999px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-tertiary);font-size:12px}
+.paper-podcast-hero-step.is-active{border-color:color-mix(in srgb,var(--accent) 45%,transparent);color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.paper-podcast-hero-arrow{display:flex;color:var(--text-tertiary)}
+.paper-podcast-hero .paper-podcast-btn{margin-top:6px;padding:10px 22px;font-size:13px}
+/* ── Video tab: player + per-scene grid. These rules were MISSING before the
+ * 2026-07 redesign — the grid, thumbnails and regen buttons rendered as raw
+ * unstyled blocks, which was half of the "cramped" complaint. ── */
+.paper-video-player{display:block;width:100%;max-height:60vh;border-radius:14px;border:1px solid var(--border);background:#000;box-shadow:0 20px 44px -26px rgba(0,0,0,.65)}
+.paper-video-grid{display:flex;flex-direction:column;gap:8px}
+.paper-video-grid:empty{display:none}
+.paper-video-grid-title{font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--text-tertiary)}
+.paper-video-grid-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:10px}
+.paper-video-cell{display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid var(--border);border-radius:12px;background:var(--bg-secondary);transition:transform .16s,border-color .16s}
+.paper-video-cell:hover{transform:translateY(-2px);border-color:var(--border-light)}
+.paper-video-cell.is-regening{border-color:var(--accent)}
+.paper-video-cell.is-pending{opacity:.55}
+.paper-video-thumb{display:block;width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:8px;background:#000;cursor:pointer}
+.paper-video-thumb-empty{display:flex;align-items:center;justify-content:center;color:var(--text-tertiary);cursor:default;animation:pmPendingPulse 1.6s ease-in-out infinite}
+@keyframes pmPendingPulse{0%,100%{opacity:.45}50%{opacity:1}}
+.paper-video-cell-meta{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9px;line-height:1.3;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.paper-video-cell-text{font-size:11px;color:var(--text-secondary);line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.9em}
+.paper-video-regen{padding:5px 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg-tertiary);color:var(--text-secondary);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;transition:border-color .15s,color .15s}
+.paper-video-regen:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.paper-video-regen:disabled{opacity:.6;cursor:default}
+.babel-pdf-module{display:flex;flex-direction:column;flex:1;overflow:hidden}
+.babel-pdf-brand{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border);background:var(--bg-secondary)}
+.babel-pdf-icon{color:var(--accent);flex-shrink:0}
+.babel-pdf-brand-text{display:flex;flex-direction:column;gap:1px}
+.babel-pdf-title{font-size:14px;font-weight:700;color:var(--text-primary);letter-spacing:0.02em}
+.babel-pdf-subtitle{font-size:11px;color:var(--text-tertiary)}
+.babel-pdf-lang-bar{display:flex;gap:4px;padding:10px 16px;background:var(--bg-secondary);border-bottom:1px solid var(--border)}
+.babel-pdf-lang{flex:0 0 auto;padding:6px 14px;border:1px solid var(--border);background:none;color:var(--text-tertiary);font-size:12px;font-weight:600;cursor:pointer;border-radius:20px;transition:background .15s,color .15s,border-color .15s,transform .12s,box-shadow .15s;font-family:inherit}
+.babel-pdf-lang:hover{color:var(--text-secondary);border-color:var(--border-light);transform:translateY(-1px)}
+.babel-pdf-lang:active{transform:translateY(0)}
+.babel-pdf-lang.active{background:var(--accent);color:white;border-color:var(--accent);box-shadow:0 4px 12px -5px var(--accent)}
+.babel-pdf-body{flex:1;overflow-y:auto;padding:20px}
+.babel-pdf-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;min-height:200px;color:var(--text-tertiary);text-align:center;gap:8px}
+.babel-pdf-empty p{margin:0;font-size:13px}
+.babel-pdf-hint{font-size:12px!important;opacity:0.7}
+.babel-pdf-progress{width:200px;height:4px;background:var(--bg-tertiary);border-radius:2px;overflow:hidden;margin-top:8px}
+.babel-pdf-progress-bar{height:100%;background:var(--accent);border-radius:2px;transition:width .3s}
+.babel-pdf-status{padding:6px 12px;font-size:11px;color:var(--text-tertiary);border-top:1px solid var(--border);flex-shrink:0;text-align:center}
+
+/* ── Landing / Upload screen ── */
+.paper-landing{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;min-height:300px;gap:16px;padding:40px 20px;text-align:center}
+.paper-landing-icon{font-size:48px;opacity:0.6}
+.paper-landing h3{font-size:18px;font-weight:700;color:var(--text-primary);margin:0}
+.paper-landing p{font-size:14px;color:var(--text-tertiary);margin:0}
+.paper-landing-actions{display:flex;flex-direction:column;gap:12px;align-items:center;margin-top:12px;width:100%;max-width:520px}
+.paper-upload-btn{display:flex;align-items:center;gap:8px;padding:12px 24px;border:2px dashed var(--border-light);border-radius:12px;background:var(--bg-tertiary);color:var(--text-primary);font-size:14px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit;width:100%;justify-content:center}
+.paper-upload-btn:hover{border-color:var(--accent);background:var(--accent-subtle);color:var(--accent);transform:translateY(-2px);box-shadow:0 10px 24px -14px var(--accent)}
+.paper-upload-btn:active{transform:translateY(0)}
+.paper-arxiv-input{display:flex;gap:8px;width:100%;position:relative}
+.paper-arxiv-search-icon{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--text-tertiary);pointer-events:none;transition:color .15s}
+.paper-arxiv-input input{flex:1;padding:10px 14px 10px 36px;border:1px solid var(--border);border-radius:10px;background:var(--bg-tertiary);color:var(--text-primary);font-size:13px;font-family:inherit;outline:none;transition:border-color .15s}
+.paper-arxiv-input input:focus{border-color:var(--accent)}
+.paper-arxiv-input:focus-within .paper-arxiv-search-icon{color:var(--accent)}
+.paper-arxiv-input input::placeholder{color:var(--text-tertiary)}
+.paper-arxiv-btn{padding:10px 20px;border:none;border-radius:10px;background:var(--accent);color:white;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit}
+.paper-arxiv-btn:hover{background:var(--accent-hover);transform:translateY(-1px);box-shadow:0 6px 16px -6px var(--accent)}
+.paper-arxiv-btn:active{transform:translateY(0)}
+
+/* ── arXiv search results ── */
+.paper-search{display:flex;flex-direction:column;gap:14px;padding:24px 22px;max-width:780px;margin:0 auto;width:100%;box-sizing:border-box}
+.paper-search-loading{flex:1}
+.paper-search-head{display:flex;align-items:center;gap:12px}
+.paper-search-back{display:flex;align-items:center;justify-content:center;width:34px;height:34px;flex:0 0 auto;border:1px solid var(--border);border-radius:9px;background:var(--bg-tertiary);color:var(--text-secondary);cursor:pointer;transition:all .15s}
+.paper-search-back:hover{border-color:var(--accent);color:var(--accent);transform:translateX(-2px)}
+.paper-search-head-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.paper-search-head-title{font-size:15px;font-weight:700;color:var(--text-primary)}
+.paper-search-head-q{font-size:12.5px;color:var(--text-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.paper-search-hint{font-size:12px;color:var(--text-tertiary);margin:-4px 0 2px}
+.paper-search-empty{padding:48px 20px;text-align:center;color:var(--text-tertiary);font-size:13px}
+.paper-result-list{display:flex;flex-direction:column;gap:10px}
+.paper-result-card{display:flex;align-items:stretch;gap:14px;padding:14px 16px;border:1px solid var(--border);border-radius:14px;background:var(--bg-tertiary);cursor:pointer;transition:transform .18s cubic-bezier(.2,.9,.3,1.1),border-color .18s,box-shadow .18s;outline:none}
+.paper-result-card:hover,.paper-result-card:focus-visible{border-color:var(--accent);transform:translateY(-2px);box-shadow:0 12px 28px -18px var(--accent)}
+.paper-result-card:hover .paper-result-arrow,.paper-result-card:focus-visible .paper-result-arrow{color:var(--accent);transform:translateX(3px)}
+.paper-result-num{flex:0 0 auto;width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:8px;background:var(--accent-subtle,rgba(99,102,241,.12));color:var(--accent);font-size:12px;font-weight:700;font-variant-numeric:tabular-nums}
+.paper-result-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}
+.paper-result-title{font-size:14px;font-weight:650;color:var(--text-primary);line-height:1.35}
+.paper-result-authors{font-size:12px;color:var(--text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.paper-result-summary{font-size:12px;color:var(--text-tertiary);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.paper-result-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+.paper-result-meta span{font-size:11px;padding:2px 8px;border-radius:6px;background:var(--bg-hover);color:var(--text-tertiary);font-variant-numeric:tabular-nums}
+.paper-result-meta .paper-card-cat{background:var(--accent-subtle,rgba(99,102,241,.12));color:var(--accent);font-weight:600;font-family:var(--font-mono,monospace)}
+.paper-result-meta .paper-card-id{font-family:var(--font-mono,monospace)}
+.paper-result-arrow{display:flex;align-items:center;color:var(--text-tertiary);transition:transform .18s,color .18s}
+.paper-result-why{display:flex;align-items:flex-start;gap:6px;font-size:12px;color:var(--accent);line-height:1.45}
+.paper-result-why svg{flex:0 0 auto;margin-top:2px;opacity:.85}
+.paper-result-meta .paper-card-venue{background:var(--accent-subtle,rgba(99,102,241,.12));color:var(--accent);font-weight:700}
+
+/* Paper mode is a full-screen overlay in the same SPA — suppress the global
+   Project-Brain docked collaboration bar (project + conv-influence clusters)
+   so it doesn't bleed through under the reader. Decoupled from its own
+   push-driven visibility toggling (this !important override always wins). */
+body.paper-mode-active #presenceStrip{display:none !important}
+
+/* ── Describe-to-recommend ── */
+.paper-describe-divider{display:flex;align-items:center;gap:10px;width:100%;color:var(--text-tertiary);font-size:11px;margin:2px 0}
+.paper-describe-divider::before,.paper-describe-divider::after{content:"";flex:1;height:1px;background:var(--border)}
+.paper-describe-box{display:flex;flex-direction:column;gap:8px;width:100%}
+.paper-describe-label{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:var(--text-secondary)}
+.paper-describe-input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-tertiary);color:var(--text-primary);font-size:13px;font-family:inherit;line-height:1.5;resize:vertical;min-height:56px;outline:none;transition:border-color .15s}
+.paper-describe-input:focus{border-color:var(--accent)}
+.paper-describe-input::placeholder{color:var(--text-tertiary)}
+.paper-describe-btn{display:flex;align-items:center;justify-content:center;gap:7px;padding:10px 20px;border:none;border-radius:10px;background:var(--accent);color:white;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit}
+.paper-describe-btn:hover{background:var(--accent-hover);transform:translateY(-1px);box-shadow:0 6px 16px -6px var(--accent)}
+.paper-describe-btn:active{transform:translateY(0)}
+/* ── Research mode — auto-research is its own full-page studio (direction in,
+   reviewed ideas out), not a pane of Paper mode. The console (pm-console)
+   renders into #researchViewer by research-view.ts paintResearch. ── */
+.research-mode-container{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;background:var(--bg-primary)}
+.research-body{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column}
+.research-landing{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;min-height:300px;gap:14px;padding:48px 20px;text-align:center}
+.research-landing-icon{color:var(--accent);opacity:.85}
+.research-landing h3{font-size:20px;font-weight:700;color:var(--text-primary);margin:0}
+.research-landing p{font-size:13.5px;color:var(--text-tertiary);margin:0;max-width:460px;line-height:1.6}
+.research-landing-row{display:flex;gap:8px;width:100%;max-width:560px;margin-top:6px}
+.research-landing-input{flex:1;min-width:0;box-sizing:border-box;padding:11px 14px;border:1px solid var(--border);border-radius:10px;background:var(--bg-tertiary);color:var(--text-primary);font-size:13.5px;font-family:inherit;outline:none;transition:border-color .15s}
+.research-landing-input:focus{border-color:var(--accent)}
+.research-landing-input::placeholder{color:var(--text-tertiary)}
+.research-landing-btn{display:flex;align-items:center;justify-content:center;gap:7px;padding:11px 18px;border:none;border-radius:10px;background:var(--accent);color:white;font-size:13.5px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit;white-space:nowrap}
+.research-landing-btn:hover{background:var(--accent-hover);transform:translateY(-1px);box-shadow:0 6px 16px -6px var(--accent)}
+.research-landing-btn:active{transform:translateY(0)}
+.research-landing .pm-recent{max-width:560px;margin-top:16px}
+.research-body .pm-console{width:min(880px,calc(100% - 48px));margin:24px auto}
+/* Product-quality banner — a degraded job keeps status='done', so this is the
+   only thing that stops a 100% gate wipe from reading as a clean success. */
+.pm-quality{margin:12px 0;padding:11px 13px;border-radius:11px;font-size:12.5px;line-height:1.55}
+.pm-quality.is-degraded{border:1px solid color-mix(in srgb,#f59e0b 55%,transparent);background:color-mix(in srgb,#f59e0b 12%,transparent);color:var(--text-primary)}
+.pm-quality-title{font-weight:700;margin-bottom:3px}
+.pm-quality-reason{color:var(--text-secondary)}
+.pm-research-tally{display:flex;gap:16px;margin:10px 0;font-size:12.5px;color:var(--text-secondary)}
+.pm-research-usage{margin:12px 0;border:1px solid var(--border);border-radius:10px;background:var(--bg-tertiary);font-size:12px;color:var(--text-secondary)}
+.pm-research-usage>summary{cursor:pointer;padding:9px 11px;color:var(--text-primary);font-weight:650;line-height:1.45}
+.pm-research-usage-body{display:flex;flex-direction:column;gap:7px;padding:0 11px 10px;border-top:1px solid var(--border)}
+.pm-research-usage-row{display:flex;justify-content:space-between;gap:12px;padding-top:8px;font-variant-numeric:tabular-nums}
+.pm-research-usage-row>span:last-child{text-align:right;color:var(--text-tertiary)}
+.pm-research-usage-note{padding-top:7px;border-top:1px dashed var(--border);color:var(--text-tertiary);line-height:1.5}
+.pm-research-tools{padding:0;margin:10px 0;flex-shrink:1}
+.pm-research-tools:empty{display:none}
+.pm-research-corpus{margin:12px 0;border:1px solid var(--border);border-radius:10px;background:var(--bg-tertiary);font-size:12px}
+.pm-research-corpus>summary{cursor:pointer;padding:9px 11px;color:var(--text-primary);font-weight:650}
+.pm-research-corpus-list{display:flex;flex-wrap:wrap;gap:6px;padding:0 11px 11px}
+.pm-research-corpus-paper{padding:5px 8px;border:1px solid var(--border);border-radius:7px;background:var(--bg-hover);color:var(--text-secondary);font:11px var(--font-mono,monospace);cursor:pointer}
+.pm-research-corpus-paper:hover{border-color:var(--accent);color:var(--accent)}
+.pm-research-evaluation{margin:14px 0;padding:13px;border:1px solid color-mix(in srgb,var(--accent) 45%,var(--border));border-radius:12px;background:color-mix(in srgb,var(--accent) 7%,var(--bg-tertiary));color:var(--text-secondary)}
+.pm-research-evaluation.is-degraded{border-color:color-mix(in srgb,#f59e0b 50%,var(--border));background:color-mix(in srgb,#f59e0b 8%,var(--bg-tertiary))}
+.pm-eval-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+.pm-eval-kicker{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-tertiary)}
+.pm-eval-score{margin-top:2px;font-size:22px;font-weight:750;color:var(--text-primary);font-variant-numeric:tabular-nums}
+.pm-eval-follow{padding:5px 8px;border-radius:999px;background:var(--accent-subtle);color:var(--accent);font-size:11px;font-weight:700;text-align:right}
+.pm-eval-meta{margin-top:4px;font-size:11px;color:var(--text-tertiary)}
+.pm-eval-verdict{margin-top:10px;font-size:12.5px;line-height:1.55;color:var(--text-primary)}
+.pm-eval-line{margin-top:9px;font-size:11.5px;line-height:1.55}
+.pm-eval-changes{margin:5px 0 0;padding-left:20px}
+.pm-eval-changes li{margin:3px 0}
+.pm-eval-priority{font:10px var(--font-mono,monospace);text-transform:uppercase;color:var(--accent)}
+/* ── Recent research index on the landing screen (research-view.ts
+ * renderRecentResearch). These rules were MISSING: the past-run list rendered
+ * as raw browser-default buttons with direction + counts text run together. ── */
+.pm-recent{display:flex;flex-direction:column;gap:9px;width:100%;margin-top:4px;text-align:left}
+.pm-recent:empty{display:none}
+.pm-recent-head{display:flex;flex-direction:column;gap:2px}
+.pm-recent-title{font-size:13px;font-weight:700;color:var(--text-primary)}
+.pm-recent-hint{font-size:11.5px;color:var(--text-tertiary);line-height:1.5}
+.pm-recent-list{display:flex;flex-direction:column;gap:7px;max-height:260px;overflow-y:auto}
+.pm-recent-item{display:flex;flex-direction:column;gap:3px;padding:10px 12px;border:1px solid var(--border);border-radius:11px;background:var(--bg-secondary);color:var(--text-primary);font-family:inherit;text-align:left;cursor:pointer;transition:border-color .16s,background .16s,transform .16s}
+.pm-recent-item:hover{border-color:var(--accent);transform:translateY(-1px)}
+.pm-recent-item:focus-visible{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent);outline:none}
+.pm-recent-dir{font-size:12.5px;font-weight:600;color:var(--text-primary);line-height:1.45;overflow-wrap:anywhere}
+.pm-recent-meta{font-size:11px;color:var(--text-tertiary);font-variant-numeric:tabular-nums}
+
+/* ── Correction banner (false-premise) ── */
+.paper-correction{display:flex;gap:12px;padding:14px 16px;border:1px solid var(--warn,#d9922e);border-radius:14px;background:color-mix(in srgb,var(--warn,#d9922e) 8%,transparent)}
+.paper-correction-icon{flex:0 0 auto;color:var(--warn,#d9922e);margin-top:1px}
+.paper-correction-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+.paper-correction-title{font-size:13px;font-weight:700;color:var(--text-primary)}
+.paper-correction-note{font-size:12.5px;color:var(--text-secondary);line-height:1.55}
+.paper-correction-offer{margin-top:6px;background:var(--bg-tertiary)}
+.paper-correction-offer-label{font-size:11px;font-weight:600;color:var(--warn,#d9922e);text-transform:uppercase;letter-spacing:.03em}
+
+/* ── Streaming describe-to-recommend (progressive reveal, aligned with chatInner) ── */
+/* Status line above the list: interpreting → grounding progress. */
+.paper-rec-status{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-tertiary);min-height:18px}
+.paper-rec-status[hidden]{display:none}
+/* Research tool timeline in the recommend view reuses .paper-report-tools
+   (chatInner's unified panel), but the recommend shell is a centered flex
+   column with its own gap/padding — neutralize the report-flex insets so the
+   panel aligns with the status line + cards. */
+.paper-rec-tools{padding:0;flex-shrink:1}
+.paper-rec-tools:empty,.paper-rec-tools[hidden]{display:none}
+.paper-rec-spin{flex:0 0 auto;width:13px;height:13px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:paperSpin .8s linear infinite}
+.paper-rec-banner:empty{display:none}
+/* A card streams in: opacity+translateY only (compositor-only, no reflow),
+   staggered by its --i index. animation-fill-mode:both prevents a pre-flash. */
+.paper-rec-card[data-status="grounded"]{animation:paperRecIn .34s cubic-bezier(.2,.9,.3,1.1) both;animation-delay:calc(var(--i,0) * 55ms)}
+@keyframes paperRecIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+/* Skeleton placeholder — same box as a real card so the swap causes zero CLS. */
+.paper-rec-skeleton{cursor:default;pointer-events:none;border-style:dashed}
+.paper-rec-skeleton:hover{border-color:var(--border);transform:none;box-shadow:none}
+.paper-rec-sk-num{background:var(--bg-hover)}
+.paper-rec-sk-line{height:11px;border-radius:6px;background:linear-gradient(90deg,var(--bg-hover) 25%,var(--border) 37%,var(--bg-hover) 63%);background-size:200% 100%;animation:paperRecShimmer 1.3s ease-in-out infinite}
+.paper-rec-sk-title{width:70%;height:13px}
+.paper-rec-sk-why{width:88%}
+.paper-rec-sk-meta{width:40%;margin-top:3px}
+@keyframes paperRecShimmer{to{background-position:-200% 0}}
+/* First-open chat skeleton (epic ②) — placeholder bubbles shown INSTANTLY when
+   opening a not-yet-loaded conversation, swapped out zero-CLS when the real
+   messages arrive. Reuses the paperRecShimmer keyframe. The `.message` /
+   `.message-content` structure is inherited from the real bubble styles so the
+   swap causes no layout jump. */
+.chat-skeleton{pointer-events:none}
+.chat-sk-avatar{width:100%;height:100%;border-radius:50%;background:linear-gradient(90deg,var(--bg-hover) 25%,var(--border) 37%,var(--bg-hover) 63%);background-size:200% 100%;animation:paperRecShimmer 1.3s ease-in-out infinite}
+.chat-sk-line{height:12px;margin:7px 0;border-radius:6px;background:linear-gradient(90deg,var(--bg-hover) 25%,var(--border) 37%,var(--bg-hover) 63%);background-size:200% 100%;animation:paperRecShimmer 1.3s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){.chat-sk-avatar,.chat-sk-line{animation:none}}
+/* Respect reduced-motion: no shimmer, no stagger, no slide — reveal instantly. */
+@media (prefers-reduced-motion:reduce){
+  .paper-rec-card[data-status="grounded"]{animation:none}
+  .paper-rec-sk-line{animation:none}
+  .paper-rec-spin{animation-duration:1.6s}
+  /* Reading surface: kill decorative motion but keep the (instant) progress
+   * fill legible — the read-time bar still conveys position, just without the
+   * animated width tween; the section chips stop pulsing; the landing icon
+   * stops floating. Spinners keep spinning (they signal in-progress work). */
+  .paper-read-time-fill{transition:none}
+  .report-section-chip.running .report-section-chip-dot{animation:none}
+  .paper-landing-icon{animation:none}
+}
+
+/* ── Loading / Error ── */
+.paper-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:40px;color:var(--text-secondary);font-size:13px}
+.paper-loading-spinner{width:28px;height:28px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:paperSpin .8s linear infinite}
+@keyframes paperSpin{to{transform:rotate(360deg)}}
+.paper-fetch-progress{max-width:420px;margin:0 auto;width:100%;text-align:center}
+.paper-fetch-title{color:var(--text-primary);font-weight:500;font-size:13px}
+.paper-fetch-id{color:var(--text-tertiary);font-weight:400;font-size:12px;margin-left:6px;font-family:var(--font-mono,monospace)}
+.paper-fetch-bar-wrap{width:100%;height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:4px}
+.paper-fetch-bar{height:100%;background:var(--accent);border-radius:2px;transition:width .15s ease}
+.paper-fetch-detail{color:var(--text-tertiary);font-size:12px;font-variant-numeric:tabular-nums}
+@keyframes paperProgressIndet{0%{margin-left:-40%}100%{margin-left:100%}}
+.paper-error{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:40px;color:var(--text-tertiary);font-size:13px;text-align:center}
+.paper-error-detail{font-size:12px;color:var(--text-secondary);max-width:560px;word-break:break-word;font-family:var(--font-mono,monospace)}
+.paper-retry-btn{margin-top:8px;padding:8px 20px;border:1px solid var(--border);border-radius:8px;background:var(--bg-hover);color:var(--text-primary);font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit}
+.paper-retry-btn:hover{background:var(--bg-tertiary);border-color:var(--border-light)}
+
+/* ── Mobile: full-screen single-pane view + bottom PDF⇄Reader switcher ──
+ * On phones the desktop side-by-side split is unusable, so we show ONE pane
+ * at a time (the PDF or the Reader = Q&A/Report/Babel tabs), each filling the
+ * whole body, toggled by the .paper-mobile-switch bar pinned to the bottom.
+ * .paper-body[data-paper-view] is the source of truth (set by
+ * _setPaperMobileView() in paper-reader.js).
+ *
+ * The predicate covers BOTH true phones (≤768px, any pointer) AND touch
+ * tablets / unfolded foldables in portrait (≤1024px WITH a coarse pointer) —
+ * where the desktop side-by-side split becomes two cramped columns plus a
+ * 6px finger-hostile divider. A mouse-driven narrow desktop window (fine
+ * pointer, ≤1024px) is deliberately EXCLUDED — it keeps the draggable split.
+ * paper-reader.js mirrors this exact predicate in matchMedia() so a fold /
+ * orientation crossing re-asserts the view + refits the PDF. */
+@media(max-width:768px),(max-width:1024px) and (pointer:coarse){
+  /* Body becomes a positioning context for the two stacked full-size panes.
+   * Reserve room at the bottom for the fixed switcher + the iOS safe area. */
+  .paper-mode-container{--paper-switch-h:calc(54px + env(safe-area-inset-bottom,0px))}
+  .paper-body{position:relative;flex-direction:row;padding-bottom:var(--paper-switch-h)}
+  /* Both panes overlay the same area; the active one wins via [data-paper-view].
+   * !important defeats any stale inline width/flex left by a desktop divider drag. */
+  .paper-left,.paper-right{position:absolute!important;inset:0;width:auto!important;max-width:none!important;min-width:0!important;flex:none!important;border:none!important}
+  .paper-body[data-paper-view="pdf"] .paper-left{display:flex;z-index:2}
+  .paper-body[data-paper-view="pdf"] .paper-right{display:none}
+  .paper-body[data-paper-view="reader"] .paper-right{display:flex;z-index:2}
+  .paper-body[data-paper-view="reader"] .paper-left{display:none}
+  .paper-divider{display:none}
+
+  /* Bottom switcher — fixed, full width, two big touch targets */
+  .paper-mobile-switch{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:25;height:var(--paper-switch-h);padding-bottom:env(safe-area-inset-bottom,0px);background:var(--bg-secondary);border-top:1px solid var(--border);box-shadow:0 -2px 12px rgba(0,0,0,0.12)}
+  .paper-mobile-switch-btn{flex:1;display:flex;align-items:center;justify-content:center;gap:7px;border:none;background:none;color:var(--text-tertiary);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;-webkit-tap-highlight-color:transparent;border-top:2px solid transparent;transition:color .15s,background .15s}
+  .paper-mobile-switch-btn svg{flex-shrink:0}
+  .paper-mobile-switch-btn.active{color:var(--accent);background:var(--bg-hover);border-top-color:var(--accent)}
+
+  .paper-pdf-toolbar{padding:4px 8px}
+  /* In Paper Reading Mode the sidebar drawer IS the paper library (current
+   * paper + library list) — same as desktop. The previous mobile rules here
+   * force-reverted it to the chat conversation list, which was the bug: on a
+   * phone, opening the drawer in reading mode showed conversations instead of
+   * papers. We keep the paper-active behaviour and only resize for touch. */
+  .sidebar.paper-active .paper-sidebar-overlay{display:flex!important}
+  .sidebar.paper-active .sidebar-action-row,
+  .sidebar.paper-active .sidebar-search-wrapper,
+  .sidebar.paper-active .folder-quickadd,
+  .sidebar.paper-active .sidebar-body,
+  .sidebar.paper-active .conversations-list{display:none!important}
+  .sidebar.paper-active .sidebar-header h1{display:none!important}
+  /* Larger touch targets for the paper library on phones */
+  .paper-sidebar-current{padding:14px 16px}
+  .paper-sidebar-new-inline-btn{width:32px;height:32px}
+  .paper-lib-item{padding:12px;min-height:48px}
+  .paper-lib-item-del{display:flex;width:32px;height:32px}
+  .paper-tab-btn{padding:10px 6px;font-size:12px;gap:4px}
+  .paper-tab-btn svg{width:13px;height:13px}
+  .paper-qa-input-area{padding:8px}
+  #paperQAInput{font-size:16px}
+  .paper-report-content{padding:14px}
+  .paper-landing{padding:24px 16px}
+  .paper-landing h3{font-size:16px}
+  .paper-arxiv-input{flex-direction:column}
+  .paper-arxiv-input .paper-arxiv-search-icon{display:none}
+  .paper-arxiv-input input{padding-left:14px}
+  .paper-arxiv-btn{width:100%}
+  .research-landing{padding:32px 16px}
+  .research-landing-row{flex-direction:column}
+  .research-landing-btn{width:100%}
+  .paper-search{padding:16px 12px}
+  .paper-result-card{padding:12px}
+}
+

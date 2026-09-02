@@ -2,10 +2,11 @@
 
   * ``execute_compact_tool``    — generates the summary, mutates messages.
   * ``force_compact_if_needed`` — gates on threshold + injects synthetic pair.
-  * ``smart_summary_compact``   — legacy alias delegating to force-compact.
 """
 
-import sys as _sys
+import hashlib
+import math
+import re
 import time
 
 from lib.ids import short_id
@@ -16,6 +17,7 @@ from lib.tasks_pkg.compaction._constants import (
     _cooldown_lock,
     _MAX_PRESERVE_TURNS,
     _PRESERVE_BUDGET_RATIO,
+    _SUMMARY_MAX_TOKENS,
     _SUMMARY_TRIGGER_RATIO,
     _AUTO_COMPACT_MIN_PAYBACK_ROUNDS,
     _AUTO_COMPACT_MIN_REDUCTION_RATIO,
@@ -24,11 +26,17 @@ from lib.tasks_pkg.compaction._constants import (
 from lib.tasks_pkg.compaction._tokens import (
     _compaction_trigger_threshold,
     _estimate_total_tokens,
+    _fixed_observed_survival_payback_horizon,
     _get_context_limit,
     _should_force_compact,
     _usable_context,
 )
+from lib.tasks_pkg.compaction._receipt import (
+    build_compaction_receipt,
+    summary_usage_details,
+)
 from lib.tasks_pkg.compaction._layer2._anchor import (
+    _collect_user_verbatim,
     _extract_current_query,
     _extract_recently_accessed_files,
     _find_turn_boundary,
@@ -36,70 +44,117 @@ from lib.tasks_pkg.compaction._layer2._anchor import (
     _objective_anchor_index,
 )
 from lib.tasks_pkg.compaction._layer2._summary import _generate_query_aware_summary
+from lib.tasks_pkg.compaction._layer2._prompt import (
+    _SUMMARY_SYSTEM_PROMPT,
+    _format_messages_for_summary,
+    _summary_input_char_budget,
+)
 
 logger = get_logger(__name__)
 
-
-# The old flat ``_layer2.py`` module exposed ``_archive_transcript`` and
-# ``_generate_query_aware_summary`` as module-level globals, and tests (plus
-# any hot-reload path) monkeypatch them on the package namespace
-# ``lib.tasks_pkg.compaction._layer2``. Resolve those two through the facade
-# package at CALL time (not import time) so such patches take effect exactly
-# as they did against the flat module.
-def _facade():
-    return _sys.modules.get('lib.tasks_pkg.compaction._layer2')
+_USER_VERBATIM_AUDIT_LATCH = {'done': False}
 
 
-def _archive_transcript_dyn(*args, **kwargs):
-    fac = _facade()
-    fn = getattr(fac, '_archive_transcript', _archive_transcript) if fac else _archive_transcript
-    return fn(*args, **kwargs)
+def _task_owner(task):
+    from lib.tasks_pkg.manager import task_user_id
+
+    return task_user_id(task)
 
 
-def _generate_query_aware_summary_dyn(*args, **kwargs):
-    fac = _facade()
-    fn = (getattr(fac, '_generate_query_aware_summary', _generate_query_aware_summary)
-          if fac else _generate_query_aware_summary)
-    # ``usage_out`` is a new optional accounting hook. Preserve the old
-    # monkeypatch/plugin seam for callables that still implement the previous
-    # signature instead of turning a metrics addition into a compaction error.
-    if 'usage_out' in kwargs:
-        try:
-            import inspect
-            parameters = inspect.signature(fn).parameters.values()
-            accepts_usage = any(
-                p.name == 'usage_out' or p.kind == inspect.Parameter.VAR_KEYWORD
-                for p in parameters)
-            if not accepts_usage:
-                kwargs = dict(kwargs)
-                kwargs.pop('usage_out', None)
-        except (TypeError, ValueError) as exc:
-            logger.debug(
-                '[L2] summary callback signature unavailable; preserving '
-                'usage_out argument: %s', exc)
-    return fn(*args, **kwargs)
+def _audit_user_verbatim_once() -> None:
+    """One-time §10.1 audit entry for the user-verbatim hyperparameters."""
+    if _USER_VERBATIM_AUDIT_LATCH['done']:
+        return
+    _USER_VERBATIM_AUDIT_LATCH['done'] = True
+    try:
+        from lib.log import audit_log
+        from lib.tasks_pkg.compaction._constants import (
+            _USER_VERBATIM_BUDGET_TOKENS,
+            _USER_VERBATIM_MAX_MESSAGES,
+        )
+        audit_log('config_change', change='user_verbatim_retention',
+                  budget_tokens=_USER_VERBATIM_BUDGET_TOKENS,
+                  max_messages=_USER_VERBATIM_MAX_MESSAGES,
+                  approved_by='user')
+    except Exception as e:
+        logger.debug('[Compact] user-verbatim config audit skipped: %s', e)
 
 
-def _objective_anchor_index_dyn(*args, **kwargs):
-    # Same facade-resolution as above: the flat ``_layer2.py`` exposed
-    # ``_objective_anchor_index`` as a module global, and both tests and any
-    # hot-reload path monkeypatch it on the package namespace
-    # ``lib.tasks_pkg.compaction._layer2``. Resolve through the facade at CALL
-    # time so those patches take effect (an import-time-bound local reference
-    # would ignore them — the exact facade-split drift this restores).
-    fac = _facade()
-    fn = (getattr(fac, '_objective_anchor_index', _objective_anchor_index)
-          if fac else _objective_anchor_index)
-    return fn(*args, **kwargs)
+def _summary_covers_state_value(summary: str, value: str) -> bool:
+    """Conservatively detect whether a mutable state value survived prose."""
+    candidate = ' '.join(str(value or '').lower().split())
+    rendered = ' '.join(str(summary or '').lower().split())
+    if not candidate or candidate[:120] in rendered:
+        return True
+    terms = list(dict.fromkeys(re.findall(
+        r'[a-z0-9_./:-]{3,}|[\u3400-\u9fff]', candidate, re.I)))
+    if not terms:
+        return False
+    required = 1 if len(terms) <= 3 else min(4, max(2, len(terms) // 4))
+    return sum(term in rendered for term in terms) >= required
+
+
+def _summary_missing_task_state_fields(summary: str, snapshot) -> list[str]:
+    """Return named critical snapshot fields absent from a model summary."""
+    missing = []
+    if snapshot.goal and not _summary_covers_state_value(summary, snapshot.goal):
+        missing.append('goal')
+    for index, constraint in enumerate(snapshot.hard_constraints):
+        if not _summary_covers_state_value(summary, constraint):
+            missing.append(f'hard_constraints[{index}]')
+    pending_groups = (
+        ('todos', snapshot.todos),
+        ('open_questions', snapshot.open_questions),
+        ('next_steps', snapshot.next_steps),
+    )
+    for field, values in pending_groups:
+        for index, value in enumerate(values):
+            if not _summary_covers_state_value(summary, value):
+                missing.append(f'{field}[{index}]')
+    return missing
 
 
 def _summary_usage_tokens(usage: dict | None) -> int:
-    if not isinstance(usage, dict):
-        return 0
-    from lib.cost import normalize_usage, split_input_tokens
-    normalized = normalize_usage(usage)
-    _uncached, total_input = split_input_tokens(usage)
-    return max(0, int(total_input)) + max(0, int(normalized['output']))
+    return int(summary_usage_details(usage).get('totalTokens') or 0)
+
+
+def _projected_summary_usage_tokens(
+    messages: list,
+    current_query: str,
+    task: dict | None,
+) -> int:
+    """Conservative pre-dispatch cost estimate for proactive ROI gating.
+
+    The old best-case check assumed a free summary, then sometimes paid for a
+    real summary only to reject it as cache-negative. Estimate the same bounded
+    prompt shape before dispatch, including the evidence-ledger reserve and the
+    configured maximum completion, so economic declines happen before money
+    and wall time are spent.
+    """
+    try:
+        char_budget = _summary_input_char_budget(task)
+        evidence_chars = max(2_000, min(16_000, char_budget // 4))
+        history_budget = max(
+            4_000,
+            char_budget - evidence_chars - len(current_query or '') - 500,
+        )
+        formatted = _format_messages_for_summary(
+            messages, char_budget=history_budget)
+        base_prompt = [
+            {'role': 'system', 'content': _SUMMARY_SYSTEM_PROMPT},
+            {'role': 'user', 'content': (
+                f'## Current User Query\n{current_query}\n\n'
+                '## Conversation History to Compress\n\n'
+                f'{formatted}')},
+        ]
+        base_tokens = _estimate_total_tokens(base_prompt)
+        # Evidence is structured JSON and paths: ~3 chars/token is a more
+        # realistic conservative reserve than repetitive filler through BPE.
+        evidence_tokens = (evidence_chars + 2) // 3
+        return max(1, base_tokens + evidence_tokens + _SUMMARY_MAX_TOKENS)
+    except Exception as exc:
+        logger.debug('[Compact] summary-cost projection failed: %s', exc)
+        return max(1, _SUMMARY_MAX_TOKENS * 2)
 
 
 def _proactive_cache_economics(task: dict | None, *, tokens_before: int,
@@ -110,8 +165,9 @@ def _proactive_cache_economics(task: dict | None, *, tokens_before: int,
     model = ((task or {}).get('config', {}) or {}).get('model', '') or ''
     provider_id = (task or {}).get('provider_id') or ''
     try:
-        from lib.tasks_pkg.cache_tracking import get_warm_cache_read
-        cache_read = int(get_warm_cache_read(conv_id) or 0)
+        from lib.tasks_pkg.cache_tracking._state import get_warm_cache_read
+        cache_read = int(get_warm_cache_read(
+            conv_id, user_id=_task_owner(task)) or 0) if conv_id else 0
     except Exception as e:
         logger.debug('[Compact] warm-cache lookup failed: %s', e)
         cache_read = 0
@@ -154,14 +210,131 @@ def _proactive_cache_economics(task: dict | None, *, tokens_before: int,
     }
 
 
-def _defer_proactive_retry(task: dict | None, tokens_before: int) -> None:
-    """Wait for at least 8K/5% prompt growth after an economic decline."""
+def _proactive_payback_policy(
+    task: dict | None,
+    *,
+    current_round: object = None,
+    remaining_api_rounds: object = None,
+) -> tuple[float, str]:
+    """Return the exact-ROI horizon selected by the request strategy.
+
+    ``adaptive`` already makes an observable expected-value decision before
+    entering L2.  Reapplying the fixed one-round horizon inside L2 used to
+    veto candidates that the adaptive decision had explicitly admitted.  Use
+    that same bounded remaining-round horizon for both exact candidate checks.
+    The fixed strategy starts with the shipped one-round rule, then earns a
+    bounded wider horizon from observed task survival.  The task's remaining
+    hard API-round budget caps that horizon.
+    """
+    fixed = max(0.0, float(_AUTO_COMPACT_MIN_PAYBACK_ROUNDS))
+    cfg = ((task or {}).get('config') or {}) if isinstance(task, dict) else {}
+    comp_cfg = cfg.get('compaction') if isinstance(cfg, dict) else None
+    if not (isinstance(comp_cfg, dict)
+            and str(comp_cfg.get('strategy') or '').lower() == 'adaptive'):
+        horizon = _fixed_observed_survival_payback_horizon(
+            current_round,
+            remaining_api_rounds=remaining_api_rounds,
+        )
+        if horizon > fixed:
+            return horizon, 'fixed_observed_survival'
+        return fixed, 'fixed_one_round'
+
+    decision = (task or {}).get('_adaptiveCompactionDecision')
+    if not (isinstance(decision, dict) and decision.get('shouldTrigger')):
+        return fixed, 'fixed_one_round'
+    try:
+        horizon = float(decision.get('remainingRoundsMedian'))
+    except (TypeError, ValueError, OverflowError):
+        return fixed, 'fixed_one_round'
+    if not math.isfinite(horizon) or horizon < fixed:
+        return fixed, 'fixed_one_round'
+    # Mirrors _adaptive_compaction_economics' established request bound.  The
+    # private decision is still validated here rather than trusted blindly.
+    return min(200.0, horizon), 'adaptive_expected_horizon'
+
+
+def _proactive_retry_growth_tokens(
+    tokens_before: int,
+    *,
+    reason: str,
+    economics: dict | None,
+) -> int:
+    """Return the earliest prompt growth that could reverse a decline.
+
+    The proof is deliberately optimistic: every future token is assumed to be
+    droppable while rewrite/summary cost stays flat. If even that best case
+    cannot meet the policy threshold, repeating the full candidate build is
+    guaranteed waste. Cache-witness changes and the hard window gate bypass
+    this floor in ``_should_force_compact``.
+    """
+    total = max(0, int(tokens_before))
+    growth = max(8_192, int(total * 0.05))
+    if not isinstance(economics, dict):
+        return growth
+
+    dropped = max(0, int(economics.get('dropped_tokens') or 0))
+    proof_growth = 0
+    if reason == 'low_yield':
+        target = max(0.0, min(
+            0.99, float(_AUTO_COMPACT_MIN_REDUCTION_RATIO)))
+        deficit = target * total - dropped
+        if deficit > 0 and target < 1.0:
+            proof_growth = math.ceil(deficit / (1.0 - target))
+    elif reason == 'cache_negative':
+        read_multiplier = max(
+            0.0, float(economics.get('cache_read_mul') or 0.0))
+        try:
+            target_rounds = float(economics.get(
+                'payback_limit_rounds', _AUTO_COMPACT_MIN_PAYBACK_ROUNDS))
+        except (TypeError, ValueError, OverflowError):
+            target_rounds = float(_AUTO_COMPACT_MIN_PAYBACK_ROUNDS)
+        if not math.isfinite(target_rounds):
+            target_rounds = float(_AUTO_COMPACT_MIN_PAYBACK_ROUNDS)
+        target_rounds = max(0.0, target_rounds)
+        rewrite_cost = max(
+            0.0, float(economics.get('rewrite_cost_tokens') or 0.0))
+        summary_cost = max(
+            0.0, float(economics.get('summary_cost_tokens') or 0.0))
+        denominator = read_multiplier * target_rounds
+        total_cost = rewrite_cost + summary_cost
+        if denominator > 0 and math.isfinite(total_cost):
+            required_dropped = math.ceil(total_cost / denominator)
+            proof_growth = max(0, required_dropped - dropped)
+    return max(growth, proof_growth)
+
+
+def _defer_proactive_retry(
+    task: dict | None,
+    tokens_before: int,
+    *,
+    reason: str = '',
+    economics: dict | None = None,
+) -> int:
+    """Record a bounded task-local retry floor after an economic decline."""
     if not isinstance(task, dict):
-        return
-    growth = max(8_192, int(max(0, tokens_before) * 0.05))
+        return 0
+    growth = _proactive_retry_growth_tokens(
+        tokens_before, reason=reason, economics=economics)
     floor = max(0, int(tokens_before)) + growth
-    task['_autoCompactRetryAfterTokens'] = max(
-        floor, int(task.get('_autoCompactRetryAfterTokens') or 0))
+    previous_floor = int(task.get('_autoCompactRetryAfterTokens') or 0)
+    task['_autoCompactRetryAfterTokens'] = max(floor, previous_floor)
+    if floor >= previous_floor:
+        cache_read = int((economics or {}).get('cache_read_tokens') or 0)
+        if reason == 'cache_negative' and cache_read > 0:
+            try:
+                payback_limit = float((economics or {}).get(
+                    'payback_limit_rounds',
+                    _AUTO_COMPACT_MIN_PAYBACK_ROUNDS))
+            except (TypeError, ValueError, OverflowError):
+                payback_limit = float(_AUTO_COMPACT_MIN_PAYBACK_ROUNDS)
+            task['_autoCompactRetryWitness'] = {
+                'reason': reason,
+                'cacheReadTokens': cache_read,
+                'paybackLimitRounds': payback_limit,
+            }
+        else:
+            task.pop('_autoCompactRetryWitness', None)
+    return int(task['_autoCompactRetryAfterTokens'])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -190,8 +363,19 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     if isinstance(_result_meta, dict):
         _result_meta['compacted'] = False
 
-    tokens_before = _estimate_total_tokens(messages)
+    _premeasured_tokens = kwargs.get('_message_tokens_before') if kwargs else None
+    if (isinstance(_premeasured_tokens, int)
+            and not isinstance(_premeasured_tokens, bool)
+            and _premeasured_tokens >= 0):
+        tokens_before = _premeasured_tokens
+    else:
+        tokens_before = _estimate_total_tokens(messages)
     msg_count_before = len(messages)
+    if isinstance(_result_meta, dict):
+        _result_meta.update({
+            'tokens_before': int(tokens_before),
+            'msgs_before': int(msg_count_before),
+        })
     context_limit = _get_context_limit(task)
     usable = _usable_context(context_limit)
 
@@ -248,7 +432,7 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     old_messages = messages[:boundary]
     recent_messages = messages[boundary:]
 
-    # ★ OBJECTIVE ANCHOR — the first real user message is the north-star
+    # OBJECTIVE ANCHOR — the first real user message is the north-star
     #   objective.  If it falls in the to-be-summarized ``old_messages`` it
     #   would be lossily paraphrased (and re-paraphrased every subsequent
     #   compaction → unbounded drift), so we PULL IT OUT and re-insert it
@@ -258,7 +442,7 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     #   message (not a synthesized prepend), a subsequent compaction finds the
     #   SAME message already at the front of ``recent_messages`` and never
     #   duplicates it — idempotent, byte-identical, cache-prefix-stable.
-    anchor_idx = _objective_anchor_index_dyn(messages)
+    anchor_idx = _objective_anchor_index(messages)
     anchor_msg = None
     if anchor_idx is not None and anchor_idx < boundary:
         anchor_msg = messages[anchor_idx]
@@ -281,7 +465,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     #   ``_split_cold_rounds`` policy) can never orphan a ``tool`` message. A
     #   no-op when the preserved region has <= hot-tail tool-call rounds, so a
     #   normal multi-turn chat near the window is byte-identical to before.
-    folded_recent, cold_round_msgs = _fold_recent_intra_turn(recent_messages)
+    folded_recent, cold_round_msgs = _fold_recent_intra_turn(
+        recent_messages, hot_budget_tokens=budget_tokens)
     if cold_round_msgs:
         logger.info('%s [Compact] Intra-turn fold: %d cold round-message(s) '
                     'folded out of the preserved region (%d recent → %d kept)',
@@ -289,6 +474,13 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                     len(folded_recent))
     recent_messages = folded_recent
     summary_input = list(old_messages) + list(cold_round_msgs)
+
+    _proactive = bool(kwargs.get('_proactive_economic')) if kwargs else False
+    _payback_limit, _payback_policy = _proactive_payback_policy(
+        task,
+        current_round=kwargs.get('_compaction_round'),
+        remaining_api_rounds=kwargs.get('_compaction_remaining_api_rounds'),
+    )
 
     # Nothing to summarize: no old region with real content AND the preserved
     # turn had too few tool-call rounds to fold (or is one fat non-tool
@@ -302,23 +494,35 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
         logger.info('%s [Compact] Nothing foldable — no old region and preserved '
                     'turn has <= hot-tail tool rounds; skipping', pfx)
         if isinstance(_result_meta, dict):
-            _result_meta['compacted'] = False
+            _result_meta.update({
+                'compacted': False,
+                'reason': 'nothing_foldable',
+            })
+        if _proactive:
+            _defer_proactive_retry(
+                task, tokens_before, reason='nothing_foldable')
         return ('Context compaction skipped — no foldable history '
                 '(preserved turn within the hot-round tail). '
                 'Messages preserved as-is.')
 
-    # Proactive L2 must earn the cache-prefix rewrite.  First project the
-    # impossible best case (the foldable region vanishes, summary costs zero).
-    # If that still cannot repay a warm-prefix rewrite within one future cache
-    # read, decline before the summary call.  Forced manual/reactive paths
-    # bypass this because their goal is user intent or window correctness.
-    _proactive = bool(kwargs.get('_proactive_economic')) if kwargs else False
+    # Proactive L2 must earn the cache-prefix rewrite. Project the foldable
+    # region vanishing while charging a conservative summary-call estimate.
+    # This keeps an uneconomic attempt from buying a summary and rejecting it
+    # only afterwards. Forced manual/reactive paths bypass this because their
+    # goal is user intent or window correctness.
     _foldable_tokens = _estimate_total_tokens(summary_input)
+    _projected_summary_cost = _projected_summary_usage_tokens(
+        summary_input, current_query, task) if _proactive else 0
     if _proactive:
         _best_candidate_tokens = max(0, tokens_before - _foldable_tokens)
         _best_econ = _proactive_cache_economics(
             task, tokens_before=tokens_before,
-            candidate_tokens=_best_candidate_tokens)
+            candidate_tokens=_best_candidate_tokens,
+            summary_usage_tokens=_projected_summary_cost)
+        _best_econ.update({
+            'payback_limit_rounds': _payback_limit,
+            'payback_policy': _payback_policy,
+        })
         _best_reduction = (_best_econ['dropped_tokens']
                            / max(1, tokens_before))
         if _best_reduction < _AUTO_COMPACT_MIN_REDUCTION_RATIO:
@@ -335,30 +539,37 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                     'foldable_tokens': _foldable_tokens,
                     'projected_reduction_ratio': _best_reduction,
                 })
-            _defer_proactive_retry(task, tokens_before)
+            _defer_proactive_retry(
+                task, tokens_before, reason='low_yield',
+                economics=_best_econ)
             return ('Context compaction skipped — foldable history is below '
                     'the automatic minimum reduction. Messages preserved '
                     'as-is.')
         if (_best_econ['cache_read_tokens'] > 0
                 and _best_econ['payback_rounds']
-                > _AUTO_COMPACT_MIN_PAYBACK_ROUNDS):
+                > _payback_limit):
             logger.info(
                 '%s [Compact] Proactive uneconomic decline before summary: '
                 'foldable=%d total=%d cache_read=%d projected_rewrite=%d '
-                'payback=%.2f rounds > %.2f — preserving cache prefix',
+                'summary_estimate=%d payback=%.2f rounds > %.2f — preserving '
+                'cache prefix',
                 pfx, _foldable_tokens, tokens_before,
                 _best_econ['cache_read_tokens'],
                 _best_econ['cache_rewrite_tokens'],
+                _projected_summary_cost,
                 _best_econ['payback_rounds'],
-                _AUTO_COMPACT_MIN_PAYBACK_ROUNDS)
+                _payback_limit)
             if isinstance(_result_meta, dict):
                 _result_meta.update({
                     'compacted': False,
                     'reason': 'cache_negative',
                     'foldable_tokens': _foldable_tokens,
+                    'projected_summary_cost_tokens': _projected_summary_cost,
                     'economics': _best_econ,
                 })
-            _defer_proactive_retry(task, tokens_before)
+            _defer_proactive_retry(
+                task, tokens_before, reason='cache_negative',
+                economics=_best_econ)
             return ('Context compaction skipped — foldable history cannot '
                     'repay the warm-cache rewrite. Messages preserved as-is.')
 
@@ -372,17 +583,96 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                 len(recent_messages), preserved_turns, current_query)
 
     _summary_usage: dict = {}
-    summary_text = _generate_query_aware_summary_dyn(
+    _summary_started = time.monotonic()
+    summary_text = _generate_query_aware_summary(
         summary_input, current_query, pfx, conv_id=conv_id, task=task,
         usage_out=_summary_usage,
     )
+    _summary_duration_ms = round(
+        (time.monotonic() - _summary_started) * 1000)
 
     if not summary_text:
         logger.warning('%s [Compact] Summary generation failed — keeping messages intact', pfx)
         if isinstance(_result_meta, dict):
-            _result_meta['compacted'] = False
+            _result_meta.update({
+                'compacted': False,
+                'tokens_before': int(tokens_before),
+                'msgs_before': int(msg_count_before),
+                'trigger': kwargs.get('_compaction_trigger') or 'force',
+                'reason': kwargs.get('_compaction_reason') or '',
+                'summary_usage': dict(_summary_usage),
+                'summary_duration_ms': int(_summary_duration_ms),
+                'summaryFailureReason': 'summary_failed',
+            })
         return ('Context compaction attempted but summary generation failed. '
                 'Messages preserved as-is.')
+
+    # V2 validates critical state before accepting lossy model prose. If the
+    # model omitted unfinished work or grounded mutation/test evidence, reject
+    # that prose and continue with a deterministic transcript-derived state
+    # projection. This evicts cold history without claiming the rejected
+    # summary was faithful.
+    _comp_cfg = ((task or {}).get('config', {}) or {}).get('compaction') or {}
+    if str(_comp_cfg.get('strategy') or '').lower() == 'adaptive':
+        try:
+            import json as _json
+            from lib.tasks_pkg.context_composer.task_state import (
+                derive_task_state_snapshot,
+            )
+            _ledger = (task or {}).get('_contextEvidenceLedger') or {}
+            _critical_types = {
+                'test_result', 'error', 'mutation_result', 'modified_file',
+                'unfinished',
+            }
+            _critical = [entry for entry in (_ledger.get('entries') or [])
+                         if entry.get('type') in _critical_types]
+            _missing_ids = [str(entry.get('id') or '') for entry in _critical
+                            if str(entry.get('id') or '') not in summary_text]
+            _snapshot = derive_task_state_snapshot(messages, task)
+            _missing_fields = _summary_missing_task_state_fields(
+                summary_text, _snapshot)
+            _state_block = (
+                '## TaskStateSnapshotV1\n' + _snapshot.to_context_text())
+            _evidence_block = (
+                '## Critical Evidence\n' + '\n'.join(
+                    f"[EVIDENCE {entry.get('id')}] "
+                    + _json.dumps(entry, ensure_ascii=False,
+                                  sort_keys=True, separators=(',', ':'))
+                    for entry in _critical[:32]))
+            if _missing_ids or _missing_fields:
+                _rejected_digest = hashlib.sha256(
+                    summary_text.encode('utf-8')).hexdigest()[:16]
+                summary_text = _state_block + '\n\n' + _evidence_block
+                logger.warning(
+                    '%s [Compact] rejected lossy summary digest=%s '
+                    'missing_critical=%d missing_fields=%s; using '
+                    'deterministic state projection', pfx, _rejected_digest,
+                    len(_missing_ids), ','.join(_missing_fields))
+                if isinstance(_result_meta, dict):
+                    _result_meta.update({
+                        'summaryRejected': True,
+                        'summaryRejectedDigest': _rejected_digest,
+                        'summaryRejectionReason': 'critical_state_missing',
+                        'missingEvidenceIds': _missing_ids,
+                        'missingTaskStateFields': _missing_fields,
+                    })
+            else:
+                # Adaptive L2 always carries the versioned state projection;
+                # accepted model prose is only the short narrative layer.
+                summary_text = (
+                    _state_block + '\n\n## Narrative Summary\n'
+                    + summary_text + '\n\n' + _evidence_block)
+        except Exception as exc:
+            logger.warning('%s [Compact] v2 summary validation failed closed: %s',
+                           pfx, exc)
+            if isinstance(_result_meta, dict):
+                _result_meta.update({
+                    'compacted': False,
+                    'summaryRejected': True,
+                    'summaryRejectionReason': 'validation_failed',
+                })
+            return ('Context compaction attempted but summary validation '
+                    'failed. Messages preserved as-is.')
 
     recent_files = _extract_recently_accessed_files(messages)
     if recent_files:
@@ -393,6 +683,22 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
             f'{file_list}'
         )
 
+    # Codex-inspired (turn_diff_tracker.rs): the summary must preserve WHAT
+    # changed this turn, not just WHICH files. Journal pre-images make this
+    # free of extra writes; failures are advisory-only.
+    _turn_diff_included = False
+    try:
+        from lib.tasks_pkg.commit_round._turn_diff import build_turn_diff_block
+        _cfg = (task or {}).get('config', {}) or {}
+        _diff_block = build_turn_diff_block(
+            task, _cfg.get('projectPath') or '',
+            _cfg.get('projectPaths') or None)
+        if _diff_block:
+            summary_text += f'\n\n{_diff_block}'
+            _turn_diff_included = True
+    except Exception as e:
+        logger.debug('%s [Compact] turn-diff block failed: %s', pfx, e)
+
     system_msgs = []
     for msg in old_messages:
         if msg.get('role') == 'system':
@@ -400,45 +706,108 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
         else:
             break
 
+    # ── USER-VERBATIM RETENTION (Codex-inspired, codex-rs compact.rs) ──
+    #   The summary is lossy; the user's literal instructions must not survive
+    #   ONLY as paraphrase. Retain the old region's real user messages
+    #   VERBATIM inside ONE ``_isMeta`` wrapper message: the wrapper is
+    #   transparent to ``_find_turn_boundary`` (batch-1 meta-skip), excluded
+    #   from future retention passes (no feedback duplication), and never
+    #   touches the RAW transcript (the automatic path is ephemeral), so the
+    #   raw→api merge cannot mangle it. Extraction happens AFTER the anchor
+    #   was pulled out of ``old_messages``, so the anchor is never duplicated.
+    retained_user_texts = _collect_user_verbatim(old_messages)
+    retained_wrapper = None
+    if retained_user_texts:
+        _audit_user_verbatim_once()
+        quoted = '\n\n'.join(f'[{k}] {t}'
+                             for k, t in enumerate(retained_user_texts, 1))
+        retained_wrapper = {
+            'role': 'user',
+            'content': (
+                '<retained_user_messages>\n'
+                "The user's earlier messages from the now-summarized history, "
+                'preserved VERBATIM (oldest first). They remain binding '
+                'unless superseded by later messages.\n\n'
+                f'{quoted}\n'
+                '</retained_user_messages>'),
+            '_isMeta': True,
+        }
+        logger.info('%s [Compact] Retaining %d user message(s) verbatim '
+                    '(%d chars) across the summary',
+                    pfx, len(retained_user_texts), len(quoted))
+
     # Rebuild: system → [objective anchor, if it was in the summarized region]
-    # → recent.  The anchor is placed immediately after the system block so the
-    # model always sees the original goal at a stable position, and exactly
-    # once (it was removed from ``old_messages`` above, so it isn't also inside
-    # the summary text's source, and it is NOT in ``recent_messages`` because
+    # → [retained user-verbatim wrapper] → recent.  The anchor is placed
+    # immediately after the system block so the model always sees the original
+    # goal at a stable position, and exactly once (it was removed from
+    # ``old_messages`` above, so it isn't also inside the summary text's
+    # source, and it is NOT in ``recent_messages`` because
     # anchor_idx < boundary).
     anchor_block = [anchor_msg] if anchor_msg is not None else []
-    new_messages = list(system_msgs) + anchor_block + list(recent_messages)
+    retained_block = [retained_wrapper] if retained_wrapper is not None else []
+    new_messages = (list(system_msgs) + anchor_block + retained_block
+                    + list(recent_messages))
 
     intermediate_tokens_after = _estimate_total_tokens(new_messages)
-    intermediate_reduction_pct = (
-        1 - intermediate_tokens_after / max(1, tokens_before)) * 100
+    compacted_message_count = sum(
+        1 for message in summary_input if message.get('role') != 'system')
 
-    result_parts = [
-        '## Context Compacted — Selective Summary\n',
-        f'Compressed {(boundary - len(system_msgs)) + len(cold_round_msgs)} '
-        f'historical messages '
-        f'({tokens_before:,} → {intermediate_tokens_after:,} tokens, '
-        f'{intermediate_reduction_pct:.0f}% reduction)\n',
-        summary_text,
+    def _render_compact_result(estimated_final_tokens: int) -> str:
+        estimated_reduction_pct = (
+            1 - estimated_final_tokens / max(1, tokens_before)) * 100
+        return '\n'.join([
+            '## Context Compacted — Selective Summary\n',
+            f'Compressed {compacted_message_count} historical messages. '
+            'Estimated compacted context at this stage (receipt included; '
+            'later context providers may add content): '
+            f'{tokens_before:,} → {estimated_final_tokens:,} tokens '
+            f'({estimated_reduction_pct:.0f}% reduction).\n',
+            summary_text,
+        ])
+
+    # The receipt contains its own projected total, so converge the tiny
+    # self-reference until the rendered text and estimate agree. This replaces
+    # the old misleading intermediate count that omitted the receipt itself.
+    compact_result = _render_compact_result(intermediate_tokens_after)
+    _candidate_pair = [
+        {'role': 'assistant', 'content': None,
+         'tool_calls': [{'id': '_roi_candidate', 'type': 'function',
+                         'function': {'name': _COMPACT_TOOL_NAME,
+                                      'arguments': '{}'}}]},
+        {'role': 'tool', 'tool_call_id': '_roi_candidate',
+         'name': _COMPACT_TOOL_NAME, 'content': compact_result},
     ]
-    compact_result = '\n'.join(result_parts)
+    for _projection_pass in range(3):
+        _candidate_tokens = _estimate_total_tokens(
+            new_messages + _candidate_pair)
+        rendered = _render_compact_result(_candidate_tokens)
+        if rendered == compact_result:
+            break
+        compact_result = rendered
+        _candidate_pair[-1]['content'] = compact_result
+    _candidate_tokens = _estimate_total_tokens(new_messages + _candidate_pair)
 
+    _summary_cost_tokens = _summary_usage_tokens(_summary_usage)
+    _accounting_econ = None
+    _adoption_econ = None
     if _proactive:
-        _candidate_pair = [
-            {'role': 'assistant', 'content': None,
-             'tool_calls': [{'id': '_roi_candidate', 'type': 'function',
-                             'function': {'name': _COMPACT_TOOL_NAME,
-                                          'arguments': '{}'}}]},
-            {'role': 'tool', 'tool_call_id': '_roi_candidate',
-             'name': _COMPACT_TOOL_NAME, 'content': compact_result},
-        ]
-        _candidate_tokens = _estimate_total_tokens(new_messages + _candidate_pair)
-        _summary_cost_tokens = _summary_usage_tokens(_summary_usage)
-        _realized_econ = _proactive_cache_economics(
+        _accounting_econ = _proactive_cache_economics(
             task, tokens_before=tokens_before,
             candidate_tokens=_candidate_tokens,
             summary_usage_tokens=_summary_cost_tokens)
-        _realized_reduction = (_realized_econ['dropped_tokens']
+        # Once generated, summary tokens are sunk. Adoption must compare only
+        # future cache rewrite cost with future savings; otherwise a paid,
+        # faithful candidate can be discarded and regenerated on a later turn.
+        _adoption_econ = _proactive_cache_economics(
+            task, tokens_before=tokens_before,
+            candidate_tokens=_candidate_tokens,
+            summary_usage_tokens=0)
+        for _economics in (_accounting_econ, _adoption_econ):
+            _economics.update({
+                'payback_limit_rounds': _payback_limit,
+                'payback_policy': _payback_policy,
+            })
+        _realized_reduction = (_accounting_econ['dropped_tokens']
                                / max(1, tokens_before))
         if _realized_reduction < _AUTO_COMPACT_MIN_REDUCTION_RATIO:
             logger.info(
@@ -454,34 +823,40 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                     'reason': 'low_yield',
                     'candidate_tokens': int(_candidate_tokens),
                     'realized_reduction_ratio': _realized_reduction,
-                    'economics': _realized_econ,
+                    'economics': _accounting_econ,
+                    'adoptionEconomics': _adoption_econ,
                 })
-            _defer_proactive_retry(task, tokens_before)
+            _defer_proactive_retry(
+                task, tokens_before, reason='low_yield',
+                economics=_accounting_econ)
             return ('Context compaction skipped — generated summary is below '
                     'the automatic minimum reduction. Messages preserved '
                     'as-is.')
-        if (_realized_econ['cache_read_tokens'] > 0
-                and _realized_econ['payback_rounds']
-                > _AUTO_COMPACT_MIN_PAYBACK_ROUNDS):
+        if (_adoption_econ['cache_read_tokens'] > 0
+                and _adoption_econ['payback_rounds']
+                > _payback_limit):
             logger.info(
                 '%s [Compact] Proactive candidate rejected: projected=%d '
                 'before=%d dropped=%d cache_read=%d rewrite=%d '
-                'summary_cost=%d payback=%.2f rounds > %.2f — preserving '
-                'cache prefix',
+                'summary_cost_sunk=%d future_payback=%.2f rounds > %.2f — '
+                'preserving cache prefix',
                 pfx, _candidate_tokens, tokens_before,
-                _realized_econ['dropped_tokens'],
-                _realized_econ['cache_read_tokens'],
-                _realized_econ['cache_rewrite_tokens'],
-                _summary_cost_tokens, _realized_econ['payback_rounds'],
-                _AUTO_COMPACT_MIN_PAYBACK_ROUNDS)
+                _adoption_econ['dropped_tokens'],
+                _adoption_econ['cache_read_tokens'],
+                _adoption_econ['cache_rewrite_tokens'],
+                _summary_cost_tokens, _adoption_econ['payback_rounds'],
+                _payback_limit)
             if isinstance(_result_meta, dict):
                 _result_meta.update({
                     'compacted': False,
                     'reason': 'cache_negative',
                     'candidate_tokens': int(_candidate_tokens),
-                    'economics': _realized_econ,
+                    'economics': _accounting_econ,
+                    'adoptionEconomics': _adoption_econ,
                 })
-            _defer_proactive_retry(task, tokens_before)
+            _defer_proactive_retry(
+                task, tokens_before, reason='cache_negative',
+                economics=_accounting_econ)
             return ('Context compaction skipped — generated summary would not '
                     'repay the warm-cache rewrite. Messages preserved as-is.')
 
@@ -490,10 +865,11 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
         _round_num = task.get('round_num') if task else 0
     _round_num = int(_round_num or 0)
 
-    _archive_id: int | None = None
+    _archive_id: str | None = None
     if not kwargs.get('_compaction_skip_archive'):
-        _archive_id = _archive_transcript_dyn(
+        _archive_id = _archive_transcript(
             conv_id, messages,
+            user_id=_task_owner(task),
             trigger=kwargs.get('_compaction_trigger') or 'force',
             task=task,
             round_num=_round_num,
@@ -515,6 +891,7 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     messages.extend(new_messages)
     if task is not None:
         task.pop('_autoCompactRetryAfterTokens', None)
+        task.pop('_autoCompactRetryWitness', None)
     with _cooldown_lock:
         _summary_cooldowns[conv_id] = time.time()
 
@@ -522,12 +899,39 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
         _result_meta.update({
             'compacted': True,
             'tokens_before': int(tokens_before),
+            'tokens_after_estimated': int(_candidate_tokens),
+            'token_count_kind': 'estimated',
             'msgs_before': int(msg_count_before),
             'archive_id': _archive_id,
             'summary_text': summary_text,
             'trigger': kwargs.get('_compaction_trigger') or 'force',
             'reason': kwargs.get('_compaction_reason') or '',
             'round_num': _round_num,
+            'summary_usage_tokens': int(_summary_cost_tokens),
+            'projected_summary_usage_tokens': int(_projected_summary_cost),
+            'summary_usage': dict(_summary_usage),
+            'summary_duration_ms': int(_summary_duration_ms),
+            'summarized_messages': int(compacted_message_count),
+            'preserved_turns': int(preserved_turns),
+            'folded_tool_rounds': sum(
+                1 for message in cold_round_msgs
+                if isinstance(message, dict)
+                and message.get('role') == 'assistant'
+                and message.get('tool_calls')
+            ),
+            'objective_anchored': anchor_msg is not None,
+            'retained_user_messages': len(retained_user_texts),
+            'recent_files': list(recent_files),
+            'turn_diff_included': bool(_turn_diff_included),
+            'mode': (
+                'turns_and_intra_turn'
+                if cold_round_msgs and any(
+                    message.get('role') != 'system'
+                    for message in old_messages)
+                else 'intra_turn' if cold_round_msgs else 'turns'
+            ),
+            'economics': _accounting_econ,
+            'adoptionEconomics': _adoption_econ,
         })
 
     # ── SUCCESS-PATH CONVERGENCE CHECK (post-fold hot-tail overflow) ──
@@ -563,14 +967,19 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                          '(%s) — using heuristic', pfx, _pe)
             return _estimate_total_tokens(messages), 'heuristic'
 
-    ceiling = int(usable * _SUMMARY_TRIGGER_RATIO)
+    window_ceiling = int(usable * _SUMMARY_TRIGGER_RATIO)
+    effective_trigger, _window_trigger, _working_set_trigger = (
+        _compaction_trigger_threshold(task))
+    ceiling = (min(window_ceiling, int(effective_trigger))
+               if _proactive else window_ceiling)
+    ceiling_kind = 'effective automatic target' if _proactive else 'window safety'
     proj_tokens, proj_method = _project_tokens()
     if proj_tokens > ceiling:
         logger.warning(
             '%s [Compact] Post-fold STILL over ceiling: projected=%d (via %s) '
-            '> ceiling=%d (usable=%d × %.2f) — preserved hot-tail rounds are '
+            '> ceiling=%d (%s; usable=%d) — preserved hot-tail rounds are '
             'oversized; converging with pairing-safe head-truncate',
-            pfx, proj_tokens, proj_method, ceiling, usable, _SUMMARY_TRIGGER_RATIO)
+            pfx, proj_tokens, proj_method, ceiling, ceiling_kind, usable)
         from lib.tasks_pkg.compaction._reactive import _head_truncate
         _tok_pre = _estimate_total_tokens(messages)
         _dropped = _head_truncate(
@@ -618,7 +1027,14 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
 
     Returns True if compaction was performed, False otherwise.
     """
-    if not force and not _should_force_compact(messages, task):
+    _measurement_out = kwargs.get('_measurement_out')
+    if not isinstance(_measurement_out, dict):
+        _measurement_out = None
+    if not force and not _should_force_compact(
+            messages, task, measurement_out=_measurement_out,
+            current_round=kwargs.get('_compaction_round'),
+            remaining_api_rounds=kwargs.get(
+                '_compaction_remaining_api_rounds')):
         return False
 
     # The historical preservation budget scales from the model's usable
@@ -642,10 +1058,24 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                 'preserve_budget=%s', pfx,
                 conv_id[:8] if conv_id else '?', preserve_budget_tokens)
 
-    _trigger = (kwargs.get('_compaction_trigger')
-                if isinstance(kwargs, dict) else None) or 'force'
+    _explicit_trigger = (kwargs.get('_compaction_trigger')
+                         if isinstance(kwargs, dict) else None)
+    _effective = _window_threshold = _working_set = 0
+    if _explicit_trigger:
+        _trigger = _explicit_trigger
+    elif force:
+        _trigger = 'force'
+    else:
+        _effective, _window_threshold, _working_set = (
+            _compaction_trigger_threshold(task))
+        _trigger = ('working_set'
+                    if 0 < _working_set <= _window_threshold else 'window')
     _reason = (kwargs.get('_compaction_reason')
                if isinstance(kwargs, dict) else None) or ''
+    if not _reason and not force:
+        _reason = (
+            f'estimated input crossed {_effective:,}-token {_trigger} '
+            'threshold')
     _skip_archive = bool(kwargs.get('_compaction_skip_archive')
                          if isinstance(kwargs, dict) else False)
     _meta: dict = {}
@@ -658,9 +1088,19 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
         _compaction_skip_archive=_skip_archive,
         _compaction_archive_id=kwargs.get('_compaction_archive_id'),
         _compaction_round=kwargs.get('_compaction_round'),
+        _compaction_remaining_api_rounds=kwargs.get(
+            '_compaction_remaining_api_rounds'),
         _proactive_economic=not force,
+        _message_tokens_before=(
+            _measurement_out.get('message_tokens')
+            if _measurement_out is not None else None),
         _result_meta=_meta,
     )
+    if _measurement_out is not None:
+        _measurement_out.setdefault(
+            'message_tokens', int(_meta.get('tokens_before') or 0))
+        _measurement_out.setdefault(
+            'message_count', int(_meta.get('msgs_before') or len(messages)))
 
     # If the summary LLM returned empty / compaction refused, the message
     # list was NOT mutated. Injecting a synthetic context_compact
@@ -674,7 +1114,7 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
             # durable task state. A declined/failed attempt has no summary to
             # audit, so release the bounded working set immediately.
             task.pop('_contextEvidenceLedger', None)
-        # ★ Deterministic proactive safety net (fix for the OOM fatal loop).
+        # Deterministic proactive safety net (fix for the OOM fatal loop).
         #   The summary LLM is the ONLY mechanism the proactive path had; on
         #   a vanilla/exported deploy the cheap-model dispatch can fail
         #   outright (no model tagged 'cheap', saturated single model,
@@ -696,16 +1136,21 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
         _allow_ht = bool(kwargs.get('_allow_head_truncate_fallback')
                          if isinstance(kwargs, dict) else False)
         if _allow_ht:
-            try:
-                from lib.tasks_pkg.compaction._tokens import (
-                    _count_tokens_authoritative)
-                _est_tokens, _tok_method = _count_tokens_authoritative(
-                    messages, task)
-            except Exception as _ce:
-                logger.debug('%s [ForceCompact] authoritative count failed, '
-                             'using heuristic: %s', pfx, _ce)
-                _est_tokens = _estimate_total_tokens(messages)
-                _tok_method = 'heuristic'
+            _est_tokens = int(
+                (_measurement_out or {}).get('gate_tokens') or 0)
+            _tok_method = str(
+                (_measurement_out or {}).get('method') or '')
+            if _est_tokens <= 0:
+                try:
+                    from lib.tasks_pkg.compaction._tokens import (
+                        _count_tokens_authoritative)
+                    _est_tokens, _tok_method = _count_tokens_authoritative(
+                        messages, task)
+                except Exception as _ce:
+                    logger.debug('%s [ForceCompact] authoritative count failed, '
+                                 'using heuristic: %s', pfx, _ce)
+                    _est_tokens = _estimate_total_tokens(messages)
+                    _tok_method = 'heuristic'
             _usable = _usable_context(_get_context_limit(task))
             if _est_tokens >= _usable:
                 logger.warning(
@@ -715,11 +1160,83 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                     'without depending on the summary LLM',
                     pfx, _est_tokens, _tok_method, _usable)
                 from lib.tasks_pkg.compaction._reactive import _head_truncate
+                _fallback_archive_id = None
+                _fallback_tokens_before = int(_est_tokens)
+                _fallback_msgs_before = len(messages)
+                # Archive the exact list before the deterministic fallback
+                # mutates it. Summary candidates are not archived earlier
+                # because an economic decline must leave no user-visible row.
+                try:
+                    _fallback_archive_id = _archive_transcript(
+                        conv_id, messages,
+                        user_id=_task_owner(task),
+                        trigger=_trigger,
+                        task=task,
+                        round_num=int(kwargs.get('_compaction_round') or 0),
+                        tokens_before=_fallback_tokens_before,
+                        msgs_before=_fallback_msgs_before,
+                        reason=(_reason or 'summary failed over window'),
+                        emit_event=True,
+                    )
+                except Exception as _ar_e:
+                    logger.debug('%s [ForceCompact] fallback archive failed: %s',
+                                 pfx, _ar_e)
                 _dropped = _head_truncate(
                     messages, task,
                     reported_token_count=_est_tokens,
                     event_name='proactive_head_truncate')
                 if _dropped:
+                    _fallback_tokens_after = _estimate_total_tokens(messages)
+                    _fallback_receipt = build_compaction_receipt(
+                        trigger=_trigger,
+                        status='completed',
+                        strategy='deterministic_recovery',
+                        implementation='pairing_safe_head_truncate',
+                        mode='summary_failure_over_window',
+                        continuation_format='none',
+                        summary_generated=False,
+                        summary_usage=_meta.get('summary_usage'),
+                        summary_duration_ms=(
+                            _meta.get('summary_duration_ms') or 0),
+                        dropped_messages=_dropped,
+                        outcome_reason='summary_failed_over_window',
+                    )
+                    if _fallback_archive_id is not None:
+                        try:
+                            from lib.agent_core.store import get_conversation_store
+                            get_conversation_store().update_archive_summary(
+                                _fallback_archive_id, '',
+                                int(_fallback_tokens_after), len(messages),
+                                user_id=_task_owner(task),
+                                receipt=_fallback_receipt)
+                        except Exception as _up_e:
+                            logger.debug('%s [ForceCompact] fallback receipt '
+                                         'update failed: %s', pfx, _up_e)
+                        if task is not None:
+                            try:
+                                from lib.agent_core.events import EventType, build_event
+                                from lib.tasks_pkg.manager import append_event
+                                _fallback_reduction = (
+                                    1 - _fallback_tokens_after
+                                    / max(1, _fallback_tokens_before)) * 100
+                                append_event(task, build_event(
+                                    EventType.COMPACTION_DONE,
+                                    archiveId=str(_fallback_archive_id),
+                                    convId=conv_id,
+                                    trigger=_trigger,
+                                    tokensBefore=int(_fallback_tokens_before),
+                                    tokensAfter=int(_fallback_tokens_after),
+                                    tokenCountKind='estimated',
+                                    msgsBefore=int(_fallback_msgs_before),
+                                    msgsAfter=len(messages),
+                                    reductionPct=round(_fallback_reduction, 1),
+                                    roundNum=int(
+                                        kwargs.get('_compaction_round') or 0),
+                                    receipt=_fallback_receipt,
+                                ))
+                            except Exception as _ev_e:
+                                logger.debug('%s [ForceCompact] fallback done '
+                                             'event failed: %s', pfx, _ev_e)
                     # Context was bounded — surface as a real compaction so
                     # the pipeline notifies the cache tracker (prefix changed)
                     # and the round proceeds with a smaller prompt.
@@ -727,9 +1244,61 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                 logger.warning(
                     '%s [ForceCompact] Head-truncate dropped 0 messages '
                     '(too few to shed) — reporting failure', pfx)
-        logger.warning('%s [ForceCompact] Compaction did not mutate messages '
-                       '(summary empty or refused) — reporting failure so the '
-                       'caller can fall back', pfx)
+                if _fallback_archive_id is not None:
+                    _failed_receipt = build_compaction_receipt(
+                        trigger=_trigger,
+                        status='failed',
+                        strategy='deterministic_recovery',
+                        implementation='pairing_safe_head_truncate',
+                        mode='summary_failure_over_window',
+                        continuation_format='none',
+                        summary_generated=False,
+                        summary_usage=_meta.get('summary_usage'),
+                        summary_duration_ms=(
+                            _meta.get('summary_duration_ms') or 0),
+                        outcome_reason='no_safe_messages_to_drop',
+                    )
+                    try:
+                        from lib.agent_core.store import get_conversation_store
+                        get_conversation_store().update_archive_summary(
+                            _fallback_archive_id, '',
+                            _fallback_tokens_before, len(messages),
+                            user_id=_task_owner(task), receipt=_failed_receipt)
+                    except Exception as _up_e:
+                        logger.debug('%s [ForceCompact] failed fallback receipt '
+                                     'update failed: %s', pfx, _up_e)
+                    if task is not None:
+                        try:
+                            from lib.agent_core.events import EventType, build_event
+                            from lib.tasks_pkg.manager import append_event
+                            append_event(task, build_event(
+                                EventType.COMPACTION_DONE,
+                                archiveId=str(_fallback_archive_id),
+                                convId=conv_id,
+                                trigger=_trigger,
+                                tokensBefore=int(_fallback_tokens_before),
+                                tokensAfter=_fallback_tokens_before,
+                                tokenCountKind='estimated',
+                                msgsBefore=int(_fallback_msgs_before),
+                                msgsAfter=len(messages),
+                                reductionPct=0.0,
+                                roundNum=int(
+                                    kwargs.get('_compaction_round') or 0),
+                                receipt=_failed_receipt,
+                            ))
+                        except Exception as _ev_e:
+                            logger.debug('%s [ForceCompact] failed fallback done '
+                                         'event failed: %s', pfx, _ev_e)
+        _decline_reason = str(_meta.get('reason') or '')
+        if _decline_reason in {
+                'cache_negative', 'low_yield', 'nothing_foldable'}:
+            logger.debug(
+                '%s [ForceCompact] Expected proactive decline (%s); '
+                'messages unchanged', pfx, _decline_reason)
+        else:
+            logger.warning('%s [ForceCompact] Compaction did not mutate messages '
+                           '(summary empty or refused) — reporting failure so the '
+                           'caller can fall back', pfx)
         return False
 
     # The economic preflight may decline without mutation.  Surface the phase
@@ -782,20 +1351,63 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
 
     if conv_id:
         try:
-            from lib.tasks_pkg.cache_tracking import record_l2_compaction
+            from lib.tasks_pkg.cache_tracking._roi import record_l2_compaction
             record_l2_compaction(
                 conv_id, tokens_before=tokens_before, tokens_after=tokens_after,
-                msgs_before=msgs_before, msgs_after=msgs_after)
+                msgs_before=msgs_before, msgs_after=msgs_after,
+                user_id=_task_owner(task))
         except Exception as _roi_e:
             logger.debug('%s [Compact] record_l2_compaction failed: %s', pfx, _roi_e)
 
     archive_id = _meta.get('archive_id')
     summary_text = _meta.get('summary_text') or ''
+    retained: list[str] = []
+    lost: list[str] = []
+    if task is not None:
+        try:
+            ledger = task.get('_contextEvidenceLedger')
+            if isinstance(ledger, dict):
+                from lib.tasks_pkg.compaction._evidence import evidence_retention
+                retained, lost = evidence_retention(summary_text, ledger)
+        except Exception as _er_e:
+            logger.debug('%s [Compact] evidence retention audit failed: %s',
+                         pfx, _er_e)
+
+    receipt = build_compaction_receipt(
+        trigger=_meta.get('trigger') or 'force',
+        status='completed',
+        strategy='selective_summary',
+        implementation=(
+            'deterministic_task_state_projection'
+            if _meta.get('summaryRejected') else 'model_summary'),
+        mode=_meta.get('mode') or 'turns',
+        continuation_format='context_compact_tool',
+        summary_generated=True,
+        summary_text=summary_text,
+        summary_usage=_meta.get('summary_usage'),
+        summary_duration_ms=_meta.get('summary_duration_ms') or 0,
+        projected_summary_usage_tokens=(
+            _meta.get('projected_summary_usage_tokens') or 0),
+        summary_rejected=bool(_meta.get('summaryRejected')),
+        summary_rejection_reason=(
+            _meta.get('summaryRejectionReason') or ''),
+        summarized_messages=_meta.get('summarized_messages') or 0,
+        preserved_turns=_meta.get('preserved_turns') or 0,
+        folded_tool_rounds=_meta.get('folded_tool_rounds') or 0,
+        objective_anchored=bool(_meta.get('objective_anchored')),
+        retained_user_messages=_meta.get('retained_user_messages') or 0,
+        recent_files=_meta.get('recent_files') or (),
+        turn_diff_included=bool(_meta.get('turn_diff_included')),
+        economics=_meta.get('economics'),
+        evidence_retained=retained,
+        evidence_lost=lost,
+    )
     if archive_id is not None:
         try:
             from lib.agent_core.store import get_conversation_store
             get_conversation_store().update_archive_summary(
-                archive_id, summary_text, tokens_after, msgs_after)
+                archive_id, summary_text, tokens_after, msgs_after,
+                user_id=_task_owner(task), receipt=receipt)
         except Exception as _upd_e:
             logger.debug('[Compact] archive row update failed: %s', _upd_e)
 
@@ -805,12 +1417,17 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                 from lib.tasks_pkg.manager import append_event
                 append_event(task, build_event(
                     EventType.COMPACTION_DONE,
-                    archiveId=int(archive_id),
+                    archiveId=str(archive_id),
                     convId=conv_id,
+                    trigger=_meta.get('trigger') or 'force',
+                    tokensBefore=tokens_before,
                     tokensAfter=tokens_after,
+                    tokenCountKind='estimated',
+                    msgsBefore=msgs_before,
                     msgsAfter=msgs_after,
                     reductionPct=round(reduction_pct, 1),
                     roundNum=int(_meta.get('round_num') or 0),
+                    receipt=receipt,
                 ))
             except Exception as _ev_e:
                 logger.debug('[Compact] compaction_done emit failed: %s', _ev_e)
@@ -818,12 +1435,6 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
     if task is not None:
         try:
             from lib.context_telemetry import record_compaction_event
-            retained: list[str] = []
-            lost: list[str] = []
-            ledger = task.get('_contextEvidenceLedger')
-            if isinstance(ledger, dict):
-                from lib.tasks_pkg.compaction._evidence import evidence_retention
-                retained, lost = evidence_retention(summary_text, ledger)
             record_compaction_event(
                 task,
                 trigger=_meta.get('trigger') or 'force',
@@ -843,8 +1454,3 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
             task.pop('_contextEvidenceLedger', None)
 
     return True
-
-
-def smart_summary_compact(messages: list, task: dict | None = None):
-    """Legacy entry point — now delegates to force_compact_if_needed."""
-    force_compact_if_needed(messages, task=task)

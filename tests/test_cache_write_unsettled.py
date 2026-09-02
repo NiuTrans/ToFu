@@ -211,7 +211,8 @@ def test_detector_names_write_unsettled_not_upstream():
     the previous round was a COLD WRITE and this round arrived within the
     cold-write settle window → the miss must be NAMED cache_write_unsettled,
     NEVER laundered into upstream_identical / server_side."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
 
     _cache_states.clear()
@@ -230,8 +231,8 @@ def test_detector_names_write_unsettled_not_upstream():
     u2 = {'cache_read_tokens': 0, 'cache_creation_input_tokens': 120000,
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
           '_wire_routing': dict(r_same), '_prev_cold_write_gap_s': 8.0}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None, 'expected a break (read collapsed after a cold write)'
     assert 'cache_write_unsettled' in r, (
         f'a byte-identical read-collapse within the cold-write settle window '
@@ -248,7 +249,8 @@ def test_detector_NEUTER_without_cold_gap_launders_to_upstream():
     collapse, but WITHOUT the _prev_cold_write_gap_s marker (prior round was not
     a cold write, or the gap is unknown) → the miss launders back into the
     byte-identical upstream verdict and cache_write_unsettled is never named."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
 
     _cache_states.clear()
@@ -264,8 +266,8 @@ def test_detector_NEUTER_without_cold_gap_launders_to_upstream():
     u2 = {'cache_read_tokens': 79615, 'cache_creation_input_tokens': 190000,
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
           '_wire_routing': dict(r_same)}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None
     assert 'cache_write_unsettled' not in r, (
         f'NEUTER: without the cold-gap marker the write-visibility race MUST '

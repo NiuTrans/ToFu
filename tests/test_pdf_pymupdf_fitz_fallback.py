@@ -72,7 +72,7 @@ def test_real_pdf_parses_end_to_end():
     page.insert_text((72, 72), 'Hello Tofu research pipeline.')
     pdf_bytes = doc.tobytes()
     doc.close()
-    from lib.pdf_parser import parse_pdf
+    from lib.pdf_parser.core import parse_pdf
     out = parse_pdf(pdf_bytes, max_images=0, text_mode='fast')
     assert out.get('totalPages') == 1, out.get('totalPages')
     assert 'Hello Tofu' in (out.get('text') or ''), repr((out.get('text') or '')[:80])

@@ -47,12 +47,6 @@ class FlowRunOutcome:
     def error_envelope(self) -> dict | None:
         return self.terminal_outcome.error_envelope
 
-    @property
-    def durable_error(self) -> dict | None:
-        """Compatibility alias retained for durable projection callers."""
-        return self.error_envelope
-
-
 def failure_outcome(
     error: Exception,
     failure_kind: str,

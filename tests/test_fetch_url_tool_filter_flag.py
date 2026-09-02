@@ -71,7 +71,7 @@ class TestFetchUrlToolFilterFlag:
         # Source pin: the three per-request consumers must call the builder,
         # not the import-time FETCH_URL_TOOL snapshot (which stays for the
         # static capability listing only).
-        import lib.paper.prompts as paper_prompts
+        import lib.paper.tools as paper_tools
         import lib.scheduler.timer._poll as timer_poll
         import lib.tools.registry._build as registry_build
 
@@ -79,8 +79,10 @@ class TestFetchUrlToolFilterFlag:
         assert 'build_fetch_url_tool()' in fetch_builder
         assert 'FETCH_URL_TOOL' not in fetch_builder
 
-        assert 'build_fetch_url_tool()' in inspect.getsource(
-            paper_prompts._ReportTools._resolve)
+        paper_builder = inspect.getsource(
+            paper_tools.build_research_tool_schemas)
+        assert 'build_fetch_url_tool()' in paper_builder
+        assert 'FETCH_URL_TOOL' not in paper_builder
 
         poll_src = inspect.getsource(timer_poll._build_poll_tools)
         assert 'build_fetch_url_tool()' in poll_src

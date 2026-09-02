@@ -1,67 +1,45 @@
-"""Async translation TaskRuntime + worker (facade package).
+"""Lazy facade for translation task state, segments, commits, and workers."""
 
-The TaskRuntime owns the task registry, locking, push channel ('translate'),
-TTL cleanup, and ``audit_log``-style error reporting. ``_do_translate`` is
-the actual worker thread invoked via ``_translate_runtime.spawn(...)``.
+from __future__ import annotations
 
-Compatibility shims ``_translate_tasks`` / ``_translate_tasks_lock`` exist
-because callers in lib.tasks_pkg.manager and tests import them by name.
-New code should use the runtime directly.
-
-This file is a pure re-export facade — the implementation lives in the
-submodules (``._state`` / ``._segments`` / ``._worker``). The import path
-``lib.translate.runtime`` is UNCHANGED, so ``from lib.translate.runtime
-import X`` works byte-identically for every previously-public symbol.
-``_translate_runtime`` / ``_translate_tasks`` / ``_translate_tasks_lock``
-have a SINGLE home in ``._state`` — the aliases below are the same objects.
-"""
-
-from lib.log import get_logger
-
-logger = get_logger(__name__)
-
-# ── Shared state (single home — the TaskRuntime singleton + its aliases) ──
-from ._state import (  # noqa: E402,F401
-    _translate_runtime,
-    _translate_tasks,
-    _translate_tasks_lock,
-    _cleanup_translate_tasks,
-)
-
-# ── Segment-level translation map builders (retro + backfill shared core) ──
-from ._segments import (  # noqa: E402,F401
-    _read_message_segments,
-    _build_segment_translation_map,
-    _translate_segments_to_map,
-)
-
-# ── DB commit (monkeypatch seam — see ._worker note below) ──
-from ..commit import _commit_translation_to_db  # noqa: E402,F401
-
-# ── The background worker thread ──
-from ._worker import _do_translate  # noqa: E402,F401
-
-# The pre-split single module had ``_translate_freetext`` as a module global
-# (imported from ..engine), and callers/tests monkeypatch
-# ``lib.translate.runtime._translate_freetext`` to stub the LLM call. Re-export
-# it here — ``._segments`` / ``._worker`` resolve it dynamically off this
-# facade module at call time, so patching it takes effect byte-identically.
-from ..engine import _translate_freetext  # noqa: E402,F401
+from importlib import import_module
 
 __all__ = [
-    # shared state
     '_translate_runtime',
-    '_translate_tasks',
-    '_translate_tasks_lock',
     '_cleanup_translate_tasks',
-    # segments
-    '_read_message_segments',
+    '_read_turn_segments',
     '_build_segment_translation_map',
     '_translate_segments_to_map',
-    # db commit (monkeypatch seam)
-    '_commit_translation_to_db',
-    # worker
+    'commit_translation_to_turn',
+    'mark_turn_translation_complete',
     '_do_translate',
-    # engine passthrough (monkeypatch target)
-    '_translate_freetext',
 ]
+
+_EXPORT_MODULES = {
+    '_translate_runtime': 'lib.translate.runtime._state',
+    '_cleanup_translate_tasks': 'lib.translate.runtime._state',
+    '_read_turn_segments': 'lib.translate.runtime._segments',
+    '_build_segment_translation_map': 'lib.translate.runtime._segments',
+    '_translate_segments_to_map': 'lib.translate.runtime._segments',
+    'commit_translation_to_turn': 'lib.translate.commit',
+    'mark_turn_translation_complete': 'lib.translate.commit',
+    '_do_translate': 'lib.translate.runtime._worker',
+}
+
+_CHILD_MODULES = {'_segments', '_state', '_worker'}
+
+
+def __getattr__(name: str):
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None and name in _CHILD_MODULES:
+        module_name = f'lib.translate.runtime.{name}'
+    if module_name is None:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    module = import_module(module_name)
+    value = module if name in _CHILD_MODULES else getattr(module, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__) | _CHILD_MODULES)

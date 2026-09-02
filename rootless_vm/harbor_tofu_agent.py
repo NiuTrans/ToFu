@@ -25,6 +25,7 @@ from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 from lib.llm_errors import PromptTooLongError
+from rootless_vm.trajectory import persist_host_atif
 
 
 _TERMINAL_TOOL = {
@@ -120,6 +121,8 @@ _AUDIT_DISPATCH_FIELDS = frozenset(
         "gate_wait_ms",
         "attempt",
         "429_retries",
+        "slot_wait_cycles",
+        "upstream_429_retries",
     }
 )
 _CREDENTIAL_URL_RE = re.compile(
@@ -290,12 +293,19 @@ def _redact_audit_value(value: Any) -> Any:
     return value
 
 
-def _persist_transcript(logs_dir: Path, transcript: list[dict[str, Any]]) -> None:
+def _persist_transcript(
+    logs_dir: Path,
+    transcript: list[dict[str, Any]],
+    *,
+    filename: str = "tofu-host-transcript.json",
+) -> None:
     """Atomically checkpoint the redacted audit trail before risky tool waits."""
 
+    if filename not in {"tofu-host-transcript.json", "host-dispatch-transcript.json"}:
+        raise ValueError(f"unsupported host transcript filename: {filename}")
     logs_dir.mkdir(parents=True, exist_ok=True)
-    path = logs_dir / "tofu-host-transcript.json"
-    temporary = logs_dir / ".tofu-host-transcript.json.partial"
+    path = logs_dir / filename
+    temporary = logs_dir / f".{filename}.partial"
     temporary.write_text(
         json.dumps(_redact_audit_value(transcript), ensure_ascii=False, indent=2)
         + "\n",
@@ -361,6 +371,78 @@ def _dispatch_slot(gate_dir: Path, limit: int):
         for descriptor in descriptors:
             os.close(descriptor)
         os.close(directory_fd)
+
+
+def _dispatch_model(
+    messages: list[dict[str, Any]],
+    model_name: str,
+    max_tokens: int,
+    timeout: float,
+    max_retries: int,
+    reasoning_effort: str,
+    temperature: float,
+    top_p: float,
+    global_dispatch_concurrency: int,
+    dispatch_gate_dir: Path,
+    tools: list[dict[str, Any]],
+    *,
+    log_prefix: str,
+) -> tuple[str, dict[str, Any]]:
+    """Dispatch one physically pinned host-side model turn.
+
+    Harness adapters own their prompts and tool schemas, while this function is
+    the single authority for routing, provider backpressure, and the host-only
+    credential boundary.
+    """
+
+    from lib.llm_dispatch import dispatch_chat, get_dispatcher
+
+    # Tofu's strict_model intentionally permits every physical route with the
+    # same logical model id. Benchmarks need a stronger invariant: a request for
+    # the Meituan route must never silently use Huawei/Tencent.
+    dispatcher = get_dispatcher()
+    dispatcher.initialize()
+    physical_models = {slot.model for slot in dispatcher.slots}
+    if model_name not in physical_models:
+        raise RuntimeError(f"requested physical model is unavailable: {model_name}")
+    excluded_models = physical_models - {model_name}
+
+    extra: dict[str, Any] = {"top_p": top_p}
+    if "deepseek-v4" in model_name.lower():
+        extra.update(
+            {
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": reasoning_effort,
+            }
+        )
+
+    gate_started = time.monotonic()
+    with _dispatch_slot(dispatch_gate_dir, global_dispatch_concurrency):
+        gate_wait_ms = round((time.monotonic() - gate_started) * 1000)
+        result = dispatch_chat(
+            messages,
+            prefer_model=model_name,
+            strict_model=True,
+            exclude_models=excluded_models,
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            thinking_enabled=True,
+            effort=reasoning_effort,
+            extra=extra,
+            timeout=timeout,
+            max_retries=max_retries,
+            log_prefix=log_prefix,
+        )
+    metadata = result[1].get("_dispatch")
+    if isinstance(metadata, dict):
+        metadata["gate_wait_ms"] = gate_wait_ms
+    served_model = metadata.get("model") if isinstance(metadata, dict) else None
+    if served_model != model_name:
+        raise RuntimeError(
+            f"physical model routing mismatch: requested {model_name}, got {served_model}"
+        )
+    return result
 
 
 class TofuHostAgent(BaseAgent):
@@ -437,54 +519,20 @@ class TofuHostAgent(BaseAgent):
         global_dispatch_concurrency: int,
         dispatch_gate_dir: Path,
     ) -> tuple[str, dict[str, Any]]:
-        from lib.llm_dispatch import dispatch_chat, get_dispatcher
-
-        # Tofu's strict_model intentionally permits every physical route with
-        # the same logical model id. Benchmarks need a stronger invariant: a
-        # request for the Meituan route must never silently use Huawei/Tencent.
-        dispatcher = get_dispatcher()
-        dispatcher.initialize()
-        physical_models = {slot.model for slot in dispatcher.slots}
-        if model_name not in physical_models:
-            raise RuntimeError(f"requested physical model is unavailable: {model_name}")
-        excluded_models = physical_models - {model_name}
-
-        extra: dict[str, Any] = {"top_p": top_p}
-        if "deepseek-v4" in model_name.lower():
-            extra.update(
-                {
-                    "thinking": {"type": "enabled"},
-                    "reasoning_effort": reasoning_effort,
-                }
-            )
-
-        gate_started = time.monotonic()
-        with _dispatch_slot(dispatch_gate_dir, global_dispatch_concurrency):
-            gate_wait_ms = round((time.monotonic() - gate_started) * 1000)
-            result = dispatch_chat(
-                messages,
-                prefer_model=model_name,
-                strict_model=True,
-                exclude_models=excluded_models,
-                tools=_TOOLS,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                thinking_enabled=True,
-                effort=reasoning_effort,
-                extra=extra,
-                timeout=timeout,
-                max_retries=max_retries,
-                log_prefix="[rootless-vm/harbor]",
-            )
-        metadata = result[1].get("_dispatch")
-        if isinstance(metadata, dict):
-            metadata["gate_wait_ms"] = gate_wait_ms
-        served_model = metadata.get("model") if isinstance(metadata, dict) else None
-        if served_model != model_name:
-            raise RuntimeError(
-                f"physical model routing mismatch: requested {model_name}, got {served_model}"
-            )
-        return result
+        return _dispatch_model(
+            messages,
+            model_name,
+            max_tokens,
+            timeout,
+            max_retries,
+            reasoning_effort,
+            temperature,
+            top_p,
+            global_dispatch_concurrency,
+            dispatch_gate_dir,
+            _TOOLS,
+            log_prefix="[rootless-vm/harbor/tofu]",
+        )
 
     async def run(
         self,
@@ -519,6 +567,22 @@ class TofuHostAgent(BaseAgent):
         dispatch_output_budget = self._max_output_tokens
         dispatch_succeeded_since_checkpoint = True
 
+        def checkpoint() -> None:
+            _persist_transcript(self.logs_dir, transcript)
+            persist_host_atif(
+                self.logs_dir,
+                transcript=transcript,
+                instruction=instruction,
+                system_prompt=_SYSTEM_PROMPT,
+                agent_name=self.name(),
+                agent_version=self.version(),
+                model_name=self.model_name or "unknown",
+                tool_definitions=_TOOLS,
+                session_id=str(self.context_id or self.session_id or "") or None,
+                credential_boundary="host-only",
+                harness_profile="tofu",
+            )
+
         for round_index in range(self._max_rounds):
             try:
                 content, usage = await asyncio.to_thread(
@@ -551,7 +615,7 @@ class TofuHostAgent(BaseAgent):
                         "reason": "provider_prompt_too_long",
                     }
                 )
-                _persist_transcript(self.logs_dir, transcript)
+                checkpoint()
                 continue
             dispatch_succeeded_since_checkpoint = True
             reported_tool_calls = usage.pop("_tool_calls", []) or []
@@ -593,7 +657,7 @@ class TofuHostAgent(BaseAgent):
             # A command can consume the rest of Harbor's trial budget. Persist
             # its exact (reasoning-redacted) request first so timeout diagnosis
             # never depends on a normally returned agent result.
-            _persist_transcript(self.logs_dir, transcript)
+            checkpoint()
             if tool_calls and len(assistant["content"]) > 2048:
                 assistant["content"] = assistant["content"][-2048:]
             messages.append(assistant)
@@ -813,7 +877,7 @@ class TofuHostAgent(BaseAgent):
                 # Do not make timeout diagnosis wait for the next provider
                 # response: at this boundary the guest command has definitely
                 # returned, while the following dispatch may retry for minutes.
-                _persist_transcript(self.logs_dir, transcript)
+                checkpoint()
                 if result_text == repeated_result:
                     result_repeat_count += 1
                 else:
@@ -866,7 +930,7 @@ class TofuHostAgent(BaseAgent):
                     }
                 )
 
-        _persist_transcript(self.logs_dir, transcript)
+        checkpoint()
         context.n_input_tokens = input_tokens
         context.n_output_tokens = output_tokens
         context.metadata = {

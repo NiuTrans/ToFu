@@ -25,7 +25,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(scope='module')
 def srv():
-    import server  # noqa: F401 — side-effect installs Flask→Quart shim
+    import lib.server_boot.lock as server
     return server
 
 

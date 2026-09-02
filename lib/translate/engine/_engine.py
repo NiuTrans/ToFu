@@ -20,29 +20,12 @@ from lib import translate_refusal
 from lib.log import get_logger
 
 from ..dedup import _dedup_repetition_loop
+from ..errors import TranslationContentRefused
 from ..prompt import _wrap_for_translation
 from ._split import _ends_midsentence
 
 logger = get_logger(__name__)
 
-
-class TranslationContentRefused(ValueError):
-    """A content-quality guard rejected every candidate output after the
-    full retry budget (wrong-language flip / no-op echo / over-generated
-    contamination). Subclasses ValueError so existing ``except ValueError``
-    handlers keep working; carries the machine-readable ``verdict`` so the
-    REST surface can answer 502 + a typed envelope instead of a bare 500
-    (pt_75d8f8c7)."""
-
-    def __init__(self, verdict, reason, *, attempts=0, content_fails=0):
-        self.verdict = verdict
-        self.reason = reason
-        self.attempts = attempts
-        self.content_fails = content_fails
-        super().__init__(
-            f'translation refused by content guard: verdict={verdict} '
-            f'after {content_fails} content fails ({attempts} attempts) '
-            f'— {reason}')
 
 # ── Over-generation guard thresholds (symmetric to the truncation floors) ──
 # A translation should be roughly the same order of magnitude as its input.
@@ -176,6 +159,64 @@ def _translate_freetext(text, system_prompt, chunk_label='',
         use_cache=use_cache)
 
 
+def _dispatch_translation_candidate(
+        messages, *, chunk_label, max_tokens, timeout, max_retries,
+        excluded_models, progress_cb, deadline_exceeded,
+        remaining_deadline_seconds):
+    """Run one translation attempt and normalize stream/non-stream results."""
+    from lib.llm_dispatch import dispatch_stream, smart_chat
+
+    if progress_cb is None:
+        return smart_chat(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=1,
+            capability='cheap',
+            log_prefix=f'[Translate{chunk_label}]',
+            timeout=min(float(timeout),
+                        max(0.1, remaining_deadline_seconds())),
+            max_retries=max_retries,
+            exclude_models=excluded_models or None,
+            abort_check=deadline_exceeded,
+        )
+
+    stream_buffer = []
+
+    def on_content_delta(delta):
+        if not delta:
+            return
+        stream_buffer.append(delta)
+        try:
+            progress_cb(''.join(stream_buffer))
+        except Exception as callback_error:
+            logger.debug('[Translate%s] progress_cb failed: %s',
+                         chunk_label, callback_error)
+
+    from lib.llm.stream_result import require_verified_provider_stream_result
+    stream_result = require_verified_provider_stream_result(dispatch_stream(
+        messages,
+        on_content=on_content_delta,
+        max_tokens=max_tokens,
+        temperature=1,
+        capability='cheap',
+        log_prefix=f'[Translate{chunk_label}]',
+        max_retries=max_retries,
+        exclude_models=excluded_models or None,
+        abort_check=deadline_exceeded,
+    ), context='streaming translation candidate')
+    stream_message = stream_result.message
+    finish_reason = stream_result.provider_finish_reason
+    usage = stream_result.usage
+    if isinstance(stream_message, dict):
+        content = stream_message.get('content', '') or ''
+    else:
+        content = stream_message or ''
+    normalized_usage = dict(usage or {})
+    if finish_reason:
+        normalized_usage.setdefault('finish_reason', finish_reason)
+    return content, normalized_usage
+
+
 def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                          source='', target='', status_cb=None,
                          progress_cb=None, overall_deadline=None,
@@ -295,7 +336,6 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
             _notify('mt_fallback', 1, 0, str(e)[:120])
             # Fall through to LLM translation below
 
-    from lib.llm_dispatch import dispatch_stream, smart_chat
     from lib.llm_dispatch.factory import get_dispatcher
     from lib.llm import RateLimitError
 
@@ -323,11 +363,22 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     # Wall-clock budget for the whole retry loop. Defaults to 10min so the
     # background async-translate path can ride out a quota reset; the
     # send-path wrapper passes a tighter budget (see routes/chat.py).
-    _OVERALL_DEADLINE_SEC = float(overall_deadline) if overall_deadline is not None else 600.0
+    _OVERALL_DEADLINE_SEC = (
+        max(0.0, float(overall_deadline))
+        if overall_deadline is not None else 600.0)
     _BACKOFF_MIN = 1.0
     _BACKOFF_MAX = 30.0
 
     _start_ts = time.time()
+    _start_mono = time.monotonic()
+    _deadline_at = _start_mono + _OVERALL_DEADLINE_SEC
+
+    def _deadline_exceeded():
+        return time.monotonic() >= _deadline_at
+
+    def _remaining_deadline_seconds():
+        return max(0.0, _deadline_at - time.monotonic())
+
     _attempt = 0
     _content_fail_count = 0
     _dispatch_fail_count = 0
@@ -370,8 +421,8 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
 
     while True:
         _attempt += 1
-        _elapsed = time.time() - _start_ts
-        if _elapsed >= _OVERALL_DEADLINE_SEC:
+        _elapsed = time.monotonic() - _start_mono
+        if _deadline_exceeded():
             logger.error('[Translate%s] Giving up after %.0fs (attempts=%d, '
                          'content_fails=%d, dispatch_fails=%d, last_err=%s)',
                          chunk_label, _elapsed, _attempt - 1,
@@ -381,72 +432,47 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
         try:
             _msgs = [{'role': 'system', 'content': system_prompt},
                      {'role': 'user', 'content': _wrap_for_translation(chunk)}]
-            if progress_cb is not None:
-                # Streamed path — frontend gets live preview as text arrives.
-                _stream_buf = []
-
-                def _on_content_delta(delta):
-                    if not delta:
-                        return
-                    _stream_buf.append(delta)
-                    try:
-                        progress_cb(''.join(_stream_buf))
-                    except Exception as cb_err:
-                        logger.debug('[Translate%s] progress_cb failed: %s',
-                                     chunk_label, cb_err)
-
-                _stream_msg, _finish, _usage = dispatch_stream(
-                    _msgs,
-                    on_content=_on_content_delta,
-                    max_tokens=_mt,
-                    temperature=1,
-                    capability='cheap',
-                    log_prefix=f'[Translate{chunk_label}]',
-                    max_retries=_retries,
-                    exclude_models=_excluded_models or None,
-                )
-                # Match smart_chat's contract: c is the assistant content
-                # string, u is the usage dict with finish_reason embedded
-                # so the truncation detector below still works.
-                # dispatch_stream returns the assistant message as a dict
-                # ({'role': 'assistant', 'content': '...'}); unwrap it.
-                if isinstance(_stream_msg, dict):
-                    c = _stream_msg.get('content', '') or ''
-                else:
-                    c = _stream_msg or ''
-                u = dict(_usage or {})
-                if _finish:
-                    u.setdefault('finish_reason', _finish)
-            else:
-                c, u = smart_chat(
-                    messages=_msgs,
-                    max_tokens=_mt,
-                    temperature=1,
-                    capability='cheap',
-                    log_prefix=f'[Translate{chunk_label}]',
-                    timeout=_timeout,
-                    max_retries=_retries,
-                    exclude_models=_excluded_models or None,
-                )
+            c, u = _dispatch_translation_candidate(
+                _msgs,
+                chunk_label=chunk_label,
+                max_tokens=_mt,
+                timeout=_timeout,
+                max_retries=_retries,
+                excluded_models=_excluded_models,
+                progress_cb=progress_cb,
+                deadline_exceeded=_deadline_exceeded,
+                remaining_deadline_seconds=_remaining_deadline_seconds,
+            )
         except RateLimitError as re_err:
             # All keys temporarily rate-limited — wait and retry forever
             # (within the overall deadline).  This is the most common transient
             # failure and users expect the translation to eventually land.
             _dispatch_fail_count += 1
             _last_err = f'RateLimitError: {re_err}'
+            if _deadline_exceeded():
+                _notify('deadline_exceeded', _attempt, _elapsed,
+                        'translation deadline expired during dispatch')
+                break
             _sleep = min(_BACKOFF_MAX, _BACKOFF_MIN * (2 ** min(_dispatch_fail_count - 1, 5)))
             logger.warning('[Translate%s] All keys rate-limited (attempt %d, '
                            'total_rl_fails=%d, elapsed=%.0fs) — sleeping %.1fs and retrying',
                            chunk_label, _attempt, _dispatch_fail_count, _elapsed, _sleep)
             _notify('rate_limited', _attempt, _elapsed,
                     f'all keys busy (fails={_dispatch_fail_count}, retry in {_sleep:.0f}s)')
-            time.sleep(_sleep)
+            time.sleep(min(_sleep, _remaining_deadline_seconds()))
             continue
         except Exception as se:
             # Other dispatch errors (network, timeout, bad payload, etc.) —
             # retry a few times but don't loop forever.
             _dispatch_fail_count += 1
             _last_err = f'dispatch error: {se}'
+            if _deadline_exceeded():
+                logger.warning(
+                    '[Translate%s] Dispatch stopped at the %.0fs caller '
+                    'deadline: %s', chunk_label, _OVERALL_DEADLINE_SEC, se)
+                _notify('deadline_exceeded', _attempt, _elapsed,
+                        'translation deadline expired during dispatch')
+                break
             if _dispatch_fail_count >= _MAX_CONTENT_RETRIES + 1:
                 logger.error('[Translate%s] Too many dispatch failures (%d): %s',
                              chunk_label, _dispatch_fail_count, se, exc_info=True)
@@ -458,10 +484,10 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                            chunk_label, _attempt, _dispatch_fail_count, se, _sleep)
             _notify('dispatch_error', _attempt, _elapsed,
                     f'{type(se).__name__}: {str(se)[:120]}')
-            time.sleep(_sleep)
+            time.sleep(min(_sleep, _remaining_deadline_seconds()))
             continue
 
-        # ★ Coerce structured Anthropic-style content (list of blocks
+        # Coerce structured Anthropic-style content (list of blocks
         #   like [{"type": "text", "text": "..."}, ...]) and stray dicts
         #   into a plain string so the regexes below don't crash with
         #   "expected string or bytes-like object, got 'dict'/'list'".
@@ -642,7 +668,7 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                 # Refuse to commit an identical-to-input "translation" — it
                 # would clobber any earlier good translation. Raise the typed
                 # refusal so the REST surface can answer 502 + envelope
-                # instead of a bare 500 (pt_75d8f8c7).
+                # instead of a bare 500 ().
                 translate_refusal.put(chunk, source, target, verdict='noop',
                                       reason=_noop_reason, model=_model,
                                       content_fails=_content_fail_count)
@@ -705,7 +731,7 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                         f'output flipped language after {_content_fail_count} retries')
                 # Refuse to commit a flipped translation — it would clobber the
                 # already-Chinese source with English. Raise the typed refusal
-                # so the REST surface can answer 502 + envelope (pt_75d8f8c7).
+                # so the REST surface can answer 502 + envelope ().
                 translate_refusal.put(chunk, source, target,
                                       verdict='wrong_language',
                                       reason=_flip_reason, model=_model,
@@ -769,7 +795,7 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                 # Refuse to commit the over-generated body — it would persist a
                 # correct translation fused with unrelated hallucinated text.
                 # Raise the typed refusal so the REST surface can answer
-                # 502 + envelope instead of a bare 500 (pt_75d8f8c7).
+                # 502 + envelope instead of a bare 500 ().
                 translate_refusal.put(chunk, source, target,
                                       verdict='over_generated',
                                       reason=_overgen_reason, model=_model,

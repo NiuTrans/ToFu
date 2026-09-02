@@ -33,3 +33,16 @@ def test_auto_certificate_uses_configured_and_bind_sans(tmp_path, monkeypatch):
     assert ipaddress.ip_address('192.0.2.44') in ips
     assert ipaddress.ip_address('192.0.2.45') in ips
     assert ipaddress.ip_address('0.0.0.0') not in ips
+
+
+def test_missing_explicit_certificate_never_downgrades_to_http(tmp_path):
+    from lib.server_tls import ensure_tls_certificates
+
+    with pytest.raises(FileNotFoundError, match='configured TLS file'):
+        ensure_tls_certificates(
+            str(tmp_path / 'missing-cert.pem'),
+            str(tmp_path / 'missing-key.pem'),
+            data_root=str(tmp_path / 'generated'),
+        )
+
+    assert not (tmp_path / 'generated').exists()

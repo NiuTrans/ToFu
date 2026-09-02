@@ -14,7 +14,6 @@ Routes:
   POST   /api/v1/orchestrations/layout          — tidy node positions (pure)
   POST   /api/v1/orchestrations/compose         — LLM author/edit from NL
   GET    /api/v1/orchestrations/authoring-contract — Studio schema/catalogue
-  GET    /api/v1/orchestrations/role-schema     — compatibility role lookup
   POST   /api/v1/orchestrations/plan            — dry-run execution preview
   POST   /api/v1/orchestrations/run             — execute (background task)
   GET    /api/v1/orchestrations/run/poll/{id}   — poll a run's events
@@ -27,7 +26,6 @@ from __future__ import annotations
 
 from quart import Blueprint
 
-from lib.config_dir import config_path as _config_path
 from lib.orchestration.application_services import (
     OrchestrationApplicationServices,
 )
@@ -36,10 +34,11 @@ from lib.orchestration.definition_service import (
     OrchestrationDefinitionService,
 )
 from lib.orchestration.run_service import OrchestrationRunService
+from lib.orchestration.sidecar_run_store import SidecarOrchestrationRunStore
 from lib.orchestration.human_gate_service import (
     OrchestrationHumanGateService,
 )
-from lib.task_runtime import TaskRuntime
+from lib.agent_core.task_runtime import TaskRuntime
 
 from .orchestration_definition_routes import (
     register_orchestration_definition_routes,
@@ -52,10 +51,9 @@ from .orchestration_task_routes import register_orchestration_task_routes
 from .orchestration_mutation_routes import (
     register_orchestration_mutation_routes,
 )
+from .auth import current_auth
 
 api_v1_orchestrations_bp = Blueprint('api_v1_orchestrations', __name__)
-
-_ORCH_PATH = _config_path('orchestrations.json')
 
 #: Background runtime for flow executions. Events stream to the
 #: ``orchestration`` push channel; the frontend polls /run/poll/<id>.
@@ -64,15 +62,22 @@ orchestration_run_runtime = TaskRuntime('orchestration-run', ttl=3600,
 
 
 def _definitions() -> OrchestrationDefinitionService:
-    # Construct on demand so tests/config reloads that replace _ORCH_PATH are
-    # honored without a module-global repository carrying a stale path.
-    return OrchestrationDefinitionService.from_path(_ORCH_PATH)
+    ctx = current_auth()
+    if ctx is None or ctx.owner_user_id is None:
+        raise RuntimeError('orchestration request has no repository owner')
+    return OrchestrationDefinitionService.for_owner(
+        ctx.owner_user_id, tenant_id=ctx.tenant_id)
 
 
 def _run_instances() -> OrchestrationRunService:
     """Construct the framework-free durable-run application boundary."""
+    ctx = current_auth()
+    if ctx is None or ctx.owner_user_id is None:
+        raise RuntimeError('orchestration request has no repository owner')
     return OrchestrationRunService(
-        runtime_mutation=_services.runtime_mutations())
+        SidecarOrchestrationRunStore(
+            ctx.owner_user_id, tenant_id=ctx.tenant_id),
+        runtime_mutation=_services.runtime_mutations(ctx.owner_user_id))
 
 
 def _authoring() -> OrchestrationAuthoringService:

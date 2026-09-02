@@ -82,7 +82,7 @@ def resolve_conv_config(
         # built-in Claude-Code static prompt. 'replace' → user prompt
         # fully replaces the built-in base block (CLAUDE.md / memory /
         # swarm / date are still auto-injected — they track feature
-        # toggles, not the base prose). See _inject_system_contexts.
+        # toggles, not the base prose). See compose_task_context.
         'systemPromptMode': (
             ov.get('systemPromptMode')
             or defaults.get('systemPromptMode')
@@ -127,17 +127,23 @@ def resolve_conv_config(
             _coerce_bool(conv.get('schedulerEnabled')),
             is_active=is_active,
         ),
-        'swarmEnabled': _pick(
-            _coerce_bool(ov.get('swarmEnabled')),
-            _coerce_bool(conv.get('swarmEnabled')),
-            is_active=is_active,
-        ),
         'projectPath': ov.get('projectPath') or conv.get('projectPath') or '',
         # RWA 伪路径(remote:<agent>:<root>)在下方翻译为 project_remote。
         'project_remote': None,
         'projectPaths': list(conv.get('projectPaths') or []),
         'readOnlyPaths': list(conv.get('readOnlyPaths') or []),
-        'autoApply': _coerce_bool(ov.get('autoApply'), False),
+        # Write-approval default is AUTO everywhere (2026-08-21 policy): the
+        # approval gate fires only on an EXPLICIT per-conv Manual choice.
+        # Active conv reads the live toolbar value (falling back to the conv's
+        # stored override); an inactive conv reads its stored value. Absent on
+        # both → True. Headless callers omit the key entirely and therefore
+        # never gate.
+        'autoApply': _pick(
+            _coerce_bool(ov.get('autoApply'),
+                         _coerce_bool(conv.get('autoApply'), True)),
+            _coerce_bool(conv.get('autoApply'), True),
+            is_active=is_active,
+        ),
         'browserEnabled': _pick(
             _coerce_bool(ov.get('browserEnabled')),
             _coerce_bool(conv.get('browserEnabled')),
@@ -156,11 +162,6 @@ def resolve_conv_config(
         'humanGuidanceEnabled': _pick(
             _coerce_bool(ov.get('humanGuidanceEnabled')),
             _coerce_bool(conv.get('humanGuidanceEnabled')),
-            is_active=is_active,
-        ),
-        'endpointMode': _pick(
-            _coerce_bool(ov.get('endpointMode')),
-            _coerce_bool(conv.get('endpointEnabled')),
             is_active=is_active,
         ),
         'autopilot': _pick(
@@ -192,7 +193,6 @@ def resolve_conv_config(
         'uiLang': _pick(ov.get('uiLang'), conv.get('uiLang'),
                         is_active=is_active) or None,
         'browserClientId': None,  # populated below
-        'keepToolHistory': ov.get('keepToolHistory') is not False,
     }
     # ── Orchestration flow selection (the Mode dropdown) ──
     # Active conv reads the live toolbar token; inactive reads the stored one.
@@ -207,6 +207,18 @@ def resolve_conv_config(
     # one reads the stored per-conv value.
     _chat_mode = _pick(ov.get('chatMode'), conv.get('chatMode'),
                        is_active=is_active)
+    # ── Agent interaction choice: Plan projection ──
+    # Plan remains orthogonal to the Chat/Studio capability dial, but is
+    # mutually exclusive with Goal, Autopilot, and an explicit Flow. Active
+    # conversations read the live toolbar value (falling back to stored state
+    # for old clients); inactive conversations read their stored value. The
+    # complete choice is normalized once all interaction fields are assembled.
+    out['planMode'] = _pick(
+        _coerce_bool(ov.get('planMode'),
+                     _coerce_bool(conv.get('planMode'), False)),
+        _coerce_bool(conv.get('planMode'), False),
+        is_active=is_active,
+    )
     if isinstance(_chat_mode, str) and _chat_mode.strip():
         out['chatMode'] = _chat_mode.strip().lower()
     out['activeFlow'] = active_flow if isinstance(active_flow, str) else ''
@@ -235,7 +247,8 @@ def resolve_conv_config(
         if parsed:
             out['project_remote'] = {'agent_id': parsed[0], 'root': parsed[1]}
             out['projectPath'] = ''
-    return out
+    from lib.tasks_pkg.plan_mode import normalize_interaction_mode_runtime_config
+    return normalize_interaction_mode_runtime_config(out)
 
 
 def resolve_conv_settings(
@@ -272,8 +285,6 @@ def resolve_conv_settings(
             if conv.get('memoryEnabled') is not None else True
         ),
         'schedulerEnabled': _coerce_bool(conv.get('schedulerEnabled')),
-        'swarmEnabled': _coerce_bool(conv.get('swarmEnabled')),
-        'endpointEnabled': _coerce_bool(conv.get('endpointEnabled')),
         'autopilotEnabled': _coerce_bool(conv.get('autopilotEnabled')),
         'imageGenEnabled': _coerce_bool(conv.get('imageGenEnabled')),
         'humanGuidanceEnabled': _coerce_bool(conv.get('humanGuidanceEnabled')),
@@ -289,9 +300,18 @@ def resolve_conv_settings(
             else _coerce_bool(ov.get('autoTranslate'), False)
         ),
         'folderId': conv.get('folderId') or None,
+        # Per-conv write-mode override; default Auto (approval prompts only
+        # after an explicit per-conv switch to Manual). Persist the conv's
+        # stored value, else the live toolbar override, else the Auto default.
+        'autoApply': _coerce_bool(conv.get('autoApply'),
+                                  _coerce_bool(ov.get('autoApply'), True)),
         # OUTPUT-side translate target language (see resolve_conv_config). This
-        # is what _maybe_auto_translate_assistant reads off settings.uiLang.
+        # is what the terminal turn translator reads from settings.uiLang.
         'uiLang': conv.get('uiLang') or ov.get('uiLang') or None,
+        # Plan Mode toggle state persists per-conv like the other atomic
+        # flags (stored conv value wins; live toolbar override as fallback).
+        'planMode': _coerce_bool(conv.get('planMode'),
+                                 _coerce_bool(ov.get('planMode'), False)),
     }
     # Two-tier chat mode — persist the stored/override value (chat/studio). A
     # legacy air/pro value is left as-is here and normalised forward to 'chat'
@@ -299,4 +319,7 @@ def resolve_conv_settings(
     _cm = conv.get('chatMode') or ov.get('chatMode')
     if isinstance(_cm, str) and _cm.strip():
         out['chatMode'] = _cm.strip().lower()
-    return out
+    from lib.tasks_pkg.plan_mode import (
+        normalize_interaction_mode_conversation_settings,
+    )
+    return normalize_interaction_mode_conversation_settings(out)

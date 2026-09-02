@@ -1,52 +1,21 @@
-"""lib.conversations.project_status — the human↔brain status lane (Pillar #7).
+"""Human-facing project status synthesis and snapshot history.
 
-Where the first six pillars (Activity Feed, Charter, Board, presence, per-conv
-summaries, peer comms) are agent-facing blackboards the human can read and poke
-per-cell, THIS pillar is the human's window back in as automation runs ahead:
-
-  • a **persistent, append-only history of project-status snapshots** — the
-    durable memory of *where the project IS* (the Charter is durable memory of
-    *intent*; the Feed is a raw ephemeral pulse; per-conv summaries were never
-    aggregated). The human works with facts that drift over time and needs the
-    TRAIL — how the project got here — not a single overwritten narrative.
-
-  • a **synthesis generator** that reads LIVE pillar state and produces one
-    bounded narrative answering "where are we / are we drifting from the
-    charter", with an explicit alignment-to-north-star read.
-
-Design invariants (owner-locked 2026-07-08; see docs/PROJECT_BRAIN_STATUS_LANE.md):
-  • **Keyed strictly on ``project_path``** — never a process-global singleton.
-  • **Append-only**, monotonic per-project ``seq`` minted under one module lock
-    (mirrors ``project_feed.emit_project_event`` exactly).
-  • **Laziness (reuse ``ensure_summary``'s discipline):** a new snapshot is
-    minted only when the pillar-state FINGERPRINT changed since the last
-    snapshot; a quiescent project is never re-synthesized (no LLM), and repeated
-    tab-opens are free.
-  • **Best-effort** — any pillar sub-read failing degrades that field; the
-    generator NEVER raises into a caller, and keeps the previous snapshot rather
-    than writing an empty one on LLM failure.
-  • **HUMAN-FACING ONLY** — this memory is NEVER injected into
-    ``lib/tasks_pkg/system_context.py`` / sibling agent prompts. That would blur
-    the human↔brain lane into the agent↔agent lane and re-raise the
-    coupling/storm concerns. (Guarded by test_project_status_no_ambient_injection.)
+Entry points collect live project state, synthesize a bounded narrative, and
+append/read snapshots through the Sidecar ``project.status`` operations.
+Snapshots and background jobs are keyed by explicit owner plus normalized
+project path. They are never injected into agent prompts.
 """
 
 from __future__ import annotations
 
 import json
-import queue
-import threading
 import time
 import uuid
 
-from lib.database import (
-    DOMAIN_CHAT,
-    allocate_scoped_sequence,
-    pooled_db,
-    write_transaction,
-)
+from lib.conversations._bounded_lane import BoundedCoalescingLane
 from lib.log import audit_log, get_logger
-from lib.timeutil import now_ms
+from lib.storage import get_storage_client
+from runtime_guards import resolve_resource_budget
 
 logger = get_logger(__name__)
 
@@ -77,9 +46,6 @@ _SYSTEM_PROMPT = (
 )
 
 
-_now_ms = now_ms
-
-
 # Event-driven status refreshes are intentionally asynchronous, but a raw
 # ``Thread(...).start()`` per charter commit turns a burst into an unbounded
 # number of simultaneous LLM calls.  Keep a small process-wide worker lane and
@@ -87,95 +53,72 @@ _now_ms = now_ms
 # change that arrives during it causes one follow-up pass over the newest
 # state.  Different projects still make bounded progress in parallel.
 _BACKGROUND_WORKERS = 2
-_background_queue: queue.Queue[str] = queue.Queue()
-_background_lock = threading.Lock()
-_background_jobs: dict[str, dict] = {}
-_background_started = False
+_BACKGROUND_CAPACITY = resolve_resource_budget(
+    'TOFU_PROJECT_REFRESH_QUEUE_CAPACITY', maximum=4096)
 
 
-def _background_worker() -> None:
-    while True:
-        project_path = _background_queue.get()
-        try:
-            while True:
-                with _background_lock:
-                    state = _background_jobs.get(project_path)
-                    if state is None:
-                        break
-                    trigger = state['trigger']
-                    force = bool(state['force'])
-                    state['running'] = True
-                    state['dirty'] = False
-                    state['force'] = False
-                try:
-                    _build_status_snapshot_blocking(
-                        project_path, trigger=trigger, force=force)
-                except Exception as exc:
-                    # The blocking builder is already fail-soft, but the lane
-                    # must survive an unexpected regression in that contract.
-                    logger.warning(
-                        '[ProjStatus] background worker failed proj=%.40r: %s',
-                        project_path, exc, exc_info=True)
-                with _background_lock:
-                    state = _background_jobs.get(project_path)
-                    if state is not None and state['dirty']:
-                        continue
-                    _background_jobs.pop(project_path, None)
-                    break
-        finally:
-            _background_queue.task_done()
+def _merge_background_request(
+    current: tuple[str, bool], newest: tuple[str, bool]
+) -> tuple[str, bool]:
+    return newest[0], bool(current[1] or newest[1])
 
 
-def _ensure_background_workers_locked() -> None:
-    global _background_started
-    if _background_started:
-        return
-    for index in range(_BACKGROUND_WORKERS):
-        threading.Thread(
-            target=_background_worker,
-            name=f'projstatus-worker-{index + 1}',
-            daemon=True,
-        ).start()
-    _background_started = True
+def _consume_background_request(
+    scope: tuple[int, str], request: tuple[str, bool]
+) -> None:
+    user_id, project_path = scope
+    trigger, force = request
+    _build_status_snapshot_blocking(
+        project_path,
+        user_id=user_id,
+        trigger=trigger,
+        force=force,
+    )
 
 
-def _schedule_background_snapshot(project_path: str, *, trigger: str,
-                                  force: bool) -> None:
+def _report_background_failure(
+    scope: tuple[int, str], error: Exception
+) -> None:
+    logger.warning(
+        '[ProjStatus] background worker failed proj=%.40r: %s',
+        scope[1], error, exc_info=True)
+
+
+_background_lane = BoundedCoalescingLane[
+    tuple[int, str], tuple[str, bool]
+](
+    name='project-status',
+    workers=_BACKGROUND_WORKERS,
+    capacity=_BACKGROUND_CAPACITY,
+    merge=_merge_background_request,
+    consume=_consume_background_request,
+    on_error=_report_background_failure,
+)
+
+
+def _schedule_background_snapshot(
+    project_path: str,
+    *,
+    user_id: int,
+    trigger: str,
+    force: bool,
+) -> bool:
     """Coalesce one non-blocking refresh into the bounded worker lane."""
-    enqueue = False
-    with _background_lock:
-        _ensure_background_workers_locked()
-        state = _background_jobs.get(project_path)
-        if state is None:
-            _background_jobs[project_path] = {
-                'trigger': trigger,
-                'force': bool(force),
-                'running': False,
-                'dirty': False,
-            }
-            enqueue = True
-        else:
-            state['trigger'] = trigger
-            state['force'] = bool(state['force'] or force)
-            if state['running']:
-                state['dirty'] = True
-    if enqueue:
-        _background_queue.put(project_path)
+    scope = (int(user_id), project_path)
+    return _background_lane.submit(scope, (trigger, bool(force)))
 
 
 def _wait_for_background_status(timeout: float = 5.0) -> bool:
     """Wait until the status lane is idle; lifecycle/test diagnostic seam."""
-    deadline = time.monotonic() + max(0.0, float(timeout))
-    while time.monotonic() < deadline:
-        with _background_lock:
-            if not _background_jobs:
-                return True
-        time.sleep(0.01)
-    with _background_lock:
-        return not _background_jobs
+    return _background_lane.wait_idle(timeout)
 
 
-def collect_pillar_state(project_path: str) -> dict:
+def background_status_lane_snapshot() -> dict[str, float | int | str]:
+    """Operational counters for capacity, saturation, and coalescing."""
+    return _background_lane.snapshot()
+
+
+def collect_pillar_state(project_path: str, *, user_id: int) -> dict:
     """Read LIVE state across the six pillars into one evidence dict.
 
     This is the SAME cross-pillar join ``build_brain_summary`` performs (board
@@ -205,7 +148,7 @@ def collect_pillar_state(project_path: str) -> dict:
     board_tasks = []
     try:
         from lib.conversations.project_board import read_board
-        board = read_board(project_path)
+        board = read_board(project_path, user_id=user_id)
         state['epicsOpen'] = int(board.get('open', 0))
         state['epicsClaimed'] = int(board.get('claimed', 0))
         state['epicsDone'] = int(board.get('done', 0))
@@ -224,7 +167,7 @@ def collect_pillar_state(project_path: str) -> dict:
     # ── Charter: north-star + committed decisions + version ──
     try:
         from lib.conversations.project_charter import read_charter
-        rec = read_charter(project_path)
+        rec = read_charter(project_path, user_id=user_id)
         state['charterExists'] = bool(rec.get('exists'))
         state['charterVersion'] = int(rec.get('version', 0))
         state['northStar'] = (rec.get('content') or '').strip()
@@ -241,7 +184,8 @@ def collect_pillar_state(project_path: str) -> dict:
     # ── Pending decisions (the human-gate count) — SINGLE source ──
     try:
         from lib.conversations.project_charter import pending_proposals
-        state['pendingDecisions'] = len(pending_proposals(project_path))
+        state['pendingDecisions'] = len(
+            pending_proposals(project_path, user_id=user_id))
     except Exception as e:
         logger.debug('[ProjStatus] pending read failed proj=%.40r: %s',
                      project_path, e)
@@ -249,7 +193,7 @@ def collect_pillar_state(project_path: str) -> dict:
     # ── Presence: active conversation-level peers ──
     try:
         from lib.presence.registry import snapshot
-        peers = snapshot(project_path).get('peers', []) or []
+        peers = snapshot(project_path, user_id=user_id).get('peers', []) or []
         conv_ids = {p.get('convId') for p in peers
                     if p.get('convId') and not p.get('agentId')}
         state['activePeers'] = len(conv_ids)
@@ -260,7 +204,7 @@ def collect_pillar_state(project_path: str) -> dict:
     # ── Feed: recent 'blocked' events (why work stalled) ──
     try:
         from lib.conversations.project_feed import read_project_feed
-        feed = read_project_feed(project_path, limit=80)
+        feed = read_project_feed(project_path, user_id=user_id, limit=80)
         blocks = []
         for e in feed.get('events', []):
             if e.get('kind') == 'blocked':
@@ -275,7 +219,8 @@ def collect_pillar_state(project_path: str) -> dict:
     # ── Sibling digest: bounded title+summary of other conversations ──
     try:
         from lib.conversations.project_summary import project_digest_entries
-        entries = project_digest_entries(project_path, limit=10)
+        entries = project_digest_entries(
+            project_path, user_id=user_id, limit=10)
         state['siblings'] = [{'title': e.get('title', ''),
                               'summary': e.get('summary', '')}
                              for e in entries]
@@ -386,40 +331,33 @@ def generate_narrative(pillar_state: dict) -> str:
     return text
 
 
-def _read_latest_snapshot(project_path: str) -> dict | None:
+def _read_latest_snapshot(project_path: str, *, user_id: int) -> dict | None:
     """Return the most-recent snapshot row for ``project_path`` (or None)."""
     from lib.conversations.project_feed import normalize_project_path
     project_path = normalize_project_path(project_path)
     if not project_path:
         return None
     try:
-        with pooled_db(DOMAIN_CHAT) as db:
-            row = db.execute(
-                'SELECT project_path, seq, snapshot_id, narrative, pillar_state, '
-                '       trigger, ts FROM project_status_snapshots '
-                'WHERE project_path=? ORDER BY seq DESC LIMIT 1',
-                (project_path,)).fetchone()
+        result = get_storage_client().query(
+            'project.status.list', {
+                'project_path': project_path,
+                'user_id': int(user_id),
+                'limit': 1,
+            },
+        )
     except Exception as e:
         logger.debug('[ProjStatus] latest read failed proj=%.40r: %s',
                      project_path, e)
         return None
-    return _row_to_snapshot(row) if row else None
+    return (result.get('snapshots') or [None])[0]
 
 
-def _row_to_snapshot(r) -> dict:
-    try:
-        pillar_state = json.loads(r['pillar_state']) if r['pillar_state'] else {}
-    except (TypeError, ValueError) as e:
-        logger.debug('[ProjStatus] pillar_state parse failed, defaulting: %s', e)
-        pillar_state = {}
-    return {
-        'seq': int(r['seq']), 'snapshot_id': r['snapshot_id'],
-        'narrative': r['narrative'] or '', 'pillar_state': pillar_state,
-        'trigger': r['trigger'] or '', 'ts': int(r['ts'] or 0),
-    }
-
-
-def read_status_history(project_path: str, limit: int = 30) -> dict:
+def read_status_history(
+    project_path: str,
+    *,
+    user_id: int,
+    limit: int = 30,
+) -> dict:
     """Read the snapshot trail for ``project_path`` (newest-first).
 
     Read-only, NO synthesis. Returns ``{'snapshots': [...newest-first...],
@@ -432,60 +370,54 @@ def read_status_history(project_path: str, limit: int = 30) -> dict:
         return out
     limit = max(1, min(int(limit or 30), _SNAPSHOTS_KEEP))
     try:
-        with pooled_db(DOMAIN_CHAT) as db:
-            rows = db.execute(
-                'SELECT project_path, seq, snapshot_id, narrative, pillar_state, '
-                '       trigger, ts FROM project_status_snapshots '
-                'WHERE project_path=? ORDER BY seq DESC LIMIT ?',
-                (project_path, limit)).fetchall()
+        return get_storage_client().query(
+            'project.status.list', {
+                'project_path': project_path,
+                'user_id': int(user_id),
+                'limit': limit,
+            },
+        )
     except Exception as e:
         logger.warning('[ProjStatus] history read failed proj=%.40r: %s',
                        project_path, e)
         return out
-    snapshots = [_row_to_snapshot(r) for r in rows]
-    out['snapshots'] = snapshots
-    out['maxSeq'] = snapshots[0]['seq'] if snapshots else 0
-    return out
 
 
-def _persist_snapshot(project_path: str, narrative: str, pillar_state: dict,
-                      trigger: str) -> dict | None:
+def _persist_snapshot(
+    project_path: str,
+    narrative: str,
+    pillar_state: dict,
+    trigger: str,
+    *,
+    user_id: int,
+) -> dict | None:
     """Append one snapshot row under the monotonic-seq lock; prune old rows."""
     snapshot_id = uuid.uuid4().hex
-    ts = _now_ms()
     try:
-        pillar_json = json.dumps(pillar_state, ensure_ascii=False)
-    except (TypeError, ValueError) as e:
-        logger.debug('[ProjStatus] pillar_state dump failed, defaulting: %s', e)
-        pillar_json = '{}'
-    try:
-        with pooled_db(DOMAIN_CHAT) as db:
-            with write_transaction(db, label='project-status-append'):
-                seq = allocate_scoped_sequence(
-                    db, 'project_status_snapshots', project_path)
-                db.execute(
-                    'INSERT INTO project_status_snapshots '
-                    '(project_path, seq, snapshot_id, narrative, pillar_state, '
-                    ' trigger, ts) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    (project_path, seq, snapshot_id, narrative, pillar_json,
-                     trigger or 'manual', ts))
-                if seq > _SNAPSHOTS_KEEP:
-                    db.execute(
-                        'DELETE FROM project_status_snapshots '
-                        'WHERE project_path=? AND seq <= ?',
-                        (project_path, seq - _SNAPSHOTS_KEEP))
+        snapshot = get_storage_client(write=True).command(
+            'project.status.append', {
+                'project_path': project_path,
+                'user_id': int(user_id),
+                'snapshot_id': snapshot_id,
+                'narrative': narrative,
+                'pillar_state': pillar_state,
+                'trigger': trigger or 'manual',
+                'keep': _SNAPSHOTS_KEEP,
+            },
+            f'project.status:{int(user_id)}:{project_path}:{snapshot_id}',
+        )
     except Exception as e:
         logger.warning('[ProjStatus] persist failed proj=%.40r: %s',
                        project_path, e)
         return None
-    audit_log('project_status_snapshot', project_path=project_path,
-              seq=seq, trigger=trigger)
-    return {'seq': seq, 'snapshot_id': snapshot_id, 'narrative': narrative,
-            'pillar_state': pillar_state, 'trigger': trigger or 'manual',
-            'ts': ts}
+    audit_log('project_status_snapshot', user_id=int(user_id),
+              project_path=project_path,
+              seq=int(snapshot.get('seq') or 0), trigger=trigger)
+    return snapshot
 
 
-def build_status_snapshot(project_path: str, *, trigger: str = 'manual',
+def build_status_snapshot(project_path: str, *, user_id: int,
+                          trigger: str = 'manual',
                           force: bool = False,
                           blocking: bool = True) -> dict | None:
     """Ensure ``project_path`` has a fresh status snapshot; return the latest.
@@ -512,20 +444,25 @@ def build_status_snapshot(project_path: str, *, trigger: str = 'manual',
         return None
 
     if not blocking:
-        cached = _read_latest_snapshot(project_path)
+        cached = _read_latest_snapshot(project_path, user_id=user_id)
         _schedule_background_snapshot(
-            project_path, trigger=trigger, force=force)
+            project_path, user_id=user_id, trigger=trigger, force=force)
         return cached
 
-    return _build_status_snapshot_blocking(project_path, trigger=trigger,
-                                           force=force)
+    return _build_status_snapshot_blocking(
+        project_path, user_id=user_id, trigger=trigger, force=force)
 
 
-def _build_status_snapshot_blocking(project_path: str, *, trigger: str,
-                                    force: bool) -> dict | None:
+def _build_status_snapshot_blocking(
+    project_path: str,
+    *,
+    user_id: int,
+    trigger: str,
+    force: bool,
+) -> dict | None:
     """Inline collect → staleness-gate → synthesize-if-stale → persist."""
-    pillar_state = collect_pillar_state(project_path)
-    latest = _read_latest_snapshot(project_path)
+    pillar_state = collect_pillar_state(project_path, user_id=user_id)
+    latest = _read_latest_snapshot(project_path, user_id=user_id)
     if not force and latest is not None:
         prev_fp = _fingerprint(latest.get('pillar_state') or {})
         if prev_fp == _fingerprint(pillar_state):
@@ -541,11 +478,17 @@ def _build_status_snapshot_blocking(project_path: str, *, trigger: str,
                      project_path)
         return latest
 
-    snap = _persist_snapshot(project_path, narrative, pillar_state, trigger)
+    snap = _persist_snapshot(
+        project_path,
+        narrative,
+        pillar_state,
+        trigger,
+        user_id=user_id,
+    )
     return snap or latest
 
 
-def get_status_view(project_path: str, *, limit: int = 30,
+def get_status_view(project_path: str, *, user_id: int, limit: int = 30,
                     force: bool = False) -> dict:
     """Non-blocking status view for the tab-open path.
 
@@ -568,7 +511,7 @@ def get_status_view(project_path: str, *, limit: int = 30,
     if not project_path:
         return {'latest': None, 'history': [], 'maxSeq': 0, 'refreshing': False}
 
-    hist = read_status_history(project_path, limit=limit)
+    hist = read_status_history(project_path, user_id=user_id, limit=limit)
     snapshots = hist.get('snapshots', [])
     latest = snapshots[0] if snapshots else None
 
@@ -577,7 +520,7 @@ def get_status_view(project_path: str, *, limit: int = 30,
     # a fresh one in the background and tell the client to poll.
     refreshing = False
     try:
-        pillar_state = collect_pillar_state(project_path)
+        pillar_state = collect_pillar_state(project_path, user_id=user_id)
         stale = (
             force or latest is None
             or _fingerprint(latest.get('pillar_state') or {})
@@ -592,8 +535,13 @@ def get_status_view(project_path: str, *, limit: int = 30,
         # Fire-and-forget warm (the blocking builder re-collects + re-checks the
         # gate itself, so a racing warm is harmless — it dedups on fingerprint).
         try:
-            build_status_snapshot(project_path, trigger='on_open',
-                                  force=force, blocking=False)
+            build_status_snapshot(
+                project_path,
+                user_id=user_id,
+                trigger='on_open',
+                force=force,
+                blocking=False,
+            )
         except Exception as e:
             logger.warning('[ProjStatus] background warm failed proj=%.40r: %s',
                            project_path, e)
@@ -603,7 +551,12 @@ def get_status_view(project_path: str, *, limit: int = 30,
             'maxSeq': hist.get('maxSeq', 0), 'refreshing': refreshing}
 
 
-def answer_status_question(project_path: str, question: str) -> dict:
+def answer_status_question(
+    project_path: str,
+    question: str,
+    *,
+    user_id: int,
+) -> dict:
     """Read-only synthesis Q&A: the human's question + LIVE pillar state → an
     answer. Writes NOTHING (no snapshot appended). Returns ``{'ok', 'answer'?,
     'pillar_state'?, 'error'?}``. Never raises.
@@ -615,7 +568,7 @@ def answer_status_question(project_path: str, question: str) -> dict:
         return {'ok': False, 'error': 'no project'}
     if not question:
         return {'ok': False, 'error': 'empty question'}
-    pillar_state = collect_pillar_state(project_path)
+    pillar_state = collect_pillar_state(project_path, user_id=user_id)
     source = _build_synthesis_source(pillar_state)
     started = time.time()
     try:
@@ -650,14 +603,14 @@ def answer_status_question(project_path: str, question: str) -> dict:
     return {'ok': True, 'answer': answer, 'pillar_state': pillar_state}
 
 
-def status_line(project_path: str) -> str:
+def status_line(project_path: str, *, user_id: int) -> str:
     """The one-line status headline for the collab-bar (ambient perception).
 
     Returns the FIRST sentence of the latest stored snapshot's narrative, or ''
     when there is no snapshot yet. Read-only, NO synthesis (cheap enough for the
     always-visible bar).
     """
-    latest = _read_latest_snapshot(project_path)
+    latest = _read_latest_snapshot(project_path, user_id=user_id)
     if not latest or not latest.get('narrative'):
         return ''
     text = latest['narrative'].strip()

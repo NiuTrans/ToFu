@@ -6,8 +6,8 @@ Wiring/structure checks, following the project's verify-then-write discipline.
 
 Fixes covered:
   1. spawn_agents role catalogue only advertises MANUALLY-SPAWNABLE roles.
-     The 4 endpoint/autopilot-internal roles (planner/worker/critic/
-     virtual_user) are used by get_role_config for endpoint mode but must NOT
+     The four Flow/Autopilot-internal roles (planner/worker/critic/
+     virtual_user) are used by get_role_config for Flow execution but must NOT
      appear in format_role_catalogue() — the spawn_agents `role` param text
      lists 7 roles, so dumping 11 in the catalogue above it is self-
      contradictory and invites the model to spawn a role whose prompt makes no
@@ -44,7 +44,7 @@ def test_role_catalogue_excludes_internal_roles():
     cat = format_role_catalogue()
     for role in _INTERNAL_ROLES:
         assert f'- {role}:' not in cat, (
-            f'{role!r} is endpoint/autopilot-internal and must not be offered '
+            f'{role!r} is Flow/Autopilot-internal and must not be offered '
             f'as a manually-spawnable role in the catalogue')
 
 
@@ -56,8 +56,8 @@ def test_role_catalogue_keeps_spawnable_roles():
             f'{role!r} must remain in the manual-spawn catalogue')
 
 
-def test_internal_roles_still_resolvable_for_endpoint_mode():
-    # The filter is catalogue-only: endpoint mode still needs the configs.
+def test_internal_roles_still_resolvable_for_flow_nodes():
+    # The filter is catalogue-only: Flow execution still needs the configs.
     from lib.swarm.registry import AGENT_ROLES, get_role_config
     for role in _INTERNAL_ROLES:
         assert role in AGENT_ROLES

@@ -43,11 +43,6 @@ class RateLimitTest(unittest.TestCase):
         d = check_request(None)
         self.assertTrue(d.allowed)
 
-    def test_tunnel_bypasses_limits(self):
-        ctx = AuthContext(via_tunnel_token=True, scopes=frozenset({'admin'}))
-        d = check_request(ctx)
-        self.assertTrue(d.allowed)
-
     def test_zero_limits_allow_everything(self):
         ctx = self._ctx(rpm=0, tpd=0)
         for _ in range(1000):

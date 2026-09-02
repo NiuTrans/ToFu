@@ -11,12 +11,31 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from lib.vite_assets import VITE_MANIFEST, ViteAssetError, validate_vite_artifact  # noqa: E402
+from lib.vite_assets import (  # noqa: E402
+    VITE_MANIFEST,
+    ViteAssetError,
+    validate_source_vite_artifact,
+    validate_vite_artifact,
+)
 
 
 def main() -> int:
+    arguments = sys.argv[1:]
+    unknown = [argument for argument in arguments
+               if argument != '--authoring-freshness']
+    if unknown:
+        print(
+            f'unknown frontend validation option(s): {", ".join(unknown)}',
+            file=sys.stderr,
+        )
+        return 2
+    validator = (
+        validate_source_vite_artifact
+        if '--authoring-freshness' in arguments else
+        validate_vite_artifact
+    )
     try:
-        manifest = validate_vite_artifact()
+        manifest = validator()
     except ViteAssetError as exc:
         print(f'frontend artifact validation failed: {exc}', file=sys.stderr)
         return 1

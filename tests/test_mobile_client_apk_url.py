@@ -112,6 +112,9 @@ def test_ci_workflow_tag_namespace_and_path_filter():
         "the tag trigger must be the android-v* namespace, not bare v* "
         "(desktop releases share this repo's tag space)"
     )
+    assert 'branches: [main, master]' in text, (
+        'Android changes on the default main branch must run the APK build'
+    )
     assert re.search(r"tags:\s*\[?'v\*'?", text) is None, (
         'a bare v* tag trigger would fire an APK build on every desktop release'
     )

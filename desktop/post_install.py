@@ -149,53 +149,8 @@ class PlaywrightChromium(Component):
             return False, 'detail:%s' % e
 
 
-class PostgreSQL(Component):
-    key = 'postgresql'
-    name = 'PostgreSQL Database'
-    description = (
-        'High-performance database for multi-user deployments. '
-        'Provides better concurrency, JSONB support, and full-text search. '
-        'Without this, the app uses SQLite (single-user, still fully functional).'
-    )
-    recommended = True
-
-    def is_installed(self) -> bool:
-        """Check if PG binaries are available."""
-        import shutil
-        # Check in bundled location first
-        pg_dir = os.path.join(DATA_DIR, 'pgsql', 'bin')
-        if os.path.isdir(pg_dir):
-            return True
-        # Check system PATH
-        return shutil.which('initdb') is not None
-
-    def install(self, progress_callback=None) -> tuple[bool, str]:
-        """Bootstrap PostgreSQL via the app's existing mechanism."""
-        try:
-            if progress_callback:
-                progress_callback(self.name, 'pg_setting_up')
-
-            # The app's lib/database/_bootstrap.py handles PG setup.
-            # Trigger it by importing the database module.
-            sys.path.insert(0, BASE_DIR)
-            os.chdir(BASE_DIR)
-
-            from lib.database._bootstrap import ensure_pg_available
-            success = ensure_pg_available()
-
-            if success:
-                return True, 'pg_ok'
-            else:
-                return False, 'pg_bootstrap_failed'
-        except ImportError:
-            return False, 'pg_no_module'
-        except Exception as e:
-            return False, 'detail:%s' % e
-
-
 # Registry of all optional components
 OPTIONAL_COMPONENTS: list[Component] = [
-    PostgreSQL(),
     PlaywrightChromium(),
 ]
 

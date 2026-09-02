@@ -1,5 +1,3 @@
-# Incident anchor: born in commit 4ae62fe4 — test(docs): guard CLAUDE.md against path drift; fix 8 stale references
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """CLAUDE.md path-drift guard.
 
 Why this exists
@@ -67,7 +65,8 @@ CLAUDE_MD = os.path.join(ROOT, 'CLAUDE.md')
 # they are shorthand for a file inside a package named in the surrounding
 # tree block, and resolving them would require guessing.
 _PATH_RE = re.compile(
-    r'`([a-zA-Z0-9_.-]+/[a-zA-Z0-9_./-]+\.(?:py|js|md|json|css|html))`'
+    r'`([a-zA-Z0-9_.-]+/[a-zA-Z0-9_./-]+'
+    r'(?:\.(?:py|js|ts|md|json|css|html|yaml|yml)|/))`'
 )
 
 # Paths that are legitimately absent from a fresh checkout: runtime-generated
@@ -140,12 +139,23 @@ def test_claude_md_exists():
 
 
 def test_claude_md_has_checkable_paths():
-    """Sanity: the regex still matches. Guards against a silent no-op."""
+    """The concise entry point must retain every high-value navigation seam."""
     paths = _referenced_paths()
-    assert len(paths) >= 50, (
-        f'Only {len(paths)} fully-qualified paths found in CLAUDE.md — the '
-        'extraction regex likely broke (it matched 91 when written). A guard '
-        'that scans nothing always passes and protects nothing.'
+    required = {
+        'docs/README.md',
+        'docs/catalog.json',
+        'lib/app_assembly.py',
+        'routes/__init__.py',
+        'contracts/conversation_sync_v3.yaml',
+        'frontend/src/runtime/sections/',
+        'frontend/src/runtime/app-runtime.js',
+        'docs/API_CONTRACT.md',
+        'docs/EVENTS.md',
+        'docs/ARCHITECTURE.md',
+    }
+    assert required <= paths, (
+        'CLAUDE.md is a one-hop repository entry point; these navigation '
+        f'seams are missing: {sorted(required - paths)}'
     )
 
 

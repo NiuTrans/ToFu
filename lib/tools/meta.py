@@ -272,11 +272,11 @@ def _build_edit_file(meta, fn_name, fn_args, tool_content, path):
 
 def _build_run_command(meta, fn_name, fn_args, tool_content, path):
     cmd = fn_args.get('command', '')
-    # ★ Must anchor to END — command output may itself contain [exit code: N]
+    # Must anchor to END — command output may itself contain [exit code: N]
     m = re.search(r'\[exit code: (-?\d+)\]\s*$', tool_content)
     exit_code = m.group(1) if m else '?'
     timed_out = '[Command timed out]' in tool_content
-    # ★ Per-command interrupt (user button / stall watchdog, pt_232244fb):
+    # Per-command interrupt (user button / stall watchdog, ):
     #   `[Command interrupted by user]` / `[Command interrupted by stall-
     #   watchdog: …]`. Distinct from a whole-task abort — the turn CONTINUED
     #   with the partial output, so the round settles done, not aborted.
@@ -294,7 +294,7 @@ def _build_run_command(meta, fn_name, fn_args, tool_content, path):
     meta['description'] = fn_args.get('description', '')
     meta['timedOut'] = timed_out
     meta['interrupted'] = interrupted
-    # ★ "Never ran" classification. When there is NO [exit code] marker and it
+    # "Never ran" classification. When there is NO [exit code] marker and it
     #   isn't a timeout, the command was REFUSED/BLOCKED before execution
     #   (read-only root, dangerous pattern, empty command, no project path, a
     #   pre-tool-hook block, an abort, or a start error). Surfacing this as the
@@ -408,19 +408,6 @@ def _build_insert_content(meta, fn_name, fn_args, tool_content, path):
         meta['writeOk'] = ok
 
 
-def _build_create_project(meta, fn_name, fn_args, tool_content, path):
-    ok = not tool_content.lower().startswith('create_project failed')
-    p = fn_args.get('path', '') or path
-    name = fn_args.get('name', '')
-    if ok:
-        meta['snippet'] = f'{p}' + (f'  name={name}' if name else '')
-        meta['badge'] = 'created'
-    else:
-        meta['snippet'] = f'{p} — {tool_content[:120]}'
-        meta['badge'] = 'failed'
-    meta['writeOk'] = ok
-
-
 def _build_default(meta, fn_name, fn_args, tool_content, path):
     meta['snippet'] = tool_content[:120].replace('\n', ' ')
     meta['badge'] = ''
@@ -459,7 +446,6 @@ _META_BUILDERS = {
     'run_command':  _build_run_command,
     'insert_content': _build_insert_content,
     'insert_contents': _build_insert_content,
-    'create_project': _build_create_project,
 }
 
 

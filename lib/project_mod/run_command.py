@@ -17,6 +17,7 @@ layer depends on this module, not the reverse.
 
 import os
 import re as _re  # alias used by the retained _maybe_wrap_rm_with_trash
+import shlex
 import subprocess
 import time
 
@@ -35,6 +36,7 @@ from lib.project_mod.modifications import _record_modification
 # `lib.project_mod.tools` keep exposing these symbols unchanged.
 from lib.project_mod.command_analysis import (  # noqa: F401
     _ANSI_ESC_RE,
+    _AWK_INPLACE,
     _DANGEROUS_RE,
     _DELETE_COMMANDS,
     _DEVICE_RE,
@@ -70,6 +72,228 @@ from lib.project_mod.grep_redirect import plan_grep_redirect
 
 logger = get_logger(__name__)
 
+_TIMEOUT_SCAN_ARGS = {}
+
+
+_DIRECTORY_LISTING_SHORT_FLAGS = frozenset('aAFlh1')
+_DIRECTORY_LISTING_LONG_FLAGS = frozenset({
+    '--all', '--almost-all', '--classify', '--group-directories-first',
+    '--human-readable',
+})
+_LS_FAST_PATH_EXECUTABLES = frozenset({'ls', '/bin/ls', '/usr/bin/ls'})
+_FIND_FAST_PATH_EXECUTABLES = frozenset({
+    'find', '/bin/find', '/usr/bin/find',
+})
+_PYTHON_COMMAND_EXECUTABLE_RE = _re.compile(
+    r'^python(?:\d+(?:\.\d+)*)?(?:\.exe)?$', _re.IGNORECASE)
+
+
+def _looks_like_python_command(command):
+    """Cheap import gate for the optional Python cache planner."""
+    try:
+        tokens = shlex.split(str(command or '').strip(), posix=True)
+    except ValueError:
+        return False
+    return bool(
+        tokens
+        and _PYTHON_COMMAND_EXECUTABLE_RE.fullmatch(
+            os.path.basename(tokens[0]))
+    )
+
+
+def _has_dynamic_shell_syntax(source):
+    """Whether *source* needs shell expansion/control semantics.
+
+    A fast-path parser may consume quoted literals, including a quoted glob
+    used as a ``find -name`` argument. It must not consume separators,
+    redirections, substitutions, or unquoted glob/brace expansion: those stay
+    with the real shell. Backslash-escaped characters are static literals.
+    """
+    in_single = False
+    in_double = False
+    index = 0
+    while index < len(source):
+        char = source[index]
+        if char == '\\' and not in_single and index + 1 < len(source):
+            index += 2
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif char in '\n\r':
+            return True
+        elif not in_single and char in '$`':
+            return True
+        elif not in_single and not in_double and char in ';&|<>(){}*?[]#':
+            return True
+        index += 1
+    return False
+
+
+def _safe_fast_path_relative_path(path):
+    value = str(path or '')
+    if (not value or os.path.isabs(value) or value.startswith('~')
+            or any(part == '..'
+                   for part in value.replace('\\', '/').split('/'))):
+        return None
+    return value
+
+
+def parse_safe_directory_listing_command(command):
+    """Return a bounded directory-listing request for a plain ``ls`` command.
+
+    The interception is intentionally narrower than shell parsing: one command,
+    one relative path, and presentation-only flags. Pipelines, expansions,
+    recursion, absolute/parent traversal, and multiple operands keep using the
+    ordinary shell so redirect/exit-code semantics are never silently changed.
+    """
+    source = str(command or '').strip()
+    if not source or _has_dynamic_shell_syntax(source):
+        return None
+    try:
+        tokens = shlex.split(source, posix=True)
+    except ValueError:
+        return None
+    if not tokens or tokens[0] not in _LS_FAST_PATH_EXECUTABLES:
+        return None
+
+    paths = []
+    show_hidden = False
+    options_done = False
+    for token in tokens[1:]:
+        if not options_done and token == '--':
+            options_done = True
+            continue
+        if not options_done and token.startswith('--'):
+            option, separator, value = token.partition('=')
+            if option == '--color' and (not separator or value in {
+                    'always', 'auto', 'never'}):
+                continue
+            if option not in _DIRECTORY_LISTING_LONG_FLAGS or separator:
+                return None
+            if option in {'--all', '--almost-all'}:
+                show_hidden = True
+            continue
+        if not options_done and token.startswith('-') and token != '-':
+            flags = token[1:]
+            if not flags or any(flag not in _DIRECTORY_LISTING_SHORT_FLAGS
+                                for flag in flags):
+                return None
+            if 'a' in flags or 'A' in flags:
+                show_hidden = True
+            continue
+        paths.append(token)
+
+    if len(paths) > 1:
+        return None
+    path = paths[0] if paths else '.'
+    path = _safe_fast_path_relative_path(path)
+    if path is None:
+        return None
+    return {'path': path, 'show_hidden': show_hidden}
+
+
+def parse_safe_file_find_command(command):
+    """Translate the safe, index-compatible subset of GNU ``find``.
+
+    Accepted shapes have one relative root, exactly ``-type f``, at most one
+    basename ``-name``/``-iname`` predicate, and an optional trailing
+    ``-print``. Complex expressions, mutation, dynamic shell input, and
+    pipelines deliberately return ``None`` and retain the real ``find`` plus
+    its existing segment timeout.
+    """
+    source = str(command or '').strip()
+    if not source or _has_dynamic_shell_syntax(source):
+        return None
+    try:
+        tokens = shlex.split(source, posix=True)
+    except ValueError:
+        return None
+    if not tokens or tokens[0] not in _FIND_FAST_PATH_EXECUTABLES:
+        return None
+
+    index = 1
+    path = '.'
+    if index < len(tokens) and not tokens[index].startswith('-'):
+        path = tokens[index]
+        index += 1
+    path = _safe_fast_path_relative_path(path)
+    if path is None:
+        return None
+
+    pattern = '*'
+    case_sensitive = False
+    saw_name = False
+    saw_file_type = False
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {'-name', '-iname'}:
+            if saw_name or index + 1 >= len(tokens):
+                return None
+            pattern = tokens[index + 1]
+            if not pattern or '/' in pattern or '\\' in pattern:
+                return None
+            case_sensitive = token == '-name'
+            saw_name = True
+            index += 2
+            continue
+        if token == '-type':
+            if saw_file_type or index + 1 >= len(tokens) \
+                    or tokens[index + 1] != 'f':
+                return None
+            saw_file_type = True
+            index += 2
+            continue
+        if token == '-print' and index == len(tokens) - 1:
+            index += 1
+            continue
+        return None
+    if not saw_file_type:
+        return None
+    return {
+        'path': path,
+        'pattern': pattern,
+        'case_sensitive': case_sensitive,
+        'max_results': 500,
+    }
+
+
+def _timeout_scan_wrapper_args(timeout_binary):
+    """Probe one timeout binary and return only options it advertises.
+
+    GNU coreutils before 8.23 has no ``--verbose``; BusyBox variants may only
+    expose short signal/kill flags. The duration-only form is the safe final
+    fallback, so a compatibility optimization can never make ``find`` fail at
+    process startup merely because of the host's timeout version.
+    """
+    cached = _TIMEOUT_SCAN_ARGS.get(timeout_binary)
+    if cached is not None:
+        return cached
+    try:
+        probe = subprocess.run(
+            [timeout_binary, '--help'], capture_output=True, text=True,
+            timeout=2, check=False)
+        help_text = f'{probe.stdout}\n{probe.stderr}'
+    except (OSError, subprocess.SubprocessError):
+        help_text = ''
+    args = []
+    if '--verbose' in help_text:
+        args.append('--verbose')
+    if '--signal' in help_text:
+        args.append('--signal=TERM')
+    elif _re.search(r'(?m)(?:^|[\s,])-s(?:[\s,=]|$)', help_text):
+        args.extend(('-s', 'TERM'))
+    if '--kill-after' in help_text:
+        args.append('--kill-after=2s')
+    elif _re.search(r'(?m)(?:^|[\s,])-k(?:[\s,=]|$)', help_text):
+        args.extend(('-k', '2s'))
+    result = tuple(args)
+    if len(_TIMEOUT_SCAN_ARGS) >= 4:
+        _TIMEOUT_SCAN_ARGS.clear()
+    _TIMEOUT_SCAN_ARGS[timeout_binary] = result
+    return result
+
 
 _SENSITIVE_ENV_SUFFIX_RE = _re.compile(
     r'(?:^|_)(?:API_KEYS?|TOKENS?|SECRETS?|PASSWORDS?|PASSWDS?|'
@@ -92,7 +316,7 @@ def _is_sensitive_inherited_env(name):
 
 
 def _get_cmd_env(cwd=None, credential_env=None, strip_credential_vars=None,
-                net_overlay=None):
+                 owner_user_id=None):
     """Return an env dict for subprocess calls spawned by run_command.
 
     Subprocesses inherit the server's non-sensitive runtime environment
@@ -146,7 +370,8 @@ def _get_cmd_env(cwd=None, credential_env=None, strip_credential_vars=None,
     # Skill-scoped bindings keep their separate declaration/eligibility path.
     try:
         from lib.skills.env import exec_env_overlay
-        env.update(exec_env_overlay(project_path=cwd))
+        env.update(exec_env_overlay(
+            project_path=cwd, owner_user_id=owner_user_id))
     except Exception as _env_e:
         logger.debug('[run_command] skill env overlay skipped: %s', _env_e)
 
@@ -222,17 +447,7 @@ def _get_cmd_env(cwd=None, credential_env=None, strip_credential_vars=None,
             else:
                 env['PYTHONPATH'] = cwd
 
-    # ── run_net route injection (TOFU_NETCMD): per-command proxy/mirror
-    #   overlay resolved by the adaptive network layer for THIS command's
-    #   targets. A value of None unsets the var (e.g. force-direct).
-    if net_overlay:
-        for _key, _value in net_overlay.items():
-            if _value is None:
-                env.pop(_key, None)
-            else:
-                env[_key] = _value
-
-    # ★ Portable sandbox env-jail (restricted/agent-run principals only):
+    # Portable sandbox env-jail (restricted/agent-run principals only):
     #   point HOME/TMPDIR inside the workspace and prepend the rm/mv shim dir
     #   to PATH. Applied LAST so the shim dir wins over venv/system bins.
     #   Local desktop/CLI callers are not restricted → untouched.
@@ -305,7 +520,7 @@ def _read_cwd_capture(capture_file):
 
 
 # ═══════════════════════════════════════════════════════
-#  ★ Filesystem snapshot helpers for run_command tracking
+#  Filesystem snapshot helpers for run_command tracking
 # ═══════════════════════════════════════════════════════
 
 # Max depth to scan for file changes after run_command (avoid scanning huge trees)
@@ -343,18 +558,44 @@ except (ValueError, TypeError) as e:
     _TRASH_TTL_DAYS = 7
 
 
+def _trash_workspace_root(cwd):
+    """Resolve the enclosing workspace (git) root for the recoverable-delete bin.
+
+    The undo bin belongs to the WORKSPACE, not to whatever subdirectory the
+    command happens to run in: a sticky ``cd lib/tasks_pkg`` used to drop a
+    ``.tofu_trash/`` full of stale source copies right inside the source
+    tree (found 2026-08-20: 161K of old orchestrator snapshots under
+    ``lib/tasks_pkg/.tofu_trash``). Walk up from ``cwd`` to the nearest
+    directory containing a ``.git`` entry (directory OR git-worktree file);
+    fall back to ``cwd`` itself when there is none (temp dirs, un-versioned
+    workspaces — the historical behaviour).
+    """
+    if not cwd or not os.path.isabs(cwd):
+        return cwd
+    d = os.path.normpath(cwd)
+    while True:
+        if os.path.exists(os.path.join(d, '.git')):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return cwd
+        d = parent
+
 def _maybe_wrap_rm_with_trash(command, cwd):
     """Prepend an ``rm`` shell-function shim that trashes instead of deletes.
 
     Returns the (possibly rewritten) command. No-op when disabled, when the
     command has no ``rm`` segment, or when the command already references the
     trash dir (avoid double-wrapping). The shim moves each target under
-    ``<cwd>/.tofu_trash/<timestamp>/`` preserving relative layout; ``-f`` on
+    ``<workspace-root>/.tofu_trash/<timestamp>/`` preserving relative layout
+    (the workspace root is resolved by ``_trash_workspace_root`` so a sticky
+    ``cd`` into a subdirectory never drops the bin inside the source tree);
+    ``-f`` on
     a missing file still succeeds (exit 0) to match ``rm`` semantics. On each
     delete it also lazily prunes trash entries older than
     ``TOFU_TRASH_TTL_DAYS`` (default 7) so the bin can't grow unbounded.
 
-    ★ The trash is the WORKSPACE's undo bin, not the machine's. An absolute
+    The trash is the WORKSPACE's undo bin, not the machine's. An absolute
     operand that resolves OUTSIDE ``cwd`` (the routine
     ``rm -rf /tmp/wt_fill`` temp-worktree cleanup) is deleted DIRECTLY by the
     real ``rm`` inside the shim — moving it into the project trash is a
@@ -376,8 +617,10 @@ def _maybe_wrap_rm_with_trash(command, cwd):
         return command
     if _TRASH_DIRNAME in command:
         return command
-    trash_root = os.path.join(cwd or '.', _TRASH_DIRNAME)
-    _ws = os.path.normpath(cwd) if cwd and os.path.isabs(cwd) else None
+    trash_base = _trash_workspace_root(cwd)
+    trash_root = os.path.join(trash_base or '.', _TRASH_DIRNAME)
+    _ws = (os.path.normpath(trash_base)
+           if trash_base and os.path.isabs(trash_base) else None)
     if _ws == os.sep:
         _ws = None  # root cwd: every absolute path is "inside" — trash all
     # Lazy retention prune: drop trash timestamp-dirs older than the TTL so the
@@ -430,44 +673,66 @@ def _maybe_wrap_rm_with_trash(command, cwd):
 
 
 def _snapshot_project_files(base_path):
-    """Take a lightweight snapshot of the project file tree (path → mtime).
+    """Take a lightweight snapshot of the project file tree (rel → (mtime, size)).
 
     Captures only files that pass the ignore filter and are within a
     reasonable depth/count.  Used before/after run_command to detect
     what files were created, deleted, or modified.
+
+    Size is captured from the SAME ``DirEntry.stat`` result as mtime, so the
+    undo content read in ``tools.py`` can reuse it instead of re-statting each
+    file.  The walk is a single-pass iterative ``os.scandir`` (top-down DFS)
+    instead of ``os.walk`` + ``os.stat``: ``os.walk`` discards the ``DirEntry``
+    objects, so the old code issued a fresh ``stat(2)`` per file even though the
+    scandir readdirplus had already cached the metadata.  Symlinks are skipped
+    (never followed) — real files/dirs are tracked; a symlink target inside the
+    project is still covered via its own real path.
     """
-    snapshot = {}  # rel_path → mtime (float)
+    snapshot = {}  # rel_path → (mtime, size)
     count = 0
-    base_len = len(base_path.rstrip('/')) + 1
+    base = base_path.rstrip('/')
+    base_len = len(base) + 1
     try:
-        for dirpath, dirnames, filenames in os.walk(base_path, followlinks=False):
-            # Depth check
-            rel_dir = dirpath[base_len:] if len(dirpath) > base_len else ''
-            depth = rel_dir.count(os.sep) + 1 if rel_dir else 0
+        stack = [(base, 0)]
+        while stack and count < _SNAPSHOT_MAX_FILES:
+            dirpath, depth = stack.pop()
             if depth > _SNAPSHOT_MAX_DEPTH:
-                dirnames.clear()
                 continue
-            # Prune ignored dirs in-place — exclude per-project ignore + DB engine dirs
-            # Note: dot-dirs like .tofu/.project_sessions are still walked
-            # so that destructive commands targeting them are tracked.
-            dirnames[:] = [
-                d for d in dirnames
-                if d not in IGNORE_DIRS
-                and d not in _SNAPSHOT_EXTRA_IGNORE
-            ]
-            for fname in filenames:
+            try:
+                entries = list(os.scandir(dirpath))
+            except OSError as e:
+                logger.debug('[Snapshot] scandir failed for %s: %s', dirpath, e)
+                continue
+            subdirs = []
+            for entry in entries:
+                name = entry.name
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        # Exclude per-project ignore + DB engine dirs.  Dot-dirs
+                        # like .tofu/.project_sessions are still walked so that
+                        # destructive commands targeting them are tracked.
+                        if name in IGNORE_DIRS or name in _SNAPSHOT_EXTRA_IGNORE:
+                            continue
+                        subdirs.append((entry.path, depth + 1))
+                        continue
+                    # Non-directory: only regular files are tracked (symlinks
+                    # and special files are skipped).  DirEntry caches the
+                    # lstat from the is_dir check above, so this costs nothing.
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                except OSError as e:
+                    logger.debug('[Snapshot] type check failed for %s: %s', entry.path, e)
+                    continue
                 if count >= _SNAPSHOT_MAX_FILES:
                     break
-                fp = os.path.join(dirpath, fname)
-                rel = fp[base_len:]
+                rel = entry.path[base_len:]
                 try:
-                    st = os.stat(fp)
-                    snapshot[rel] = st.st_mtime
+                    st = entry.stat(follow_symlinks=False)
+                    snapshot[rel] = (st.st_mtime, st.st_size)
                 except OSError as e:
                     logger.debug('[Snapshot] stat failed for %s: %s', rel, e)
                 count += 1
-            if count >= _SNAPSHOT_MAX_FILES:
-                break
+            stack.extend(reversed(subdirs))
     except OSError as e:
         logger.debug('[Snapshot] os.walk error for %s: %s', base_path, e)
     return snapshot
@@ -475,6 +740,10 @@ def _snapshot_project_files(base_path):
 
 def _diff_snapshots(base_path, before, after):
     """Compare two snapshots to find created, deleted, and modified files.
+
+    Each snapshot maps ``rel_path → (mtime, size)``.  A file is reported
+    ``modified`` when its mtime changed (size is captured for the undo content
+    read, not for change detection).
 
     Returns list of dicts: [{rel_path, change_type}] where change_type is
     'created', 'deleted', or 'modified'.
@@ -488,7 +757,7 @@ def _diff_snapshots(base_path, before, after):
             changes.append({'rel_path': rel, 'change_type': 'created'})
         elif in_before and not in_after:
             changes.append({'rel_path': rel, 'change_type': 'deleted'})
-        elif in_before and in_after and before[rel] != after[rel]:
+        elif in_before and in_after and before[rel][0] != after[rel][0]:
             changes.append({'rel_path': rel, 'change_type': 'modified'})
     return changes
 
@@ -536,7 +805,7 @@ def _record_run_command_changes(base_path, changes, conv_id=None, task_id=None):
 
 
 # ═══════════════════════════════════════════════════════
-#  ★ Tool Implementation: run_command
+#  Tool Implementation: run_command
 # ═══════════════════════════════════════════════════════
 
 # Stdin detection uses /proc/<pid>/syscall for definitive read(0,...) detection.
@@ -650,7 +919,7 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
         logger.error('[run_command] credential resolution failed: %s', e)
         return 'Error: Credential request rejected: vault unavailable.'
 
-    # ★ Resolve timeout — NO DEFAULT CEILING.
+    # Resolve timeout — NO DEFAULT CEILING.
     #   A build / test suite / pip install / big grep is a WAIT, not a crash,
     #   and the old auto-detect (60s FS-heavy, 300s otherwise) SIGKILLed the
     #   process tree mid-run and returned "[Command timed out]" for work that
@@ -681,7 +950,7 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     if _is_dangerous_command(command):
         return 'Error: Command blocked for safety: matches dangerous pattern.'
 
-    # ★ Catastrophic top-level deletion guard — refuse `rm /mnt`, `rm -rf /`,
+    # Catastrophic top-level deletion guard — refuse `rm /mnt`, `rm -rf /`,
     #   `rmdir /home`, etc. OUTRIGHT. These are never legitimate and are the
     #   exact failure mode that wiped shared paths during a benchmark run.
     #   Checked before the trash rewrite so a shallow target is never even
@@ -695,7 +964,39 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                 f"first-level directories (e.g. /mnt, /home, /data) is not "
                 f"permitted. Delete only specific paths inside your workspace.")
 
-    # ★ Unbounded recursive-scan guard (pt_8524e0ec B2). A recursive scan of a
+    # Plan the direct-find budget before classifying an ancestor scan.  The
+    # guard must judge the command that will actually execute: previously it
+    # rejected ``find`` here, then (unreachably) added a native timeout much
+    # later.  Keep the plan execution-side only so logs and the shell echo
+    # still show the caller's original command.
+    _scan_timeout_plan = None
+    _scan_guard_source = command
+    if (timeout is None
+            and os.name == 'posix'
+            and os.environ.get('TOFU_RUN_SCAN_SEGMENT_TIMEOUT', '1') != '0'):
+        import shutil
+        _timeout_binary = shutil.which('timeout')
+        if _timeout_binary:
+            try:
+                _scan_seconds = int(os.environ.get(
+                    'TOFU_RUN_SCAN_SEGMENT_TIMEOUT_S', '40'))
+            except (TypeError, ValueError) as _scan_timeout_e:
+                logger.debug('[run_command] invalid scanner segment timeout: %s',
+                             _scan_timeout_e)
+                _scan_seconds = 40
+            # Detect a direct find with pure parsing first.  Host-option
+            # probing launches ``timeout --help`` and must not happen on a
+            # command the outer resource guard will refuse before any spawn.
+            _, _find_segments = _bound_scan_segments(
+                command, _timeout_binary, _scan_seconds, ())
+            if _find_segments:
+                _timeout_args = _timeout_scan_wrapper_args(_timeout_binary)
+                _scan_guard_source, _planned_bounded_scans = _bound_scan_segments(
+                    command, _timeout_binary, _scan_seconds, _timeout_args)
+                _scan_timeout_plan = (
+                    _timeout_binary, _scan_seconds, _timeout_args)
+
+    # Unbounded recursive-scan guard ( B2). A recursive scan of a
     #   workspace ANCESTOR or a FUSE mount root can crawl for hours on network
     #   filesystems — measured 2026-07-31: `grep -rn "mcp>=1.0.0" ../` ran
     #   2.5h with zero output and wedged task 96c56840 (no timeout existed to
@@ -704,12 +1005,13 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     #   `timeout` wrapper). In-workspace scans, sibling dirs and bounded
     #   scans are all legitimate and stay open. TOFU_RUN_SCAN_GUARD=0 opts out.
     if timeout is None and os.environ.get('TOFU_RUN_SCAN_GUARD', '1') != '0':
-        _scan = _unbounded_recursive_scan_target(command, base)
+        _scan = _unbounded_recursive_scan_target(_scan_guard_source, base)
         if _scan is not None:
-            # WARNING, not ERROR — a policy nudge, not an application failure.
+            # WARNING, not ERROR — this is a resource-boundary refusal, not a
+            # destructive-command classification.
             logger.warning('[run_command] BLOCKED unbounded recursive scan '
                            'target=%r (cwd=%s): %.200s', _scan, base, command)
-            return (f"Error: Command blocked for safety: unbounded recursive "
+            return (f"Error: Command blocked by resource guard: unbounded recursive "
                     f"scan of '{_scan}'. Recursive scans of a workspace "
                     f"ancestor or a FUSE mount root can crawl for hours on "
                     f"network filesystems and hang the whole task (measured: "
@@ -718,7 +1020,7 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                     f"`timeout` to run_command; or (3) wrap the scan with "
                     f"coreutils `timeout <secs>`.")
 
-    # ★ Filesystem-grep TRANSPARENT RUNTIME REDIRECT. Planning only replaces
+    # Filesystem-grep TRANSPARENT RUNTIME REDIRECT. Planning only replaces
     #   the grep executable token with an absolute internal helper. The search
     #   starts when the shell reaches that segment, so earlier writes, cd,
     #   substitutions, redirections, pipelines and &&/|| retain native shell
@@ -785,7 +1087,7 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                     'grep with file/dir operands or `-r` is intercepted. '
                     'Escape hatch: TOFU_RUN_GREP_GUARD=0.')
 
-    # ★ Cross-DC timeout adjustment — multiply timeout for remote DolphinFS clusters
+    # Cross-DC timeout adjustment — multiply timeout for remote DolphinFS clusters
     try:
         from lib.cross_dc import get_timeout_multiplier
         multiplier = get_timeout_multiplier(base)
@@ -797,7 +1099,7 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     except Exception as e:
         logger.debug('[run_command] Cross-DC check skipped: %s', e)
 
-    # ★ Non-silent grep hardening: when the user runs a recursive `grep -r ...`
+    # Non-silent grep hardening: when the user runs a recursive `grep -r ...`
     # in a non-pipeline form, inject `-I` (skip binary) and `--exclude-dir=` for
     # each entry in IGNORE_DIRS so cross-DC FUSE mounts don't time out.  Real
     # grep still does the work — output format and regex flavor are unchanged.
@@ -811,40 +1113,26 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                        '[run_command] auto-added grep flags for FUSE/binary safety\n')
         command = hardened
 
-    # ★ Scanner segment budget: direct `find` remains a real streaming
+    # Scanner segment budget: direct `find` remains a real streaming
     #   command, but cannot wedge forever in a FUSE/NFS syscall loop. The
     #   timeout wraps only the find segment, so downstream sort/head/xargs
     #   keep normal pipe backpressure. A caller-provided run_command timeout
     #   is already authoritative and suppresses this internal budget.
     _exec_source = _grep_spliced if _grep_spliced is not None else command
-    if (timeout is None
-            and os.name == 'posix'
-            and os.environ.get('TOFU_RUN_SCAN_SEGMENT_TIMEOUT', '1') != '0'):
-        import shutil
-        _timeout_binary = shutil.which('timeout')
-        if _timeout_binary:
-            try:
-                _scan_seconds = int(os.environ.get(
-                    'TOFU_RUN_SCAN_SEGMENT_TIMEOUT_S', '40'))
-            except (TypeError, ValueError) as _scan_timeout_e:
-                logger.debug('[run_command] invalid scanner segment timeout: %s',
-                             _scan_timeout_e)
-                _scan_seconds = 40
-            _exec_source, _bounded_scans = _bound_scan_segments(
-                _exec_source, _timeout_binary, _scan_seconds)
-            if _bounded_scans:
-                logger.info('[run_command] bounded %d find segment(s) to %ds '
-                            '(cwd=%s): %.200s', _bounded_scans, _scan_seconds,
-                            base, command)
-                _safe_on_chunk(
-                    on_chunk, 'stderr',
-                    f'[run_command] find scan capped at {_scan_seconds}s '
-                    'to prevent network-filesystem stalls\n')
-        else:
-            logger.warning('[run_command] cannot bound find segments: '
-                           'coreutils timeout is unavailable')
+    if _scan_timeout_plan is not None:
+        _timeout_binary, _scan_seconds, _timeout_args = _scan_timeout_plan
+        _exec_source, _bounded_scans = _bound_scan_segments(
+            _exec_source, _timeout_binary, _scan_seconds, _timeout_args)
+        if _bounded_scans:
+            logger.info('[run_command] bounded %d find segment(s) to %ds '
+                        '(cwd=%s): %.200s', _bounded_scans, _scan_seconds,
+                        base, command)
+            _safe_on_chunk(
+                on_chunk, 'stderr',
+                f'[run_command] find scan capped at {_scan_seconds}s '
+                'to prevent network-filesystem stalls\n')
 
-    # ★ rm → trash rewrite: ordinary deletes become recoverable (moved to a
+    # rm → trash rewrite: ordinary deletes become recoverable (moved to a
     #   per-workspace .tofu_trash/ instead of unlinked). Applied to the
     #   EXECUTED command only — the displayed/logged `command` stays clean so
     #   the model sees its own `rm ...` echoed back, not the shim. Catastrophic
@@ -852,7 +1140,7 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     #   redirect splice and scanner budget ride the same exec-side-only seam.
     exec_command = _maybe_wrap_rm_with_trash(_exec_source, base)
 
-    # ★ Sticky-cwd capture (layer 2): wrap the command so its FINAL cwd is
+    # Sticky-cwd capture (layer 2): wrap the command so its FINAL cwd is
     #   written to a dedicated temp file, preserving the exit code. Only when a
     #   sink is provided AND not sandboxed — a jailed TMPDIR would make the
     #   host-side read miss, so under portable_sandbox we skip capture and rely
@@ -880,7 +1168,35 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     shell_prefix = SHELL_PREFIX
     full_command = f'{shell_prefix} {exec_command}' if shell_prefix else exec_command
 
-    # ★ Portable sandbox (restricted/agent-run principals only). On a host
+    # Build the child environment once.  Besides avoiding duplicate policy
+    # work, this is the explicit seam where an eligible Python subprocess may
+    # receive a bounded host-local PYTHONPYCACHEPREFIX.  The cache module keeps
+    # owner/workspace/interpreter authority and lifecycle out of this shell
+    # runner; any planning failure leaves the environment unchanged.
+    try:
+        child_env = _get_cmd_env(
+            base, credential_env, strip_credential_vars,
+            owner_user_id=(task or {}).get('_userId'))
+    except Exception as _env_e:
+        logger.error(
+            'run_command environment setup failed (cwd=%s): %s',
+            base, _env_e, exc_info=True)
+        return (f'$ {command}\n\n'
+                f'Error starting command: {_env_e}\n'
+                f'[exit code: -1]')
+
+    python_cache_activation = None
+    if _looks_like_python_command(command):
+        try:
+            from lib.project_mod.python_bytecode_cache import (
+                prepare_python_bytecode_cache,
+            )
+            python_cache_activation = prepare_python_bytecode_cache(
+                command, base, task, child_env)
+        except Exception as _cache_e:
+            logger.debug('[python-cache] planning skipped: %s', _cache_e)
+
+    # Portable sandbox (restricted/agent-run principals only). On a host
     #   that allows it this wraps the command in a real isolation backend
     #   (bwrap/podman); on a locked host it is a no-op here and containment
     #   comes from the HOME/TMPDIR jail + rm shim applied in _get_cmd_env.
@@ -889,7 +1205,14 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
         from lib.project_mod.abs_path_guard import is_restricted
         if is_restricted() and base:
             from lib.project_mod import portable_sandbox
-            full_command = portable_sandbox.wrap_command(full_command, base)
+            full_command = portable_sandbox.wrap_command(
+                full_command,
+                base,
+                writable_cache_dir=(
+                    python_cache_activation.namespace
+                    if python_cache_activation is not None else None
+                ),
+            )
     except Exception as _sb_e:  # never let sandbox wiring break command exec
         logger.debug('[run_command] portable_sandbox.wrap skipped: %s', _sb_e)
 
@@ -908,58 +1231,40 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
             except Exception as _e:
                 logger.debug('[run_command] cwd_sink raised: %s', _e)
 
-    # ★ Network layer (run_net): detect curl/pip/npm/conda/git commands,
-    #   inject each target host's measured-best route into the child env,
-    #   then feed the outcome back to the scorer and append a
-    #   [network diagnosis] block on network-class failures.
-    #   TOFU_NETCMD=0 disables the whole layer.
-    _net_plan = None
-    _run_net = None
-    _net_overlay = None
-    _net_t0 = time.monotonic()
-    try:
-        from lib.project_mod import run_net as _rn
-        _run_net = _rn
-        _net_plan = _rn.plan(command)
-        _net_overlay = _rn.env_overlay(_net_plan)
-    except Exception as _rn_e:
-        logger.debug('[run_command] net layer planning skipped: %s', _rn_e)
-
-    def _net_finalize(result):
-        if _net_plan is None or _run_net is None:
-            return result
+    def _finalize_command():
+        _flush_cwd_capture()
+        if python_cache_activation is None:
+            return
         try:
-            return _run_net.finalize(
-                _net_plan, command, result,
-                (time.monotonic() - _net_t0) * 1000.0)
-        except Exception as _rn_f_e:
-            logger.debug('[run_command] net finalize skipped: %s', _rn_f_e)
-            return result
+            from lib.project_mod.python_bytecode_cache import (
+                release_python_bytecode_cache,
+            )
+            release_python_bytecode_cache(python_cache_activation)
+        except Exception as _cache_e:
+            logger.debug('[python-cache] release skipped: %s', _cache_e)
 
     # ── Non-interactive fast path (no stdin_callback) ──
     if not stdin_callback:
         try:
-            result = _run_command_simple(
+            return _run_command_simple(
                 command, full_command, timeout, base, task=task,
                 on_chunk=on_chunk, on_spawn=on_spawn,
+                child_env=child_env,
                 credential_env=credential_env,
-                strip_credential_vars=strip_credential_vars,
-                net_overlay=_net_overlay)
-            return _net_finalize(result)
+                strip_credential_vars=strip_credential_vars)
         finally:
-            _flush_cwd_capture()
+            _finalize_command()
 
     # ── Interactive path: Popen with stdin pipe + stdin detection ──
     try:
-        result = _run_command_interactive(
+        return _run_command_interactive(
             command, full_command, timeout, base, stdin_callback,
             on_chunk=on_chunk, task=task, on_spawn=on_spawn,
+            child_env=child_env,
             credential_env=credential_env,
-            strip_credential_vars=strip_credential_vars,
-            net_overlay=_net_overlay)
-        return _net_finalize(result)
+            strip_credential_vars=strip_credential_vars)
     finally:
-        _flush_cwd_capture()
+        _finalize_command()
 
 
 def _pop_cmd_interrupt(task, proc_pid=None):
@@ -1057,8 +1362,8 @@ def _safe_on_chunk(on_chunk, stream, text):
 
 
 def _run_command_simple(command, full_command, timeout, base, task=None, on_chunk=None,
-                        on_spawn=None, credential_env=None,
-                        strip_credential_vars=None, net_overlay=None):
+                        on_spawn=None, child_env=None, credential_env=None,
+                        strip_credential_vars=None):
     """Execute command with abort-awareness + incremental output streaming.
 
     Reads stdout/stderr in non-blocking 64 KB chunks using ``safe_select_pipes``
@@ -1081,8 +1386,8 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
             stdin=subprocess.DEVNULL,
             text=False,  # binary mode for non-blocking I/O
             cwd=base,
-            env=_get_cmd_env(base, credential_env, strip_credential_vars,
-                             net_overlay=net_overlay),
+            env=(child_env if child_env is not None else _get_cmd_env(
+                base, credential_env, strip_credential_vars)),
             start_new_session=True,  # own process group for clean kill
         )
     except (FileNotFoundError, NotADirectoryError) as e:
@@ -1096,7 +1401,7 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
                 f'Error starting command: {e}\n'
                 f'[exit code: -1]')
 
-    # ★ Spawn clock — the subprocess now EXISTS and `timeout` already holds the
+    # Spawn clock — the subprocess now EXISTS and `timeout` already holds the
     #   effective budget, so this is the earliest and only point at which a
     #   truthful deadline can be published. Fired before the read loop so the
     #   countdown appears immediately rather than at the first heartbeat tick.
@@ -1547,8 +1852,8 @@ def _collect_descendants(parent_pid):
 
 def _run_command_interactive(command, full_command, timeout, base, stdin_callback,
                               on_chunk=None, task=None, on_spawn=None,
-                              credential_env=None, strip_credential_vars=None,
-                              net_overlay=None):
+                              child_env=None, credential_env=None,
+                              strip_credential_vars=None):
     """Popen-based execution with stdin detection and interactive input.
 
     When *task* is provided, the subprocess PID/PGID is stored on the task
@@ -1572,8 +1877,8 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=base,
-            env=_get_cmd_env(base, credential_env, strip_credential_vars,
-                             net_overlay=net_overlay),
+            env=(child_env if child_env is not None else _get_cmd_env(
+                base, credential_env, strip_credential_vars)),
             text=False,  # binary mode for non-blocking I/O
             start_new_session=True,  # own process group for clean kill
         )
@@ -1600,7 +1905,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
     if not nonblocking_ok:
         logger.warning('run_command: non-blocking pipe setup failed — falling back to polling I/O')
 
-    # ★ Spawn clock — same contract as _run_command_simple: the subprocess
+    # Spawn clock — same contract as _run_command_simple: the subprocess
     #   exists and `timeout` already carries the effective budget, so this is
     #   the earliest truthful deadline. Both runners must publish it, else an
     #   interactive command (the ones that block LONGEST) would be the only
@@ -1717,7 +2022,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                     pass
                 break
 
-            # ★ Stdin detection: check /proc/pid/syscall for read(0, ...) on our pipe
+            # Stdin detection: check /proc/pid/syscall for read(0, ...) on our pipe
             if (retcode is None and not stdin_closed
                     and stdin_pipe_ino is not None):
                 reader = _is_any_child_reading_stdin(proc.pid, stdin_pipe_ino)

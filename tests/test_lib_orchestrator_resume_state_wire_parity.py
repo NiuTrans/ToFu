@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Incident anchor: born in commit c139b8b1 — refactor(orchestrator): pt_03f4cdf1 slice 10 — extract resume-state h...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity for pt_03f4cdf1 slice 10 — Resume-state hydration.
 
 Scope: run_task's Content-Prefix + Resume-Prefill + Checkpoint-stash block

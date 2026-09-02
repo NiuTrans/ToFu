@@ -16,6 +16,7 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 _MAX_ROUND_SNAPSHOTS = 512
+PROMPT_PROFILE_EVIDENCE_VERSION = 'tofu.prompt-profile/v1'
 
 
 def _json_text(value: Any) -> str:
@@ -108,6 +109,61 @@ def prefix_fingerprint(messages: Any) -> str:
             _json_text(messages or []).encode('utf-8')).hexdigest()[:24]
 
 
+def build_prompt_profile_evidence(
+    *, requested_profile: str, resolved_profile: str, content: str,
+    model: str, status: str, reason: str = '',
+) -> dict:
+    """Build bounded proof of the static prompt contract used by a request."""
+    prompt = str(content or '') if status == 'applied' else ''
+    return {
+        'contractVersion': PROMPT_PROFILE_EVIDENCE_VERSION,
+        'requestedProfile': str(requested_profile or ''),
+        'resolvedProfile': str(resolved_profile or ''),
+        'effectiveProfile': (
+            str(resolved_profile or '') if status == 'applied' else ''),
+        'status': str(status or ''),
+        'reason': str(reason or ''),
+        'model': str(model or ''),
+        'charCount': len(prompt),
+        'tokenCount': _count_text(prompt, model=model) if prompt else 0,
+        'sha256': (
+            hashlib.sha256(prompt.encode('utf-8')).hexdigest()
+            if prompt else ''),
+    }
+
+
+def prompt_profile_evidence_matches(
+    evidence: Any, *, expected_profile: str, model: str = '',
+) -> bool:
+    """Return whether bounded evidence proves one applied prompt profile."""
+    if not isinstance(evidence, dict):
+        return False
+
+    def _positive_int(value: Any) -> bool:
+        if isinstance(value, bool):
+            return False
+        try:
+            return int(value or 0) > 0
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    expected = str(expected_profile or '')
+    digest = str(evidence.get('sha256') or '')
+    return bool(
+        expected
+        and evidence.get('contractVersion') == PROMPT_PROFILE_EVIDENCE_VERSION
+        and evidence.get('status') == 'applied'
+        and evidence.get('requestedProfile') == expected
+        and evidence.get('resolvedProfile') == expected
+        and evidence.get('effectiveProfile') == expected
+        and (not model or evidence.get('model') == str(model))
+        and _positive_int(evidence.get('charCount'))
+        and _positive_int(evidence.get('tokenCount'))
+        and len(digest) == 64
+        and set(digest) <= set('0123456789abcdef')
+    )
+
+
 def capture_round_context(task: dict, messages: list, tools: Any,
                           *, round_num: int, model: str) -> dict:
     """Capture the request-side token shape immediately before an API call."""
@@ -119,6 +175,9 @@ def capture_round_context(task: dict, messages: list, tools: Any,
         'modelToolResultTokens': tool_result_tokens(messages, model=model),
         'prefixFingerprint': prefix_fingerprint(messages),
     }
+    prompt_profile = task.get('_promptProfileV1')
+    if isinstance(prompt_profile, dict):
+        snapshot['promptProfile'] = dict(prompt_profile)
     rows = task.setdefault('_contextTelemetryRounds', [])
     if isinstance(rows, list):
         rows.append(snapshot)
@@ -151,6 +210,7 @@ def record_compaction_event(task: dict | None, *, trigger: str,
         'reason': str(reason or '')[:500],
         'tokensBefore': max(0, int(tokens_before or 0)),
         'tokensAfter': max(0, int(tokens_after or 0)),
+        'tokenCountKind': 'estimated',
         'evidenceRetained': list(evidence_retained or []),
         'evidenceLost': list(evidence_lost or []),
     }
@@ -166,7 +226,9 @@ def record_mcp_search(task: dict, *, misses: int = 0) -> None:
 
 
 __all__ = [
-    'capture_round_context', 'prefix_fingerprint',
+    'PROMPT_PROFILE_EVIDENCE_VERSION', 'build_prompt_profile_evidence',
+    'capture_round_context', 'prompt_profile_evidence_matches',
+    'prefix_fingerprint',
     'raw_tool_result_tokens', 'record_compaction_event', 'record_mcp_search',
     'stable_prefix_tokens', 'stamp_tool_exposure', 'tool_result_tokens',
     'tool_schema_tokens',

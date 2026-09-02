@@ -9,13 +9,8 @@ but include extra fields: ``type='pptx'``, ``filename``, ``download_url``.
 """
 
 import os
-import time
 
 from lib.log import get_logger
-
-from .engine import _translate_one_chunk
-from .prompt import _build_translate_prompt
-from .runtime import _translate_tasks, _translate_tasks_lock
 
 logger = get_logger(__name__)
 
@@ -44,9 +39,11 @@ def _ensure_pptx_upload_dir():
 
 def _do_translate_pptx(task_id, input_path, filename, target, source):
     """Background thread: translate a PPTX file."""
-    with _translate_tasks_lock:
-        task = _translate_tasks.get(task_id)
-    if not task:
+    from .engine import _translate_one_chunk
+    from .prompt import _build_translate_prompt
+    from .runtime._state import _translate_runtime
+
+    if not _translate_runtime.get(task_id):
         return
 
     system_prompt = _build_translate_prompt(target, source)
@@ -61,10 +58,16 @@ def _do_translate_pptx(task_id, input_path, filename, target, source):
         return c
 
     def _progress_cb(current, total, _status_msg):
-        with _translate_tasks_lock:
-            t = _translate_tasks.get(task_id)
-            if t:
-                t['progress'] = f'{current}/{total}'
+        progress = f'{current}/{total}'
+        if _translate_runtime.update_fields(
+                task_id,
+                fields={'progress': progress},
+                only_if_status='running'):
+            _translate_runtime.append_event(task_id, {
+                'type': 'running',
+                'status': 'running',
+                'progress': progress,
+            })
 
     try:
         from lib.pptx_translator import translate_pptx
@@ -90,26 +93,25 @@ def _do_translate_pptx(task_id, input_path, filename, target, source):
                 source='routes.translate:pptx',
                 raw=str(_err_text),
             )
-            with _translate_tasks_lock:
-                task['status'] = 'error'
-                task['error'] = envelope
-                task['completed_at'] = time.time()
+            _translate_runtime.finish(
+                task_id,
+                error=envelope,
+                error_context='pptx-translate',
+            )
             logger.error('[PPTX-Translate] Task %s failed: %s', task_id[:8],
                          _err_text)
             return
 
-        with _translate_tasks_lock:
-            task['status'] = 'done'
-            task['result'] = {
-                'filename': output_filename,
-                'download_url': f'/api/translate/pptx/download/{output_filename}',
-                'slides': result.get('slides', 0),
-                'segments': result.get('segments', 0),
-                'chars_translated': result.get('chars_translated', 0),
-                'errors': result.get('errors', 0),
-                'elapsed': result.get('elapsed', 0),
-            }
-            task['completed_at'] = time.time()
+        task_result = {
+            'filename': output_filename,
+            'download_url': f'/api/translate/pptx/download/{output_filename}',
+            'slides': result.get('slides', 0),
+            'segments': result.get('segments', 0),
+            'chars_translated': result.get('chars_translated', 0),
+            'errors': result.get('errors', 0),
+            'elapsed': result.get('elapsed', 0),
+        }
+        _translate_runtime.finish(task_id, result=task_result)
 
         logger.info('[PPTX-Translate] Task %s done: %s — %d slides, %d segments, '
                     '%d chars, %.1fs',
@@ -123,10 +125,11 @@ def _do_translate_pptx(task_id, input_path, filename, target, source):
             e, context='pptx-translate',
             source='routes.translate:pptx',
         )
-        with _translate_tasks_lock:
-            task['status'] = 'error'
-            task['error'] = envelope
-            task['completed_at'] = time.time()
+        _translate_runtime.finish(
+            task_id,
+            error=envelope,
+            error_context='pptx-translate',
+        )
         logger.error('[PPTX-Translate] Task %s failed: %s', task_id[:8], e, exc_info=True)
     finally:
         # Clean up input file (translated file kept for download)

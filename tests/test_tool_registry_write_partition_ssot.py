@@ -33,7 +33,7 @@ pytestmark = pytest.mark.unit
 
 
 def _all_specs():
-    from lib.tools import all_specs
+    from lib.tools.registry import all_specs
     return list(all_specs())
 
 
@@ -58,7 +58,7 @@ def _declared_write_tools():
 
 def _browser_names():
     from lib.browser.advanced import ADVANCED_BROWSER_TOOL_NAMES
-    from lib.tools import BROWSER_TOOL_NAMES
+    from lib.tools.browser import BROWSER_TOOL_NAMES
     return set(BROWSER_TOOL_NAMES) | set(ADVANCED_BROWSER_TOOL_NAMES)
 
 
@@ -68,7 +68,7 @@ def _scheduler_names():
 
 
 def _memory_names():
-    from lib.memory import ALL_MEMORY_TOOLS
+    from lib.memory.tools import ALL_MEMORY_TOOLS
     return {t['function']['name'] for t in ALL_MEMORY_TOOLS}
 
 
@@ -80,6 +80,7 @@ STATE_CHANGING_EXPECTATIONS = {
     # pt_869e5648403e4745; the retired names are gone from provides/write_tools
     # entirely, so they cannot be listed here without contradicting the merge)
     'browser_execute_js':   'runs arbitrary JS in the user page',
+    'browser_devtools':     'may evaluate JS or pause/step page execution',
     'browser_navigate':     'changes what page the user is on (incl. new_tab)',
     'browser_click':        'activates page controls (may submit/purchase)',
     'browser_type':         'types into the user page',
@@ -195,6 +196,15 @@ class TestFullCoverageRatchet:
         # the ratchet; exempting it here is what keeps the two guards from
         # contradicting each other.
         'project_charter_commit',
+        # RETIRED 2026-08-26 (run_command read-only compat layer): the
+        # handler stays dispatchable ONLY for conversation-latched legacy
+        # schemas; new tool epochs omit the name and route simple ls/find
+        # requests through the same bounded directory reader. Declaring it
+        # on a spec's provides would re-expose a retired tool on the
+        # model-visible inventory surfaces, so this name can never satisfy
+        # the ratchet by declaration. See PROJECT_TOOL_NAMES in
+        # lib/tools/project.py.
+        'list_dir',
     }
 
     def test_every_handler_is_declared(self):
@@ -274,6 +284,7 @@ class TestApprovalMetaCoverage:
 
     @pytest.mark.parametrize('tool', [
         'browser_execute_js', 'browser_navigate', 'browser_fill_form',
+        'browser_devtools',
         'browser_type', 'browser_press_key', 'browser_menu_click',
         'schedule_create', 'schedule_manage', 'timer_create',
         'project_charter_commit',
@@ -304,11 +315,11 @@ class TestApprovalMetaCoverage:
         inside the approval path (that would abort the gate itself)."""
         from lib.tasks_pkg.tool_dispatch._approval import _APPROVAL_META_ENRICHERS
         completed = []
-        for tool in ('browser_execute_js', 'schedule_create',
+        for tool in ('browser_execute_js', 'browser_devtools', 'schedule_create',
                      'project_charter_commit'):
             _APPROVAL_META_ENRICHERS[tool]({}, {})
             completed.append(tool)
         # An enricher raising on missing args would abort the loop — the
         # completion list is the no-exception contract made assertable.
-        assert completed == ['browser_execute_js', 'schedule_create',
+        assert completed == ['browser_execute_js', 'browser_devtools', 'schedule_create',
                              'project_charter_commit']

@@ -73,6 +73,14 @@ def test_definition_precondition_uses_contract_header_and_canonical_failure(
     assert request_http.definition_precondition() == (None, sentinel)
     assert captured['field'] == 'If-Match'
 
+    monkeypatch.setattr(
+        request_http,
+        'request',
+        SimpleNamespace(headers={}),
+    )
+    assert request_http.definition_precondition() == (None, sentinel)
+    assert captured['message'] == 'If-Match is required'
+
 
 def test_definition_ingress_preserves_resolver_result_and_provenance():
     body = {'id': 'flow-1'}

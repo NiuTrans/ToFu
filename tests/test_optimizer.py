@@ -28,11 +28,21 @@ from unittest import mock
 
 import pytest
 
-from lib.optimizer import applier, proposer
+from lib.identity import PrincipalContext
+from lib.optimizer import applier, orchestrator, proposer
 from lib.optimizer import analyzer
 from lib.optimizer.actions import ACTION_REGISTRY, get_action
 
 pytestmark = pytest.mark.unit
+_OWNER_USER_ID = 23
+
+
+def _optimizer_principal(owner_user_id: int = _OWNER_USER_ID):
+    return PrincipalContext.system(
+        subject_id=f'optimizer-test-{owner_user_id}',
+        owner_user_id=owner_user_id,
+        scopes={'optimizer:maintain'},
+    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -53,6 +63,8 @@ class TestActionRegistry:
                 assert callable(entry["revert"]), f"{name}: auto_apply w/o revert()"
             else:
                 assert entry["apply"] is None, f"{name}: suggest-only has apply()"
+            assert entry.get('deployment_modes'), (
+                f'{name}: missing deployment availability contract')
 
     def test_only_block_search_domain_auto_applies(self):
         auto = [n for n, e in ACTION_REGISTRY.items() if e["auto_apply"]]
@@ -209,16 +221,23 @@ class TestApplyProposalGate:
                              {"block_search_domain": {"name": "block_search_domain",
                                                       "auto_apply": True,
                                                       "apply": fake_apply,
-                                                      "revert": lambda a: None}}):
-            res = applier.apply_proposal(prop)
+                                                      "revert": lambda a, **kw: None,
+                                                      "deployment_modes": frozenset({'personal'})}}):
+            res = applier.apply_proposal(
+                prop, owner_user_id=_OWNER_USER_ID)
         assert res["status"] == "applied"
         fake_apply.assert_called_once()
         _stub_storage.record_applied.assert_called_once()  # learning-loop log written
+        assert _stub_storage.create_proposal.call_args.kwargs[
+            'owner_user_id'] == _OWNER_USER_ID
+        assert _stub_storage.record_applied.call_args.kwargs[
+            'owner_user_id'] == _OWNER_USER_ID
 
     def test_suggest_only_action_does_NOT_auto_apply(self, _stub_storage):
         prop = {"title": "Tune timeout", "rationale": "r",
                 "action_type": "adjust_fetch_timeout", "action_args": {}}
-        res = applier.apply_proposal(prop)
+        res = applier.apply_proposal(
+            prop, owner_user_id=_OWNER_USER_ID)
         assert res["status"] == "pending_review"
         assert res["detail"] == "not in auto-apply whitelist"
         _stub_storage.record_applied.assert_not_called()  # nothing applied
@@ -226,7 +245,8 @@ class TestApplyProposalGate:
     def test_unknown_action_lands_in_pending_review(self, _stub_storage):
         prop = {"title": "Mystery", "rationale": "r",
                 "action_type": "totally_unknown", "action_args": {}}
-        res = applier.apply_proposal(prop)
+        res = applier.apply_proposal(
+            prop, owner_user_id=_OWNER_USER_ID)
         assert res["status"] == "pending_review"
         assert "unknown action_type" in res["detail"]
         _stub_storage.record_applied.assert_not_called()
@@ -240,8 +260,10 @@ class TestApplyProposalGate:
                              {"block_search_domain": {"name": "block_search_domain",
                                                       "auto_apply": True,
                                                       "apply": fake_apply,
-                                                      "revert": lambda a: None}}):
-            res = applier.apply_proposal(prop, dry_run=True)
+                                                      "revert": lambda a, **kw: None,
+                                                      "deployment_modes": frozenset({'personal'})}}):
+            res = applier.apply_proposal(
+                prop, owner_user_id=_OWNER_USER_ID, dry_run=True)
         assert res["status"] == "pending_review"
         assert res["detail"] == "dry_run"
         fake_apply.assert_not_called()
@@ -255,13 +277,42 @@ class TestApplyProposalGate:
                              {"block_search_domain": {"name": "block_search_domain",
                                                       "auto_apply": True,
                                                       "apply": boom,
-                                                      "revert": lambda a: None}}):
-            res = applier.apply_proposal(prop)
+                                                      "revert": lambda a, **kw: None,
+                                                      "deployment_modes": frozenset({'personal'})}}):
+            res = applier.apply_proposal(
+                prop, owner_user_id=_OWNER_USER_ID)
         assert res["status"] == "rejected"
         assert "disk full" in res["error"]
         # rejected proposals are NOT recorded as applied
         _stub_storage.record_applied.assert_not_called()
         _stub_storage.update_proposal_status.assert_called_once()
+        assert _stub_storage.update_proposal_status.call_args.kwargs[
+            'owner_user_id'] == _OWNER_USER_ID
+
+    def test_distributed_mode_never_mutates_personal_config(
+            self, _stub_storage, monkeypatch):
+        monkeypatch.setenv('TOFU_DEPLOYMENT_MODE', 'distributed')
+        prop = {
+            'title': 'Block x', 'rationale': 'r',
+            'action_type': 'block_search_domain',
+            'action_args': {'domain': 'x.example'},
+        }
+        fake_apply = mock.Mock(return_value={})
+        with mock.patch.dict(applier.ACTION_REGISTRY, {
+                'block_search_domain': {
+                    'name': 'block_search_domain',
+                    'auto_apply': True,
+                    'apply': fake_apply,
+                    'revert': mock.Mock(),
+                    'deployment_modes': frozenset({'personal'}),
+                }}):
+            result = applier.apply_proposal(
+                prop, owner_user_id=_OWNER_USER_ID)
+
+        assert result['status'] == 'pending_review'
+        assert result['detail'] == 'action unavailable in this deployment mode'
+        fake_apply.assert_not_called()
+        _stub_storage.record_applied.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -283,7 +334,9 @@ class TestBlockSearchDomainAction:
         monkeypatch.setattr(b, "_CONFIG_FILE", str(tmp_path / "server_config.json"))
         monkeypatch.setattr(b._lib, "reload_config", lambda: None)
         with pytest.raises(ValueError):
-            b.apply({"domain": "not-a-domain"})  # no dot → invalid
+            b.apply(
+                {"domain": "not-a-domain"},
+                owner_user_id=_OWNER_USER_ID)  # no dot → invalid
 
     def test_apply_then_revert_roundtrip(self, tmp_path, monkeypatch):
         from lib.optimizer.actions import block_search_domain as b
@@ -292,12 +345,15 @@ class TestBlockSearchDomainAction:
         monkeypatch.setattr(b._lib, "reload_config", lambda: None)
         monkeypatch.setattr(b._lib, "SKIP_DOMAINS", set(), raising=False)
 
-        out = b.apply({"domain": "junk.example", "ttl_days": 3})
+        out = b.apply(
+            {"domain": "junk.example", "ttl_days": 3},
+            owner_user_id=_OWNER_USER_ID)
         assert out["domain"] == "junk.example"
         data = json.loads(open(cfg).read())
         assert "junk.example" in data["search"]["skip_domains"]
 
-        rev = b.revert({"domain": "junk.example"})
+        rev = b.revert(
+            {"domain": "junk.example"}, owner_user_id=_OWNER_USER_ID)
         assert rev["reverted"] is True
         data2 = json.loads(open(cfg).read())
         assert "junk.example" not in data2["search"]["skip_domains"]
@@ -306,7 +362,8 @@ class TestBlockSearchDomainAction:
         from lib.optimizer.actions import block_search_domain as b
         monkeypatch.setattr(b, "_CONFIG_FILE", str(tmp_path / "server_config.json"))
         monkeypatch.setattr(b._lib, "reload_config", lambda: None)
-        rev = b.revert({"domain": "never.added"})
+        rev = b.revert(
+            {"domain": "never.added"}, owner_user_id=_OWNER_USER_ID)
         assert rev["reverted"] is False and rev["reason"] == "not_present"
 
 
@@ -390,7 +447,12 @@ class TestAnalyzerPureLogic:
         monkeypatch.setattr(analyzer, "ERROR_LOG", str(err))
         monkeypatch.setattr(analyzer, "AUDIT_LOG_FILE", str(empty_audit))
         out = analyzer._collect_recurring_issues(
-            now - timedelta(hours=1), now - timedelta(hours=1), min_count=2)
+            now - timedelta(hours=1),
+            now - timedelta(hours=1),
+            min_count=2,
+            owner_user_id=_OWNER_USER_ID,
+            allow_unowned=True,
+        )
         labels = {c["fingerprint"] for c in out}
         assert "errorlog::KeyError" in labels
         assert "errorlog::ConnectionError" not in labels  # below threshold
@@ -405,6 +467,120 @@ class TestAnalyzerPureLogic:
         # Make the prior-actions DB read fail → exercises the except path
         monkeypatch.setattr(analyzer.storage, "list_applied_actions",
                             mock.Mock(side_effect=RuntimeError("no db")))
-        bundle = analyzer.gather_evidence(window_hours=24)
+        bundle = analyzer.gather_evidence(
+            principal=_optimizer_principal(), window_hours=24)
         assert isinstance(bundle, analyzer.EvidenceBundle)
         assert bundle.prior_actions == []  # degraded cleanly
+
+
+def test_orchestrator_propagates_one_principal_and_owner(monkeypatch):
+    principal = _optimizer_principal()
+    evidence = analyzer.EvidenceBundle(window_hours=12)
+    proposal = {
+        'title': 'Review', 'rationale': 'owner propagation',
+        'action_type': 'other', 'action_args': {},
+    }
+    revert = mock.Mock(return_value=[])
+    gather = mock.Mock(return_value=evidence)
+    propose = mock.Mock(return_value=[proposal])
+    apply = mock.Mock(return_value={
+        'proposal_id': 'owner-proposal',
+        'action_type': 'other',
+        'status': 'pending_review',
+    })
+    monkeypatch.setattr(orchestrator.applier, 'revert_expired_actions', revert)
+    monkeypatch.setattr(orchestrator.analyzer, 'gather_evidence', gather)
+    monkeypatch.setattr(orchestrator.proposer, 'propose', propose)
+    monkeypatch.setattr(orchestrator.applier, 'apply_proposal', apply)
+
+    summary = orchestrator.run_once(
+        principal=principal, dry_run=True, window_hours=12)
+
+    revert.assert_called_once_with(owner_user_id=_OWNER_USER_ID)
+    gather.assert_called_once_with(principal=principal, window_hours=12)
+    apply.assert_called_once_with(
+        proposal, owner_user_id=_OWNER_USER_ID, dry_run=True)
+    assert len(summary['pending_review']) == 1
+
+
+def test_orchestrator_rejects_missing_scope_or_owner_before_storage(monkeypatch):
+    revert = mock.Mock()
+    monkeypatch.setattr(orchestrator.applier, 'revert_expired_actions', revert)
+    invalid = (
+        (None, TypeError),
+        (
+            PrincipalContext.system(
+                subject_id='optimizer-no-scope', owner_user_id=23,
+                scopes=set()),
+            PermissionError,
+        ),
+        (
+            PrincipalContext.system(
+                subject_id='optimizer-no-owner',
+                scopes={'optimizer:maintain'}),
+            PermissionError,
+        ),
+    )
+    for principal, error in invalid:
+        with pytest.raises(error):
+            orchestrator.run_once(principal=principal)
+    revert.assert_not_called()
+
+
+def test_distributed_evidence_excludes_unowned_and_foreign_owner_logs(
+        tmp_path, monkeypatch):
+    from lib.optimizer.analyzer import _model
+
+    monkeypatch.setenv('TOFU_DEPLOYMENT_MODE', 'distributed')
+    now = datetime.now().astimezone()
+    local_ts = now.strftime('%Y-%m-%d %H:%M:%S')
+    audit_ts = now.isoformat()
+    app_log = tmp_path / 'app.log'
+    error_log = tmp_path / 'error.log'
+    audit_log = tmp_path / 'audit.log'
+    app_log.write_text(
+        f'{local_ts} [WARNING] [Tool:web_search] foreign raw secret\n')
+    error_log.write_text(
+        f'{local_ts} [ERROR] foreign owner private failure\n')
+    audit_log.write_text('\n'.join((
+        json.dumps({
+            'timestamp': audit_ts, 'event': 'optimizer_owner_event',
+            'user_id': 7, 'detail': 'owner-seven-visible'}),
+        json.dumps({
+            'timestamp': audit_ts, 'event': 'optimizer_foreign_event',
+            'user_id': 8, 'detail': 'owner-eight-secret'}),
+        json.dumps({
+            'timestamp': audit_ts, 'event': 'optimizer_unowned_event',
+            'detail': 'unowned-secret'}),
+    )) + '\n')
+    monkeypatch.setattr(analyzer, 'APP_LOG', str(app_log))
+    monkeypatch.setattr(analyzer, 'ERROR_LOG', str(error_log))
+    monkeypatch.setattr(analyzer, 'AUDIT_LOG_FILE', str(audit_log))
+    monkeypatch.setattr(
+        _model, '_collect_scheduler_signals',
+        lambda **_kwargs: {
+            'failing_scheduled_tasks': [], 'idle_proactive_tasks': []})
+    monkeypatch.setattr(
+        _model, '_collect_cost_outliers',
+        lambda **_kwargs: {'top_cost_conversations': []})
+    monkeypatch.setattr(
+        _model, '_collect_conversation_tool_distribution',
+        lambda *_args, **_kwargs: {
+            'tool_counts': {}, 'search_urls': [], 'fetch_urls': []})
+    monkeypatch.setattr(
+        _model, '_collect_daily_report_snippets', lambda **_kwargs: [])
+    monkeypatch.setattr(
+        _model, '_compute_post_apply_metrics', lambda *_args, **_kwargs: [])
+
+    bundle = analyzer.gather_evidence(
+        principal=_optimizer_principal(owner_user_id=7), window_hours=24)
+    serialized = json.dumps(bundle.as_dict(), ensure_ascii=False)
+
+    assert bundle.audit_event_counts == {'optimizer_owner_event': 1}
+    assert bundle.tool_call_counts == {}
+    assert bundle.error_log_excerpts == []
+    assert 'owner-seven-visible' in serialized
+    assert 'owner-eight-secret' not in serialized
+    assert 'unowned-secret' not in serialized
+    assert 'foreign raw secret' not in serialized
+    assert 'foreign owner private failure' not in serialized

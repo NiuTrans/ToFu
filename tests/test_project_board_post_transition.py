@@ -66,11 +66,12 @@ def _run_board_post_build(fn_name, fn_args, tool_content, board_tasks,
     import lib.conversations.project_board as pb
     orig_read_board = pb.read_board
     brain.simple_call = _fake_simple_call
-    pb.read_board = lambda _p: {'tasks': list(board_tasks),
-                                'open': 0, 'claimed': 0, 'done': 0}
+    pb.read_board = lambda _p, **_kw: {'tasks': list(board_tasks),
+                                       'open': 0, 'claimed': 0, 'done': 0}
     try:
         brain._handle_board_tool(
-            {'convId': 'cPoster'}, {}, fn_name, 'tc1', fn_args, 1, {}, {},
+            {'convId': 'cPoster', '_userId': 1}, {}, fn_name, 'tc1', fn_args,
+            1, {}, {},
             '/proj/x', True)
         meta = {}
         assert captured.get('post_build') is not None, \
@@ -232,8 +233,8 @@ def test_NC_post_branch_is_load_bearing():
     title = 'NC epic title that must vanish without the post branch'
     with neutered_source(
         _BRAIN_SRC,
-        "            if fn_name == 'project_board_post':",
-        "            if fn_name == '__nc_never_matches__':",
+        '            if fn_name == "project_board_post":',
+        '            if fn_name == "__nc_never_matches__":',
     ) as neutered:
         meta = _run_board_post_build(
             'project_board_post', {'title': title},

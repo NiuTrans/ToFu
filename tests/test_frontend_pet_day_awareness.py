@@ -24,9 +24,24 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from tests._runtime_sections import runtime_section
+
 REPO = Path(__file__).resolve().parent.parent
-PET_JS = REPO / "static" / "js" / "tofu-pet.js"
-MYDAY_JS = REPO / "static" / "js" / "myday.js"
+LOCALES = REPO / "frontend" / "src" / "i18n" / "locales"
+
+pytestmark = pytest.mark.unit
+
+
+def _pet_source():
+    """Source text of the migrated tofu-pet.js owner (lazy Vite chunk)."""
+    return runtime_section("tofu-pet.js")
+
+
+def _myday_source():
+    """Source text of the migrated myday.js owner (retained Vite runtime)."""
+    return runtime_section("myday.js")
 
 
 # ── node harness: boot the REAL pet with a fake DOM (reduced-motion ON so the
@@ -169,23 +184,21 @@ process.exit(0);
 
 
 def _i18n_dict():
-    """Scrape ``static/js/i18n.js`` into ``{key: {zh, en}}``.
+    """Load the shipped locale dictionaries into ``{key: {zh, en}}``.
 
-    Parsing the REAL file (instead of hand-listing keys) is what makes the
-    harness honest: a key absent from production is absent here too, so ``t()``
-    returns the bare key in BOTH places and a guard can actually see it.
+    Reading the REAL dictionaries (frontend/src/i18n/locales/*.json — flat
+    key → text chunks since the Vite migration) instead of hand-listing keys
+    is what makes the harness honest: a key absent from production is absent
+    here too, so ``t()`` returns the bare key in BOTH places and a guard can
+    actually see it.
     """
-    src = (REPO / "static" / "js" / "i18n.js").read_text(encoding="utf-8")
-    pat = re.compile(
-        r"""^[ \t]*'([\w.\-]+)':\s*\{\s*zh:\s*(['"])(.*?)\2\s*,"""
-        r"""\s*en:\s*(['"])(.*?)\4""",
-        re.MULTILINE)
-    return {m.group(1): {'zh': m.group(3), 'en': m.group(5)}
-            for m in pat.finditer(src)}
+    zh = json.loads((LOCALES / "zh.json").read_text(encoding="utf-8"))
+    en = json.loads((LOCALES / "en.json").read_text(encoding="utf-8"))
+    return {k: {'zh': zhv, 'en': en.get(k)} for k, zhv in zh.items()}
 
 
 def _run(hour=14, now=0, digest=None, click=False, mood=None, src=None):
-    src = src if src is not None else PET_JS.read_text()
+    src = src if src is not None else _pet_source()
     script = (_HARNESS
               .replace("__SRC__", src)
               .replace("__HOUR__", str(hour))
@@ -280,7 +293,7 @@ def test_neuter_blocked_mapping_bites():
     """Remove the blocked→'sad' branch from _resolve()'s day signal → a blocked
     digest no longer surfaces the concerned pose (falls through to generic),
     proving test (b) actually bites."""
-    src = PET_JS.read_text()
+    src = _pet_source()
     neut = src.replace("if (_day.streams && _day.streams.blocked > 0) return 'sad';",
                        "/* neutered blocked mapping */", 1)
     assert neut != src, "neuter did not match the blocked-mapping branch"
@@ -295,7 +308,7 @@ def test_myday_derives_digest_from_report_shape():
     """The digest fields must be READ from the report the backend returns
     (streams[].status, today_todos[].done, stats.totalConversations) — not
     recomputed with day thresholds in JS."""
-    src = MYDAY_JS.read_text()
+    src = _myday_source()
     assert "_mydayBuildDigest" in src, "digest builder missing"
     m = re.search(r"function _mydayBuildDigest\(report\)\s*\{(.*?)\n\}", src, re.S)
     assert m, "could not isolate _mydayBuildDigest"
@@ -311,7 +324,7 @@ def test_myday_emit_routes_through_single_cache_choke():
     """Both My Day open and the boot fetch must emit tofu:day via the ONE
     cache choke (_mydaySetCache) — no second source. And the boot fetch must go
     through Api.daily.status (no raw fetch) and be dedup-guarded."""
-    src = MYDAY_JS.read_text()
+    src = _myday_source()
     # _mydaySetCache emits for today's report.
     m = re.search(r"function _mydaySetCache\(dateStr, report\)\s*\{(.*?)\n\}", src, re.S)
     assert m and "_mydayEmitDay" in m.group(1), \

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """lib/desktop/pairing.py — pairing-code store + LAN discovery responder.
 
-The PAIRING-CODE UX (docs/DESKTOP_AGENT_DIST_DESIGN.md §11): a 6-digit
+The pairing-code UX (docs/modules/remote_execution.md): a 6-digit
 one-time code is minted by the panel (POST /api/v1/desktop/pair-code,
 authenticated) and consumed by the agent (POST /api/desktop/pair, NOT
 authenticated — the code IS the credential) to exchange for an
@@ -29,11 +29,14 @@ import hashlib
 import hmac
 import os
 import secrets
+import select
 import socket
 import threading
 import time
+from dataclasses import dataclass
 from typing import Optional
 
+from lib.identity import require_user_id
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -50,7 +53,24 @@ _MAX_ATTEMPTS = 3  # per-code brute-force lockout
 _LAN_MAGIC = b'TOFU-DESKTOP-DISC\x01'  # 16 bytes: magic + version
 _LAN_BIND = ('', 15001)  # adjacent to the app; not a privileged port
 
-_STORE: dict[str, dict] = {}  # code -> {user_id, expires_at, attempts}
+@dataclass(frozen=True, slots=True)
+class PairingIdentity:
+    owner_user_id: int
+    account_user_id: str = ''
+    tenant_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, 'owner_user_id',
+            require_user_id(self.owner_user_id, context='desktop pairing'),
+        )
+        object.__setattr__(
+            self, 'account_user_id', str(self.account_user_id or '').strip())
+        object.__setattr__(
+            self, 'tenant_id', str(self.tenant_id or '').strip() or None)
+
+
+_STORE: dict[str, dict] = {}  # code -> {identity, expires_at, attempts}
 _STORE_LOCK = threading.Lock()
 
 # ── Per-IP global failure budget ──
@@ -91,14 +111,18 @@ def generate_code() -> str:
     return ''.join(_CODE_ALPHABET[secrets.randbelow(10)] for _ in range(_CODE_LEN))
 
 
-def mint_code(user_id: str, ttl: int | None = None) -> tuple[str, float]:
-    """Mint a code bound to *user_id*. Returns ``(code, expires_at)``."""
+def mint_code(
+    identity: PairingIdentity, ttl: int | None = None,
+) -> tuple[str, float]:
+    """Mint a code bound to one complete authenticated identity."""
+    if not isinstance(identity, PairingIdentity):
+        raise TypeError('desktop pairing requires PairingIdentity')
     if ttl is None:
         ttl = _CODE_TTL_S
     code = generate_code()
     expires_at = _now() + ttl
     with _STORE_LOCK:
-        _STORE[code] = {'user_id': str(user_id), 'expires_at': expires_at,
+        _STORE[code] = {'identity': identity, 'expires_at': expires_at,
                         'attempts': 0}
     return code, expires_at
 
@@ -107,8 +131,8 @@ def _hmac(code: str, secret: str) -> str:
     return hmac.new(secret.encode(), code.encode(), hashlib.sha256).hexdigest()
 
 
-def consume_code(code: str) -> Optional[str]:
-    """Validate and ONE-SHOT consume a code. Returns the owning user_id on
+def consume_code(code: str) -> Optional[PairingIdentity]:
+    """Validate and consume a code, returning its complete identity on
     success, or ``None`` on any failure (missing / expired / locked /
     over-attempted). A consume that fails the attempt budget also burns
     the code so it cannot be re-tried.
@@ -129,9 +153,11 @@ def consume_code(code: str) -> Optional[str]:
         if row['attempts'] > _MAX_ATTEMPTS:
             del _STORE[code]
             return None
-        user_id = str(row['user_id'])
+        identity = row['identity']
         del _STORE[code]  # ONE-SHOT: never reusable
-    return user_id
+    if not isinstance(identity, PairingIdentity):
+        raise RuntimeError('desktop pairing identity is corrupt')
+    return identity
 
 
 def ip_fail_budget_exceeded(ip: str) -> bool:
@@ -176,16 +202,17 @@ def record_pair_success(ip: str) -> None:
         _IP_FAILS.pop(ip, None)
 
 
-def pending_codes(user_id: str) -> list[dict]:
+def pending_codes(owner_user_id: int) -> list[dict]:
     """Metadata (no secrets) for a user's still-valid codes — the panel's
     countdown renders against this."""
-    uid = str(user_id)
+    owner_id = require_user_id(owner_user_id, context='desktop pairing list')
     now = _now()
     with _STORE_LOCK:
         return [{'code': c, 'expires_at': r['expires_at'],
                  'remaining': max(0, int(r['expires_at'] - now))}
                 for c, r in _STORE.items()
-                if r['user_id'] == uid and r['expires_at'] > now]
+                if r['identity'].owner_user_id == owner_id
+                and r['expires_at'] > now]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -207,9 +234,12 @@ class LanDiscoveryResponder:
         self.url = url
         self.bind = bind
         self._secret = secrets.token_bytes(32).hex()
+        self._lifecycle_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._sock: socket.socket | None = None
+        self._wake_reader: socket.socket | None = None
+        self._wake_writer: socket.socket | None = None
 
     def _hmac(self, nonce: bytes) -> bytes:
         return hmac.new(self._secret.encode(), nonce, hashlib.sha256).digest()
@@ -234,49 +264,118 @@ class LanDiscoveryResponder:
                              'failed: %s', addr, e)
 
     def _loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                data, addr = self._sock.recvfrom(1024)
-            except socket.timeout:
-                logger.debug('[DesktopPairing] discovery recv timed out; '
-                             'polling again')
-                continue
-            except OSError as e:
-                logger.debug('[DesktopPairing] discovery socket closed — '
-                             'responder loop exiting: %s', e)
-                return
-            else:
-                self._handle(data, addr)
+        current_thread = threading.current_thread()
+        sock = self._sock
+        wake_reader = self._wake_reader
+        if sock is None or wake_reader is None:
+            return
+        try:
+            while not self._stop.is_set():
+                try:
+                    readable, _, _ = select.select((sock, wake_reader), (), ())
+                    if wake_reader in readable:
+                        wake_reader.recv(1)
+                        if self._stop.is_set():
+                            return
+                    if sock in readable:
+                        data, addr = sock.recvfrom(1024)
+                        self._handle(data, addr)
+                except (OSError, ValueError) as exc:
+                    logger.debug(
+                        '[DesktopPairing] discovery wait ended: %s', exc)
+                    return
+        finally:
+            with self._lifecycle_lock:
+                if self._thread is current_thread:
+                    self._thread = None
+                    self._close_sockets_locked()
+
+    def _close_sockets_locked(self) -> None:
+        for attribute in ('_sock', '_wake_reader', '_wake_writer'):
+            endpoint = getattr(self, attribute)
+            setattr(self, attribute, None)
+            if endpoint is not None:
+                try:
+                    endpoint.close()
+                except OSError as exc:
+                    logger.debug(
+                        '[DesktopPairing] discovery socket close failed: %s',
+                        exc)
+
+    def is_running(self) -> bool:
+        with self._lifecycle_lock:
+            return self._thread is not None and self._thread.is_alive()
 
     def start(self) -> bool:
-        if self._thread and self._thread.is_alive():
-            return True
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.settimeout(0.5)
-            s.bind(self.bind)
-            self._sock = s
-        except OSError as e:
-            logger.warning('[DesktopPairing] LAN discovery responder could '
-                           'not bind %s — staying silent: %s', self.bind, e)
-            return False
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, daemon=True,
-                                        name='tofu-desktop-lan-discovery')
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return True
+            self._close_sockets_locked()
+            sock = None
+            wake_reader = None
+            wake_writer = None
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(self.bind)
+                wake_reader, wake_writer = socket.socketpair()
+            except OSError as exc:
+                for endpoint in (sock, wake_reader, wake_writer):
+                    if endpoint is not None:
+                        endpoint.close()
+                logger.warning('[DesktopPairing] LAN discovery responder could '
+                               'not bind %s — staying silent: %s', self.bind,
+                               exc)
+                return False
+            self._sock = sock
+            self._wake_reader = wake_reader
+            self._wake_writer = wake_writer
+            self._stop.clear()
+            thread = threading.Thread(
+                target=self._loop, daemon=True,
+                name='tofu-desktop-lan-discovery')
+            self._thread = thread
+            try:
+                thread.start()
+            except Exception as exc:
+                self._thread = None
+                self._close_sockets_locked()
+                logger.warning(
+                    '[DesktopPairing] LAN discovery thread failed to start: %s',
+                    exc)
+                return False
         logger.info('[DesktopPairing] LAN discovery responder listening on '
                     'UDP %s', self.bind[1])
         return True
 
-    def stop(self) -> None:
-        self._stop.set()
-        if self._sock is not None:
+    def stop(self, timeout: float = 2.0) -> bool:
+        """Wake and bounded-join the exact responder owner."""
+        with self._lifecycle_lock:
+            self._stop.set()
+            thread = self._thread
+            wake_writer = self._wake_writer
+            if thread is None:
+                self._close_sockets_locked()
+                return True
+        if wake_writer is not None:
             try:
-                self._sock.close()
-            except OSError as e:
-                logger.debug('[DesktopPairing] socket close failed: %s', e)
-            self._sock = None
+                wake_writer.send(b'\x00')
+            except OSError as exc:
+                logger.debug(
+                    '[DesktopPairing] discovery wake failed: %s', exc)
+        try:
+            wait_seconds = max(0.0, float(timeout))
+        except (TypeError, ValueError, OverflowError):
+            wait_seconds = 2.0
+        if thread is not threading.current_thread():
+            thread.join(timeout=wait_seconds)
+        stopped = not thread.is_alive()
+        if stopped:
+            with self._lifecycle_lock:
+                if self._thread is thread:
+                    self._thread = None
+                    self._close_sockets_locked()
+        return stopped
 
 
 def lan_ip() -> str:

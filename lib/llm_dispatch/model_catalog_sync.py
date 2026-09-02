@@ -24,6 +24,7 @@ same time.
 from __future__ import annotations
 
 import copy
+import math
 import os
 import threading
 import time
@@ -57,9 +58,18 @@ def _env_int(name: str, default: int, minimum: int) -> int:
 
 
 # Remote provider catalogues change much less often than local serving boxes.
-# Six hours keeps a deployment current without turning /models into a noisy
-# health check. A Settings save wakes the worker immediately.
+# Six hours is the change-confirmation floor. Exact unchanged snapshots back
+# off to 12 hours and repeated failures to 48 hours; a Settings save still
+# wakes and forces the selected providers immediately.
 SYNC_INTERVAL_S = _env_int('TOFU_MODEL_CATALOG_SYNC_INTERVAL', 6 * 3600, 60)
+STABLE_MAX_INTERVAL_S = max(
+    SYNC_INTERVAL_S,
+    _env_int('TOFU_MODEL_CATALOG_STABLE_INTERVAL', 12 * 3600, 60),
+)
+FAILURE_MAX_INTERVAL_S = max(
+    SYNC_INTERVAL_S,
+    _env_int('TOFU_MODEL_CATALOG_FAILURE_INTERVAL', 48 * 3600, 60),
+)
 BOOT_DELAY_S = _env_int('TOFU_MODEL_CATALOG_SYNC_DELAY', 20, 0)
 LEASE_S = _env_int('TOFU_MODEL_CATALOG_SYNC_LEASE', 120, 30)
 REMOVE_AFTER = _env_int('TOFU_MODEL_CATALOG_REMOVE_AFTER', 2, 2)
@@ -133,6 +143,47 @@ def _provider_signature(provider: dict) -> tuple:
         str(provider.get('models_path') or '').strip(),
         first_key,
     )
+
+
+def _backoff_interval(streak: int, *, maximum: int) -> int:
+    """Return a bounded exponential interval without growing huge integers."""
+    exponent = min(16, _counter(streak))
+    return min(max(SYNC_INTERVAL_S, int(maximum)),
+               SYNC_INTERVAL_S * (2 ** exponent))
+
+
+def _counter(value: object) -> int:
+    try:
+        return min(1_000_000, max(0, int(value or 0)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _timestamp(value: object) -> float:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return timestamp if math.isfinite(timestamp) and timestamp > 0 else 0.0
+
+
+def _next_attempt_at(state: dict) -> float:
+    """Project explicit and legacy sync state onto one persisted due time."""
+    explicit = _timestamp(state.get('next_attempt_at'))
+    if explicit:
+        return explicit
+    failures = _counter(state.get('consecutive_failures'))
+    if failures:
+        return _timestamp(state.get('last_finished_at')) + _backoff_interval(
+            failures, maximum=FAILURE_MAX_INTERVAL_S)
+    unchanged = _counter(state.get('unchanged_successes'))
+    last_success = _timestamp(state.get('last_success_at'))
+    if unchanged and last_success:
+        return last_success + _backoff_interval(
+            unchanged, maximum=STABLE_MAX_INTERVAL_S)
+    if last_success:
+        return last_success + SYNC_INTERVAL_S
+    return 0.0
 
 
 def reconcile_catalog_models(existing: list, discovered: list,
@@ -232,11 +283,10 @@ def _claim(provider_id: str, *, force: bool, now: float,
             if not _eligible(provider):
                 return None
             state = _sync_state(provider)
-            lease_until = float(state.get('lease_until') or 0)
+            lease_until = _timestamp(state.get('lease_until'))
             if lease_until > now:
                 return None
-            last_success = float(state.get('last_success_at') or 0)
-            if not force and last_success and now - last_success < SYNC_INTERVAL_S:
+            if not force and _next_attempt_at(state) > now:
                 return None
             state.update({
                 'mode': 'auto',
@@ -268,11 +318,20 @@ def _finish_failure(provider_id: str, claim: dict, error: str, *, now: float,
                 return None
             if _provider_signature(provider) != claim['signature']:
                 return None
+            consecutive_failures = min(
+                1_000_000,
+                _counter(state.get('consecutive_failures')) + 1,
+            )
             state.update({
                 'mode': 'auto',
                 'last_error': str(error)[:300],
-                'consecutive_failures': int(state.get('consecutive_failures') or 0) + 1,
+                'consecutive_failures': consecutive_failures,
+                'unchanged_successes': 0,
                 'last_finished_at': now,
+                'next_attempt_at': now + _backoff_interval(
+                    consecutive_failures,
+                    maximum=FAILURE_MAX_INTERVAL_S,
+                ),
                 'lease_until': 0,
             })
             state.pop('claim_token', None)
@@ -370,6 +429,27 @@ def _finish_success(provider_id: str, claim: dict, discovered: list,
                 state.get('pending_removals') or {},
                 remove_after=remove_after,
             )
+            previous_pending = state.get('pending_removals')
+            if not isinstance(previous_pending, dict):
+                previous_pending = {}
+            catalog_changed = bool(
+                reconciled['added']
+                or reconciled['removed']
+                or reconciled['updated']
+                or previous_pending != reconciled['pending_removals']
+            )
+            unchanged_successes = (
+                0 if catalog_changed else min(
+                    1_000_000,
+                    _counter(state.get('unchanged_successes')) + 1,
+                )
+            )
+            next_interval = (
+                SYNC_INTERVAL_S if catalog_changed else _backoff_interval(
+                    unchanged_successes,
+                    maximum=STABLE_MAX_INTERVAL_S,
+                )
+            )
             provider['models'] = reconciled['models']
             state.update({
                 'mode': 'auto',
@@ -377,6 +457,8 @@ def _finish_success(provider_id: str, claim: dict, discovered: list,
                 'last_finished_at': now,
                 'last_error': '',
                 'consecutive_failures': 0,
+                'unchanged_successes': unchanged_successes,
+                'next_attempt_at': now + next_interval,
                 'lease_until': 0,
                 'pending_removals': reconciled['pending_removals'],
                 'last_added': reconciled['added'][:50],
@@ -389,6 +471,11 @@ def _finish_success(provider_id: str, claim: dict, discovered: list,
             _repair_retired_references(
                 cfg, set(reconciled['removed']), provider)
             outcome.update(reconciled)
+            outcome.update({
+                'catalog_changed': catalog_changed,
+                'next_attempt_at': now + next_interval,
+                'next_interval': next_interval,
+            })
             return cfg
         return None
 
@@ -524,9 +611,38 @@ def _take_pending() -> tuple[set[str] | None, bool]:
     return ids, forced
 
 
+def _next_worker_delay(*, now: float | None = None,
+                       config_path: str | None = None) -> float:
+    """Sleep until the earliest eligible provider deadline or a Settings wake."""
+    now = time.time() if now is None else float(now)
+    cfg = read_json(config_path or _server_config_path(), default={})
+    providers = cfg.get('providers') if isinstance(cfg, dict) else []
+    deadlines = []
+    for provider in providers or []:
+        if not isinstance(provider, dict) or not _eligible(provider):
+            continue
+        state = _sync_state(provider)
+        deadlines.append(max(
+            _next_attempt_at(state),
+            _timestamp(state.get('lease_until')),
+        ))
+    if not deadlines:
+        return float(STABLE_MAX_INTERVAL_S)
+    earliest = min(deadlines)
+    if earliest <= now:
+        # A failed claim/config write must not turn a due provider into a hot
+        # loop. Settings still wakes this bounded fallback immediately.
+        return float(min(SYNC_INTERVAL_S, max(30, LEASE_S)))
+    return max(0.1, min(
+        float(FAILURE_MAX_INTERVAL_S), earliest - now))
+
+
 def _loop() -> None:
-    logger.info('[ModelCatalog] worker started (interval=%ds, remove_after=%d)',
-                SYNC_INTERVAL_S, REMOVE_AFTER)
+    logger.info(
+        '[ModelCatalog] worker started '
+        '(base=%ds, stable_max=%ds, failure_max=%ds, remove_after=%d)',
+        SYNC_INTERVAL_S, STABLE_MAX_INTERVAL_S,
+        FAILURE_MAX_INTERVAL_S, REMOVE_AFTER)
     _wake_event.wait(BOOT_DELAY_S)
     _wake_event.clear()
     while not _stop_event.is_set():
@@ -535,7 +651,14 @@ def _loop() -> None:
             sync_once(provider_ids=provider_ids, force=force)
         except Exception as exc:
             logger.error('[ModelCatalog] sweep failed: %s', exc, exc_info=True)
-        _wake_event.wait(SYNC_INTERVAL_S)
+        try:
+            delay = _next_worker_delay()
+        except Exception as exc:
+            logger.error(
+                '[ModelCatalog] next-deadline read failed: %s', exc,
+                exc_info=True)
+            delay = SYNC_INTERVAL_S
+        _wake_event.wait(delay)
         _wake_event.clear()
     logger.info('[ModelCatalog] worker stopped')
 

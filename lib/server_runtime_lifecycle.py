@@ -52,7 +52,6 @@ def register_runtime_lifecycle(
     hooks: Any = None,
     fault_shm_log: Any = None,
     fault_log: Any = None,
-    deferred_dispatch_provider: Callable[[], Any] | None = None,
     logger: logging.Logger | None = None,
     environ: Mapping[str, str] | None = None,
     serving_registrar: LifecycleRegistrar = register_serving_loop_lifecycle,
@@ -71,7 +70,6 @@ def register_runtime_lifecycle(
         hooks=hooks,
         fault_shm_log=fault_shm_log,
         fault_log=fault_log,
-        deferred_dispatch_provider=deferred_dispatch_provider,
         logger=logger,
         environ=environ,
     )

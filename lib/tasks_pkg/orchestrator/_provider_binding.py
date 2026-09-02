@@ -1,6 +1,6 @@
 """Provider binding — hard provider pin + conversation-sticky routing.
 
-Extracted 2026-08-01 (pt_03f4cdf1 slice 31) from ``run_task``'s pre-stream
+Extracted 2026-08-01 ( slice 31) from ``run_task``'s pre-stream
 prep. Runs ONCE per run_task invocation, right before Section 1 (config
 resolution). Both binds are THREAD-LOCAL and cleared in run_task's finally
 block (``_teardown.finalize_task_lane``) because worker threads are pooled
@@ -11,7 +11,7 @@ Two bindings, one branch:
 1. **Hard provider pin (multi-tenant isolation).** When this task was
    created from an inline ``provider`` block or a registered ``@prov_xxx``
    BYO endpoint, bind THIS worker thread to that provider so every LLM
-   dispatch on it (main solve, L2/advanced compaction summaries, endpoint
+   dispatch on it (main solve, L2/advanced compaction summaries, Flow role
    replan turns) can only pick that provider's slot — never silently fall
    back to an operator key and eat a 429. See
    ``lib/llm_dispatch/provider_pin.py``. BRANCH: only when

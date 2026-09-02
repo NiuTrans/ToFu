@@ -78,6 +78,49 @@ class AnthropicTranslateTest(unittest.TestCase):
         self.assertEqual(resp['usage']['input_tokens'], 12)
         self.assertEqual(resp['usage']['output_tokens'], 7)
 
+    def test_failed_response_uses_error_channel_not_fake_end_turn(self):
+        from lib.compat._common import CompatTerminalFailure
+        from lib.compat.anthropic import build_anthropic_response
+
+        task = {
+            'id': 'cut',
+            'status': 'done',
+            'content': 'safe prefix',
+            'finishReason': 'premature_close',
+            'streamState': 'premature_close',
+        }
+        with self.assertRaises(CompatTerminalFailure):
+            build_anthropic_response(task, model='claude')
+
+    def test_stream_failure_emits_error_instead_of_message_stop(self):
+        import asyncio
+
+        from lib.compat.anthropic import stream_anthropic_chunks
+
+        task = {
+            'id': 'cut',
+            'status': 'done',
+            'content': 'safe prefix',
+            'finishReason': 'premature_close',
+            'streamState': 'malformed_stream',
+            'events': [{
+                'type': 'done',
+                'finishReason': 'premature_close',
+                'streamState': 'malformed_stream',
+                'seq': 0,
+            }],
+            'events_lock': threading.Lock(),
+        }
+
+        async def _drain():
+            return [frame async for frame in
+                    stream_anthropic_chunks(task, model='claude')]
+
+        wire = ''.join(asyncio.new_event_loop().run_until_complete(_drain()))
+        self.assertIn('event: error', wire)
+        self.assertIn('provider_stream_error', wire)
+        self.assertNotIn('event: message_stop', wire)
+
     def test_streaming_emits_named_events(self):
         import asyncio
         from lib.compat.anthropic import stream_anthropic_chunks

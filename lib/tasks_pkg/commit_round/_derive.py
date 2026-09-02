@@ -105,4 +105,7 @@ def derive_round_modified_files(task: dict, project_path: str | None,
          **({'root': info['root']} if info['root'] else {})}
         for (root_name, p), info in seen.items()
     ]
-    return file_list, len(turn_mods), used_ts_fallback
+    # The count is the UNIQUE-FILE count, never the raw journal-event count:
+    # the "files changed" card headlines this number above the deduped list,
+    # and a file edited five times must read as one changed file, not five.
+    return file_list, len(file_list), used_ts_fallback

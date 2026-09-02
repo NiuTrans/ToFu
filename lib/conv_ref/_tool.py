@@ -70,7 +70,7 @@ def _paging_int(value, name):
 
 
 def execute_conv_ref_tool(fn_name, fn_args, current_conv_id=None,
-                          project_path=None, user_id=None):
+                          project_path=None, *, user_id):
     """Execute a conversation reference tool and return the result string.
 
     Args:
@@ -79,10 +79,8 @@ def execute_conv_ref_tool(fn_name, fn_args, current_conv_id=None,
         current_conv_id: the ID of the current conversation (to prevent self-reference)
         project_path: the current task's project path, used to scope
             ``list_conversations`` to sibling conversations of the same project.
-        user_id: the OWNING principal whose conversations are readable. The
-            caller resolves it (``task_user_id(task)`` on a background task
-            thread, ``_request_user_id()`` on a request thread); ``None``
-            falls back to the single-user default.
+        user_id: the owning principal whose conversations are readable. The
+            caller resolves it at its request or task boundary.
 
     Returns:
         str: formatted result

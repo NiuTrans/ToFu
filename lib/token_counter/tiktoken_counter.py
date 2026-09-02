@@ -11,9 +11,13 @@ Encoding choice:
 
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
+from collections import OrderedDict
 from typing import Any, Optional
+
+from runtime_guards import resolve_resource_budget
 
 from lib.log import get_logger
 
@@ -31,6 +35,17 @@ logger = get_logger(__name__)
 _lock = threading.Lock()
 _encoders: dict[str, Any] = {}
 _available: Optional[bool] = None
+
+# Repeated model rounds count byte-identical tool-schema and compaction blocks.
+# Keep only a cryptographic digest and integer result: prompt/schema text never
+# becomes resident cache state.  The launch-time resource profile bounds the
+# entry count for personal and distributed deployments, with a hard ceiling at
+# this consumer boundary.
+_TEXT_COUNT_CACHE_MIN_CHARS = 4_096
+_TEXT_COUNT_CACHE_CAPACITY = resolve_resource_budget(
+    'TOFU_TOKEN_COUNT_CACHE_CAPACITY', maximum=4_096)
+_text_count_cache: OrderedDict[tuple[str, int, bytes], int] = OrderedDict()
+_text_count_cache_lock = threading.Lock()
 
 
 def _get_encoder(name: str):
@@ -69,14 +84,36 @@ def count_text(text: str, model: str = '') -> int:
     """Exact-ish count for a single text blob (public API)."""
     if not text:
         return 0
-    enc = _get_encoder(encoding_for_model(model))
+    encoding = encoding_for_model(model)
+    cache_key: tuple[str, int, bytes] | None = None
+    if len(text) >= _TEXT_COUNT_CACHE_MIN_CHARS:
+        cache_key = (
+            encoding,
+            len(text),
+            hashlib.sha256(text.encode('utf-8')).digest(),
+        )
+        with _text_count_cache_lock:
+            cached = _text_count_cache.get(cache_key)
+            if cached is not None:
+                _text_count_cache.move_to_end(cache_key)
+                return cached
+
+    enc = _get_encoder(encoding)
     if enc is None:
         return 0  # caller should fall back to heuristic
     try:
-        return len(enc.encode(text, disallowed_special=()))
+        result = len(enc.encode(text, disallowed_special=()))
     except Exception as e:
         logger.debug('[TokenCounter] tiktoken encode failed: %s', e)
         return 0
+    if cache_key is not None:
+        with _text_count_cache_lock:
+            _text_count_cache[cache_key] = result
+            _text_count_cache.move_to_end(cache_key)
+            capacity = max(1, int(_TEXT_COUNT_CACHE_CAPACITY))
+            while len(_text_count_cache) > capacity:
+                _text_count_cache.popitem(last=False)
+    return result
 
 
 class TiktokenCounter(TokenCounter):

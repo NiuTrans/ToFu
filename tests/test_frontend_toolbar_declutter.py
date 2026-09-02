@@ -30,10 +30,11 @@ from pathlib import Path
 
 import pytest
 
+from tests._runtime_sections import runtime_section
+
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOLBAR_JS = ROOT / "static" / "js" / "main" / "main_toolbar_ui.js"
 INDEX_HTML = ROOT / "index.html"
 
 
@@ -69,12 +70,12 @@ def _slice_fn(src: str, signature: str) -> str:
 
 
 def _populate_fn() -> str:
-    return _slice_fn(TOOLBAR_JS.read_text(encoding="utf-8"),
+    return _slice_fn(runtime_section('main/main_toolbar_ui.js'),
                      "function _populateModelDropdown(models) {")
 
 
 def _toggle_fn() -> str:
-    return _slice_fn(TOOLBAR_JS.read_text(encoding="utf-8"),
+    return _slice_fn(runtime_section('main/main_toolbar_ui.js'),
                      "function toggleSubmenu(id) {")
 
 
@@ -126,7 +127,7 @@ HARNESS = textwrap.dedent("""
     // eval scope, so BOTH must be stubbed: without isChatModel the filter
     // takes its degraded branch, which then calls _warnModelCapsMissing and
     // throws ReferenceError before a single item renders.
-    global.isChatModel = () => true;
+    global.runtimeScope = {{ isChatModel: () => true }};
     global._warnModelCapsMissing = () => {{}};
     // Shared display-name comparator (settings/branding.js). This harness only
     // evals main_toolbar_ui.js, so the picker's sort is typeof-guarded on it —

@@ -10,7 +10,7 @@ from typing import Any
 _NAME = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 _NAMESPACE = re.compile(r'^[a-z][a-z0-9_.-]{2,127}$')
 _TYPES = {'string', 'integer', 'number', 'boolean', 'json', 'bytes', 'timestamp'}
-_ACTIONS = {'get', 'list', 'put', 'delete'}
+_ACTIONS = {'get', 'list', 'put', 'delete', 'batch', 'legacy_scan'}
 
 
 class ManifestError(ValueError):
@@ -107,17 +107,44 @@ def validate_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
         if name in operation_names or action not in _ACTIONS or table_name not in table_map:
             raise ManifestError('invalid or duplicate operation')
         operation_names.add(name)
-        expected_kind = 'query' if action in {'get', 'list'} else 'command'
+        expected_kind = (
+            'query' if action in {'get', 'list', 'legacy_scan'} else 'command'
+        )
         kind = str(raw_operation.get('kind') or expected_kind)
         if kind != expected_kind:
             raise ManifestError(f'{name}: action/kind mismatch')
         limit_max = raw_operation.get('limit_max', 100)
         if not isinstance(limit_max, int) or not 1 <= limit_max <= 1000:
             raise ManifestError(f'{name}: limit_max must be 1..1000')
-        operations.append({
+        operation = {
             'name': name, 'kind': kind, 'action': action, 'table': table_name,
             'limit_max': limit_max,
-        })
+        }
+        if action == 'legacy_scan':
+            legacy_table = _name(
+                raw_operation.get('legacy_table'), 'legacy table')
+            legacy_columns_in = raw_operation.get('legacy_columns')
+            if (not isinstance(legacy_columns_in, list)
+                    or not legacy_columns_in):
+                raise ManifestError(
+                    f'{name}: legacy columns are required')
+            legacy_columns = [
+                _name(column, 'legacy column')
+                for column in legacy_columns_in
+            ]
+            if len(set(legacy_columns)) != len(legacy_columns):
+                raise ManifestError(f'{name}: duplicate legacy column')
+            legacy_order_in = raw_operation.get('legacy_order_by') or []
+            if (not isinstance(legacy_order_in, list)
+                    or any(column not in legacy_columns
+                           for column in legacy_order_in)):
+                raise ManifestError(f'{name}: invalid legacy order')
+            operation.update({
+                'legacy_table': legacy_table,
+                'legacy_columns': legacy_columns,
+                'legacy_order_by': list(legacy_order_in),
+            })
+        operations.append(operation)
 
     return {
         'namespace': namespace,

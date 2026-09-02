@@ -60,12 +60,20 @@ _lock = threading.Lock()
 _cache: dict[str, _UsageEntry] = {}
 
 
-def _signature(messages: list, n_tail: int = 3) -> str:
+def _signature(
+    messages: list,
+    n_tail: int = 3,
+    *,
+    end: int | None = None,
+) -> str:
     """Short signature of the last n_tail messages — used to detect
     whether the tail changed (e.g. a regenerate or edit) vs. simply
     had new messages appended."""
+    end_index = len(messages) if end is None else max(
+        0, min(len(messages), int(end)))
+    start_index = max(0, end_index - max(0, int(n_tail)))
     parts = []
-    for m in (messages or [])[-n_tail:]:
+    for m in messages[start_index:end_index]:
         role = m.get('role', '')
         content = m.get('content')
         if isinstance(content, str):
@@ -186,8 +194,7 @@ class UsageCacheCounter(TokenCounter):
         # Safety: the tail of the recorded-at-time prefix must still
         # match. We cheaply verify with a signature of the messages up
         # to entry.message_count.
-        prefix = messages[:entry.message_count]
-        if _signature(prefix) != entry.tail_signature:
+        if _signature(messages, end=entry.message_count) != entry.tail_signature:
             # The conversation was edited mid-flight — e.g. a message
             # was regenerated or truncated. Don't trust the cache.
             return None
@@ -195,10 +202,10 @@ class UsageCacheCounter(TokenCounter):
         # Estimate delta tokens for the appended suffix.
         from .heuristic import cheap_estimate_text
         suffix = messages[entry.message_count:]
-        delta_tokens = 0
-        for m in suffix:
-            for txt in iter_message_texts([m]):
-                delta_tokens += cheap_estimate_text(txt)
+        delta_tokens = sum(
+            cheap_estimate_text(txt)
+            for txt in iter_message_texts(suffix)
+        )
 
         # IMPORTANT: do NOT add the tool-schema / system-prompt cost here.
         # ``entry.prompt_tokens`` is the gateway's exact count for the

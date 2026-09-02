@@ -35,16 +35,36 @@ pytestmark = pytest.mark.unit
 _MS_FLOOR = 1e12  # epoch-ms is ~1.78e12; epoch-SECONDS is ~1.78e9
 
 
+@pytest.fixture(autouse=True)
+def _stub_video_report_lookup(monkeypatch):
+    """Clock tests stay behind the report repository's public facade.
+
+    Report availability is orthogonal to every assertion in this module, and
+    a unit-test process has no live Storage Sidecar. Keep the handler on its
+    semantic ``has_report`` seam while proving it forwards the authenticated
+    owner explicitly.
+    """
+    import lib.paper.podcast_engine.worker as podcast_engine
+
+    def _has_report(_paper_hash, *, user_id):
+        assert user_id == 1
+        return False
+
+    monkeypatch.setattr(podcast_engine, 'has_report', _has_report)
+
+
 @pytest.fixture
 def podcast_task():
     """A real podcast task registered in the real runtime, cleaned up after."""
     from lib.paper.podcast_runtime import _podcast_runtime
     tid = 'pc_clock_probe'
-    task = _podcast_runtime.create(task_id=tid)
-    task['task_id'] = tid
-    task['progress'] = {'done': 1, 'total': 4}
+    task = _podcast_runtime.create(user_id=1, task_id=tid)
+    _podcast_runtime.update_fields(
+        tid,
+        fields={'task_id': tid, 'progress': {'done': 1, 'total': 4}},
+    )
     yield tid, task
-    _podcast_runtime._tasks.pop(tid, None)
+    _podcast_runtime.remove_owned(tid, user_id=1)
 
 
 def _call_podcast_poll(app, task_id, cursor=0):
@@ -54,11 +74,14 @@ def _call_podcast_poll(app, task_id, cursor=0):
     is wrapped in a tiny event loop rather than a plain ``with``.
     """
     import asyncio
-    from routes.paper import poll_podcast_task
+    from lib.api_keys import local_admin_context
+    from quart import g
+    from routes.paper_pkg._podcast import poll_podcast_task
 
     async def _run():
         async with app.test_request_context(
                 f'/api/v1/paper/podcast/poll?task_id={task_id}&cursor={cursor}'):
+            g.auth_ctx = local_admin_context()
             resp = await poll_podcast_task()  # async since the Quart migration
             body = resp[0] if isinstance(resp, tuple) else resp
             return await body.get_json()
@@ -133,9 +156,11 @@ def test_podcast_poll_exposes_standard_replay_and_correlation(app):
 
     set_req_id('paper-page-12')
     tid = 'pc_replay_envelope'
-    task = _podcast_runtime.create(task_id=tid)
-    task['task_id'] = tid
-    task['progress'] = {'done': 0, 'total': 1}
+    task = _podcast_runtime.create(user_id=1, task_id=tid)
+    _podcast_runtime.update_fields(
+        tid,
+        fields={'task_id': tid, 'progress': {'done': 0, 'total': 1}},
+    )
     set_req_id('')
     try:
         _podcast_runtime.append_event(tid, {'type': 'phase', 'phase': 'script'})
@@ -149,7 +174,7 @@ def test_podcast_poll_exposes_standard_replay_and_correlation(app):
             'requested': 0, 'next': 1, 'reset': False,
         }
     finally:
-        _podcast_runtime._tasks.pop(tid, None)
+        _podcast_runtime.remove_owned(tid, user_id=1)
 
 
 def test_podcast_poll_preserves_progress_and_status(app, podcast_task):
@@ -199,21 +224,24 @@ def test_video_lookup_running_branch_carries_clock():
     """
     from lib.app_factory import create_base_app
     from lib.motion_video.runtime import _motion_runtime
-    from routes.paper import lookup_video_abstract
+    from routes.paper_pkg._podcast import lookup_video_abstract
 
     phash = 'clockprobehash'
     tid = 'motion_clock_probe'
-    task = _motion_runtime.create(task_id=tid)
-    task['task_id'] = tid
-    task['paper_hash'] = phash
-    task['status'] = 'running'
+    task = _motion_runtime.create(user_id=1, task_id=tid)
+    _motion_runtime.update_fields(
+        tid, fields={'task_id': tid, 'paper_hash': phash})
+    _motion_runtime.mark_running(tid)
     app = create_base_app(__name__)
     try:
         import asyncio
 
         async def _run():
+            from lib.api_keys import local_admin_context
+            from quart import g
             async with app.test_request_context(
                     f'/api/v1/paper/video/lookup?paper_hash={phash}'):
+                g.auth_ctx = local_admin_context()
                 resp = await lookup_video_abstract()  # async (Quart migration)
                 body = resp[0] if isinstance(resp, tuple) else resp
                 return await body.get_json()
@@ -228,7 +256,7 @@ def test_video_lookup_running_branch_carries_clock():
             'lookup clock must be epoch ms like every other surface'
         assert body['createdAt'] == pytest.approx(task['created_at'] * 1000)
     finally:
-        _motion_runtime._tasks.pop(tid, None)
+        _motion_runtime.remove_owned(tid, user_id=1)
 
 
 # ── the DISK-FALLBACK lookup: the post-restart re-attach ───────
@@ -260,6 +288,7 @@ def disk_job(tmp_path, monkeypatch):
         (wd / 'job.json').write_text(json.dumps({
             'task_id': task_id, 'kind': 'paper-video', 'state': state,
             'created_at': created_at, 'paper_hash': phash,
+            'user_id': 1,
             'narration': True, 'workdir': str(wd),
         }), encoding='utf-8')
         if final:
@@ -272,15 +301,17 @@ def disk_job(tmp_path, monkeypatch):
 def _call_video_lookup(phash):
     import asyncio
 
-    from quart import Quart
+    from lib.api_keys import local_admin_context
+    from quart import Quart, g
 
-    from routes.paper import lookup_video_abstract
+    from routes.paper_pkg._podcast import lookup_video_abstract
 
     app = Quart(__name__)
 
     async def _run():
         async with app.test_request_context(
                 f'/api/v1/paper/video/lookup?paper_hash={phash}'):
+            g.auth_ctx = local_admin_context()
             resp = await lookup_video_abstract()  # async (Quart migration)
             body = resp[0] if isinstance(resp, tuple) else resp
             return await body.get_json()

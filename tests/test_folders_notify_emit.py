@@ -58,11 +58,18 @@ def folder_store(tmp_path, monkeypatch):
 def captured(monkeypatch):
     """Capture every push_event(channel, task_id, payload) the seam emits."""
     frames = []
+
+    def _capture(channel, task_id, payload, *, user_id):
+        assert payload['userId'] == user_id
+        frames.append({
+            'channel': channel,
+            'taskId': task_id,
+            'payload': payload,
+            'ownerUserId': user_id,
+        })
+
     import lib.agent_core.push as push_mod
-    monkeypatch.setattr(
-        push_mod, 'push_event',
-        lambda channel, task_id, payload: frames.append(
-            {'channel': channel, 'taskId': task_id, 'payload': payload}))
+    monkeypatch.setattr(push_mod, 'push_event', _capture)
     return frames
 
 
@@ -83,6 +90,7 @@ def test_create_folder_emits_frame(flask_client, folder_store, captured):
     assert len(frames) == 1, f'create must emit exactly one frame, got {frames}'
     assert 'deletedFolderId' not in frames[0]['payload']
     assert frames[0]['payload'].get('userId') == 1
+    assert frames[0]['ownerUserId'] == 1
 
 
 def test_update_folder_emits_frame(flask_client, folder_store, captured):

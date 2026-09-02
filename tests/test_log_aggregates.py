@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 import time
 
 import pytest
@@ -213,14 +214,11 @@ class TestContinuationAttribution:
 class _DbBase:
     @pytest.fixture()
     def fresh_db(self, tmp_path, monkeypatch):
-        from lib.database import init_db, reset_sqlite_for_tests, restore_db_state
         from lib.storage import StorageSupervisor
 
-        snapshot = reset_sqlite_for_tests(str(tmp_path / 'agg.db'))
-        init_db()
         supervisor = StorageSupervisor(
             project_root=tmp_path / 'sidecar', backend='sqlite',
-            startup_timeout=20)
+            startup_timeout=60)
         supervisor.start()
         monkeypatch.setattr(
             la, '_storage', lambda **_kwargs: supervisor.client)
@@ -228,7 +226,6 @@ class _DbBase:
             yield supervisor
         finally:
             supervisor.stop()
-            restore_db_state(snapshot)
 
     @staticmethod
     def _rows():
@@ -278,6 +275,35 @@ class TestFlush(_DbBase):
         assert result['ok'] is True
         rows = self._rows()
         assert len(rows) == 1 and rows[0]['count'] == 5
+
+    def test_count_flush_and_ttl_sweep_use_separate_priority_transactions(
+            self, monkeypatch):
+        calls = []
+
+        class Client:
+            def command(self, operation, payload, _command_id, *, priority):
+                calls.append((operation, payload, priority))
+                return {
+                    'flushed': len(payload['rows']),
+                    'swept': 0,
+                }
+
+        store = self._store_with(n=2)
+        monkeypatch.setattr(la, '_storage', lambda **_kwargs: Client())
+        monkeypatch.setattr(
+            la, '_last_sweep_at',
+            time.monotonic() - 2 * la._TTL_SWEEP_INTERVAL_SEC)
+
+        result = la.flush_once(store=store)
+
+        assert result == {'ok': True, 'flushed': 1, 'swept': 0}
+        assert len(calls) == 2
+        assert calls[0][0] == 'log_aggregate.flush'
+        assert len(calls[0][1]['rows']) == 1
+        assert calls[0][2] == 'event'
+        assert calls[1][1]['rows'] == []
+        assert 'cutoff_ms' in calls[1][1]
+        assert calls[1][2] == 'maintenance'
 
     def test_ttl_sweep_deletes_only_stale(self, fresh_db, monkeypatch):
         new_ms = 9_000_000_000_000
@@ -373,11 +399,20 @@ class TestAggregatesEndpoint(_DbBase):
 # ═══ 5b. flusher 生命周期(server.py 生产分支调的正是这两个函数)═══
 
 class TestFlusherLifecycle:
+    def test_failed_flushes_back_off_and_success_resets(self, monkeypatch):
+        monkeypatch.setenv('TOFU_LOG_AGG_FLUSH_SEC', '10')
+
+        assert la._next_flush_delay(10.0, {'ok': False}) == 20.0
+        assert la._next_flush_delay(20.0, {'ok': False}) == 40.0
+        assert la._next_flush_delay(200.0, None) == 300.0
+        assert la._next_flush_delay(300.0, {'ok': True}) == 10.0
+
     def test_start_is_idempotent_and_loop_flushes(self, monkeypatch):
         calls = []
         monkeypatch.setattr(la, 'flush_once',
                             lambda **kw: calls.append(kw) or {'ok': True})
         monkeypatch.setenv('TOFU_LOG_AGG_FLUSH_SEC', '1')
+        monkeypatch.setattr(la, '_last_sweep_at', 0.0)
         try:
             assert la.start_flusher() is True
             first = la._flusher_thread
@@ -391,6 +426,53 @@ class TestFlusherLifecycle:
         finally:
             la.stop_flusher(final_flush=False)
         assert la._flusher_thread is None
+
+    def test_idle_worker_wakes_hourly_instead_of_every_flush_window(
+            self, monkeypatch):
+        monkeypatch.setenv('TOFU_LOG_AGG_FLUSH_SEC', '15')
+        monkeypatch.setattr(la, '_last_sweep_at', 100.0)
+
+        assert la._idle_flush_delay(now=100.0) == 3600.0
+        assert la._idle_flush_delay(now=3700.0) == 15.0
+        assert 3600 / la._idle_flush_delay(now=100.0) == 1
+        assert 3600 / 15 == 240
+
+    def test_default_store_rows_wake_an_hourly_idle_worker(self, monkeypatch):
+        store = la.AggregateStore()
+        flushed = threading.Event()
+        rows_seen = []
+        monkeypatch.setattr(la, '_default_store', store)
+        monkeypatch.setattr(la, '_last_sweep_at', time.monotonic())
+        monkeypatch.setenv('TOFU_LOG_AGG_FLUSH_SEC', '1')
+
+        def flush_once():
+            rows_seen.extend(store.snapshot())
+            flushed.set()
+            return {'ok': True, 'flushed': len(rows_seen), 'swept': 0}
+
+        monkeypatch.setattr(la, 'flush_once', flush_once)
+        try:
+            assert la.start_flusher() is True
+            assert flushed.wait(0.2) is False
+            la.FingerprintHandler(store).emit(_record('new aggregate work'))
+            assert flushed.wait(2.5) is True
+        finally:
+            la.stop_flusher(final_flush=False)
+        assert len(rows_seen) == 1
+
+    def test_default_store_wakes_only_on_empty_to_pending_transition(
+            self, monkeypatch):
+        store = la.AggregateStore()
+        wakes = []
+        monkeypatch.setattr(la, '_default_store', store)
+        monkeypatch.setattr(la, '_wake_flusher', lambda: wakes.append('wake'))
+
+        handler = la.FingerprintHandler(store)
+        handler.emit(_record('first pending aggregate'))
+        handler.emit(_record('second pending aggregate'))
+
+        assert wakes == ['wake']
+        assert len(store) == 2
 
     def test_stop_timeout_retains_live_thread_and_skips_final_flush(
             self, monkeypatch):

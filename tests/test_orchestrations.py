@@ -1,36 +1,34 @@
-"""tests/test_orchestrations.py — orchestration validator + REST CRUD.
+"""Orchestration validation, owner-scoped persistence, and HTTP contracts.
 
 Covers:
   * lib.orchestration.validate_definition — pure validation rules.
   * /api/v1/orchestrations CRUD + /validate — end-to-end through a Quart
     test client, mirroring the fixture style of test_api_v1_integration.
 
-The store path (data/config/orchestrations.json) is redirected to a
-tmp file so the real config is never touched.
+The module-scoped Sidecar fixture owns every persisted definition, run, and
+event. No test redirects legacy JSON or application-database paths.
 """
 
 import asyncio
-import os
-import sys
-import tempfile
 import unittest
 
 import pytest
 
 pytest_plugins = ('tests._artifact_sidecar',)
+pytestmark = pytest.mark.api
 
 
 # ── Pure validator tests (no app needed) ────────────────────────────
 
 class ValidatorTest(unittest.TestCase):
     def _v(self, d):
-        from lib.orchestration import validate_definition
+        from lib.orchestration._validate import validate_definition
         return validate_definition(d)
 
-    def _endpoint_def(self):
+    def _verifier_loop_def(self):
         return {
             'schema': 'tofu.orchestration/v1',
-            'name': 'Endpoint Loop',
+            'name': 'Verifier Loop',
             'nodes': [
                 {'id': 's1', 'type': 'control', 'kind': 'start'},
                 {'id': 'p1', 'type': 'role', 'role': 'planner'},
@@ -48,41 +46,41 @@ class ValidatorTest(unittest.TestCase):
             ],
         }
 
-    def test_valid_endpoint_passes_clean(self):
-        v = self._v(self._endpoint_def())
+    def test_valid_verifier_loop_passes_clean(self):
+        v = self._v(self._verifier_loop_def())
         self.assertTrue(v['ok'], v['errors'])
         self.assertEqual(v['errors'], [])
         self.assertEqual(v['warnings'], [])
 
     def test_missing_name_is_error(self):
-        d = self._endpoint_def(); d['name'] = ''
+        d = self._verifier_loop_def(); d['name'] = ''
         v = self._v(d)
         self.assertFalse(v['ok'])
         self.assertTrue(any('name' in e for e in v['errors']))
 
     def test_duplicate_id_is_error(self):
-        d = self._endpoint_def()
+        d = self._verifier_loop_def()
         d['nodes'].append({'id': 's1', 'type': 'control', 'kind': 'barrier'})
         v = self._v(d)
         self.assertFalse(v['ok'])
         self.assertTrue(any('duplicate' in e for e in v['errors']))
 
     def test_two_start_nodes_is_error(self):
-        d = self._endpoint_def()
+        d = self._verifier_loop_def()
         d['nodes'].append({'id': 's2', 'type': 'control', 'kind': 'start'})
         v = self._v(d)
         self.assertFalse(v['ok'])
         self.assertTrue(any('start' in e for e in v['errors']))
 
     def test_edge_to_unknown_node_is_error(self):
-        d = self._endpoint_def()
+        d = self._verifier_loop_def()
         d['edges'].append({'from': 's1', 'to': 'ghost'})
         v = self._v(d)
         self.assertFalse(v['ok'])
         self.assertTrue(any('ghost' in e for e in v['errors']))
 
     def test_bad_tier_and_isolation_are_errors(self):
-        d = self._endpoint_def()
+        d = self._verifier_loop_def()
         d['nodes'][3]['params'] = {'tier': 'ultra', 'isolation': 'weird'}
         v = self._v(d)
         self.assertFalse(v['ok'])
@@ -90,21 +88,21 @@ class ValidatorTest(unittest.TestCase):
         self.assertTrue(any('isolation' in e for e in v['errors']))
 
     def test_unknown_role_is_warning_not_error(self):
-        d = self._endpoint_def()
+        d = self._verifier_loop_def()
         d['nodes'][1]['role'] = 'wizard'
         v = self._v(d)
         self.assertTrue(v['ok'], v['errors'])
         self.assertTrue(any('wizard' in w for w in v['warnings']))
 
     def test_edge_into_start_rejected(self):
-        d = self._endpoint_def()
+        d = self._verifier_loop_def()
         d['edges'].append({'from': 'w1', 'to': 's1'})
         v = self._v(d)
         self.assertFalse(v['ok'])
         self.assertTrue(any('start' in e for e in v['errors']))
 
     def test_stop_has_no_output(self):
-        d = self._endpoint_def()
+        d = self._verifier_loop_def()
         d['edges'].append({'from': 'e1', 'to': 'w1'})
         v = self._v(d)
         self.assertFalse(v['ok'])
@@ -112,7 +110,7 @@ class ValidatorTest(unittest.TestCase):
 
     def test_human_node_valid_modes(self):
         for mode in ('approve', 'input', 'notify'):
-            d = self._endpoint_def()
+            d = self._verifier_loop_def()
             # splice a human gate between planner and loop
             d['nodes'].append({'id': 'h1', 'type': 'control', 'kind': 'human',
                                'params': {'mode': mode, 'prompt': 'ok?'}})
@@ -122,7 +120,7 @@ class ValidatorTest(unittest.TestCase):
             self.assertTrue(v['ok'], (mode, v['errors']))
 
     def test_human_invalid_mode_is_error(self):
-        d = self._endpoint_def()
+        d = self._verifier_loop_def()
         d['nodes'].append({'id': 'h1', 'type': 'control', 'kind': 'human',
                            'params': {'mode': 'teleport'}})
         d['edges'].append({'from': 'p1', 'to': 'h1'})
@@ -135,14 +133,6 @@ class ValidatorTest(unittest.TestCase):
 
 class _AppFixture:
     def __init__(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        # Patch api_keys store before auth loads.
-        from lib import api_keys
-        self._orig_keys = api_keys._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(self._tmp.name, 'api_keys.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-
         # Install the flask→quart shim the same way the server does
         # (server._install_flask_shim handles the sync get_json wrapper +
         # Quart config defaults that a bare inline copy misses). This MUST
@@ -151,12 +141,8 @@ class _AppFixture:
         # installed. Otherwise a standalone run of this file errors at import.
         import server  # noqa: F401  — import side-effect installs the shim
 
-        # Redirect the orchestrations store to a tmp file.
         import routes.api_v1.orchestrations as orch_mod
-        self._orig_orch_path = orch_mod._ORCH_PATH
-        orch_mod._ORCH_PATH = os.path.join(self._tmp.name, 'orchestrations.json')
 
-        os.environ['TUNNEL_TOKEN'] = 'test-tunnel-token-not-real'
         # Auth mode is pinned to 'private' per-test via the ``auth_mode``
         # marker on the test classes (CrudTest / TaskRunHttpTest), honoured
         # by the conftest fixture — not mutated here (a fixture-level env
@@ -171,16 +157,6 @@ class _AppFixture:
         self.app.before_request(bearer_auth_before_request)
         self.app.after_request(attach_rate_headers)
         self.app.register_blueprint(orch_mod.api_v1_orchestrations_bp)
-
-    def cleanup(self):
-        from lib import api_keys
-        import routes.api_v1.orchestrations as orch_mod
-        api_keys._STORE_PATH = self._orig_keys
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        orch_mod._ORCH_PATH = self._orig_orch_path
-        self._tmp.cleanup()
-
 
 def _run(coro):
     loop = asyncio.new_event_loop()
@@ -199,17 +175,22 @@ class CrudTest(unittest.TestCase):
     def setUpClass(cls):
         cls.fix = _AppFixture()
         from lib.api_keys import create_key
-        _row, cls.token = create_key(name='orch-test', scopes=[], admin=True)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.fix.cleanup()
+        _row, cls.token = create_key(owner_user_id=1, name='orch-test', scopes=[], admin=True)
+        _row, cls.other_token = create_key(
+            owner_user_id=82_002,
+            name='orch-test-other-owner',
+            scopes=[],
+            admin=True,
+        )
 
     def _cli(self):
         return self.fix.app.test_client()
 
     def _hdr(self):
         return {'Authorization': f'Bearer {self.token}'}
+
+    def _other_hdr(self):
+        return {'Authorization': f'Bearer {self.other_token}'}
 
     def _def(self, name='Flow A'):
         return {
@@ -375,7 +356,10 @@ class CrudTest(unittest.TestCase):
             # Update (rename)
             upd = self._def('CycleFlow v2')
             r = await cli.put(f'/api/v1/orchestrations/{oid}',
-                              headers=self._hdr(), json=upd)
+                              headers={
+                                  **self._hdr(),
+                                  'If-Match': f'"{got["updatedAt"]}"',
+                              }, json=upd)
             self.assertEqual(r.status_code, 200)
             updated = await r.get_json()
             self.assertEqual(updated['format'],
@@ -385,10 +369,73 @@ class CrudTest(unittest.TestCase):
                              f'"{updated["updatedAt"]}"')
 
             # Delete
-            r = await cli.delete(f'/api/v1/orchestrations/{oid}', headers=self._hdr())
+            r = await cli.delete(
+                f'/api/v1/orchestrations/{oid}',
+                headers={
+                    **self._hdr(),
+                    'If-Match': f'"{updated["updatedAt"]}"',
+                },
+            )
             self.assertEqual(r.status_code, 200)
             r = await cli.get(f'/api/v1/orchestrations/{oid}', headers=self._hdr())
             self.assertEqual(r.status_code, 404)
+        _run(go())
+
+    def test_definition_http_boundary_is_owner_scoped(self):
+        async def go():
+            client = self._cli()
+            created_response = await client.post(
+                '/api/v1/orchestrations',
+                headers=self._hdr(),
+                json=self._def('Private owner flow'),
+            )
+            self.assertEqual(created_response.status_code, 201)
+            created = await created_response.get_json()
+            orchestration_id = created['id']
+            guarded_other_headers = {
+                **self._other_hdr(),
+                'If-Match': f'"{created["updatedAt"]}"',
+            }
+            try:
+                other_list = await client.get(
+                    '/api/v1/orchestrations', headers=self._other_hdr())
+                self.assertEqual(other_list.status_code, 200)
+                self.assertNotIn(orchestration_id, {
+                    item['id']
+                    for item in (await other_list.get_json())['items']
+                })
+
+                other_read = await client.get(
+                    f'/api/v1/orchestrations/{orchestration_id}',
+                    headers=self._other_hdr(),
+                )
+                self.assertEqual(other_read.status_code, 404)
+                other_update = await client.put(
+                    f'/api/v1/orchestrations/{orchestration_id}',
+                    headers=guarded_other_headers,
+                    json=self._def('Cross-owner overwrite'),
+                )
+                self.assertEqual(other_update.status_code, 404)
+                other_delete = await client.delete(
+                    f'/api/v1/orchestrations/{orchestration_id}',
+                    headers=guarded_other_headers,
+                )
+                self.assertEqual(other_delete.status_code, 404)
+
+                owner_read = await client.get(
+                    f'/api/v1/orchestrations/{orchestration_id}',
+                    headers=self._hdr(),
+                )
+                self.assertEqual(owner_read.status_code, 200)
+            finally:
+                await client.delete(
+                    f'/api/v1/orchestrations/{orchestration_id}',
+                    headers={
+                        **self._hdr(),
+                        'If-Match': f'"{created["updatedAt"]}"',
+                    },
+                )
+
         _run(go())
 
     def test_guarded_update_rejects_stale_tab_without_overwrite(self):
@@ -465,23 +512,22 @@ class CrudTest(unittest.TestCase):
             self.assertEqual(r.status_code, 400)
         _run(go())
 
-    def test_builtin_endpoint(self):
+    def test_builtin_autopilot(self):
         async def go():
-            r = await self._cli().get('/api/v1/orchestrations/builtin/endpoint',
+            r = await self._cli().get('/api/v1/orchestrations/builtin/autopilot',
                                       headers=self._hdr())
             self.assertEqual(r.status_code, 200)
             body = await r.get_json()
             self.assertTrue(body['ok'])
             ids = [n['id'] for n in body['definition']['nodes']]
             self.assertIn('worker', ids)
-            self.assertIn('critic', ids)
+            self.assertIn('vu', ids)
         _run(go())
 
     def test_all_studio_builtins_use_the_same_api(self):
         async def go():
             client = self._cli()
-            for name in ('endpoint', 'autopilot', 'fanout',
-                         'adversarial', 'blank'):
+            for name in ('autopilot', 'fanout', 'adversarial', 'blank'):
                 r = await client.get(
                     f'/api/v1/orchestrations/builtin/{name}',
                     headers=self._hdr(),
@@ -532,8 +578,6 @@ class CrudTest(unittest.TestCase):
                 [{'name': 'summary', 'type': 'text'},
                  {'name': 'changes', 'type': 'artifact'}],
             )
-            self.assertEqual(body['ioTypes'], io_contract['types'])
-            self.assertEqual(body['defaultOutput'], 'text')
             node_defaults = body['nodeDefaults']
             self.assertEqual(node_defaults['roles']['worker']['tier'],
                              body['personas']['worker']['tier'])
@@ -594,10 +638,6 @@ class CrudTest(unittest.TestCase):
                 'kinds': ['ephemeral', 'durable'],
                 'idField': 'id',
                 'kindField': 'kind',
-                'legacyIdFields': {
-                    'ephemeral': 'task_id',
-                    'durable': 'run_id',
-                },
                 'successStatuses': {
                     'ephemeral': 200,
                     'durable': 201,
@@ -610,57 +650,11 @@ class CrudTest(unittest.TestCase):
                 'definition', body['durableRunContract']['readFields'])
         _run(go())
 
-    def test_role_schema_full_map_is_compatibility_alias(self):
-        async def go():
-            cli = self._cli()
-            primary = await cli.get(
-                '/api/v1/orchestrations/authoring-contract',
-                headers=self._hdr())
-            legacy = await cli.get('/api/v1/orchestrations/role-schema',
-                                   headers=self._hdr())
-            self.assertEqual(primary.status_code, 200)
-            self.assertEqual(legacy.status_code, 200)
-            primary_body = await primary.get_json()
-            legacy_body = await legacy.get_json()
-            primary_body.pop('request_id', None)
-            legacy_body.pop('request_id', None)
-            self.assertEqual(legacy_body, primary_body)
-        _run(go())
-
-    def test_role_schema_single_role(self):
+    def test_authoring_contract_requires_auth(self):
         async def go():
             r = await self._cli().get(
-                '/api/v1/orchestrations/role-schema?role=worker',
-                headers=self._hdr())
-            self.assertEqual(r.status_code, 200)
-            body = await r.get_json()
-            self.assertTrue(body['ok'])
-            self.assertEqual(body['role'], 'worker')
-            keys = [f['key'] for f in body['fields']]
-            self.assertIn('must_do', keys)
-            self.assertIn('must_not_do', keys)
-            # Single-role responses also carry the read-only persona.
-            self.assertIn('persona', body)
-            self.assertTrue(body['persona']['prompt'])
-        _run(go())
-
-    def test_role_schema_unknown_role_gets_generic(self):
-        async def go():
-            r = await self._cli().get(
-                '/api/v1/orchestrations/role-schema?role=made-up',
-                headers=self._hdr())
-            body = await r.get_json()
-            self.assertTrue(body['ok'])
-            keys = [f['key'] for f in body['fields']]
-            self.assertEqual(keys[0], 'objective')  # generic fallback
-        _run(go())
-
-    def test_role_schema_requires_auth(self):
-        async def go():
-            for path in ('/api/v1/orchestrations/authoring-contract',
-                         '/api/v1/orchestrations/role-schema'):
-                r = await self._cli().get(path)
-                self.assertEqual(r.status_code, 401)
+                '/api/v1/orchestrations/authoring-contract')
+            self.assertEqual(r.status_code, 401)
         _run(go())
 
     def test_plan_returns_steps(self):
@@ -714,10 +708,10 @@ class CrudTest(unittest.TestCase):
 
 
 class ComposerTest(unittest.TestCase):
-    def _endpoint_payload(self):
+    def _verifier_loop_payload(self):
         import json
-        g = {'reply': 'Built an endpoint loop.', 'definition': {
-            'name': 'EP', 'nodes': [
+        g = {'reply': 'Built a verifier loop.', 'definition': {
+            'name': 'Verifier Loop', 'nodes': [
                 {'id': 's1', 'type': 'control', 'kind': 'start'},
                 {'id': 'p1', 'type': 'role', 'role': 'planner'},
                 {'id': 'l1', 'type': 'control', 'kind': 'loop', 'params': {'max_iterations': 8}},
@@ -731,8 +725,8 @@ class ComposerTest(unittest.TestCase):
 
     def test_compose_parses_fenced_json_and_lays_out(self):
         from lib.orchestration_composer import compose
-        payload = self._endpoint_payload()
-        r = compose('endpoint loop', llm_override=lambda m: (payload, {}))
+        payload = self._verifier_loop_payload()
+        r = compose('verifier loop', llm_override=lambda m: (payload, {}))
         self.assertTrue(r['ok'], r.get('error'))
         self.assertEqual(r['definition']['schema'], 'tofu.orchestration/v1')
         # backend forced layout — every node has a position
@@ -768,7 +762,7 @@ class ComposerTest(unittest.TestCase):
 class LayoutTest(unittest.TestCase):
     def test_indeg0_orphan_is_a_source(self):
         # A node with no incoming edge is a valid source → layer 0.
-        from lib.orchestration import layout_definition
+        from lib.orchestration._layout import layout_definition
         d = {'nodes': [
             {'id': 's1', 'type': 'control', 'kind': 'start'},
             {'id': 'w1', 'type': 'role', 'role': 'worker'},
@@ -780,7 +774,7 @@ class LayoutTest(unittest.TestCase):
 
     def test_unreachable_cycle_placed_last(self):
         # a→b→a is a disconnected cycle (both indeg>0, neither a source).
-        from lib.orchestration import layout_definition
+        from lib.orchestration._layout import layout_definition
         d = {'nodes': [
             {'id': 's1', 'type': 'control', 'kind': 'start'},
             {'id': 'w1', 'type': 'role', 'role': 'worker'},
@@ -803,13 +797,15 @@ class TemplateBackendCoordsTest(unittest.TestCase):
     each builder still returns the final first-paint coordinates.
     """
 
-    _TEMPLATES = ('endpoint', 'autopilot', 'fanout', 'adversarial')
+    _TEMPLATES = ('autopilot', 'fanout', 'adversarial')
 
     def test_each_template_matches_layout_engine(self):
         import copy
 
-        from lib.orchestration import layout_definition
-        from lib.orchestration.service import build_builtin_definition
+        from lib.orchestration._layout import layout_definition
+        from lib.orchestration.authoring_builtin_registry import (
+            build_builtin_definition,
+        )
 
         for which in self._TEMPLATES:
             with self.subTest(template=which):
@@ -827,30 +823,23 @@ class TemplateBackendCoordsTest(unittest.TestCase):
 # ── Durable run-instance persistence (Task Mode, Phase 2) ───────────
 
 class RunInstanceTest(unittest.TestCase):
-    """lib.orchestration_runs — durable run header + event log against a
-    fresh SQLite DB. Exercises the load-bearing persistence layer directly
-    (no app/HTTP), mirroring the dual-sink contract the /tasks routes rely on.
-    """
+    """Direct owner-bound Sidecar run/event repository coverage."""
 
-    @classmethod
-    def setUpClass(cls):
-        cls._tmpdir = tempfile.TemporaryDirectory()
-        cls._dbpath = os.path.join(cls._tmpdir.name, 'orch_runs.db')
-        os.environ['TOFU_DB_BACKEND'] = 'sqlite'
-        os.environ['TOFU_DB_PATH'] = cls._dbpath
-        from lib.database import init_db
-        init_db()
+    OWNER_USER_ID = 82_001
 
-    @classmethod
-    def tearDownClass(cls):
-        cls._tmpdir.cleanup()
+    def _store(self):
+        from lib.orchestration.sidecar_run_store import (
+            SidecarOrchestrationRunStore,
+        )
+
+        return SidecarOrchestrationRunStore(self.OWNER_USER_ID)
 
     def _defn(self):
         return {'schema': 'tofu.orchestration/v1', 'name': 'Screener',
                 'nodes': [], 'edges': []}
 
     def test_create_get_list_and_definition_snapshot(self):
-        from lib import orchestration_runs as r
+        r = self._store()
         rid = r.new_run_id()
         self.assertTrue(rid.startswith('run_'))
         self.assertTrue(r.create_run(
@@ -869,7 +858,7 @@ class RunInstanceTest(unittest.TestCase):
         r.delete_run(rid)
 
     def test_event_log_cursor_replay_and_dup_seq_is_benign(self):
-        from lib import orchestration_runs as r
+        r = self._store()
         rid = r.new_run_id()
         r.create_run(rid, definition=self._defn())
         completed = {'type': 'step_complete', 'node_id': 'n1'}
@@ -891,21 +880,22 @@ class RunInstanceTest(unittest.TestCase):
                              ['step_complete'])
 
             # A corrupt/future client cursor is reset to the durable boundary.
-            future_events, boundary, reset = r.get_event_page(rid, 999)
-            self.assertEqual(future_events, [])
-            self.assertEqual(boundary, 3)
-            self.assertTrue(reset)
+            future_page = r.get_event_page(rid, 999)
+            self.assertEqual(future_page.events, [])
+            self.assertEqual(future_page.next_cursor, 3)
+            self.assertTrue(future_page.cursor_reset)
             self.assertTrue(r.append_event(
-                rid, boundary, {'type': 'flow_complete'}))
-            resumed, next_cursor, reset = r.get_event_page(rid, boundary)
-            self.assertEqual([e['type'] for e in resumed], ['flow_complete'])
-            self.assertEqual(next_cursor, 4)
-            self.assertFalse(reset)
+                rid, future_page.next_cursor, {'type': 'flow_complete'}))
+            resumed = r.get_event_page(rid, future_page.next_cursor)
+            self.assertEqual(
+                [e['type'] for e in resumed.events], ['flow_complete'])
+            self.assertEqual(resumed.next_cursor, 4)
+            self.assertFalse(resumed.cursor_reset)
         finally:
             r.delete_run(rid)
 
     def test_terminal_status_sets_finished_and_final(self):
-        from lib import orchestration_runs as r
+        r = self._store()
         rid = r.new_run_id()
         r.create_run(rid, definition=self._defn())
         try:
@@ -931,7 +921,7 @@ class RunInstanceTest(unittest.TestCase):
             r.delete_run(rid)
 
     def test_startup_recovery_retires_active_headers_and_preserves_events(self):
-        from lib import orchestration_runs as r
+        r = self._store()
         active = []
         for status in ('pending', 'running', 'paused'):
             rid = r.new_run_id()
@@ -963,7 +953,7 @@ class RunInstanceTest(unittest.TestCase):
                 r.delete_run(rid)
 
     def test_status_filter_and_delete(self):
-        from lib import orchestration_runs as r
+        r = self._store()
         rid = r.new_run_id()
         r.create_run(rid, definition=self._defn(), orch_id='orch_f')
         r.update_status(rid, 'error', error='boom')
@@ -976,13 +966,15 @@ class RunInstanceTest(unittest.TestCase):
         self.assertFalse(r.delete_run(rid))
 
     def test_unknown_status_is_rejected_by_storage_contract(self):
-        from lib import orchestration_runs as r
+        from lib.orchestration.run_store_port import OrchestrationRunStoreError
+
+        r = self._store()
         rid = r.new_run_id()
         self.assertTrue(r.create_run(rid, definition=self._defn()))
         try:
             self.assertFalse(r.update_status(rid, 'dnne'))
             self.assertEqual(r.get_run(rid)['status'], 'pending')
-            with self.assertRaises(r.OrchestrationRunStoreError):
+            with self.assertRaises(OrchestrationRunStoreError):
                 r.list_runs(status='dnne')
         finally:
             r.delete_run(rid)
@@ -993,30 +985,25 @@ class TaskRunHttpTest(unittest.TestCase):
     POST a flow → poll /events to completion → assert the durable event log
     and final result persisted.
 
-    This is the load-bearing coverage for the DUAL-SINK durability claim:
+    This is the load-bearing coverage for the runtime + Sidecar projection:
     it drives the actual route handler, the real FlowExecutor, and the real
-    orchestration_runs DB tables. The only thing stubbed is the LLM —
-    FlowExecutor._default_runner is patched to a canned response so no
-    network/model call happens (the engine, event emission, dual-sink
-    on_event, and DB persistence are all exercised for real).
+    owner-scoped orchestration tables. The only thing stubbed is the LLM;
+    engine execution, event projection, and durable persistence remain real.
     """
 
     pytestmark = pytest.mark.auth_mode('private')
 
     @classmethod
     def setUpClass(cls):
-        # Fresh SQLite DB BEFORE the app/runtime touch it. The worker thread
-        # acquires its own thread-local connection against this global path,
-        # so it must be set + initialized before any run is spawned.
-        cls._dbtmp = tempfile.TemporaryDirectory()
-        os.environ['TOFU_DB_BACKEND'] = 'sqlite'
-        os.environ['TOFU_DB_PATH'] = os.path.join(cls._dbtmp.name, 'tasks.db')
-        from lib.database import init_db
-        init_db()
-
         cls.fix = _AppFixture()
         from lib.api_keys import create_key
-        _row, cls.token = create_key(name='orch-task-test', scopes=[], admin=True)
+        _row, cls.token = create_key(owner_user_id=1, name='orch-task-test', scopes=[], admin=True)
+        _row, cls.other_token = create_key(
+            owner_user_id=82_003,
+            name='orch-task-other-owner',
+            scopes=[],
+            admin=True,
+        )
 
         # Stub the LLM-backed agent runner: every role node returns a canned
         # deliverable. Keeps the engine + dual-sink real, the model fake.
@@ -1031,11 +1018,12 @@ class TaskRunHttpTest(unittest.TestCase):
     def tearDownClass(cls):
         import lib.orchestration_engine as eng
         eng.FlowExecutor._default_runner = cls._orig_runner
-        cls.fix.cleanup()
-        cls._dbtmp.cleanup()
 
     def _hdr(self):
         return {'Authorization': f'Bearer {self.token}'}
+
+    def _other_hdr(self):
+        return {'Authorization': f'Bearer {self.other_token}'}
 
     def _def(self, name='TaskFlow'):
         return {
@@ -1086,11 +1074,11 @@ class TaskRunHttpTest(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200)
             body = await response.get_json()
-            self.assertTrue(body['task_id'])
+            self.assertTrue(body['start']['id'])
             self.assertEqual(body['start'], {
                 'format': 'tofu.orchestration.runtime-start/v1',
                 'kind': 'ephemeral',
-                'id': body['task_id'],
+                'id': body['start']['id'],
             })
 
         _run(go())
@@ -1148,7 +1136,7 @@ class TaskRunHttpTest(unittest.TestCase):
 
         task_id = 'mutation-contract-ephemeral'
         runtime = route_module.orchestration_run_runtime
-        runtime.create(task_id=task_id)
+        runtime.create(user_id=1, task_id=task_id)
 
         async def go():
             cli = self.fix.app.test_client()
@@ -1158,7 +1146,8 @@ class TaskRunHttpTest(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200)
             accepted = await response.get_json()
-            self.assertEqual(accepted['status'], 'aborting')
+            self.assertEqual(
+                accepted['mutation']['resource_status'], 'aborting')
             self.assertEqual(accepted['mutation']['action'], 'abort_run')
             self.assertEqual(accepted['mutation']['reason'], 'accepted')
             self.assertFalse(accepted['mutation']['reconcile_required'])
@@ -1170,8 +1159,8 @@ class TaskRunHttpTest(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 409)
             terminal = await response.get_json()
-            self.assertEqual(terminal['status'], 'aborted')
-            self.assertEqual(terminal['note'], 'already finished')
+            self.assertEqual(
+                terminal['mutation']['resource_status'], 'aborted')
             self.assertEqual(terminal['mutation']['reason'], 'terminal')
             self.assertTrue(terminal['mutation']['reconcile_required'])
 
@@ -1184,7 +1173,8 @@ class TaskRunHttpTest(unittest.TestCase):
             self.assertEqual(missing['mutation']['reason'], 'not_found')
 
             with patch.object(
-                    runtime, 'abort', side_effect=OSError('registry offline')):
+                    runtime, 'abort_owned',
+                    side_effect=OSError('registry offline')):
                 response = await cli.post(
                     '/api/v1/orchestrations/run/abort/runtime-failure',
                     headers=self._hdr(),
@@ -1199,6 +1189,38 @@ class TaskRunHttpTest(unittest.TestCase):
             )
 
         _run(go())
+
+    def test_ephemeral_abort_cannot_cross_owner_boundary(self):
+        import routes.api_v1.orchestrations as route_module
+
+        task_id = 'owner-bound-ephemeral'
+        runtime = route_module.orchestration_run_runtime
+        runtime.create(user_id=1, task_id=task_id)
+
+        async def go():
+            client = self.fix.app.test_client()
+            denied = await client.post(
+                f'/api/v1/orchestrations/run/abort/{task_id}',
+                headers=self._other_hdr(),
+            )
+            self.assertEqual(denied.status_code, 404)
+            denied_body = await denied.get_json()
+            self.assertEqual(
+                denied_body['mutation']['reason'], 'not_found')
+            self.assertFalse(runtime.get(task_id).get('aborted', False))
+
+            accepted = await client.post(
+                f'/api/v1/orchestrations/run/abort/{task_id}',
+                headers=self._hdr(),
+            )
+            self.assertEqual(accepted.status_code, 200)
+            self.assertEqual(
+                (await accepted.get_json())['mutation']['reason'], 'accepted')
+
+        try:
+            _run(go())
+        finally:
+            runtime.finish(task_id)
 
     def test_create_maps_service_exception_to_api_error(self):
         from unittest.mock import patch
@@ -1282,7 +1304,7 @@ class TaskRunHttpTest(unittest.TestCase):
             created = await r.get_json()
             self.assertTrue(created['ok'])
             self.assertEqual(created['definitionSource'], 'inline')
-            run_id = created['run_id']
+            run_id = created['start']['id']
             self.assertTrue(run_id.startswith('run_'))
             self.assertEqual(created['start'], {
                 'format': 'tofu.orchestration.runtime-start/v1',
@@ -1372,7 +1394,7 @@ class TaskRunHttpTest(unittest.TestCase):
                 headers=self._hdr(), json={})
             self.assertEqual(r.status_code, 409)
             conflict = await r.get_json()
-            self.assertEqual(conflict['run_status'], 'done')
+            self.assertEqual(conflict['mutation']['resource_status'], 'done')
             self.assertEqual(
                 conflict['mutation']['format'],
                 'tofu.orchestration.mutation/v1',
@@ -1421,7 +1443,7 @@ class TaskRunHttpTest(unittest.TestCase):
             r = await cli.post('/api/v1/orchestrations/tasks',
                                headers=self._hdr(),
                                json={'definition': self._def('TraceFlow'), 'input': 'go'})
-            run_id = (await r.get_json())['run_id']
+            run_id = (await r.get_json())['start']['id']
 
             cursor, deadline = 0, 0
             evs = []
@@ -1492,7 +1514,7 @@ class TaskRunHttpTest(unittest.TestCase):
                                headers=self._hdr(),
                                json={'definition': self._gated_def(), 'input': 'go'})
             self.assertEqual(r.status_code, 201)
-            run_id = (await r.get_json())['run_id']
+            run_id = (await r.get_json())['start']['id']
 
             # Poll until the gate request appears; capture its request_id and
             # assert the header parked in 'paused'.
@@ -1524,7 +1546,8 @@ class TaskRunHttpTest(unittest.TestCase):
                                  headers=self._hdr())
             self.assertEqual(r.status_code, 409)
             active_delete = await r.get_json()
-            self.assertEqual(active_delete['run_status'], 'paused')
+            self.assertEqual(
+                active_delete['mutation']['resource_status'], 'paused')
             self.assertEqual(active_delete['mutation']['action'], 'delete_run')
             self.assertEqual(active_delete['mutation']['reason'], 'active')
             r = await cli.get(f'/api/v1/orchestrations/tasks/{run_id}',
@@ -1583,7 +1606,6 @@ class TaskRunHttpTest(unittest.TestCase):
             self.assertEqual(r.status_code, 404)
             body = await r.get_json()
             self.assertFalse(body['ok'])
-            self.assertEqual(body['requestId'], 'expired-gate')
             self.assertEqual(
                 body['mutation'],
                 {
@@ -1609,4 +1631,6 @@ class TaskRunHttpTest(unittest.TestCase):
 
 
 if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_orchestrations.__main__')
     unittest.main()

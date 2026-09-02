@@ -1,204 +1,244 @@
-"""tests/test_byo_providers.py — Persistent BYO provider store.
+"""Executable contract for the Sidecar-backed BYO provider repository."""
 
-Covers:
-* create / list / get / update / delete
-* per-key isolation (caller A never sees caller B's row)
-* api_key redaction in public views
-* resolve_model_string ('foo' / 'foo@prov_xxx' / 'foo@1.0' / unknown)
-* per-key quota enforcement
-"""
+from __future__ import annotations
 
-import os
-import tempfile
-import unittest
+from cryptography.fernet import Fernet
+import pytest
 
 
-class ByoProviderStoreTest(unittest.TestCase):
+pytest_plugins = ("tests._credential_sidecar",)
 
-    @classmethod
-    def setUpClass(cls):
-        cls._tmp = tempfile.TemporaryDirectory()
-        from lib import byo_providers
-        cls._orig_store = byo_providers._STORE_PATH
-        byo_providers._STORE_PATH = os.path.join(cls._tmp.name,
-                                                  'byo_providers.json')
-        byo_providers._cache.clear()
-        byo_providers._cache_loaded = False
+ALICE = 11_001
+BOB = 11_002
+QUOTA_OWNER = 11_003
+TEST_OWNERS = (ALICE, BOB, QUOTA_OWNER)
 
-    @classmethod
-    def tearDownClass(cls):
-        from lib import byo_providers
-        byo_providers._STORE_PATH = cls._orig_store
-        byo_providers._cache.clear()
-        byo_providers._cache_loaded = False
-        cls._tmp.cleanup()
 
-    def setUp(self):
-        from lib import byo_providers
-        byo_providers._cache.clear()
-        byo_providers._cache_loaded = False
-        # Wipe the on-disk store so each test starts fresh.
-        try:
-            os.remove(byo_providers._STORE_PATH)
-        except FileNotFoundError:
-            pass
+@pytest.fixture(autouse=True)
+def isolated_provider_domain(monkeypatch):
+    """Give each test a fresh encryption key and remove only its owner rows."""
+    from lib.secret_envelope import reset_secret_envelope_for_test
 
-    # ── CRUD ────────────────────────────────────────────────────────
+    monkeypatch.setenv(
+        "TOFU_SECRET_ENCRYPTION_KEY", Fernet.generate_key().decode("ascii"))
+    reset_secret_envelope_for_test()
+    yield
+    from lib.byo_providers import delete_provider, list_providers
 
-    def test_create_and_list(self):
-        from lib.byo_providers import (
-            create_provider, get_provider, list_providers, redact,
-        )
-        row = create_provider(
-            owner_key_id='k_alice',
-            name='cluster-A',
-            base_url='http://10.0.0.5:8080/v1',
-            api_key='sk-secret-AAAA',
-            models=[{'model_id': 'deepseek-v4-pro'}],
-        )
-        self.assertTrue(row['id'].startswith('prov_'))
-        self.assertEqual(row['owner_key_id'], 'k_alice')
-        self.assertEqual(row['api_key'], 'sk-secret-AAAA')
+    for owner_user_id in TEST_OWNERS:
+        for provider in list_providers(owner_user_id):
+            delete_provider(provider["id"], owner_user_id)
+    reset_secret_envelope_for_test()
 
-        # list_providers redacts api_key into key_hint
-        listed = list_providers('k_alice')
-        self.assertEqual(len(listed), 1)
-        self.assertNotIn('api_key', listed[0])
-        self.assertIn('key_hint', listed[0])
-        self.assertTrue(listed[0]['key_hint'].startswith('sk-sec'))
 
-        # get_provider (internal) keeps the raw api_key
-        fetched = get_provider(row['id'], 'k_alice')
-        self.assertEqual(fetched['api_key'], 'sk-secret-AAAA')
+def _create(
+    owner_user_id: int = ALICE,
+    *,
+    name: str = "cluster-A",
+    api_key: str = "sk-secret-AAAA",
+    models: list[dict] | None = None,
+    **fields,
+) -> dict:
+    from lib.byo_providers import create_provider
 
-        # redact is idempotent on already-public row
-        red = redact(row)
-        self.assertNotIn('api_key', red)
-        self.assertIn('key_hint', red)
+    return create_provider(
+        owner_user_id=owner_user_id,
+        name=name,
+        base_url=fields.pop("base_url", "http://10.0.0.5:8080/v1"),
+        api_key=api_key,
+        models=(
+            [{"model_id": "deepseek-v4-pro"}]
+            if models is None
+            else models
+        ),
+        **fields,
+    )
 
-    def test_per_key_isolation(self):
-        from lib.byo_providers import (
-            create_provider, get_provider, list_providers,
-        )
-        a = create_provider(
-            owner_key_id='k_alice', name='A',
-            base_url='http://1.1.1.1:8080/v1', api_key='', models=[],
-        )
+
+def test_create_list_and_get_keep_plaintext_out_of_storage_projection():
+    from lib.byo_providers import get_provider, list_providers, redact
+    from lib.storage.service import get_storage_client
+
+    created = _create()
+    assert created["id"].startswith("prov_")
+    assert created["owner_user_id"] == ALICE
+    assert created["api_key"] == "sk-secret-AAAA"
+
+    listed = list_providers(ALICE)
+    assert len(listed) == 1
+    assert "api_key" not in listed[0]
+    assert "api_key_ciphertext" not in listed[0]
+    assert "owner_user_id" not in listed[0]
+    assert listed[0]["key_hint"] == "sk-s…AAAA"
+
+    stored = get_storage_client().query(
+        "provider.get",
+        {"provider_id": created["id"], "owner_user_id": ALICE,
+         "tenant_id": ""},
+    )
+    assert "sk-secret-AAAA" not in str(stored)
+    assert stored["api_key_ciphertext"]
+    assert get_provider(created["id"], ALICE)["api_key"] == "sk-secret-AAAA"
+    assert redact(listed[0]) == listed[0]
+
+
+def test_repository_owner_not_bearer_key_controls_visibility():
+    from lib.byo_providers import get_provider, list_providers
+
+    alice = _create(ALICE, name="A", api_key="", models=[])
+    _create(BOB, name="B", api_key="", models=[])
+    assert [row["name"] for row in list_providers(ALICE)] == ["A"]
+    assert get_provider(alice["id"], BOB) is None
+    assert get_provider(alice["id"], ALICE) is not None
+
+
+def test_tenant_boundary_is_part_of_every_lookup():
+    from lib.byo_providers import get_provider, list_providers
+
+    created = _create(ALICE, tenant_id="tenant-a")
+    assert list_providers(ALICE) == []
+    assert get_provider(created["id"], ALICE, tenant_id="tenant-b") is None
+    assert get_provider(
+        created["id"], ALICE, tenant_id="tenant-a") is not None
+
+
+def test_update_delete_and_wrong_owner_are_atomic():
+    from lib.byo_providers import delete_provider, get_provider, update_provider
+
+    created = _create(api_key="", models=[])
+    assert update_provider(
+        created["id"], ALICE, name="renamed", disabled=True)
+    updated = get_provider(created["id"], ALICE)
+    assert updated["name"] == "renamed"
+    assert updated["disabled"] is True
+    assert not update_provider(created["id"], BOB, name="stolen")
+    assert not delete_provider(created["id"], BOB)
+    assert delete_provider(created["id"], ALICE)
+    assert get_provider(created["id"], ALICE) is None
+    assert not delete_provider(created["id"], ALICE)
+
+
+def test_update_reencrypts_secret_and_refreshes_hint():
+    from lib.byo_providers import get_provider, get_public, update_provider
+    from lib.storage.service import get_storage_client
+
+    created = _create()
+    before = get_storage_client().query(
+        "provider.get",
+        {"provider_id": created["id"], "owner_user_id": ALICE,
+         "tenant_id": ""},
+    )["api_key_ciphertext"]
+    assert update_provider(created["id"], ALICE, api_key="new-secret-9999")
+    after = get_storage_client().query(
+        "provider.get",
+        {"provider_id": created["id"], "owner_user_id": ALICE,
+         "tenant_id": ""},
+    )["api_key_ciphertext"]
+    assert after != before
+    assert get_provider(created["id"], ALICE)["api_key"] == "new-secret-9999"
+    assert get_public(created["id"], ALICE)["key_hint"] == "new-…9999"
+
+
+def test_secret_ciphertext_is_bound_to_owner_and_record():
+    from lib.secret_envelope import SecretEnvelopeError, open_secret, seal_secret
+
+    ciphertext = seal_secret(
+        "secret", purpose="byo-provider-api-key",
+        owner_user_id=ALICE, record_id="prov_one")
+    with pytest.raises(SecretEnvelopeError):
+        open_secret(
+            ciphertext, purpose="byo-provider-api-key",
+            owner_user_id=BOB, record_id="prov_one")
+    with pytest.raises(SecretEnvelopeError):
+        open_secret(
+            ciphertext, purpose="byo-provider-api-key",
+            owner_user_id=ALICE, record_id="prov_two")
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"name": ""}, "name is required"),
+        ({"base_url": "ftp://bad"}, "must start with"),
+        ({"models": "not-a-list"}, "models must be a list"),
+        ({"api_key": "x" * 9000}, "api_key exceeds"),
+    ],
+)
+def test_create_rejects_invalid_input(fields, message):
+    defaults = {
+        "owner_user_id": ALICE,
+        "name": "valid",
+        "base_url": "http://10.0.0.5:8080/v1",
+        "api_key": "",
+        "models": [],
+    }
+    defaults.update(fields)
+    from lib.byo_providers import create_provider
+
+    with pytest.raises(ValueError, match=message):
+        create_provider(**defaults)
+
+
+def test_domain_validation_cannot_be_bypassed_by_direct_call():
+    from lib.byo_providers import create_provider, update_provider
+
+    with pytest.raises(ValueError, match="reserved"):
         create_provider(
-            owner_key_id='k_bob', name='B',
-            base_url='http://2.2.2.2:8080/v1', api_key='', models=[],
+            owner_user_id=ALICE,
+            name="bad headers",
+            base_url="http://10.0.0.5:8080/v1",
+            api_key="",
+            models=[],
+            extra_headers={"Authorization": "Bearer stolen"},
         )
-        # Alice sees only her row
-        alice_list = list_providers('k_alice')
-        self.assertEqual(len(alice_list), 1)
-        self.assertEqual(alice_list[0]['name'], 'A')
-        # Bob can't get Alice's prov_id
-        self.assertIsNone(get_provider(a['id'], 'k_bob'))
-        # Alice can
-        self.assertIsNotNone(get_provider(a['id'], 'k_alice'))
-
-    def test_update_and_delete(self):
-        from lib.byo_providers import (
-            create_provider, delete_provider, get_provider, update_provider,
-        )
-        row = create_provider(
-            owner_key_id='k', name='n',
-            base_url='http://127.0.0.1:8080/v1', api_key='', models=[],
-        )
-        ok = update_provider(row['id'], 'k', name='renamed', disabled=True)
-        self.assertTrue(ok)
-        upd = get_provider(row['id'], 'k')
-        self.assertEqual(upd['name'], 'renamed')
-        self.assertTrue(upd['disabled'])
-
-        # Wrong owner update fails
-        self.assertFalse(update_provider(row['id'], 'someone-else', name='x'))
-
-        # Delete
-        self.assertTrue(delete_provider(row['id'], 'k'))
-        self.assertIsNone(get_provider(row['id'], 'k'))
-        # Idempotent
-        self.assertFalse(delete_provider(row['id'], 'k'))
-
-    def test_validation_rejects_bad_input(self):
-        from lib.byo_providers import create_provider
-        with self.assertRaises(ValueError):
-            create_provider(owner_key_id='k', name='', base_url='x',
-                            api_key='', models=[])
-        with self.assertRaises(ValueError):
-            create_provider(owner_key_id='k', name='n',
-                            base_url='ftp://nope', api_key='', models=[])
-        with self.assertRaises(ValueError):
-            create_provider(owner_key_id='k', name='n',
-                            base_url='http://h/v1', api_key='',
-                            models=[{'no_model_id': 'x'}])
-
-    def test_quota_per_key(self):
-        from lib.byo_providers import _MAX_PROVIDERS_PER_KEY, create_provider
-        for i in range(_MAX_PROVIDERS_PER_KEY):
-            create_provider(
-                owner_key_id='k_quota', name=f'n{i}',
-                base_url=f'http://127.0.0.1:{8000 + i}/v1',
-                api_key='', models=[],
-            )
-        with self.assertRaises(RuntimeError):
-            create_provider(
-                owner_key_id='k_quota', name='overflow',
-                base_url='http://127.0.0.1:9999/v1', api_key='', models=[],
-            )
-
-    # ── resolve_model_string ────────────────────────────────────────
-
-    def test_resolve_plain_model(self):
-        from lib.byo_providers import resolve_model_string
-        rm = resolve_model_string('deepseek-v4-pro', 'k_alice')
-        self.assertIsNotNone(rm)
-        self.assertEqual(rm.model_id, 'deepseek-v4-pro')
-        self.assertIsNone(rm.provider)
-
-    def test_resolve_byo_suffix_hits(self):
-        from lib.byo_providers import create_provider, resolve_model_string
-        row = create_provider(
-            owner_key_id='k_alice', name='c',
-            base_url='http://127.0.0.1:8080/v1', api_key='sk-x',
-            models=[{'model_id': 'deepseek-v4-pro'}],
-        )
-        rm = resolve_model_string(f'deepseek-v4-pro@{row["id"]}', 'k_alice')
-        self.assertIsNotNone(rm)
-        self.assertEqual(rm.model_id, 'deepseek-v4-pro')
-        self.assertIsNotNone(rm.provider)
-        self.assertEqual(rm.provider['id'], row['id'])
-        self.assertEqual(rm.provider['api_key'], 'sk-x')  # internal lookup carries plaintext
-
-    def test_resolve_byo_suffix_wrong_owner_returns_none(self):
-        from lib.byo_providers import create_provider, resolve_model_string
-        row = create_provider(
-            owner_key_id='k_alice', name='c',
-            base_url='http://127.0.0.1:8080/v1', api_key='', models=[],
-        )
-        # Bob can't pin to Alice's provider
-        rm = resolve_model_string(f'foo@{row["id"]}', 'k_bob')
-        self.assertIsNone(rm)
-
-    def test_resolve_byo_suffix_disabled_returns_none(self):
-        from lib.byo_providers import (
-            create_provider, resolve_model_string, update_provider,
-        )
-        row = create_provider(
-            owner_key_id='k', name='c',
-            base_url='http://127.0.0.1:8080/v1', api_key='', models=[],
-        )
-        update_provider(row['id'], 'k', disabled=True)
-        self.assertIsNone(resolve_model_string(f'foo@{row["id"]}', 'k'))
-
-    def test_resolve_version_suffix_passes_through(self):
-        from lib.byo_providers import resolve_model_string
-        # `foo@1.0` is NOT a BYO suffix — must not look up a provider
-        rm = resolve_model_string('foo@1.0', 'k_alice')
-        self.assertIsNotNone(rm)
-        self.assertEqual(rm.model_id, 'foo@1.0')
-        self.assertIsNone(rm.provider)
+    created = _create(api_key="", models=[])
+    with pytest.raises(ValueError, match="reserved"):
+        update_provider(
+            created["id"], ALICE,
+            extra_headers={"X-API-Key": "stolen"})
+    with pytest.raises(ValueError, match="unknown provider update fields"):
+        update_provider(created["id"], ALICE, owner_key_id="credential")
 
 
-if __name__ == '__main__':
-    unittest.main()
+def test_quota_is_enforced_transactionally_per_owner():
+    for index in range(32):
+        _create(
+            QUOTA_OWNER, name=f"provider-{index}", api_key="", models=[])
+    with pytest.raises(RuntimeError, match="provider quota reached"):
+        _create(QUOTA_OWNER, name="overflow", api_key="", models=[])
+
+
+def test_model_string_resolution_and_disabled_behavior():
+    from lib.byo_providers import resolve_model_string, update_provider
+
+    plain = resolve_model_string("deepseek-v4-pro", ALICE)
+    assert plain.model_id == "deepseek-v4-pro"
+    assert plain.provider is None
+
+    created = _create(api_key="", models=[])
+    resolved = resolve_model_string(
+        f"deepseek-v4-pro@{created['id']}", ALICE)
+    assert resolved.model_id == "deepseek-v4-pro"
+    assert resolved.provider["id"] == created["id"]
+    assert resolve_model_string(f"foo@{created['id']}", BOB) is None
+
+    assert update_provider(created["id"], ALICE, disabled=True)
+    assert resolve_model_string(f"foo@{created['id']}", ALICE) is None
+
+    version_tag = resolve_model_string("foo@1.0", ALICE)
+    assert version_tag.model_id == "foo@1.0"
+    assert version_tag.provider is None
+
+
+def test_thinking_format_round_trips_and_rejects_unknown_dialects():
+    from lib.byo_providers import get_provider, update_provider
+
+    created = _create(
+        api_key="", models=[], thinking_format="chat_template_kwargs")
+    assert created["thinking_format"] == "chat_template_kwargs"
+    assert get_provider(
+        created["id"], ALICE)["thinking_format"] == "chat_template_kwargs"
+    assert update_provider(created["id"], ALICE, thinking_format="none")
+    assert get_provider(created["id"], ALICE)["thinking_format"] == "none"
+    with pytest.raises(ValueError):
+        update_provider(created["id"], ALICE, thinking_format="glm-style")

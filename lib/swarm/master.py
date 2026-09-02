@@ -197,6 +197,7 @@ class MasterOrchestrator:
     """
 
     def __init__(self, task_id: str, conv_id: str, specs: list[SubTaskSpec], *,
+                 user_id,
                  project_path: str = '',
                  model: str = '',
                  thinking_enabled: bool = True,
@@ -212,6 +213,7 @@ class MasterOrchestrator:
                  on_settled: Callable | None = None):
         self.task_id = task_id
         self.conv_id = conv_id
+        self.user_id = user_id
         # Fired ONCE from the driver thread when the swarm terminates (all
         # agents done / aborted). ``integration`` uses it to auto-continue the
         # main agent when the spawning turn already ended but pending
@@ -296,6 +298,7 @@ class MasterOrchestrator:
         self._parent_task_proxy = {
             'id':           task_id,
             'convId':       conv_id,
+            '_userId':      user_id,
             'events_lock':  threading.Lock(),
             'events':       [],
             'toolRounds':   [],
@@ -306,6 +309,10 @@ class MasterOrchestrator:
         self._scheduler: StreamingScheduler | None = None
         self._driver_thread: threading.Thread | None = None
         self._terminated = False  # set when driver thread exits
+        #: Set when the driver loop crashed (``_driver`` except branch). The
+        #: terminal ``swarm_phase`` emission carries it so the panel renders
+        #: Failed-with-reason instead of a green Complete over crashed work.
+        self._driver_error: str | None = None
 
         #: THE shared liveness fact for this swarm (lib/swarm/liveness.py).
         #: Handed BY REFERENCE to the scheduler and to every SubAgent, and read
@@ -517,7 +524,7 @@ class MasterOrchestrator:
                     'preview':       '',
                     'modifiedFiles': 0,
                     'error':         '',
-                    # ★ The live stopwatch's anchor. The frontend renders a
+                    # The live stopwatch's anchor. The frontend renders a
                     #   per-agent timer only while `status` is running AND it
                     #   has a start; minting that start client-side meant a
                     #   reload DROPPED THE TIMER NODE ENTIRELY for an agent
@@ -558,24 +565,21 @@ class MasterOrchestrator:
             'version':      version,
         }
 
-    def _persist_agent_snapshot(self, *, force: bool = False) -> None:
+    def _persist_agent_snapshot(self, *, force: bool = False,
+                                cas: bool = True) -> None:
         """Write the current agent snapshot durably onto the spawn round.
 
-        Dual-write so the panel survives every reload path:
-          1. The LIVE chat task dict's spawn round_entry (if the spawning turn
-             is still running and reachable) — so the in-turn
-             ``_sync_*_to_conversation`` persists it as part of toolRounds and
-             does not clobber it. This is an in-memory dict mutation (cheap,
-             microseconds) and runs on EVERY call, so an in-flight swarm's
-             snapshot reaches disk on the next regular ~10s checkpoint anyway.
-          2. Directly into ``conversations.messages`` via CAS — a full
-             read-modify-write of the whole messages blob (~10ms on FUSE).
-             THROTTLED: coalesced to at most once per
-             ``_SNAPSHOT_CAS_MIN_INTERVAL_S`` so a 10-agent burst doesn't do
-             ~10 full-blob rewrites contending with the frontend sync. The
-             ``force=True`` settle write bypasses the throttle (final truth;
-             covers any incremental that was throttled out — nothing is lost,
-             detached-case staleness is bounded to the interval).
+        Two coordinated projections keep the panel current:
+          1. Stamp the live task's spawn round while its attempt owns the turn.
+             The normal turn-event bridge folds that state into the live
+             projection.
+          2. CAS-patch settled Sidecar turn projections for detached
+             fire-and-forget completions. These updates are throttled to one
+             per ``_SNAPSHOT_CAS_MIN_INTERVAL_S``; ``force=True`` always
+             writes the final snapshot.
+
+        ``cas=False`` only stamps the attempt-owned live projection. It is
+        used at agent start, before the spawn round can exist in a settled turn.
 
         Best-effort; never raises into the driver / scheduler thread.
         """
@@ -589,40 +593,49 @@ class MasterOrchestrator:
             agent_id_set = set(agent_ids)
 
             # (1) Stamp the live task's spawn round(s), if reachable. The stamp
-            #     happens INSIDE tasks_lock so two swarm driver threads can't
+            #     happens inside TaskRuntime's transaction boundary so two swarm driver threads can't
             #     mutate the same round concurrently. The cross-thread race
-            #     with the SYNC paths (which serialize task['toolRounds']
-            #     by-reference on the orchestrator thread) is closed on the
-            #     OTHER side: _merge_tool_rounds now shallow-copies each round
-            #     dict before serialize, so json_dumps_pg never iterates the
-            #     same dict this stamp mutates ("dict changed size during
-            #     iteration" / half-stamped round). Both together = safe.
+            #     with executor checkpoints is closed on the other side:
+            #     _merge_tool_rounds returns independent round dictionaries.
             #
             #     #4: a follow-up wave merges both waves' specs into ONE
             #     snapshot, so we stamp EACH matching spawn round with only the
             #     agents ITS handle launched (filter_snapshot) — never the
             #     combined set onto one panel.
             try:
-                from lib.tasks_pkg.manager import tasks, tasks_lock
-                with tasks_lock:
-                    for _t in tasks.values():
-                        if _t.get('convId') != self.conv_id:
-                            continue
-                        for _r in (_t.get('toolRounds') or []):
-                            _hids = _snap._round_handle_ids(_r) & agent_id_set
-                            if _hids:
-                                _snap.stamp_round(_r, _snap.filter_snapshot(snapshot, _hids))
+                from lib.tasks_pkg.manager.runtime import chat_task_runtime
+
+                def _stamp_task(task):
+                    for round_record in task.get('toolRounds') or []:
+                        handle_ids = (
+                            _snap._round_handle_ids(round_record) & agent_id_set
+                        )
+                        if handle_ids:
+                            _snap.stamp_round(
+                                round_record,
+                                _snap.filter_snapshot(snapshot, handle_ids),
+                            )
+
+                chat_task_runtime.update_matching(
+                    predicate=lambda task: (
+                        task.get('convId') == self.conv_id
+                        and int(task.get('_userId') or 0) == int(self.user_id)
+                    ),
+                    updater=_stamp_task,
+                )
             except Exception as e:
                 logger.debug('[Master:%s] live-task snapshot stamp skipped: %s',
                              self.task_id, e)
 
-            # (2) Durable CAS write into conversations.messages — one filtered
-            #     write per spawn round handle (covers the detached /
-            #     fire-and-forget case + multi-wave scoping). THROTTLED unless
+            # (2) Durable CAS write into settled turn projections (covers the
+            #     detached fire-and-forget case and multi-wave scoping).
+            #     THROTTLED unless
             #     forced: a per-agent burst coalesces to one write per interval;
             #     the monotonic version guard (snapshot.stamp_round) makes a
             #     skipped incremental harmless — the next write (or the forced
             #     settle) carries the strictly-newer state.
+            if not cas:
+                return
             now = time.monotonic()
             with self._snapshot_cas_lock:
                 due = force or (now - self._last_snapshot_cas
@@ -631,13 +644,13 @@ class MasterOrchestrator:
                     self._last_snapshot_cas = now
             if not due:
                 logger.debug('[Master:%s] snapshot CAS throttled (%.1fs since '
-                             'last, interval=%.0fs) — live stamp kept, DB write '
+                             'last, interval=%.0fs) — live stamp kept, projection '
                              'deferred', self.task_id,
                              now - self._last_snapshot_cas,
                              _SNAPSHOT_CAS_MIN_INTERVAL_S)
                 return
             _snap.persist_snapshot_to_conversation(
-                self.conv_id, agent_ids, snapshot)
+                self.conv_id, agent_ids, snapshot, user_id=self.user_id)
         except Exception as e:
             logger.warning('[Master:%s] agent snapshot persist failed: %s',
                            self.task_id, e, exc_info=True)
@@ -650,6 +663,12 @@ class MasterOrchestrator:
         # the UI swarm panel and grep every transition in one shot.
         logger.info('[Master:%s] AGENT_START agent-%s-%s role=%s objective=%.120s',
                     self.task_id, spec.role, spec.id, spec.role, spec.objective)
+        # Roster snapshot at agent START (live-task stamp only): the first
+        # completion-time snapshot can be minutes away, and a reload in that
+        # window recovered handle-only stubs (every agent 'unknown'). The
+        # stamp rides the turn's next regular checkpoint to disk, so a
+        # mid-run reload rebuilds real pending/running statuses instead.
+        self._persist_agent_snapshot(cas=False)
         if self.on_progress:
             # NOTE: ``objective`` is sent to the UI agent card and is
             # rendered with CSS wrapping, so do NOT truncate here — the
@@ -682,6 +701,11 @@ class MasterOrchestrator:
         # (unlike the per-tool-call frame, which stays bounded by
         # ``agent._SSE_TOOL_PREVIEW_CHARS`` because it fires per call).
         modified_files = _count_file_writes(result.tool_log)
+        # Error transparency: a failed agent's reason MUST reach the panel —
+        # previously only the model-facing inbox payload carried it, so the UI
+        # card showed a bare ❌ with an empty body and no way to say WHY.
+        _agent_error = ((result.error_message or '')
+                        if result.status != SubAgentStatus.COMPLETED.value else '')
         if self.on_progress:
             self.on_progress({
                 'type':      'swarm_agent_complete',
@@ -694,7 +718,8 @@ class MasterOrchestrator:
                 'elapsed':   round(result.elapsed_seconds, 1),
                 'tokens':    result.total_tokens,
                 'summary':   (result.final_answer or ''),
-                # ★ Number of file-mutating tool calls this agent made.
+                'error':     _agent_error,
+                # Number of file-mutating tool calls this agent made.
                 #   Surfaced in the UI so agents that edited the workspace
                 #   are flagged for closer review.
                 'modifiedFiles': modified_files,
@@ -815,6 +840,9 @@ class MasterOrchestrator:
             self.on_progress({
                 'type': 'swarm_phase', 'phase': 'spawning',
                 'content': f'🚀 Spawning {len(self.specs)} agent(s) (async)…',
+                # Frontend stamps this onto the panel; the reconciler probes
+                # the status route with it (the key that always resolves).
+                'swarmKey': self.inbox_key,
                 'agents': [
                     {'agentId': s.id, 'role': s.role,
                      'objective': s.objective,
@@ -845,6 +873,7 @@ class MasterOrchestrator:
                     if self._aborted or self.abort_check():
                         break
             except Exception as e:
+                self._driver_error = f'{type(e).__name__}: {e}'
                 logger.error('%s Driver loop crashed: %s', log_prefix, e, exc_info=True)
             finally:
                 # iter_completions returns on a liveness verdict, but returning
@@ -920,20 +949,6 @@ class MasterOrchestrator:
                     logger.warning('%s stalled-agents harvest failed: %s',
                                    log_prefix, e)
 
-                self._terminated = True
-                self._completion_event.set()
-
-                # Mark the durable session row terminated so startup
-                # rehydration won't try to resume a swarm that has finished.
-                # (Undelivered completed results are still rehydrated for
-                # their <swarm-update> — see persistence.load_resumable_sessions.)
-                try:
-                    from lib.swarm import persistence
-                    persistence.mark_session_terminated(self.inbox_key)
-                except Exception as _pe:
-                    logger.debug('%s mark_session_terminated failed: %s',
-                                 log_prefix, _pe)
-
                 with self._lock:
                     n = len(self._results)
                     failed = sum(1 for _, r in self._results
@@ -945,14 +960,51 @@ class MasterOrchestrator:
                     log_prefix, n, failed, total_tokens, elapsed)
 
                 if self.on_progress:
-                    self.on_progress({
-                        'type': 'swarm_phase', 'phase': 'complete',
-                        'content': (f'✅ Swarm complete — {n} agents '
-                                     f'({failed} failed), {total_tokens:,} tokens'),
-                        'agentCount':  n,
-                        'failedCount': failed,
-                        'totalTokens': total_tokens,
-                    })
+                    # Error transparency: a crashed driver used to surface ONLY
+                    # in app.log while the panel fell through to Unconfirmed /
+                    # a false green Complete. Say it on the wire, BEFORE the
+                    # complete frame, so the UI settles as Failed-with-reason.
+                    try:
+                        if self._driver_error:
+                            self.on_progress({
+                                'type': 'swarm_phase', 'phase': 'error',
+                                'error': self._driver_error,
+                                'content': (
+                                    '❌ Swarm driver error: '
+                                    f'{self._driver_error}'),
+                            })
+                        self.on_progress({
+                            'type': 'swarm_phase', 'phase': 'complete',
+                            'content': (f'✅ Swarm complete — {n} agents '
+                                        f'({failed} failed), '
+                                        f'{total_tokens:,} tokens'),
+                            'agentCount': n,
+                            'failedCount': failed,
+                            'totalTokens': total_tokens,
+                            **({'error': self._driver_error}
+                               if self._driver_error else {}),
+                        })
+                    except Exception as _progress_error:
+                        logger.warning(
+                            '%s terminal progress callback failed: %s',
+                            log_prefix, _progress_error, exc_info=True,
+                        )
+
+                # Observable termination is published only after the terminal
+                # wire frames. Callers that see ``is_terminated`` can now rely
+                # on error/complete delivery having been attempted already.
+                self._terminated = True
+                self._completion_event.set()
+
+                # Mark the durable session row terminated so startup
+                # rehydration won't try to resume a swarm that has finished.
+                # Undelivered results remain eligible for inbox recovery.
+                try:
+                    from lib.swarm import persistence
+                    persistence.mark_session_terminated(self.inbox_key)
+                except Exception as _pe:
+                    logger.debug('%s mark_session_terminated failed: %s',
+                                 log_prefix, _pe)
 
                 # ── Final durable snapshot (settled=True) ──
                 # Mirrors the terminal swarm_phase:complete UI event into the
@@ -1518,11 +1570,19 @@ class MasterOrchestrator:
                     else:
                         status = 'pending'
                     rounds = 0
+                _err = ''
+                if pair:
+                    _err = pair[1].error_message or ''
+                elif agent and agent.result:
+                    _err = agent.result.error_message or ''
                 out[spec.id] = {
                     'role':       spec.role,
                     'objective':  spec.objective[:120],
                     'status':     status,
                     'round':      rounds,
+                    # Surfaced by /api/v1/swarm/status so a reconciling panel
+                    # can show WHY an agent failed, not just THAT it failed.
+                    'error':      _err,
                 }
             return out
 

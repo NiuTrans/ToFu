@@ -23,8 +23,9 @@ from lib.oauth.outbound import CODEX_CLIENT_VERSION
 
 logger = get_logger(__name__)
 
-CODEX_CATALOG_TTL_S = 300
+CODEX_CATALOG_TTL_S = 3600
 CODEX_CATALOG_REFRESH_INTERVAL_S = 180
+CODEX_CATALOG_MAX_REFRESH_INTERVAL_S = 3600
 CODEX_CATALOG_TIMEOUT_S = 5
 
 _CACHE_SCHEMA_VERSION = 1
@@ -36,7 +37,6 @@ _refresh_wake = threading.Event()
 _worker_stop = threading.Event()
 _worker_thread = None
 _worker_started = False
-_oneshot_pending = False
 _last_error = ''
 
 
@@ -258,27 +258,36 @@ def refresh_codex_model_catalog(*, force: bool = False,
 
     stored = load_token('codex') or {}
     if not stored.get('access_token'):
-        return {'ok': False, 'skipped': 'not_authenticated'}
+        return {
+            'ok': False,
+            'skipped': 'not_authenticated',
+            'catalog_changed': False,
+        }
 
     with _refresh_lock:
         cache = _read_cache()
         if cache and not force and _cache_age(cache) <= CODEX_CATALOG_TTL_S:
             changed = _provision_from_best_available()
             return dict(codex_catalog_status(), ok=True, changed=changed,
-                        not_modified=True)
+                        not_modified=True, catalog_changed=False)
         try:
+            previous_rows = list(cache.get('models') or [])
             rows, etag, not_modified = _fetch_catalog(
                 cache, user_id=user_id)
+            catalog_changed = rows != previous_rows
             cache = _write_cache(
                 rows, etag, _account_fingerprint(stored))
             changed = _provision_from_best_available()
             with _state_lock:
                 global _last_error
                 _last_error = ''
-            logger.info('[CodexCatalog] refreshed %d models%s', len(rows),
-                        ' (not modified)' if not_modified else '')
+            log = logger.info if catalog_changed else logger.debug
+            log('[CodexCatalog] %s %d models%s',
+                'updated' if catalog_changed else 'revalidated', len(rows),
+                ' (HTTP 304)' if not_modified else '')
             return dict(codex_catalog_status(), ok=True, changed=changed,
-                        not_modified=not_modified)
+                        not_modified=not_modified,
+                        catalog_changed=catalog_changed)
         except Exception as exc:
             with _state_lock:
                 _last_error = str(exc)[:300]
@@ -292,7 +301,7 @@ def refresh_codex_model_catalog(*, force: bool = False,
             logger.warning('[CodexCatalog] refresh failed; keeping last good '
                            'catalogue: %s', exc)
             return dict(codex_catalog_status(), ok=False,
-                        error=str(exc)[:300])
+                        error=str(exc)[:300], catalog_changed=False)
 
 
 def codex_catalog_status() -> dict:
@@ -312,19 +321,56 @@ def codex_catalog_status() -> dict:
     }
 
 
-def _worker_loop() -> None:
-    refresh_codex_model_catalog(force=False)
-    while not _worker_stop.is_set():
-        _refresh_wake.wait(CODEX_CATALOG_REFRESH_INTERVAL_S)
-        _refresh_wake.clear()
-        if _worker_stop.is_set():
-            break
-        refresh_codex_model_catalog(force=True)
+def _next_refresh_interval(
+    current: float,
+    result: dict,
+    *,
+    explicit_wake: bool = False,
+) -> float:
+    """Back off stable/error polling; recover fast after a real change."""
+    if result.get('skipped') == 'not_authenticated':
+        return float(CODEX_CATALOG_MAX_REFRESH_INTERVAL_S)
+    if explicit_wake or result.get('catalog_changed'):
+        return float(CODEX_CATALOG_REFRESH_INTERVAL_S)
+    return float(min(
+        CODEX_CATALOG_MAX_REFRESH_INTERVAL_S,
+        max(CODEX_CATALOG_REFRESH_INTERVAL_S, current) * 2,
+    ))
 
 
-def start_codex_catalog_refresher() -> bool:
+def _worker_loop(*, force_initial: bool = False) -> None:
+    global _worker_started, _worker_thread
+    interval = float(CODEX_CATALOG_REFRESH_INTERVAL_S)
+    try:
+        result = refresh_codex_model_catalog(force=force_initial)
+        if result.get('skipped') == 'not_authenticated':
+            return
+        interval = _next_refresh_interval(interval, result)
+        while not _worker_stop.is_set():
+            explicit_wake = _refresh_wake.wait(interval)
+            _refresh_wake.clear()
+            if _worker_stop.is_set():
+                break
+            result = refresh_codex_model_catalog(force=True)
+            if result.get('skipped') == 'not_authenticated':
+                break
+            interval = _next_refresh_interval(
+                interval, result, explicit_wake=explicit_wake)
+    finally:
+        current = threading.current_thread()
+        with _state_lock:
+            if _worker_thread is current:
+                _worker_thread = None
+                _worker_started = False
+
+
+def start_codex_catalog_refresher(*, force_initial: bool = False) -> bool:
     """Start the import-safe, process-wide daemon refresher once."""
     global _worker_started, _worker_thread
+    from lib.oauth.token_store import load_token
+
+    if not (load_token('codex') or {}).get('access_token'):
+        return False
     with _state_lock:
         if _worker_thread is not None and _worker_thread.is_alive():
             return False
@@ -332,7 +378,8 @@ def start_codex_catalog_refresher() -> bool:
         _worker_stop.clear()
         _refresh_wake.clear()
         _worker_thread = threading.Thread(
-            target=_worker_loop, daemon=True,
+            target=_worker_loop, kwargs={'force_initial': force_initial},
+            daemon=True,
             name='codex-model-catalog-refresher')
         _worker_thread.start()
     return True
@@ -365,35 +412,23 @@ def stop_codex_catalog_refresher(timeout: float = 2.0) -> bool:
 
 def trigger_codex_catalog_refresh() -> None:
     """Request an immediate non-blocking refresh after a successful login."""
-    global _oneshot_pending, _worker_started, _worker_thread
     with _state_lock:
         if _worker_thread is not None and _worker_thread.is_alive():
             _refresh_wake.set()
             return
-        # A crashed persistent worker must not leave the boolean latch routing
-        # every future login refresh into an event nobody consumes.
-        _worker_started = False
-        _worker_thread = None
-        if _oneshot_pending:
-            return
-        _oneshot_pending = True
-
-    def _once():
-        global _oneshot_pending
-        try:
-            refresh_codex_model_catalog(force=True)
-        finally:
-            with _state_lock:
-                _oneshot_pending = False
-
-    threading.Thread(
-        target=_once, daemon=True,
-        name='codex-model-catalog-refresh-once').start()
+    if start_codex_catalog_refresher(force_initial=True):
+        return
+    # Another caller may have published the persistent worker while this
+    # trigger was between locks. Do not lose the explicit refresh request.
+    with _state_lock:
+        if _worker_thread is not None and _worker_thread.is_alive():
+            _refresh_wake.set()
 
 
 __all__ = [
     'CODEX_CATALOG_TTL_S',
     'CODEX_CATALOG_REFRESH_INTERVAL_S',
+    'CODEX_CATALOG_MAX_REFRESH_INTERVAL_S',
     'cached_codex_provider_models',
     'codex_catalog_status',
     'refresh_codex_model_catalog',

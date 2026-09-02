@@ -5,7 +5,7 @@ move (A) and the mixed-TTL split invariant (B).
 A — the ``Current date`` line changes once per UTC day. Baking it into the
 cached static system block re-billed the WHOLE system prefix at every UTC-day
 rollover (Anthropic's named "don't inject timestamps into the cached prompt"
-anti-pattern). It now rides the TRUE tail via ``_refresh_tail_block`` (the same
+anti-pattern). It now rides the TRUE tail via the Context Composer (the same
 cache-safe seam the digest / charter / board use), so the system floor stays
 byte-identical across the day boundary and the volatile date rides the
 already-5m tail for free.
@@ -56,10 +56,10 @@ def _system_text_of(messages):
 
 
 def _run_inject(messages, *, model='claude-opus-4', mode='append'):
-    from lib.tasks_pkg.system_context import _inject_system_contexts
-    _inject_system_contexts(
-        messages, project_path='/tmp/x', project_enabled=False,
-        memory_enabled=False, search_enabled=False, swarm_enabled=False,
+    from lib.tasks_pkg.context_composer import compose_task_context
+    compose_task_context(
+        messages, user_id=0, project_path='/tmp/x', project_enabled=False,
+        memory_enabled=False, search_enabled=False,
         has_real_tools=True, conv_id='', task={'config': {}}, model=model,
         system_prompt_mode=mode,
     )

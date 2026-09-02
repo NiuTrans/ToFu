@@ -24,7 +24,7 @@ _FS_TOOLS_FOR_ROOT_PILL = frozenset({
     'read_files', 'inspect_image', 'list_dir', 'grep_search', 'find_files',
     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
-    'create_project', 'run_command',
+    'run_command',
 })
 
 
@@ -124,7 +124,7 @@ def _resolve_tool_root_name(fn_name, fn_args, conv_id=None):
 
     # Pick the registry that scopes this conv (falls back to global).
     #
-    # ★ Multi-root detection must consider BOTH registries. The conv-scoped
+    # Multi-root detection must consider BOTH registries. The conv-scoped
     #   map can lag the global one (e.g. user opens a new conv while the
     #   global registry already has 4 roots; conv_map starts empty or
     #   single-entry). Suppressing the prefix when EITHER registry alone

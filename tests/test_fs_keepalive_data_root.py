@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
 
 import pytest
@@ -145,3 +146,85 @@ class ProbePathsFollowDataRootTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_probe_runtime_reuses_one_inflight_worker(monkeypatch):
+    import lib.fs_keepalive as keepalive
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def blocking_probe(path):
+        calls.append(path)
+        entered.set()
+        release.wait(timeout=1.0)
+
+    monkeypatch.setattr(keepalive, '_probe_path', blocking_probe)
+    runtime = keepalive._ProbeRuntime()
+    runtime.start()
+    try:
+        generation = runtime.request(('data', 'logs'))
+        assert entered.wait(timeout=1.0)
+        results, active_path = runtime.wait(generation, timeout=0.01)
+        assert results is None and active_path == 'data'
+
+        same_generation = runtime.request(('data', 'logs'))
+        assert same_generation == generation
+        assert calls == ['data'], 'a timeout must not spawn another stat thread'
+
+        release.set()
+        results, active_path = runtime.wait(generation, timeout=1.0)
+        assert active_path == ''
+        assert results is not None and [row[0] for row in results] == [
+            'data', 'logs']
+    finally:
+        release.set()
+        runtime.request_stop()
+        assert runtime.join(1.0)
+
+
+def test_keepalive_uses_one_interruptible_interval_deadline(monkeypatch):
+    import lib.fs_keepalive as keepalive
+
+    class StopAfterFirstDeadline:
+        def __init__(self):
+            self.stopped = False
+            self.waits = []
+
+        def is_set(self):
+            return self.stopped
+
+        def wait(self, timeout):
+            self.waits.append(timeout)
+            self.stopped = True
+            return True
+
+    class ProbeRuntime:
+        def __init__(self):
+            self.requests = 0
+            self.stopped = False
+
+        def request(self, _paths):
+            self.requests += 1
+            return self.requests
+
+        def wait(self, _generation, _timeout):
+            return [('data', True, 0.001)], ''
+
+        def request_stop(self):
+            self.stopped = True
+
+    stop_event = StopAfterFirstDeadline()
+    runtime = ProbeRuntime()
+    monkeypatch.setattr(keepalive, '_stop_event', stop_event)
+    monkeypatch.setattr(keepalive, '_PROBE_PATHS', ['data'])
+
+    keepalive._keepalive_loop(runtime)
+
+    assert runtime.requests == 1
+    assert runtime.stopped is True
+    assert stop_event.waits == [keepalive.KEEPALIVE_INTERVAL_S]
+    old_timer_wakes_per_day = 86_400 / 0.5
+    new_timer_wakes_per_day = 86_400 / keepalive.KEEPALIVE_INTERVAL_S
+    assert 1 - new_timer_wakes_per_day / old_timer_wakes_per_day >= 0.96

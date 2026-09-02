@@ -245,11 +245,35 @@ win.t = global.t = (k, vars) => {
 
 // ── Fixtures the two files read at runtime ──
 let ACTIVE = 'conv-1';
-let CONV = { id: 'conv-1', model: 'm', messages: [] };
+let CONV = { id: 'conv-1', model: 'm' };
+let TURN_PROJECTIONS = [];
+let COMPACTION_HISTORY = [];
+let TURN_BUSY = false;
 global.activeConvId = win.activeConvId = ACTIVE;
 global.getConvById = win.getConvById = (id) => (id === CONV.id ? CONV : null);
 global.getActiveConv = win.getActiveConv = () => CONV;
 global.activeStreams = win.activeStreams = new Map();
+global.convIsBusy = win.convIsBusy = () => TURN_BUSY;
+global.getCompactionHistory = win.getCompactionHistory = () => COMPACTION_HISTORY;
+global.ConversationTurnRead = win.ConversationTurnRead = {
+  ordered() {
+    return TURN_PROJECTIONS.map((projection, index) => ({
+      turnId: 'turn-' + index,
+      actor: projection.role === 'user' ? 'human' : projection.role,
+      projection,
+      updatedAt: projection.timestamp || 0,
+    }));
+  },
+  state() {
+    const liveRoundUsageByTurn = {};
+    TURN_PROJECTIONS.forEach((projection, index) => {
+      if (projection._liveLastRoundUsage) {
+        liveRoundUsageByTurn['turn-' + index] = projection._liveLastRoundUsage;
+      }
+    });
+    return { liveRoundUsageByTurn };
+  },
+};
 win._contextPolicy = {
   default_limit: 200000,
   per_model: { m: { window: 200000, source: 'test', exact: true } },
@@ -281,7 +305,7 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
   check('compact_fn_exposed', typeof window._mobileCompactNow === 'function');
 
   // ── (a) usage % surfaces in the desc when there IS usage ──
-  CONV.messages = [{ role: 'assistant', _liveLastRoundUsage: { tokensIn: 100000 } }];
+  TURN_PROJECTIONS = [{ role: 'assistant', _liveLastRoundUsage: { tokensIn: 100000 } }];
   const expectedPct = window.contextUsageSummary().pct;
   updateMobileContext();
   const desc = document.getElementById('mobileCompactDesc');
@@ -291,20 +315,20 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
         !document.getElementById('mobileCompactNow').classList.contains('disabled'));
 
   // ── (b) busy guard: a live task disables "compact now" ──
-  activeStreams.set('conv-1', {});
+  TURN_BUSY = true;
   updateMobileContext();
   check('disabled_when_busy',
         document.getElementById('mobileCompactNow').classList.contains('disabled'));
   check('desc_shows_busy', desc.textContent === 'busy');
-  activeStreams.delete('conv-1');
+  TURN_BUSY = false;
 
   // ── (c) history item hidden without snapshots, shown with them ──
-  CONV.messages = [{ role: 'assistant', _liveLastRoundUsage: { tokensIn: 100000 } }];
+  TURN_PROJECTIONS = [{ role: 'assistant', _liveLastRoundUsage: { tokensIn: 100000 } }];
+  COMPACTION_HISTORY = [];
   updateMobileContext();
   check('history_hidden_no_snapshots',
         document.getElementById('mobileCompactHistory').style.display === 'none');
-  CONV.messages = [{ role: 'assistant', _liveLastRoundUsage: { tokensIn: 100000 },
-                     _compactions: [{ archiveId: 7 }] }];
+  COMPACTION_HISTORY = [{ archiveId: 7 }];
   updateMobileContext();
   check('history_shown_with_snapshots',
         document.getElementById('mobileCompactHistory').style.display !== 'none');

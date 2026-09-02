@@ -360,6 +360,11 @@ HARNESS = textwrap.dedent("""
       stranded:      {{ connected: false, localBrowser: null,
                         lockedOutClients: [{{client_id:'dead1',
                           ext_version:'4.3.0', seconds_ago: 42}}] }},
+      incompatible:  {{ connected: false, localBrowser: null,
+                        protocolVersion: 2,
+                        incompatibleClients: [{{client_id:'old-protocol',
+                          ext_version:'5.0.0', protocol_version:1,
+                          seconds_ago: 2}}] }},
     }};
     for (const k of Object.keys(bcases)) {{
       document.getElementById('lcBrowserSetup').innerHTML = '';
@@ -548,7 +553,7 @@ def test_the_deprecated_cli_flow_is_never_taught():
         assert "lib.desktop_agent" not in info["text"], (
             f"setup_state={st} teaches the deprecated CLI flow")
         for flag in ("--allow-write", "--allow-exec", "--allow-gui",
-                     "--allow-all", "--bridge-secret"):
+                     "--allow-all", "--bridge-token"):
             assert flag not in info["text"], (
                 f"setup_state={st} exposes the raw CLI flag {flag}")
 
@@ -581,9 +586,10 @@ def test_browser_row_picks_the_actionable_instruction():
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_browser_row_distinguishes_the_install_states():
-    """2026-08-04 stranded-fleet fix: 'never installed' / 'installed &
-    current' / 'installed but outdated' / 'installed but LOCKED OUT' are
-    four different situations and the row must say which. The locked-out
+    """'Never installed' / current / outdated / locked out / incompatible are
+    different situations and the row must say which. The rejected-device
+    cases are load-bearing: an installed extension that cannot poll must not
+    be reported as absent. The locked-out
     case is load-bearing: a side-loaded extension with a dead credential
     cannot heal itself (no update channel, cannot poll), so the ONLY cure
     is the preseeded re-download — rendering it as 尚未安装 sends the user
@@ -604,6 +610,11 @@ def test_browser_row_distinguishes_the_install_states():
         f"exists to kill")
     assert out["stranded"]["hasDownloadBtn"] is True, (
         "the stranded state must offer the preseeded re-download")
+    assert "升级" in out["incompatible"]["statusText"], (
+        "a protocol-rejected extension must name the required recovery")
+    assert "v1" in out["incompatible"]["text"] \
+        and "v2" in out["incompatible"]["text"]
+    assert out["incompatible"]["hasDownloadBtn"] is True
     # Plain never-installed keeps the honest 'not installed'.
     assert "尚未安装" in out["download"]["statusText"]
 
@@ -964,7 +975,7 @@ LC_FILE_HARNESS = textwrap.dedent("""
     global.desktopEnabled = false;
     global._applyBrowserUI = (v) => {{ global.browserEnabled = !!v; }};
     global._applyDesktopUI = (v) => {{ global.desktopEnabled = !!v; }};
-    global._saveConvToolState = () => {{}};
+    global.captureActiveConversationSettings = () => {{}};
     global.updateSubmenuCounts = () => {{}};
 
     {shipped}
@@ -1181,7 +1192,7 @@ def test_NEUTER_letting_a_toggle_assert_reachability_is_caught():
 def test_a_new_chat_does_not_inherit_computer_control():
     """Desktop was the ONE tool flag `_resetToolsToDefaults` never cleared.
 
-    `_restoreConvToolState` sets it per-conversation and nothing reset it, so
+    `restoreConversationSettingsToComposer` sets it per-conversation and nothing reset it, so
     a brand-new chat silently inherited computer control — shell, file writes,
     GUI — from whatever conversation came before, and the merged badge then
     reported it as active on a conversation the user never granted it on.
@@ -1206,7 +1217,7 @@ def test_the_reset_path_covers_every_local_control_flag():
     omission visible rather than silent.
     """
     reset = _slice_fn("_resetToolsToDefaults")
-    restored = _slice_fn("_restoreConvToolState")
+    restored = _slice_fn("restoreConversationSettingsToComposer")
     for setter in ("_applyBrowserUI", "_applyDesktopUI"):
         assert setter in restored, (
             f"{setter} is not restored per-conversation — the guard below "

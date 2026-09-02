@@ -2,47 +2,60 @@
 
 from __future__ import annotations
 
-import json
 import re
 
 import pytest
 import lib.orchestration.runtime_service as runtime_module
 import lib.orchestration.authoring_contract as authoring_module
-import lib.orchestration.authoring_service as authoring_service_module
-import lib.orchestration.service as service_module
 
-from lib.orchestration import build_autopilot_definition, validate_definition
+from lib.orchestration._builtin_definitions import build_autopilot_definition
+from lib.orchestration._validate import validate_definition
+from lib.orchestration.authoring_builtin_registry import (
+    build_builtin_definition,
+    builtin_names,
+)
+from lib.orchestration.authoring_contract import (
+    authoring_contract,
+    node_authoring_defaults,
+)
 from lib.orchestration.authoring_service import (
     OrchestrationAuthoringService,
     compose_definition,
     layout_authoring_definition,
     plan_authoring_definition,
 )
-from lib.orchestration.service import (
-    AUTHORING_CONTRACT_FORMAT,
+from lib.orchestration.definition_inspection import inspect_definition
+from lib.orchestration.definition_resolution import resolve_definition
+from lib.orchestration.definition_service import (
     DefinitionServiceError,
-    DurableProjectionError,
     OrchestrationDefinitionService,
-    FlowEventSink,
-    FlowRunOutcome,
-    authoring_contract,
-    build_builtin_definition,
-    builtin_names,
+)
+from lib.orchestration.definition_contract_registry import (
     definition_entry_contract,
     definition_list_contract,
+)
+from lib.orchestration.definition_contract_schema import (
     definition_request_schema,
-    execute_flow,
-    execute_runtime_flow,
-    INSPECTION_FORMAT,
-    inspect_definition,
-    inspection_response_fields,
-    node_authoring_defaults,
+)
+from lib.orchestration.definition_wire_projection import (
     parse_definition_write_precondition,
     project_definition_entry,
     project_definition_list,
-    resolve_definition,
-    role_authoring_contract,
+)
+from lib.orchestration.durable_projection import DurableProjectionError
+from lib.orchestration.inspection_wire_contract import (
+    inspection_response_fields,
+)
+from lib.orchestration.runtime_event_sink import FlowEventSink
+from lib.orchestration.runtime_outcome import FlowRunOutcome
+from lib.orchestration.runtime_service import (
+    execute_flow,
+    execute_runtime_flow,
     spawn_runtime_flow,
+)
+from lib.orchestration.wire_formats import (
+    AUTHORING_CONTRACT_FORMAT,
+    INSPECTION_FORMAT,
 )
 from lib.orchestration.store import OrchestrationStore
 from lib.orchestration.events import runtime_event_contract
@@ -53,27 +66,25 @@ from lib.orchestration.run_service import (
 )
 
 
+pytest_plugins = ('tests._credential_sidecar',)
 pytestmark = pytest.mark.unit
+STORE_OWNER = 14_001
+OTHER_STORE_OWNER = 14_002
 
 
-def test_authoring_catalogue_has_focused_owner_and_compatibility_facade():
-    assert service_module.authoring_contract is authoring_module.authoring_contract
-    assert service_module.authoring_object_sections \
-        is authoring_module.authoring_object_sections
-    assert service_module.AUTHORING_OBJECT_SECTION_NAMES \
-        is authoring_module.AUTHORING_OBJECT_SECTION_NAMES
-    assert service_module.build_builtin_definition \
-        is authoring_module.build_builtin_definition
-    assert service_module.node_authoring_defaults \
-        is authoring_module.node_authoring_defaults
-    assert service_module.OrchestrationAuthoringService \
-        is authoring_service_module.OrchestrationAuthoringService
-    assert service_module.compose_definition \
-        is authoring_service_module.compose_definition
-    assert service_module.layout_authoring_definition \
-        is authoring_service_module.layout_authoring_definition
-    assert service_module.plan_authoring_definition \
-        is authoring_service_module.plan_authoring_definition
+@pytest.fixture(autouse=True)
+def clean_definition_store():
+    for owner_user_id in (STORE_OWNER, OTHER_STORE_OWNER):
+        store = OrchestrationStore(owner_user_id)
+        for entry in store.list_entries():
+            store.delete_if_current(
+                entry['id'], expected_updated_at=entry['updatedAt'])
+    yield
+    for owner_user_id in (STORE_OWNER, OTHER_STORE_OWNER):
+        store = OrchestrationStore(owner_user_id)
+        for entry in store.list_entries():
+            store.delete_if_current(
+                entry['id'], expected_updated_at=entry['updatedAt'])
 
 
 def _linear_definition(name='Linear'):
@@ -90,9 +101,9 @@ def _linear_definition(name='Linear'):
     }
 
 
-def test_store_owns_crud_shape_and_returns_snapshots(tmp_path):
-    path = tmp_path / 'orchestrations.json'
-    store = OrchestrationStore(str(path), id_factory=lambda: 'orch_fixed')
+def test_store_owns_crud_shape_and_returns_snapshots():
+    store = OrchestrationStore(
+        STORE_OWNER, id_factory=lambda: 'orch_fixed')
 
     created = store.create(_linear_definition())
     assert created['id'] == 'orch_fixed'
@@ -103,67 +114,55 @@ def test_store_owns_crud_shape_and_returns_snapshots(tmp_path):
     loaded['name'] = 'client mutation'
     assert store.get_definition('orch_fixed')['name'] == 'Linear'
 
-    updated = store.update('orch_fixed', _linear_definition('Updated'))
-    assert updated['name'] == 'Updated'
-    assert json.loads(path.read_text())[-1]['definition']['name'] == 'Updated'
-    assert store.delete('orch_fixed') is True
+    updated = store.update_if_current(
+        'orch_fixed', _linear_definition('Updated'),
+        expected_updated_at=created['updatedAt'])
+    assert updated.entry['name'] == 'Updated'
+    assert store.get_definition('orch_fixed')['name'] == 'Updated'
+    assert store.delete_if_current(
+        'orch_fixed',
+        expected_updated_at=updated.entry['updatedAt'],
+    ).deleted is True
     assert store.get_entry('orch_fixed') is None
 
 
-@pytest.mark.parametrize('stored', [
-    '[{"id":"survivor"}',
-    '{}',
-    '[{"id":"survivor"}, 7]',
-    '[{"id":"missing-definition"}]',
-    '[{"id":"same","definition":{}},{"id":"same","definition":{}}]',
-])
-def test_definition_store_fails_closed_on_corrupt_existing_catalogue(
-        tmp_path, stored):
-    from lib.json_store import JsonStoreReadError
+def test_definition_store_is_owner_scoped():
+    owner_store = OrchestrationStore(
+        STORE_OWNER, id_factory=lambda: 'orch_private')
+    other_store = OrchestrationStore(OTHER_STORE_OWNER)
+    owner_store.create(_linear_definition())
+    assert other_store.list_entries() == []
+    assert other_store.get_entry('orch_private') is None
+    assert other_store.delete_if_current(
+        'orch_private', expected_updated_at=0).deleted is False
+    assert owner_store.get_entry('orch_private') is not None
 
-    path = tmp_path / 'orchestrations.json'
-    path.write_text(stored, encoding='utf-8')
+
+def test_definition_store_rejects_nonstandard_json_numbers():
     store = OrchestrationStore(
-        str(path), id_factory=lambda: 'must_not_write')
-
-    with pytest.raises(JsonStoreReadError):
-        store.list_entries()
-    with pytest.raises(JsonStoreReadError):
-        store.create(_linear_definition('Must not replace'))
-
-    assert path.read_text(encoding='utf-8') == stored
-
-
-def test_definition_store_rejects_nonstandard_json_numbers(tmp_path):
-    path = tmp_path / 'orchestrations.json'
-    store = OrchestrationStore(
-        str(path), id_factory=lambda: 'must_not_write')
+        STORE_OWNER, id_factory=lambda: 'must_not_write')
     definition = _linear_definition('Non-finite')
     definition['nodes'][0]['pos'] = {'x': float('nan'), 'y': 0}
 
-    with pytest.raises(ValueError, match='JSON compliant'):
+    with pytest.raises(RuntimeError):
         store.create(definition)
+    assert store.list_entries() == []
 
-    assert not path.exists()
 
-
-def test_definition_store_rejects_id_collision_atomically(tmp_path):
-    path = tmp_path / 'orchestrations.json'
+def test_definition_store_rejects_id_collision_atomically():
     store = OrchestrationStore(
-        str(path), id_factory=lambda: 'orch_collision')
+        STORE_OWNER, id_factory=lambda: 'orch_collision')
     created = store.create(_linear_definition('Original'))
 
-    with pytest.raises(ValueError, match='id collision'):
+    with pytest.raises(RuntimeError, match='already exists'):
         store.create(_linear_definition('Must not append'))
 
-    entries = json.loads(path.read_text(encoding='utf-8'))
-    assert entries == [created]
+    assert store.list_entries() == [created]
 
 
-def test_store_compare_and_set_is_atomic_and_preserves_newer_definition(
-        tmp_path):
-    path = tmp_path / 'orchestrations.json'
-    store = OrchestrationStore(str(path), id_factory=lambda: 'orch_cas')
+def test_store_compare_and_set_is_atomic_and_preserves_newer_definition():
+    store = OrchestrationStore(
+        STORE_OWNER, id_factory=lambda: 'orch_cas')
     created = store.create(_linear_definition('Original'))
 
     accepted = store.update_if_current(
@@ -198,11 +197,12 @@ def test_store_compare_and_set_is_atomic_and_preserves_newer_definition(
 
 
 def test_definition_write_precondition_accepts_wire_token_and_rejects_noise():
-    from lib.orchestration.definition_wire_contracts import (
+    from lib.orchestration.definition_wire_projection import (
         definition_write_version_token,
     )
 
-    assert parse_definition_write_precondition(None) is None
+    with pytest.raises(ValueError, match='If-Match is required'):
+        parse_definition_write_precondition(None)
     assert parse_definition_write_precondition(
         definition_write_version_token(123)) == 123
     assert parse_definition_write_precondition('W/"456"') == 456
@@ -293,9 +293,9 @@ def test_definition_http_documents_share_versioned_detached_projectors():
     assert entry['name'] == 'Projected'
 
 
-def test_definition_service_unifies_validation_crud_and_resolution(tmp_path):
+def test_definition_service_unifies_validation_crud_and_resolution():
     store = OrchestrationStore(
-        str(tmp_path / 'orchestrations.json'),
+        STORE_OWNER,
         id_factory=lambda: 'orch_service',
     )
     service = OrchestrationDefinitionService(store)
@@ -323,11 +323,16 @@ def test_definition_service_unifies_validation_crud_and_resolution(tmp_path):
     assert resolved.source == 'stored:orch_service'
     assert resolved.definition['name'] == 'Linear'
 
-    updated = service.update('orch_service', _linear_definition('Updated'))
+    updated = service.update(
+        'orch_service', _linear_definition('Updated'),
+        expected_updated_at=created.entry['updatedAt'])
     assert updated.valid is True
     assert updated.entry['name'] == 'Updated'
     assert service.get_definition('orch_service')['name'] == 'Updated'
-    assert service.delete('orch_service') is True
+    assert service.delete_if_current(
+        'orch_service',
+        expected_updated_at=updated.entry['updatedAt'],
+    ).deleted is True
 
 
 def test_definition_service_wraps_every_repository_failure():
@@ -363,8 +368,10 @@ def test_definition_service_wraps_every_repository_failure():
         lambda: service.get_entry('flow-1'),
         lambda: service.get_definition('flow-1'),
         lambda: service.create(_linear_definition()),
-        lambda: service.update('flow-1', _linear_definition()),
-        lambda: service.delete_if_current('flow-1'),
+        lambda: service.update(
+            'flow-1', _linear_definition(), expected_updated_at=0),
+        lambda: service.delete_if_current(
+            'flow-1', expected_updated_at=0),
     )
     for operation in operations:
         with pytest.raises(DefinitionServiceError) as captured:
@@ -372,9 +379,9 @@ def test_definition_service_wraps_every_repository_failure():
         assert isinstance(captured.value.__cause__, OSError)
 
 
-def test_successful_definition_writes_canonicalize_fields_recursively(tmp_path):
+def test_successful_definition_writes_canonicalize_fields_recursively():
     store = OrchestrationStore(
-        str(tmp_path / 'orchestrations.json'),
+        STORE_OWNER,
         id_factory=lambda: 'orch_canonical',
     )
     service = OrchestrationDefinitionService(store)
@@ -434,12 +441,6 @@ def test_routes_and_chat_depend_on_definition_service_not_store():
     runtime_routes = open(
         'routes/api_v1/orchestration_runtime_routes.py', encoding='utf-8',
     ).read()
-    route_ports = open(
-        'routes/api_v1/orchestration_route_ports.py', encoding='utf-8',
-    ).read()
-    application_ports = open(
-        'lib/orchestration/application_ports.py', encoding='utf-8',
-    ).read()
     application_result_ports = open(
         'lib/orchestration/application_result_ports.py', encoding='utf-8',
     ).read()
@@ -482,7 +483,7 @@ def test_routes_and_chat_depend_on_definition_service_not_store():
         encoding='utf-8',
     ).read()
     runner = open(
-        'lib/orchestration_endpoint_runner.py', encoding='utf-8',
+        'lib/orchestration_chat_flow_runner.py', encoding='utf-8',
     ).read()
     assert 'OrchestrationDefinitionService' in route
     assert 'OrchestrationDefinitionService' in runner
@@ -497,8 +498,6 @@ def test_routes_and_chat_depend_on_definition_service_not_store():
             not in mutation_routes + task_http)
     assert ('from lib.orchestration.store import OrchestrationStore'
             not in run_http)
-    assert ('from lib.orchestration.store import OrchestrationStore'
-            not in route_ports)
     assert 'from lib.orchestration.store import OrchestrationStore' not in runner
     assert 'definition_service().create(parse_body())' in definition_routes
     assert 'lambda: definition_service().update(' in definition_routes
@@ -541,12 +540,8 @@ def test_routes_and_chat_depend_on_definition_service_not_store():
     assert 'def prepare_compose_request(' in authoring_http
     assert 'api_payload(result)' in authoring_http
     assert authoring_routes.count('prepare_compose_request(') == 1
-    assert authoring_routes.count('role_contract_query(request.args)') == 1
-    assert authoring_routes.count(
-        'parameters=_ROLE_CONTRACT_PARAMETERS') == 1
-    assert 'def role_contract_query(' in authoring_http
-    assert 'def role_contract_parameters(' in authoring_http
-    assert "request.args.get('role')" not in authoring_routes
+    assert 'role-schema' not in authoring_routes
+    assert 'role_contract' not in authoring_http
     assert authoring_routes.count("'schema': _COMPOSE_SCHEMA") == 1
     assert authoring_routes.count(
         "'schema': _DEFINITION_SELECTION_SCHEMA") == 1
@@ -695,11 +690,6 @@ def test_routes_and_chat_depend_on_definition_service_not_store():
     assert runtime_start_port.count('def start(') == 1
     assert 'def start_ephemeral(' not in runtime_start_port
     assert 'def start_durable(' not in runtime_start_port
-    assert 'from lib.orchestration.application_ports import (' in route_ports
-    assert 'class ' not in route_ports
-    assert 'def ' not in route_ports
-    assert 'class ' not in application_ports
-    assert 'def ' not in application_ports
     assert '-> Any' not in (
         application_result_ports + application_service_ports
         + application_provider_ports)
@@ -741,8 +731,6 @@ def test_application_services_are_physically_split():
         'lib/orchestration/definition_store_port.py',
         encoding='utf-8',
     ).read()
-    compatibility_facade = open(
-        'lib/orchestration/service.py', encoding='utf-8').read()
     runtime_service = open(
         'lib/orchestration/runtime_service.py', encoding='utf-8').read()
     runtime_outcome = open(
@@ -790,7 +778,7 @@ def test_application_services_are_physically_split():
     assert 'getattr(' not in definition_service
     assert 'class OrchestrationDefinitionStorePort(Protocol)' \
         in definition_store_port
-    assert 'class _LegacyDefinitionStoreAdapter' in definition_store_port
+    assert 'class _LegacyDefinitionStoreAdapter' not in definition_store_port
     assert 'def bind_orchestration_definition_store(' \
         in definition_store_port
     assert 'from lib.orchestration.errors import DefinitionServiceError' \
@@ -798,17 +786,6 @@ def test_application_services_are_physically_split():
     assert 'def _repository_call(' in definition_service
     assert 'class FlowEventSink' not in definition_service
     assert 'def execute_runtime_flow(' not in definition_service
-    assert 'class OrchestrationDefinitionService' not in compatibility_facade
-    assert ('from lib.orchestration.definition_service import ('
-            in compatibility_facade)
-    assert ('from lib.orchestration.definition_inspection import ('
-            in compatibility_facade)
-    assert ('from lib.orchestration.authoring_service import ('
-            in compatibility_facade)
-    assert ('from lib.orchestration.runtime_service import ('
-            in compatibility_facade)
-    assert ('from lib.orchestration.durable_projection import ('
-            in compatibility_facade)
     assert 'class FlowEventSink' not in runtime_service
     assert 'class FlowEventSink' in runtime_event_sink
     assert 'class FlowRunOutcome' not in runtime_service
@@ -829,15 +806,9 @@ def test_application_services_are_physically_split():
     assert 'def spawn_runtime_flow(' in runtime_service
     assert 'class OrchestrationRuntimeStartService' in runtime_start_service
     assert runtime_start_service.count('spawn_runtime_flow(') == 2
-    assert 'def start_ephemeral(' in runtime_start_service
-    assert 'def start_durable(' in runtime_start_service
     assert 'def start(' in runtime_start_service
     assert 'def _record_start_failure(' not in runtime_start_service
     assert 'def recover_failed_durable_start(' in runtime_start_recovery
-    assert 'from lib.orchestration.runtime_start_service import (' \
-        in compatibility_facade
-    assert "'execute_runtime_flow', 'spawn_runtime_flow'" \
-        in compatibility_facade
     assert 'class OrchestrationDefinitionService' not in runtime_service
     assert 'OrchestrationStore' not in runtime_service
     assert 'from lib.orchestration.run_service' not in runtime_service
@@ -857,8 +828,6 @@ def test_graph_build_responsibilities_are_physically_split():
         'lib/orchestration/_chat_projection.py', encoding='utf-8').read()
     expansion = open(
         'lib/orchestration/_subflow_expansion.py', encoding='utf-8').read()
-    facade = open(
-        'lib/orchestration/_build.py', encoding='utf-8').read()
     builtin_registry = open(
         'lib/orchestration/authoring_builtin_registry.py',
         encoding='utf-8').read()
@@ -866,15 +835,13 @@ def test_graph_build_responsibilities_are_physically_split():
         'lib/orchestration/definition_inspection.py', encoding='utf-8').read()
     plan = open('lib/orchestration_plan.py', encoding='utf-8').read()
 
-    assert 'def build_endpoint_definition(' in builtins
     assert 'def build_autopilot_definition(' in builtins
+    assert 'def build_fanout_definition(' in builtins
+    assert 'def build_adversarial_definition(' in builtins
     assert 'def chat_projection_for_flow(' not in builtins
     assert 'def expand_subflows(' not in builtins
     assert 'def chat_projection_for_flow(' in projection
     assert 'def expand_subflows(' in expansion
-    assert 'def build_endpoint_definition(' not in facade
-    assert 'def chat_projection_for_flow(' not in facade
-    assert 'def expand_subflows(' not in facade
     assert 'from lib.orchestration._builtin_definitions import (' \
         in builtin_registry
     assert 'from lib.orchestration._chat_projection import ' \
@@ -884,7 +851,6 @@ def test_graph_build_responsibilities_are_physically_split():
     assert builtins.count('\n') < 230
     assert projection.count('\n') < 50
     assert expansion.count('\n') < 150
-    assert facade.count('\n') < 40
 
 
 def test_definition_request_schema_uses_canonical_domain_vocabulary():
@@ -916,9 +882,9 @@ def test_spawn_runtime_flow_owns_live_and_durable_task_wiring(monkeypatch):
             self.created = []
             self.spawned = []
 
-        def create(self, *, task_id='', meta=None):
+        def create(self, *, user_id, task_id='', meta=None):
             runtime_task_id = task_id or self.generated_id
-            self.created.append((task_id, meta))
+            self.created.append((user_id, task_id, meta))
             return {'id': runtime_task_id, 'abort_event': AbortEvent()}
 
         def spawn(self, task_id, worker):
@@ -945,12 +911,13 @@ def test_spawn_runtime_flow_owns_live_and_durable_task_wiring(monkeypatch):
     live_id = spawn_runtime_flow(
         live_runtime,
         _linear_definition(),
+        owner_user_id=41,
         meta={'name': 'Linear'},
         initial_context='start live',
         subflow_resolver_provider=resolver_provider,
     )
     assert live_id == 'live-1'
-    assert live_runtime.created == [('', {'name': 'Linear'})]
+    assert live_runtime.created == [(41, '', {'name': 'Linear'})]
     assert live_runtime.spawned == ['live-1']
     live_options = executions[0][3]
     assert live_options['initial_context'] == 'start live'
@@ -965,6 +932,7 @@ def test_spawn_runtime_flow_owns_live_and_durable_task_wiring(monkeypatch):
     durable_id = spawn_runtime_flow(
         durable_runtime,
         _linear_definition(),
+        owner_user_id=41,
         task_id='run-1',
         meta={'run_id': 'run-1'},
         initial_context='start durable',
@@ -972,7 +940,7 @@ def test_spawn_runtime_flow_owns_live_and_durable_task_wiring(monkeypatch):
     )
     assert durable_id == 'run-1'
     assert durable_runtime.created == [
-        ('run-1', {'run_id': 'run-1'}),
+        (41, 'run-1', {'run_id': 'run-1'}),
     ]
     assert durable_runtime.spawned == ['run-1']
     durable_options = executions[1][3]
@@ -982,6 +950,7 @@ def test_spawn_runtime_flow_owns_live_and_durable_task_wiring(monkeypatch):
     with pytest.raises(ValueError, match='requires a task_id'):
         spawn_runtime_flow(
             Runtime('orphan'), _linear_definition(),
+            owner_user_id=41,
             durable_runs=object(),
         )
 
@@ -1368,8 +1337,6 @@ def test_authoring_contract_is_complete_and_returns_detached_snapshots():
         'contractNonNegativeIntegerFields': ['nodes', 'edges'],
     }
     assert contract['ioContract']['maxPorts'] == 12
-    assert contract['ioTypes'] == contract['ioContract']['types']
-    assert contract['defaultOutput'] == 'text'
     assert contract['eventContract']['schema'] == \
         'tofu.orchestration.events/v1'
     assert contract['eventContract']['types']['step_phase']['durable'] is False
@@ -1449,12 +1416,8 @@ def test_authoring_contract_is_complete_and_returns_detached_snapshots():
         'reconcile_required'
     assert contract['mutationContract']['targetExistsField'] == \
         'target_exists'
-    assert contract['mutationContract']['legacyTargetFields'] == [
-        'run_id', 'requestId',
-    ]
-    assert contract['mutationContract']['legacyStatusFields'] == [
-        'run_status', 'status',
-    ]
+    assert 'legacyTargetFields' not in contract['mutationContract']
+    assert 'legacyStatusFields' not in contract['mutationContract']
     assert contract['replayContract'] == {
         'format': 'tofu.task-replay/v1',
         'httpStatuses': {
@@ -1524,14 +1487,13 @@ def test_authoring_contract_is_complete_and_returns_detached_snapshots():
             'operation': {'name': 'operation', 'type': 'string'},
             'expectedUpdatedAt': {
                 'name': 'expectedUpdatedAt',
-                'type': 'nullable_non_negative_integer',
+                'type': 'non_negative_integer',
             },
             'currentUpdatedAt': {
                 'name': 'currentUpdatedAt',
-                'type': 'nullable_non_negative_integer',
+                'type': 'non_negative_integer',
             },
         },
-        'legacyUnguarded': True,
     }
     assert contract['definitionListContract'] == {
         'format': 'tofu.orchestration.definition-list/v1',
@@ -1559,10 +1521,6 @@ def test_authoring_contract_is_complete_and_returns_detached_snapshots():
         'kinds': ['ephemeral', 'durable'],
         'idField': 'id',
         'kindField': 'kind',
-        'legacyIdFields': {
-            'ephemeral': 'task_id',
-            'durable': 'run_id',
-        },
         'successStatuses': {
             'ephemeral': 200,
             'durable': 201,
@@ -1674,7 +1632,7 @@ def test_authoring_contract_is_complete_and_returns_detached_snapshots():
 
 def test_all_studio_templates_share_the_backend_builtin_registry():
     assert builtin_names() == (
-        'endpoint', 'autopilot', 'fanout', 'adversarial', 'blank',
+        'autopilot', 'fanout', 'adversarial', 'blank',
     )
     for name in builtin_names():
         definition = build_builtin_definition(name)
@@ -1728,19 +1686,17 @@ def test_compose_route_uses_service_boundary_not_direct_implementation():
     assert 'lib.orchestration.service' not in route_source
 
 
-def test_chat_builtin_entrypoints_use_service_registry():
+def test_chat_autopilot_entrypoint_uses_service_registry():
     runner = open(
-        'lib/orchestration_endpoint_runner.py', encoding='utf-8',
+        'lib/orchestration_chat_flow_runner.py', encoding='utf-8',
     ).read()
-    assert "_build_builtin('endpoint'" in runner
     assert "_build_builtin('autopilot'" in runner
-    assert 'from lib.orchestration import build_endpoint_definition' not in runner
     assert 'from lib.orchestration import build_autopilot_definition' not in runner
 
 
 def test_chat_runner_uses_normalized_execute_flow_boundary():
     runner = open(
-        'lib/orchestration_endpoint_runner.py', encoding='utf-8',
+        'lib/orchestration_chat_flow_runner.py', encoding='utf-8',
     ).read()
     runtime = open(
         'lib/orchestration_chat_flow_runtime.py', encoding='utf-8',
@@ -1775,10 +1731,9 @@ def test_authoring_service_exposes_one_adapter_interface():
     definition = _linear_definition()
 
     assert service.inspect(definition)['ok'] is True
-    assert service.builtin('endpoint')['schema'] == 'tofu.orchestration/v1'
+    assert service.builtin('autopilot')['schema'] == 'tofu.orchestration/v1'
     assert service.builtin('unknown') is None
     assert service.contract()['format'] == AUTHORING_CONTRACT_FORMAT
-    assert service.role_contract('worker')['role'] == 'worker'
     assert service.layout(definition) == layout_authoring_definition(definition)
     plan = service.plan(definition)
     assert plan == plan_authoring_definition(definition)
@@ -1797,21 +1752,6 @@ def test_blank_subflow_authoring_default_is_valid_and_detached():
     blank['nodes'][1]['params']['tier'] = 'client-mutation'
     fresh = node_authoring_defaults()
     assert fresh['blankSubflow']['nodes'][1]['params']['tier'] == 'standard'
-
-
-def test_single_role_authoring_contract_uses_generic_fallback_snapshot():
-    known = role_authoring_contract(' worker ')
-    unknown = role_authoring_contract('future-specialist')
-
-    assert known['role'] == 'worker'
-    assert any(field['key'] == 'must_do' for field in known['fields'])
-    assert known['persona']['prompt']
-    assert unknown['role'] == 'future-specialist'
-    assert unknown['fields'][0]['key'] == 'objective'
-
-    unknown['fields'][0]['key'] = 'client-mutation'
-    assert role_authoring_contract('another-new-role')['fields'][0]['key'] \
-        == 'objective'
 
 
 def test_event_sink_filters_deltas_and_maps_human_lifecycle():

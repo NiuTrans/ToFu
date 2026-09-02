@@ -57,8 +57,11 @@ def test_project_js_has_remote_seams():
 
 
 def test_i18n_remote_group_key():
-    src = _read(os.path.join(JS_DIR, 'i18n.js'))
-    assert "'devices.remoteGroup'" in src, 'i18n 缺 devices.remoteGroup'
+    for locale in ('en.json', 'zh.json'):
+        src = _read(os.path.join(
+            PROJECT_ROOT, 'frontend', 'src', 'i18n', 'locales', locale))
+        assert '"devices.remoteGroup"' in src, (
+            f'{locale} 缺 devices.remoteGroup')
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -90,11 +93,15 @@ const { check, report } = setup({
     '</body>',
   targets: [process.argv[2], process.argv[4]],  // project_state.js + project.js (bundle order)
   globals: {
+    activeConvId: 'c1',
+    conversations: [{ id: 'c1' }],
     debugLog: () => {},
     saveConversations: () => {},
-    syncConversationToServer: () => {},
+    persistConversationSettings: () => {},
     getActiveConv: () => null,
     _stopScanPoll: () => {},
+    _applyProjectData: () => {},
+    onProjectCleared: () => {},
     saveRecentProject: () => {},
     // project.js 的 projectState 经 setup globals 双挂(win+node global)——
     // eval'd 代码里的裸读写查的是 node global,挂 window 上是另一对象。
@@ -211,6 +218,8 @@ def test_NEUTER_strip_shortcircuit_calls_setPaths():
                      os.path.dirname(os.path.abspath(__file__)),
                      '_jsdom_harness.js')})
         out = (proc.stdout or '').strip()
+        assert proc.returncode == 0, (
+            f'NEUTER harness crashed:\n{proc.stderr}\n{out}')
         assert 'PASS neuter_setPaths_called_with_pseudo' in out, (
             f'NEUTER 未咬:摘掉短路后 setPaths 仍未被伪路径调用?\n{out}')
     finally:

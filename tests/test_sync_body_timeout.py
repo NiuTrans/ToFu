@@ -60,7 +60,6 @@ def server_module():
         import quart      # noqa: F401
     except ImportError as e:
         pytest.skip(f'async deps unavailable: {e}')
-    os.environ.setdefault('TUNNEL_TOKEN', '__sync_body_timeout_test__')
     spec = importlib.util.spec_from_file_location(
         'server',
         os.path.join(os.path.dirname(os.path.dirname(__file__)), 'server.py'),

@@ -1,6 +1,6 @@
 """lib/tasks_pkg/segments/ — the ordered typed-segment model (SoT groundwork).
 
-Board epic ``pt_cb8f98b0cb9b47fb`` (design: docs/EPIC_SEGMENT_TIMELINE_DESIGN.md).
+Board epic ``` (design: docs/RENDER_CONTRACT.md).
 
 An assistant turn is stored today as THREE parallel channels on the task dict:
 ``task['content']`` (deliverable string), ``task['thinking']`` (reasoning
@@ -27,7 +27,7 @@ segments as seg_mod`` both keep working byte-identically):
 
   * ``_types``    — SEG_* type tags + RESUMABLE_FINISH_REASONS (the closed
                     vocabulary; defined ONCE, shared by every submodule).
-  * ``_assemble`` — assemble_segments + _merged_rounds.
+  * ``_assemble`` — assemble_segments + single-round tool block construction.
   * ``_derive``   — derive_content / derive_thinking / derive_tool_rounds /
                     deliverable_text + _rounds_view_from_segments.
   * ``_project``  — reconstruct_tool_messages_from_segments /
@@ -53,6 +53,7 @@ from lib.tasks_pkg.segments._types import (  # noqa: E402,F401
 
 from lib.tasks_pkg.segments._assemble import (  # noqa: E402,F401
     assemble_segments,
+    tool_use_segment_from_round,
     _merged_rounds,
 )
 
@@ -82,6 +83,7 @@ from lib.tasks_pkg.segments._serde import (  # noqa: E402,F401
 
 __all__ = [
     'assemble_segments',
+    'tool_use_segment_from_round',
     'derive_content',
     'derive_thinking',
     'derive_tool_rounds',

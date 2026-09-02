@@ -1,20 +1,19 @@
-"""L2 ROI instrumentation, session stats, per-round logging & notify signals.
+"""L2 ROI instrumentation, session stats, and compaction notification.
 
 Everything here reaches into the shared ``_cache_states`` singleton (imported
 from ``._state``) — it mutates per-conversation ``CacheState`` fields
-(``compaction_pending`` / ``history_rewrite_pending`` / ``pending_l2_roi``)
+(``compaction_pending`` / ``pending_l2_roi``)
 and reads aggregate counters. ``_emit_l2_roi`` is the one function ``._state``
 calls back into (lazily) when it flushes an unpaired ROI on eviction.
 """
 
 from __future__ import annotations
 
-import sys as _sys
 import time
 from typing import Any
 
 from lib.cost import normalize_usage, split_input_tokens
-from lib.log import audit_log as _audit_log_direct, get_logger
+from lib.log import audit_log, get_logger
 from lib.tasks_pkg.cache_tracking._state import (
     _cache_lock,
     _cache_states,
@@ -31,23 +30,9 @@ logger = get_logger(__name__)
 _MIN_CACHEABLE_PROMPT = 4096
 
 
-def _audit_log(event, **details):
-    """Emit an audit metric, resolving ``audit_log`` through the package facade
-    at CALL time.
-
-    The old flat ``cache_tracking.py`` exposed ``audit_log`` as a module global,
-    so tests (and any hot-reload path) spy it on the package namespace
-    ``lib.tasks_pkg.cache_tracking.audit_log``. After the package split the emit
-    moved here with its own import-time binding, which a facade patch could not
-    reach. Resolving through the facade at call time restores that contract
-    exactly (falls back to the direct binding if the facade isn't importable).
-    """
-    fac = _sys.modules.get('lib.tasks_pkg.cache_tracking')
-    fn = getattr(fac, 'audit_log', _audit_log_direct) if fac else _audit_log_direct
-    return fn(event, **details)
-
-
-def get_session_cache_stats(conv_id: str) -> dict[str, Any] | None:
+def get_session_cache_stats(
+    conv_id: str, *, user_id: int,
+) -> dict[str, Any] | None:
     """Get aggregate session-level cache stats for a conversation.
 
     Returns a dict with cumulative cache read/write tokens, break count,
@@ -58,7 +43,7 @@ def get_session_cache_stats(conv_id: str) -> dict[str, Any] | None:
     effectiveness across the entire conversation session.
     """
     with _cache_lock:
-        state = _cache_states.get(_state_key(conv_id))
+        state = _cache_states.get(_state_key(conv_id, user_id=user_id))
         if not state or state.call_count == 0:
             return None
         total_input = state.total_input_tokens
@@ -77,10 +62,10 @@ def get_session_cache_stats(conv_id: str) -> dict[str, Any] | None:
         }
 
 
-def notify_compaction(conv_id: str) -> None:
+def notify_compaction(conv_id: str, *, user_id: int) -> None:
     """Notify that compaction occurred — the next cache_read drop is expected.
 
-    Call this after micro-compact or smart_summary_compact modifies messages
+    Call this after micro-compaction or force-compaction modifies messages
     so that detect_cache_break doesn't false-positive on the resulting
     cache_read token drop.
 
@@ -89,34 +74,12 @@ def notify_compaction(conv_id: str) -> None:
     if not conv_id:
         return
     with _cache_lock:
-        state = _cache_states.get(_state_key(conv_id))
+        state = _cache_states.get(_state_key(conv_id, user_id=user_id))
         if state:
             state.compaction_pending = True
 
 
-def notify_history_rewrite(conv_id: str) -> None:
-    """Signal that the backend REWROTE committed history this round.
-
-    Call this after a backend reconcile (``reconcile_conversation_messages``)
-    or a committed-dict projection edited/deleted messages in
-    ``conversations.messages`` that were part of the cached prefix.
-
-    Deliberately the OPPOSITE of ``notify_compaction``: it does NOT suppress
-    break detection and does NOT skip the authoritative wire diff. Its ONLY
-    effect is to let ``detect_cache_break`` NAME the cause as a backend history
-    rewrite instead of mislabeling it ``(compacted)`` or laundering it into a
-    false ``server-side — PROVEN`` verdict. The real cache cost is still
-    detected, attributed to the exact changed ``key.field``, and surfaced.
-    """
-    if not conv_id:
-        return
-    with _cache_lock:
-        state = _cache_states.get(_state_key(conv_id))
-        if state:
-            state.history_rewrite_pending = True
-
-
-def _emit_l2_roi(conv_id: str, roi: dict, *,
+def _emit_l2_roi(conv_id: str, roi: dict, *, user_id: int,
                  cache_write_rebilled: int | None,
                  cache_read_next: int | None = None,
                  now: float | None = None) -> None:
@@ -141,8 +104,9 @@ def _emit_l2_roi(conv_id: str, roi: dict, *,
         _read_lost = int(roi.get('cache_read_at_event', 0))
         _observed = cache_write_rebilled is not None
         _net = (_dropped - int(cache_write_rebilled)) if _observed else None
-        _audit_log(
+        audit_log(
             'l2_cache_roi',
+            user_id=user_id,
             conv_id=conv_id[:12],
             outcome='paired' if _observed else 'no_following_round',
             tokens_dropped=_dropped,
@@ -167,8 +131,10 @@ def _emit_l2_roi(conv_id: str, roi: dict, *,
         logger.debug('[CacheTrack] L2 ROI emit failed: %s', _roi_e)
 
 
-def record_l2_compaction(conv_id: str, *, tokens_before: int, tokens_after: int,
-                         msgs_before: int, msgs_after: int) -> None:
+def record_l2_compaction(
+    conv_id: str, *, user_id: int, tokens_before: int, tokens_after: int,
+    msgs_before: int, msgs_after: int,
+) -> None:
     """Record the 'saved' half of ONE L2 (force-summary) compaction event.
 
     Phase-C instrumentation (measure, don't tune). The ROI of an L2 event has
@@ -189,14 +155,16 @@ def record_l2_compaction(conv_id: str, *, tokens_before: int, tokens_after: int,
     if not conv_id:
         return
     with _cache_lock:
-        state = _cache_states.get(_state_key(conv_id))
+        state = _cache_states.get(_state_key(conv_id, user_id=user_id))
         if state is None:
             return
         # A second L2 event in the same round-gap would clobber the first's
         # unpaired record → the first event's ROI is silently lost. Flush it
         # first (re-billed half unobserved) so it is counted, not dropped.
         if state.pending_l2_roi is not None:
-            _emit_l2_roi(conv_id, state.pending_l2_roi, cache_write_rebilled=None)
+            _emit_l2_roi(
+                conv_id, state.pending_l2_roi, user_id=user_id,
+                cache_write_rebilled=None)
             state.pending_l2_roi = None
         state.pending_l2_roi = {
             'tokens_dropped': max(0, int(tokens_before) - int(tokens_after)),
@@ -238,7 +206,7 @@ def log_round_cache_stats(
     cache_write = _nu['cache_write']
     cache_read = _nu['cache_read']
 
-    # ★ A round with NO cache activity used to return here — which silenced
+    # A round with NO cache activity used to return here — which silenced
     #   exactly the most expensive rounds in the system (a full miss on a
     #   200k-token prompt logged nothing at all, while a healthy 99% hit
     #   logged happily). Two 20+ round Opus-5 sessions each burned a whole
@@ -252,7 +220,7 @@ def log_round_cache_stats(
         if total_input < _MIN_CACHEABLE_PROMPT:
             return
 
-    # ★ The hit ratio's denominator is the TOTAL prompt the provider
+    # The hit ratio's denominator is the TOTAL prompt the provider
     #   processed, which is convention-dependent: on the OpenAI-compat wire
     #   prompt_tokens ALREADY INCLUDES the cached tokens, so the old
     #   `prompt_tokens + cache_write + cache_read` counted them TWICE and

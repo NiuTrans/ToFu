@@ -1,5 +1,3 @@
-# Incident anchor: born in commit 1fb1e5c6 — refactor(orchestrator): pt_03f4cdf1 slice 36 — extract continue-toolH...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 36 — extract the
 continue-toolHistory injection + the memory-prefetch eligibility drift
 guard from _run.py into

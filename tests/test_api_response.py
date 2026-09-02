@@ -15,23 +15,19 @@ import pytest as _pytest
 
 @_pytest.fixture(autouse=True)
 def _isolate_req_id():
-    """Clear lib.log's request-id thread-local around each test.
+    """Clear the request ContextVar around each test.
 
-    ``set_req_id(None)`` MINTS a fresh id rather than clearing, and route
-    middleware in unrelated test files sets one on this same thread and never
-    removes it. Left over from an earlier test in a shared batch run,
-    ``_attach_request_id`` then adds a stray ``request_id`` key to error
-    bodies and breaks the exact-dict assertions below — while the file
-    passes in isolation. ``asyncio.run`` executes on this same thread, so
-    clearing here covers the async bodies too.
+    ``set_req_id(None)`` mints a fresh id; an empty string is the explicit
+    no-request value. Preserve the caller's context so exact response-shape
+    assertions do not depend on test execution order.
     """
-    from lib.log import _thread_ctx
-    saved = getattr(_thread_ctx, 'req_id', '')
-    _thread_ctx.req_id = ''
+    from lib.log import req_id, set_req_id
+    saved = req_id()
+    set_req_id('')
     try:
         yield
     finally:
-        _thread_ctx.req_id = saved
+        set_req_id(saved)
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -482,17 +478,6 @@ def test_api_service_unavailable_custom_retry():
     _ok('api_service_unavailable(retry_after=5) → Retry-After: 5')
 
 
-def test_pool_exhausted_error_is_typed():
-    """PoolExhaustedError is a distinct type carrying the pool snapshot so the
-    server errorhandler can map it to 503 (not a generic 500)."""
-    from lib.database import PoolExhaustedError
-    e = PoolExhaustedError('pool full', active=800, max_conns=800,
-                           pooled=0, tracked=136)
-    assert isinstance(e, RuntimeError)
-    assert e.active == 800 and e.max_conns == 800 and e.tracked == 136
-    _ok('PoolExhaustedError is a typed RuntimeError with pool snapshot')
-
-
 def test_api_internal_error_with_exception():
     """api_internal_error(exc) auto-logs and returns envelope."""
     from lib.api_response import api_internal_error
@@ -508,11 +493,44 @@ def test_api_internal_error_with_exception():
             assert status == 500
             assert body['ok'] is False
             assert isinstance(body['error'], dict)
-            assert 'database exploded' in body['error']['raw']
+            assert body['error']['kind'] == 'internal'
+            assert body['error']['raw'] == ''
+            assert body['error']['detail'] == ''
+            assert 'database exploded' not in str(body)
 
     import asyncio
     asyncio.run(_t())
-    _ok('api_internal_error(Exception) → 500 with envelope')
+    _ok('api_internal_error(Exception) → redacted 500 envelope')
+
+
+def test_api_internal_error_logs_detached_exception_traceback():
+    """A passed exception keeps its traceback after its except block ended."""
+    from unittest.mock import patch
+
+    import lib.api_response as api_response
+
+    app = _make_app_ctx()
+    try:
+        raise RuntimeError('backend-only-sensitive-detail')
+    except RuntimeError as caught:
+        failure = caught
+
+    async def _t():
+        async with app.test_request_context('/test'):
+            with patch.object(api_response.logger, 'error') as logged:
+                status, body = await _resolve(api_response.api_internal_error(
+                    failure, context='detached', source='unit'))
+            assert status == 500
+            assert 'backend-only-sensitive-detail' not in str(body)
+            logged.assert_called_once()
+            exception_info = logged.call_args.kwargs['exc_info']
+            assert exception_info[0] is RuntimeError
+            assert exception_info[1] is failure
+            assert exception_info[2] is failure.__traceback__
+
+    import asyncio
+    asyncio.run(_t())
+    _ok('api_internal_error logs an explicit detached exception tuple')
 
 
 def test_api_internal_error_default():
@@ -775,8 +793,8 @@ def main():
         test_api_method_not_allowed,
         test_api_service_unavailable_default,
         test_api_service_unavailable_custom_retry,
-        test_pool_exhausted_error_is_typed,
         test_api_internal_error_with_exception,
+        test_api_internal_error_logs_detached_exception_traceback,
         test_api_internal_error_default,
         test_safe_route_decorator,
         test_safe_route_decorator_async,

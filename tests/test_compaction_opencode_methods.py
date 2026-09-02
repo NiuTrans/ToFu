@@ -32,7 +32,7 @@ def _n_compacted(msgs, marker):
 
 @pytest.mark.unit
 def test_registered():
-    from lib.tasks_pkg.compaction import list_steps
+    from lib.tasks_pkg.compaction.api import list_steps
     assert 'prune_with_hysteresis' in list_steps()
     assert 'adaptive_hot_tail' in list_steps()
 
@@ -42,7 +42,7 @@ def test_registered():
 @pytest.mark.unit
 def test_prune_skips_below_minimum():
     """When reclaimable tokens are below PRUNE_MINIMUM, nothing is pruned."""
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
     # Small protected tail + tiny reclaimable → below minimum.
     msgs = _mk_tools(3, 12_000)  # ~3k tokens each
     micro_compact(msgs, conv_id='', steps=['prune_with_hysteresis'],
@@ -53,7 +53,7 @@ def test_prune_skips_below_minimum():
 
 @pytest.mark.unit
 def test_prune_acts_above_minimum_and_protects_tail():
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
     # 10 results × ~3k tokens = 30k total. Protect 6k tail (~2 results),
     # minimum 4k → the other ~8 are pruned.
     msgs = _mk_tools(10, 12_000)
@@ -71,7 +71,7 @@ def test_prune_acts_above_minimum_and_protects_tail():
 
 @pytest.mark.unit
 def test_adaptive_hot_tail_compacts_outside_budget():
-    from lib.tasks_pkg.compaction import micro_compact
+    from lib.tasks_pkg.compaction.api import micro_compact
     # 12 results × ~3k tokens. Budget 9k ≈ keep ~3 newest, compact the rest.
     msgs = _mk_tools(12, 12_000)
     micro_compact(msgs, conv_id='', steps=['adaptive_hot_tail'],
@@ -84,10 +84,11 @@ def test_adaptive_hot_tail_compacts_outside_budget():
 
 @pytest.mark.unit
 def test_adaptive_hot_tail_respects_cache_prefix(monkeypatch):
-    from lib.tasks_pkg.compaction import micro_compact
-    import lib.tasks_pkg.cache_tracking as ct
+    from lib.tasks_pkg.compaction.api import micro_compact
+    import lib.tasks_pkg.cache_tracking._prefix as ct
     monkeypatch.setattr(ct, 'get_cache_prefix_count',
-                        lambda _cid, current_msg_count=None: 100)
+                        lambda _cid, user_id=None,
+                        current_msg_count=None: 100)
     msgs = _mk_tools(12, 12_000)
     # Large cache prefix → most are protected; aggressive lifts it.
     micro_compact(msgs, conv_id='c1', steps=['adaptive_hot_tail'],

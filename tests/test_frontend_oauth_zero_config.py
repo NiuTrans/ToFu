@@ -50,20 +50,24 @@ def test_subscription_page_never_starts_or_polls_the_legacy_adapter():
     assert 'settings.adapterTitle' not in src
 
 
-def test_egress_diagnostics_are_not_rendered_to_normal_users():
+def test_egress_route_is_rendered_without_assigning_setup_work():
     src = OAUTH_JS.read_text(encoding='utf-8')
     assert 'function _renderEgressLine(provider, egress)' in src
-    assert "el.style.display = 'none';" in src
-    for implementation_key in (
+    renderer = src[src.index(
+        'function _renderEgressLine(provider, egress)'):src.index(
+        'function _updateOAuthCard(provider, status)')]
+    assert "el.style.display = '';" in renderer
+    for route_key in (
+        'settings.egressChecking',
         'settings.egressDirect',
+        'settings.egressViaProxy',
         'settings.egressViaAgent',
         'settings.egressAgentNoCap',
         'settings.egressUnavailable',
-        'settings.egressGetAgent',
     ):
-        assert implementation_key not in src[src.index(
-            'function _renderEgressLine(provider, egress)'):src.index(
-            'function _updateOAuthCard(provider, status)')]
+        assert route_key in renderer
+    for setup_work in ('openLocalControlModal', 'settings.egressGetAgent'):
+        assert setup_work not in renderer
 
 
 def test_user_facing_copy_states_the_ownership_boundary():

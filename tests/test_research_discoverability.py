@@ -42,6 +42,8 @@ import pytest
 
 from tests._runtime_sections import native_module_path
 
+TEST_OWNER_USER_ID = 1
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -49,7 +51,7 @@ RESEARCH_VIEW_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'research-view.ts')
 RESEARCH_RUNTIME_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'research-runtime.ts')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 pytestmark = pytest.mark.unit
 
 _DIR_A = 'long-context KV-cache compression'
@@ -94,13 +96,11 @@ def _new_loop_run(coro):
 
 @pytest.fixture()
 def fresh_db(tmp_path, monkeypatch):
-    from lib.database import reset_sqlite_for_tests, restore_db_state
-    from lib.research import persistence
+    import lib.research.persistence as persistence
     from lib.storage import StorageSupervisor
 
-    snapshot = reset_sqlite_for_tests(str(tmp_path / 'research_disc.db'))
     supervisor = StorageSupervisor(
-        project_root=tmp_path / 'sidecar', backend='sqlite', startup_timeout=20)
+        project_root=tmp_path / 'sidecar', backend='sqlite', startup_timeout=60)
     supervisor.start()
     monkeypatch.setattr(
         persistence, '_storage', lambda **_kwargs: supervisor.client)
@@ -108,7 +108,6 @@ def fresh_db(tmp_path, monkeypatch):
         yield supervisor
     finally:
         supervisor.stop()
-        restore_db_state(snapshot)
 
 
 @pytest.fixture()
@@ -139,8 +138,11 @@ def test_past_directions_are_listable_without_knowing_the_text(client):
     reach the artifacts again — the hash is not reversible.
     """
     from lib.research.persistence import persist_ideate, persist_survey
-    persist_survey(_DIR_A, 'en', '# Survey A', _GAPS, model='m')
-    persist_ideate(_DIR_A, 'en', _IDEATE, model='m')
+    persist_survey(
+        _DIR_A, 'en', '# Survey A', _GAPS, model='m',
+        user_id=TEST_OWNER_USER_ID)
+    persist_ideate(
+        _DIR_A, 'en', _IDEATE, model='m', user_id=TEST_OWNER_USER_ID)
     _empty_the_task_registry()
 
     status, body = _get_json(client, '/api/v1/research/list')
@@ -166,8 +168,11 @@ def test_past_directions_are_listable_without_knowing_the_text(client):
 def test_list_carries_the_counts_needed_to_choose(client):
     """A list of bare strings is not usable — the user picks by outcome."""
     from lib.research.persistence import persist_ideate, persist_survey
-    persist_survey(_DIR_A, 'en', '# Survey A', _GAPS, model='m')
-    persist_ideate(_DIR_A, 'en', _IDEATE, model='m')
+    persist_survey(
+        _DIR_A, 'en', '# Survey A', _GAPS, model='m',
+        user_id=TEST_OWNER_USER_ID)
+    persist_ideate(
+        _DIR_A, 'en', _IDEATE, model='m', user_id=TEST_OWNER_USER_ID)
     _empty_the_task_registry()
 
     _, body = _get_json(client, '/api/v1/research/list')
@@ -182,8 +187,12 @@ def test_list_carries_the_counts_needed_to_choose(client):
 
 def test_list_covers_multiple_directions_and_is_newest_first(client):
     from lib.research.persistence import persist_survey
-    persist_survey(_DIR_A, 'en', '# A', _GAPS, model='m')
-    persist_survey(_DIR_B, 'en', '# B', _GAPS, model='m')
+    persist_survey(
+        _DIR_A, 'en', '# A', _GAPS, model='m',
+        user_id=TEST_OWNER_USER_ID)
+    persist_survey(
+        _DIR_B, 'en', '# B', _GAPS, model='m',
+        user_id=TEST_OWNER_USER_ID)
     _empty_the_task_registry()
 
     _, body = _get_json(client, '/api/v1/research/list')
@@ -211,13 +220,16 @@ def test_list_never_leaks_a_real_papers_report(client, fresh_db):
     """
     from lib.research.persistence import persist_survey
     fresh_db.client.command('paper.report.upsert', {
+        'user_id': TEST_OWNER_USER_ID,
         'paper_hash': 'deadbeef' * 4, 'lang': 'en',
         'report': 'A REAL PAPER REPORT', 'model': '',
         'meta': {'kind': 'insight',
                  'direction': 'NOT A RESEARCH DIRECTION'},
         'created_at': 9999999999,
     }, 'research-discovery-paper-decoy')
-    persist_survey(_DIR_A, 'en', '# A', _GAPS, model='m')
+    persist_survey(
+        _DIR_A, 'en', '# A', _GAPS, model='m',
+        user_id=TEST_OWNER_USER_ID)
     _empty_the_task_registry()
 
     _, body = _get_json(client, '/api/v1/research/list')
@@ -240,7 +252,7 @@ _RENDER_HARNESS = r"""
 const fs = require('fs'), path = require('path');
 const ROOT = process.argv[2];
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
-const dom = new JSDOM('<!DOCTYPE html><body><div id="paperPdfViewer"></div></body>',
+const dom = new JSDOM('<!DOCTYPE html><body><div id="researchViewer"></div></body>',
                       { url: 'http://localhost/' });
 global.window = global; global.document = dom.window.document;
 global.requestAnimationFrame = (fn) => setTimeout(fn, 0);
@@ -311,8 +323,8 @@ const src = fs.readFileSync(process.argv[4], 'utf8');
     await _startResearchJob('long-context KV-cache compression');
     await new Promise(r => setTimeout(r, 40));
   }
-  out.html = document.getElementById('paperPdfViewer').innerHTML;
-  out.text = document.getElementById('paperPdfViewer').textContent;
+  out.html = document.getElementById('researchViewer').innerHTML;
+  out.text = document.getElementById('researchViewer').textContent;
   console.log(JSON.stringify(out));
   if (typeof _stopResearchPoll === 'function') _stopResearchPoll();
   process.exit(0);

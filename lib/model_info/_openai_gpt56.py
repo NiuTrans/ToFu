@@ -1,9 +1,10 @@
 """Verified GPT-5.6 public-API contract shared by backend consumers.
 
-The declarative source lives in ``static/provider_templates/openai.json`` so
-the setup UI, bootstrap flow, pricing, routing, and model capability code can be
-checked against the same facts.  This module is deliberately stdlib-only apart
-from no application imports, keeping it safe to import from model hot paths.
+The declarative source is package data in ``lib/model_info/data/openai.json``.
+The setup UI, bootstrap flow, pricing, routing, and model capability code all
+consume that same file, so the published wheel does not depend on a checkout's
+frontend ``static/`` tree. This module is deliberately stdlib-only and safe to
+import from model hot paths.
 """
 
 from __future__ import annotations
@@ -13,10 +14,7 @@ from pathlib import Path
 from typing import Any
 
 
-_CONTRACT_PATH = (
-    Path(__file__).resolve().parents[2]
-    / 'static' / 'provider_templates' / 'openai.json'
-)
+_CONTRACT_PATH = Path(__file__).with_name('data') / 'openai.json'
 
 
 def _load_contract() -> tuple[dict[str, Any], dict[str, Any]]:
@@ -25,9 +23,12 @@ def _load_contract() -> tuple[dict[str, Any], dict[str, Any]]:
     models = contract.get('models') if isinstance(contract, dict) else None
     if not isinstance(models, dict) or not models:
         raise RuntimeError(f'invalid GPT-5.6 contract: {_CONTRACT_PATH}')
+    offerings = payload.get('offering_recipes')
+    if offerings is None:  # Legacy checked-out templates remain readable.
+        offerings = payload.get('models')
     template_ids = {
         str(item.get('model_id') or '')
-        for item in payload.get('models') or () if isinstance(item, dict)
+        for item in offerings or () if isinstance(item, dict)
     }
     missing = set(models) - template_ids
     if missing:
@@ -107,9 +108,12 @@ def gpt56_slot_configs() -> dict[str, dict[str, Any]]:
     the public API does not promise a universal per-model latency.
     """
     rows: dict[str, dict[str, Any]] = {}
+    offerings = OPENAI_TEMPLATE.get('offering_recipes')
+    if offerings is None:  # Compatibility with pre-recipe source trees.
+        offerings = OPENAI_TEMPLATE.get('models')
     templates = {
         str(item.get('model_id') or ''): item
-        for item in OPENAI_TEMPLATE.get('models') or ()
+        for item in offerings or ()
         if isinstance(item, dict)
     }
     local_latency = {

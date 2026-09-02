@@ -259,15 +259,15 @@ try {
 
   // ══ NEUTER 3: row icon renders raw m.brand (the 2026-08-10 grey box) ══
   {
-    const fixed = "      const _rowBrand = (m.brand || '').trim();\n"
-      + "      const _rowCredKind = (_rowBrand === 'oauth' || _rowBrand === 'adapter');\n"
-      + "      const brand = (_rowBrand && !_rowCredKind)\n"
-      + "        ? _rowBrand\n"
-      + "        : (_rowCredKind && _hasGroup)\n"
-      + "          ? runtimeScope.modelGroupKey({ brand: m.brand, name: m.provider_name }, m)\n"
-      + "          : (typeof _detectBrand === 'function' ? _detectBrand(m.model_id) : 'generic');";
+    const fixed = "    const _rowBrand = (m.brand || '').trim();\n"
+      + "    const _rowCredKind = (_rowBrand === 'oauth' || _rowBrand === 'adapter');\n"
+      + "    const brand = (_rowBrand && !_rowCredKind)\n"
+      + "      ? _rowBrand\n"
+      + "      : (_rowCredKind && _hasGroup)\n"
+      + "        ? runtimeScope.modelGroupKey({ brand: m.brand, name: m.provider_name }, m)\n"
+      + "        : (typeof _detectBrand === 'function' ? _detectBrand(m.model_id) : 'generic');";
     const n = TB_SRC.replace(fixed,
-      "      const brand = m.brand || (typeof _detectBrand === 'function' ? _detectBrand(m.model_id) : 'generic');");
+      "    const brand = m.brand || (typeof _detectBrand === 'function' ? _detectBrand(m.model_id) : 'generic');");
     check('N3_applied', n !== TB_SRC);
     indirectEval(n);
     window._populateModelDropdown ? window._populateModelDropdown(regModels())

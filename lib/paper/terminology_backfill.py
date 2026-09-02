@@ -40,11 +40,8 @@ import uuid
 from lib.llm_json import extract_json
 from lib.log import get_logger
 
-from .terminology_audit import (
-    _extract_acronyms,
-    _strip_code,
-    build_terminology_audit,
-)
+from .terminology_audit._acronyms import _extract_acronyms, _strip_code
+from .terminology_audit.audit import build_terminology_audit
 
 logger = get_logger(__name__)
 
@@ -54,11 +51,6 @@ __all__ = [
     'build_backfill_addendum',
     'run_report_termfill',
 ]
-
-
-def _storage(*, write: bool = False):
-    from lib.storage import get_storage_client
-    return get_storage_client(write=write)
 
 _TERMFILL_LANG_PREFIX = 'termfill'
 # The addendum header intentionally contains "glossary" so the audit's
@@ -344,7 +336,8 @@ def build_backfill_addendum(report_text, audit, ui_lang='en', *,
 
 
 def run_report_termfill(report_md, ui_lang='en', *, phash='', model=None,
-                        audit=None, persist=True, dispatch=None) -> dict:
+                        audit=None, persist=True, dispatch=None,
+                        user_id: int) -> dict:
     """Generate → gate → persist the backfill addendum. Best-effort.
 
     Mirrors ``run_report_insight``: computes the addendum, and on success
@@ -379,14 +372,21 @@ def run_report_termfill(report_md, ui_lang='en', *, phash='', model=None,
 
     if persist and addendum:
         try:
-            _storage(write=True).command('paper.report.upsert', {
-                'paper_hash': phash,
-                'lang': termfill_lang_key(ui_lang),
-                'report': addendum,
-                'model': model or '',
-                'meta': {'kind': 'termfill'},
-                'created_at': int(time.time()),
-            }, f'paper-termfill:{uuid.uuid4().hex}')
+            from lib.paper.artifact_repository import (
+                PaperArtifactRepository,
+                PaperReport,
+            )
+            PaperArtifactRepository(user_id).put_report(
+                PaperReport(
+                    paper_hash=phash,
+                    lang=termfill_lang_key(ui_lang),
+                    report=addendum,
+                    model=model or '',
+                    meta={'kind': 'termfill'},
+                    created_at=int(time.time()),
+                ),
+                command_id=f'paper-termfill:{uuid.uuid4().hex}',
+            )
             logger.info('[Paper:TermFill] Persisted addendum — hash=%s key=%s %d chars',
                         phash, termfill_lang_key(ui_lang), len(addendum))
         except Exception as e:

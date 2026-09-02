@@ -1,25 +1,23 @@
 # HOT_PATH
 """web_search / fetch_url tool-handler orchestrators (single + batch).
 
-MONKEYPATCH PARITY: the orchestrators call ``_web_search_one`` /
-``_fetch_url_one`` THROUGH the package facade (``lib.tasks_pkg.handlers.search``)
-at call time — NOT via a submodule-local import — so tests that patch
-``lib.tasks_pkg.handlers.search._web_search_one`` /
-``lib.tasks_pkg.handlers.search._fetch_url_one`` steer them exactly as before
-the package split.
+Search and fetch primitives are resolved through their concrete ``_core``
+owner module at the first valid call. Registration and invalid-input paths stay
+free of tofu-search's heavyweight optional dependency graph.
 """
 
 from __future__ import annotations
 
+import json
 import threading
 from urllib.parse import urlparse
 
 from lib.agent_core.events import EventType, build_event
 from lib.log import get_logger
 from lib.tasks_pkg.executor import _finalize_tool_round, tool_registry
-from tofu_search.search import format_search_for_tool_response
 from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
 from lib.tasks_pkg.manager import append_event
+from lib.tools.result_envelope import typed_tool_error
 
 from lib.tasks_pkg.handlers.search._display import (
     _format_fetch_display,
@@ -31,10 +29,19 @@ from lib.tasks_pkg.handlers.search._display import (
 logger = get_logger(__name__)
 
 
+def _load_search_backend():
+    """Activate providers, then resolve the authoritative search primitives."""
+    from lib.search_runtime import ensure_search_runtime
+    ensure_search_runtime()
+    from lib.tasks_pkg.handlers.search import _core as search_core
+    from tofu_search.search import format_search_for_tool_response
+    return search_core, format_search_for_tool_response
+
+
 def _batch_progress_reporter(task, rn, round_entry, total, label_of):
     """Build an ``on_item`` callback that emits per-item batch progress.
 
-    ★ WHY (pt_67ffc2b7). A batch call — ``web_search(queries=[a,b,c])`` or
+    WHY (). A batch call — ``web_search(queries=[a,b,c])`` or
     ``fetch_url(urls=[...])`` — is ONE tool round with ONE ``round_entry``, so
     its terminal ``tool_result`` is the round's ONLY observable transition. With
     a 2s query beside a 40s one, the user watches an undifferentiated spinner
@@ -104,11 +111,7 @@ def _batch_progress_reporter(task, rn, round_entry, total, label_of):
 @tool_registry.handler('web_search', category='search',
                        description='Perform a web search and return formatted results')
 def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
-    # Resolve the search primitive THROUGH the package facade so a
-    # package-level monkeypatch (patch('...search._web_search_one', ...)) steers it.
-    from lib.tasks_pkg.handlers import search as _facade
-
-    # ★ Batch mode: if 'queries' array is present, run all searches concurrently
+    # Batch mode: if 'queries' array is present, run all searches concurrently
     queries = fn_args.get('queries')
     if queries and isinstance(queries, list):
         return _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, round_entry, cfg, project_path, project_enabled, all_tools)
@@ -130,20 +133,21 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
         )
         round_entry['results'] = []
         round_entry['status'] = 'done'
-        append_event(task, {'type': 'tool_result', 'roundNum': rn, 'query': query, 'results': []})
+        append_event(task, {'type': 'tool_result', 'roundNum': rn, 'query': query, 'results': [], 'status': 'done'})
         return tc_id, tool_content, False
 
+    search_core, format_search_for_tool_response = _load_search_backend()
     from lib.search_bridge import bind_search_browser
     with bind_search_browser(
             user_id=task.get('_userId', '') or '',
             client_id=cfg.get('browserClientId') or ''):
-        results, search_diag, engine_breakdown, vertical_result = _facade._web_search_one(
+        results, search_diag, engine_breakdown, vertical_result = search_core._web_search_one(
             query, user_question, freshness, vertical=vertical_param)
     display_results = _format_search_display_for_results(results)
 
     round_entry['results'] = display_results
     round_entry['status'] = 'done'
-    event_payload = {'type': 'tool_result', 'roundNum': rn, 'query': query, 'results': display_results}
+    event_payload = {'type': 'tool_result', 'roundNum': rn, 'query': query, 'results': display_results, 'status': 'done'}
     if engine_breakdown:
         round_entry['engineBreakdown'] = engine_breakdown
         event_payload['engineBreakdown'] = engine_breakdown
@@ -180,9 +184,6 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
     per-query headers. Each query's display_results are merged into the
     round_entry's results list for frontend rendering.
     """
-    # Resolve the search primitive THROUGH the package facade (monkeypatch parity).
-    from lib.tasks_pkg.handlers import search as _facade
-
     import time as _time
 
     handler_t0 = _time.time()
@@ -206,6 +207,7 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
         _finalize_tool_round(task, rn, round_entry, [{'type': 'error', 'content': tool_content}])
         return tc_id, tool_content, False
 
+    search_core, format_search_for_tool_response = _load_search_backend()
     query_list = [q for q, _, _ in query_specs]
     n = len(query_list)
 
@@ -215,7 +217,7 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
         with bind_search_browser(
                 user_id=task.get('_userId', '') or '',
                 client_id=cfg.get('browserClientId') or ''):
-            results, search_diag, engine_breakdown, vertical_result = _facade._web_search_one(
+            results, search_diag, engine_breakdown, vertical_result = search_core._web_search_one(
                 q, user_question, f, vertical=v)
         formatted = format_search_for_tool_response(results, search_diag=search_diag, query=q)
         if vertical_result:
@@ -264,6 +266,7 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
         'query': f'🔍 {n} searches',
         'results': all_display_results,
         '_batchQueries': query_list,
+        'status': 'done',
     }
     if all_verticals:
         round_entry['verticals'] = all_verticals
@@ -284,10 +287,7 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
 @tool_registry.handler('fetch_url', category='search',
                        description='Fetch and extract content from a URL')
 def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
-    # Resolve the fetch primitive THROUGH the package facade (monkeypatch parity).
-    from lib.tasks_pkg.handlers import search as _facade
-
-    # ★ Batch mode: if 'urls' array is present, fetch all concurrently
+    # Batch mode: if 'urls' array is present, fetch all concurrently
     urls = fn_args.get('urls')
     if urls and isinstance(urls, list):
         return _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls, rn, round_entry, cfg, project_path, project_enabled, all_tools)
@@ -340,11 +340,12 @@ def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         _finalize_tool_round(task, rn, round_entry, [dr], query_override=f'📄 {target_url}')
         return tc_id, tool_content, False
 
+    search_core, _format_search_for_tool_response = _load_search_backend()
     from lib.search_bridge import bind_search_browser
     with bind_search_browser(
             user_id=task.get('_userId', '') or '',
             client_id=cfg.get('browserClientId') or ''):
-        item = _facade._fetch_url_one(
+        item = search_core._fetch_url_one(
             target_url, user_question, fetch_reason=fetch_reason)
 
     from lib.tasks_pkg.tool_display import _short_url
@@ -364,6 +365,114 @@ def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     return tc_id, tool_content, True
 
 
+@tool_registry.handler(
+    'download_url_to_server',
+    category='search',
+    description='Download one remote URL into server staging',
+)
+def _handle_download_url_to_server(
+    task,
+    tc,
+    fn_name,
+    tc_id,
+    fn_args,
+    rn,
+    round_entry,
+    cfg,
+    project_path,
+    project_enabled,
+    all_tools=None,
+):
+    """Execute the explicit server-location download contract."""
+    target_url = str((fn_args or {}).get('url') or '').strip()
+    parsed = urlparse(target_url)
+    if parsed.scheme.lower() not in {'http', 'https'} or not parsed.hostname:
+        failure = typed_tool_error(
+            'server_download_invalid_url',
+            retryable=False,
+            next_action=(
+                'Pass one complete http:// or https:// URL. Use read_files for '
+                'a local path.'),
+            message='download_url_to_server requires one complete remote URL.',
+        ).to_model_text()
+        _finalize_tool_round(
+            task, rn, round_entry,
+            [{
+                'title': 'Server download rejected',
+                'snippet': 'A valid http(s) URL is required',
+                'url': '', 'source': 'Server staging', 'fetched': False,
+                'fetchedChars': 0, 'badge': 'invalid URL',
+            }],
+            query_override='⬇ server download',
+            status='error',
+        )
+        return tc_id, failure, False
+
+    search_core, _format_search_for_tool_response = _load_search_backend()
+    from lib.search_bridge import bind_search_browser
+    with bind_search_browser(
+            user_id=task.get('_userId', '') or '',
+            client_id=cfg.get('browserClientId') or '',
+            required_capabilities=('file_export',)):
+        result = search_core.download_url_to_server(
+            target_url, owner_user_id=task.get('_userId', '') or '')
+
+    if result.get('error_code'):
+        failure = typed_tool_error(
+            result['error_code'],
+            retryable=bool(result.get('retryable')),
+            next_action=result.get('next_action') or (
+                'Stop and report that the URL could not be downloaded.'),
+            message=result.get('error_msg') or 'The URL could not be downloaded.',
+        ).to_model_text()
+        _finalize_tool_round(
+            task, rn, round_entry,
+            [{
+                'title': 'Server download failed',
+                'snippet': result.get('error_msg') or result['error_code'],
+                'url': '', 'source': 'Server staging', 'fetched': False,
+                'fetchedChars': 0, 'badge': result['error_code'],
+            }],
+            query_override=f'⬇ {parsed.hostname}',
+            status='error',
+        )
+        return tc_id, failure, False
+
+    receipt = {
+        'location': 'server_staging',
+        'path': result['saved_path'],
+        'sizeBytes': int(result.get('size_bytes') or 0),
+        'sha256': result.get('sha256') or '',
+        'contentType': result.get('content_type') or '',
+        'transport': result.get('transport') or '',
+        'temporary': True,
+        'nextAction': (
+            'If the user named a final destination, perform a separate '
+            'authorized filesystem copy/move and verify that destination.'
+        ),
+    }
+    tool_content = json.dumps(
+        receipt, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    _finalize_tool_round(
+        task, rn, round_entry,
+        [{
+            'title': 'File downloaded to server staging',
+            'snippet': (
+                f"{receipt['sizeBytes']:,} bytes via {receipt['transport']}\n"
+                f"{receipt['path']}"
+            ),
+            'url': '', 'source': 'Server staging', 'fetched': True,
+            'fetchedChars': receipt['sizeBytes'],
+            'savedPath': receipt['path'],
+            'location': 'server_staging',
+            'sha256': receipt['sha256'],
+            'badge': 'server staged',
+        }],
+        query_override=f'⬇ {parsed.hostname}',
+    )
+    return tc_id, tool_content, True
+
+
 def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
     """Handle batch fetch_url: fetch multiple URLs concurrently.
 
@@ -371,9 +480,6 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
     per-URL headers. Each URL's display_result is added to the
     round_entry's results list for frontend rendering.
     """
-    # Resolve the fetch primitive THROUGH the package facade (monkeypatch parity).
-    from lib.tasks_pkg.handlers import search as _facade
-
     import time as _time
 
     handler_t0 = _time.time()
@@ -391,6 +497,7 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
         _finalize_tool_round(task, rn, round_entry, [{'type': 'error', 'content': tool_content}])
         return tc_id, tool_content, False
 
+    search_core, _format_search_for_tool_response = _load_search_backend()
     n = len(url_list)
 
     def _worker(target_url):
@@ -398,7 +505,7 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
         with bind_search_browser(
                 user_id=task.get('_userId', '') or '',
                 client_id=cfg.get('browserClientId') or ''):
-            return _facade._fetch_url_one(
+            return search_core._fetch_url_one(
                 target_url, user_question, fetch_reason='')
 
     ordered = run_batch_concurrent(url_list, _worker, max_workers=8, tag='Fetch',

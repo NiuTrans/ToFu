@@ -47,11 +47,13 @@ import shutil
 import subprocess
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+SOURCE_ROOT = os.path.dirname(HERE)
+ROOT = _legacy_test_root()
 TR_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'tool_rounds.js')
 
 
@@ -81,7 +83,7 @@ def _extract_timeline_fns() -> str:
     # the real helper so this isolated harness follows the shipped dependency
     # graph instead of failing before any timeline contract is exercised.
     todo_start = src.index('function _projectTodoRoundsForDisplay(')
-    todo_end = src.index('\nfunction _renderTodoBlock(', todo_start)
+    todo_end = src.index('\nfunction ', todo_start + 1)
     todo_chunk = src[todo_start:todo_end]
     return todo_chunk + '\n' + chunk + '\n' + sup_chunk
 
@@ -95,6 +97,9 @@ function renderMarkdown(s){ return '<md>' + String(s) + '</md>'; }
 function t(k){ return k; }
 function getToolRoundsFromMsg(m){ return (m && m.toolRounds) || []; }
 function _toolPanelHeaderLabel(rounds, active){ return 'HDR'; }
+// Decorative glyph factory (the shipped unicode→Icon migration) — the order
+// assertions only need it to exist, not to draw anything.
+function Icon(){ return ''; }
 function _renderToolGroupsHTML(rounds, allRounds){
   return (rounds || []).map(function(r){ return '<TOOL name=' + (r.toolName||'') + '>'; }).join('');
 }
@@ -682,6 +687,7 @@ function renderMarkdown(s){ return '<span class="md">' + String(s) + '</span>'; 
 function t(k){ return k; }
 function getToolRoundsFromMsg(m){ return (m && m.toolRounds) || []; }
 function _toolPanelHeaderLabel(rounds, active){ return 'HDR'; }
+function Icon(){ return ''; }
 function stripNoTranslateTags(s){ return s; }
 var localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
 var config = { segmentTimeline: true };
@@ -1031,9 +1037,13 @@ def test_settings_toggle_is_wired():
         'the Settings toggle checkbox should be removed from index.html'
     assert 'settings.segmentTimeline' not in idx_html, 'toggle i18n label still referenced'
 
-    i18n = open(os.path.join(ROOT, 'static', 'js', 'i18n.js'), encoding='utf-8').read()
-    assert "'settings.segmentTimeline'" not in i18n and "'settings.segmentTimelineDesc'" not in i18n, \
-        'segment-timeline i18n keys should be removed'
+    for locale in ('en.json', 'zh.json'):
+        i18n = open(os.path.join(
+            SOURCE_ROOT, 'frontend', 'src', 'i18n', 'locales', locale,
+        ), encoding='utf-8').read()
+        assert '"settings.segmentTimeline"' not in i18n \
+            and '"settings.segmentTimelineDesc"' not in i18n, \
+            f'segment-timeline i18n keys should be removed from {locale}'
 
     core = open(os.path.join(ROOT, 'static', 'js', 'settings', 'core_panel.js'), encoding='utf-8').read()
     assert 'settingSegmentTimeline' not in core and 'config.segmentTimeline' not in core, \

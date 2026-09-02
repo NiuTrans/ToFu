@@ -31,15 +31,18 @@ generation render chain itself.
 
 NEUTER DISCIPLINE (charter: a guard that never bites is worse than none)
 ────────────────────────────────────────────────────────────────────────
-Two negative controls neuter the production seams IN THE LIVE PAGE (function
-overrides — no filesystem mutation, nothing to restore):
+Two negative controls mutate the recorded transport input before it reaches
+the live reducer (no filesystem mutation, nothing to restore):
 
-  * ``_reportSegmentsForRender → []``: the paint must fall back to a
-    thinking-LESS grouped panel — the main "thinking adjacent" assertion
-    would fail, proving it depends on the segments being passed.
-  * ``_segApplyDeltaReset → no-op``: the discarded draft's narration segment
-    survives and RENDERS — proving the "draft is gone" assertion depends on
-    the removal.
+  * drop the ``thinking`` frames while retaining the tool frames: the panel
+    must keep its tool rows but lose inline thinking;
+  * drop the ``delta_reset`` frame: the discarded draft's narration segment
+    must survive and render.
+
+This boundary-level mutation remains valid after Paper state became
+module-owned: it avoids adding a public mutable runtime hook solely for tests,
+while still proving that both positive assertions fail when their causal input
+is removed.
 
 Skips cleanly when Playwright/Chromium is unavailable (standard visual mark).
 """
@@ -76,43 +79,53 @@ _VIEWS = {
 }
 
 
-def _poll_payload(cursor: int) -> dict:
+def _poll_payload(
+        cursor: int, *, include_thinking: bool = True,
+        include_delta_reset: bool = True) -> dict:
     """The recorded event sequence a real report task emits, paged by cursor.
 
     Round 0: thinking → draft prose (discarded via delta_reset) → web_search.
     Round 1 (terminal): thinking → final report body (no tools) → done.
     """
     if cursor == 0:
+        events = [{'type': 'status', 'status': 'running'}]
+        if include_thinking:
+            events.append(
+                {'type': 'thinking', 'delta': _THINK_R0, 'llmRound': 0})
         return {
-            'events': [
-                {'type': 'status', 'status': 'running'},
-                {'type': 'thinking', 'delta': _THINK_R0, 'llmRound': 0},
-            ],
+            'events': events,
             'next_cursor': 1, 'status': 'running',
         }
     if cursor == 1:
+        events = [
+            {'type': 'delta', 'delta': _DRAFT_R0, 'llmRound': 0},
+        ]
+        if include_delta_reset:
+            events.append({'type': 'delta_reset', 'llmRound': 0})
+        events.append(
+            {'type': 'tool_start', 'roundNum': 1, 'llmRound': 0,
+             'toolName': 'web_search', 'query': _SEARCH_QUERY,
+             'toolCallId': 'tc-1',
+             'toolArgs': '{"queries": ["LLaDA2.2"]}'})
         return {
-            'events': [
-                {'type': 'delta', 'delta': _DRAFT_R0, 'llmRound': 0},
-                {'type': 'delta_reset', 'llmRound': 0},
-                {'type': 'tool_start', 'roundNum': 1, 'llmRound': 0,
-                 'toolName': 'web_search', 'query': _SEARCH_QUERY,
-                 'toolCallId': 'tc-1',
-                 'toolArgs': '{"queries": ["LLaDA2.2"]}'},
-            ],
+            'events': events,
             'next_cursor': 2, 'status': 'running',
         }
     if cursor == 2:
+        events = [
+            {'type': 'tool_done', 'roundNum': 1, 'llmRound': 0,
+             'toolName': 'web_search', 'toolCallId': 'tc-1', 'elapsed': 1.2,
+             'toolContent': 'search result bytes the model saw',
+             'results': [{'title': 'LLaDA2.2', 'url': 'https://example.org/x',
+                          'snippet': 'follow-up work'}]},
+        ]
+        if include_thinking:
+            events.append(
+                {'type': 'thinking', 'delta': _THINK_R1, 'llmRound': 1})
+        events.append(
+            {'type': 'delta', 'delta': _FINAL_BODY, 'llmRound': 1})
         return {
-            'events': [
-                {'type': 'tool_done', 'roundNum': 1, 'llmRound': 0,
-                 'toolName': 'web_search', 'toolCallId': 'tc-1', 'elapsed': 1.2,
-                 'toolContent': 'search result bytes the model saw',
-                 'results': [{'title': 'LLaDA2.2', 'url': 'https://example.org/x',
-                              'snippet': 'follow-up work'}]},
-                {'type': 'thinking', 'delta': _THINK_R1, 'llmRound': 1},
-                {'type': 'delta', 'delta': _FINAL_BODY, 'llmRound': 1},
-            ],
+            'events': events,
             'next_cursor': 3, 'status': 'running',
         }
     return {
@@ -125,7 +138,9 @@ def _poll_payload(cursor: int) -> dict:
     }
 
 
-def _install_report_task_routes(page) -> None:
+def _install_report_task_routes(
+        page, *, include_thinking: bool = True,
+        include_delta_reset: bool = True) -> None:
     """Stub the report-task endpoints (shared by report AND review — the review
     reuses the whole report pipeline with a composite cache key), plus the two
     review-only pre/post chains (venue registry, translation cache).
@@ -149,7 +164,11 @@ def _install_report_task_routes(page) -> None:
     def on_poll(route) -> None:
         query = parse_qs(urlparse(route.request.url).query)
         cursor = int(query.get('cursor', ['0'])[0])
-        payload = _poll_payload(cursor)
+        payload = _poll_payload(
+            cursor,
+            include_thinking=include_thinking,
+            include_delta_reset=include_delta_reset,
+        )
         payload['ok'] = True
         _fulfill(route, payload)
 
@@ -189,14 +208,32 @@ def _enter_paper_mode(page) -> None:
 
 
 def _start_generation(page, view: str = 'report', *, enter: bool = True) -> None:
-    """Enter reading mode and drive the REAL production generation flow."""
+    """Stage a paper through its owner and drive the real generation flow.
+
+    Paper state is module-owned after the ESM migration.  Assigning similarly
+    named ``window`` properties only mutates stale compatibility snapshots and
+    leaves the report owner with no parsed text.  Build and open the fixture
+    through the Paper library surface so this browser guard exercises the same
+    authority boundary as a user opening a stored paper.
+    """
     if enter:
         _enter_paper_mode(page)
     page.evaluate(
-        "(entry) => { window._activePaperId = 'p-tl';"
-        " window._paperParsedText = 'parsed paper text';"
-        " window._paperHash = 'h-tl';"
-        " window.TofuModules.resolveAction(entry)(); }",
+        "(entryAction) => {"
+        " const resolve = window.TofuModules.resolveAction;"
+        " const create = resolve('_createPaperEntry');"
+        " const setActive = resolve('_setActivePaperId');"
+        " const open = resolve('_openPaperEntry');"
+        " const paper = create('Timeline fixture', '',"
+        "   'parsed paper text', '', 'p-tl');"
+        " paper.paperHash = 'h-tl';"
+        # ``create`` selects the new entry.  Clear that selection before
+        # ``open`` because open first saves the prior active entry; otherwise
+        # the empty reader state would overwrite this fixture's parsed text.
+        " setActive('');"
+        " open(paper);"
+        " resolve(entryAction)();"
+        " }",
         _VIEWS[view]['entry'])
 
 
@@ -365,22 +402,11 @@ def test_review_stream_uses_chat_inline_tool_timeline(page, assert_no_js_errors)
     _assert_timeline_above_body(page, 'review', 'Final report body')
 
 
-def test_neuter_drop_segments_passing_removes_inline_thinking(page, assert_no_js_errors):
-    """NEUTER 1: if the paint stops passing segments to the timeline renderer,
-    the main assertion (thinking adjacent to tools) must collapse — the panel
-    falls back to a thinking-LESS grouped render. Proves the guard depends on
-    the segments seam, not on incidental markup."""
+def test_neuter_drop_thinking_events_removes_inline_thinking(page, assert_no_js_errors):
+    """NEUTER 1: without thinking frames, tools remain but thinking vanishes."""
     _wait_ready(page)
-    _install_report_task_routes(page)
+    _install_report_task_routes(page, include_thinking=False)
     _enter_paper_mode(page)
-    # Precondition: the production seam must exist in the shipped bundle —
-    # an absent global means the override neuters NOTHING (silent no-op).
-    seam = page.evaluate(
-        "() => typeof window.TofuModules.resolveAction('_reportSegmentsForRender')")
-    assert seam == 'function', (
-        'window._reportSegmentsForRender is not a function in the shipped '
-        'bundle — the neuter would be a no-op; check bundling first')
-    page.evaluate("() => { window._reportSegmentsForRender = () => []; }")
     _start_generation(page, 'report', enter=False)
 
     page.wait_for_function(
@@ -392,27 +418,17 @@ def test_neuter_drop_segments_passing_removes_inline_thinking(page, assert_no_js
         f" return {{ hasThinking: p.textContent.includes({json.dumps(_THINK_R0.strip())}),"
         f"  hasQuery: p.textContent.includes({json.dumps(_SEARCH_QUERY)}) }}; }}")
     assert state['hasQuery'], (
-        'neutered render lost the tool rows too — the override broke more '
-        'than the segments seam; the control says nothing')
+        'neutered input lost the tool rows too — the control says nothing')
     assert not state['hasThinking'], (
-        'thinking STILL rendered adjacent to the tools with segments passing '
-        'neutered — the main assertion does not depend on the seam it claims '
-        'to guard')
+        'thinking rendered without any thinking frame — the positive guard '
+        'does not depend on its claimed transport input')
 
 
-def test_neuter_drop_delta_reset_segment_removal_leaks_draft(page, assert_no_js_errors):
-    """NEUTER 2: if delta_reset stops removing the round's narration segment,
-    the discarded draft RENDERS in the timeline (its round did call tools).
-    Proves the draft-absence assertion depends on the removal."""
+def test_neuter_drop_delta_reset_event_leaks_draft(page, assert_no_js_errors):
+    """NEUTER 2: without delta_reset, the discarded draft must render."""
     _wait_ready(page)
-    _install_report_task_routes(page)
+    _install_report_task_routes(page, include_delta_reset=False)
     _enter_paper_mode(page)
-    seam = page.evaluate(
-        "() => typeof window.TofuModules.resolveAction('_segApplyDeltaReset')")
-    assert seam == 'function', (
-        'window._segApplyDeltaReset is not a function in the shipped bundle — '
-        'the neuter would be a no-op; check bundling first')
-    page.evaluate("() => { window._segApplyDeltaReset = () => {}; }")
     _start_generation(page, 'report', enter=False)
 
     page.wait_for_function(
@@ -424,3 +440,8 @@ def test_neuter_drop_delta_reset_segment_removal_leaks_draft(page, assert_no_js_
         "   '#paperReportContent .ptool-panel.seg-timeline');"
         f" return p && p.textContent.includes({json.dumps(_DRAFT_R0.strip())}); }}",
         timeout=15000)
+    panel_text = page.evaluate(
+        "() => document.querySelector("
+        "  '#paperReportContent .ptool-panel.seg-timeline').textContent")
+    assert _DRAFT_R0.strip() in panel_text, (
+        'delta_reset-negative control did not preserve the discarded draft')

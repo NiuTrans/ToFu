@@ -1,7 +1,7 @@
 # HOT_PATH — this leaf is called per stream-loop iteration.
 """Post-LLM deferred peer + steer inbox flush.
 
-Extracted 2026-07-28 (pt_03f4cdf1 slice 12) from
+Extracted 2026-07-28 ( slice 12) from
 ``lib.tasks_pkg.orchestrator._run.run_task``. The two flushes run
 RIGHT AFTER a successful ``_llm_call_with_fallback`` return and
 BEFORE the stream loop reads the resolved model onto the task.
@@ -112,7 +112,9 @@ def flush_deferred_peer_and_steer(task: dict[str, Any], *,
         if _conv_dd and _dd_ids:
             try:
                 from lib.message_queue import dedup_peer_durable_rows
-                dedup_peer_durable_rows(_conv_dd, _dd_ids)
+                from lib.tasks_pkg.manager import task_user_id
+                dedup_peer_durable_rows(
+                    _conv_dd, _dd_ids, user_id=int(task_user_id(task)))
             except Exception as _dde:
                 logger.warning(
                     '[Task %s] deferred peer de-dup failed (durable '

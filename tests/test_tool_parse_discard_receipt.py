@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from lib.tasks_pkg.tool_dispatch import parse_tool_calls
+from lib.tasks_pkg.tool_dispatch.api import parse_tool_calls
 from lib.tool_input_repair import ingest_tool_call
 
 pytestmark = pytest.mark.unit

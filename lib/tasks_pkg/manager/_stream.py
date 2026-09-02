@@ -10,23 +10,42 @@ import time
 
 from lib.agent_core.events import EventType, Phase, build_event, build_phase
 from lib.cost import normalize_usage
-from lib.llm_dispatch import dispatch_stream
+from lib.llm.stream_result import (
+    ProviderStreamResult,
+    ensure_provider_stream_result,
+)
 from lib.llm_dispatch.retry_i18n import (
     GATEWAY_PREFIXES as _GATEWAY_PREFIXES,  # noqa: F401  (re-exported by the manager facade)
+    GATEWAY_RETRY_TOKEN as _GATEWAY_RETRY_TOKEN,
+    RetryPhaseEventBudget,
     display_model_name as _display_model_name,
     retry_phase_fields,
 )
 from lib.log import get_logger
+from lib.log_redaction import redact_text
 
+from lib.tasks_pkg.manager._delta_coalescer import TaskTextDeltaCoalescer
 from lib.tasks_pkg.manager._events import append_event
+from lib.tasks_pkg.manager._floor_retry_stream import apply_floor_retry
+from lib.tasks_pkg.manager._registry import make_task_abort_check
 from lib.tasks_pkg.manager._sync import checkpoint_task_partial
 
 logger = get_logger(__name__)
 
 
+def dispatch_stream(*args, **kwargs):
+    """Load provider dispatch only when a task starts an LLM stream.
+
+    The module-level seam remains patchable by the task/floor-retry tests.
+    """
+    from lib.llm_dispatch.api import dispatch_stream as _dispatch_stream
+
+    return _dispatch_stream(*args, **kwargs)
+
+
 # ``_GATEWAY_PREFIXES`` / ``_display_model_name`` / the retry-reason mapping
 # live in lib/llm_dispatch/retry_i18n.py (single source of truth shared with
-# the swarm emitter, pt_18ebee9c9ea64cf3) — imported above under their legacy
+# the swarm emitter, ) — imported above under their legacy
 # private names so this module's existing references AND the manager facade's
 # re-export (manager/__init__.py) keep working byte-identically.
 #
@@ -41,8 +60,194 @@ logger = get_logger(__name__)
 # the DB so data survives server crashes even when there are no tool rounds.
 _STREAM_CHECKPOINT_INTERVAL = 5
 
+_RETRY_REASON_CLASSES = frozenset({
+    _GATEWAY_RETRY_TOKEN,
+    'Endpoint unreachable',
+    'Request timed out',
+    'Waiting for model (rate-limited)',
+    'Waiting for model (retry backoff)',
+    'Waiting for model (shared project limit)',
+    'Key balance exhausted',
+    'Subscription quota reached',
+    'Rate limited (429)',
+})
+
+_WAIT_CAUSE_KEYS = {
+    'rate_limit': 'stream.retryReason.waitingForModel',
+    'quota': 'stream.retryReason.keyBalanceExhausted',
+    'upstream': 'stream.retryReason.upstreamError',
+    'error': 'stream.retryReason.waitingBackoff',
+}
+
+
+def _append_dispatch_retry_phase(task, event_budget, *, model, attempt,
+                                 reason='', status_code=0):
+    """Refresh exact liveness and persist only sampled retry phase frames."""
+    # Dispatch invokes this callback on every direct 429 retry (~3/s). Keep the
+    # independent liveness clock exact even when a durable/UI frame is sampled
+    # out; otherwise a legitimate indefinite wait could look wedged.
+    task['_dispatch_heartbeat'] = time.time()
+    reason_class = (reason if reason in _RETRY_REASON_CLASSES
+                    else ('other' if reason else ''))
+    if not event_budget.should_emit(
+            ('dispatch_retry', reason_class, int(status_code or 0))):
+        return
+
+    if status_code == 429:
+        legacy = (f'⏳ 模型 {model} 限流中，正在排队重试 '
+                  f'(第 {attempt} 次)…')
+    elif reason == _GATEWAY_RETRY_TOKEN:
+        legacy = (f'⚠️ 后端网关暂时不可用，正在等待恢复'
+                  f'（模型保持 {model}，不会自动切换）… 第 {attempt} 次')
+    elif reason:
+        legacy = f'Retrying… {reason} ({model}, attempt {attempt})'
+    else:
+        legacy = f'Retrying {model}… (attempt {attempt})'
+    fields = retry_phase_fields(
+        model=model,
+        attempt=attempt,
+        reason=reason,
+        status_code=status_code,
+        legacy_detail=legacy,
+    )
+    append_event(task, build_phase(
+        Phase.RETRYING,
+        detail=fields['detail'],
+        detailKey=fields['detailKey'],
+        detailArgs=fields['detailArgs'],
+        attempt=attempt,
+        statusCode=status_code,
+        model=model,
+    ))
+
+
+def _model_request_complete_fields(
+    task,
+    *,
+    status,
+    finish_reason,
+    error,
+    usage_value,
+    span_id,
+    model,
+    started_ms,
+    tag,
+    round_num,
+):
+    """Project provider diagnostics into the bounded request-complete event."""
+    dispatch_meta = (
+        usage_value.get('_dispatch')
+        if isinstance(usage_value, dict)
+        and isinstance(usage_value.get('_dispatch'), dict)
+        else {}
+    )
+    network_route = (
+        usage_value.get('_network_route')
+        if isinstance(usage_value, dict)
+        and isinstance(usage_value.get('_network_route'), dict)
+        else getattr(error, 'network_route', None)
+    )
+    if not isinstance(network_route, dict):
+        network_route = {}
+    failure_stage = str(
+        (usage_value.get('_failure_stage')
+         if isinstance(usage_value, dict) else '')
+        or getattr(error, 'failure_stage', '') or ''
+    )[:80]
+    fields = {
+        'spanId': span_id,
+        'model': str(dispatch_meta.get('model') or model or '?')[:160],
+        'providerId': str(
+            dispatch_meta.get('provider_id')
+            or task.get('provider_id') or ''
+        )[:160],
+        'status': status,
+        'finishReason': str(finish_reason or '')[:80],
+        'durationMs': max(0, int(time.time() * 1000) - started_ms),
+        'requestTag': str(tag or '')[:80],
+    }
+    stream_state = str(
+        usage_value.get('_stream_state')
+        if isinstance(usage_value, dict) else ''
+    )[:80]
+    if stream_state:
+        fields['streamState'] = stream_state
+    if round_num is not None:
+        fields['roundNum'] = round_num
+    for event_key, route_key, limit in (
+            ('routeId', 'routeId', 160),
+            ('routeMode', 'routeMode', 24),
+            ('routeDecision', 'decisionReason', 80)):
+        route_value = str(network_route.get(route_key) or '')[:limit]
+        if route_value:
+            fields[event_key] = route_value
+    if failure_stage:
+        fields['failureStage'] = failure_stage
+    if error is not None:
+        fields['errorKind'] = type(error).__name__[:160]
+        fields['errorDetail'] = ' '.join(
+            redact_text(error, max_chars=400).split())[:400]
+        try:
+            status_code = int(getattr(error, 'status_code', 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            status_code = 0
+        if status_code > 0:
+            fields['statusCode'] = status_code
+    elif status == 'failed':
+        semantic_progress_timeout = bool(
+            isinstance(usage_value, dict)
+            and (usage_value.get('_semantic_progress_timeout')
+                 or usage_value.get('_no_actionable_timeout')))
+        malformed_stream = bool(
+            isinstance(usage_value, dict)
+            and usage_value.get('_malformed_stream'))
+        try:
+            semantic_idle_ms = (
+                usage_value.get('_semantic_progress_idle_ms')
+                if isinstance(usage_value, dict) else None)
+            semantic_stall_s = max(0.0, (
+                float(semantic_idle_ms) / 1000
+                if semantic_idle_ms is not None else float(
+                    usage_value.get('_no_actionable_stall_elapsed_s')
+                    or usage_value.get('_no_actionable_timeout_s')
+                    or (float(usage_value.get('stream_elapsed_ms') or 0) / 1000)
+                    or 0))) if isinstance(usage_value, dict) else 0.0
+        except (TypeError, ValueError, OverflowError):
+            semantic_stall_s = 0.0
+        fields['errorKind'] = (
+            'SemanticProgressTimeout' if semantic_progress_timeout else
+            'MalformedProviderStream' if malformed_stream else
+            'PrematureStreamClose')
+        fields['errorDetail'] = (
+            ('No new reasoning progress, assistant text, or tool action for '
+             f'{semantic_stall_s:.1f}s; the rolling semantic-stall window '
+             'expired.') if semantic_progress_timeout else
+            'At least one provider stream frame was malformed and discarded.'
+            if malformed_stream else
+            'The upstream stream ended without a complete terminal frame.'
+        )
+    return fields
+
+
+def _log_stream_completion(task, *, prefix, model, finish_reason, message):
+    """Log the compact terminal shape of one provider stream."""
+    logger.info(
+        '%s conv=%s stream_llm_response complete: finish_reason=%s model=%s '
+        'provider=%s content=%dchars thinking=%dchars tool_calls=%d',
+        prefix,
+        task.get('convId', ''),
+        finish_reason,
+        model,
+        task.get('provider_id', '?'),
+        len(message.get('content', '') or ''),
+        len(message.get('reasoning_content', '') or ''),
+        len(message.get('tool_calls', [])),
+    )
+
+
 def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
-                        *, pool_wide=False, exclude_models=None):
+                        *, pool_wide=False,
+                        exclude_models=None) -> ProviderStreamResult:
     """Stream an LLM response, wiring deltas into the task's event system.
 
     Delegates all key selection, retry, 429/401/403 failover to the
@@ -64,13 +269,121 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             ``dispatch_stream`` (caller-provided exclusions are permanent
             for the dispatch call).
 
-    ★ Crash-recovery: periodically checkpoints to DB every ~5s during
+    Crash-recovery: periodically checkpoints to DB every ~5s during
     streaming so that even pure-LLM responses (no tool calls) survive
     a server crash with minimal data loss.
     """
     pfx = f'[Task {task["id"][:8]}][{tag}]'
     model = body.get('model', '?')
-    # ★ SESSION-STABLE TTL LATCH — single chokepoint guarantee. Every
+    try:
+        _model_request_ordinal = int(task.get('_modelRequestOrdinal') or 0) + 1
+    except (TypeError, ValueError, OverflowError):
+        _model_request_ordinal = 1
+    task['_modelRequestOrdinal'] = _model_request_ordinal
+    _attempt_token = str(
+        task.get('_attemptId') or task.get('attemptId') or task.get('id') or 'task'
+    )[:80]
+    _model_request_span = (
+        f'model:{_attempt_token}:{_model_request_ordinal}'
+    )
+    _tag_digits = ''.join(character for character in str(tag) if character.isdigit())
+    _activity_round_num = int(_tag_digits) if _tag_digits else None
+    _model_request_started_ms = int(time.time() * 1000)
+    _model_request_settled = False
+
+    def _clear_request_activity_state():
+        if task.get('_activeModelRequestSpan') == _model_request_span:
+            task.pop('_activeModelRequestSpan', None)
+        if body.get('_request_activity_sink') is _request_activity_sink:
+            body.pop('_request_activity_sink', None)
+
+    def _emit_model_request_complete(
+        status, *, finish_reason='', error=None, usage_value=None,
+    ):
+        """Close this request span exactly once without changing LLM control flow."""
+        nonlocal _model_request_settled
+        if _model_request_settled:
+            return
+        _model_request_settled = True
+        fields = _model_request_complete_fields(
+            task,
+            status=status,
+            finish_reason=finish_reason,
+            error=error,
+            usage_value=usage_value,
+            span_id=_model_request_span,
+            model=model,
+            started_ms=_model_request_started_ms,
+            tag=tag,
+            round_num=_activity_round_num,
+        )
+        try:
+            append_event(
+                task,
+                build_event(EventType.MODEL_REQUEST_COMPLETE, **fields),
+            )
+        finally:
+            _clear_request_activity_state()
+
+    def _on_request_diagnostic(diagnostic):
+        """Persist bounded provider projection/isolation diagnostics."""
+        if not isinstance(diagnostic, dict):
+            return
+        if diagnostic.get('kind') == 'wire_projection':
+            fields = {
+                'model': str(diagnostic.get('model') or model or '?')[:160],
+                'backend': str(diagnostic.get('backend') or '')[:80],
+                'toolNames': [
+                    str(name)[:160]
+                    for name in (diagnostic.get('toolNames') or [])[:128]
+                ],
+                'toolCount': max(0, int(diagnostic.get('toolCount') or 0)),
+                'schemaTokens': max(
+                    0, int(diagnostic.get('schemaTokens') or 0)),
+                'schemaFingerprint': str(
+                    diagnostic.get('schemaFingerprint') or '')[:64],
+                'schemaBudgetTokens': max(
+                    0, int(diagnostic.get('schemaBudgetTokens') or 0)),
+                'budgetDroppedNames': [
+                    str(name)[:160]
+                    for name in (
+                        diagnostic.get('budgetDroppedNames') or [])[:128]
+                ],
+                'compactedNames': [
+                    str(name)[:160]
+                    for name in (diagnostic.get('compactedNames') or [])[:128]
+                ],
+                'executableToolCount': max(
+                    0, int(diagnostic.get('executableToolCount') or 0)),
+                'parentSpanId': _model_request_span,
+                'turn': str(task.get('_flow_phase') or '')[:80],
+            }
+            if _activity_round_num is not None:
+                fields['roundNum'] = _activity_round_num
+            append_event(
+                task,
+                build_event(EventType.TOOL_WIRE_PROJECTION, **fields),
+            )
+            return
+        fields = {
+            'toolName': str(diagnostic.get('toolName') or 'unknown tool')[:160],
+            'stage': str(diagnostic.get('stage') or 'wire_preflight')[:80],
+            'reasonCode': str(
+                diagnostic.get('reasonCode') or 'invalid_schema'
+            )[:160],
+            'detail': ' '.join(str(diagnostic.get('detail') or '').split())[:400],
+            'action': 'omitted',
+            'model': str(model or '?')[:160],
+            'parentSpanId': _model_request_span,
+        }
+        if _activity_round_num is not None:
+            fields['roundNum'] = _activity_round_num
+        append_event(
+            task,
+            build_event(EventType.TOOL_SCHEMA_REJECTED, **fields),
+        )
+
+    # SESSION-STABLE TTL LATCH — single chokepoint guarantee. Every
     #   task-based LLM send flows through here, so stamp the task id on the body
     #   unconditionally (only when absent — never clobber a call site that set
     #   its own latch key, e.g. the swarm agent's agent_id). add_cache_breakpoints
@@ -86,28 +399,28 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     _tid = task.get('id')
     if _tid and not body.get('_task_id'):
         body['_task_id'] = _tid
-    # ★ Reset the per-round FloorRetry-adoption marker so reconcile_announced_rounds
+    # Reset the per-round FloorRetry-adoption marker so reconcile_announced_rounds
     #   (called by _run.py right after this returns) attributes THIS round's
     #   orphans correctly — a round that adopted then a later round that did not
     #   must not read a stale True.
     task['_floor_retry_adopted'] = False
-    # ★ Per-round BASE for attempt-restart truncation: a transport/dispatch
+    # Per-round BASE for attempt-restart truncation: a transport/dispatch
     #   retry discards an in-flight attempt whose deltas already landed in
     #   task['content']/['thinking'] (and were checkpointed into the conv row).
     #   Capture the round's starting text so _on_attempt_restart can truncate
     #   back to exactly it — the re-streamed attempt then never stacks on the
     #   abandoned one's tail (the "transport-retry 自愈后重复文本落库" latent
-    #   class, pt_6e12b1ffd95a453e). The shrink-convergent checkpoint path
+    #   class, ). The shrink-convergent checkpoint path
     #   then settles the row to the retried attempt's text.
     with task['content_lock']:
         _round_base_content = task['content']
         _round_base_thinking = task['thinking']
-    # ★ Stamp the round base on the task so analyse_stream_result's
+    # Stamp the round base on the task so analyse_stream_result's
     #   truncated-tool-call guard can reset THIS round's poisoned partial text
     #   (and only this round's) before the transparent retry re-streams.
     task['_round_base_content'] = _round_base_content
     task['_round_base_thinking'] = _round_base_thinking
-    # ★ Init to 0.0 (epoch) so the FIRST content/thinking delta checkpoints
+    # Init to 0.0 (epoch) so the FIRST content/thinking delta checkpoints
     #   immediately, then settle into the _STREAM_CHECKPOINT_INTERVAL cadence.
     #   Starting at time.time() left a pre-first-checkpoint window where a
     #   server crash after the first tokens but before the 5s tick lost the
@@ -116,12 +429,16 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     #   orchestrator tool-loop's `_last_checkpoint = 0.0` (orchestrator.py).
     _last_stream_ckpt = 0.0
 
-    # ★ Timing: measure time-to-first-token (TTFT) for the FIRST LLM round
+    # Timing: measure time-to-first-token (TTFT) for the FIRST LLM round
     #   of this task only (the "waiting" window the user sees). Anchored to
     #   '_t_prep_done' (set in run_task once context is assembled) and fired
     #   once, on the first content/thinking delta. Guarded so tool-round
     #   re-calls and tasks without the anchor don't re-log.
     _t_request_start = time.time()
+    # A retry is allowed to wait forever, but its transient phase history is
+    # not.  The callbacks still refresh liveness on every cycle; this sampler
+    # bounds only duplicate durable/UI frames for the current LLM round.
+    _retry_phase_budget = RetryPhaseEventBudget()
 
     def _log_ttft_once():
         if task.get('_ttft_done'):
@@ -166,23 +483,21 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             if _pp and _cid:
                 try:
                     from lib.presence import heartbeat as _presence_heartbeat
-                    _presence_heartbeat(_pp, _cid, phase='generating')
+                    from lib.tasks_pkg.manager._registry import task_user_id
+                    _presence_heartbeat(
+                        _pp,
+                        _cid,
+                        user_id=int(task_user_id(task)),
+                        phase='generating',
+                    )
                 except Exception as e:
                     logger.debug('%s presence heartbeat failed (non-fatal): %s', pfx, e)
 
-    def _on_thinking(td):
-        _log_ttft_once()
-        with task['content_lock']:
-            task['thinking'] += td
-        append_event(task, build_event(EventType.DELTA, thinking=td))
-        _maybe_checkpoint_during_stream()
-
-    def _on_content(cd):
-        _log_ttft_once()
-        with task['content_lock']:
-            task['content'] += cd
-        append_event(task, build_event(EventType.DELTA, content=cd))
-        _maybe_checkpoint_during_stream()
+    _text_deltas = TaskTextDeltaCoalescer(
+        task, append_event, on_first_delta=_log_ttft_once,
+        on_after_delta=_maybe_checkpoint_during_stream, log_prefix=pfx)
+    _request_activity_sink = _text_deltas.wrap_boundary(
+        _on_request_diagnostic)
 
     def _on_attempt_restart(reason=''):
         """A transport/dispatch-level retry discarded an in-flight attempt:
@@ -222,126 +537,79 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         (lib/llm_dispatch/retry_i18n.retry_phase_fields) so the swarm
         emitter can never drift from this mapping.
         """
-        if status_code == 429:
-            # Rate-limit: surface the model clearly and phrase it as a
-            # queue wait rather than an error.
-            _legacy = (f'⏳ 模型 {model} 限流中，正在排队重试 '
-                       f'(第 {attempt} 次)…')
-        elif reason:
-            _legacy = f'Retrying… {reason} ({model}, attempt {attempt})'
-        else:
-            _legacy = f'Retrying {model}… (attempt {attempt})'
-        _fields = retry_phase_fields(model=model, attempt=attempt,
-                                     reason=reason, status_code=status_code,
-                                     legacy_detail=_legacy)
-        append_event(task, build_phase(
-            Phase.RETRYING,
-            detail=_fields['detail'],
-            detailKey=_fields['detailKey'],
-            detailArgs=_fields['detailArgs'],
-            attempt=attempt,
-            statusCode=status_code,
+        _append_dispatch_retry_phase(
+            task,
+            _retry_phase_budget,
             model=model,
-        ))
+            attempt=attempt,
+            reason=reason,
+            status_code=status_code,
+        )
 
-    # ★ Slot cooldown-reason → typed reasonKey for the waiting heartbeat.
-    #   Mirrors the dispatcher's honest-label ruling: a cooldown wait is
-    #   限流 ONLY when the cooling slot actually says rate_limit.
-    _WAIT_CAUSE_KEYS = {
-        'rate_limit': 'stream.retryReason.waitingForModel',
-        'quota': 'stream.retryReason.keyBalanceExhausted',
-        'upstream': 'stream.retryReason.upstreamError',
-        'error': 'stream.retryReason.waitingBackoff',
-    }
-
-    def _on_waiting(elapsed, slot=None):
-        """Heartbeat while an attempt is SILENT (no bytes yet, or a
-        mid-stream stall).
+    def _on_waiting(*, status=None, elapsed=None, slot=None):
+        """Heartbeat from the current attempt's typed progress snapshot.
 
         Two jobs:
 
-        1. **HUD.** Emits a transient ``retrying`` PHASE event so a slow
-           upstream shows a LIVE "still waiting + what the pool knows"
-           label instead of a static spinner. ``phase='retrying'`` is
-           deliberate and load-bearing: the frontend retrying branch keys
-           its DOM refresh on ``attempt``, so each beat (attempt=beat
-           number) actually repaints — a constant-phase heartbeat would
-           freeze on the first beat's text.
+        1. **HUD.** Emits ``waiting_model`` before semantic output and
+           ``stream_stalled`` after reasoning/text/tool progress pauses. Each
+           event receives its ordinary event sequence; ``attempt`` remains a
+           real retry count and is never reused as a heartbeat counter.
 
         2. **Reaper liveness.** Refreshes ``_dispatch_heartbeat``. The
            stuck-task reaper (manager/_maintenance.reap_stuck_running_tasks)
            force-fails a task once BOTH ``_t_last_event`` AND
-           ``_dispatch_heartbeat`` are stale past 30 min. There is no read
-           timeout any more, so a genuinely long silence is no longer
-           interrupted-and-retried — without this bump the reaper would
-           become the new 30-minute timeout and kill exactly the long waits
-           we made legal, writing a "terminated as wedged" error bubble
-           into the conversation. ``append_event`` below covers
+           ``_dispatch_heartbeat`` are stale past 30 min. There is no socket
+           read timeout, so this beat keeps the task live during its configured
+           semantic window (including deployments that disable or extend it)
+           instead of letting the unrelated reaper become the effective
+           timeout. ``append_event`` below covers
            ``_t_last_event``; this line covers the other clock, so EITHER
            being fresh (the reaper's own AND-gate) is guaranteed while we
            are legitimately waiting. A truly dead worker emits no beats at
-           all, so the reaper keeps its real job.
+        all, so the reaper keeps its real job.
         """
         task['_dispatch_heartbeat'] = time.time()
-        _secs = int(elapsed)
-        try:
-            from lib.llm._transport import IDLE_HEARTBEAT_S as _hb
-            _beat = max(1, int(elapsed // max(1, _hb)))
-        except Exception as _e:
-            logger.debug('on waiting: failed (%s)', _e)
-            _beat = max(1, int(elapsed // 20))
+        _request_elapsed = getattr(status, 'request_elapsed_s', elapsed or 0)
+        _semantic_idle = getattr(status, 'semantic_idle_s', elapsed or 0)
+        _status_kind = str(getattr(status, 'kind', '') or '')
+        _secs = max(0, int(_request_elapsed or 0))
+        _idle_secs = max(0, int(_semantic_idle or 0))
         _label = _display_model_name(model)
-        _reason = ''
-        _reason_key = ''
-        if slot is not None:
-            _cr = getattr(slot, 'cooldown_reason', '') or ''
-            _cooled = (getattr(slot, 'cooldown_until', 0) or 0) > time.time()
-            if _cooled and _cr in _WAIT_CAUSE_KEYS:
-                _reason_key = _WAIT_CAUSE_KEYS[_cr]
-                _reason = _cr  # raw fallback if the key is unknown client-side
-            else:
-                _lem = getattr(slot, 'last_error_msg', '') or ''
-                if _lem:
-                    _reason = str(_lem)[:80]
-                else:
-                    _ce = getattr(slot, 'consecutive_errors', 0) or 0
-                    if _ce >= 2:
-                        _reason = f'{_ce} consecutive errors on this line'
-        # ★ Honest label: the beat now fires for TWO shapes, and calling a
-        #   mid-stream stall "no first byte yet" would be a lie the user can
-        #   see (text is already on screen). Distinguish by whether this
-        #   round has produced anything yet.
-        with task['content_lock']:
-            _started = bool(task['content'] != _round_base_content
-                            or task['thinking'] != _round_base_thinking)
-        if _started:
-            _detail_key = ('stream.phase.stalledMidStreamReason' if _reason
-                           else 'stream.phase.stalledMidStream')
-            _detail = (f'Paused {_secs}s — {_label} stopped mid-reply'
-                       + (f' ({_reason})' if _reason else '…'))
-        elif _reason:
-            _detail_key = 'stream.phase.waitingFirstByteReason'
-            _detail = (f'Waiting {_secs}s — no first byte from {_label} yet '
-                       f'({_reason})')
+        if not _status_kind:
+            with task['content_lock']:
+                _started = bool(task['content'] != _round_base_content
+                                or task['thinking'] != _round_base_thinking)
+            _status_kind = 'stream_stalled' if _started else 'waiting_event'
+        if _status_kind == 'stream_stalled':
+            _phase = Phase.STREAM_STALLED
+            _detail_key = 'stream.phase.streamStalled'
+            _detail = (f'No new model progress for {_idle_secs}s '
+                       f'({_secs}s total) — {_label} is still connected…')
+            _args = {
+                'model': _label,
+                'elapsed': _secs,
+                'idle': _idle_secs,
+            }
         else:
-            _detail_key = 'stream.phase.waitingFirstByte'
-            _detail = f'Waiting {_secs}s — no first byte from {_label} yet…'
-        _args = {'model': _label, 'elapsed': _secs}
-        if _reason:
-            _args['reason'] = _reason
-        if _reason_key:
-            _args['reasonKey'] = _reason_key
+            _phase = Phase.WAITING_MODEL
+            _detail_key = 'stream.phase.waitingForResponse'
+            _detail = f'Waiting {_secs}s for {_label} to respond…'
+            _args = {'model': _label, 'elapsed': _secs}
+        if not _retry_phase_budget.should_emit(
+                ('transport_wait', _status_kind)):
+            return
         append_event(task, build_phase(
-            Phase.RETRYING,
+            _phase,
             detail=_detail,
             detailKey=_detail_key,
             detailArgs=_args,
-            attempt=_beat,
             model=model,
         ))
 
-    # ── Consume zero-byte force-rotate signal ──
-    # If the previous round zero-byte'd, ``analyse_stream_result`` set
+    # ── Consume unusable-stream force-rotate signal ──
+    # If the previous round returned an empty/truncated stream,
+    # ``analyse_stream_result`` set
     # ``task['_force_rotate_pair']`` to ``(key_name, model)``.  We pass
     # it as ``avoid_pairs`` to dispatch so the picker steers away from
     # the poisoned slot for THIS attempt only — clear immediately after
@@ -351,10 +619,10 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     _rotate_signal = task.pop('_force_rotate_pair', None)
     if _rotate_signal:
         _avoid_pairs = {_rotate_signal}
-        logger.info('%s zero-byte force-rotate: avoiding %s:%s for this dispatch',
+        logger.info('%s stream-recovery rotate: avoiding %s:%s for this dispatch',
                     pfx, _rotate_signal[0], _rotate_signal[1])
 
-    # ★ Surface the in-flight request as a live phase BEFORE the first token.
+    # Surface the in-flight request as a live phase BEFORE the first token.
     #   Between a finished tool and the model's next token there is a silent
     #   gap (prompt prefill / TTFT) during which no content/thinking delta
     #   fires — and if the next turn is a tool call with no preamble, nothing
@@ -363,255 +631,101 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     #   Cleared automatically by the first content/thinking delta, or by
     #   tool_start (hasActiveSearch) on the frontend.
     _model_label = _display_model_name(model)
-    append_event(task, build_phase(
-        Phase.WAITING_MODEL,
-        detail=f'Sent to {_model_label}, waiting for it to start replying…',
-        detailKey='stream.phase.waitingForModel',
-        detailArgs={'model': _model_label},
-        model=model))
+    # The callable is task-scoped request metadata and is stripped at every
+    # provider serialization boundary. Install it only when the model span is
+    # ready to open, so an earlier setup exception cannot retain the closure on
+    # the caller's canonical body.
+    body['_request_activity_sink'] = _request_activity_sink
+    task['_activeModelRequestSpan'] = _model_request_span
+    _model_start_fields = {
+        'spanId': _model_request_span,
+        'model': str(model or '?')[:160],
+        'providerId': str(task.get('provider_id') or '')[:160],
+        'requestTag': str(tag or '')[:80],
+    }
+    if _activity_round_num is not None:
+        _model_start_fields['roundNum'] = _activity_round_num
+    try:
+        append_event(
+            task,
+            build_event(EventType.MODEL_REQUEST_START, **_model_start_fields),
+        )
+        append_event(task, build_phase(
+            Phase.WAITING_MODEL,
+            detail=f'Sent to {_model_label}, waiting for it to start replying…',
+            detailKey='stream.phase.waitingForModel',
+            detailArgs={'model': _model_label},
+            model=model))
+    except Exception:
+        _clear_request_activity_state()
+        raise
 
-    # Resolve dispatch_stream THROUGH the package facade at call time so a test's
-    # ``monkeypatch.setattr(lib.tasks_pkg.manager, 'dispatch_stream', …)`` steers
-    # this stream exactly as it did on the pre-split single module (which imported
-    # dispatch_stream at module top-level, making it patchable on `manager`).
-    import lib.tasks_pkg.manager as _mgr_facade
-    _dispatch_stream = getattr(_mgr_facade, 'dispatch_stream', dispatch_stream)
-    # ★ pt_a21cd6eb ③-3: the abort_check now ALSO consumes the tombstone
+    #  ③-3: the abort_check now ALSO consumes the tombstone
     #   channel (in-memory set + throttled DB mark), so an abort that arrived
     #   while this task was missing from the registry still reaches the loop.
-    #   Facade-resolved like everything else; falls back to the bare flag when
-    #   the facade predates the factory (partial bundle / legacy tests).
-    _mk_abort_check = getattr(_mgr_facade, 'make_task_abort_check', None)
-    _abort_check = (_mk_abort_check(task) if callable(_mk_abort_check)
-                    else (lambda: task.get('aborted', False)))
-    msg, finish_reason, usage = _dispatch_stream(
-        body,
-        on_thinking=_on_thinking,
-        on_content=_on_content,
-        on_tool_call_ready=on_tool_call_ready,
-        abort_check=_abort_check,
-        prefer_model=None if pool_wide else model,
-        log_prefix=pfx,
-        # ★ User-facing request: the user explicitly chose this model in
-        #   the frontend preset selector.  429 retries must stay within
-        #   this model's slots (different keys / alias group) — never
-        #   silently fall back to a cheaper/different model.  The pool-wide
-        #   rescue is the ONE sanctioned exception: the requested model's
-        #   keys are already proven unavailable, so holding the pin would
-        #   mean dying while healthy slots sit idle.
-        strict_model=not pool_wide,
-        exclude_models=exclude_models,
-        on_retry=_on_retry,
-        avoid_pairs=_avoid_pairs,
-        on_attempt_restart=_on_attempt_restart,
-        on_waiting=_on_waiting,
-    )
+    _abort_check = make_task_abort_check(task)
+    try:
+        stream_result = ensure_provider_stream_result(dispatch_stream(
+            body,
+            on_thinking=_text_deltas.on_thinking,
+            on_content=_text_deltas.on_content,
+            on_tool_call_ready=on_tool_call_ready,
+            on_before_tool_call_ready=_text_deltas.flush,
+            abort_check=_abort_check,
+            prefer_model=None if pool_wide else model,
+            log_prefix=pfx,
+            # User-facing request: the user explicitly chose this model in
+            #   the frontend preset selector.  429 retries must stay within
+            #   this model's slots (different keys / alias group) — never
+            #   silently fall back to a cheaper/different model.  The pool-wide
+            #   rescue is the ONE sanctioned exception: the requested model's
+            #   keys are already proven unavailable, so holding the pin would
+            #   mean dying while healthy slots sit idle.
+            strict_model=not pool_wide,
+            exclude_models=exclude_models,
+            on_retry=_text_deltas.wrap_boundary(_on_retry),
+            avoid_pairs=_avoid_pairs,
+            on_attempt_restart=_text_deltas.wrap_boundary(_on_attempt_restart),
+            on_waiting=_text_deltas.wrap_boundary(_on_waiting),
+        ))
+        msg, finish_reason, usage = stream_result
+        # Final flush shares the request failure/span-cleanup path.
+        _text_deltas.close()
+    except Exception as error:
+        _text_deltas.close_after_error(error)
+        request_status = (
+            'aborted' if type(error).__name__ == 'AbortedError' else 'failed'
+        )
+        _emit_model_request_complete(request_status, error=error)
+        raise
 
-    # ★ Timing fallback: if the first round was tool-call-only (no content/
+    # Timing fallback: if the first round was tool-call-only (no content/
     #   thinking deltas fired the TTFT hook), log it now using stream return.
     _log_ttft_once()
+    stream_result = apply_floor_retry(
+        task, body, msg, finish_reason, usage,
+        model=model, pool_wide=pool_wide, pfx=pfx, tag=tag,
+        dispatch_stream_fn=dispatch_stream, abort_check=_abort_check,
+        on_retry=_on_retry, avoid_pairs=_avoid_pairs,
+        on_waiting=_on_waiting,
+        round_base_content=_round_base_content,
+        round_base_thinking=_round_base_thinking,
+        stream_result=stream_result,
+    )
+    msg, finish_reason, usage = stream_result
 
-    # ★ Floor-collapse identical-resend mitigation (env-gated, default OFF).
-    #   A byte-STABLE round whose cache_read pinned at the system+tools floor
-    #   is the SERVER-SIDE stochastic cache-write-visibility miss (proven by
-    #   4-run identical-byte replay: different rounds collapse each run). A
-    #   resend of the IDENTICAL body re-rolls the gateway's dice and usually
-    #   hits the now-visible cache write — driving effective floor% toward zero
-    #   (harness: mrsfs9d6 20%->0%). Discipline: only on a proven byte-stable
-    #   collapse, capped, and STOP on a throttle error (don't pile retries on
-    #   an already-throttled gateway). See lib/tasks_pkg/floor_retry.py +
-    #   docs/CACHE_GATEWAY_STOCHASTIC_REPORT.md.
-    # ★ Tracks whether ANY floor-retry resend's response was adopted into the
-    #   returned (msg, finish_reason, usage). Both adoption sites below
-    #   (RECOVERED and still-floored-loop-exhausted) stream with
-    #   on_content=None / on_thinking=None, so the adopted resend's text NEVER
-    #   reached task['content']/task['thinking'] — those still hold ONLY the
-    #   FIRST attempt's (floor-collapsed, often partial) deltas. Since _sync
-    #   persists from task['content'] (not the returned msg), an adopted resend
-    #   would silently persist the first-attempt residue (the live 3411→215
-    #   loss). We converge ONCE after the loop, covering both doors.
-    _fr_adopted = False
-    # ★ HONEST ACCOUNTING: every attempt the gateway processed (whether
-    #   ADOPTED or DISCARDED) was BILLED. Collect their usage dicts here
-    #   so the outer LLM-fallback loop can append them to api_rounds and
-    #   accumulate them — the "reported cost < actual gateway bill" bug
-    #   is impossible when every billed request appears once in api_rounds.
-    _fr_discarded_billing = []  # list of {'model', 'usage', 'tag'}
-    try:
-        from lib.tasks_pkg import floor_retry as _fr
-        _conv_for_fr = task.get('convId', '') or ''
-        # pool_wide rescue: floor-retry resends the identical body to the
-        # SAME model — undefined when the rescue is free to roam models —
-        # so the mitigation stays off for rescue dispatches.
-        if (_fr.floor_retry_enabled() and _conv_for_fr and not pool_wide
-                and _fr.is_floor_collapse(usage)
-                and _fr.wire_prefix_stable(_conv_for_fr, usage)):
-            _fr_max = _fr.floor_retry_max()
-            # The primary attempt (whose msg/usage `usage` currently holds) is
-            # the FIRST billed request; it is about to be superseded by a resend
-            # if one recovers. Preserve its usage now so it survives the
-            # `usage = _rusage` reassignments below.
-            _fr_primary_billed_usage = dict(usage) if isinstance(usage, dict) else None
-            for _fr_i in range(_fr_max):
-                if task.get('aborted', False):
-                    break
-                _fr_u = normalize_usage(usage)
-                logger.warning(
-                    '%s conv=%s [FloorRetry] byte-stable floor-collapse '
-                    '(read=%s write=%s) — resending identical body (%d/%d)',
-                    pfx, _conv_for_fr,
-                    _fr_u['cache_read'], _fr_u['cache_write'],
-                    _fr_i + 1, _fr_max)
-                try:
-                    # ★ Layer-1 orphan fix: a FloorRetry resend re-streams the
-                    #   IDENTICAL body purely to re-roll the gateway's cache-write
-                    #   dice for a cheaper usage — its token/tool deltas are
-                    #   THROWAWAY unless it RECOVERS (adopted below). Reusing
-                    #   on_tool_call_ready here made every discarded resend
-                    #   announce a fresh 'searching' tool round (new tc_id) that
-                    #   never survived into the final assistant_msg → an orphan
-                    #   swept to status='aborted' with an empty result, which the
-                    #   reader then had to defend against (layer 2). Pass None —
-                    #   exactly as on_thinking/on_content already are — so the
-                    #   resend announces NOTHING. If it RECOVERS, parse_tool_calls
-                    #   re-emits the adopted response's tool_start (a few-hundred-ms
-                    #   later chip; functionally lossless — owner-approved).
-                    _rmsg, _rfin, _rusage = _dispatch_stream(
-                        body,
-                        on_thinking=None, on_content=None,
-                        on_tool_call_ready=None,
-                        abort_check=_abort_check,
-                        prefer_model=model, log_prefix=f'{pfx}[floor-retry{_fr_i+1}]',
-                        strict_model=True, on_retry=_on_retry,
-                        avoid_pairs=_avoid_pairs,
-                        on_waiting=_on_waiting)
-                except Exception as _rerr:
-                    # 503/throttle/transient — do NOT keep piling resends on an
-                    # already-throttled gateway; that only deepens the throttle.
-                    logger.warning('%s [FloorRetry] resend %d errored, stopping: '
-                                   '%s: %s', pfx, _fr_i + 1,
-                                   type(_rerr).__name__, str(_rerr)[:120])
-                    break
-                # ★ HONEST ACCOUNTING: the CURRENT `usage` is about to be
-                #   superseded. Whatever it points to now (the primary attempt
-                #   on iter 0, or the previously-floored resend on iter >0) was
-                #   BILLED by the gateway — preserve it before overwriting.
-                if isinstance(usage, dict):
-                    _disc_tag_suffix = ('primary' if _fr_i == 0
-                                        else f'resend{_fr_i}')
-                    _fr_discarded_billing.append({
-                        'model': model,
-                        'usage': {k: v for k, v in usage.items()
-                                  if k != '_extra_billing_rounds'},
-                        'tag': f'{tag}-FLOOR-DISCARDED-{_disc_tag_suffix}'
-                        if tag else f'FLOOR-DISCARDED-{_disc_tag_suffix}',
-                    })
-                if not _fr.is_floor_collapse(_rusage):
-                    # Recovered: the resend hit the now-visible cache write.
-                    # Adopt its response + usage (a genuine cache read, cheaper
-                    # AND the same conversation content — the body was identical).
-                    _ru = normalize_usage(_rusage)
-                    logger.warning('%s conv=%s [FloorRetry] RECOVERED on resend %d '
-                                   '(read=%s write=%s)', pfx, _conv_for_fr, _fr_i + 1,
-                                   _ru['cache_read'], _ru['cache_write'])
-                    msg, finish_reason, usage = _rmsg, _rfin, _rusage
-                    _fr_adopted = True
-                    break
-                # Still floored — keep the freshest usage and try again.
-                msg, finish_reason, usage = _rmsg, _rfin, _rusage
-                _fr_adopted = True
-    except Exception as _fre:
-        logger.debug('%s [FloorRetry] mitigation skipped (non-fatal): %s', pfx, _fre)
-
-    # ★ FloorRetry content-track convergence (fixes the 3411→215 silent loss).
-    #   When a resend was adopted, its full text lives ONLY in the returned
-    #   `msg` — the adopted resend streamed with on_content=None/on_thinking=None,
-    #   so task['content']/task['thinking'] still hold the FIRST attempt's
-    #   (floor-collapsed, partial) deltas. _sync persists from task['content'],
-    #   so without this the partial first-attempt text is what lands in the DB.
-    #   A resend is a byte-identical-body FRESH generation, so REPLACE (not
-    #   append) — the adopted msg is the whole, authoritative answer. We do NOT
-    #   emit DELTA_RESET / replay here: the live tab is reconciled by the done
-    #   event's committedMessage (existing mechanism), so no new visual behavior.
-    if _fr_adopted:
-        with task['content_lock']:
-            _discarded_content = task['content']
-            _discarded_thinking = task['thinking']
-            # ★ Base-preserve (owner audit on pt_6e12b1f): task['content']/
-            #   ['thinking'] ACCUMULATE across ALL rounds of this turn — the
-            #   main orchestrator loop has no per-round content reset (only
-            #   the one-time contentPrefix seed at _run.py:501). The adopted
-            #   msg holds THIS round's text only, so a wholesale replace
-            #   would silently drop every prior round's prose from the
-            #   persisted answer (the R1+R2 preamble the user already read).
-            #   Keep the round base captured at stream entry and replace
-            #   only this round's tail. The residue recording below stays
-            #   the FULL pre-convergence snapshot — the checkpointed conv
-            #   row mirrors that full text and the terminal-guard exemption
-            #   byte-matches on it.
-            task['content'] = _round_base_content + (msg.get('content') or '')
-            task['thinking'] = _round_base_thinking + (msg.get('reasoning_content') or '')
-        # ★ Record the DISCARDED first-attempt text verbatim (bounded). The
-        #   ~5s streaming checkpoint mirrors task['content']/['thinking'] into
-        #   conversations.messages DURING the attempt — so after this
-        #   convergence the conv row can still hold the discarded draft while
-        #   the task holds the adopted one. Downstream guards (the terminal
-        #   content guard / CAS re-read guard in _sync.py) treat "existing >
-        #   new" as "frontend genuinely won"; an EXACT byte-match against this
-        #   recorded residue is how they tell our own discarded attempt apart
-        #   from a real frontend win and overwrite it with the authoritative
-        #   final answer (the live mrxij7q34xm070 "abrupt stop" bug: the
-        #   4344-char discarded draft survived with a stop finish-tag).
-        if _discarded_content or _discarded_thinking:
-            _residue = task.setdefault('_floor_retry_residue', [])
-            if len(_residue) < 8:
-                _residue.append({'content': _discarded_content,
-                                 'thinking': _discarded_thinking})
-        # ★ Record the TRUE cause of any orphan tool round this turn produces.
-        #   When a FloorRetry resend is adopted, the FIRST attempt's tool calls
-        #   (announced live via on_tool_call_ready → 'searching' rounds) are NOT
-        #   in the adopted msg (the resend re-minted fresh tc_ids), so
-        #   reconcile_announced_rounds settles them as 'superseded' orphans.
-        #   This marker lets reconcile log the accurate cause (FloorRetry
-        #   adoption) instead of the hardcoded — and, per the app.log evidence,
-        #   FALSE — "discarded stream-retry attempt" story: stream transient
-        #   retries were 0 while FloorRetry drove 100% of observed orphans.
-        task['_floor_retry_adopted'] = True
-        logger.info('%s [FloorRetry] converged task content/thinking from adopted '
-                    'resend (content=%dchars thinking=%dchars) — prevents first-'
-                    'attempt residue from being persisted',
-                    pfx, len(task['content']), len(task['thinking']))
-
-    # ★ HONEST ACCOUNTING: expose every discarded-but-billed FloorRetry
-    #   attempt on the returned usage dict so the LLM-fallback loop can
-    #   append them to api_rounds and accumulated_usage. The gateway billed
-    #   each of these; the cost popover / wallet / daily-report MUST see them.
-    #   Silent covering-up of billed rounds is what motivated flipping the
-    #   floor-retry default OFF — but even opt-in usage must be honest.
-    if _fr_discarded_billing and isinstance(usage, dict):
-        # dict.setdefault: never clobber a caller-provided list (defensive).
-        _bill_list = usage.setdefault('_extra_billing_rounds', [])
-        if isinstance(_bill_list, list):
-            _bill_list.extend(_fr_discarded_billing)
-        else:
-            usage['_extra_billing_rounds'] = list(_fr_discarded_billing)
-        logger.warning('%s [FloorRetry] preserved %d discarded-but-billed '
-                       'attempt(s) for honest cost accounting: tags=%s',
-                       pfx, len(_fr_discarded_billing),
-                       [b['tag'] for b in _fr_discarded_billing])
-
-    # ★ Propagate provider_id from dispatch metadata into task
+    # Propagate provider_id from dispatch metadata into task
     _dispatch = (usage or {}).get('_dispatch', {})
     if _dispatch.get('provider_id'):
         task['provider_id'] = _dispatch['provider_id']
 
-    # ★ Notify user if a model token limit was auto-learned during this request
+    # Notify user if a model token limit was auto-learned during this request
     _limit_info = (usage or {}).get('_model_limit_learned')
     if _limit_info:
         # Notify via phase event (transient UI status, does NOT pollute
         # assistantMsg.content).  The limit is persisted automatically.
         append_event(task, build_phase(
-            Phase.RETRYING,
+            Phase.WORKING,
             detail=(f'⚙️ Auto-detected model limit: {_limit_info["model"]} '
                     f'max_tokens={_limit_info["new_limit"]:,} '
                     f'(was {_limit_info["old_limit"]:,})'),
@@ -619,16 +733,12 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         logger.info('%s ⚙️ Model limit auto-learned and user notified: %s max_tokens=%d',
                     pfx, _limit_info['model'], _limit_info['new_limit'])
 
-    _content_len = len(msg.get('content', '') or '')
-    _thinking_len = len(msg.get('reasoning_content', '') or '')
-    _tool_calls = len(msg.get('tool_calls', []))
-    _provider = task.get('provider_id', '?')
-    logger.info('%s conv=%s stream_llm_response complete: finish_reason=%s model=%s '
-                'provider=%s content=%dchars thinking=%dchars tool_calls=%d',
-                pfx, task.get('convId', ''), finish_reason, model,
-                _provider, _content_len, _thinking_len, _tool_calls)
+    _log_stream_completion(
+        task, prefix=pfx, model=model,
+        finish_reason=finish_reason, message=msg,
+    )
 
-    # ★ Feed authoritative prompt_tokens into the usage cache so the NEXT
+    # Feed authoritative prompt_tokens into the usage cache so the NEXT
     #   round's compaction check returns a bit-exact number instead of
     #   falling back to the CJK-aware heuristic. Inspired by OpenCode's
     #   MessageV2.Assistant.tokens — the provider already told us the
@@ -655,7 +765,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             # ``body['messages']`` is the exact list we sent. Recording it
             # lets the cache detect edit/regenerate (prefix changed →
             # invalidate) vs append-only (reuse + delta).
-            # ★ Record the FULL normalized prompt, NOT the raw input figure:
+            # Record the FULL normalized prompt, NOT the raw input figure:
             #   on Anthropic-convention wires input_tokens EXCLUDES the cache
             #   (a 99%-hit warm round reports only the ~2K residual), so
             #   recording ``_prompt_tokens`` left the usage_cache tier — and
@@ -676,13 +786,13 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         # here break the LLM return path.
         logger.debug('%s record_usage failed (non-fatal): %s', pfx, e)
 
-    # ★ Auto-learn an EXPANDED context limit when this provider just
+    # Auto-learn an EXPANDED context limit when this provider just
     #   accepted a prompt larger than our presumed ceiling. Mirrors the
     #   shrink-on-overflow path in llm_fallback.py.
     if _total_prompt_tokens > 0:
         try:
             from lib.context_limits import learn_expand_from_success
-            from lib.tasks_pkg.compaction import _get_context_limit
+            from lib.tasks_pkg.compaction._tokens import _get_context_limit
             _prior_limit = _get_context_limit(task)
             _expand_info = learn_expand_from_success(
                 task.get('provider_id') or '',
@@ -692,7 +802,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             )
             if _expand_info:
                 append_event(task, build_phase(
-                    Phase.RETRYING,
+                    Phase.WORKING,
                     detail=(
                         f'⚙️ Auto-detected larger context window for '
                         f'{model}: '
@@ -707,4 +817,9 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         except Exception as e:
             logger.debug('%s context_limits expand-learn failed: %s', pfx, e)
 
-    return msg, finish_reason, usage
+    _emit_model_request_complete(
+        'succeeded' if stream_result.is_verified_complete else 'failed',
+        finish_reason=finish_reason,
+        usage_value=usage,
+    )
+    return stream_result

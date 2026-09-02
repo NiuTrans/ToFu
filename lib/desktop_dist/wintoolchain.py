@@ -2,7 +2,7 @@
 
 Provisions and runs a Windows-build-capable Wine on THIS host: no root,
 old glibc, and a corporate seccomp profile. Everything here is the
-PROBE-PROVEN recipe (2026-08-01, design: docs/DESKTOP_CLIENT_BUILD_DESIGN.md,
+Build recipe (docs/modules/remote_execution.md,
 memory: userspace-wine-toolchain-recipe) — each stage answers a measured
 trap, and the tests pin them so a future "simplification" reintroduces the
 trap loudly rather than silently.

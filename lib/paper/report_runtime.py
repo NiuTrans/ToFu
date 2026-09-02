@@ -1,9 +1,9 @@
 """Report task store — server-owned background generation.
 
 Design (per user request 2026-04-18):
-  • Report generation happens ONCE per (paper_hash, lang). If a task is
-    already running, any new /start request joins it and polls the same
-    events.
+  • Ordinary report generation happens once per (paper_hash, lang). In-flight
+    reuse additionally requires an exact model+config fingerprint, so paired
+    experiment arms cannot join one another.
   • Task is server-owned: tool-call progress, deltas, status are all
     accumulated in an append-only `events` list. Frontend polls
     /api/paper/report/poll?cursor=N and replays — no SSE, no client-held
@@ -16,45 +16,78 @@ Design (per user request 2026-04-18):
 """
 
 import threading
-import time
 
 from lib.log import get_logger
-from lib.task_runtime import TaskRuntime
+from lib.agent_core.task_runtime import TaskRuntime
+from lib.paper.request_policy import paper_request_policy_telemetry
 
 logger = get_logger(__name__)
 
 
-# Backed by the unified TaskRuntime. Dedup index keys (paper_hash, lang)
-# tuples to task_id strings — preserves the "two clients open the same
-# paper share one task" semantic.
+# Backed by the unified TaskRuntime. Dedup index keys include the request's
+# execution fingerprint, so two clients share work only when model and config
+# are identical.  This prevents concurrent experiment arms from joining one
+# another while preserving the ordinary "same paper shares one task" path.
 _report_runtime = TaskRuntime(
     'paper-report', ttl=3600,
     push_channel='paper',
     error_source='routes.paper:report',
 )
-# (phash, lang) → task_id. Updated alongside _report_runtime.create()/cleanup.
+# (owner, phash, lang, execution_fingerprint) → task_id.
+# Updated alongside _report_runtime.create()/cleanup.
 _report_dedup_index: dict[tuple, str] = {}
 _report_dedup_lock = threading.Lock()
 _REPORT_TASK_TTL = 3600
 
 
-def _report_index_get(phash: str, lang: str) -> dict | None:
-    """Find a task by (paper_hash, lang). Returns the task dict or None."""
+def _report_index_get(
+    phash: str,
+    lang: str,
+    *,
+    user_id: int,
+    execution_fingerprint: str = '',
+) -> dict | None:
+    """Find an owner's exact request task, or latest compatible task.
+
+    Routes that may join work pass ``execution_fingerprint`` and therefore
+    require an exact model/config match.  The omitted-fingerprint form remains
+    for the tab-reentry lookup API: it returns the most recently registered
+    task for the paper regardless of request policy, but never joins it.
+    """
     with _report_dedup_lock:
-        tid = _report_dedup_index.get((phash, lang))
+        if execution_fingerprint:
+            tid = _report_dedup_index.get(
+                (user_id, phash, lang, execution_fingerprint))
+        else:
+            tid = next((
+                candidate_tid
+                for key, candidate_tid in reversed(
+                    tuple(_report_dedup_index.items()))
+                if key[:3] == (user_id, phash, lang)
+            ), None)
     if not tid:
         return None
-    return _report_runtime.get(tid)
+    return _report_runtime.get_owned(tid, user_id=user_id)
 
 
-def _report_index_register(phash: str, lang: str, task_id: str) -> None:
-    """Register a (phash, lang) → task_id mapping in the dedup index."""
+def _report_index_register(
+    phash: str, lang: str, task_id: str, *, user_id: int,
+    execution_fingerprint: str = '',
+) -> None:
+    """Register an owner- and request-policy-scoped report mapping."""
+    if not execution_fingerprint:
+        task = _report_runtime.get_owned(task_id, user_id=user_id) or {}
+        execution_fingerprint = str(task.get('execution_fingerprint') or '')
+    if not execution_fingerprint:
+        raise ValueError('report execution fingerprint is required')
     with _report_dedup_lock:
-        _report_dedup_index[(phash, lang)] = task_id
+        _report_dedup_index[
+            (user_id, phash, lang, execution_fingerprint)
+        ] = task_id
 
 
 def _new_report_task(task_id, phash, lang, model, *, client_title='', ui_lang='',
-                     config=None):
+                     config=None, user_id: int):
     """Create a fresh report task. Registers it in the dedup index.
 
     ``lang`` is the cache key (plain 'en'/'zh' for reports, or the composite
@@ -65,29 +98,38 @@ def _new_report_task(task_id, phash, lang, model, *, client_title='', ui_lang=''
     reads ``paperInsightPersonalContext`` from it via personal_scope to decide
     whether the operator's personal reader-context may be injected.
     """
+    detached_config = dict(config or {})
+    request_policy = paper_request_policy_telemetry(
+        model=model, config=detached_config)
+    execution_fingerprint = request_policy['executionFingerprint']
     task = _report_runtime.create(
+        user_id=user_id,
         task_id=task_id,
-        meta={'paper_hash': phash, 'lang': lang, 'model': model},
+        meta={
+            'paper_hash': phash,
+            'lang': lang,
+            'model': model,
+            'execution_fingerprint': execution_fingerprint,
+        },
     )
-    # Augment with legacy field names that the rest of paper.py expects.
-    task.update({
+    _report_runtime.update_fields(task_id, fields={
         'task_id': task_id,
         'paper_hash': phash,
         'lang': lang,
         'ui_lang': ui_lang or lang,
         'model': model,
         'client_title': client_title,
-        'config': config,
-        'status': 'pending',        # pending → running → done | error
-        'finished_at': None,
+        'config': detached_config,
+        'execution_fingerprint': execution_fingerprint,
+        'requestPolicyV1': request_policy,
         'full_text': '',            # accumulated delta text
         'enriched_text': '',        # final enriched text (with images)
         'tool_rounds': [],          # synchronised toolRounds array
         'round_counter': 0,
-        # Note: TaskRuntime stores 'error' as None; legacy code expected ''.
-        # Tests/code that read task['error'] should treat both as "no error".
     })
-    _report_index_register(phash, lang, task_id)
+    _report_index_register(
+        phash, lang, task_id, user_id=user_id,
+        execution_fingerprint=execution_fingerprint)
     return task
 
 
@@ -103,25 +145,12 @@ def _append_report_event(task, event):
 
 def _cleanup_stale_report_tasks():
     """Drop finished tasks older than TTL and remove their dedup entries."""
-    # Snapshot finished tasks BEFORE cleanup to know which dedup keys to drop.
-    finished_ids: set = set()
-    with _report_runtime._lock:
-        for tid, t in _report_runtime._tasks.items():
-            if t['status'] in ('done', 'error', 'aborted'):
-                if t.get('finished_at'):
-                    if time.time() - t['finished_at'] > _REPORT_TASK_TTL:
-                        finished_ids.add(tid)
     n = _report_runtime.cleanup_stale()
     if n:
-        # Drop matching dedup-index entries
+        live_task_ids = _report_runtime.task_ids()
         with _report_dedup_lock:
             stale_keys = [k for k, tid in _report_dedup_index.items()
-                          if tid in finished_ids]
+                          if tid not in live_task_ids]
             for k in stale_keys:
                 _report_dedup_index.pop(k, None)
         logger.debug('[Paper:Report] Cleaned %d stale task(s)', n)
-
-
-# Compatibility shims (legacy code in paper.py / tests still references these names).
-_report_tasks = _report_runtime._tasks       # type: ignore[attr-defined]
-_report_tasks_lock = _report_runtime._lock   # type: ignore[attr-defined]

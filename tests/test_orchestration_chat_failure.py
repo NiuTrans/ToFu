@@ -33,7 +33,7 @@ def test_failure_port_is_immutable_and_complete():
     ('config', 'expected'),
     [
         ({'flowId': 'saved'}, 'stored:saved'),
-        ({'flowBuiltin': 'endpoint'}, 'builtin:endpoint'),
+        ({'flowBuiltin': 'autopilot'}, 'builtin:autopilot'),
         ({'flowDefinition': {}}, 'inline'),
     ],
 )
@@ -65,7 +65,7 @@ def test_unavailable_selection_and_runtime_crash_share_terminal_port():
     assert fatal['kind'] == 'internal'
     assert fatal['context'] == 'orchestration-flow-fatal'
     assert fatal['model'] == 'model-b'
-    assert [entry[2]['endpoint_reason'] for entry in settled] == [
+    assert [entry[2]['flow_reason'] for entry in settled] == [
         'definition_unavailable', 'fatal',
     ]
 

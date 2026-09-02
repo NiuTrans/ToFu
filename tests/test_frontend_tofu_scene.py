@@ -23,8 +23,15 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCENE_JS = REPO / "static" / "js" / "tofu-scene.js"
-BUNDLER = REPO / "lib" / "js_bundler.py"
+import sys as _sys
+_sys.path.insert(0, str(REPO))
+from tests._runtime_sections import runtime_section_path
+
+# The classic js tree is gone; sections materialize from the retained
+# runtime (lazy chunks are concatenated back into the virtual view).
+SCENE_JS = Path(runtime_section_path('tofu-scene.js'))
+APP_RUNTIME = REPO / 'frontend' / 'src' / 'runtime' / 'app-runtime.js'
+VITE_MANIFEST = REPO / 'static' / 'vite' / 'manifest.json'
 INDEX = REPO / "index.html"
 CSS = REPO / "static" / "styles.css"
 
@@ -1065,18 +1072,25 @@ def test_NEUTER_no_springback_persistence_is_caught():
 
 
 def test_registered_in_bundler_after_pet():
-    """Must be registered in the bundler (else it's a silent no-op) and load
-    after the pet (which owns the data-decor attribute it mirrors). Both moved
-    from _BUNDLE_FILES to _CLASSIC_ASSET_FILES 2026-08-01 (the ~160KB decorative
-    family out of the render-blocking core), so the ordering is asserted
-    inside _CLASSIC_ASSET_FILES."""
-    b = BUNDLER.read_text()
-    assert "'tofu-scene.js'" in b, "tofu-scene.js missing from the bundler manifests"
-    from lib.js_bundler import _CLASSIC_ASSET_FILES
-    assert "tofu-pet.js" in _CLASSIC_ASSET_FILES and "tofu-scene.js" in _CLASSIC_ASSET_FILES, \
-        "the decorative pet family must ride the deferred pack"
-    assert _CLASSIC_ASSET_FILES.index("tofu-scene.js") > _CLASSIC_ASSET_FILES.index("tofu-pet.js"), \
-        "tofu-scene.js must load after tofu-pet.js"
+    """Must be wired into the bundle graph (else it's a silent no-op) and load
+    after the pet (which owns the data-decor attribute it mirrors). In the Vite
+    graph the decorative family rides idle-scheduled lazy chunks out of the
+    render-blocking core; the runtime shell schedules both imports and the
+    manifest must carry the emitted chunks."""
+    shell = APP_RUNTIME.read_text(encoding='utf-8')
+    pet_import = "import('./scene/tofu-pet.js')"
+    scene_import = "import('./scene/tofu-scene.js')"
+    assert pet_import in shell, 'tofu-pet.js lazy chunk not scheduled — silent no-op'
+    assert scene_import in shell, 'tofu-scene.js lazy chunk not scheduled — silent no-op'
+    assert shell.index(pet_import) < shell.index(scene_import), \
+        'pet must be scheduled first (it owns data-decor, which scene mirrors)'
+    import json as _json
+    manifest = _json.loads(VITE_MANIFEST.read_text(encoding='utf-8'))
+    files = {row.get('file', '') for row in manifest.values() if isinstance(row, dict)}
+    assert any(f.startswith('assets/tofu-scene-') for f in files), \
+        'tofu-scene chunk missing from the Vite manifest'
+    assert any(f.startswith('assets/tofu-pet-') for f in files), \
+        'tofu-pet chunk missing from the Vite manifest'
 
 
 def test_not_registered_as_raw_index_script():

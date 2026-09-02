@@ -96,7 +96,7 @@ def _run_main(argv, cfg_path, monkeypatch):
         captured['permissions'] = permissions
 
     monkeypatch.setattr(ar, 'run_agent', _fake_run_agent)
-    ar.main(argv)
+    ar.main([*argv, '--bridge-token', 'test-device-credential'])
     return captured
 
 

@@ -65,7 +65,7 @@ def layout_definition(defn: dict, *, x_gap: int = 230, y_gap: int = 150,
     The frontend is a thin renderer, so position computation lives here.
     Layers are derived by relaxing ``layer[v] = max(layer[u]+1)`` over
     every edge, bounded by ``len(nodes)`` passes so a cycle (e.g. an
-    endpoint loop's critic→loop back-edge) can't spin forever. Nodes are
+    verifier loop's critic→loop back-edge) can't spin forever. Nodes are
     then spread horizontally within their layer.
 
     Mutates each node's ``pos`` in place and returns the same dict for

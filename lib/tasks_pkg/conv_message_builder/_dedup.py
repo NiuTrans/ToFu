@@ -2,8 +2,8 @@
 
   * ``_dedup_duplicate_user_messages`` — collapse same-timestamp duplicate
     user rows (send-path race / stale-task resurrection guard).
-  * ``_collapse_historical_endpoint_sessions`` — replace completed endpoint
-    sessions with their last worker output.
+  * ``_collapse_historical_flow_sessions`` — replace completed Flow sessions
+    with their last worker output.
   * ``_merge_consecutive_same_role`` — merge consecutive same-role messages
     (never across structured tool-call sequences).
 """
@@ -37,8 +37,8 @@ def _dedup_duplicate_user_messages(src: list[dict]) -> list[dict]:
     Strategy: keep only the LAST user row in any run of consecutive user
     rows that share a ``timestamp`` (the server-translated copy is appended
     after the optimistic one, so the last wins — it carries the
-    authoritative ``content`` + translation fields). Endpoint-mode user rows
-    (``_isEndpointReview``) are never collapsed — they legitimately repeat.
+    authoritative ``content`` + translation fields). Flow-review user rows
+    (``_isFlowReview``) are never collapsed — they legitimately repeat.
 
     Args:
         src: Raw conversation messages (mutated copy returned, input untouched).
@@ -54,12 +54,12 @@ def _dedup_duplicate_user_messages(src: list[dict]) -> list[dict]:
     for msg in src:
         if (isinstance(msg, dict)
                 and msg.get('role') == 'user'
-                and not msg.get('_isEndpointReview')
+                and not msg.get('_isFlowReview')
                 and result):
             prev = result[-1]
             if (isinstance(prev, dict)
                     and prev.get('role') == 'user'
-                    and not prev.get('_isEndpointReview')
+                    and not prev.get('_isFlowReview')
                     and msg.get('timestamp') is not None
                     and prev.get('timestamp') == msg.get('timestamp')):
                 # Same logical turn — server copy (this one) supersedes the
@@ -75,20 +75,19 @@ def _dedup_duplicate_user_messages(src: list[dict]) -> list[dict]:
     return result
 
 
-def _collapse_historical_endpoint_sessions(src: list[dict]) -> list[dict]:
-    """Replace completed endpoint sessions with their last worker output.
+def _collapse_historical_flow_sessions(src: list[dict]) -> list[dict]:
+    """Replace completed Flow sessions with their last worker output.
 
-    An endpoint session is a contiguous block of messages tagged with
-    ``_isEndpointPlanner``, ``_isEndpointReview``, or ``_epIteration``.
+    A Flow session is a contiguous block of messages tagged with
+    ``_isFlowPlanner``, ``_isFlowReview``, or ``_flowIteration``.
 
-    - **Historical** sessions (followed by non-endpoint messages): the entire
-      block is collapsed to just the last worker output (highest ``_epIteration``),
-      stripped of its endpoint marker so downstream treats it as a normal
+    - **Historical** sessions (followed by non-Flow messages): the entire
+      block is collapsed to just the last worker output (highest ``_flowIteration``),
+      stripped of its Flow marker so downstream treats it as a normal
       assistant message.  This preserves conversation context for follow-up
       questions.
-    - **Trailing** session (at the end, no non-endpoint messages after): left
-      as-is for the main loop to skip (current in-progress session managed by
-      ``endpoint.py``).
+    - **Trailing** session (at the end, no non-Flow messages after): left
+      as-is for the main loop to skip.
     """
     if not src:
         return src
@@ -97,25 +96,25 @@ def _collapse_historical_endpoint_sessions(src: list[dict]) -> list[dict]:
     i = 0
     while i < len(src):
         msg = src[i]
-        is_ep = (msg.get('_isEndpointReview')
-                 or msg.get('_isEndpointPlanner')
-                 or msg.get('_epIteration'))
+        is_flow = (msg.get('_isFlowReview')
+                   or msg.get('_isFlowPlanner')
+                   or msg.get('_flowIteration'))
 
-        if not is_ep:
+        if not is_flow:
             result.append(msg)
             i += 1
             continue
 
-        # Found an endpoint block — scan to its end
+        # Found a Flow block — scan to its end
         block_start = i
         last_worker = None
         while i < len(src):
             m = src[i]
-            if (not m.get('_isEndpointReview')
-                    and not m.get('_isEndpointPlanner')
-                    and not m.get('_epIteration')):
+            if (not m.get('_isFlowReview')
+                    and not m.get('_isFlowPlanner')
+                    and not m.get('_flowIteration')):
                 break
-            if m.get('_epIteration') and m.get('role') == 'assistant':
+            if m.get('_flowIteration') and m.get('role') == 'assistant':
                 last_worker = m  # track the final worker output
             i += 1
 
@@ -123,7 +122,7 @@ def _collapse_historical_endpoint_sessions(src: list[dict]) -> list[dict]:
             # Historical block — include the last worker output as normal assistant
             if last_worker:
                 clean_worker = dict(last_worker)
-                clean_worker.pop('_epIteration', None)
+                clean_worker.pop('_flowIteration', None)
                 result.append(clean_worker)
             # else: no worker output (e.g. aborted during planning) — skip entire block
         else:
@@ -137,8 +136,8 @@ def _collapse_historical_endpoint_sessions(src: list[dict]) -> list[dict]:
 def _merge_consecutive_same_role(messages: list) -> None:
     """Merge consecutive same-role messages in-place.
 
-    After filtering out endpoint-mode messages (_isEndpointPlanner,
-    _isEndpointReview, _epIteration), there may still be consecutive
+    After filtering out Flow-owned messages (_isFlowPlanner,
+    _isFlowReview, _flowIteration), there may still be consecutive
     same-role messages from normal conversation flow. Merge by concatenation.
 
     NEVER merges structured tool-call messages (those with ``tool_calls``

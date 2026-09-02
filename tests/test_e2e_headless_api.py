@@ -20,7 +20,10 @@ Goals:
 If something is broken, this test catches it before SDK clients hit it.
 """
 
+
 from __future__ import annotations
+
+pytest_plugins = ('tests._credential_sidecar',)
 
 import asyncio
 import inspect
@@ -45,26 +48,16 @@ def _setup_once():
     # ⚠️ DATA-LOSS GUARD (2026-06-28): imports server.py + builds the real app
     # OUTSIDE the conftest flask_app/live_server fixtures, so it must call the
     # keystone DB guard itself before touching the real app/DB.
-    from tests.conftest import _assert_test_database
-    _assert_test_database('test_e2e_headless_api._setup_once')
+    from tests.conftest import _assert_isolated_storage
+    _assert_isolated_storage('test_e2e_headless_api._setup_once')
     _STATE['tmp'] = tempfile.TemporaryDirectory()
     tmp = _STATE['tmp'].name
     # Patch the API-key + usage stores to a tempdir BEFORE booting server.
     from lib import api_keys, usage_tracker
-    _STATE['orig_keys_path'] = api_keys._STORE_PATH
     _STATE['orig_usage_path'] = usage_tracker._STORE_PATH
-    api_keys._STORE_PATH = os.path.join(tmp, 'api_keys.json')
-    api_keys._cache.clear()
-    api_keys._cache_loaded = False
     usage_tracker._STORE_PATH = os.path.join(tmp, 'usage.json')
     usage_tracker._state.clear()
     usage_tracker._loaded = False
-    # Empty TUNNEL_TOKEN means tunnel auth is fully open — but bearer
-    # auth still gates /api/v1/* paths because _is_api_path() is
-    # checked unconditionally in the middleware. (If a deployment had
-    # no TUNNEL_TOKEN AND no Bearer, requests to /api/v1/* return 401.)
-    os.environ['TUNNEL_TOKEN'] = ''
-
     import importlib.util
     spec = importlib.util.spec_from_file_location('server_e2e', 'server.py')
     mod = importlib.util.module_from_spec(spec)
@@ -73,9 +66,9 @@ def _setup_once():
 
     # Mint two keys: one full-admin, one chat+tasks+usage scoped.
     from lib.api_keys import create_key
-    _row, _STATE['admin'] = create_key(name='e2e-admin', scopes=[],
+    _row, _STATE['admin'] = create_key(owner_user_id=1, name='e2e-admin', scopes=[],
                                         admin=True)
-    _row, _STATE['user'] = create_key(
+    _row, _STATE['user'] = create_key(owner_user_id=1, 
         name='e2e-user',
         scopes=['chat', 'tasks', 'usage', 'capabilities',
                 'agents:memory', 'agents:image', 'agents:browser',
@@ -90,9 +83,6 @@ def _teardown_once():
     if _STATE['app'] is None:
         return
     from lib import api_keys, usage_tracker
-    api_keys._STORE_PATH = _STATE['orig_keys_path']
-    api_keys._cache.clear()
-    api_keys._cache_loaded = False
     usage_tracker._STORE_PATH = _STATE['orig_usage_path']
     usage_tracker._state.clear()
     usage_tracker._loaded = False
@@ -127,7 +117,7 @@ def _install_chat_stub():
     global _STUB_INSTALLED, _ORIG_SPAWN
     if _STUB_INSTALLED:
         return
-    import lib.tasks_pkg as pkg
+    import lib.tasks_pkg.spawn as pkg
     from lib.tasks_pkg.manager import append_event
     _ORIG_SPAWN = pkg.spawn_task
 
@@ -172,7 +162,7 @@ def _uninstall_chat_stub():
     global _STUB_INSTALLED
     if not _STUB_INSTALLED:
         return
-    import lib.tasks_pkg as pkg
+    import lib.tasks_pkg.spawn as pkg
     pkg.spawn_task = _ORIG_SPAWN
     _STUB_INSTALLED = False
 
@@ -348,13 +338,13 @@ class E2EHeadlessApiTest(unittest.TestCase):
     def test_disabled_key_rejected(self):
         """Disable a key, immediately try to use it → 401."""
         from lib.api_keys import create_key, update_key
-        _row, tok = create_key(name='disable-me', scopes=['chat'])
+        _row, tok = create_key(owner_user_id=1, name='disable-me', scopes=['chat'])
 
         async def go():
             c = self._client()
             r = await c.get('/api/v1/keys/whoami', headers=_hdr(tok))
             self.assertEqual(r.status_code, 200)
-            update_key(_row['id'], disabled=True)
+            update_key(_row['id'], owner_user_id=1, disabled=True)
             r = await c.get('/api/v1/keys/whoami', headers=_hdr(tok))
             # whoami is public — but the auth middleware still validates
             # the bearer token before reaching it. Rejection happens at
@@ -488,7 +478,7 @@ class E2EHeadlessApiTest(unittest.TestCase):
         """Same Idempotency-Key from a different principal must NOT
         collide — it would be a tenant-isolation bug."""
         from lib.api_keys import create_key
-        _row, second = create_key(name='other', scopes=['chat'])
+        _row, second = create_key(owner_user_id=1, name='other', scopes=['chat'])
 
         async def go():
             c = self._client()
@@ -524,7 +514,7 @@ class E2EHeadlessApiTest(unittest.TestCase):
         """A key with rpm=2 must 429 on the third call."""
         from lib import rate_limit_api
         from lib.api_keys import create_key
-        _row, tok = create_key(name='rate-limited', scopes=['capabilities'],
+        _row, tok = create_key(owner_user_id=1, name='rate-limited', scopes=['capabilities'],
                                 rate_limit_rpm=2)
         rate_limit_api._state.pop(_row['id'], None)
 

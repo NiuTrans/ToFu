@@ -5,7 +5,6 @@ from __future__ import annotations
 from lib.orchestration.authoring_contract import (
     authoring_contract,
     build_builtin_definition,
-    role_authoring_contract,
 )
 from lib.orchestration.authoring_operations import (
     Composer,
@@ -56,9 +55,6 @@ class OrchestrationAuthoringService:
 
     def contract(self) -> dict:
         return authoring_contract()
-
-    def role_contract(self, role: str = '') -> dict:
-        return role_authoring_contract(role) if role else authoring_contract()
 
     def layout(self, definition: dict) -> dict:
         return layout_authoring_definition(definition)

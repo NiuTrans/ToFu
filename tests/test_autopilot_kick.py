@@ -17,10 +17,11 @@ import pytest
 @pytest.fixture()
 def put_task():
     """Insert a synthetic task into the in-memory registry; auto-cleanup."""
-    from lib.tasks_pkg import tasks, tasks_lock
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
     added = []
 
     def _put(task):
+        task.setdefault('_userId', 1)
         with tasks_lock:
             tasks[task['id']] = task
         added.append(task['id'])
@@ -35,6 +36,7 @@ def put_task():
 
 def _running_task(tid, conv_id, **over):
     t = {'id': tid, 'convId': conv_id, 'status': 'running',
+         '_userId': 1,
          'config': {'model': 'm', 'autopilot': False}}
     t.update(over)
     return t
@@ -44,7 +46,7 @@ def _running_task(tid, conv_id, **over):
 
 def test_kick_requires_conv_id():
     from lib.tasks_pkg.autopilot import kick_autopilot
-    r = kick_autopilot('', {})
+    r = kick_autopilot('', {}, user_id=1)
     assert r['taskId'] is None
     assert r['error'] == 'conv_id is required'
 
@@ -53,7 +55,7 @@ def test_kick_refuses_when_task_running(put_task):
     """A live (non-VU) task means the user should ARM, not kick."""
     from lib.tasks_pkg.autopilot import kick_autopilot
     put_task(_running_task('t-live', 'conv-K1'))
-    r = kick_autopilot('conv-K1', {})
+    r = kick_autopilot('conv-K1', {}, user_id=1)
     assert r['taskId'] is None
     assert r['error'] == 'task_already_running'
 
@@ -64,62 +66,59 @@ def test_kick_allows_when_only_vu_subtask_running(put_task, monkeypatch):
     put_task(_running_task('t-vu', 'conv-K2', _vu_subtask=True))
 
     monkeypatch.setattr(ap, 'build_api_messages_from_db',
-                        lambda cid, cfg: [{'role': 'user', 'content': 'hi'}],
+                        lambda cid, cfg, *, user_id: [{'role': 'user', 'content': 'hi'}],
                         raising=False)
     # build_api_messages_from_db is imported lazily inside kick_autopilot;
     # patch at the source module too.
-    import lib.tasks_pkg.conv_message_builder as cmb
+    import lib.tasks_pkg.conv_message_builder.api as cmb
     monkeypatch.setattr(cmb, 'build_api_messages_from_db',
-                        lambda cid, cfg: [{'role': 'user', 'content': 'hi'}])
+                        lambda cid, cfg, *, user_id: [{'role': 'user', 'content': 'hi'}])
 
     spawned = {}
-    import lib.tasks_pkg as pkg
+    import lib.tasks_pkg.spawn as pkg
     monkeypatch.setattr(pkg, 'spawn_task', lambda t: spawned.update(t=t))
 
-    r = kick = ap.kick_autopilot('conv-K2', {'model': 'm'})
+    r = kick = ap.kick_autopilot('conv-K2', {'model': 'm'}, user_id=1)
     assert r['taskId']
     assert spawned['t']['_autopilot_kick'] is True
     assert spawned['t']['config']['autopilot'] is True
-    assert spawned['t']['config']['endpointMode'] is False
 
 
 def test_kick_conversation_not_found(monkeypatch):
-    import lib.tasks_pkg.conv_message_builder as cmb
+    import lib.tasks_pkg.conv_message_builder.api as cmb
     import lib.tasks_pkg.autopilot as ap
-    monkeypatch.setattr(cmb, 'build_api_messages_from_db', lambda cid, cfg: None)
-    r = ap.kick_autopilot('conv-missing', {})
+    monkeypatch.setattr(cmb, 'build_api_messages_from_db', lambda cid, cfg, *, user_id: None)
+    r = ap.kick_autopilot('conv-missing', {}, user_id=1)
     assert r['taskId'] is None
     assert r['error'] == 'conversation_not_found'
 
 
 def test_kick_conversation_empty(monkeypatch):
-    import lib.tasks_pkg.conv_message_builder as cmb
+    import lib.tasks_pkg.conv_message_builder.api as cmb
     import lib.tasks_pkg.autopilot as ap
-    monkeypatch.setattr(cmb, 'build_api_messages_from_db', lambda cid, cfg: [])
-    r = ap.kick_autopilot('conv-empty', {})
+    monkeypatch.setattr(cmb, 'build_api_messages_from_db', lambda cid, cfg, *, user_id: [])
+    r = ap.kick_autopilot('conv-empty', {}, user_id=1)
     assert r['taskId'] is None
     assert r['error'] == 'conversation_empty'
 
 
 def test_kick_sets_flag_and_strips_checkpoints(monkeypatch):
-    import lib.tasks_pkg.conv_message_builder as cmb
-    import lib.tasks_pkg as pkg
+    import lib.tasks_pkg.conv_message_builder.api as cmb
+    import lib.tasks_pkg.spawn as pkg
     import lib.tasks_pkg.autopilot as ap
 
     monkeypatch.setattr(cmb, 'build_api_messages_from_db',
-                        lambda cid, cfg: [{'role': 'user', 'content': 'hi'}])
+                        lambda cid, cfg, *, user_id: [{'role': 'user', 'content': 'hi'}])
     spawned = {}
     monkeypatch.setattr(pkg, 'spawn_task', lambda t: spawned.update(t=t))
 
     r = ap.kick_autopilot('conv-K3', {
         'model': 'm', 'excludeLast': True, 'checkpointUsage': {'x': 1},
-        'endpointMode': True,
-    })
+    }, user_id=1)
     assert r['taskId']
     t = spawned['t']
     assert t['_autopilot_kick'] is True
     assert t['config']['autopilot'] is True
-    assert t['config']['endpointMode'] is False
     assert 'excludeLast' not in t['config']
     assert 'checkpointUsage' not in t['config']
 
@@ -136,10 +135,10 @@ def test_run_kick_emits_no_retired_baton_on_done(monkeypatch):
     This test pins the RETIREMENT so the dual mechanism cannot silently
     come back."""
     import lib.tasks_pkg.autopilot as ap
-    from lib.tasks_pkg import create_task
+    from lib.tasks_pkg.manager import create_task
 
     task = create_task('conv-K4', [{'role': 'user', 'content': 'hi'}],
-                       {'model': 'm', 'autopilot': True})
+                       {'model': 'm', 'autopilot': True}, user_id=1)
     task['_autopilot_kick'] = True
 
     monkeypatch.setattr(ap, 'maybe_run_autopilot',
@@ -167,10 +166,10 @@ def test_run_kick_emits_no_retired_baton_on_done(monkeypatch):
 def test_run_kick_done_without_followup(monkeypatch):
     """VU declined (TASK_DONE) → done event carries no baton, no crash."""
     import lib.tasks_pkg.autopilot as ap
-    from lib.tasks_pkg import create_task
+    from lib.tasks_pkg.manager import create_task
 
     task = create_task('conv-K5', [{'role': 'user', 'content': 'hi'}],
-                       {'model': 'm', 'autopilot': True})
+                       {'model': 'm', 'autopilot': True}, user_id=1)
     task['_autopilot_kick'] = True
 
     monkeypatch.setattr(ap, 'maybe_run_autopilot', lambda t: None)

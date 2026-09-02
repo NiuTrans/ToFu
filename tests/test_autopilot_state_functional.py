@@ -23,7 +23,7 @@ Gaps this file closes vs the pre-slice-1 baseline:
   * ``_resolve_recent_run_id`` — was UNCOVERED. All 4 paths:
     empty conv_id, pinned in settings, fallback to tail-scan of messages,
     no run at all.
-  * ``_resolve_run_anchor_msgid`` — was UNCOVERED. All 5 boundary rules:
+  * ``_resolve_run_anchor_turn_id`` — was UNCOVERED. All 5 boundary rules:
     empty conv_id/run_id, stamped VU turn only, extended across unstamped
     followups, stopped by next VU stamp, stopped by real (non-VU) user turn.
   * ``_record_vu_turn_and_check_budget`` — extra coverage: no conv_id (early
@@ -220,27 +220,28 @@ def test_extract_objective_all_synthetic_returns_empty():
 
 @pytest.mark.unit
 def test_extract_objective_from_db_empty_conv_id():
-    assert ap_state._extract_objective_from_db('') == ''
-    assert ap_state._extract_objective_from_db(None) == ''  # type: ignore[arg-type]
+    assert ap_state._extract_objective_from_db('', user_id=1) == ''
+    assert ap_state._extract_objective_from_db(None, user_id=1) == ''  # type: ignore[arg-type]
 
 
 @pytest.mark.unit
 def test_extract_objective_from_db_load_raise_swallowed(monkeypatch):
     """Any exception in _load_messages_from_db → '' (best-effort)."""
-    from lib.tasks_pkg import conv_message_builder
-    def _boom(_cid):
+    from lib.tasks_pkg.conv_message_builder import _load as conv_message_load
+    def _boom(_cid, *, user_id):
+        del user_id
         raise RuntimeError('DB unavailable')
-    monkeypatch.setattr(conv_message_builder, '_load_messages_from_db', _boom)
-    assert ap_state._extract_objective_from_db('cv-boom') == ''
+    monkeypatch.setattr(conv_message_load, '_load_messages_from_db', _boom)
+    assert ap_state._extract_objective_from_db('cv-boom', user_id=1) == ''
 
 
 @pytest.mark.unit
 def test_extract_objective_from_db_empty_raw(monkeypatch):
     """Empty messages returned → ''."""
-    from lib.tasks_pkg import conv_message_builder
-    monkeypatch.setattr(conv_message_builder, '_load_messages_from_db',
-                        lambda _cid: [])
-    assert ap_state._extract_objective_from_db('cv-empty') == ''
+    from lib.tasks_pkg.conv_message_builder import _load as conv_message_load
+    monkeypatch.setattr(conv_message_load, '_load_messages_from_db',
+                        lambda _cid, *, user_id: [])
+    assert ap_state._extract_objective_from_db('cv-empty', user_id=1) == ''
 
 
 @pytest.mark.unit
@@ -248,14 +249,14 @@ def test_extract_objective_from_db_delegates_to_pure_extract(monkeypatch):
     """A real DB row is round-tripped through _extract_objective — same
     skip rules apply (DB is truth, but injected synthetic turns COULD in
     theory exist if the caller persisted them, so verify by skipping)."""
-    from lib.tasks_pkg import conv_message_builder
-    monkeypatch.setattr(conv_message_builder, '_load_messages_from_db',
-                        lambda _cid: [
+    from lib.tasks_pkg.conv_message_builder import _load as conv_message_load
+    monkeypatch.setattr(conv_message_load, '_load_messages_from_db',
+                        lambda _cid, *, user_id: [
                             {'role': 'user', '_isVirtualUser': True,
                              'content': 'VU synthetic'},
                             {'role': 'user', 'content': 'the persisted ask'},
                         ])
-    assert ap_state._extract_objective_from_db('cv-real') == 'the persisted ask'
+    assert ap_state._extract_objective_from_db('cv-real', user_id=1) == 'the persisted ask'
 
 
 # ══════════════════════════════════════════════════════════
@@ -266,7 +267,7 @@ def test_extract_objective_from_db_delegates_to_pure_extract(monkeypatch):
 def test_get_or_persist_objective_empty_conv_id_derives_locally():
     """Empty conv_id → no persistence, just derive from live messages."""
     msgs = [{'role': 'user', 'content': 'local derive'}]
-    assert ap_state._get_or_persist_objective('', msgs) == 'local derive'
+    assert ap_state._get_or_persist_objective('', msgs, user_id=1) == 'local derive'
 
 
 @pytest.mark.unit
@@ -274,12 +275,12 @@ def test_get_or_persist_objective_existing_pin_no_write(store, monkeypatch):
     """Existing autopilotObjective → skip the write, return the pin."""
     store.ensure('cv1', autopilotObjective='pinned value')
     # DB read should NOT be reached — pin wins.
-    from lib.tasks_pkg import conv_message_builder
-    monkeypatch.setattr(conv_message_builder, '_load_messages_from_db',
-                        lambda _cid: (_ for _ in ()).throw(RuntimeError(
+    from lib.tasks_pkg.conv_message_builder import _load as conv_message_load
+    monkeypatch.setattr(conv_message_load, '_load_messages_from_db',
+                        lambda _cid, *, user_id: (_ for _ in ()).throw(RuntimeError(
                             'DB should not be read when pin exists')))
     result = ap_state._get_or_persist_objective(
-        'cv1', [{'role': 'user', 'content': 'live ask'}])
+        'cv1', [{'role': 'user', 'content': 'live ask'}], user_id=1)
     assert result == 'pinned value'
     # Verify no write (skip counter incremented, write did not).
     assert store.write_count == 0
@@ -292,14 +293,15 @@ def test_get_or_persist_objective_fresh_derives_from_db_and_persists(
     """No pin → derive from DB (truth) → persist. Live messages are the
     FALLBACK, not the primary source (they carry injected boilerplate)."""
     store.ensure('cv2')  # no pin
-    from lib.tasks_pkg import conv_message_builder
-    monkeypatch.setattr(conv_message_builder, '_load_messages_from_db',
-                        lambda _cid: [{'role': 'user', 'content': 'db truth'}])
+    from lib.tasks_pkg.conv_message_builder import _load as conv_message_load
+    monkeypatch.setattr(conv_message_load, '_load_messages_from_db',
+                        lambda _cid, *, user_id: [
+                            {'role': 'user', 'content': 'db truth'}])
     live_with_injection = [
         {'role': 'user', '_isMeta': True, 'content': 'CLAUDE.md carrier'},
         {'role': 'user', 'content': 'db truth (mirrored on live but with boilerplate wrapper)'},
     ]
-    result = ap_state._get_or_persist_objective('cv2', live_with_injection)
+    result = ap_state._get_or_persist_objective('cv2', live_with_injection, user_id=1)
     assert result == 'db truth', 'objective must come from DB, not live'
     assert store.rows['cv2']['autopilotObjective'] == 'db truth'
     assert store.write_count == 1
@@ -310,11 +312,11 @@ def test_get_or_persist_objective_falls_back_to_live_when_db_empty(
         store, monkeypatch):
     """No pin, DB read returns nothing → fall back to live messages."""
     store.ensure('cv3')
-    from lib.tasks_pkg import conv_message_builder
-    monkeypatch.setattr(conv_message_builder, '_load_messages_from_db',
-                        lambda _cid: [])
+    from lib.tasks_pkg.conv_message_builder import _load as conv_message_load
+    monkeypatch.setattr(conv_message_load, '_load_messages_from_db',
+                        lambda _cid, *, user_id: [])
     result = ap_state._get_or_persist_objective(
-        'cv3', [{'role': 'user', 'content': 'live only'}])
+        'cv3', [{'role': 'user', 'content': 'live only'}], user_id=1)
     assert result == 'live only'
     assert store.rows['cv3']['autopilotObjective'] == 'live only'
 
@@ -325,11 +327,11 @@ def test_get_or_persist_objective_no_objective_skips_write(
     """DB empty + live has NO real user ask (all synthetic) → return ''
     WITHOUT writing an empty pin."""
     store.ensure('cv4')
-    from lib.tasks_pkg import conv_message_builder
-    monkeypatch.setattr(conv_message_builder, '_load_messages_from_db',
-                        lambda _cid: [])
+    from lib.tasks_pkg.conv_message_builder import _load as conv_message_load
+    monkeypatch.setattr(conv_message_load, '_load_messages_from_db',
+                        lambda _cid, *, user_id: [])
     result = ap_state._get_or_persist_objective(
-        'cv4', [{'role': 'user', '_isMeta': True, 'content': 'meta'}])
+        'cv4', [{'role': 'user', '_isMeta': True, 'content': 'meta'}], user_id=1)
     assert result == ''
     assert 'autopilotObjective' not in store.rows['cv4']
     assert store.write_count == 0
@@ -343,7 +345,7 @@ def test_get_or_persist_objective_conv_row_absent_falls_back(monkeypatch):
     monkeypatch.setattr(conv_pkg, 'update_conversation_settings',
                         lambda *a, **k: None)
     result = ap_state._get_or_persist_objective(
-        'ghost', [{'role': 'user', 'content': 'ephemeral ask'}])
+        'ghost', [{'role': 'user', 'content': 'ephemeral ask'}], user_id=1)
     assert result == 'ephemeral ask'
 
 
@@ -355,7 +357,7 @@ def test_get_or_persist_objective_exception_falls_back(monkeypatch):
         raise RuntimeError('settings store on fire')
     monkeypatch.setattr(conv_pkg, 'update_conversation_settings', _boom)
     result = ap_state._get_or_persist_objective(
-        'cv-err', [{'role': 'user', 'content': 'fallback ask'}])
+        'cv-err', [{'role': 'user', 'content': 'fallback ask'}], user_id=1)
     assert result == 'fallback ask'
 
 
@@ -366,7 +368,7 @@ def test_get_or_persist_objective_exception_falls_back(monkeypatch):
 @pytest.mark.unit
 def test_get_or_persist_run_id_empty_conv_id_ephemeral():
     """Empty conv_id → mint a fresh 'ar-...' id that is not persisted."""
-    r = ap_state._get_or_persist_run_id('')
+    r = ap_state._get_or_persist_run_id('', user_id=1)
     assert r.startswith('ar-')
     assert len(r) == 15  # 'ar-' + 12 hex chars
 
@@ -375,7 +377,7 @@ def test_get_or_persist_run_id_empty_conv_id_ephemeral():
 def test_get_or_persist_run_id_existing_pin_no_write(store):
     """Existing autopilotRunId → return the pin, no write."""
     store.ensure('cvR1', autopilotRunId='ar-preexisting')
-    result = ap_state._get_or_persist_run_id('cvR1')
+    result = ap_state._get_or_persist_run_id('cvR1', user_id=1)
     assert result == 'ar-preexisting'
     assert store.skip_count == 1
     assert store.write_count == 0
@@ -385,7 +387,7 @@ def test_get_or_persist_run_id_existing_pin_no_write(store):
 def test_get_or_persist_run_id_fresh_mint_and_persist(store):
     """No pin → mint 'ar-<12hex>' and persist under autopilotRunId."""
     store.ensure('cvR2')
-    result = ap_state._get_or_persist_run_id('cvR2')
+    result = ap_state._get_or_persist_run_id('cvR2', user_id=1)
     assert result.startswith('ar-')
     assert len(result) == 15
     assert store.rows['cvR2']['autopilotRunId'] == result
@@ -398,7 +400,7 @@ def test_get_or_persist_run_id_conv_row_absent_ephemeral(monkeypatch):
     import lib.conversations as conv_pkg
     monkeypatch.setattr(conv_pkg, 'update_conversation_settings',
                         lambda *a, **k: None)
-    result = ap_state._get_or_persist_run_id('ghost-R')
+    result = ap_state._get_or_persist_run_id('ghost-R', user_id=1)
     assert result.startswith('ar-')
     assert len(result) == 15
 
@@ -410,7 +412,7 @@ def test_get_or_persist_run_id_exception_ephemeral(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError('boom')
     monkeypatch.setattr(conv_pkg, 'update_conversation_settings', _boom)
-    result = ap_state._get_or_persist_run_id('cv-R-err')
+    result = ap_state._get_or_persist_run_id('cv-R-err', user_id=1)
     assert result.startswith('ar-')
 
 
@@ -420,8 +422,8 @@ def test_get_or_persist_run_id_mints_are_unique(store):
     against a shadow-bug where the uuid slice collapsed to a constant)."""
     store.ensure('cvR-a')
     store.ensure('cvR-b')
-    a = ap_state._get_or_persist_run_id('cvR-a')
-    b = ap_state._get_or_persist_run_id('cvR-b')
+    a = ap_state._get_or_persist_run_id('cvR-a', user_id=1)
+    b = ap_state._get_or_persist_run_id('cvR-b', user_id=1)
     assert a != b
 
 
@@ -436,8 +438,8 @@ def test_clear_run_id_empty_conv_id_noop(monkeypatch):
     calls = []
     monkeypatch.setattr(conv_pkg, 'update_conversation_settings',
                         lambda *a, **k: calls.append((a, k)))
-    ap_state._clear_run_id('')
-    ap_state._clear_run_id(None)  # type: ignore[arg-type]
+    ap_state._clear_run_id('', user_id=1)
+    ap_state._clear_run_id(None, user_id=1)  # type: ignore[arg-type]
     assert calls == [], 'empty ids must return before touching persistence'
 
 
@@ -451,7 +453,7 @@ def test_clear_run_id_removes_all_four_run_scoped_keys(store):
                  autopilotProgress=[{'resolved_delta': 1}],
                  autopilotObjective='the goal',
                  unrelatedKey='keep me')
-    ap_state._clear_run_id('cvC1')
+    ap_state._clear_run_id('cvC1', user_id=1)
     for k in ('autopilotRunId', 'autopilotTurnCount',
               'autopilotVuHistory', 'autopilotProgress'):
         assert k not in store.rows['cvC1'], f'{k} should be cleared'
@@ -466,7 +468,7 @@ def test_clear_run_id_removes_all_four_run_scoped_keys(store):
 def test_clear_run_id_nothing_to_clear_skips_write(store):
     """If no run-scoped keys are present, skip the write entirely."""
     store.ensure('cvC2', autopilotObjective='ok', unrelatedKey='x')
-    ap_state._clear_run_id('cvC2')
+    ap_state._clear_run_id('cvC2', user_id=1)
     assert store.write_count == 0
     assert store.skip_count == 1
     # Nothing lost.
@@ -481,7 +483,7 @@ def test_clear_run_id_conv_row_absent_silent(monkeypatch):
     calls = []
     monkeypatch.setattr(conv_pkg, 'update_conversation_settings',
                         lambda *a, **k: calls.append((a, k)))
-    result = ap_state._clear_run_id('ghost-C')
+    result = ap_state._clear_run_id('ghost-C', user_id=1)
     assert result is None
     assert len(calls) == 1 and calls[0][0][0] == 'ghost-C'
 
@@ -494,51 +496,26 @@ def test_clear_run_id_exception_swallowed(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError('boom')
     monkeypatch.setattr(conv_pkg, 'update_conversation_settings', _boom)
-    ap_state._clear_run_id('cv-C-err')  # no raise
+    ap_state._clear_run_id('cv-C-err', user_id=1)  # no raise
 
 
 # ══════════════════════════════════════════════════════════
 #  _resolve_recent_run_id — all 4 paths
 # ══════════════════════════════════════════════════════════
 
-class _FakeCursor:
-    def __init__(self, row):
-        self._row = row
-    def fetchone(self):
-        return self._row
-
-
-class _FakeDB:
-    """Minimal db.execute stub returning a fake cursor for one canned row."""
-    def __init__(self, row):
-        self._row = row
-    def execute(self, sql, params=None):
-        return _FakeCursor(self._row)
-
-
 @pytest.fixture
-def fake_db(monkeypatch):
-    """Install the conversation-repository boundary with a canned snapshot.
-
-    Resolver tests are about run-id policy, not the repository's SQL projection
-    order.  The production helper now reads ``ConversationSnapshot`` objects;
-    keeping the old two-column SQL fake made every settings test fail inside
-    repository compatibility parsing before the resolver ran at all.
-    """
+def fake_snapshot(monkeypatch):
+    """Install the owner-scoped snapshot boundary with a canned projection."""
     import json
-    import lib.database
-    import lib.database.conversation_repository as repository
-    from lib.database.conversation_repository import (
-        ConversationIntegrityError,
-        ConversationSnapshot,
-    )
+    import lib.conversations.repository as repository
+    from lib.conversations.repository import ConversationSnapshot
 
     installed = {'row': None}
 
     def _install(row):
         installed['row'] = row
 
-    def _load(_db, _conv_id, **_kwargs):
+    def _load(_conv_id, **_kwargs):
         row = installed['row']
         if row is None:
             return None
@@ -549,42 +526,40 @@ def fake_db(monkeypatch):
         try:
             messages = json.loads(raw_messages or '[]')
         except (json.JSONDecodeError, TypeError) as exc:
-            raise ConversationIntegrityError('invalid test transcript') from exc
+            raise RuntimeError('invalid test transcript') from exc
         return ConversationSnapshot(
             metadata={'settings': raw_settings},
             messages=messages,
-            source='test',
         )
 
-    monkeypatch.setattr(lib.database, 'get_thread_db', lambda _dom: object())
-    monkeypatch.setattr(repository, 'load_conversation', _load)
+    monkeypatch.setattr(repository, 'get_conversation', _load)
 
     return _install
 
 
 @pytest.mark.unit
 def test_resolve_recent_run_id_empty_conv_id():
-    assert ap_state._resolve_recent_run_id('') == ''
+    assert ap_state._resolve_recent_run_id('', user_id=1) == ''
 
 
 @pytest.mark.unit
-def test_resolve_recent_run_id_pinned_wins(fake_db):
+def test_resolve_recent_run_id_pinned_wins(fake_snapshot):
     """A pinned settings.autopilotRunId beats the message-tail scan."""
     import json
-    fake_db((
+    fake_snapshot((
         json.dumps({'autopilotRunId': 'ar-pinned'}),
         json.dumps([{'_autopilotRunId': 'ar-tail-stamp',
                      'role': 'user', '_isVirtualUser': True}]),
     ))
-    assert ap_state._resolve_recent_run_id('cvA') == 'ar-pinned'
+    assert ap_state._resolve_recent_run_id('cvA', user_id=1) == 'ar-pinned'
 
 
 @pytest.mark.unit
-def test_resolve_recent_run_id_falls_back_to_tail_scan(fake_db):
+def test_resolve_recent_run_id_falls_back_to_tail_scan(fake_snapshot):
     """No pin → scan messages TAIL-FIRST for the newest _autopilotRunId
     stamp (a run whose pin was already cleared)."""
     import json
-    fake_db((
+    fake_snapshot((
         json.dumps({}),  # no pin
         json.dumps([
             {'_autopilotRunId': 'ar-old', 'role': 'user', '_isVirtualUser': True},
@@ -593,166 +568,166 @@ def test_resolve_recent_run_id_falls_back_to_tail_scan(fake_db):
             {'role': 'assistant', 'content': 'later reply'},
         ]),
     ))
-    assert ap_state._resolve_recent_run_id('cvB') == 'ar-new'
+    assert ap_state._resolve_recent_run_id('cvB', user_id=1) == 'ar-new'
 
 
 @pytest.mark.unit
-def test_resolve_recent_run_id_no_run_at_all(fake_db):
+def test_resolve_recent_run_id_no_run_at_all(fake_snapshot):
     """Empty pin AND no _autopilotRunId stamp anywhere → ''."""
     import json
-    fake_db((
+    fake_snapshot((
         json.dumps({}),
         json.dumps([
             {'role': 'user', 'content': 'ordinary ask'},
             {'role': 'assistant', 'content': 'ordinary reply'},
         ]),
     ))
-    assert ap_state._resolve_recent_run_id('cvC') == ''
+    assert ap_state._resolve_recent_run_id('cvC', user_id=1) == ''
 
 
 @pytest.mark.unit
-def test_resolve_recent_run_id_conv_missing(fake_db):
+def test_resolve_recent_run_id_conv_missing(fake_snapshot):
     """fetchone → None → ''."""
-    fake_db(None)
-    assert ap_state._resolve_recent_run_id('cv-missing') == ''
+    fake_snapshot(None)
+    assert ap_state._resolve_recent_run_id('cv-missing', user_id=1) == ''
 
 
 @pytest.mark.unit
-def test_resolve_recent_run_id_bad_settings_json_falls_through(fake_db):
+def test_resolve_recent_run_id_bad_settings_json_falls_through(fake_snapshot):
     """Corrupt settings JSON → treat as empty settings → tail-scan."""
     import json
-    fake_db(('not-json', json.dumps([
+    fake_snapshot(('not-json', json.dumps([
         {'_autopilotRunId': 'ar-fallback', 'role': 'user', '_isVirtualUser': True}])))
-    assert ap_state._resolve_recent_run_id('cvBad') == 'ar-fallback'
+    assert ap_state._resolve_recent_run_id('cvBad', user_id=1) == 'ar-fallback'
 
 
 @pytest.mark.unit
-def test_resolve_recent_run_id_bad_messages_json_returns_empty(fake_db):
+def test_resolve_recent_run_id_bad_messages_json_returns_empty(fake_snapshot):
     """Corrupt messages JSON + no pin → '' (silent, defensive)."""
     import json
-    fake_db((json.dumps({}), 'not-json'))
-    assert ap_state._resolve_recent_run_id('cvBadM') == ''
+    fake_snapshot((json.dumps({}), 'not-json'))
+    assert ap_state._resolve_recent_run_id('cvBadM', user_id=1) == ''
 
 
 @pytest.mark.unit
-def test_resolve_recent_run_id_pinned_trimmed(fake_db):
+def test_resolve_recent_run_id_pinned_trimmed(fake_snapshot):
     """Whitespace on pinned id is stripped."""
     import json
-    fake_db((json.dumps({'autopilotRunId': '  ar-padded  '}),
+    fake_snapshot((json.dumps({'autopilotRunId': '  ar-padded  '}),
              json.dumps([])))
-    assert ap_state._resolve_recent_run_id('cvT') == 'ar-padded'
+    assert ap_state._resolve_recent_run_id('cvT', user_id=1) == 'ar-padded'
 
 
 # ══════════════════════════════════════════════════════════
-#  _resolve_run_anchor_msgid — all 5 boundary rules
+#  _resolve_run_anchor_turn_id — all 5 boundary rules
 # ══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
 def test_resolve_anchor_empty_conv_or_run_id():
-    assert ap_state._resolve_run_anchor_msgid('', 'ar-x') == ''
-    assert ap_state._resolve_run_anchor_msgid('cv', '') == ''
+    assert ap_state._resolve_run_anchor_turn_id('', 'ar-x', user_id=1) == ''
+    assert ap_state._resolve_run_anchor_turn_id('cv', '', user_id=1) == ''
 
 
 @pytest.mark.unit
-def test_resolve_anchor_stamped_vu_turn_alone(fake_db):
+def test_resolve_anchor_stamped_vu_turn_alone(fake_snapshot):
     """A run's VU turn with NO subsequent messages → the VU turn IS the boundary."""
     import json
-    fake_db((json.dumps([
-        {'role': 'user', 'content': 'human ask', '_msgId': 'm-user'},
-        {'role': 'assistant', 'content': 'reply', '_msgId': 'm-asst'},
+    fake_snapshot((json.dumps([
+        {'role': 'user', 'content': 'human ask', '_turnId': 'm-user'},
+        {'role': 'assistant', 'content': 'reply', '_turnId': 'm-asst'},
         {'role': 'user', '_isVirtualUser': True,
-         '_autopilotRunId': 'ar-target', '_msgId': 'm-vu'},
+         '_autopilotRunId': 'ar-target', '_turnId': 'm-vu'},
     ]),))
-    assert ap_state._resolve_run_anchor_msgid('cvA', 'ar-target') == 'm-vu'
+    assert ap_state._resolve_run_anchor_turn_id('cvA', 'ar-target', user_id=1) == 'm-vu'
 
 
 @pytest.mark.unit
-def test_resolve_anchor_extends_over_unstamped_followups(fake_db):
+def test_resolve_anchor_extends_over_unstamped_followups(fake_snapshot):
     """The VU turn extends FORWARD across unstamped agent follow-ups —
     the boundary is the LAST unstamped follow-up (assistant reply)."""
     import json
-    fake_db((json.dumps([
+    fake_snapshot((json.dumps([
         {'role': 'user', '_isVirtualUser': True,
-         '_autopilotRunId': 'ar-r', '_msgId': 'm-vu'},
-        {'role': 'assistant', 'content': 'first followup', '_msgId': 'm-a1'},
-        {'role': 'assistant', 'content': 'second followup', '_msgId': 'm-a2'},
+         '_autopilotRunId': 'ar-r', '_turnId': 'm-vu'},
+        {'role': 'assistant', 'content': 'first followup', '_turnId': 'm-a1'},
+        {'role': 'assistant', 'content': 'second followup', '_turnId': 'm-a2'},
     ]),))
-    assert ap_state._resolve_run_anchor_msgid('cvB', 'ar-r') == 'm-a2'
+    assert ap_state._resolve_run_anchor_turn_id('cvB', 'ar-r', user_id=1) == 'm-a2'
 
 
 @pytest.mark.unit
-def test_resolve_anchor_stops_at_next_run_stamp(fake_db):
+def test_resolve_anchor_stops_at_next_run_stamp(fake_snapshot):
     """A NEXT run's VU turn (stamped with a different run id) is the STOP
     boundary — anchor is the last unstamped turn BEFORE it."""
     import json
-    fake_db((json.dumps([
+    fake_snapshot((json.dumps([
         {'role': 'user', '_isVirtualUser': True,
-         '_autopilotRunId': 'ar-A', '_msgId': 'm-vu-A'},
-        {'role': 'assistant', 'content': 'A followup', '_msgId': 'm-A-fu'},
+         '_autopilotRunId': 'ar-A', '_turnId': 'm-vu-A'},
+        {'role': 'assistant', 'content': 'A followup', '_turnId': 'm-A-fu'},
         {'role': 'user', '_isVirtualUser': True,
-         '_autopilotRunId': 'ar-B', '_msgId': 'm-vu-B'},  # next run — STOP
+         '_autopilotRunId': 'ar-B', '_turnId': 'm-vu-B'},  # next run — STOP
     ]),))
     # Anchor for run A must NOT drift into run B.
-    assert ap_state._resolve_run_anchor_msgid('cvC', 'ar-A') == 'm-A-fu'
+    assert ap_state._resolve_run_anchor_turn_id('cvC', 'ar-A', user_id=1) == 'm-A-fu'
 
 
 @pytest.mark.unit
-def test_resolve_anchor_stops_at_real_user_turn(fake_db):
+def test_resolve_anchor_stops_at_real_user_turn(fake_snapshot):
     """A real (non-VU) human user turn is the STOP boundary — the run
     ends before the human intervenes."""
     import json
-    fake_db((json.dumps([
+    fake_snapshot((json.dumps([
         {'role': 'user', '_isVirtualUser': True,
-         '_autopilotRunId': 'ar-r', '_msgId': 'm-vu'},
-        {'role': 'assistant', 'content': 'reply', '_msgId': 'm-asst'},
-        {'role': 'user', 'content': 'human interrupt', '_msgId': 'm-user'},
+         '_autopilotRunId': 'ar-r', '_turnId': 'm-vu'},
+        {'role': 'assistant', 'content': 'reply', '_turnId': 'm-asst'},
+        {'role': 'user', 'content': 'human interrupt', '_turnId': 'm-user'},
     ]),))
-    assert ap_state._resolve_run_anchor_msgid('cvD', 'ar-r') == 'm-asst'
+    assert ap_state._resolve_run_anchor_turn_id('cvD', 'ar-r', user_id=1) == 'm-asst'
 
 
 @pytest.mark.unit
-def test_resolve_anchor_no_stamped_turn_returns_empty(fake_db):
+def test_resolve_anchor_no_stamped_turn_returns_empty(fake_snapshot):
     """A run id that never appeared → ''."""
     import json
-    fake_db((json.dumps([
-        {'role': 'user', 'content': 'no autopilot here', '_msgId': 'm-u'},
+    fake_snapshot((json.dumps([
+        {'role': 'user', 'content': 'no autopilot here', '_turnId': 'm-u'},
     ]),))
-    assert ap_state._resolve_run_anchor_msgid('cvE', 'ar-nonexistent') == ''
+    assert ap_state._resolve_run_anchor_turn_id('cvE', 'ar-nonexistent', user_id=1) == ''
 
 
 @pytest.mark.unit
-def test_resolve_anchor_boundary_lacks_msgid_returns_empty(fake_db):
-    """A boundary turn that has NO stable _msgId → '' (backend must not
+def test_resolve_anchor_boundary_lacks_turn_id_returns_empty(fake_snapshot):
+    """A boundary turn that has NO stable _turnId → '' (backend must not
     invent placement)."""
     import json
-    fake_db((json.dumps([
+    fake_snapshot((json.dumps([
         {'role': 'user', '_isVirtualUser': True,
-         '_autopilotRunId': 'ar-r'},  # no _msgId
+         '_autopilotRunId': 'ar-r'},  # no _turnId
     ]),))
-    assert ap_state._resolve_run_anchor_msgid('cvF', 'ar-r') == ''
+    assert ap_state._resolve_run_anchor_turn_id('cvF', 'ar-r', user_id=1) == ''
 
 
 @pytest.mark.unit
-def test_resolve_anchor_conv_missing_returns_empty(fake_db):
-    fake_db(None)
-    assert ap_state._resolve_run_anchor_msgid('cv-missing', 'ar-x') == ''
+def test_resolve_anchor_conv_missing_returns_empty(fake_snapshot):
+    fake_snapshot(None)
+    assert ap_state._resolve_run_anchor_turn_id('cv-missing', 'ar-x', user_id=1) == ''
 
 
 @pytest.mark.unit
-def test_resolve_anchor_last_stamp_wins_on_repeated_run(fake_db):
+def test_resolve_anchor_last_stamp_wins_on_repeated_run(fake_snapshot):
     """A run id that appears TWICE (edit-branch pathology): the code uses
     the LAST occurrence (its stamped_idx is overwritten in the loop)."""
     import json
-    fake_db((json.dumps([
+    fake_snapshot((json.dumps([
         {'role': 'user', '_isVirtualUser': True,
-         '_autopilotRunId': 'ar-dup', '_msgId': 'm-first'},
+         '_autopilotRunId': 'ar-dup', '_turnId': 'm-first'},
         {'role': 'user', '_isVirtualUser': True,
-         '_autopilotRunId': 'ar-dup', '_msgId': 'm-second'},
-        {'role': 'assistant', 'content': 'tail', '_msgId': 'm-tail'},
+         '_autopilotRunId': 'ar-dup', '_turnId': 'm-second'},
+        {'role': 'assistant', 'content': 'tail', '_turnId': 'm-tail'},
     ]),))
     # Boundary extends from the LAST 'ar-dup' occurrence over the trailing
     # unstamped assistant → m-tail.
-    assert ap_state._resolve_run_anchor_msgid('cvDup', 'ar-dup') == 'm-tail'
+    assert ap_state._resolve_run_anchor_turn_id('cvDup', 'ar-dup', user_id=1) == 'm-tail'
 
 
 # ══════════════════════════════════════════════════════════
@@ -762,7 +737,7 @@ def test_resolve_anchor_last_stamp_wins_on_repeated_run(fake_db):
 @pytest.mark.unit
 def test_record_vu_turn_empty_conv_id_early_return():
     """Empty conv_id → fail-open no-stop with turn=0."""
-    assert ap_state._record_vu_turn_and_check_budget('', 'text') == {
+    assert ap_state._record_vu_turn_and_check_budget('', 'text', user_id=1) == {
         'stop': False, 'reason': '', 'turn': 0}
 
 
@@ -776,7 +751,7 @@ def test_record_vu_turn_progress_ledger_delta_arithmetic(store, monkeypatch):
     # Turn 1: baseline, no prior → delta = 3 (== resolved).
     r1 = ap_state._record_vu_turn_and_check_budget(
         'cvP1', 'first turn [PROGRESS: resolved=3 remaining=1]',
-        targets=['a.py'])
+        targets=['a.py'], user_id=1)
     ledger = store.rows['cvP1']['autopilotProgress']
     assert ledger[-1]['resolved_delta'] == 3
     assert ledger[-1]['cum_resolved'] == 3
@@ -786,7 +761,7 @@ def test_record_vu_turn_progress_ledger_delta_arithmetic(store, monkeypatch):
     # Turn 2: cum unchanged (still 3) → delta = 0.
     ap_state._record_vu_turn_and_check_budget(
         'cvP1', 'no new progress [PROGRESS: resolved=3 remaining=1]',
-        targets=['a.py'])
+        targets=['a.py'], user_id=1)
     ledger = store.rows['cvP1']['autopilotProgress']
     assert ledger[-1]['resolved_delta'] == 0
     assert ledger[-1]['cum_resolved'] == 3
@@ -794,14 +769,14 @@ def test_record_vu_turn_progress_ledger_delta_arithmetic(store, monkeypatch):
     # Turn 3: NEGATIVE delta (resolved went backwards) → clamp to 0.
     ap_state._record_vu_turn_and_check_budget(
         'cvP1', 'oops backwards [PROGRESS: resolved=1 remaining=3]',
-        targets=['a.py'])
+        targets=['a.py'], user_id=1)
     ledger = store.rows['cvP1']['autopilotProgress']
     assert ledger[-1]['resolved_delta'] == 0  # clamped from -2
     assert ledger[-1]['cum_resolved'] == 1
 
     # Turn 4: no [PROGRESS] line → delta None, cum stays at prev cum (1).
     ap_state._record_vu_turn_and_check_budget(
-        'cvP1', 'no progress marker here', targets=['a.py'])
+        'cvP1', 'no progress marker here', targets=['a.py'], user_id=1)
     ledger = store.rows['cvP1']['autopilotProgress']
     assert ledger[-1]['resolved_delta'] is None
     assert ledger[-1]['cum_resolved'] == 1
@@ -819,7 +794,7 @@ def test_record_vu_turn_progress_ledger_cap_evicts_oldest(store, monkeypatch):
         ap_state._record_vu_turn_and_check_budget(
             'cvP2',
             f'turn {i} [PROGRESS: resolved={i} remaining=0]',
-            targets=[f'f{i}.py'])
+            targets=[f'f{i}.py'], user_id=1)
     ledger = store.rows['cvP2']['autopilotProgress']
     assert len(ledger) == ap_state._PROGRESS_LEDGER_CAP == 8
     # The last 8 entries are turns 2..9; verify by cum_resolved.
@@ -843,7 +818,7 @@ def test_record_vu_turn_history_cap_evicts_oldest(store, monkeypatch):
         'theta turn eight text distinct',
     ]
     for t in varied:
-        ap_state._record_vu_turn_and_check_budget('cvH1', t)
+        ap_state._record_vu_turn_and_check_budget('cvH1', t, user_id=1)
     hist = store.rows['cvH1']['autopilotVuHistory']
     assert len(hist) == ap_state._VU_HISTORY_CAP == 6
     assert hist[0].startswith('gamma')  # first two evicted
@@ -859,7 +834,7 @@ def test_record_vu_turn_exception_fail_open(store, monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError('settings on fire')
     monkeypatch.setattr(conv_pkg, 'update_conversation_settings', _boom)
-    assert ap_state._record_vu_turn_and_check_budget('cv-err', 'text') == {
+    assert ap_state._record_vu_turn_and_check_budget('cv-err', 'text', user_id=1) == {
         'stop': False, 'reason': '', 'turn': 0}
 
 
@@ -871,7 +846,7 @@ def test_record_vu_turn_deduplicates_targets(store, monkeypatch):
     monkeypatch.setenv('TOFU_AUTOPILOT_PROGRESS_WINDOW', '0')
     store.ensure('cvT1', autopilotRunId='ar-t1')
     ap_state._record_vu_turn_and_check_budget(
-        'cvT1', 'text', targets=['b.py', 'a.py', 'b.py', 'a.py', ''])
+        'cvT1', 'text', targets=['b.py', 'a.py', 'b.py', 'a.py', ''], user_id=1)
     ledger = store.rows['cvT1']['autopilotProgress']
     assert ledger[-1]['targets'] == ['a.py', 'b.py']
 

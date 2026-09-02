@@ -1,7 +1,7 @@
 """lib/tools/motion_video.py — Motion-video tool definitions.
 
 The chat-agent surface of the motion-video pipeline
-(docs/MOTION_VIDEO_DESIGN.md): the agent storyboards + authors scene
+(docs/modules/ingest_media.md): the agent storyboards + authors scene
 compositions itself, and these tools are the deterministic machinery around
 it (env bootstrap, zero-LLM gates, render, probe, concat). Execution lives
 in ``lib/tasks_pkg/handlers/motion_video.py`` on top of

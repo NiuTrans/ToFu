@@ -6,7 +6,7 @@ Covers the model-facing skills channel end to end:
     (format, byte-stability, disabled/ineligible exclusion)
   * ``load_skill``           — exact-id progressive-disclosure loader
     (body + bounded file sample, honest unknown/disabled/ineligible)
-  * the ``_inject_system_contexts`` splice seam — gated on has_real_tools
+  * the ``compose_task_context`` splice seam — gated on has_real_tools
     ONLY (independent of the memory toggle), idempotent, own cache block
   * tool registration (``_build_skills``) + display wiring (label /
     renderer / dispatch table) + the executor handler
@@ -135,12 +135,13 @@ def test_load_returns_instructions_and_manifest(isolated):
 
     out = load_skill('mypkg', project_path=proj)
     assert out.startswith('Skill loaded: **mypkg**')
-    assert f'base_directory: {os.path.abspath(pkg_dir)}' in out
+    assert 'base_directory:' not in out
+    assert os.path.abspath(pkg_dir) not in out
     assert 'content_hash:' in out
     assert '<skill_instructions>\nTHE GUIDE\n</skill_instructions>' in out
-    # Bounded sample uses absolute, directly-readable paths.
-    assert os.path.join(pkg_dir, 'references', 'ref.md') in out
-    assert os.path.join(pkg_dir, 'scripts', 'run.py') in out
+    # Bounded sample uses opaque, owner-resolved resource paths.
+    assert 'skill://mypkg/references/ref.md' in out
+    assert 'skill://mypkg/scripts/run.py' in out
 
 
 @pytest.mark.unit
@@ -189,17 +190,18 @@ def test_load_ineligible_reports_reason(isolated):
     assert 'SECRET GUIDE' not in out
 
 
-# ── _inject_system_contexts splice seam ──────────────────────────────
+# ── compose_task_context splice seam ──────────────────────────────
 
 def _run_inject(messages, *, has_real_tools=True, memory_enabled=False,
                 project_path=None, project_enabled=False):
-    from lib.tasks_pkg.system_context import _inject_system_contexts
-    _inject_system_contexts(
+    from lib.tasks_pkg.context_composer import compose_task_context
+    compose_task_context(
         messages,
+        user_id=0,
         project_path=project_path or '/tmp/x',
         project_enabled=project_enabled,
         memory_enabled=memory_enabled,
-        search_enabled=False, swarm_enabled=False,
+        search_enabled=False,
         has_real_tools=has_real_tools,
         conv_id='', task={'config': {}}, model='claude-opus-4',
     )
@@ -258,7 +260,7 @@ def test_injection_skills_gating_and_idempotency(isolated):
 @pytest.mark.unit
 def test_tool_registration_surface(isolated):
     from types import SimpleNamespace
-    from lib.tools.registry._build import _build_skills
+    from lib.tools.registry._build import _build_skill_install, _build_skills
 
     proj = _proj(isolated)
     _write_pkg(os.path.join(proj, '.tofu', 'skills'), 'mypkg')
@@ -266,21 +268,34 @@ def test_tool_registration_surface(isolated):
         lean=False, has_base_tools=True, cfg={'projectPaths': [proj]},
         project_path=proj, project_enabled=True, tid='test')
     on = _build_skills(ctx)
-    assert [t['function']['name'] for t in on] == ['load_skill']
+    assert [t['function']['name'] for t in on] == [
+        'search_skills', 'load_skill', 'read_skill_resource',
+    ]
+    assert [t['function']['name'] for t in _build_skill_install(ctx)] == [
+        'request_skill_install']
 
-    # No base tools or no eligible installed skills → no loader schema.
+    # No base tools / lean mode → no skill surface. Zero installed packages
+    # still gets catalog discovery, so installation can be requested.
     assert _build_skills(
         SimpleNamespace(lean=False, has_base_tools=False)) == []
     assert _build_skills(
         SimpleNamespace(lean=True, has_base_tools=True)) == []
+    assert _build_skill_install(
+        SimpleNamespace(lean=True, has_base_tools=True)) == []
 
     # Declared idempotent (read-only) via the ToolSpec registry.
-    from lib.tools import all_specs
+    from lib.tools.registry import all_specs
     spec = next(s for s in all_specs() if s.key == 'skills')
     assert 'load_skill' in spec.idempotent_tools
+    assert 'search_skills' in spec.idempotent_tools
     assert 'load_skill' in spec.provides
     assert 'activate_skill' not in spec.provides
-    assert not spec.write_tools
+    assert spec.write_tools == frozenset()
+    install_spec = next(s for s in all_specs() if s.key == 'skill_install')
+    assert install_spec.discovery_policy == 'searchable'
+    assert install_spec.write_tools == frozenset({'request_skill_install'})
+    assert install_spec.confirmation_tools == frozenset({
+        'request_skill_install'})
 
 
 @pytest.mark.unit
@@ -290,9 +305,13 @@ def test_display_wiring(isolated):
     from lib.tasks_pkg.tool_dispatch._labels import tool_label
 
     assert 'load_skill' in _TOOL_DISPLAY_DISPATCH
+    assert 'search_skills' in _TOOL_DISPLAY_DISPATCH
+    assert 'read_skill_resource' in _TOOL_DISPLAY_DISPATCH
+    assert 'request_skill_install' in _TOOL_DISPLAY_DISPATCH
     assert tool_round_label('load_skill', {'skill_id': 'mypkg'}) == \
         'Loaded skill: mypkg'
     assert tool_label('load_skill') == 'Loading skill'
+    assert tool_label('request_skill_install') == 'Installing skill'
     # Display-only history shim; this name has no schema or handler.
     assert tool_round_label('activate_skill', {'skill': 'mypkg'}) == \
         'Previously activated skill: mypkg'
@@ -319,7 +338,8 @@ def test_handler_end_to_end(isolated):
     import threading
     # _suppressEvents: the same isolation swarm sub-agents use — keeps
     # append_event (SSE push + durable event-log row) out of this unit test.
-    task = {'id': 'skill-test-task', 'toolRounds': [], 'events': [],
+    task = {'id': 'skill-test-task', '_userId': 1,
+            'toolRounds': [], 'events': [],
             'events_lock': threading.Lock(), '_suppressEvents': True}
     round_entry = {'query': 'Loaded skill: mypkg'}
     tc_id, content, is_search = _handle_skill_tool(

@@ -1,0 +1,19 @@
+{
+  "include": [
+    "lib/api_v4.py",
+    "lib/identity.py",
+    "lib/process_roles.py",
+    "lib/storage/connection_probe.py",
+    "lib/storage_sidecar/config.py",
+    "lib/storage_sidecar/migrate.py"
+  ],
+  "exclude": [
+    "codex",
+    "node_modules",
+    "static",
+    "frontend/src/runtime/app-runtime.js"
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "strict",
+  "reportMissingTypeStubs": "none"
+}

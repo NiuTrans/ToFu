@@ -1,6 +1,6 @@
 """lib/conversations/segments_backfill.py — the ONE segments-fill primitive.
 
-Segment-timeline delivery (epic pt_cb8f98b0cb9b47fb) has two consumers that
+Segment-timeline delivery () has two consumers that
 must fill a segment-less assistant message from the backend-authoritative
 ``task_results.segments`` row (the thin persisted render form —
 id/name/input/result, exactly what ``renderSegmentTimelineHTML`` consumes),

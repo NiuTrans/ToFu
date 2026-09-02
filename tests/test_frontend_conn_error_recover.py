@@ -52,15 +52,20 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+from tests._runtime_sections import runtime_section
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-EE_JS = os.path.join(ROOT, 'static', 'js', 'core', 'error_envelope.js')
-I18N_JS = os.path.join(ROOT, 'static', 'js', 'i18n.js')
+# static/js was deleted by the Epic-E Vite migration; the shipped owner is
+# the core/error_envelope.js section of frontend/src/runtime/app-runtime.js.
+EE_JS = 'core/error_envelope.js'
+# Locale data migrated to Vite-owned JSON chunks; the harness rebuilds a
+# t()-compatible runtime directly from those authoritative tables.
+LOCALE_DIR = os.path.join(ROOT, 'frontend', 'src', 'i18n', 'locales')
 
 
 def _read(path: str) -> str:
-    with open(path, encoding='utf-8') as f:
-        return f.read()
+    return runtime_section(path, scope_prelude=False)
 
 
 def _brace_match(src: str, open_pos: int) -> int:
@@ -93,13 +98,25 @@ def _extract_const_obj(src: str, name: str) -> str:
 
 
 def _extract_i18n_runtime() -> str:
-    src = _read(I18N_JS)
-    m = re.search(r'var\s+_i18n\s*=\s*', src)
-    assert m, '_i18n table not found in i18n.js'
-    brace = src.find('{', m.end())
-    table = src[m.start():_brace_match(src, brace)]
-    t_fn = _extract_fn(src, 't')
-    return 'var _i18nLang = "zh";\n' + table + ';\n' + t_fn
+    with open(os.path.join(LOCALE_DIR, 'zh.json'), encoding='utf-8') as f:
+        zh = json.load(f)
+    with open(os.path.join(LOCALE_DIR, 'en.json'), encoding='utf-8') as f:
+        en = json.load(f)
+    return (
+        'var _i18nLang = "zh";\n'
+        'var _i18n = { zh: ' + json.dumps(zh, ensure_ascii=False)
+        + ', en: ' + json.dumps(en, ensure_ascii=False) + ' };\n'
+        'function t(key, params) {\n'
+        '  var value = (_i18n[_i18nLang] && _i18n[_i18nLang][key])\n'
+        '    !== undefined ? _i18n[_i18nLang][key] : _i18n.zh[key];\n'
+        '  if (value === undefined) value = key;\n'
+        '  if (!params) return value;\n'
+        '  return value.replace(/\\{([A-Za-z0-9_]+)\\}/g, function (token, name) {\n'
+        '    return Object.prototype.hasOwnProperty.call(params, name)\n'
+        '      ? String(params[name] == null ? "" : params[name]) : token;\n'
+        '  });\n'
+        '}\n'
+    )
 
 
 def _render(*, kind: str, lang: str = 'en', poison: str = '') -> str:

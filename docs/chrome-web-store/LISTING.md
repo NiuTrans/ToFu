@@ -52,7 +52,9 @@ What it lets your assistant do, on the tabs you point it at:
 • Read the text content of a tab, or a specific element by CSS selector.
 • Take a full-page screenshot so the assistant can "see" the page.
 • Fill in forms, click buttons, hover menus, and send keystrokes to complete multi-step tasks.
+• Inspect console errors and temporarily debug JavaScript with bounded object inspection, breakpoints, pause, and stepping.
 • Read or set cookies, search your history, and read your bookmarks when a task needs them.
+• Transfer a file available through your browser login into bounded staging on your own Tofu server, without silently saving it to this device's Downloads folder.
 
 WHO THIS IS FOR
 This is a companion to the Tofu app. It is only useful if you are already running a Tofu server. On first use you paste your own server's URL (for example http://localhost:15000) into the extension popup. With no server configured, the extension does nothing.
@@ -64,6 +66,7 @@ YOU ARE IN CONTROL
 • Nothing happens until you enter your server URL and enable the bridge.
 • The popup shows a live connected/disconnected status and a Pause button that stops all activity instantly.
 • The assistant acts on tabs in response to tasks you give it in the Tofu app.
+• DevTools sessions expire automatically, paused pages auto-resume, and executable debugging actions use Tofu's browser-domain approval controls.
 
 OPEN SOURCE
 Tofu and this extension are open source. You can read exactly what the extension does in background.js before installing.

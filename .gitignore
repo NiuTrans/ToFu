@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Repository guidance is source even when a local Git exclude hides it.
+!/AGENTS.md
+
 # ── Per-host env marker (written by install.sh, read by server.py
 #    / bootstrap.py to re-exec into the correct conda interpreter).
 #    Contains absolute paths — machine-specific, never commit. ──
@@ -26,6 +29,14 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Local interpreters and test-run state.  Modern venv/pytest versions create
+# nested .gitignore files themselves, but the repository boundary must not
+# depend on a tool having initialized those directories successfully.
+/.venv/
+/venv/
+/.pytest_cache/
+/.hypothesis/
+
 
 # ── Runtime data (auto-created, contains databases, configs, temp files) ──
 # ROOT-ANCHORED on purpose: a bare `data/` matches a nested `data` dir at ANY
@@ -44,6 +55,8 @@ __pycache__/
 /analysis_scripts/
 /sundries/
 /tools/
+# External Codex source checkout used for local comparison/evaluation.
+/codex/
 
 # ── Academic / personal scratch content (NOT part of the app — must never
 #    be published to the public mirror). overleaf_cache holds fetched
@@ -52,6 +65,11 @@ __pycache__/
 /overleaf_cache/
 /paper/
 /thesis_references.bib
+
+# Separate internal LongCat harness workspace. Its own AGENTS.md explicitly
+# marks links/data as company-internal; keep it on disk but outside Tofu's Git
+# baseline and every Tofu export.
+/autoharness/
 
 # ── Personal scratch copy script (not part of the app) ──
 /copy_to_chenxin.sh
@@ -69,43 +87,90 @@ __pycache__/
 #     without it makes that instruction a dead end),
 #   scripts/install_on_server.sh (server-side installer; same shape — a
 #     documented entry point that must exist in a clean clone to be runnable).
+# Benchmark result payloads remain local, but executable benchmark contracts
+# imported by the release test suite must exist in a clean clone.
 /benchmarks/
+!/benchmarks/
+/benchmarks/*
+!/benchmarks/AGENTS.md
+!/benchmarks/task_replay_bench.py
+!/benchmarks/context_efficiency_bench.py
+!/benchmarks/context_efficiency_manifest.json
+!/benchmarks/context_efficiency/
+/benchmarks/context_efficiency/*
+!/benchmarks/context_efficiency/__init__.py
+!/benchmarks/context_efficiency/analyze.py
+!/benchmarks/context_efficiency/cli.py
+!/benchmarks/context_efficiency/dataset.py
+!/benchmarks/context_efficiency/runtime.py
+!/benchmarks/context_efficiency/README.md
+/audit_codex_session.py
+!/audit_codex_session.py
 /promo/
+# Retired root-level README screenshot dump. Referenced documentation assets
+# belong beside their owning docs or in the canonical static asset tree.
+/propaganda/
 /scripts/*
+!/scripts/AGENTS.md
 !/scripts/rootless_egress_bridge.c
 !/scripts/gen_desktop_icons.py
 !/scripts/gen_tofu_icons.py
 !/scripts/png_to_svg.py
 !/scripts/build_frontend.mjs
+!/scripts/check_i18n_usage.mjs
+!/scripts/compose_frontend_runtime.mjs
+!/scripts/compose_frontend_styles.mjs
 !/scripts/frontend_budget.py
+# scripts/check_helm_render.py is the CI semantic gate for the rendered chart.
+!/scripts/check_helm_render.py
+!/scripts/check_developer_runtime_artifacts.py
+!/scripts/gen_i18n_contract.mjs
 !/scripts/update_runtime_actions.mjs
 !/scripts/verify_frontend_dist.py
 !/scripts/gen_orchestration_authoring_metadata.py
 !/scripts/gen_orchestration_compatibility_defaults.py
 !/scripts/gen_orchestration_http_contract.py
 !/scripts/gen_orchestration_wire_formats.py
+!/scripts/gen_conversation_sync_contract.py
+!/scripts/gen_api_v4_contract.py
 !/scripts/gen_tool_inventory.py
 !/scripts/audit_tests.py
 !/scripts/bootstrap_rootless_qemu.sh
 !/scripts/rootless_qemu-conda-linux-64.lock
 !/scripts/rootless_terminal_bench_21.py
+
+# Release-bound ESM behavior gates must remain visible even when an older
+# checkout carries the historical ``tests/test_frontend_*.py`` local exclude.
+!/tests/test_frontend_browser_storage_vite.py
+!/tests/test_frontend_authoritative_composer.py
+!/tests/test_frontend_conversation_surface_vite.py
+!/tests/test_frontend_model_catalog_vite.py
+!/tests/test_frontend_paper_podcast_runtime_vite.py
+!/tests/test_frontend_paper_report_runtime_vite.py
+!/tests/test_frontend_paper_video_runtime_vite.py
+!/tests/test_frontend_project_mode_decoupling.py
+!/tests/test_orchestration_wire_contracts.py
 # P2 test tooling (docs/TESTING_STRATEGY.md): test_select.py is loaded by
 # tests/test_test_select.py and driven by `make test-affected`; ratchet_audit.py
 # is loaded by tests/test_ratchet_incident_link.py and regenerates
 # docs/RATCHET_AUDIT.md. A clean clone without them breaks both consumers.
 !/scripts/test_select.py
 !/scripts/ratchet_audit.py
+# Test-harness bundler for native TS/ESM owners: tests/_runtime_sections.py
+# shells out to it to materialize isolated classic-script test views. A clean
+# clone without it breaks every harness that adapter serves (it raises
+# AssertionError at collection).
+!/scripts/vite_test_bundle.mjs
 !/scripts/package_extension.sh
 !/scripts/vendor_mcp.sh
 !/scripts/migrate_pg_to_sqlite.py
+!/scripts/migrate_sqlite_to_postgres.py
 !/scripts/activate_sqlite_cutover.py
-!/scripts/_database_leaf.py
-!/scripts/migrate_chatui_to_tofu.py
-!/scripts/compact_sqlite_diagnostics.py
-!/scripts/compact_sqlite_projections.py
-!/scripts/retranslate_truncated.py
 !/scripts/storagectl.py
 !/scripts/storage_certify.py
+# Offline bloat-reclamation window tool (verify-gated VACUUM INTO + retained
+# pre-image) — the same supported storage-maintenance surface as storagectl.
+!/scripts/storage_deep_clean.py
 !/scripts/ptc_live_smoke.py
 !/scripts/verify_pdf_stack.py
 !/scripts/install_on_server.sh
@@ -122,6 +187,8 @@ __pycache__/
 # through 0.15.2) shipped with no changelog entry: nothing in the repo
 # referenced CHANGELOG.md, so no check could observe the drift.
 !/scripts/changelog_gate.py
+!/scripts/check_documentation.py
+!/scripts/check_architecture.py
 # Cache-waste distribution report. The measurement discipline it encodes —
 # rates DERIVED from lib.cost rather than hand-written, non-waste classes
 # (TTL expiry / cold start) excluded from the recoverable denominator,
@@ -142,12 +209,16 @@ __pycache__/
 # into an excluded DIRECTORY, so a /debug/ rule would make the negation below
 # dead (the uploads/* + !.gitkeep pattern is the established shape).
 /debug/*
+!/debug/AGENTS.md
 # Whitelist: the CI wizard pixel probe (the manual installer-ui-probe.yml
 # workflow drives it on windows-latest). That workflow ships in the
 # opensource export, so the script must too — the same dead-pipeline
 # argument as release_assets.py: a public clone without it carries a
 # workflow that dies on a missing file.
 !/debug/win_ci_shot.py
+# Canonical read-only conversation diagnostic used by serverctl and shipped
+# into source/Docker installs; all other debug scripts remain scratch-only.
+!/debug/inspect_conversation.py
 # Raw AI-gen asset candidates + proof strips (review-only, multi-MB) under the
 # pet-icon dir. Anchored to that subtree, not a bare _candidates glob.
 static/icons/pet/_candidates/
@@ -163,7 +234,7 @@ static/images/attach-icon.svg
 static/images/onigiri-icon.png
 static/images/onigiri-icon.svg
 # setuptools egg metadata (regenerable build artifact)
-/tofu.egg-info/
+/*.egg-info/
 # Per-host helper scripts (hardcoded internal proxy IP / mount paths)
 /setup_bashrc.sh
 /copy_to_dst.sh
@@ -215,6 +286,9 @@ docs/解答260505_v2.pdf
 
 # ── Test coverage ──
 .coverage
+.coverage.*
+/coverage.xml
+/htmlcov/
 
 # ── Debug artifacts (developer-only, may contain API endpoints/keys) ──
 debug/benchmark_results.json
@@ -228,6 +302,17 @@ logs/
 # into CWD instead of logs/). Runtime-only, never source.
 *.log
 server_*.log
+
+# ── misc/ (collected strays) ──
+# Untracked leftovers gathered out of the repo root: runtime logs, per-host
+# copy scripts, temp residue, regenerable node_modules backups. Tracked
+# strays (git mv'd) live alongside them and stay tracked.
+misc/logs/
+misc/scripts/
+misc/tmp/
+misc/node_modules.local_bak.*/
+# Untracked personal scratch PDFs collected into misc/docs (tracked strays there stay tracked).
+misc/docs/*.pdf
 
 static/js/.bundle-*.js
 static/js/.i18n-*.js
@@ -251,6 +336,7 @@ node_modules/
 # processes on FUSE-mounted repos (see CLAUDE.md §9 cross-DC notes).
 # Personal files (launch.json, tasks.json, *.code-workspace) stay ignored.
 .vscode/*
+!.vscode/AGENTS.md
 !.vscode/settings.json
 !.vscode/extensions.json
 !.vscode/README.md
@@ -325,6 +411,8 @@ benchmarks/context_efficiency_results/
 /artifacts/
 /"artifacts/
 /config-temp/
+/.playwright-cli/
+/output/
 /remote:*/
 /*.tmp.js
 *.neuter

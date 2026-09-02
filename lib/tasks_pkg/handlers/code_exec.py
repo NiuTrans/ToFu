@@ -8,6 +8,7 @@ import threading
 import time
 
 from lib.log import get_logger
+from lib.project_mod.config import MAX_COMMAND_OUTPUT
 from lib.tasks_pkg.executor import _finalize_tool_round, tool_registry
 from lib.tasks_pkg.manager import append_event
 
@@ -28,6 +29,41 @@ except Exception as _e:  # pragma: no cover - defensive: never break run_command
 # user approval — defaults agreed in chat).
 _COALESCE_MS = 200            # max wall-clock between flushes
 _COALESCE_BYTES = 4096        # flush as soon as buffered output exceeds this
+RUN_COMMAND_RECOVERY_OUTPUT_MAX_CHARS = max(1, int(MAX_COMMAND_OUTPUT))
+
+
+def _remember_bounded_partial_output(state, text):
+    """Retain one command-output prefix/tail inside the recovery budget."""
+    if not text:
+        return
+    state['partial_total_chars'] += len(text)
+    prefix = state['partial_prefix']
+    prefix_room = state['partial_prefix_limit'] - len(prefix)
+    if prefix_room > 0:
+        prefix += text[:prefix_room]
+        text = text[prefix_room:]
+        state['partial_prefix'] = prefix
+    if text:
+        tail = state['partial_suffix'] + text
+        state['partial_suffix'] = tail[-state['partial_suffix_limit']:]
+
+
+def _render_bounded_partial_output(state):
+    """Render exact output below the cap, otherwise a bounded prefix/tail."""
+    total = state['partial_total_chars']
+    prefix = state['partial_prefix']
+    suffix = state['partial_suffix']
+    limit = RUN_COMMAND_RECOVERY_OUTPUT_MAX_CHARS
+    if total <= limit:
+        return prefix + suffix
+    marker = f'\n\n… [live output truncated: {total:,} chars total] …\n\n'
+    if len(marker) >= limit:
+        return marker[:limit]
+    available = limit - len(marker)
+    prefix_size = min(len(prefix), available * 3 // 4)
+    suffix_size = available - prefix_size
+    tail = suffix[-suffix_size:] if suffix_size else ''
+    return prefix[:prefix_size] + marker + tail
 
 
 def _make_run_command_progress_cb(task, rn, round_entry, command):
@@ -48,7 +84,18 @@ def _make_run_command_progress_cb(task, rn, round_entry, command):
         'last_flush': time.monotonic(),
         'lock': threading.Lock(),
         'timer': None,
-        # ★ Live QR recovery. A scan-to-login QR is printed while the command
+        # A command can print without bound even though its settled result is
+        # capped by MAX_COMMAND_OUTPUT. Keep the reconnect projection at the
+        # same hard budget instead of repeatedly copying the entire raw log.
+        'partial_prefix': '',
+        'partial_suffix': '',
+        'partial_total_chars': 0,
+        'partial_prefix_limit': (
+            RUN_COMMAND_RECOVERY_OUTPUT_MAX_CHARS * 3 // 4),
+        'partial_suffix_limit': max(
+            1, RUN_COMMAND_RECOVERY_OUTPUT_MAX_CHARS
+            - RUN_COMMAND_RECOVERY_OUTPUT_MAX_CHARS * 3 // 4),
+        # Live QR recovery. A scan-to-login QR is printed while the command
         #   is STILL RUNNING and blocking for the scan, so recovering it only
         #   at finalize delivers the image after the authorization window has
         #   closed. The scanner is stateful (dedup + growth throttle) because
@@ -86,9 +133,16 @@ def _make_run_command_progress_cb(task, rn, round_entry, command):
 
         # Mirror partial output onto the round_entry so a
         # state-snapshot reconnect can replay it (see manager.append_event).
-        partial = round_entry.setdefault('_partialOutput', '')
         for s, t in merged:
-            partial = partial + t
+            _remember_bounded_partial_output(state, t)
+            partial = _render_bounded_partial_output(state)
+            round_entry['_partialOutput'] = partial
+            round_entry['_partialOutputTotalChars'] = state[
+                'partial_total_chars']
+            if state['partial_total_chars'] > RUN_COMMAND_RECOVERY_OUTPUT_MAX_CHARS:
+                round_entry['_partialOutputTruncated'] = True
+            else:
+                round_entry.pop('_partialOutputTruncated', None)
             append_event(task, {
                 'type': 'tool_progress',
                 'roundNum': rn,
@@ -97,9 +151,8 @@ def _make_run_command_progress_cb(task, rn, round_entry, command):
                 'chunk': t,
                 'toolName': round_entry.get('toolName') or 'run_command',
             })
-        round_entry['_partialOutput'] = partial
 
-        # ★ Live QR recovery — the scan-to-login seam.
+        # Live QR recovery — the scan-to-login seam.
         #   Runs AFTER the buffer is updated so the scanner sees the complete
         #   art block, and emits its own event rather than riding a chunk
         #   frame: the code becomes visible the moment it is drawable, which
@@ -206,7 +259,7 @@ def _make_run_command_spawn_cb(task, rn, round_entry):
         if deadline_ms is not None:
             ev['deadlineTs'] = deadline_ms
         append_event(task, ev)
-        # ★ Durability. See the docstring: this is the ONLY write that puts a
+        # Durability. See the docstring: this is the ONLY write that puts a
         #   still-running round + its deadline into the DB, so a conversation
         #   switch / reload mid-command can project a live countdown instead of
         #   restarting it. Deliberately NOT throttled — it happens once per
@@ -309,6 +362,28 @@ def _make_stdin_callback(task, rn, round_entry, command):
 def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
     from lib.project_mod import execute_standalone_command
     cmd = fn_args.get('command', '')
+    from lib.tasks_pkg.handlers.authenticated_download import (
+        maybe_redirect_authenticated_download,
+    )
+    redirected = maybe_redirect_authenticated_download(
+        task=task, cfg=cfg, command=cmd)
+    if redirected is not None:
+        round_entry['authenticatedDownloadRedirected'] = True
+        meta = {
+            'toolName': 'code_exec',
+            'command': redirected.display_command,
+            'output': redirected.tool_content,
+            'exitCode': '0' if redirected.ok else 'not-run',
+            'timedOut': False,
+            'badge': redirected.badge,
+            'authenticatedDownloadRedirected': True,
+        }
+        if redirected.receipt:
+            meta['serverStagingReceipt'] = redirected.receipt
+        _finalize_tool_round(
+            task, rn, round_entry, [meta],
+            status='done' if redirected.ok else 'error')
+        return tc_id, redirected.tool_content, False
     # Background swarm/agent workers have no UI capable of answering a stdin
     # request. Giving them the interactive callback changes run_command to its
     # stdin-waiting implementation and can strand a worker indefinitely.
@@ -318,7 +393,7 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     spawn_cb = _make_run_command_spawn_cb(task, rn, round_entry)
     grep_intercept_cb = _make_grep_intercept_cb(task, rn, round_entry)
     try:
-        # ★ task= (pt_0bde0fd8): without it the runner got task=None — the
+        # task= (): without it the runner got task=None — the
         #   subprocess was NEVER registered (_subprocess_pid), so a silent
         #   >30min code_exec was still whole-task-reaped (the reaper could
         #   not interrupt it) and even Stop could not kill the process
@@ -339,7 +414,7 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     m_exit = re.search(r'\[exit code: (-?\d+)\]\s*$', tool_content)
     exit_code = m_exit.group(1) if m_exit else '?'
     timed_out = '[Command timed out]' in tool_content
-    # ★ Per-command interrupt (user button / stall watchdog) — same contract
+    # Per-command interrupt (user button / stall watchdog) — same contract
     #   as lib/tools/meta.py::_build_run_command: an amber neutral stop, the
     #   task CONTINUED, never the red `exit -1` error frame.
     interrupted = '[Command interrupted by' in tool_content

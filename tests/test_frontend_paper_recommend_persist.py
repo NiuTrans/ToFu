@@ -37,7 +37,7 @@ LIBRARY_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'library.ts')
 RECOMMEND_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'recommend.ts')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 def _node_deps_available():
@@ -49,7 +49,7 @@ def _node_deps_available():
 @pytest.fixture(scope='module')
 def native_owners(tmp_path_factory):
     if not _node_deps_available() or not os.path.isfile(ESBUILD):
-        pytest.skip('node + jsdom + esbuild dev dependencies required')
+        pytest.skip('node + jsdom + vite test bundler dev dependencies required')
     output = tmp_path_factory.mktemp('paper-recommend-persist')
     built = []
     for source, name in (
@@ -267,7 +267,7 @@ def test_native_reuse_contract_is_explicit(native_owners):
 
 
 @pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
-                    reason='node + jsdom + esbuild dev-deps not installed')
+                    reason='node + jsdom + vite test bundler dev-deps not installed')
 def test_vite_library_preserves_recommend_persistence_contract(native_owners):
     out = _run(*native_owners)
     assert out['after_first_count'] == 1

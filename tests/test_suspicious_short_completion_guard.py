@@ -189,9 +189,14 @@ class TestSuspiciousGuardIsWired:
         import ast
         src = _read(FINALIZE_PATH)
         tree = ast.parse(src)
+        finalizer = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == '_finalize_and_emit_done'
+        )
         calls = {
             node.func.id
-            for node in ast.walk(tree)
+            for node in ast.walk(finalizer)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
         }
@@ -204,17 +209,27 @@ class TestSuspiciousGuardIsWired:
 
     def test_hook_runs_before_done_event_emit(self):
         """The hook must run BEFORE the done event is built/emitted — the
-        done event's committedMessage (and the pre-emit conv sync) read
-        task['content'], so a hook that runs after would persist the short
-        residue to the client anyway."""
-        src = _read(FINALIZE_PATH)
-        hook_pos = src.index('_maybe_preserve_accumulated_on_suspicion(')
-        # The done event emit happens at append_event(task, done_evt) near the
-        # end of _finalize_and_emit_done; the pre-emit conv sync earlier reads
-        # task['content']. Assert the hook sits before BOTH.
-        sync_pos = src.index('_sync_result_to_conversation(task')
-        assert hook_pos < sync_pos, (
-            f'{FINALIZE_PATH}: the preservation hook must run BEFORE the '
-            f'pre-emit conv sync (which reads task[\'content\']), otherwise '
-            f'the short residue is already committed before interception.'
+        terminal event bridge snapshots task['content'], so a hook that runs
+        after it would persist the short residue."""
+        import ast
+        tree = ast.parse(_read(FINALIZE_PATH))
+        finalizer = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == '_finalize_and_emit_done'
+        )
+        call_lines = {
+            node.func.id: node.lineno
+            for node in ast.walk(finalizer)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {
+                '_maybe_preserve_accumulated_on_suspicion',
+                '_build_done_event_base',
+            }
+        }
+        assert call_lines['_maybe_preserve_accumulated_on_suspicion'] \
+            < call_lines['_build_done_event_base'], (
+            f'{FINALIZE_PATH}: the preservation hook must run before the '
+            'terminal event is built.'
         )

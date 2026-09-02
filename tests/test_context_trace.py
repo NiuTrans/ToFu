@@ -1,6 +1,6 @@
 """Tests for the unified ``[Context]`` context-assembly observability layer.
 
-``_inject_system_contexts`` (lib/tasks_pkg/system_context.py) emits, at the END
+``compose_task_context`` (``lib.tasks_pkg.context_composer``) emits, at the END
 of assembly, ONE INFO line of the shape::
 
     [Context] conv=<id> round=<n> blocks=[name:chars,...] total=<N>
@@ -25,9 +25,25 @@ import logging
 
 import pytest
 
-from lib.tasks_pkg.system_context import _inject_system_contexts, _system_text
+from lib.tasks_pkg.context_composer import compose_task_context
 
 pytestmark = pytest.mark.unit
+
+
+def _system_text(messages):
+    if not messages or messages[0].get('role') != 'system':
+        return ''
+    content = messages[0].get('content', '')
+    if isinstance(content, str):
+        return content
+    return '\n\n'.join(
+        block.get('text', '') or ''
+        for block in content or ()
+        if isinstance(block, dict) and block.get('type') == 'text')
+
+
+def _wrap_system_reminder(text):
+    return f'<system-reminder>\n{text}\n</system-reminder>'
 
 
 def _carrier_text(messages):
@@ -54,18 +70,24 @@ def _assemble(**over):
         {'role': 'user', 'content': 'Hello, please help.'},
     ]
     kwargs = dict(
+        user_id=1,
         project_path='/tmp/ctxtrace',
         project_enabled=False,
         memory_enabled=True,
         search_enabled=False,
-        swarm_enabled=True,
         has_real_tools=True,
         conv_id='ctxtrace1',
         task={},
         model='gpt-4o',
     )
     kwargs.update(over)
-    _inject_system_contexts(messages, **kwargs)
+    task = kwargs.get('task')
+    if isinstance(task, dict):
+        task.setdefault('_userId', 1)
+        task.setdefault('config', {
+            'orchestration': {'multiAgent': 'read_only'},
+        })
+    compose_task_context(messages, **kwargs)
     return messages
 
 
@@ -77,7 +99,7 @@ def test_summary_names_each_injected_block(caplog):
     """The single INFO [Context] line names static / memory_accum / swarm
     (the blocks injected on a tool-enabled, project-off, memory+swarm turn),
     each with a char count."""
-    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.system_context'):
+    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.context_composer._render'):
         _assemble()
 
     summaries = [r.getMessage() for r in caplog.records
@@ -96,9 +118,9 @@ def test_summary_names_each_injected_block(caplog):
 
 
 def test_summary_emitted_once_per_assembly_not_per_round(caplog):
-    """_inject_system_contexts runs once per task — the summary must fire
+    """compose_task_context runs once per task — the summary must fire
     exactly once, labelled round=0 on a fresh task (no toolRounds yet)."""
-    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.system_context'):
+    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.context_composer._render'):
         _assemble(task={})
     summaries = [r.getMessage() for r in caplog.records
                  if r.getMessage().startswith('[Context]') and 'blocks=[' in r.getMessage()]
@@ -109,7 +131,7 @@ def test_summary_emitted_once_per_assembly_not_per_round(caplog):
 def test_summary_round_reflects_toolrounds(caplog):
     """round= reflects len(task['toolRounds']) at assembly — proving it is an
     honest per-assembly snapshot, not a hardcoded 0."""
-    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.system_context'):
+    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.context_composer._render'):
         _assemble(task={'toolRounds': [{}, {}, {}]})
     summaries = [r.getMessage() for r in caplog.records
                  if r.getMessage().startswith('[Context]') and 'blocks=[' in r.getMessage()]
@@ -126,16 +148,16 @@ def test_instrumentation_is_byte_identical(caplog):
     [Context] records emitted) produces byte-identical system text + carrier.
     Pure-logging instrumentation must never change the prompt."""
     # With INFO logging capture active.
-    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.system_context'):
+    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.context_composer._render'):
         m_on = _assemble()
     sys_on, car_on = _system_text(m_on), _carrier_text(m_on)
 
     # With logging raised above any [Context] level — same assembly path.
-    logging.getLogger('lib.tasks_pkg.system_context').setLevel(logging.CRITICAL)
+    logging.getLogger('lib.tasks_pkg.context_composer._render').setLevel(logging.CRITICAL)
     try:
         m_off = _assemble()
     finally:
-        logging.getLogger('lib.tasks_pkg.system_context').setLevel(logging.NOTSET)
+        logging.getLogger('lib.tasks_pkg.context_composer._render').setLevel(logging.NOTSET)
     sys_off, car_off = _system_text(m_off), _carrier_text(m_off)
 
     assert sys_on == sys_off, 'system text differs between log levels'
@@ -153,10 +175,11 @@ def test_summary_total_equals_assembled_byte_delta(caplog):
     ]
     base_len = len(_system_text(messages)) + len(_carrier_text(messages))
 
-    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.system_context'):
-        _inject_system_contexts(
-            messages, project_path='/tmp/ctxtrace', project_enabled=False,
-            memory_enabled=True, search_enabled=False, swarm_enabled=True,
+    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.context_composer._render'):
+        compose_task_context(
+            messages, user_id=1,
+            project_path='/tmp/ctxtrace', project_enabled=False,
+            memory_enabled=True, search_enabled=False,
             has_real_tools=True, conv_id='ctxtrace2', task={}, model='gpt-4o',
         )
 
@@ -188,24 +211,19 @@ def test_summary_total_equals_assembled_byte_delta(caplog):
         f'{2 * n_blocks} for {n_blocks} blocks')
 
 
-def test_project_mode_covers_digest_charter_board_and_detail_seams(caplog, monkeypatch):
-    """CLOSE THE PROOF GAP over the seams whose INFO→DEBUG log level was
-    changed (digest/charter/board) and over pref_detail (left at detail=False
-    on a project-OFF run). Drive a project-mode assembly with NON-EMPTY
-    digest/charter/board builders + a detail-tier profile, and assert:
+def test_project_mode_covers_digest_charter_board_and_user_context(
+        caplog, monkeypatch):
+    """Drive a project assembly with every major provider non-empty and assert:
       (a) each of those block names appears in the summary, AND
       (b) digest/charter/board carry their WRAPPED (<system-reminder>) char
           count exactly, AND
       (c) `total` still equals the real system+carrier byte delta within glue.
     Patching targets the SOURCE modules the seams import at call time."""
-    from lib.tasks_pkg.system_context import _wrap_system_reminder
-
     _DIGEST = 'These are 3 related conversation(s) in this project: foo, bar, baz.'
     _CHARTER = '[PROJECT CHARTER]\nNorth star: ship the parser refactor.'
     _BOARD = '[PROJECT BOARD]\nopen: refactor parser (claimed by conv abc).'
-    # Profile body with BOTH a CORE (## Preferences) and DETAIL (## About the
-    # user) tier so the detail tier is non-empty AND relevance-selected by the
-    # query — exercising the pref_detail trace entry.
+    # One complete user-context body; every durable category shares the same
+    # cache-stable conversation block.
     _PROFILE = (
         '## Preferences\n- Always run ruff before committing.\n'
         '## About the user\n- Works on the parser subsystem of the chatui project.\n'
@@ -217,10 +235,11 @@ def test_project_mode_covers_digest_charter_board_and_detail_seams(caplog, monke
     import lib.memory.user_profile as up
     import lib.project_mod as pm
 
-    monkeypatch.setattr(ps, 'build_project_digest',
-                        lambda *a, **k: _DIGEST)
-    monkeypatch.setattr(ps, 'project_digest_entries',
-                        lambda *a, **k: [])
+    monkeypatch.setattr(
+        ps,
+        'build_project_digest_projection',
+        lambda *a, **k: ps.ProjectDigestProjection(_DIGEST, ()),
+    )
     monkeypatch.setattr(pc, 'render_charter_injection_block',
                         lambda *a, **k: _CHARTER)
     # The injection seam calls render_board_injection_block (the abridged
@@ -233,11 +252,11 @@ def test_project_mode_covers_digest_charter_board_and_detail_seams(caplog, monke
     })
     monkeypatch.setattr(up, 'load_context',
                         lambda *a, **k: {'items': [{'id': 'test-pref'}]})
-    monkeypatch.setattr(up, 'render_profile_tiers',
-                        lambda *a, **k: (_PROFILE.split('## About')[0],
-                                         '## About' + _PROFILE.split('## About')[1]))
-    monkeypatch.setattr(up, 'applied_profile_items',
-                        lambda *a, **k: {'core': [], 'detail': []})
+    monkeypatch.setattr(
+        up, 'render_profile_block',
+        lambda *a, **k: _wrap_system_reminder(_PROFILE))
+    monkeypatch.setattr(up, 'context_items_for_event',
+                        lambda *a, **k: [])
     monkeypatch.setattr(up, 'context_char_count', lambda *a, **k: 1)
     # No CLAUDE.md content — keep the assembly focused on the seams under test
     # (the project-context loader would otherwise auto-create JOURNAL/intel).
@@ -249,10 +268,11 @@ def test_project_mode_covers_digest_charter_board_and_detail_seams(caplog, monke
     ]
     base_len = len(_system_text(messages)) + len(_carrier_text(messages))
 
-    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.system_context'):
-        _inject_system_contexts(
-            messages, project_path='/tmp/ctxtrace_proj', project_enabled=True,
-            memory_enabled=True, search_enabled=False, swarm_enabled=True,
+    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.context_composer._render'):
+        compose_task_context(
+            messages, user_id=1,
+            project_path='/tmp/ctxtrace_proj', project_enabled=True,
+            memory_enabled=True, search_enabled=False,
             has_real_tools=True, conv_id='ctxproj01', task={}, model='gpt-4o',
         )
 
@@ -267,9 +287,9 @@ def test_project_mode_covers_digest_charter_board_and_detail_seams(caplog, monke
     import re
     named = dict((n, int(c)) for n, c in re.findall(r'(\w+):(\d+)', blockstr))
 
-    # (a) the downgraded seams + pref_detail are all NAMED this assembly.
+    # (a) every canonical context seam is named in this assembly.
     for seam in ('related_conversations', 'project_charter', 'project_board',
-                 'user_context', 'preference_detail_legacy'):
+                 'user_context'):
         assert seam in named, f'{seam} missing from summary: {line}'
 
     # (b) the recorded sizes include the canonical Composer envelope.
@@ -343,10 +363,14 @@ def test_logging_failure_cannot_break_assembly(monkeypatch):
             {'role': 'user', 'content': 'Hello.'},
         ]
         # Must NOT raise despite every logger call blowing up.
-        _inject_system_contexts(
-            messages, project_path='/tmp/x', project_enabled=False,
-            memory_enabled=True, search_enabled=False, swarm_enabled=True,
-            has_real_tools=True, conv_id='boom', task={}, model='gpt-4o',
+        compose_task_context(
+            messages, user_id=1, project_path='/tmp/x', project_enabled=False,
+            memory_enabled=True, search_enabled=False,
+            has_real_tools=True, conv_id='boom',
+            task={'_userId': 1, 'config': {
+                'orchestration': {'multiAgent': 'read_only'},
+            }},
+            model='gpt-4o',
         )
     finally:
         monkeypatch.setattr(renderer, 'logger', real_logger)
@@ -356,24 +380,3 @@ def test_logging_failure_cannot_break_assembly(monkeypatch):
     assert 'NEVER generate or guess URLs' in txt  # static block present
     assert '<memory_accumulation>' in txt
     assert '<parallel_execution>' in txt
-
-
-# ════════════════════════════════════════════════════════════════════════
-#  5. NEGATIVE CONTROL documentation
-# ════════════════════════════════════════════════════════════════════════
-#
-# The summary emit is load-bearing. To prove it, patch the SOURCE in
-# lib/tasks_pkg/system_context.py:
-#
-#     def _emit_context_summary() -> None:
-#         try:
-#             if False and _trace:          # <-- NC: disable the emit
-#                 ...
-#
-# i.e. guard the body so logger.info is never reached. Then
-# test_summary_names_each_injected_block FAILS (no summary line → the
-# `len(summaries) == 1` assertion trips). Restore byte-identical and confirm
-# `grep -c 'if False and' lib/tasks_pkg/system_context.py` == 0.
-#
-# This is documented (not automated) because the NC mutates SOURCE; the build
-# log shows the manual NC run result.

@@ -25,29 +25,59 @@ def _tool(name: str) -> dict:
     }
 
 
-def test_context_flags_ship_task_gated_gpt56_defaults_and_remain_strict():
-    from lib.context_experiment_flags import normalize_context_experiment_flags
+def test_context_flags_ship_resident_ptc_default_and_remain_strict():
+    from lib.context_experiment_flags import (
+        context_experiment_arm, normalize_context_experiment_flags)
 
     assert normalize_context_experiment_flags({}) == {
         'cache': {'gpt56BreakpointMode': 'explicit'},
         'tools': {
-            'nativeExposure': 'routed', 'programmaticCalling': 'auto',
+            'nativeExposure': 'routed', 'programmaticCalling': 'on',
             'toolSearch': 'auto', 'executionScope': 'available',
+            'schemaBudgetTokens': 0, 'resultEnvelope': 'v2',
         },
         'responses': {
             'transport': 'sse', 'reasoningMode': 'standard',
             'verbosity': 'medium', 'imageDetail': 'auto',
-            'promptProfile': 'auto', 'multiAgent': 'auto',
-            'maxConcurrentSubagents': 3,
+            'promptProfile': 'auto',
         },
-        'compaction': {'evidenceLedger': False},
+        'orchestration': {
+            'multiAgent': 'auto', 'maxConcurrentAgents': 3, 'policy': 'v1',
+        },
+        'context': {'globalBudgetTokens': 0},
+        'compaction': {'evidenceLedger': False, 'strategy': 'fixed'},
     }
+    # The provider-neutral owner wins, while the old Responses fields remain
+    # accepted as migration aliases.
+    assert normalize_context_experiment_flags({
+        'responses': {'multiAgent': 'read_only',
+                      'maxConcurrentSubagents': 7},
+    })['orchestration'] == {
+        'multiAgent': 'read_only', 'maxConcurrentAgents': 7, 'policy': 'v1'}
+    assert normalize_context_experiment_flags({
+        'orchestration': {'multiAgent': 'off', 'maxConcurrentAgents': 2},
+        'responses': {'multiAgent': 'read_only',
+                      'maxConcurrentSubagents': 7},
+    })['orchestration'] == {
+        'multiAgent': 'off', 'maxConcurrentAgents': 2, 'policy': 'v1'}
+    arm = context_experiment_arm({})
+    assert arm['maxConcurrentAgents'] == 3
+    assert arm['resultEnvelope'] == 'v2'
+    assert 'maxConcurrentSubagents' not in arm
+
+    # Legacy remains an explicit, fingerprinted rollback/control policy.
+    assert normalize_context_experiment_flags({
+        'tools': {'resultEnvelope': 'legacy'},
+    })['tools']['resultEnvelope'] == 'legacy'
     with pytest.raises(ValueError, match='nativeExposure'):
         normalize_context_experiment_flags(
             {'tools': {'nativeExposure': 'guess'}}, strict=True)
     with pytest.raises(ValueError, match='executionScope'):
         normalize_context_experiment_flags(
             {'tools': {'executionScope': 'guess'}}, strict=True)
+    with pytest.raises(ValueError, match='promptProfile'):
+        normalize_context_experiment_flags(
+            {'responses': {'promptProfile': 'guess'}}, strict=True)
     assert normalize_context_experiment_flags({
         'tools': [_tool('custom')],
         'tools.nativeExposure': 'routed',
@@ -165,7 +195,7 @@ def test_program_output_without_final_message_requests_one_more_response():
     assert chunks[0]['usage']['_program_pending'] is True
     assert translator.response_items[0]['type'] == 'program_output'
 
-    from lib.tasks_pkg.stream_handler import analyse_stream_result
+    from lib.tasks_pkg.stream_handler.api import analyse_stream_result
     messages = [{'role': 'user', 'content': 'work'}]
     assistant = {
         'role': 'assistant', 'content': '',
@@ -179,13 +209,13 @@ def test_program_output_without_final_message_requests_one_more_response():
 
 
 def test_routed_native_exposure_reduces_catalog_but_keeps_discovery_floor():
-    from lib.tools import ToolContext, assemble_tool_list
+    from lib.tools.registry import ToolContext, assemble_tool_list
 
     kwargs = dict(
         task_id='route-test', project_path='', project_enabled=False,
         search_mode='multi', search_enabled=True, fetch_enabled=True,
         code_exec_enabled=False, browser_enabled=False, desktop_enabled=False,
-        swarm_enabled=False, image_gen_enabled=False,
+        image_gen_enabled=False,
         human_guidance_enabled=False, scheduler_enabled=False,
         messages=[{'role': 'user', 'content': 'summarize current public facts'}],
     )
@@ -201,7 +231,7 @@ def test_routed_native_exposure_reduces_catalog_but_keeps_discovery_floor():
 
 
 def test_routed_exposure_never_retracts_frontend_enabled_families():
-    from lib.tools import ToolContext
+    from lib.tools.registry import ToolContext
     from lib.tools.routing import routed_native_spec_keys
 
     ctx = ToolContext(
@@ -209,7 +239,7 @@ def test_routed_exposure_never_retracts_frontend_enabled_families():
         task_id='route-pin', project_path='', project_enabled=False,
         search_mode='off', search_enabled=False, fetch_enabled=False,
         code_exec_enabled=False, browser_enabled=True, desktop_enabled=True,
-        swarm_enabled=True, image_gen_enabled=True,
+        image_gen_enabled=True,
         human_guidance_enabled=True, scheduler_enabled=True,
         messages=[{'role': 'user', 'content': 'hello'}],
     )
@@ -479,4 +509,17 @@ def test_benchmark_jsonl_budget_public_price_and_acceptance(tmp_path):
     assert decision['quality']['nonInferiorityEstablished'] is False
     assert decision['quality']['conclusion'] == (
         'observed_tie_not_statistically_established')
-    assert decision['releaseEligible'] is True
+    assert decision['gates']['resolvedNotLower'] is True
+    assert decision['gates']['qualityNoninferiorityEstablished'] is False
+    assert decision['releaseEligible'] is False
+
+    established = acceptance_decision(
+        candidate_oracles=[True] * 100,
+        baseline_oracles=[True] * 100,
+        candidate_public_cost_usd=50.0,
+        baseline_public_cost_usd=60.0,
+        candidate_p90_latency_ms=110,
+        baseline_p90_latency_ms=100,
+    )
+    assert established['quality']['nonInferiorityEstablished'] is True
+    assert established['releaseEligible'] is True

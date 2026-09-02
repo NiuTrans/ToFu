@@ -27,6 +27,7 @@ _REPAIR_PATTERN_LABELS = {
     'empty_placeholder_unwrap': 'unwrapped object to array',
     'leaked_tool_call_syntax': 'stripped leaked tool-call markup',
     'param_alias': 'renamed wrong-harness arg key',
+    'schema_default': 'applied schema default',
 }
 
 
@@ -68,7 +69,7 @@ def _build_repair_summary(json_repaired: bool, repair_log, tool_name_aliased: st
 
 def _apply_repair_to_round(round_entry: dict, fn_name: str, fn_args: dict,
                            repair_summary: dict, project_enabled: bool,
-                           conv_id) -> str | None:
+                           conv_id, task=None) -> str | None:
     """Patch a stale (early-announced) round entry after a late repair.
 
     The streaming early-announce path renders the round display BEFORE the
@@ -87,6 +88,7 @@ def _apply_repair_to_round(round_entry: dict, fn_name: str, fn_args: dict,
         _, fresh_entry, _ = _build_tool_round_entry(
             fn_name, fn_args, round_entry.get('toolCallId', ''), tc_args_str,
             round_entry.get('roundNum', 1) - 1, project_enabled, conv_id=conv_id,
+            task=task,
         )
         # Only refresh the human-facing display string; keep roundNum, status,
         # llmRound, toolCallId, etc. intact on the live entry.

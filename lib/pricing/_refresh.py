@@ -21,11 +21,16 @@ import time
 import uuid
 
 from lib.log import get_logger
-from lib.http_client import http_get
 
-from lib.pricing._tables import MODEL_PRICING
+from lib.pricing._tables import DEFAULT_USD_DISPLAY_RATES, MODEL_PRICING
 
 logger = get_logger(__name__)
+
+
+def _http_get(*args, **kwargs):
+    """Load the shared HTTP stack only inside an explicit online refresh."""
+    from lib.http_client import http_get
+    return http_get(*args, **kwargs)
 
 
 
@@ -37,9 +42,13 @@ _refresh_thread = None
 _pricing_data = {
     'model': '', 'inputPrice': 15.0, 'outputPrice': 75.0,  # model populated at runtime
     'cacheWriteMul': 1.25, 'cacheReadMul': 0.10,
-    'usdToCny': 7.24, 'exchangeRateUpdated': 0,  # DEFAULT_USD_CNY_RATE read at runtime
+    # ``usdToCny`` remains for billing/backward compatibility. ``usdRates`` is
+    # the bounded display policy consumed by Settings (currency units per USD).
+    'usdToCny': DEFAULT_USD_DISPLAY_RATES['CNY'],
+    'usdRates': dict(DEFAULT_USD_DISPLAY_RATES),
+    'exchangeRateUpdated': 0,
     'pricingUpdated': 0, 'pricingSource': 'default',
-    'exchangeRateSource': 'none', 'onlineMatchedModel': None,
+    'exchangeRateSource': 'default', 'onlineMatchedModel': None,
 }
 
 
@@ -52,9 +61,51 @@ def _storage(*, write: bool = False):
 # ══════════════════════════════════════════════════════
 
 def get_pricing_data():
-    """Return a thread-safe copy of the current pricing data."""
+    """Return a thread-safe copy of the current pricing data.
+
+    ``usdRates`` is nested, so a shallow top-level copy would let an API caller
+    mutate live exchange-rate state without the lock. Copy that bounded map too.
+    """
     with _pricing_lock:
-        return dict(_pricing_data)
+        snapshot = dict(_pricing_data)
+        snapshot['usdRates'] = dict(
+            _pricing_data.get('usdRates') or DEFAULT_USD_DISPLAY_RATES)
+        return snapshot
+
+
+def get_model_price_display_policy():
+    """Return the bounded Settings price-localization policy.
+
+    Model/provider prices stay authoritative in their declared currency. This
+    policy only supplies USD-pivot rates for presentation and edit round-trips.
+    Unknown currencies are deliberately excluded so the browser cannot invent
+    conversion semantics from arbitrary server data.
+    """
+    data = get_pricing_data()
+    rates = dict(DEFAULT_USD_DISPLAY_RATES)
+    raw_rates = data.get('usdRates')
+    if isinstance(raw_rates, dict):
+        for currency in rates:
+            try:
+                value = float(raw_rates.get(currency))
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                rates[currency] = value
+    # Old persisted/runtime state may only carry the compatibility scalar.
+    try:
+        legacy_cny = float(data.get('usdToCny'))
+    except (TypeError, ValueError):
+        legacy_cny = 0.0
+    if legacy_cny > 0:
+        rates['CNY'] = legacy_cny
+    rates['USD'] = 1.0
+    return {
+        'base_currency': 'USD',
+        'usd_rates': rates,
+        'updated_at': int(data.get('exchangeRateUpdated') or 0),
+        'source': str(data.get('exchangeRateSource') or 'default'),
+    }
 
 
 def refresh_pricing_async():
@@ -109,22 +160,58 @@ def stop_pricing_refresh(timeout=2.0):
 #  Internal Fetchers
 # ══════════════════════════════════════════════════════
 
-def _fetch_exchange_rate():
+def _fetch_exchange_rates():
+    """Fetch the bounded USD display-rate card (CNY/JPY/KRW).
+
+    Every upstream already returns a full USD rate map. Reading the three
+    supported axes from one response avoids one network call per locale and
+    keeps the personal-computer background budget unchanged.
+    """
     apis = [
-        ('https://api.exchangerate-api.com/v4/latest/USD', lambda d: d.get('rates', {}).get('CNY')),
-        ('https://open.er-api.com/v6/latest/USD', lambda d: d.get('rates', {}).get('CNY')),
-        ('https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json', lambda d: d.get('usd', {}).get('cny')),
+        ('https://api.exchangerate-api.com/v4/latest/USD',
+         lambda data: data.get('rates', {})),
+        ('https://open.er-api.com/v6/latest/USD',
+         lambda data: data.get('rates', {})),
+        ('https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json',
+         lambda data: data.get('usd', {})),
     ]
+    wanted = tuple(
+        currency for currency in DEFAULT_USD_DISPLAY_RATES
+        if currency != 'USD')
     for url, extract in apis:
         try:
-            resp = http_get(url, timeout=12, headers={'User-Agent': 'PricingBot/1.0'})
-            if resp.ok:
-                rate = extract(resp.json())
-                if rate and float(rate) > 0:
-                    return round(float(rate), 4)
+            response = _http_get(
+                url, timeout=12, headers={'User-Agent': 'PricingBot/1.0'})
+            if not response.ok:
+                continue
+            raw_rates = extract(response.json())
+            if not isinstance(raw_rates, dict):
+                continue
+            rates = {'USD': 1.0}
+            for currency in wanted:
+                raw_value = raw_rates.get(currency)
+                if raw_value is None:
+                    raw_value = raw_rates.get(currency.lower())
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    break
+                if value <= 0:
+                    break
+                rates[currency] = round(value, 6)
+            if all(currency in rates for currency in wanted):
+                return rates
         except Exception as e:
-            logger.warning('[Pricing] exchange rate API %s failed: %s', url, e, exc_info=True)
+            logger.warning(
+                '[Pricing] exchange rate API %s failed: %s',
+                url, e, exc_info=True)
     return None
+
+
+def _fetch_exchange_rate():
+    """Backward-compatible USD→CNY scalar wrapper."""
+    rates = _fetch_exchange_rates()
+    return rates.get('CNY') if rates else None
 
 def _fetch_model_pricing_online(model_name):
     try:
@@ -132,8 +219,9 @@ def _fetch_model_pricing_online(model_name):
         for prefix in ('aws.', 'gcp.', 'azure.', 'bedrock.'):
             norm = norm.replace(prefix, '')
         norm = re.sub(r'\.\d+$', '', norm)
-        resp = http_get('https://openrouter.ai/api/v1/models', timeout=20,
-                            headers={'User-Agent': 'PricingBot/1.0'})
+        resp = _http_get(
+            'https://openrouter.ai/api/v1/models', timeout=20,
+            headers={'User-Agent': 'PricingBot/1.0'})
         if not resp.ok:
             return None
         norm_parts = set(norm.replace('-', ' ').replace('.', ' ').split())
@@ -188,15 +276,16 @@ def _do_update_pricing():
     if _refresh_stop.is_set():
         return
     now_ms = int(time.time() * 1000)
-    rate = _fetch_exchange_rate()
+    rates = _fetch_exchange_rates()
     if _refresh_stop.is_set():
         return
     online = _fetch_model_pricing_online(_lib.LLM_MODEL)
     if _refresh_stop.is_set():
         return
     with _pricing_lock:
-        if rate:
-            _pricing_data['usdToCny'] = rate
+        if rates:
+            _pricing_data['usdRates'] = dict(rates)
+            _pricing_data['usdToCny'] = rates['CNY']
             _pricing_data['exchangeRateUpdated'] = now_ms
             _pricing_data['exchangeRateSource'] = 'api'
         if online:

@@ -26,20 +26,30 @@ them. Centralising here fixes that gap and the divergence in one place.
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 from lib.byo_providers import (
     resolve_model_string, sanitise_extra_headers, touch_provider,
 )
-from lib.llm_dispatch.ephemeral import (
-    EphemeralSlotHandle, dispose_ephemeral_slot, mint_ephemeral_slot,
-)
 from lib.log import get_logger
+
+if TYPE_CHECKING:
+    from lib.llm_dispatch.ephemeral import EphemeralSlotHandle
 
 logger = get_logger(__name__)
 
 
+def dispose_ephemeral_slot(handle) -> bool:
+    """Dispose a BYO handle without importing the dispatcher at route boot."""
+    from lib.llm_dispatch.ephemeral import (
+        dispose_ephemeral_slot as implementation,
+    )
+    return implementation(handle)
+
+
 def resolve_model_and_provider(model_str: str, provider_block: dict | None,
-                               owner_key_id: str
+                               owner_user_id: int, *,
+                               tenant_id: str | None = None,
                                ) -> tuple[str, EphemeralSlotHandle | None,
                                           dict | None, str | None,
                                           int | None]:
@@ -71,22 +81,27 @@ def resolve_model_and_provider(model_str: str, provider_block: dict | None,
     # 1. Inline provider block
     if has_block:
         if not isinstance(model_str, str) or not model_str.strip():
+            model_str = str(provider_block.get('model') or '').strip()
+        if not isinstance(model_str, str) or not model_str.strip():
             return '', None, None, (
-                '`model` is required when `provider` is supplied'), 400
-        url = (provider_block.get('base_url') or '').strip()
+                '`model` or `provider.model` is required when an inline '
+                'provider is supplied'), 400
+        url = (provider_block.get('base_url')
+               or provider_block.get('endpoint') or '').strip()
         if not url:
             return '', None, None, (
-                '`provider.base_url` is required'), 400
+                '`provider.base_url` (or `provider.endpoint`) is required'), 400
         headers, hdr_err = sanitise_extra_headers(
             provider_block.get('extra_headers') or {})
         if hdr_err:
             return '', None, None, hdr_err, 400
         try:
+            from lib.llm_dispatch.ephemeral import mint_ephemeral_slot
             handle = mint_ephemeral_slot(
                 base_url=url,
                 api_key=provider_block.get('api_key') or '',
                 model_id=model_str.strip(),
-                owner=owner_key_id or 'agent_run',
+                owner=f'owner:{owner_user_id}',
                 extra_headers=headers,
                 thinking_format=(provider_block.get('thinking_format')
                                  or ''),
@@ -99,7 +114,8 @@ def resolve_model_and_provider(model_str: str, provider_block: dict | None,
 
     # 2/3. String form
     if isinstance(model_str, str) and model_str.strip():
-        rm = resolve_model_string(model_str, owner_key_id)
+        rm = resolve_model_string(
+            model_str, owner_user_id, tenant_id=tenant_id)
         if rm is None:
             return '', None, None, (
                 f'model string {model_str!r} references an unknown '
@@ -109,11 +125,12 @@ def resolve_model_and_provider(model_str: str, provider_block: dict | None,
             return rm.model_id, None, None, None, None
         prov = rm.provider
         try:
+            from lib.llm_dispatch.ephemeral import mint_ephemeral_slot
             handle = mint_ephemeral_slot(
                 base_url=prov['base_url'],
                 api_key=prov.get('api_key') or '',
                 model_id=rm.model_id,
-                owner=f'{owner_key_id}:{prov["id"]}',
+                owner=f'owner:{owner_user_id}:{prov["id"]}',
                 extra_headers=prov.get('extra_headers') or {},
                 # Carry the persisted dialect so the dispatcher uses
                 # the right body shape for this engine. Without this,
@@ -126,7 +143,8 @@ def resolve_model_and_provider(model_str: str, provider_block: dict | None,
             logger.warning('[byo_resolve] BYO provider mint failed prov=%s: %s',
                            prov.get('id'), e)
             return '', None, None, str(e), 400
-        touch_provider(prov['id'])
+        touch_provider(
+            prov['id'], owner_user_id, tenant_id=tenant_id)
         return rm.model_id, handle, prov, None, None
 
     return '', None, None, '`model` is required', 400
@@ -151,4 +169,8 @@ def dispose_after_terminal(task: dict, handle: EphemeralSlotHandle) -> None:
     dispose_ephemeral_slot(handle)
 
 
-__all__ = ['resolve_model_and_provider', 'dispose_after_terminal']
+__all__ = [
+    'resolve_model_and_provider',
+    'dispose_after_terminal',
+    'dispose_ephemeral_slot',
+]

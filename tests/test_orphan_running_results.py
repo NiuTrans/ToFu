@@ -1,239 +1,133 @@
-#!/usr/bin/env python3
-"""Result-level reconciliation: ``task_results`` rows wedged at status='running'.
+"""Task-result orphan audit over the semantic storage projection."""
 
-Live incident (conv ms14u2lfihv8kj, 2026-07-26): four autopilot VU carriers
-overwrote the agent's assistant slots and then left their ``task_results`` rows
-at ``status='running'`` forever. The in-memory reaper
-(``reap_stuck_running_tasks``) structurally cannot see them — a carrier is
-discarded from the registry the moment its synchronous run returns and never
-reaches ``persist_task_result`` — so nothing revisits the row.
-
-The DB is therefore the only place the wedge is visible, and these tests pin
-the predicate that finds it.
-
-★ The load-bearing assertion is ``test_completed_at_predicate_is_wrong``: the
-intuitive ``status='running' AND completed_at IS NOT NULL`` flags EVERY live
-turn, because ``_upsert_task_row`` stamps ``completed_at`` on the ~5 s running
-checkpoint too. Measured on production 2026-07-26: 69/69 running rows had it
-non-NULL, 6 of them healthy in-flight turns.
-
-NEUTER x2: dropping the staleness filter, or dropping the live-registry filter,
-must each make a test fail.
-"""
+from __future__ import annotations
 
 import time
 
 import pytest
 
+
 pytestmark = pytest.mark.unit
 
 
-# ── Fakes ────────────────────────────────────────────────────────────────
+class _SummaryClient:
+    def __init__(self, records=(), *, capped=False, error=None):
+        self.records = list(records)
+        self.capped = capped
+        self.error = error
+        self.queries = []
 
-class _FakeDB:
-    """Minimal stand-in that answers the one SELECT the scan issues."""
-
-    def __init__(self, rows):
-        self._rows = rows
-        self.last_sql = ''
-        self.last_args = ()
-
-    def execute(self, sql, args=()):
-        self.last_sql = ' '.join(sql.split())
-        self.last_args = args
-        # Emulate the WHERE clause: status='running' is already encoded in the
-        # fixture; apply the completed_at < cutoff bound the SUT passes in.
-        cutoff = args[0]
-        hits = [r for r in self._rows
-                if r[2] is not None and r[2] < cutoff]
-        hits.sort(key=lambda r: r[2])
-        return _FakeCursor(hits[:args[1]])
-
-
-class _FakeCursor:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def fetchall(self):
-        return self._rows
-
-    def fetchone(self):
-        return self._rows[0] if self._rows else None
+    def query(self, operation, payload, **kwargs):
+        self.queries.append((operation, dict(payload), dict(kwargs)))
+        if self.error is not None:
+            raise self.error
+        assert operation == 'task_results.summary_list'
+        return {'records': list(self.records), 'capped': self.capped}
 
 
 @pytest.fixture
-def mt(monkeypatch):
-    """The maintenance module with its DB + registry stubbed."""
-    from lib.tasks_pkg.manager import _maintenance as m
-    monkeypatch.setattr(m, 'tasks', {}, raising=False)
-    return m
+def maintenance(monkeypatch):
+    import lib.tasks_pkg.manager._maintenance as module
+
+    monkeypatch.setattr(module.chat_task_runtime, 'task_ids', lambda: set())
+    return module
 
 
-def _install_db(monkeypatch, mt, rows):
-    from contextlib import contextmanager
-
-    db = _FakeDB(rows)
-    import lib.database as dbmod
-
-    @contextmanager
-    def _pooled(*_args, **_kwargs):
-        yield db
-
-    # The scanner is background maintenance and must release its connection;
-    # patch the current bounded-scope seam, not the retired thread-local seam.
-    monkeypatch.setattr(dbmod, 'pooled_db', _pooled)
-    return db
+def _record(task_id, conv_id, age_seconds):
+    return {
+        'key': task_id,
+        'task_id': task_id,
+        'conv_id': conv_id,
+        'completed_at': int((time.time() - age_seconds) * 1000),
+    }
 
 
-def _row(task_id, conv_id, age_secs):
-    """A task_results row whose last write was `age_secs` ago."""
-    return (task_id, conv_id, int((time.time() - age_secs) * 1000))
+def _install(monkeypatch, client):
+    import lib.storage
+
+    monkeypatch.setattr(
+        lib.storage, 'get_storage_client',
+        lambda write=False: client, raising=True)
 
 
-# ── The core predicate ───────────────────────────────────────────────────
-
-def test_stale_orphan_is_found(monkeypatch, mt):
-    """A running row untouched for hours, with no live task, is an orphan."""
-    _install_db(monkeypatch, mt, [_row('carrier-1', 'convA', 7200)])
-    out = mt.find_orphan_running_results()
-    assert [o['task_id'] for o in out] == ['carrier-1']
-    assert out[0]['conv_id'] == 'convA'
-    assert out[0]['age_secs'] >= 7000
-
-
-def test_fresh_running_row_is_not_an_orphan(monkeypatch, mt):
-    """NEUTER-adjacent: a row written 10 s ago is a healthy streaming turn.
-
-    Removing the `completed_at < cutoff` bound in the SUT makes this fail —
-    which is exactly the false-positive the naive predicate produces.
-    """
-    _install_db(monkeypatch, mt, [_row('live-1', 'convB', 10)])
-    assert mt.find_orphan_running_results() == []
-
-
-def test_row_still_in_registry_is_not_an_orphan(monkeypatch, mt):
-    """A stale-looking ROW whose task is still in memory belongs to the reaper.
-
-    NEUTER: drop the live-registry filter and this fails. Without it the two
-    reconcilers double-report the same wedge and the DB scan would also flag a
-    task that is merely between checkpoints.
-    """
-    _install_db(monkeypatch, mt, [_row('inmem-1', 'convC', 7200)])
-    monkeypatch.setattr(mt, 'tasks', {'inmem-1': {'status': 'running'}},
-                        raising=False)
-    assert mt.find_orphan_running_results() == []
-
-
-def test_orphans_sorted_oldest_first(monkeypatch, mt):
-    _install_db(monkeypatch, mt, [
-        _row('newer', 'c1', 4000),
-        _row('oldest', 'c2', 90000),
-        _row('mid', 'c3', 20000),
+def test_scan_uses_bounded_stale_summary_and_excludes_live_registry(
+        monkeypatch, maintenance):
+    client = _SummaryClient([
+        _record('newer', 'conv-new', 4_000),
+        _record('live', 'conv-live', 20_000),
+        _record('oldest', 'conv-old', 90_000),
     ])
-    assert [o['task_id'] for o in mt.find_orphan_running_results()] == [
-        'oldest', 'mid', 'newer']
+    _install(monkeypatch, client)
+    monkeypatch.setattr(
+        maintenance.chat_task_runtime, 'task_ids', lambda: {'live'})
+
+    result = maintenance.find_orphan_running_results(limit=2)
+
+    assert [item['task_id'] for item in result] == ['oldest', 'newer']
+    operation, payload, options = client.queries[0]
+    assert operation == 'task_results.summary_list'
+    assert payload['status'] == 'running'
+    assert payload['completed_before_ms'] > 0
+    assert payload['scan_limit'] == 10_000
+    assert options == {'deadline': 30}
 
 
-# ── The disproof: why the intuitive predicate cannot be used ─────────────
-
-def test_completed_at_predicate_is_wrong(monkeypatch, mt):
-    """`status='running' AND completed_at IS NOT NULL` matches LIVE turns.
-
-    _upsert_task_row stamps completed_at on the running checkpoint as well as
-    the terminal write, so the column is "last written at". A scan built on
-    non-NULL-ness alone would flag every in-flight task. This test encodes the
-    production measurement (69/69 running rows non-NULL, 6 of them live) so a
-    future refactor cannot quietly reintroduce that predicate.
-    """
-    live, wedged = _row('live-1', 'c1', 5), _row('carrier-1', 'c2', 7200)
-    # Both rows satisfy the naive predicate...
-    assert live[2] is not None and wedged[2] is not None
-    # ...but only the wedged one is a real orphan.
-    _install_db(monkeypatch, mt, [live, wedged])
-    assert [o['task_id'] for o in mt.find_orphan_running_results()] == ['carrier-1']
-
-
-def test_completed_at_is_stamped_on_running_checkpoints(monkeypatch):
-    """Result-level proof: the shared running upsert stamps its write time.
-
-    Both the terminal write and the running checkpoint go through
-    _upsert_task_row, which sets completed_at unconditionally.
-    """
-    from lib.tasks_pkg.manager import _persist
-    import lib.database as dbmod
-
-    captured = {}
-    monkeypatch.setattr(_persist, 'get_thread_db', lambda *_a, **_k: object())
-
-    def _execute(_db, _sql, params, **_kwargs):
-        captured['params'] = params
-        return None
-
-    monkeypatch.setattr(dbmod, 'db_execute_with_retry', _execute)
-    before = int(time.time() * 1000)
-    _persist._upsert_task_row(
-        {'id': 'running-checkpoint', '_inline_messages': True}, '',
-        content='', thinking='', status='running', error_json=None,
-        tr_json='[]', meta_json='{}')
-    after = int(time.time() * 1000)
-    assert before <= captured['params'][-1] <= after, (
-        'running checkpoint did not stamp completed_at/write time; '
-        're-evaluate find_orphan_running_results()')
-
-
-# ── Kill switch + wiring ─────────────────────────────────────────────────
-
-def test_disabled_by_env(monkeypatch, mt):
-    _install_db(monkeypatch, mt, [_row('carrier-1', 'c1', 90000)])
+def test_disabled_audit_does_not_touch_storage(monkeypatch, maintenance):
+    client = _SummaryClient([_record('orphan', 'conv', 90_000)])
+    _install(monkeypatch, client)
     monkeypatch.setenv('TOFU_ORPHAN_RESULT_MAX_AGE_SECS', '0')
-    assert mt.find_orphan_running_results() == []
+
+    assert maintenance.find_orphan_running_results() == []
+    assert client.queries == []
 
 
-def test_db_failure_fails_closed(monkeypatch, mt):
-    """A DB hiccup must return [] (report nothing), never raise into the tick."""
-    import lib.database as dbmod
-
-    def _boom(*a, **k):
-        raise RuntimeError('pool exhausted')
-
-    monkeypatch.setattr(dbmod, 'get_thread_db', _boom)
-    assert mt.find_orphan_running_results() == []
+def test_storage_failure_is_explicit(monkeypatch, maintenance):
+    _install(monkeypatch, _SummaryClient(error=RuntimeError('unavailable')))
+    with pytest.raises(RuntimeError, match='unavailable'):
+        maintenance.find_orphan_running_results()
 
 
-def test_reporter_counts_and_warns(monkeypatch, mt, caplog):
-    _install_db(monkeypatch, mt, [
-        _row('carrier-1', 'convA', 9000),
-        _row('carrier-2', 'convB', 8000),
-    ])
+def test_reporter_counts_and_warns(monkeypatch, maintenance, caplog):
+    _install(monkeypatch, _SummaryClient([
+        _record('carrier-1', 'conv-a', 9_000),
+        _record('carrier-2', 'conv-b', 8_000),
+    ]))
     with caplog.at_level('WARNING'):
-        assert mt.report_orphan_running_results() == 2
+        assert maintenance.report_orphan_running_results() == 2
     assert 'orphaned at status=running' in caplog.text
 
 
-def test_reporter_silent_when_clean(monkeypatch, mt, caplog):
-    _install_db(monkeypatch, mt, [])
+def test_reporter_silent_when_clean(monkeypatch, maintenance, caplog):
+    _install(monkeypatch, _SummaryClient())
     with caplog.at_level('WARNING'):
-        assert mt.report_orphan_running_results() == 0
+        assert maintenance.report_orphan_running_results() == 0
     assert 'orphaned at status=running' not in caplog.text
 
 
-def test_wired_into_maintenance_tick():
-    """The scan must actually run — a helper nobody calls detects nothing."""
-    import inspect
+def test_orphan_report_has_independent_success_and_failure_cadence(monkeypatch):
+    import lib.tasks_pkg.manager._maintenance as module
 
-    from lib.tasks_pkg.manager import _maintenance as m
-    src = inspect.getsource(m.cleanup_old_tasks)
-    assert 'report_orphan_running_results()' in src
+    monkeypatch.setattr(module, '_next_orphan_result_report_monotonic', 0.0)
+    assert module._claim_orphan_result_report(100.0) is True
+    assert module._claim_orphan_result_report(159.9) is False
+    assert module._claim_orphan_result_report(160.0) is True
+    module._finish_orphan_result_report(160.0)
+    assert module._claim_orphan_result_report(1059.9) is False
+    assert module._claim_orphan_result_report(1060.0) is True
 
 
-def test_scan_is_read_only():
-    """Reconciliation must not mutate rows: a finished carrier legitimately
-    ends at status='running', so flipping it to 'error' would record a failure
-    that never happened."""
-    import inspect
+def test_cleanup_throttles_audit_but_not_liveness_reaper(monkeypatch):
+    import lib.tasks_pkg.manager._maintenance as module
 
-    from lib.tasks_pkg.manager import _maintenance as m
-    for fn in (m.find_orphan_running_results, m.report_orphan_running_results):
-        src = inspect.getsource(fn).upper()
-        for verb in ('UPDATE ', 'DELETE ', 'INSERT '):
-            assert verb not in src, f'{fn.__name__} must stay read-only'
+    calls = {'reaper': 0, 'orphan': 0}
+    monkeypatch.setattr(module, '_next_orphan_result_report_monotonic', 0.0)
+    monkeypatch.setattr(
+        module, 'reap_stuck_running_tasks',
+        lambda: calls.__setitem__('reaper', calls['reaper'] + 1))
+    monkeypatch.setattr(
+        module, 'report_orphan_running_results',
+        lambda: calls.__setitem__('orphan', calls['orphan'] + 1))
+
+    module.cleanup_old_tasks()
+    module.cleanup_old_tasks()
+    assert calls == {'reaper': 2, 'orphan': 1}

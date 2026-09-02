@@ -12,8 +12,8 @@ later with zero visible explanation. This drives the REAL shipped JS under
 node with a fake push/showToast, asserting OUTCOMES (captured → one toast
 with the domain; any other frame → silence), not internals.
 
-NEUTER: neuter the 'captured' gate in a COPY of the shipped file → the toast
-check FAILS, proving the harness exercises the real frame-handling path.
+The harness bundles the typed production owner; a source ratchet separately
+keeps the retained runtime adapter thin and free of a rollback subscriber.
 """
 
 from __future__ import annotations
@@ -24,13 +24,16 @@ import subprocess
 
 import pytest
 
-from tests._runtime_sections import runtime_section_path
+from tests._runtime_sections import native_module_path, runtime_section
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_FILE = runtime_section_path('cookie_capture_consent.js')
+JS_FILE = native_module_path(
+    'cookie-capture-consent.js',
+    'frontend/src/core/cookie-capture-consent.ts',
+)
 
 
 def _node_available() -> bool:
@@ -43,22 +46,23 @@ global.window = global;
 global.console = console;
 // i18n: return the key WITH the placeholder so the shipped .replace()
 // still fires — assertions can then check both the key and the domain.
-global.t = (k) => k + ' {domain}';
 const _toasts = [];
-global.showToast = (msg, kind) => { _toasts.push({ msg, kind }); };
 
 // ── Fake push: capture the subscriber so frames can be driven by hand ──
 let _frameHandler = null;
-global.pushSubscribe = (channel, taskId, fn) => {
-  if (channel === 'cookie_capture') _frameHandler = fn;
-};
+let _unsubscribed = false;
 
-global.document = {
-  readyState: 'complete',
-  addEventListener: () => {},
-};
-
-eval(fs.readFileSync(process.argv[2], 'utf8'));   // REAL cookie_capture_consent.js
+eval(fs.readFileSync(process.argv[2], 'utf8'));
+const controller = createCookieCaptureConsentController({
+  subscribe(channel, taskId, fn) {
+    if (channel === 'cookie_capture') _frameHandler = fn;
+  },
+  unsubscribe(channel, taskId, fn) {
+    if (channel === 'cookie_capture' && fn === _frameHandler) _unsubscribed = true;
+  },
+  showToast(msg, kind) { _toasts.push({ msg, kind }); },
+  translate(key) { return key + ' {domain}'; },
+});
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -81,6 +85,12 @@ _frameHandler(null);
 _frameHandler({});
 _frameHandler('captured');
 check('malformed_frames_ignored', _toasts.length === 1);
+
+// (C) Destroy owns unsubscription and makes direct delivery inert.
+controller.destroy();
+controller.handleFrame({ type: 'captured', domain: 'after.destroy' });
+check('destroy_unsubscribes_and_suppresses',
+      _unsubscribed && _toasts.length === 1);
 
 console.log(out.join('\n'));
 """
@@ -107,25 +117,15 @@ def test_captured_frame_toasts_and_rest_ignored():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'capture-toast behavior failures:\n' + output
-    assert output.count('PASS') >= 4, f'expected >=4 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 5, f'expected >=5 PASS lines, got:\n{output}'
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_captured_frame_wiring_neuter(tmp_path):
-    """NEUTER: break the 'captured' gate in a COPY. The toast check must
-    FAIL — proving the harness drives the real frame-handling path."""
-    with open(JS_FILE, encoding='utf-8') as f:
-        src = f.read()
-    needle = "if (!frame || frame.type !== 'captured') return;"
-    assert needle in src, 'frame-gate fragment drifted — update the neuter target'
-    copy = tmp_path / 'cc_consent_neutered.js'
-    copy.write_text(src.replace(needle, 'if (true) return;', 1), encoding='utf-8')
+def test_retained_cookie_capture_adapter_has_no_shadow_subscription():
+    source = runtime_section('cookie_capture_consent.js')
 
-    proc = _run_harness(str(copy))
-    output = proc.stdout.strip()
-    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
-    assert 'FAIL captured_frame_toasts' in output, (
-        'NEUTER did not bite: toast still fired with the captured gate severed.\n' + output)
-
-    with open(JS_FILE, encoding='utf-8') as f:
-        assert f.read() == src, 'harness mutated the shipped file'
+    assert 'createCookieCaptureConsentController(dependencies())' in source
+    assert 'handleTypedCookieCaptureFrame(frame, dependencies())' in source
+    assert 'window.TofuModules' not in source
+    assert '_upgradeToVite' not in source
+    assert '_legacyAttached' not in source
+    assert 'keeping legacy handler' not in source

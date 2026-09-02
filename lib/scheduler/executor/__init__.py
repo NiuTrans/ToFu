@@ -14,6 +14,7 @@ The public import path (``lib.scheduler.executor``) and every symbol
 helpers) are preserved byte-identically for backwards compatibility.
 """
 
+from lib.identity import PrincipalContext
 from lib.log import get_logger
 from lib.scheduler.cron import describe_cron, next_cron_run
 from lib.scheduler.executor._await import _execute_await_task
@@ -30,6 +31,17 @@ logger = get_logger(__name__)
 def execute_scheduler_tool(fn_name, fn_args):
     """Execute a scheduler tool call. Returns string result for LLM."""
     mgr = get_scheduler()
+    try:
+        user_id = int(fn_args.get('_user_id'))
+    except (TypeError, ValueError):
+        return 'Error: Scheduler tools require an authenticated owner.'
+    if user_id < 1:
+        return 'Error: Scheduler tools require an authenticated owner.'
+    principal = PrincipalContext.user(
+        subject_id=f'scheduler-tool:user:{user_id}',
+        owner_user_id=user_id,
+        scopes={'agents:scheduler'},
+    )
 
     if fn_name == 'schedule_create':
         try:
@@ -42,6 +54,7 @@ def execute_scheduler_tool(fn_name, fn_args):
                 target_conv_id = source_conv_id
 
             create_kwargs = dict(
+                principal=principal,
                 name=fn_args['name'],
                 schedule=fn_args['schedule'],
                 command=fn_args['command'],
@@ -95,7 +108,9 @@ def execute_scheduler_tool(fn_name, fn_args):
             return f'Error: {e}'
 
     elif fn_name == 'schedule_list':
-        tasks = mgr.list_tasks(include_disabled=fn_args.get('include_disabled', False))
+        tasks = mgr.list_tasks(
+            user_id=user_id,
+            include_disabled=fn_args.get('include_disabled', False))
         if not tasks:
             return 'No scheduled tasks found. Use schedule_create to create one.'
 
@@ -136,7 +151,8 @@ def execute_scheduler_tool(fn_name, fn_args):
         task_id = fn_args.get('task_id', '')
 
         if action == 'log':
-            log = mgr.get_execution_log(limit=fn_args.get('limit', 20))
+            log = mgr.get_execution_log(
+                user_id=user_id, limit=fn_args.get('limit', 20))
             if not log:
                 return 'No execution log entries yet.'
             lines = ['Recent Execution Log:']
@@ -149,33 +165,37 @@ def execute_scheduler_tool(fn_name, fn_args):
             return 'Error: task_id is required for this action'
 
         if action == 'run':
-            success, result = mgr.run_task_now(task_id)
+            success, result = mgr.run_task_now(task_id, user_id=user_id)
             if success is None:
                 return f'Error: Task {task_id} not found'
             status = 'OK' if success else 'FAIL'
             return f'[{status}] Task executed:\n{result[:5000]}'
 
         elif action == 'enable':
-            enabled = mgr.toggle_task(task_id, enabled=True)
+            enabled = mgr.toggle_task(
+                task_id, user_id=user_id, enabled=True)
             return f'Task {task_id} enabled' if enabled is not None else 'Error: Task not found'
 
         elif action == 'disable':
-            enabled = mgr.toggle_task(task_id, enabled=False)
+            enabled = mgr.toggle_task(
+                task_id, user_id=user_id, enabled=False)
             return f'Task {task_id} disabled' if enabled is not None else 'Error: Task not found'
 
         elif action == 'delete':
-            mgr.delete_task(task_id)
-            return f'Task {task_id} deleted'
+            deleted = mgr.delete_task(task_id, user_id=user_id)
+            return (f'Task {task_id} deleted' if deleted
+                    else 'Error: Task not found')
 
         elif action == 'update':
             updates = fn_args.get('updates', {})
             if not updates:
                 return 'Error: No updates provided'
-            mgr.update_task(task_id, **updates)
-            return f'Task {task_id} updated: {", ".join(updates.keys())}'
+            changed = mgr.update_task(task_id, user_id=user_id, **updates)
+            return (f'Task {task_id} updated: {", ".join(updates.keys())}'
+                    if changed else 'Error: Task not found')
 
     elif fn_name == 'await_task':
-        return _execute_await_task(fn_args)
+        return _execute_await_task(fn_args, user_id=user_id)
 
     elif fn_name == 'timer_create':
         return _execute_timer_create(fn_args)

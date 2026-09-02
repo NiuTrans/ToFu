@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from lib.tasks_pkg.conv_message_builder import _transform_messages
-from lib.tasks_pkg.conv_message_builder import build_branch_api_messages
+from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
+from lib.tasks_pkg.conv_message_builder.api import build_branch_api_messages
 from unittest.mock import patch
 
 
@@ -125,35 +125,35 @@ class TestTransformMessages:
         result = _transform_messages(raw, {})
         assert 'web_search' in result[1]['content']
 
-    def test_skip_endpoint_planner(self):
+    def test_skip_flow_planner(self):
         raw = [
             {'role': 'user', 'content': 'Do X'},
-            {'role': 'assistant', 'content': 'Plan...', '_isEndpointPlanner': True},
+            {'role': 'assistant', 'content': 'Plan...', '_isFlowPlanner': True},
             {'role': 'assistant', 'content': 'Done'},
         ]
         result = _transform_messages(raw, {})
         assert len(result) == 2
         assert result[1]['content'] == 'Done'
 
-    def test_skip_endpoint_worker_iteration(self):
-        """Worker turns with _epIteration should be filtered out."""
+    def test_skip_flow_worker_iteration(self):
+        """Worker turns with _flowIteration should be filtered out."""
         raw = [
             {'role': 'user', 'content': 'Do X'},
-            {'role': 'assistant', 'content': 'Plan...', '_isEndpointPlanner': True},
-            {'role': 'assistant', 'content': 'Worker output', '_epIteration': 1},
-            {'role': 'user', 'content': 'Feedback', '_isEndpointReview': True},
-            {'role': 'assistant', 'content': 'Worker rev2', '_epIteration': 2},
+            {'role': 'assistant', 'content': 'Plan...', '_isFlowPlanner': True},
+            {'role': 'assistant', 'content': 'Worker output', '_flowIteration': 1},
+            {'role': 'user', 'content': 'Feedback', '_isFlowReview': True},
+            {'role': 'assistant', 'content': 'Worker rev2', '_flowIteration': 2},
         ]
         result = _transform_messages(raw, {})
         # All endpoint messages filtered → only user(Do X) remains
         assert len(result) == 1
         assert result[0]['content'] == 'Do X'
 
-    def test_skip_endpoint_review(self):
+    def test_skip_flow_review(self):
         raw = [
             {'role': 'user', 'content': 'Do X'},
             {'role': 'assistant', 'content': 'Done'},
-            {'role': 'user', 'content': 'Feedback', '_isEndpointReview': True},
+            {'role': 'user', 'content': 'Feedback', '_isFlowReview': True},
             {'role': 'assistant', 'content': 'Revised'},
         ]
         result = _transform_messages(raw, {})
@@ -244,9 +244,9 @@ class TestTransformMessages:
     def test_merge_consecutive_same_role(self):
         raw = [
             {'role': 'user', 'content': 'A'},
-            {'role': 'assistant', 'content': 'B', '_isEndpointPlanner': True},
+            {'role': 'assistant', 'content': 'B', '_isFlowPlanner': True},
             {'role': 'assistant', 'content': 'C'},
-            {'role': 'user', 'content': 'D', '_isEndpointReview': True},
+            {'role': 'user', 'content': 'D', '_isFlowReview': True},
             {'role': 'assistant', 'content': 'E'},
         ]
         result = _transform_messages(raw, {})
@@ -309,14 +309,14 @@ class TestTransformMessages:
         result = _transform_messages([], {})
         assert result == []
 
-    def test_historical_endpoint_session_collapsed(self):
-        """Completed endpoint session should collapse to last worker output for follow-ups."""
+    def test_historical_flow_session_collapsed(self):
+        """Completed Flow session should collapse to last worker output for follow-ups."""
         raw = [
             {'role': 'user', 'content': 'Question 1'},
-            {'role': 'assistant', 'content': 'Plan for Q1', '_isEndpointPlanner': True},
-            {'role': 'assistant', 'content': 'Worker answer to Q1', '_epIteration': 1},
-            {'role': 'user', 'content': 'Critic feedback', '_isEndpointReview': True,
-             '_epIteration': 1, '_epApproved': True},
+            {'role': 'assistant', 'content': 'Plan for Q1', '_isFlowPlanner': True},
+            {'role': 'assistant', 'content': 'Worker answer to Q1', '_flowIteration': 1},
+            {'role': 'user', 'content': 'Critic feedback', '_isFlowReview': True,
+             '_flowIteration': 1, '_flowApproved': True},
             {'role': 'user', 'content': 'Question 2'},
         ]
         result = _transform_messages(raw, {})
@@ -327,16 +327,16 @@ class TestTransformMessages:
         assert result[1]['content'] == 'Worker answer to Q1'
         assert result[2]['content'] == 'Question 2'
 
-    def test_historical_endpoint_multi_iteration_collapsed(self):
-        """Multi-iteration endpoint session should use the LAST worker output."""
+    def test_historical_flow_multi_iteration_collapsed(self):
+        """Multi-iteration Flow session should use the LAST worker output."""
         raw = [
             {'role': 'user', 'content': 'Q1'},
-            {'role': 'assistant', 'content': 'Plan', '_isEndpointPlanner': True},
-            {'role': 'assistant', 'content': 'Worker v1', '_epIteration': 1},
-            {'role': 'user', 'content': 'Fix X', '_isEndpointReview': True, '_epIteration': 1},
-            {'role': 'assistant', 'content': 'Worker v2 (final)', '_epIteration': 2},
-            {'role': 'user', 'content': 'Approved', '_isEndpointReview': True,
-             '_epIteration': 2, '_epApproved': True},
+            {'role': 'assistant', 'content': 'Plan', '_isFlowPlanner': True},
+            {'role': 'assistant', 'content': 'Worker v1', '_flowIteration': 1},
+            {'role': 'user', 'content': 'Fix X', '_isFlowReview': True, '_flowIteration': 1},
+            {'role': 'assistant', 'content': 'Worker v2 (final)', '_flowIteration': 2},
+            {'role': 'user', 'content': 'Approved', '_isFlowReview': True,
+             '_flowIteration': 2, '_flowApproved': True},
             {'role': 'user', 'content': 'Q2'},
         ]
         result = _transform_messages(raw, {})
@@ -345,31 +345,31 @@ class TestTransformMessages:
         assert result[1]['content'] == 'Worker v2 (final)'
         assert result[2]['content'] == 'Q2'
 
-    def test_trailing_endpoint_session_skipped(self):
-        """Trailing (in-progress) endpoint session should be fully skipped."""
+    def test_trailing_flow_session_skipped(self):
+        """Trailing (in-progress) Flow session should be fully skipped."""
         raw = [
             {'role': 'user', 'content': 'Do something'},
-            {'role': 'assistant', 'content': 'Planning...', '_isEndpointPlanner': True},
-            {'role': 'assistant', 'content': 'Working...', '_epIteration': 1},
+            {'role': 'assistant', 'content': 'Planning...', '_isFlowPlanner': True},
+            {'role': 'assistant', 'content': 'Working...', '_flowIteration': 1},
         ]
         result = _transform_messages(raw, {})
         # All endpoint messages filtered, only original user remains
         assert len(result) == 1
         assert result[0]['content'] == 'Do something'
 
-    def test_multiple_historical_endpoint_sessions(self):
-        """Multiple completed endpoint sessions each collapse independently."""
+    def test_multiple_historical_flow_sessions(self):
+        """Multiple completed Flow sessions each collapse independently."""
         raw = [
             {'role': 'user', 'content': 'Q1'},
-            {'role': 'assistant', 'content': 'Plan1', '_isEndpointPlanner': True},
-            {'role': 'assistant', 'content': 'Answer1', '_epIteration': 1},
-            {'role': 'user', 'content': 'OK1', '_isEndpointReview': True,
-             '_epIteration': 1, '_epApproved': True},
+            {'role': 'assistant', 'content': 'Plan1', '_isFlowPlanner': True},
+            {'role': 'assistant', 'content': 'Answer1', '_flowIteration': 1},
+            {'role': 'user', 'content': 'OK1', '_isFlowReview': True,
+             '_flowIteration': 1, '_flowApproved': True},
             {'role': 'user', 'content': 'Q2'},
-            {'role': 'assistant', 'content': 'Plan2', '_isEndpointPlanner': True},
-            {'role': 'assistant', 'content': 'Answer2', '_epIteration': 1},
-            {'role': 'user', 'content': 'OK2', '_isEndpointReview': True,
-             '_epIteration': 1, '_epApproved': True},
+            {'role': 'assistant', 'content': 'Plan2', '_isFlowPlanner': True},
+            {'role': 'assistant', 'content': 'Answer2', '_flowIteration': 1},
+            {'role': 'user', 'content': 'OK2', '_isFlowReview': True,
+             '_flowIteration': 1, '_flowApproved': True},
             {'role': 'user', 'content': 'Q3'},
         ]
         result = _transform_messages(raw, {})
@@ -380,11 +380,11 @@ class TestTransformMessages:
         assert result[3]['content'] == 'Answer2'
         assert result[4]['content'] == 'Q3'
 
-    def test_historical_endpoint_aborted_during_planning(self):
-        """Endpoint session aborted during planning (no worker) → skip entire block."""
+    def test_historical_flow_aborted_during_planning(self):
+        """Flow session aborted during planning (no worker) → skip entire block."""
         raw = [
             {'role': 'user', 'content': 'Q1'},
-            {'role': 'assistant', 'content': 'Plan...', '_isEndpointPlanner': True},
+            {'role': 'assistant', 'content': 'Plan...', '_isFlowPlanner': True},
             # aborted, no worker turn
             {'role': 'user', 'content': 'Q2'},
         ]
@@ -398,7 +398,7 @@ class TestTransformMessages:
     def test_multimodal_merge(self):
         """Consecutive user messages with mixed content types merge correctly."""
         raw = [
-            {'role': 'user', 'content': 'Text only', '_isEndpointReview': False},
+            {'role': 'user', 'content': 'Text only', '_isFlowReview': False},
             {'role': 'user', 'content': 'More text'},
         ]
         result = _transform_messages(raw, {})
@@ -484,13 +484,13 @@ class TestTransformMessages:
         assert 'one' in result[0]['content']
         assert 'two' in result[0]['content']
 
-    def test_dedup_endpoint_review_not_collapsed(self):
-        """Endpoint critic-review user rows legitimately repeat — never drop."""
+    def test_dedup_flow_review_not_collapsed(self):
+        """Flow critic-review user rows legitimately repeat — never drop."""
         raw = [
             {'role': 'user', 'content': 'Q', 'timestamp': 7},
             {'role': 'assistant', 'content': 'A'},
             {'role': 'user', 'content': 'critic feedback', 'timestamp': 7,
-             '_isEndpointReview': True},
+             '_isFlowReview': True},
         ]
         result = _transform_messages(raw, {})
         # The review row is filtered by the endpoint skip-filter, not the
@@ -519,7 +519,7 @@ class TestBuildBranchApiMessages:
     def _mock_load(self, messages):
         """Create a mock for _load_messages_from_db that returns given messages."""
         return patch(
-            'lib.tasks_pkg.conv_message_builder._load_messages_from_db',
+            'lib.tasks_pkg.conv_message_builder._load._load_messages_from_db',
             return_value=messages,
         )
 
@@ -541,7 +541,7 @@ class TestBuildBranchApiMessages:
              }]},
         ]
         with self._mock_load(conv_messages):
-            result = build_branch_api_messages('conv1', 3, 0, {})
+            result = build_branch_api_messages('conv1', 3, 0, {}, user_id=1)
         # Context: Q1, A1 (Q2 excluded because branch is on A2 which was triggered by Q2)
         # + decorated branch user + branch assistant + branch user
         # Context ends before Q2 (msgIdx=3 is assistant, walk back: Q2 at idx=2 is user → contextEnd=2)
@@ -570,7 +570,7 @@ class TestBuildBranchApiMessages:
              }]},
         ]
         with self._mock_load(conv_messages):
-            result = build_branch_api_messages('conv1', 1, 0, {})
+            result = build_branch_api_messages('conv1', 1, 0, {}, user_id=1)
         assert result is not None
         # Context: empty (branch on msg[1] which is assistant preceded by user at [0],
         #   contextEnd = 0, main_context = messages[:0] = [])
@@ -594,14 +594,14 @@ class TestBuildBranchApiMessages:
              }]},
         ]
         with self._mock_load(conv_messages):
-            result = build_branch_api_messages('conv1', 1, 0, {'systemPrompt': 'Be helpful'})
+            result = build_branch_api_messages('conv1', 1, 0, {'systemPrompt': 'Be helpful'}, user_id=1)
         assert result[0] == {'role': 'system', 'content': 'Be helpful'}
 
     def test_branch_invalid_msg_idx(self):
         """Out-of-range msgIdx should return None."""
         conv_messages = [{'role': 'user', 'content': 'Q1'}]
         with self._mock_load(conv_messages):
-            result = build_branch_api_messages('conv1', 5, 0, {})
+            result = build_branch_api_messages('conv1', 5, 0, {}, user_id=1)
         assert result is None
 
     def test_branch_invalid_branch_idx(self):
@@ -611,7 +611,7 @@ class TestBuildBranchApiMessages:
             {'role': 'assistant', 'content': 'A1', 'branches': []},
         ]
         with self._mock_load(conv_messages):
-            result = build_branch_api_messages('conv1', 1, 0, {})
+            result = build_branch_api_messages('conv1', 1, 0, {}, user_id=1)
         assert result is None
 
     def test_branch_no_branches_field(self):
@@ -621,23 +621,23 @@ class TestBuildBranchApiMessages:
             {'role': 'assistant', 'content': 'A1'},
         ]
         with self._mock_load(conv_messages):
-            result = build_branch_api_messages('conv1', 1, 0, {})
+            result = build_branch_api_messages('conv1', 1, 0, {}, user_id=1)
         assert result is None
 
     def test_branch_conv_not_found(self):
         """Missing conversation should return None."""
         with self._mock_load(None):
-            result = build_branch_api_messages('nonexistent', 0, 0, {})
+            result = build_branch_api_messages('nonexistent', 0, 0, {}, user_id=1)
         assert result is None
 
-    def test_branch_context_includes_endpoint_collapse(self):
-        """Main context with endpoint sessions should be collapsed before branch."""
+    def test_branch_context_includes_flow_collapse(self):
+        """Main context with Flow sessions should be collapsed before branch."""
         conv_messages = [
             {'role': 'user', 'content': 'Q1'},
-            {'role': 'assistant', 'content': 'Plan', '_isEndpointPlanner': True},
-            {'role': 'assistant', 'content': 'Worker answer', '_epIteration': 1},
-            {'role': 'user', 'content': 'OK', '_isEndpointReview': True,
-             '_epIteration': 1, '_epApproved': True},
+            {'role': 'assistant', 'content': 'Plan', '_isFlowPlanner': True},
+            {'role': 'assistant', 'content': 'Worker answer', '_flowIteration': 1},
+            {'role': 'user', 'content': 'OK', '_isFlowReview': True,
+             '_flowIteration': 1, '_flowApproved': True},
             {'role': 'user', 'content': 'Q2'},
             {'role': 'assistant', 'content': 'Normal A2',
              'branches': [{
@@ -649,9 +649,9 @@ class TestBuildBranchApiMessages:
              }]},
         ]
         with self._mock_load(conv_messages):
-            result = build_branch_api_messages('conv1', 5, 0, {})
+            result = build_branch_api_messages('conv1', 5, 0, {}, user_id=1)
         # Context should be: Q1, collapsed worker answer, Q2
-        # (endpoint planner/review skipped, worker kept as normal assistant)
+        # (Flow planner/review skipped, worker kept as normal assistant)
         # Then branch user
         # contextEnd for msg[5] (assistant): walk back from 4, user at 4 → contextEnd=4
         # main_context = messages[:4] = [Q1, planner, worker, review]
@@ -681,7 +681,7 @@ class TestBuildBranchApiMessages:
              }]},
         ]
         with self._mock_load(conv_messages):
-            result = build_branch_api_messages('conv1', 2, 0, {})
+            result = build_branch_api_messages('conv1', 2, 0, {}, user_id=1)
         # contextEnd = msgIdx = 2 (user message, not assistant)
         # main_context = messages[:2] = [Q1, A1]
         assert result is not None
@@ -708,7 +708,7 @@ class TestBuildBranchApiMessages:
              }]},
         ]
         with self._mock_load(conv_messages):
-            result = build_branch_api_messages('conv1', 1, 0, {})
+            result = build_branch_api_messages('conv1', 1, 0, {}, user_id=1)
         # No main context (branch on msg[1], which is assistant at idx 1,
         # walk back: idx 0 is user → contextEnd=0, main_context=[])
         # Branch: 5 messages (6 minus placeholder)
@@ -735,7 +735,7 @@ class TestBuildBranchApiMessages:
              }]},
         ]
         with self._mock_load(conv_messages):
-            result = build_branch_api_messages('conv1', 1, 0, {})
+            result = build_branch_api_messages('conv1', 1, 0, {}, user_id=1)
         assert result is not None
         # The branch user message should have the quote prepended
         user_msg = result[0]

@@ -52,7 +52,8 @@ _REQUIREMENTS = _ROOT / 'requirements.txt'
 def _fake_tree(tmp_path, monkeypatch, wheels=('tofu_search-0.5.3-py3-none-any.whl',),
                floor='0.5.3', src_version='0.5.3'):
     """A minimal ROOT/sibling/dest tree around the REAL bundling function."""
-    ex = pytest.importorskip('export', reason='export.py not shipped in opensource')
+    internal = pytest.importorskip(
+        'export_pkg._internal', reason='export internals not shipped in opensource')
     root = tmp_path / 'chatui'
     sibling = tmp_path / 'tofu-search'
     (sibling / 'dist').mkdir(parents=True)
@@ -65,8 +66,12 @@ def _fake_tree(tmp_path, monkeypatch, wheels=('tofu_search-0.5.3-py3-none-any.wh
         f'tofu-search>={floor}\n', encoding='utf-8')
     dest = tmp_path / 'dest'
     dest.mkdir()
-    monkeypatch.setattr(ex, 'ROOT', root)
-    return ex, dest
+    # Patch the helper's canonical module so the test cannot accidentally read
+    # a developer's real sibling checkout. Importing the full publish facade
+    # would also cross into secret-bearing release setup that this unit does
+    # not exercise.
+    monkeypatch.setattr(internal, 'ROOT', root)
+    return internal, dest
 
 
 def test_the_wheel_is_bundled_for_opensource_too(tmp_path, monkeypatch):
@@ -104,15 +109,16 @@ def test_the_newest_wheel_wins(tmp_path, monkeypatch):
 def test_a_missing_dist_dir_is_a_clean_skip(tmp_path, monkeypatch):
     """A host without the sibling repo must not crash the export — it just
     gets no wheel (and install.sh then reports the gap loudly)."""
-    ex = pytest.importorskip('export', reason='export.py not shipped in opensource')
+    internal = pytest.importorskip(
+        'export_pkg._internal', reason='export internals not shipped in opensource')
     root = tmp_path / 'chatui'
     root.mkdir()
     (root / 'requirements.txt').write_text('tofu-search>=0.5.3\n',
                                            encoding='utf-8')
     dest = tmp_path / 'dest'
     dest.mkdir()
-    monkeypatch.setattr(ex, 'ROOT', root)
-    ex._bundle_tofu_search_wheel(dest, 'opensource')
+    monkeypatch.setattr(internal, 'ROOT', root)
+    internal._bundle_tofu_search_wheel(dest, 'opensource')
     assert not list(dest.glob('vendor/tofu_search-*.whl'))
 
 

@@ -1,4 +1,4 @@
-"""Section 1 config resolution + model seed (pt_03f4cdf1 slice 30).
+"""Section 1 config resolution and first-dispatch model attribution.
 
 Extracted 2026-07-31 from ``lib/tasks_pkg/orchestrator/_run.py``
 run_task's Section 1, where the unit ran inline once per invocation.
@@ -9,7 +9,7 @@ Two steps:
 1. ``mcfg = _resolve_model_config(cfg, task['id'])`` — resolves the
    per-model config (model, thinking, preset, token/temperature,
    feature flags, project scope).
-2. Model seed (epic pt_8f6cbc753855415e): ``if model:
+2. Model seed: ``if model:
    task['model'] = model``. The loop tail re-stamps the model after
    each successful round, but a first-call DISPATCH failure
    (revoked-OAuth 401, all keys cooling, endpoint-unreachable
@@ -19,7 +19,7 @@ Two steps:
    tracks fallback swaps; this seed is the floor.
 
 The 17-field unpack stays inline in run_task as local-variable
-binding (owner DONE definition for pt_03f4cdf1: local binding is
+binding (owner DONE definition for : local binding is
 spine-legitimate); only the resolve + seed branch moved here.
 """
 
@@ -40,8 +40,8 @@ def resolve_and_seed_model_config(cfg, task):
     """
     mcfg = _resolve_model_config(cfg, task['id'])
     model = mcfg['model']
-    # ★ Seed the resolved model on the task IMMEDIATELY (epic
-    #   pt_8f6cbc753855415e). The loop tail stamps it again after each
+    # Seed the resolved model on the task immediately. The loop tail stamps it
+    # again after each
     #   successful round, but a first-call DISPATCH failure (revoked-OAuth
     #   401, all keys cooling, endpoint-unreachable exhaustion) raises
     #   BEFORE any round succeeds — the error row then persisted with

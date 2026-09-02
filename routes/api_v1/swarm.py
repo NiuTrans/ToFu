@@ -16,11 +16,11 @@ from __future__ import annotations
 
 from quart import Blueprint
 
-from lib.api_response import api_internal_error, api_ok
+from lib.api_response import api_internal_error, api_not_found, api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
 
-from .auth import require_auth, require_scope
+from .auth import request_user_id, require_auth, require_scope
 
 logger = get_logger(__name__)
 
@@ -49,15 +49,22 @@ def swarm_status(task_id):
         return api_internal_error(e, context='Swarm unavailable',
                                   source='api_v1.swarm.status')
     try:
-        status = get_swarm_status(task_id)
+        status = get_swarm_status(
+            task_id,
+            user_id=int(request_user_id()),
+        )
     except Exception as e:
         logger.error('[Swarm.v1] status lookup failed task=%s: %s',
                      task_id, e, exc_info=True)
         return api_internal_error(e, context='swarm_status',
                                   source='api_v1.swarm.status')
     if status is None:
-        return api_ok({'active': False,
-                       'message': 'No swarm for this task'})
+        # No in-memory session AND no durable row: genuinely unknown, NOT a
+        # settle signal. ``active: None`` + ``known: False`` tells the
+        # frontend reconciler to keep probing (restart/rehydrate windows)
+        # instead of false-settling the panel into the Unconfirmed limbo.
+        return api_ok({'active': None, 'known': False,
+                       'message': 'No swarm record for this task'})
     return api_ok(status)
 
 
@@ -74,13 +81,18 @@ def swarm_abort(task_id):
         return api_internal_error(e, context='Swarm unavailable',
                                   source='api_v1.swarm.abort')
     try:
-        abort_swarm(task_id)
+        result = abort_swarm(
+            task_id,
+            user_id=int(request_user_id()),
+        )
     except Exception as e:
         logger.warning('[Swarm.v1] abort failed task=%s: %s', task_id, e,
                        exc_info=True)
         return api_internal_error(e, context='swarm_abort',
                                   source='api_v1.swarm.abort',
                                   log_traceback=False)
+    if not result.get('success'):
+        return api_not_found('Swarm not found')
     return api_ok({'message': 'Swarm abort requested'})
 
 

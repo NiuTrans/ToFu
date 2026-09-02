@@ -30,7 +30,6 @@ import sys
 import tempfile
 import time
 
-from lib.env_compat import getenv_compat
 from lib.json_store import read_json, write_json_atomic
 from lib.log import get_logger
 
@@ -63,9 +62,8 @@ def _effective_dir() -> str:
                             f'tofu-translate-refusal-pytest-{os.getpid()}', slug)
     return _REFUSAL_DIR
 
-_ENABLED = getenv_compat('TOFU_TRANSLATE_REFUSAL', default='1') != '0'
-_TTL_SECONDS = int(getenv_compat('TOFU_TRANSLATE_REFUSAL_TTL_DAYS',
-                                 default='7')) * 86400
+_ENABLED = os.environ.get('TOFU_TRANSLATE_REFUSAL', '1') != '0'
+_TTL_SECONDS = int(os.environ.get('TOFU_TRANSLATE_REFUSAL_TTL_DAYS', '7')) * 86400
 
 
 def _key(text: str, source: str, target: str) -> str:

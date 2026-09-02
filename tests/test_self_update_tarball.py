@@ -16,7 +16,7 @@ tests never hit the network or touch the real project tree.
 
 _AUDIT_SYNTHETIC_REPO_PATHS = {
     'lib/foo.py', 'static/js/bundle-abc.js',
-    'static/vite/assets/main-abc.js',
+    'static/vite/assets/main-abc.js', 'routes/chat.py',
 }
 
 import contextlib

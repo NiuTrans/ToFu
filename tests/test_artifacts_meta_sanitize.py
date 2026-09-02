@@ -21,15 +21,6 @@ pytest_plugins = ('tests._artifact_sidecar',)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    """Bootstrap the legacy schema used by the Flask test application."""
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
-
-
 @pytest.mark.unit
 class TestPublicMetaUnit:
     """public_meta whitelist behaviour (pure function, no DB)."""

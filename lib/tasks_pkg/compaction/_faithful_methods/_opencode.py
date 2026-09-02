@@ -17,20 +17,23 @@ from lib.tasks_pkg.compaction._steps import (
     register_step,
 )
 
-from ._shared import _content_text, _msg_tokens
-from ._state import _log_id, _running_summaries, _summary_state_lock
+from ._shared import (
+    _apply_summary,
+    _content_text,
+    _max_output_tokens,
+    _msg_tokens,
+    _raw_context_limit,
+    _select_middle_turns,
+    _tok,
+)
+from ._state import (
+    _cooldown_ok,
+    _log_id,
+    _running_summaries,
+    _summary_state_lock,
+)
 
 logger = get_logger(__name__)
-
-
-# The tunable helpers (context-limit resolution, token counting, cooldown
-# gate, middle-turn selection, summary splicing) are resolved through the
-# package FACADE at CALL time — never bound at import — so that callers /
-# tests that patch ``lib.tasks_pkg.compaction._faithful_methods.<helper>``
-# take effect, exactly as when everything lived in one module.
-def _facade():
-    import lib.tasks_pkg.compaction._faithful_methods as _fm
-    return _fm
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -128,9 +131,8 @@ _OC_SUMMARY_PROMPT = (
 
 
 def _oc_usable(ctx) -> int:
-    _fm = _facade()
-    limit = _fm._raw_context_limit(ctx)
-    reserved = min(20_000, _fm._max_output_tokens(ctx))
+    limit = _raw_context_limit(ctx)
+    reserved = min(20_000, _max_output_tokens(ctx))
     return max(0, limit - reserved)
 
 
@@ -140,19 +142,18 @@ def summarize_opencode(ctx: CompactionContext) -> int:
     protect head + recent tail (DEFAULT_TAIL_TURNS=2, budget
     min(8000,max(2000,usable*0.25))); summarize the MIDDLE band ONE-SHOT
     with previousSummary fed back; 7-section template."""
-    _fm = _facade()
-    usable = _fm._oc_usable(ctx)
-    total = _fm._tok(ctx.messages, ctx.task)
+    usable = _oc_usable(ctx)
+    total = _tok(ctx.messages, ctx.task)
     if total < usable:
         logger.debug('[OCsum] conv=%s under usable (%d<%d) — skip',
                      _log_id(ctx.conv_id), total, usable)
         return 0
-    if not _fm._cooldown_ok(ctx.conv_id):
+    if not _cooldown_ok(ctx.conv_id):
         return 0
 
     tail_budget = min(8000, max(2000, int(usable * 0.25)))
-    middle, text = _fm._select_middle_turns(ctx, tail_budget, protect_first_n=1,
-                                            protect_last_n=2)
+    middle, text = _select_middle_turns(
+        ctx, tail_budget, protect_first_n=1, protect_last_n=2)
     if not middle or len(text) < 400:
         return 0
 
@@ -167,8 +168,13 @@ def summarize_opencode(ctx: CompactionContext) -> int:
         return 0
     with _summary_state_lock:
         _running_summaries[ctx.conv_id] = summary
-    saved = _fm._apply_summary(ctx, middle, summary,
-                               '[Context compacted — earlier work summarized]', total)
+    saved = _apply_summary(
+        ctx,
+        middle,
+        summary,
+        '[Context compacted — earlier work summarized]',
+        total,
+    )
     logger.info('[OCsum] conv=%s overflow %d≥%d → %d middle turns (~%d tok saved)',
                 _log_id(ctx.conv_id), total, usable, len(middle), saved)
     return saved

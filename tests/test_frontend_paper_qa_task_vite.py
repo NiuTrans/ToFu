@@ -18,7 +18,7 @@ SOURCE = os.path.join(
 CLASSIC_PUSH = os.path.join(
     ROOT, 'static', 'js', 'paper', 'push_transport.js')
 CLASSIC_QA = os.path.join(ROOT, 'static', 'js', 'paper', 'qa.js')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 _HARNESS = r"""
@@ -132,7 +132,7 @@ def _assert_contract(first: str, second: str) -> None:
 
 
 @pytest.mark.skipif(not shutil.which('node') or not os.path.isfile(ESBUILD),
-                    reason='node + esbuild dev dependency required')
+                    reason='node + vite test bundler dev dependency required')
 def test_native_qa_task_owns_push_poll_contract(tmp_path):
     assert not os.path.exists(CLASSIC_PUSH)
     assert not os.path.exists(CLASSIC_QA)

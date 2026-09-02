@@ -40,6 +40,20 @@ def test_main_routes_domains_to_explicit_esm_owners():
     assert 'version: 3 as const' in source
 
 
+def test_ambient_scene_is_a_post_ready_fail_soft_vite_chunk():
+    source = _read('frontend/src/main.ts')
+    assert source.count("import('./runtime/scene/tofu-pet.js')") == 1
+    assert source.count("import('./runtime/scene/tofu-scene.js')") == 1
+    assert "sceneRuntime: TofuSceneRuntimeBridge" in source
+    assert '__tofuRuntimeScope' not in source
+    assert "ambient pet preload failed" in source
+    assert "ambient scene preload failed" in source
+
+    ready = source[source.index('Promise.all([i18nReady(), runtimeReady])'):]
+    assert ready.index("new CustomEvent('tofu:app-ready'") \
+        < ready.index('scheduleAmbientScene();')
+
+
 def test_vendor_and_locale_owners_are_esm_chunks():
     vendor = _read('frontend/src/vendor-runtime.ts')
     for package in (
@@ -93,6 +107,8 @@ def test_manifest_validation_covers_standalone_url_assets(tmp_path, monkeypatch)
     manifest = {
         'frontend/src/main.ts': {
             'file': 'assets/main.js', 'isEntry': True,
+            assets.I18N_CATALOG_DIGEST_FIELD:
+                assets._source_i18n_catalog_digest(),
         },
         'frontend/src/admin.ts': {
             'file': 'assets/admin.js', 'isEntry': True,
@@ -110,9 +126,60 @@ def test_manifest_validation_covers_standalone_url_assets(tmp_path, monkeypatch)
     assert assets.validate_vite_artifact() == manifest
     assert 'assets/main.js' in assets.get_vite_asset_tags('main')
     assert 'assets/admin.js' in assets.get_vite_asset_tags('admin')
+    manifest['frontend/src/main.ts'][assets.I18N_CATALOG_DIGEST_FIELD] = '0' * 64
+    manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+    assets.clear_vite_asset_cache()
+    with pytest.raises(assets.ViteAssetError, match='i18n chunks are stale'):
+        assets.validate_vite_artifact()
+    manifest['frontend/src/main.ts'][assets.I18N_CATALOG_DIGEST_FIELD] = (
+        assets._source_i18n_catalog_digest())
+    manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+    assets.clear_vite_asset_cache()
     (emitted / 'worker.mjs').unlink()
     with pytest.raises(assets.ViteAssetError, match='worker.mjs'):
         assets.validate_vite_artifact()
+
+
+def test_locale_source_change_preserves_requests_but_fails_deploy_validation(
+        tmp_path, monkeypatch):
+    import lib.vite_assets as assets
+
+    out = tmp_path / 'vite'
+    emitted = out / 'assets'
+    emitted.mkdir(parents=True)
+    (emitted / 'main.js').write_text('// emitted', encoding='utf-8')
+    locales = tmp_path / 'locales'
+    locales.mkdir()
+    locale_paths = tuple(locales / f'{language}.json' for language in ('zh', 'en'))
+    for path in locale_paths:
+        path.write_text('{"contract.key":"value"}\n', encoding='utf-8')
+    monkeypatch.setattr(assets, 'VITE_OUT_DIR', str(out))
+    monkeypatch.setattr(assets, 'I18N_LOCALE_PATHS', tuple(map(str, locale_paths)))
+    manifest = {
+        'frontend/src/main.ts': {
+            'file': 'assets/main.js',
+            'isEntry': True,
+            assets.I18N_CATALOG_DIGEST_FIELD:
+                assets._source_i18n_catalog_digest(),
+        },
+    }
+    manifest_path = out / 'manifest.json'
+    manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+    monkeypatch.setattr(assets, 'VITE_MANIFEST', str(manifest_path))
+    assets.clear_vite_asset_cache()
+
+    expected_tags = assets.get_vite_asset_tags('main')
+    assert 'assets/main.js' in expected_tags
+    locale_paths[1].write_text('{"contract.key":"changed-and-longer"}\n', encoding='utf-8')
+
+    # A source edit is not a deployment and cannot withdraw the last atomically
+    # published graph from hard-refresh requests, whether the tag cache is warm
+    # or cold. The next lifecycle validation remains strict and forces a build.
+    assert assets.get_vite_asset_tags('main') == expected_tags
+    assets.clear_vite_asset_cache()
+    assert assets.get_vite_asset_tags('main') == expected_tags
+    with pytest.raises(assets.ViteAssetError, match='i18n chunks are stale'):
+        assets.validate_vite_artifact(('main',))
 
 
 def test_release_wrapper_publishes_manifest_last_and_retains_previous_graph():
@@ -166,7 +233,7 @@ def test_window_public_surface_is_limited_to_api_and_tofu_modules():
     browser_native = {
         'addEventListener', 'alert', 'cancelAnimationFrame', 'clearInterval',
         'clearTimeout', 'confirm', 'devicePixelRatio', 'dispatchEvent',
-        'getSelection', 'history', 'innerHeight', 'innerWidth',
+        'getComputedStyle', 'getSelection', 'history', 'innerHeight', 'innerWidth',
         'IntersectionObserver', 'location', 'matchMedia', 'MutationObserver',
         'navigator', 'onerror', 'open', 'opener', 'PointerEvent', 'print',
         'prompt', 'removeEventListener', 'requestAnimationFrame',

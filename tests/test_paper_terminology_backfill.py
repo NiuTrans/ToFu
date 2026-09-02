@@ -34,6 +34,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
+
+TEST_OWNER_USER_ID = 1
 sys.modules.setdefault('flask', _quart)
 
 
@@ -70,7 +72,7 @@ The end.
 
 
 def _audit(body):
-    from lib.paper.terminology_audit import build_terminology_audit
+    from lib.paper.terminology_audit.audit import build_terminology_audit
     return build_terminology_audit(body)
 
 
@@ -186,17 +188,19 @@ def test_termfill_persistence_uses_semantic_sidecar(monkeypatch):
             calls.append((operation, payload, command_id))
             return {'saved': True}
 
-    monkeypatch.setattr(tb, '_storage', lambda **_kwargs: Client())
+    monkeypatch.setattr(
+        'lib.storage.get_storage_client', lambda *, write=False: Client())
     monkeypatch.setattr(
         tb, 'build_backfill_addendum',
         lambda *_args, **_kwargs: '## Added definitions')
 
     result = tb.run_report_termfill(
         'body', 'en', phash='paper-hash', model='model-x',
-        audit={'missing': [{'term': 'SFT'}]})
+        audit={'missing': [{'term': 'SFT'}]}, user_id=TEST_OWNER_USER_ID)
 
     assert result['closed'] is True
     assert calls[0][0] == 'paper.report.upsert'
+    assert calls[0][1]['user_id'] == TEST_OWNER_USER_ID
     assert calls[0][1]['lang'] == 'termfill:en'
     assert calls[0][1]['meta'] == {'kind': 'termfill'}
     assert calls[0][2].startswith('paper-termfill:')
@@ -226,7 +230,7 @@ def test_negctl_reaudit_gate_load_bearing():
 # ── Engine off-path byte-identity ───────────────────────────────────────────
 
 def _patch_dispatch_stream(body):
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
 
     def _fake(messages, on_content=None, on_thinking=None, **kw):
         if body and on_content:
@@ -237,8 +241,8 @@ def _patch_dispatch_stream(body):
 
 
 def _run_engine(tid, body, lang='en'):
-    import lib.paper.report_engine as re_mod
-    from lib.paper import _new_report_task
+    import lib.paper.report_engine.worker as re_mod
+    from lib.paper.report_runtime import _new_report_task
     _patch_dispatch_stream(body)
     task = _new_report_task(tid, 'phashbackfill000000000000000000', lang, None,
                             client_title='Efficient RLHF Training',
@@ -246,8 +250,8 @@ def _run_engine(tid, body, lang='en'):
                             config={
                                 'paperInsightEnabled': False,
                                 'paperCheckpointsEnabled': False,
-                            })
-    re_mod._run_report_task(task, [
+                            }, user_id=TEST_OWNER_USER_ID)
+    re_mod.run_report_task(task, [
         {'role': 'system', 'content': 'sys'},
         {'role': 'user', 'content': 'paper'},
     ], [])
@@ -255,7 +259,7 @@ def _run_engine(tid, body, lang='en'):
 
 
 def test_engine_done_body_byte_identical_kill_switch():
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     orig = re_mod.dispatch_stream
     try:
         # Engage the fleet-wide kill switch → backfill must not run at all.
@@ -279,7 +283,7 @@ def test_engine_flag_on_fires_and_appends_addendum_event():
     """Flag ON, plain report, real gap → the engine hook runs the backfill and
     emits a ``termfill`` event carrying a gap-closing addendum, WITHOUT altering
     the primary persisted ``done`` body (separate-key, append-only)."""
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     import lib.paper.terminology_backfill as tb
     orig = re_mod.dispatch_stream
     orig_run = tb.run_report_termfill
@@ -314,7 +318,7 @@ def test_engine_flag_on_fires_and_appends_addendum_event():
 def test_engine_skips_backfill_in_review_mode():
     """A review lang key must short-circuit the backfill hook before any LLM
     call — run_report_termfill is never invoked."""
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     import lib.paper.terminology_backfill as tb
     orig = re_mod.dispatch_stream
     orig_run = tb.run_report_termfill

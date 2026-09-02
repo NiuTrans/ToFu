@@ -21,6 +21,7 @@ _STORE_PATH = config_path('browser_access.json')
 _SENSITIVE_KEYS = (
     'password', 'passwd', 'secret', 'token', 'cookie', 'authorization',
     'credential', 'body', 'content', 'html', 'text', 'data', 'upload',
+    'code', 'expression', 'condition',
 )
 
 
@@ -267,14 +268,42 @@ def summarize_parameters(params: dict | None) -> dict:
 _BROWSER_DOMAIN_WRITE_TOOLS = frozenset({
     'browser_click', 'browser_type', 'browser_press_key',
     'browser_execute_js', 'browser_fill_form', 'browser_menu_click',
-    'browser_keyboard', 'browser_hover_and_click', 'browser_right_click_menu',
+    'browser_devtools',
+})
+
+_DEVTOOLS_READ_OR_LIFECYCLE_ACTIONS = frozenset({
+    'console_read', 'console_clear', 'context_list',
+    'debug_start', 'debug_state', 'debug_stop',
+    'breakpoint_remove', 'script_source',
 })
 
 
-def browser_tool_domain(fn_name: str, fn_args: dict | None, *, client_id='') -> str:
+def browser_tool_requires_write(fn_name: str, fn_args: dict | None) -> bool:
+    """Return the action-aware write classification for browser access.
+
+    ``browser_devtools`` deliberately remains in the serial write partition:
+    one tab must never receive concurrent CDP state changes.  This finer
+    classification controls only domain grants and attended approval, allowing
+    console/source diagnostics and debugger cleanup without a write grant.
+    Expressions are writes because JavaScript syntax cannot prove purity.
+    """
+    if fn_name != 'browser_devtools':
+        return fn_name in _BROWSER_DOMAIN_WRITE_TOOLS
+    action = str((fn_args or {}).get('action') or 'console_read').lower()
+    return action not in _DEVTOOLS_READ_OR_LIFECYCLE_ACTIONS
+
+
+def browser_tool_domain(
+    fn_name: str,
+    fn_args: dict | None,
+    *,
+    client_id: str,
+    owner_user_id: str,
+) -> str:
     """Best-effort current domain for a generic browser tool call."""
     args = dict(fn_args or {})
-    if fn_name in ('browser_navigate', 'browser_create_tab') and args.get('url'):
+    if fn_name in ('browser_navigate', 'browser_research_page') \
+            and args.get('url'):
         return normalize_domain(args['url'])
     if fn_name == 'browser_get_cookies':
         target = args.get('url') or args.get('domain')
@@ -284,7 +313,12 @@ def browser_tool_domain(fn_name: str, fn_args: dict | None, *, client_id='') -> 
     try:
         from .queue import send_browser_command
         result, error = send_browser_command(
-            'list_tabs', {}, timeout=8, client_id=client_id or None)
+            'list_tabs',
+            {},
+            timeout=8,
+            client_id=client_id,
+            owner_user_id=owner_user_id,
+        )
         if error or not isinstance(result, list):
             return ''
         selected = None
@@ -299,56 +333,97 @@ def browser_tool_domain(fn_name: str, fn_args: dict | None, *, client_id='') -> 
         return ''
 
 
-def browser_tool_access(fn_name: str, fn_args: dict | None, *, user_id='',
-                        client_id='', grant_on_success=False) -> str:
-    """Enforce or grant domain policy for the legacy generic tool surface.
+def browser_tool_access(
+    fn_name: str,
+    fn_args: dict | None,
+    *,
+    owner_user_id: str,
+    client_id: str = '',
+    grant_on_success: bool = False,
+) -> str:
+    """Enforce or grant domain policy for the browser tool surface.
 
     Returns the resolved domain.  Lifecycle/navigation calls are reads;
     arbitrary page interactions are writes.
     """
+    owner_user_id = str(owner_user_id or '').strip()
+    if not owner_user_id.isdigit() or int(owner_user_id) < 1:
+        raise BrowserAccessDenied(
+            'Browser tool requires an authenticated owner')
+
     from .protocol import client_protocol
-    from .queue import client_user_id, get_connected_clients
+    from .queue import client_owner_user_id, get_connected_clients
     if not client_id:
-        own_clients = get_connected_clients(user_id=str(user_id or ''))
+        own_clients = get_connected_clients(
+            owner_user_id=owner_user_id)
         if own_clients:
             client_id = str(max(
                 own_clients, key=lambda row: row.get('last_poll', 0)
             ).get('client_id') or '')
-    # Passing an empty string is intentional: do not let client_protocol()
-    # silently fall back to another user's freshest browser.
-    info = client_protocol(client_id if client_id else '')
+    info = client_protocol(client_id)
     resolved_client = str(info.get('client_id') or client_id or '')
-    if resolved_client and client_user_id(resolved_client) != str(user_id or ''):
+    if (
+        resolved_client
+        and client_owner_user_id(resolved_client) != owner_user_id
+    ):
         raise BrowserAccessDenied(
             'Browser client is not connected for this user')
     if fn_name in ('browser_list_tabs', 'browser_close_tab'):
         # list_tabs filters rows itself; closing is cleanup, not page access.
         return ''
+    requires_write = browser_tool_requires_write(fn_name, fn_args)
     if not resolved_client:
-        # Never let browser_tool_domain() use its legacy global fallback when
-        # this request has no browser in the caller's tenant.
-        if fn_name in _BROWSER_DOMAIN_WRITE_TOOLS:
+        if requires_write:
             raise BrowserWriteAuthorizationRequired(
                 'unknown-domain', client_id='')
         return ''
-    domain = browser_tool_domain(fn_name, fn_args, client_id=resolved_client)
+    domain = browser_tool_domain(
+        fn_name,
+        fn_args,
+        client_id=resolved_client,
+        owner_user_id=owner_user_id,
+    )
     if not domain:
-        # Fail closed only for write actions.  A read may be the operation that
-        # discovers the URL of a newly-bound legacy tab.
-        if fn_name in _BROWSER_DOMAIN_WRITE_TOOLS:
+        # Fail closed only for write actions. A read may be the operation that
+        # discovers the URL of a newly-bound tab.
+        if requires_write:
             raise BrowserWriteAuthorizationRequired(
                 'unknown-domain', client_id=resolved_client)
         return ''
     profile = info.get('profile', '')
-    if grant_on_success and fn_name in _BROWSER_DOMAIN_WRITE_TOOLS:
-        require_access(user_id, domain, access='read',
+    source_url = str(
+        (fn_args or {}).get('source_url')
+        or (fn_args or {}).get('sourceUrl')
+        or ''
+    ).strip()
+    if fn_name == 'browser_devtools' and source_url:
+        try:
+            source_scheme = urlsplit(source_url).scheme.lower()
+        except ValueError:
+            source_scheme = ''
+        if source_scheme in ('http', 'https'):
+            require_access(
+                owner_user_id, source_url, access='read',
+                client_id=resolved_client, profile=profile)
+    if grant_on_success and requires_write:
+        require_access(owner_user_id, domain, access='read',
                        client_id=resolved_client, profile=profile)
-        grant_write(user_id, domain, client_id=resolved_client, profile=profile,
-                    granted_by=user_id)
+        grant_write(
+            owner_user_id,
+            domain,
+            client_id=resolved_client,
+            profile=profile,
+            granted_by=owner_user_id,
+        )
     else:
-        access = 'write' if fn_name in _BROWSER_DOMAIN_WRITE_TOOLS else 'read'
-        require_access(user_id, domain, access=access, client_id=resolved_client,
-                       profile=profile)
+        access = 'write' if requires_write else 'read'
+        require_access(
+            owner_user_id,
+            domain,
+            access=access,
+            client_id=resolved_client,
+            profile=profile,
+        )
     return domain
 
 
@@ -359,4 +434,5 @@ __all__ = [
     'grant_write', 'revoke_write', 'replace_write_grants',
     'summarize_parameters',
     'browser_tool_domain', 'browser_tool_access',
+    'browser_tool_requires_write',
 ]

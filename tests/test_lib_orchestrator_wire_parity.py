@@ -1,32 +1,9 @@
 #!/usr/bin/env python3
-# Incident anchor: born in commit 70334b04 — test(orchestrator): pt_03f4cdf1 slice 1 — wire-parity baseline for fu...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
-"""Wire-parity baseline for the lib/tasks_pkg/orchestrator/_run.py split
-(board epic ``pt_03f4cdf1``).
+"""Structural contracts for the sliced task orchestrator.
 
-The plan: ``lib/tasks_pkg/orchestrator/_run.py`` currently holds a single
-1813-line function ``run_task`` (the hottest path in the codebase). Future
-slices will extract phase seams (pre-stream prep / VU startup / stream loop /
-per-round tool dispatch / finalize) into sub-modules of a new
-``lib/tasks_pkg/orchestrator/_run/`` sub-package, keeping the top-level
-package's import surface byte-identical.
-
-This test is the CONTRACT the split must preserve. Analogous to the routes/
-chat.py wire-parity test (``tests/test_routes_chat_wire_parity.py``) but for
-the orchestrator: assert that every symbol external code imports today from
-``lib.tasks_pkg.orchestrator`` — the facade — AND from
-``lib.tasks_pkg.orchestrator._run`` — the raw sub-module some consumers still
-name directly (``endpoint_review.py`` / ``autopilot.py``) — keeps resolving
-after any future slice.
-
-Cannot pre-emptively snapshot Blueprint URLs here (there are none — this is
-lib code, not routes). The equivalent contract IS the import-symbol surface:
-consumers doing ``from lib.tasks_pkg.orchestrator import run_task`` /
-``from lib.tasks_pkg.orchestrator._run import run_task`` etc. all resolve.
-
-Written BEFORE any _run.py source movement so the same tests run pre- and
-post- every future extraction slice; a symbol accidentally dropped by a
-future move trips this test at that slice's PR.
+The package root is a namespace, ``api`` owns the application entry point,
+``_ports`` owns cross-phase dependency injection, and every private behavior
+has one concrete leaf-module owner.
 """
 
 from __future__ import annotations
@@ -51,82 +28,18 @@ def _unit(fn):
     return fn if pytest is None else pytest.mark.unit(fn)
 
 
-# ── The full re-export surface expected on the facade ─────────────────
-# Every name external code imports from ``lib.tasks_pkg.orchestrator``
-# today. Extracted from ``lib/tasks_pkg/orchestrator/__init__.py`` and
-# from live ``from lib.tasks_pkg.orchestrator import <X>`` grep results
-# across the tree. A future slice that inadvertently drops one of these
-# from the facade — either because a submodule renamed the symbol or
-# because __init__.py forgot to re-export it after a move — trips this
-# test. Deliberately ORDERED alphabetically inside each group so a diff
-# on a slice PR reads cleanly.
-_ORCHESTRATOR_FACADE_SYMBOLS = (
-    # ── Main entry points (drivers) ──
-    'run_task',                    # the giant 1813-line loop being sliced
-    '_run_single_turn',            # reusable one-cycle primitive
-    'drain_peer_messages_into',    # peer-message drain into a turn
-    # ── Rebindable protocol binding ──
-    'build_body',                  # tests/consumers can reassign this
-    # ── Finalize helpers (from _finalize submodule) ──
-    '_discard_pretool_prose',
-    '_check_suspicious_completion',
-    '_emit_tool_round_phase',
-    '_finalize_dangling_tool_rounds',
-    '_maybe_auto_retry_turn',
-    '_maybe_append_sources_footer',
-    '_finalize_and_emit_done',
-    '_SRC_URL_RE',
-    '_repair_json',
-    '_compute_write_breakdown',
-    '_ENVELOPE_MAX_TOKENS',
-    '_READ_DROP_WASTE_TOKENS',
-    '_run_commit_round_async',
-    # ── Re-exports from _run.py used at module.X call sites ──
-    'AbortedError',
-    'append_event',
-    'checkpoint_task_partial',
-    'persist_task_result',
-    'stream_llm_response',
-    '_strip_base64_for_snapshot',
-    'derive_round_modified_files',
-    '_spawn_async_commit_round',
-    '_spawn_async_profile_consolidation',
-    'EventType',
-    'build_event',
-    'tool_label',
-)
-
-
-# Symbols external code imports DIRECTLY from the _run submodule (bypassing
-# the facade). Discovered from grep across the tree: autopilot.py +
-# endpoint_review.py both call ``from lib.tasks_pkg.orchestrator import
-# _run_single_turn`` but _turn.py calls ``from
-# lib.tasks_pkg.orchestrator._run import run_task``. If a future slice moves
-# ``run_task`` into a sub-package (e.g. .._run/__init__.py) that submodule
-# MUST still resolve ``run_task`` as an attribute for these direct imports
-# to keep working.
 _RUN_SUBMODULE_SYMBOLS = (
     'run_task',
 )
 
 
 @_unit
-def test_orchestrator_facade_symbols_all_importable():
-    """Every symbol external code imports from
-    ``lib.tasks_pkg.orchestrator`` today must still resolve after any
-    _run.py split. A future slice that inadvertently drops a name from
-    the facade — because a submodule renamed the symbol or __init__.py
-    forgot to re-export it — trips here."""
+def test_orchestrator_root_is_a_namespace():
     import importlib
-    facade = importlib.import_module('lib.tasks_pkg.orchestrator')
-    missing = [name for name in _ORCHESTRATOR_FACADE_SYMBOLS
-               if not hasattr(facade, name)]
-    assert not missing, (
-        f'lib.tasks_pkg.orchestrator missing symbols external code '
-        f'imports: {missing}. If you split _run.py, keep '
-        f'orchestrator/__init__.py as a re-export facade that surfaces '
-        f'every name in _ORCHESTRATOR_FACADE_SYMBOLS.'
-    )
+    namespace = importlib.import_module('lib.tasks_pkg.orchestrator')
+    assert namespace.__all__ == ()
+    assert not hasattr(namespace, 'run_task')
+    assert not hasattr(namespace, 'build_body')
 
 
 @_unit
@@ -141,55 +54,31 @@ def test_run_submodule_symbols_all_importable():
     assert not missing, (
         f'lib.tasks_pkg.orchestrator._run missing symbols direct '
         f'importers rely on: {missing}. If you split _run.py into a '
-        f'sub-package, keep _run/__init__.py as a re-export facade.'
+        f'sub-package, preserve the concrete _run owner contract.'
     )
 
 
 @_unit
-def test_run_task_is_callable():
-    """``run_task`` (via both the facade and the sub-module) must be a
-    callable — not accidentally re-exported as e.g. the containing module,
-    ``None``, or some other placeholder. The wire test catches an
-    accidental type-drift a plain hasattr check would miss."""
-    from lib.tasks_pkg.orchestrator import run_task as via_facade
+def test_run_task_api_points_to_the_concrete_owner():
+    from lib.tasks_pkg.orchestrator.api import run_task as via_api
     from lib.tasks_pkg.orchestrator._run import run_task as via_submodule
-    assert callable(via_facade), (
-        'lib.tasks_pkg.orchestrator.run_task is not callable '
-        f'(got {type(via_facade).__name__})')
+    assert callable(via_api)
     assert callable(via_submodule), (
         'lib.tasks_pkg.orchestrator._run.run_task is not callable '
         f'(got {type(via_submodule).__name__})')
-    assert via_facade is via_submodule, (
-        'lib.tasks_pkg.orchestrator.run_task must be the SAME object as '
-        'lib.tasks_pkg.orchestrator._run.run_task (facade re-export, '
-        'not a copy — a copy would break monkeypatching in tests that '
-        'reassign one namespace and expect the other to follow)')
+    assert via_api is via_submodule
 
 
 @_unit
-def test_build_body_binding_is_rebindable_on_facade():
-    """The ``build_body`` binding MUST live on the facade (the docstring
-    contract): tests/consumers reassign ``orchestrator.build_body`` and
-    the loop must see it via ``_o.build_body`` at call time.
-
-    Guard: after reassigning, the new value is observable via the facade
-    AND via the raw ``import lib.tasks_pkg.orchestrator as _o`` idiom the
-    _run.py loop uses. Restore the original binding afterwards so the
-    test is idempotent + isolation-safe under xdist."""
-    import lib.tasks_pkg.orchestrator as _o
-    original = _o.build_body
+def test_build_body_binding_has_one_explicit_injection_owner():
+    import lib.tasks_pkg.orchestrator._ports as ports
+    original = ports.build_request_body
     sentinel = object()
     try:
-        _o.build_body = sentinel
-        # Both access paths must see the rebinding.
-        assert _o.build_body is sentinel, 'facade binding did not take'
-        # Simulating what _run.py does:
-        assert getattr(_o, 'build_body') is sentinel, (
-            'the "resolve at call time via _o.build_body" idiom does not '
-            'see the rebinding — this is the contract every extracted '
-            'phase must preserve')
+        ports.build_request_body = sentinel
+        assert ports.build_request_body is sentinel
     finally:
-        _o.build_body = original
+        ports.build_request_body = original
 
 
 @_unit
@@ -204,14 +93,18 @@ def test_finalize_and_turn_submodule_names_present():
     import importlib
     fin = importlib.import_module('lib.tasks_pkg.orchestrator._finalize')
     turn = importlib.import_module('lib.tasks_pkg.orchestrator._turn')
+    write_breakdown = importlib.import_module('lib.tasks_pkg.write_breakdown')
 
     # Direct imports on _finalize surfaced by grep:
     for name in ('_discard_pretool_prose', '_emit_tool_round_phase',
                  '_finalize_and_emit_done', '_maybe_auto_retry_turn',
-                 '_compute_write_breakdown'):
+                 ):
         assert hasattr(fin, name), (
             f'lib.tasks_pkg.orchestrator._finalize missing {name!r} '
             f'(imported by _run.py at module load time)')
+
+    assert hasattr(write_breakdown, '_compute_write_breakdown'), (
+        'lib.tasks_pkg.write_breakdown must own write-accounting policy')
 
     # Direct imports on _turn surfaced by grep:
     for name in ('drain_peer_messages_into', '_run_single_turn', 'run_task'):
@@ -274,7 +167,7 @@ def test_vu_phase_behavior_gated_on_vu_startup_flag():
     """Slice 2 (pt_03f4cdf1): ``_vu_phase`` MUST behave exactly as its
     original closure form did:
       * vu_startup=False → NO append_event call (silent path — the
-        default for ordinary worker/endpoint turns; must stay byte-
+        default for ordinary non-VU turns; must stay byte-
         identical to pre-slice behaviour).
       * vu_startup=True → EXACTLY ONE append_event call whose event
         carries the given detail (this is the VU sub-task path).
@@ -570,19 +463,16 @@ def test_run_py_calls_finalize_task_lane_in_finally():
 
 
 @_unit
-def test_finalize_task_lane_runs_all_five_teardown_steps():
-    """Slice 5: finalize_task_lane must run ALL FIVE teardown steps in
+def test_finalize_task_lane_runs_all_teardown_steps():
+    """finalize_task_lane must run every observable teardown step in
     the SAME ORDER as the inline finally block:
 
-      1. presence.mark_idle (if project attached + conv id)
+      1. presence.mark_idle (if project attached + owner + conv id)
       2. set_req_id('') (clear thread-local request id)
       3. clear_pinned_provider() (drop hard provider pin)
       4. clear_conv_affinity() (drop soft conv sticky-routing)
-      5. get_conversation_store().release_connection() (return DB
-         connection to shared pool)
-
     Every step is wrapped in try/except so a failure NEVER escapes.
-    Monkey-patches all five side-effect points to observation shims;
+    Monkey-patches all four side-effect points to observation shims;
     asserts each call fires + preserves relative order.
     """
     import sys
@@ -592,15 +482,10 @@ def test_finalize_task_lane_runs_all_five_teardown_steps():
     calls = []
 
     # Fakes for the 5 side-effect points.
-    fake_mark_idle = lambda pp, cid: calls.append(('mark_idle', pp, cid))
+    fake_mark_idle = lambda pp, cid, *, user_id: calls.append(
+        ('mark_idle', pp, cid, user_id))
     fake_clear_pin = lambda: calls.append(('clear_pinned_provider',))
     fake_clear_aff = lambda: calls.append(('clear_conv_affinity',))
-
-    class _FakeStore:
-        def release_connection(self):
-            calls.append(('release_connection',))
-
-    fake_get_store = lambda: _FakeStore()
 
     # EAGERLY import each side-effect module so it's in sys.modules
     # BEFORE we patch. finalize_task_lane uses lazy ``from X import Y``
@@ -610,12 +495,10 @@ def test_finalize_task_lane_runs_all_five_teardown_steps():
     presence_mod = importlib.import_module('lib.presence')
     pin_mod = importlib.import_module('lib.llm_dispatch.provider_pin')
     aff_mod = importlib.import_module('lib.llm_dispatch.conv_affinity')
-    store_mod = importlib.import_module('lib.agent_core.store')
 
     orig_mark = getattr(presence_mod, 'mark_idle', None)
     orig_pin = getattr(pin_mod, 'clear_pinned_provider', None)
     orig_aff = getattr(aff_mod, 'clear_conv_affinity', None)
-    orig_get_store = getattr(store_mod, 'get_conversation_store', None)
 
     # Also patch the local set_req_id import target.
     from lib.log import set_req_id as _real_set_req_id
@@ -627,13 +510,12 @@ def test_finalize_task_lane_runs_all_five_teardown_steps():
         presence_mod.mark_idle = fake_mark_idle
         pin_mod.clear_pinned_provider = fake_clear_pin
         aff_mod.clear_conv_affinity = fake_clear_aff
-        store_mod.get_conversation_store = fake_get_store
         _log_mod.set_req_id = _fake_set_req_id
         # Also patch inside _teardown itself since it imports at module load
         td.set_req_id = _fake_set_req_id
 
         # Case A: project + conv both present → mark_idle fires.
-        task = {'id': 'tid-full', 'convId': 'cv-1',
+        task = {'id': 'tid-full', 'convId': 'cv-1', '_userId': 7,
                 'config': {'projectPath': '/proj/A'}}
         td.finalize_task_lane(task, tid='tid-full')
 
@@ -645,20 +527,19 @@ def test_finalize_task_lane_runs_all_five_teardown_steps():
             f'clear_pinned_provider missing; got {kinds}')
         assert 'clear_conv_affinity' in kinds, (
             f'clear_conv_affinity missing; got {kinds}')
-        assert 'release_connection' in kinds, (
-            f'release_connection missing; got {kinds}')
 
         # Case B: no project → mark_idle skipped (matches inline gate
         # `if _fin_pp and _fin_cid`).
         calls.clear()
-        task2 = {'id': 'tid-noproj', 'convId': 'cv-2', 'config': {}}
+        task2 = {'id': 'tid-noproj', 'convId': 'cv-2', '_userId': 7,
+                 'config': {}}
         td.finalize_task_lane(task2, tid='tid-noproj')
         kinds2 = [c[0] for c in calls]
         assert 'mark_idle' not in kinds2, (
             f'mark_idle should NOT fire without project_path; got {kinds2}')
-        # The 4 unconditional cleanups still fire.
+        # The three unconditional cleanup owners still fire.
         for name in ('set_req_id', 'clear_pinned_provider',
-                     'clear_conv_affinity', 'release_connection'):
+                     'clear_conv_affinity'):
             assert name in kinds2, (
                 f'{name} missing when no project; got {kinds2}')
     finally:
@@ -671,8 +552,6 @@ def test_finalize_task_lane_runs_all_five_teardown_steps():
             pin_mod.clear_pinned_provider = orig_pin
         if orig_aff is not None:
             aff_mod.clear_conv_affinity = orig_aff
-        if orig_get_store is not None:
-            store_mod.get_conversation_store = orig_get_store
         _log_mod.set_req_id = _real_set_req_id
         td.set_req_id = _real_set_req_id
 
@@ -680,7 +559,7 @@ def test_finalize_task_lane_runs_all_five_teardown_steps():
 # ── Slice 6: _post_loop submodule (post-loop success tail + fatal-path) ─
 # Extracts the ~200-line post-loop block: success-tail (append-final,
 # write-back, save-to-store, finalize-and-emit-done) + fatal-path
-# (user-error extraction, endpoint-managed short-circuit, turn-level
+# (user-error extraction, Flow-managed short-circuit, turn-level
 # auto-retry, recovery-carrier re-stamp, terminal-DONE + persist).
 
 @_unit
@@ -723,22 +602,22 @@ def test_run_py_imports_and_calls_post_loop_helpers():
 
 
 @_unit
-def test_handle_task_fatal_endpoint_managed_short_circuit():
+def test_handle_task_fatal_flow_managed_short_circuit():
     """Slice 6: handle_task_fatal returns True when task carries
-    _endpoint_managed=True (caller must return early so endpoint.py
+    _flow_managed=True (caller must return early so the Flow runner
     handles the error). Byte-identical to the pre-slice inline
-    ``if task.get('_endpoint_managed'): return`` gate."""
+    ``if task.get('_flow_managed'): return`` gate."""
     import lib.tasks_pkg.orchestrator._post_loop as pl
 
-    task = {'id': 'tid-ep', '_endpoint_managed': True,
+    task = {'id': 'tid-ep', '_flow_managed': True,
             'config': {'model': 'test-model'}}
     exc = ValueError('boom')
 
     result = pl.handle_task_fatal(task, exc)
     assert result is True, (
-        f'handle_task_fatal must return True when _endpoint_managed '
+        f'handle_task_fatal must return True when _flow_managed '
         f'(caller returns early); got {result}')
-    # task fields still stamped (caller reads them from endpoint.py).
+    # task fields still stamped (caller reads them from the Flow runner).
     assert task.get('status') == 'error'
     assert task.get('finishReason') == 'error'
     assert task.get('error') is not None
@@ -773,12 +652,11 @@ def test_finalize_after_loop_no_assistant_msg_still_dispatches():
             last_finish_reason=None, last_usage=None,
             tool_call_happened=False, all_search_results_text=[],
             project_path='', project_enabled=False,
-            keep_tool_history=False, conv_id='',
             loop_exit_reason='no_tool_calls_round_0',
             abort_detected_phase=None,
         )
         # task['messages'] MUST have been written back (this is the
-        # invariant endpoint mode depends on).
+        # invariant Flow execution depends on).
         assert task.get('messages') is messages, (
             'task["messages"] must be written back to the passed-in list')
         # _finalize_and_emit_done MUST have been dispatched.
@@ -790,10 +668,10 @@ def test_finalize_after_loop_no_assistant_msg_still_dispatches():
 
 if __name__ == '__main__':
     tests = [
-        test_orchestrator_facade_symbols_all_importable,
+        test_orchestrator_root_is_a_namespace,
         test_run_submodule_symbols_all_importable,
-        test_run_task_is_callable,
-        test_build_body_binding_is_rebindable_on_facade,
+        test_run_task_api_points_to_the_concrete_owner,
+        test_build_body_binding_has_one_explicit_injection_owner,
         test_finalize_and_turn_submodule_names_present,
         test_vu_startup_submodule_exists_and_exposes_helpers,
         test_run_py_imports_the_extracted_vu_startup_helpers,
@@ -806,10 +684,10 @@ if __name__ == '__main__':
         test_setup_project_context_disabled_path_is_no_op,
         test_teardown_submodule_exists_and_exposes_finalize_task_lane,
         test_run_py_calls_finalize_task_lane_in_finally,
-        test_finalize_task_lane_runs_all_five_teardown_steps,
+        test_finalize_task_lane_runs_all_teardown_steps,
         test_post_loop_submodule_exposes_finalize_after_loop_and_handle_task_fatal,
         test_run_py_imports_and_calls_post_loop_helpers,
-        test_handle_task_fatal_endpoint_managed_short_circuit,
+        test_handle_task_fatal_flow_managed_short_circuit,
         test_finalize_after_loop_no_assistant_msg_still_dispatches,
     ]
     for fn in tests:

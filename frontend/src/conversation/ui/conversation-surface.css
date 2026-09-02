@@ -1,0 +1,104 @@
+/* Typed ConversationSurface: compatibility wrappers do not disturb chat grid. */
+.conversation-surface,
+.conversation-surface > .conversation-lane--main,
+.conversation-surface .conversation-lane-turns,
+.conversation-surface > .conversation-orphan-lanes,
+.conversation-surface > .conversation-queue{
+  display:contents;
+}
+
+.conversation-turn--empty{display:none}
+.conversation-turn-window-earlier,
+.conversation-turn-window-later{display:flex;justify-content:center;grid-column:2}
+.conversation-turn-window-earlier[hidden],
+.conversation-turn-window-later[hidden]{display:none}
+.conversation-turn-window-button{
+  border:1px solid var(--border);border-radius:999px;padding:4px 12px;
+  background:var(--bg-secondary);color:var(--text-muted);font:inherit;cursor:pointer;
+}
+
+/* Native block defaults; retained message classes override these during the
+   whole-turn compatibility phase. */
+.conversation-turn.message > .conversation-turn-header,
+.conversation-turn.message > .conversation-turn-blocks,
+.conversation-turn.message > .conversation-turn-actions,
+.conversation-turn.message > .conversation-turn-footer,
+.conversation-turn.message > .conversation-turn-branches{
+  grid-column:2;
+  min-width:0;
+  max-width:var(--msg-measure);
+}
+.conversation-turn.message.user-msg > .conversation-turn-blocks{
+  padding:10px 14px;
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  background:var(--user-bubble);
+}
+.conversation-turn-header{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  color:var(--text-muted);
+  font-size:12px;
+}
+.conversation-turn-blocks{display:grid;gap:10px}
+.conversation-block__markdown,
+.conversation-block__thinking{white-space:pre-wrap;overflow-wrap:anywhere}
+.conversation-block__tool pre{overflow:auto;max-height:360px}
+.conversation-tool{border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px}
+.conversation-tool > summary{cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:12px}
+.conversation-tool pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.conversation-attachment-button{font:inherit;color:inherit;text-align:left}
+button.msg-img-thumb.conversation-attachment-button{padding:0;background:transparent}
+button.msg-video-card.conversation-attachment-button{background:transparent}
+button.pdf-attach-badge.conversation-attachment-button{font:inherit;color:inherit;text-align:left}
+.conversation-block--attachments > .reply-quote-badge{margin-bottom:6px}
+details.bilingual-block > summary{list-style:none}
+details.bilingual-block > summary::-webkit-details-marker{display:none}
+details.bilingual-block .bilingual-body{max-height:0}
+details.bilingual-block[open] .bilingual-body{max-height:none}
+details.bilingual-block[open] .bilingual-toggle{transform:rotate(180deg)}
+
+/* Native branch lanes keep the established panel language while their turns
+   remain owned and keyed by ConversationSurface. */
+.conversation-surface .conversation-lane--branch > .conversation-lane-turns{
+  display:block;
+}
+.conversation-surface .conversation-lane--branch > .conversation-lane-turns[hidden]{
+  display:none;
+}
+.conversation-lane--branch > .branch-panel-header{margin:0}
+.conversation-branch-toggle{
+  display:flex;align-items:center;gap:8px;min-width:0;
+  padding:0;border:0;background:transparent;cursor:pointer;text-align:left;
+}
+.conversation-branch-toggle .branch-node-label{
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.conversation-lane--branch .conversation-turn.message{
+  display:block;margin:0 0 8px;padding:6px 10px;border-radius:var(--radius-xs);
+  content-visibility:visible;
+}
+.conversation-lane--branch .conversation-turn.message.user-msg{
+  background:var(--bg-tertiary);border-left:2px solid var(--user-bubble);
+}
+.conversation-lane--branch .conversation-turn.message > [data-conversation-part]{
+  max-width:none;
+}
+.conversation-lane--branch .conversation-turn-header{margin-bottom:2px}
+.conversation-lane--branch .message-role{font-size:10px;text-transform:uppercase}
+.conversation-lane--branch .md-content{font-size:13px;line-height:1.6}
+.conversation-lane--branch .message-actions{opacity:1;margin-top:4px;padding-top:4px}
+
+.conversation-queue-item.message > *{
+  grid-column:2;min-width:0;max-width:var(--msg-measure);
+}
+.conversation-queue-item__header{display:flex;align-items:center;gap:8px}
+.conversation-queue-item__body{
+  padding:10px 14px;border:1px dashed var(--border);border-radius:var(--radius-sm);
+  background:var(--user-bubble);white-space:pre-wrap;overflow-wrap:anywhere;
+}
+.conversation-queue-item__body .queue-item-attachments{
+  display:block;margin-top:6px;color:var(--text-tertiary);font-size:11px;
+}
+.conversation-queue-item__actions{opacity:1}

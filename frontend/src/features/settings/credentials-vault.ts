@@ -1,5 +1,6 @@
 import { featureRegistry } from '../../feature-registry';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
+import type { I18nKey } from '../../i18n';
 
 interface CredentialMetadata {
   name?: string;
@@ -52,7 +53,7 @@ function api(): CredentialsApi {
   return credentials;
 }
 
-function translate(key: string, fallback: string): string {
+function translate(key: I18nKey, fallback: string): string {
   return globals().t?.(key) || fallback;
 }
 

@@ -334,81 +334,71 @@ def test_real_crash_writes_a_usable_binding_into_the_log():
     assert 'LD_PRELOAD=' in last, 'annotation dropped the injection variables'
 
 
-# ── blast radius: a search-only fault must not kill the server ────────
+# ── blast radius: search is activated only at first use ──────────────
 #
 # The eight 2026-07-31 crashes all died on a module-level import chain
 # (server.py → search_bridge → tofu_search → trafilatura → lxml → libicuuc).
-# Being unguarded module-level imports, a fault confined to WEB SEARCH took the
-# whole process down — chat, projects, scheduler and all. Four separate
-# module-level entry points had to be closed; guarding one exposed the next, so
-# these tests assert the OUTCOME (process survives) rather than the presence of
-# any single guard, which is the only formulation that cannot be satisfied by
-# closing three of four doors.
+# A guarded eager import limited the crash, but still charged every server boot
+# for an optional capability. These tests pin the stronger outcome: ordinary
+# boot never imports the dependency; a native fault is diagnosed only when a
+# search call activates it; a healthy first use still installs every provider.
 
 
-def test_linkage_fault_degrades_search_instead_of_killing_the_server():
-    """A GLIBCXX linkage fault must leave the server importable.
-
-    This is the actual user-visible bug: one optional capability's dependency
-    failing took down every subsystem. Asserted end-to-end under the
-    deterministic repro, because the failure mode was precisely that each
-    individual guard looked correct while the process still died on the next
-    unguarded import.
-    """
+def test_linkage_fault_is_deferred_past_server_import():
+    """Even the known bad libstdc++ binding cannot reach optional search at boot."""
     if not os.path.exists(_SYSTEM_STDCXX):
         pytest.skip('no system libstdc++ to preload on this host')
     env = dict(os.environ)
     env['LD_PRELOAD'] = _SYSTEM_STDCXX
     proc = subprocess.run(
-        [sys.executable, '-c', 'import server; print("IMPORTED-OK")'],
+        [sys.executable, '-c',
+         'import sys; import server; '
+         'print("IMPORTED-OK SEARCH-LOADED", "tofu_search" in sys.modules)'],
         cwd=_REPO, env=env, timeout=240,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out = proc.stdout.decode('utf-8', 'replace')
     err = proc.stderr.decode('utf-8', 'replace')
-    if 'GLIBCXX' not in err and 'GLIBCXX' not in out:
-        pytest.skip('host did not reproduce the mis-binding')
-    assert 'IMPORTED-OK' in out, (
-        'server import DIED on a search-only linkage fault — blast radius is '
-        'still the whole process. stderr tail: %s' % err[-400:])
+    assert proc.returncode == 0, err[-600:]
+    assert 'IMPORTED-OK SEARCH-LOADED False' in out, out[-300:]
 
 
-def test_search_degradation_is_announced_not_silent():
-    """The degradation must say search is off, or it becomes a silent mystery.
-
-    A server that boots with search quietly missing is worse than one that
-    crashes: the operator sees tool calls failing with no reason recorded.
-    """
+def test_first_use_linkage_degradation_is_announced_not_silent():
+    """A first-use native failure stays per-call and records linkage evidence."""
     if not os.path.exists(_SYSTEM_STDCXX):
         pytest.skip('no system libstdc++ to preload on this host')
     env = dict(os.environ)
     env['LD_PRELOAD'] = _SYSTEM_STDCXX
     proc = subprocess.run(
-        [sys.executable, '-c', 'import server'],
+        [sys.executable, '-c',
+         'import server; '
+         'from lib.search_runtime import ensure_search_runtime; '
+         '\ntry:\n ensure_search_runtime()\n'
+         'except Exception:\n print("SEARCH-DEGRADED")'],
         cwd=_REPO, env=env, timeout=240,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     text = proc.stdout.decode('utf-8', 'replace')
     if 'GLIBCXX' not in text:
         pytest.skip('host did not reproduce the mis-binding')
-    assert 'DISABLED' in text or 'NOT registered' in text, (
-        'search degraded silently — no log line tells the operator why '
-        'web_search will fail')
+    assert 'SEARCH-DEGRADED' in text, text[-500:]
+    assert 'UNAVAILABLE' in text and 'LINKAGE:' in text, (
+        'search degraded silently or lost native linkage evidence: %s'
+        % text[-600:])
 
 
-def test_healthy_boot_still_installs_search_fully():
-    """Complement: the guards must not degrade a HEALTHY boot.
-
-    Without this, wrapping the imports in try/except could silently disable
-    search on every deployment and every other test here would still pass.
-    """
+def test_healthy_first_use_installs_search_fully():
+    """A healthy boot stays lean, then first use installs the complete bridge."""
     proc = subprocess.run(
         [sys.executable, '-c',
-         'import server;'
+         'import sys; import server;'
+         'print("BEFORE", "tofu_search" in sys.modules);'
+         'from lib.search_runtime import ensure_search_runtime;'
+         'ensure_search_runtime();'
          'from lib.search_bridge import _installed;'
-         'import lib.tasks_pkg.handlers.search as s;'
-         'print("BRIDGE", _installed, "HANDLER", hasattr(s, "_web_search_one"))'],
+         'import lib.tasks_pkg.handlers.search._core as search_core;'
+         'print("BRIDGE", _installed, "HANDLER", callable(search_core._web_search_one))'],
         cwd=_REPO, env={k: v for k, v in os.environ.items() if k != 'LD_PRELOAD'},
         timeout=240, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     out = proc.stdout.decode('utf-8', 'replace')
+    assert 'BEFORE False' in out, out[-300:]
     assert 'BRIDGE True HANDLER True' in out, (
-        'a healthy boot no longer installs search fully — the degradation '
-        'guards leaked into the normal path. got: %s' % out[-200:])
+        'healthy first use did not install search fully. got: %s' % out[-300:])

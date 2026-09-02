@@ -1,8 +1,8 @@
 """lib.billing.users — User accounts for multi-tenant deployments.
 
-A "user" is the principal that a wallet belongs to. Each user owns N
-API keys (see :mod:`lib.api_keys`); every key carries a ``user_id``
-field that ties requests to the user's wallet for billing.
+An account has an opaque public ``id`` for billing and a distinct positive
+``owner_user_id`` for repository isolation.  Credentials carry both values;
+neither is derived from the other.
 
 Personal/private installs leave the table empty and never call into
 this module — the unified auth gate's ``local_admin_context()`` covers
@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import os
 import re
 import time
@@ -51,6 +50,7 @@ _EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 @dataclass(frozen=True)
 class User:
     id: str
+    owner_user_id: int
     email: str
     display_name: str
     role: str
@@ -62,33 +62,16 @@ class User:
 
     @classmethod
     def from_row(cls, row) -> 'User':
-        if hasattr(row, 'keys'):
-            md = row['metadata']
-        else:
-            md = row[9]
-        if isinstance(md, dict):
-            md_dict = md
-        else:
-            try:
-                md_dict = json.loads(md) if md else {}
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.debug('[Users] Malformed metadata JSON, defaulting: %s', e)
-                md_dict = {}
-        if hasattr(row, 'keys'):
-            return cls(
-                id=row['id'], email=row['email'],
-                display_name=row['display_name'] or '',
-                role=row['role'], status=row['status'],
-                created_at=int(row['created_at']),
-                last_login_at=int(row['last_login_at']),
-                email_verified=bool(row['email_verified']),
-                metadata=md_dict,
-            )
+        metadata = row['metadata']
+        if not isinstance(metadata, dict):
+            raise ValueError('tenant user metadata must be an object')
         return cls(
-            id=row[0], email=row[1],
-            display_name=row[3] or '', role=row[4], status=row[5],
-            created_at=int(row[6]), last_login_at=int(row[7]),
-            email_verified=bool(row[8]), metadata=md_dict,
+            id=row['id'], owner_user_id=int(row['owner_user_id']),
+            email=row['email'], display_name=row['display_name'] or '',
+            role=row['role'], status=row['status'],
+            created_at=int(row['created_at']),
+            last_login_at=int(row['last_login_at']),
+            email_verified=bool(row['email_verified']), metadata=metadata,
         )
 
 

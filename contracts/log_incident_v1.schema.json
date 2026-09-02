@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/log_incident_v1.schema.json",
+  "title": "Tofu incident journal record v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "timestamp",
+    "level",
+    "logger",
+    "fingerprint",
+    "occurrence_delta",
+    "window_count",
+    "source"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "level": {
+      "type": "string",
+      "enum": ["WARNING", "ERROR", "CRITICAL"]
+    },
+    "logger": {"type": "string", "maxLength": 256},
+    "fingerprint": {"type": "string", "minLength": 1, "maxLength": 64},
+    "template": {"type": "string", "maxLength": 300},
+    "occurrence_delta": {"type": "integer", "minimum": 1},
+    "window_count": {"type": "integer", "minimum": 1},
+    "event": {"type": "string", "maxLength": 128},
+    "request_id": {"type": "string", "maxLength": 96},
+    "conversation_id": {"type": "string", "maxLength": 96},
+    "task_id": {"type": "string", "maxLength": 96},
+    "trace_id": {"type": "string", "maxLength": 96},
+    "key_id": {"type": "string", "maxLength": 96},
+    "user_id": {"type": "string", "maxLength": 96},
+    "exception": {"type": "string", "maxLength": 256},
+    "source": {"type": "string", "maxLength": 512},
+    "sample": {"type": "string", "maxLength": 1200},
+    "fields": {"type": "object", "maxProperties": 30}
+  },
+  "additionalProperties": false
+}

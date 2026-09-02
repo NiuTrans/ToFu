@@ -1,7 +1,5 @@
 """Translation engine + runtime constants."""
 
-DEFAULT_USER_ID = 1
-
 # Async task TTL (seconds) — also passed into TaskRuntime.
 _TRANSLATE_TASK_TTL = 1800
 

@@ -7,15 +7,14 @@ from pathlib import Path
 import pytest
 
 from lib.orchestration.authoring_contract import authoring_contract
-from lib.orchestration.wire_contracts import (
+from lib.orchestration._definition_contract import MAX_NAME_LEN, MAX_NODES
+from lib.orchestration._subflow_contract import MAX_SUBFLOW_DEPTH
+from lib.orchestration.request_limit_contract import (
     MAX_COMPOSE_HISTORY_ITEMS,
     MAX_COMPOSE_HISTORY_CONTENT_LENGTH,
     MAX_COMPOSE_REQUIREMENT_LENGTH,
     MAX_HUMAN_INPUT_LENGTH,
-    MAX_NAME_LEN,
-    MAX_NODES,
     MAX_RUN_INPUT_LENGTH,
-    MAX_SUBFLOW_DEPTH,
     request_limits_contract,
 )
 from routes.api_v1.orchestration_authoring_http import compose_request_schema
@@ -107,9 +106,7 @@ def test_definition_contract_has_one_physical_backend_owner():
             'lib/orchestration/_subflow_expansion.py',
             'lib/orchestration/authoring_contract.py',
             'lib/orchestration/definition_inspection.py',
-            'lib/orchestration/definition_wire_contracts.py',
             'lib/orchestration/request_limit_contract.py',
-            'lib/orchestration/wire_contracts.py',
             'lib/orchestration_composer.py',
         )
     }

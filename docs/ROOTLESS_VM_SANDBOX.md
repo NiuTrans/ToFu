@@ -32,13 +32,20 @@ The current MVP enforces these defaults:
   adapter rather than propagating down the process tree.
 - Session deletion requires a private parent, an exact child path, and an
   exact per-session marker.
+- The namespace launcher arms a Linux parent-death signal before `execve` and
+  fails closed if it was already adopted by host PID 1; launcher crashes do
+  not leave an unowned QEMU process behind. PID 0 remains valid for the first
+  process inside the private PID namespace.
 - Runtime preflight launches a real TCG machine and completes a QMP exchange;
   checking only `qemu --version` is deliberately insufficient.
 - QEMU seccomp sandbox support is mandatory for real sessions. The build is
   probed by launching QEMU with `-sandbox on`; a help-text match is not trusted.
 - QEMU runs below `prlimit`: core dumps are disabled, file descriptors and
   address space are capped, and writable output files cannot grow without
-  bound. The guest's requested disk quota determines the per-file ceiling.
+  bound. The qcow2 ceiling uses the greater of the task's storage hint and the
+  inherited backing disk's actual virtual size, plus 2 GiB of metadata
+  headroom. A smaller task hint never shrinks the filesystem or causes QEMU to
+  hit `RLIMIT_FSIZE` and remount a still-spacious ext4 guest `emergency_ro`.
 - A tiny launcher sets Linux `no_new_privs` before `execve(QEMU)`. QEMU's
   sandbox denies obsolete and resource-control syscalls. Offline runs also deny
   process spawn and identity-changing syscalls. Public runs permit the exact
@@ -89,6 +96,37 @@ identically.
 The script refuses a symlink, filesystem root, or a non-empty unmarked prefix,
 and interrupted builds are resumable without deleting unrelated data.
 
+## Trusted base disk bootstrap
+
+The repository also pins the previously external guest-disk trust input. The
+lock at `rootless_vm/alpine_3_24_x86_64.lock.json` records the exact
+official Alpine 3.24.1 BIOS/cloud-init image plus the URL, byte size, and digest
+of every APK needed for QEMU Guest Agent, Docker, containerd, and runc. Build it
+as the same ordinary user that runs the benchmark:
+
+```bash
+mkdir -m 700 /absolute/private/rootless-base
+
+/path/to/eval-venv/bin/python -m rootless_vm build-base \
+  --lock rootless_vm/alpine_3_24_x86_64.lock.json \
+  --output /absolute/private/rootless-base/alpine-docker.qcow2 \
+  --cache-root /absolute/private/rootless-base/downloads \
+  --state-root /absolute/private/rootless-base/state \
+  --qemu "$ROOTLESS_VM_QEMU" \
+  --qemu-img "$ROOTLESS_VM_QEMU_IMG" \
+  --json
+```
+
+Downloads happen in the host-side private cache and must satisfy their lock.
+Installation then runs in a networkless, namespace/chroot/seccomp-confined TCG
+VM from a read-only NoCloud ISO. A failed command forces shutdown without a
+provisioning marker. Before publishing the standalone qcow2, the builder boots
+it in a second disposable VM and checks the marker, QGA service, Docker CLI,
+runc, and a live `docker info`. The adjacent mode-0600 JSON records the output
+SHA-256, complete lock SHA-256, QEMU version, and verification output. The
+recipe is reproducible and fully auditable; output bytes need not be identical
+because a real OS boot writes timestamps and filesystem state.
+
 ## Diagnostic
 
 ```bash
@@ -103,6 +141,30 @@ python -m rootless_vm doctor --json
 zeroes. A binary that merely advertises features in help is insufficient
 because doctor performs a real QMP launch probe and reads the live process
 security state.
+
+### Why other rootless backends may still fail
+
+"Unprivileged user namespaces are enabled" is not a sufficient preflight for
+Docker-compatible isolation. Test the exact namespace combination and backend
+operation before downloading task images. A common managed-host policy allows
+`user+net` namespaces but rejects every mount in a user mount namespace; that
+blocks rootless OCI runtimes even though a simple user-namespace probe passes.
+
+| Backend | Additional host authority | Fail-closed decision |
+| --- | --- | --- |
+| KVM/Firecracker | A usable `/dev/kvm` | Use only after an explicit device and live-launch probe; absence is not an error for the TCG backend. |
+| Rootless Docker/Podman | Working user **and mount** namespaces, plus any required UID mapping helpers | Reject when a real rootless container launch fails; access to a root-owned Docker socket is not rootless. |
+| gVisor `runsc` | Working rootless mount setup; network mode has additional restrictions | Do not use `runsc do` for hostile tasks: gVisor documents that this convenience mode exposes the host filesystem read-only by default. Do not enable `--TESTONLY-unsafe-nonroot`. |
+| QEMU TCG in this project | User and network namespaces, QEMU seccomp, chroot, and no host mounts | Supported fallback when the live QMP, confinement, and proxy probes all pass. |
+
+The relevant upstream constraints are documented in gVisor's
+[rootless guide](https://gvisor.dev/docs/user_guide/rootless/),
+[security introduction](https://gvisor.dev/docs/architecture_guide/intro/), and
+[platform guide](https://gvisor.dev/docs/user_guide/platforms/). In particular,
+the built-in `--rootless` mode is primarily intended for `runsc do`, and its
+network and filesystem behavior is not a drop-in replacement for a securely
+configured OCI bundle. A failed mount/chroot probe must therefore fall back to
+the confined TCG path, not to an unsafe flag or an unconfined native process.
 
 ## Harbor and Tofu adapters
 
@@ -119,6 +181,12 @@ The optional adapters remain separate from the isolation core:
   variables or guest files. Persistent audit records keep an allowlisted route
   identity and timing fields, redact model reasoning to a length and SHA-256,
   and discard trace IDs and credential-derived fields such as key suffixes.
+- `rootless_vm.harbor_deepseek_minimal_agent:DeepSeekMinimalHostAgent` keeps the
+  same host-only credential boundary while reproducing DeepSeek Harness
+  Minimal's one-line prompt, persistent `bash`, `str_replace_editor`, 16,000
+  character tool-output cap, and thinking-tool replay contract. Both host
+  adapters checkpoint an ATIF-v1.7 `trajectory.json`; explicit reasoning is
+  represented only by a redaction marker, character count, and digest.
 
 The environment takes two immutable inputs: a trusted VM base disk and an ISO
 containing one or more Docker archives. Both accept an expected SHA-256. The
@@ -190,32 +258,102 @@ validated numeric address. HTTPS remains end-to-end TLS through CONNECT. When
 this host itself requires a corporate proxy that rejects numeric port 80,
 plain HTTP is upgraded on the host side to certificate-verified HTTPS; the
 guest still receives the requested HTTP response. Connections, headers, idle
-time, and aggregate bytes are bounded. Plain proxy requests are restricted to
+time, relay backpressure, and aggregate bytes are bounded. Established relay
+writes allow 120 seconds for a TCG guest to resume draining before the tunnel
+is closed. Plain proxy requests are restricted to
 TCP 80 and CONNECT tunnels to TCP 443; SSH, mail, arbitrary TCP, UDP, ICMP, and
 inbound networking remain unavailable.
 All sessions under one private state root also share a 16-connection upstream
 gate. The mode-0600 advisory locks contain no traffic or credentials; they
 prevent parallel package managers in many VMs from multiplying into a parent
 proxy reset storm while retaining per-session byte limits and authentication.
+Agent package installs retain a generous transient-download retry budget. The
+replaceable verifier phase limits uv to two concurrent downloads and uses a
+bounded 20-attempt, 60-second network policy. If it still cannot bootstrap, the
+result is infrastructure-invalid and the exact trial slot is regenerated
+instead of becoming a false model zero.
+
+Host/guest file transfers use 128 KiB QGA chunks, a byte ceiling, and one
+monotonic twenty-minute deadline for the whole transfer. This avoids both the
+old 32 KiB request storm and oversized JSON/base64 frames that can stall
+virtio-serial under pure TCG, without restoring an unbounded per-chunk timeout.
+
+### Planned verifier-cache boundary
+
+Large Terminal-Bench verifiers currently reinstall uv, Python, PyTorch, and
+other public dependencies in every disposable overlay. The safe acceleration
+design is a task-checksum-keyed, immutable verifier cache disk built in a
+separate confined VM from public dependency declarations only. It must contain
+neither `/tests`, private fixtures, the solution, nor an agent workspace. The
+disk is attached only after the agent phase and each trial receives a private
+copy-on-write top layer, so a verifier cannot poison another trial or the
+published cache. Hidden tests remain transferred separately at verification
+time. The manifest must pin the task checksum, package inputs, builder/runtime
+digests, and output-disk SHA-256; a mismatch falls back to the ordinary network
+bootstrap rather than using an ambiguous cache. This preserves the benchmark
+information boundary while removing repeated package downloads and most
+dependency installation from the TCG hot path.
 
 ## Terminal-Bench 2.1 validation
 
 The repository includes `scripts/rootless_terminal_bench_21.py` for a complete,
 resume-friendly local workflow. `prepare-assets` verifies and stores each OCI
 image as an ISO, `prepare-cache` builds immutable per-image qcow2 backing disks,
-and `write-config` emits a secret-free Harbor configuration. A useful pure-TCG
-pipeline keeps more live trial VMs than model agents, so verifier work overlaps
-later inference without increasing provider pressure:
+and `write-config` emits a secret-free Harbor configuration. When `--workers`
+or `--concurrency` is omitted, the command takes one snapshot through the
+shared launch-time resource probe: affinity/cgroup CPU, physical/cgroup memory
+capacity and current headroom, and free space on the state/cache volume. It
+then budgets against the largest selected task, preserves at least 2 GiB of
+memory and 8 GiB of disk for the OS/browser, caps the adaptive result at four,
+and falls back to one on any probe failure. The decision and raw probe values
+are written to a mode-0600 `*.resources.json` file beside the generated assets,
+cache, or Harbor config. Explicit `--workers`, `--concurrency`, and
+`--agent-concurrency` remain dedicated-host overrides with their existing hard
+ceilings.
 
-The published DeepSeek-V4-Flash reference score is not a Tofu-harness score. It
-uses DeepSeek Harness's Minimal preset: the exact one-line system prompt
-`You are a helpful software engineer assistant.`, a persistent `bash`, and
-`str_replace_editor`. `TofuHostAgent` intentionally has a different two-tool
-contract (`run_command` plus validated `submit_result`) and recovery policy, so
-its local result must not be compared as if it reproduced that harness. A
-future accuracy A/B should add an explicitly named DeepSeek-Minimal-compatible
-profile rather than silently changing this adapter in the middle of a k-shot
-run.
+A useful dedicated-host pure-TCG pipeline can keep more live trial VMs than
+model agents, so verifier work overlaps later inference without increasing
+provider pressure. The example below uses the adaptive personal-computer
+default; add `--concurrency 8 --agent-concurrency 4` only after an operator has
+reserved that capacity:
+
+The harness is an explicit score/provenance dimension. Inspect the registry with
+`list-harnesses`; never merge different profiles into one score ledger:
+
+| `--harness` | Execution boundary | Trajectory | Intended comparison |
+| --- | --- | --- | --- |
+| `deepseek-minimal` | model and credentials host-only; tools in QEMU | ATIF-v1.7 plus redacted host dispatch audit | Published DeepSeek Harness Minimal result |
+| `tofu` | model and credentials host-only; tools in QEMU | ATIF-v1.7 plus redacted host dispatch audit | Tofu recovery/checkpoint harness |
+| `tofu-kimi` | production AgentRuntime and Kimi credentials host-only; two exclusive client tools in QEMU | native events + runtime/tool audit + ATIF-v1.7 | Formal Tofu candidate over the same Meituan Kimi |
+| `codex-kimi` | pinned Codex in QEMU; Kimi credential in launcher-owned host proxy | raw Codex JSONL + tagged proxy usage + ATIF-v1.7 | Codex CLI 0.149.1 over the same Meituan Kimi |
+| `codex` | Codex CLI, model access, and credential inside QEMU | Harbor's native ATIF-v1.7 conversion | Harbor Codex installed agent |
+| `claude-code` | Claude Code CLI, model access, and credential inside QEMU | Harbor's native ATIF-v1.7 conversion | Harbor Claude Code installed agent |
+
+The `codex` and `claude-code` profiles are default-deny because Harbor must expose a model
+credential to the guest process. Configuration requires
+`--allow-guest-credentials`; use only an explicitly authorized, short-lived,
+scope-limited credential. The flag records authority but cannot make a
+long-lived credential ephemeral. Tofu, DeepSeek Minimal, `tofu-kimi`, and
+`codex-kimi` never need it. Both formal Kimi profiles are intentionally rejected by the legacy
+`write-config`/single-task launchers; use `python -m evaluations.swebench run`
+so the frozen runtime, credential boundary, attempt ledger, and evidence
+sharding cannot be skipped. The plain `tofu` profile remains the diagnostic
+recovery/checkpoint loop; only `tofu-kimi` is the production-runtime candidate.
+
+The published DeepSeek-V4-Flash reference uses the exact one-line system prompt
+`You are a helpful software engineer assistant.`, persistent `bash`, and
+`str_replace_editor`. `TofuHostAgent` intentionally has a different contract
+(`run_command` plus validated `submit_result`) and recovery policy, so its local
+result must not be presented as a Minimal reproduction.
+
+The Minimal profile uses DeepSeek Harness's 256,000-token default output cap.
+For the physically selected Meituan deployment it records the observed 393,216
+combined context limit and conservatively shrinks the per-turn completion
+budget as the prompt grows. This preserves the official cap for ordinary turns
+while preventing `input + max_tokens` from becoming a harness-induced HTTP 400.
+The reservation starts at 1.5× the heuristic prompt estimate and raises that
+ratio from observed provider token counts, with an additional fixed 2,048-token
+margin for serialization variance.
 
 ```bash
 python scripts/rootless_terminal_bench_21.py write-config \
@@ -230,11 +368,10 @@ python scripts/rootless_terminal_bench_21.py write-config \
   --qemu-img "$ROOTLESS_VM_QEMU_IMG" \
   --job-name deepseek-v4-attempt-1 \
   --attempts 1 \
-  --concurrency 8 \
-  --agent-concurrency 4 \
   --global-dispatch-concurrency 4 \
   --egress-global-concurrency 16 \
   --max-retries 0 \
+  --harness deepseek-minimal \
   --model deepseek-v4-flash-meituan \
   --reasoning-effort max \
   --temperature 1 \
@@ -246,11 +383,49 @@ python scripts/rootless_terminal_bench_21.py run \
   --config /private/tb21/control/deepseek-v4-attempt-1.json
 ```
 
+For a cheap plumbing smoke test, all three preparation/configuration phases
+accept repeated `--task NAME`. `prepare-assets` uses pinned `pycdlib` when
+`--genisoimage` is omitted, so ISO creation needs neither a host package nor
+root. Completed image assets are retained and merged into the immutable index;
+the full 89-task preparation therefore resumes rather than restarting. If
+Docker Hub throttles anonymous downloads, repeat `--registry-mirror HOST` to
+try explicit mirrors before the origin. Every selected endpoint and resolved
+manifest digest is retained in `asset.json`; the guest still loads only the
+digest-checked OCI payload.
+
+After an interruption or infrastructure-invalid trial, generate replacement
+configs from the current audited ledger instead of maintaining a static retry
+list:
+
+```bash
+python scripts/rootless_terminal_bench_21.py write-retry-configs \
+  /private/tb21/jobs/deepseek-v4-attempt-* \
+  --tasks-root /absolute/terminal-bench/tasks \
+  --template /private/tb21/control/deepseek-v4-attempt-1.json \
+  --output-root /private/tb21/control \
+  --job-prefix deepseek-v4-resume-1
+```
+
+The command prints a manifest followed by configs suitable for `run-series`.
+It freezes exactly the missing valid attempts per task, routes known TCG timing
+classes to bounded profiles, and refuses a ledger that already has surplus or
+unexpected valid samples.
+
 `analyze` separates verifier-confirmed model failures from provider errors,
 dependency-bootstrap failures, local watchdog failures, routing/privacy
-violations, and known sub-second TCG timing distortion. `score` accepts only
-audited exact-model attempts and emits `score_percent` only when all 89 tasks
-have exactly five valid attempts. Pass `--tasks-root` when scoring to validate
+violations, and known sub-second TCG timing distortion. Every detail includes a
+root-cause `layer`, confidence, evidence codes, and retry scope. The aggregate
+reports model, harness, provider, environment, verifier, routing, and security
+layers separately. `score` accepts only audited exact-model attempts and emits
+`score_percent` only when all 89 tasks have the requested exact attempt count.
+Pass `--output /private/results/score.json` to retain that same ledger
+atomically as a mode-0600 artifact in addition to stdout. `analyze` accepts the
+same `--output` contract for its per-trial root-cause ledger.
+Use `--expected-attempts 1` only for a fast smoke ledger. The Terminal-Bench 2.1
+submission contract requires at least five trials per task, so published model
+scores such as DeepSeek-V4-Flash-0731's 82.7 must be compared only with a
+five-attempt (445-trial) ledger; a stochastic one-attempt score is not a
+leaderboard reproduction. Pass `--tasks-root` when scoring to validate
 all task identities against the pinned checkout; duplicate job directories,
 missing attempts, and surplus valid attempts fail closed. It still reports the raw observed percentage and a
 provisional valid-only percentage, but never presents incomplete coverage as a
@@ -265,12 +440,54 @@ numeric reward: reward 1 remains a pass and numeric non-pass remains a model
 timeout. If that verifier also ends without a reward, the final workspace is
 unscored and the trial is infrastructure-invalid rather than an assumed zero.
 
+DeepSeek Minimal host agent 1.0.2 also closes a timeout-cleanup defect in
+1.0.1: terminating only the persistent Bash leader could leave its foreground
+compiler, package manager, or training process alive in the disposable guest.
+The reset now sends TERM and then KILL to the complete guest process group.
+Analysis classifies every 1.0.1 trial whose structured transcript contains a
+persistent-Bash timeout as `harness_timeout_process_leak`, regardless of its
+numeric reward. Version 1.0.2 also preserves every provider-reported tool call
+instead of retaining at most 16. A 1.0.1 trial is score-compatible only when it
+has a structured dispatch audit, contains no persistent-Bash timeout, and its
+observed per-turn maximum is below that old truncation boundary. The score and
+retry-plan artifacts expose the accepted legacy count. This path-conditional
+compatibility avoids both silently trusting contaminated workspaces and
+needlessly rerunning unaffected trials.
+
+Collect portable, privacy-safe trajectories and matching root-cause records
+after any run:
+
+```bash
+python scripts/rootless_terminal_bench_21.py collect-trajectories \
+  /private/tb21/jobs/deepseek-v4-attempt-1 \
+  --output-root /private/tb21/trajectory-bundle \
+  --expected-model deepseek-v4-flash-meituan
+```
+
+The bundle contains one sanitized ATIF file and `attribution.json` per trial,
+plus a JSONL manifest and aggregate summary. It removes explicit reasoning and
+credential-shaped values (including bearer and `sk-` tokens) from the copied
+trajectory without rewriting Harbor's source artifact. Every bundle directory
+is mode 0700 and every retained file is mode 0600. Interrupted legacy host runs
+without ATIF are projected from their redacted dispatch audit and marked
+`projected_host_audit`; absent or invalid traces remain visibly missing instead
+of being fabricated. When an OpenAI-compatible response leaves the inactive
+`input_tokens`/`output_tokens` aliases at zero but reports real counts through
+`prompt_tokens`/`completion_tokens`, the collected copy normalizes those counts
+from the matching redacted host audit and records
+`usage_normalized_from_host_audit`; the source trajectory remains immutable.
+
 `--agent-concurrency` is a per-job Harbor limit. Overlapping retry jobs share
 the separate `--global-dispatch-concurrency` gate under the private control
 root, so their limits cannot multiply into a Friday 429 storm. The gate is a
 small set of mode-0600 advisory lock files in a mode-0700 directory: it opens
 no service, stores no request data or credentials, and records each request's
 queue delay as `gate_wait_ms` in the redacted audit transcript.
+
+Timeout attribution treats that queue as causal only when its measured wait is
+material: at least 120 seconds and at least 5% of the agent execution window.
+Smaller waits remain model timeouts; material waits are classified as
+`environment_dispatch_contention` and retried at low load.
 
 The runtime multiplier compensates for pure-TCG wall-clock slowdown. It scales
 Harbor's agent and verifier budgets, the environment's inner watchdog, and any
@@ -308,11 +525,11 @@ Tasks that themselves launch a full virtual machine (for example
 no KVM device. A timeout with a demonstrably live inner VM is classified
 separately and must be retried at low load with a dedicated wall-clock scale;
 it is not timing-equivalent to the Docker reference environment.
-The timing classifier is bounded rather than an unlimited excuse: an active
-CompCert or Stan build is invalid only below an 8× agent scale, and an active
-nested-QEMU trial only below 16×. Exhausting those calibrated retry budgets is
-counted as a model timeout, ensuring the five-shot run can terminate without
-selectively forgiving hard tasks forever.
+The timing classifier is bounded rather than an unlimited excuse: progressing
+Caffe training and an active CompCert or Stan build are invalid only below an
+8× agent scale, and an active nested-QEMU trial only below 16×. Exhausting those
+calibrated retry budgets is counted as a model timeout, ensuring the five-shot
+run can terminate without selectively forgiving hard tasks forever.
 
 After any interrupted or infrastructure-invalid batch, `plan-retries` compares
 the audited results with the pinned task checkout and groups tasks by the exact
@@ -322,6 +539,13 @@ independent of job-directory ordering. It also emits bounded retry profiles:
 ordinary transient failures stay at 4×, verifier-only timeouts use an 8×
 verifier budget, active pure-TCG builds and unscored agent-plus-verifier dual
 timeouts run two at a time at 8×, and proven TCG-on-TCG boots run alone at 16×.
+The `cancel-async-tasks` verifier's fixed 500 ms signal window gets its own
+single-VM, `virtual_time_shift=0` instruction-counted clock profile; merely
+reducing host contention does not repair guest startup-time distortion.
+For each emitted group, the verifier multiplier is reduced when necessary so
+the task's native verifier budget remains within the same 24-hour hard ceiling
+enforced by `write-config`; the planner therefore cannot recommend a config
+that the safety validator rejects.
 The profiles are recommendations rather than score exemptions; the
 classifier's calibrated upper bounds still decide when a later timeout becomes
 a valid model failure.
@@ -368,8 +592,8 @@ second contract because it requires one generated file to execute correctly
 under both Python and GCC rather than merely matching text.
 
 Those upstream tasks normally download `curl`, `uv`, Python, and pytest during
-verification. The no-network validation used each unchanged official
-`tests/test_outputs.py`, an offline shell entry point that directly invokes
+verification. The no-network validation used each task's unchanged upstream
+`test_outputs.py`, an offline shell entry point that directly invokes
 the test module, and a pre-fetched `python:3.13-slim` image pinned to registry
 digest
 `sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a`.
@@ -437,11 +661,17 @@ that remote variance.
 ## Current limits
 
 - Pure TCG is substantially slower than KVM.
-- Only prebuilt single-container Linux tasks are implemented. Dockerfiles,
-  Compose, GPUs, Windows guests, raw TCP/UDP guest networking, and network
-  allowlists fail closed.
-- OCI acquisition, trusted base-image provisioning, and ISO assembly are still
-  separate digest-pinned host-side steps; the run path itself is one command.
+- Prebuilt single-container Linux tasks and the pinned single-stage literal-FROM
+  Dockerfile shape used by SWE-bench Verified are implemented. Compose, GPUs,
+  arbitrary Dockerfiles, raw TCP/UDP guest networking, and network allowlists
+  fail closed.
+- OCI acquisition and ISO assembly are automated by the SWE-bench preparation
+  CLI using a checksum-pinned user-local crane and pinned pure-Python pycdlib.
+  Trusted base-image provisioning remains a separate digest-pinned input.
+- The current per-task exported-rootfs cache favors isolation and resumability
+  over cross-image layer deduplication. A full 500-task SWE-bench cache needs
+  substantially more disk than Docker's shared content store; dataset-level
+  content-addressed backing is the main remaining scale optimization.
 - Address-space, descriptor, core, and file-size limits are enforced, but a
   cross-trial aggregate CPU quota still belongs in a future supervisor.
 - Public mode must allow QEMU/libslirp to create the fixed per-connection proxy

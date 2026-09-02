@@ -1,5 +1,3 @@
-# Incident anchor: born in commit 8f37b141 — refactor(orchestrator): pt_03f4cdf1 slice 33 — extract turn prelude t...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 33 — extract the pre-Section-1
 turn prelude from _run.py into
 lib.tasks_pkg.orchestrator._turn_prelude.run_turn_prelude().
@@ -15,13 +13,11 @@ Three independent preamble steps, in the original order:
        explicit cfg (explicit caller values always win); no-op for
        'default'. Rebinds cfg AND task['config'] — the leaf RETURNS the
        merged cfg so the caller rebinds identically.
-    3. Per-client browser routing: ``cfg['browserClientId']`` sets the
-       thread-local client ID so all browser commands from this task
-       thread route to the correct device's extension.
+Browser routing is not a prelude side effect. The device choice remains in
+the config until the browser handler binds it together with the task owner.
 
-Branches (behavioural-pinned): step 1 skips when _swarmAutoContinue is
-set; step 2 rebinds cfg only when the profile is non-default; step 3
-only routes when browserClientId is truthy.
+Branches (behavioural-pinned): step 1 skips when _swarmAutoContinue is set;
+step 2 rebinds cfg only when the profile is non-default.
 
 Failing-first: written BEFORE the extraction; the module/signature/
 delegation guards turn RED until the leaf exists and _run.py delegates.
@@ -91,8 +87,8 @@ def test_leaf_carries_all_three_steps():
     assert '_swarmAutoContinue' in src, 'leaf must gate on _swarmAutoContinue'
     assert 'apply_profile(' in src and 'resolve_profile_name(' in src, (
         'leaf must merge the capability profile')
-    assert "_set_active_client(" in src and 'browserClientId' in src, (
-        'leaf must route the browser client')
+    assert '_set_active_client' not in src
+    assert 'thread-local client ID' not in src
     assert 'return cfg' in src, 'leaf must return the (possibly merged) cfg'
 
 
@@ -106,24 +102,20 @@ def test_behaviour_human_turn_resets_chain_and_merges_profile(monkeypatch):
     import lib.agent_core.profiles as prof
     import lib.swarm.integration as swi
     import lib.tasks_pkg.orchestrator._turn_prelude as leaf
-    calls = {'reset': [], 'client': []}
+    calls = {'reset': []}
     monkeypatch.setattr(swi, 'reset_autocontinue_chain',
                         lambda k: calls['reset'].append(k))
     monkeypatch.setattr(swi, 'swarm_key_for', lambda t: 'K')
     monkeypatch.setattr(prof, 'resolve_profile_name', lambda c: 'studio')
     monkeypatch.setattr(prof, 'apply_profile',
                         lambda c: {**c, '_profiled': True})
-    import lib.browser as br
-    monkeypatch.setattr(br, '_set_active_client',
-                        lambda cid: calls['client'].append(cid))
-
     task = {'config': {'model': 'm'}}
     cfg = {'model': 'm', 'browserClientId': 'client-abc'}
     out = leaf.run_turn_prelude(task, cfg, 'deadbeef')
     assert calls['reset'] == ['K'], 'human turn must reset the chain'
     assert out.get('_profiled') is True and task['config'].get('_profiled') is True, (
         'non-default profile must rebind cfg AND task[\'config\']')
-    assert calls['client'] == ['client-abc'], 'browser routing must fire'
+    assert out['browserClientId'] == 'client-abc'
 
 
 def test_behaviour_auto_continue_turn_skips_reset_default_profile_noop(monkeypatch):
@@ -133,14 +125,10 @@ def test_behaviour_auto_continue_turn_skips_reset_default_profile_noop(monkeypat
     import lib.agent_core.profiles as prof
     import lib.swarm.integration as swi
     import lib.tasks_pkg.orchestrator._turn_prelude as leaf
-    calls = {'reset': [], 'client': []}
+    calls = {'reset': []}
     monkeypatch.setattr(swi, 'reset_autocontinue_chain',
                         lambda k: calls['reset'].append(k))
     monkeypatch.setattr(prof, 'resolve_profile_name', lambda c: 'default')
-    import lib.browser as br
-    monkeypatch.setattr(br, '_set_active_client',
-                        lambda cid: calls['client'].append(cid))
-
     cfg = {'model': 'm', '_swarmAutoContinue': True}
     task = {'config': cfg}
     out = leaf.run_turn_prelude(task, cfg, 'deadbeef')
@@ -148,4 +136,3 @@ def test_behaviour_auto_continue_turn_skips_reset_default_profile_noop(monkeypat
         'auto-continue turn must NOT reset the chain (the ceiling '
         'bounds the runaway unattended loop)')
     assert out is cfg, "default profile must return the SAME cfg object"
-    assert calls['client'] == []

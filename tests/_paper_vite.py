@@ -11,7 +11,7 @@ from typing import Iterator
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ESBUILD = ROOT / 'node_modules' / '.bin' / 'esbuild'
+ESBUILD = ROOT / 'scripts' / 'vite_test_bundle.mjs'
 
 
 @contextmanager

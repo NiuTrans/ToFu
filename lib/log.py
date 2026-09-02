@@ -33,14 +33,17 @@ Usage in any module:
 
 Log file layout:
     logs/app.log     — Business logic (lib.*, routes.*, server)  INFO+
-                       Daily rotation, 30 days retention.  (configured in server.py)
+                       Size + daily rotation with a family budget.
     logs/access.log  — HTTP request log (werkzeug)  INFO+
-                       Daily rotation, 14 days retention. Noisy polls filtered.  (configured in server.py)
+                       Bounded rotation. Noisy success polls are filtered.
     logs/error.log   — All WARNING/ERROR/CRITICAL from every source
-                       Size rotation, 5MB × 10 backups.  (configured in server.py)
+                       High-priority bounded evidence.
     logs/vendor.log  — Third-party libraries, WARNING+ only
-                       Size rotation, 5MB × 3 backups.  (configured in server.py)
-    logs/audit.log   — Structured JSON audit trail  (configured here in lib/log.py via audit_log())
+                       Lower-priority bounded evidence.
+    logs/incident.jsonl — Compact WARNING+ fingerprint/correlation index.
+    logs/audit.log   — Bounded structured JSON audit trail.
+
+Exact stream ceilings and retention are defined once in ``lib/log_policy.py``.
 """
 
 import asyncio as _asyncio
@@ -58,6 +61,8 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from threading import Lock as _Lock
 from threading import Thread as _Thread
+
+from lib.log_redaction import sanitize_value
 
 # ── Base directory and log paths ──
 # LOG_DIR must be WRITABLE. In a frozen desktop build BASE_DIR resolves inside
@@ -92,7 +97,7 @@ def _writable_base_dir() -> str:
     roots on a partially-writable install. tests/test_desktop_install_paths.py
     pins the two twins to agree.
     """
-    explicit = os.environ.get('TOFU_DATA_DIR') or os.environ.get('CHATUI_DATA_DIR')
+    explicit = os.environ.get('TOFU_DATA_DIR')
     if explicit:
         explicit = os.path.abspath(explicit)
         return os.path.dirname(explicit) if os.path.basename(explicit) == 'data' else explicit
@@ -112,8 +117,7 @@ def _writable_base_dir() -> str:
     # Source checkout — mirror runtime_paths._source_checkout_base() exactly:
     # keep user state OUT of the code tree by default (fresh clone → per-user),
     # but keep an existing populated in-tree data/ where it is (zero migration).
-    layout = (os.environ.get('TOFU_DATA_LAYOUT')
-              or os.environ.get('CHATUI_DATA_LAYOUT') or 'auto').strip().lower()
+    layout = (os.environ.get('TOFU_DATA_LAYOUT') or 'auto').strip().lower()
     if layout == 'intree':
         return BASE_DIR
     if layout == 'xdg':
@@ -152,11 +156,7 @@ ACCESS_LOG = os.path.join(LOG_DIR, 'access.log')
 ERROR_LOG = os.path.join(LOG_DIR, 'error.log')
 VENDOR_LOG = os.path.join(LOG_DIR, 'vendor.log')
 AUDIT_LOG_FILE = os.path.join(LOG_DIR, 'audit.log')
-
-# Backward compat — old code that references LOG_FILE still works,
-# but now points to app.log (the main business log).
-LOG_FILE = APP_LOG
-
+INCIDENT_LOG = os.path.join(LOG_DIR, 'incident.jsonl')
 
 # ══════════════════════════════════════════
 #  Request ID — per-request correlation
@@ -165,27 +165,19 @@ LOG_FILE = APP_LOG
 _request_id_var: ContextVar[str] = ContextVar('tofu_request_id', default='')
 
 
-class _RequestContextCompat:
-    """Compatibility facade for older tests/extensions using ``_thread_ctx``.
+def _bounded_context_scalar(value: object, max_chars: int) -> str:
+    """Return one queue/log-safe identifier without multiline injection."""
+    try:
+        text = str(value or '').encode('utf-8', 'replace').decode('utf-8')
+    except Exception:
+        return '<invalid-context-value>'[:max_chars]
+    escaped = ''.join(
+        char if ord(char) >= 32 and ord(char) != 127
+        else '\\x%02x' % ord(char)
+        for char in text
+    )
+    return escaped[:max(1, int(max_chars))]
 
-    Request ids used to live in ``threading.local``.  That is unsafe for Quart:
-    many concurrent request coroutines share one event-loop thread and can
-    overwrite each other's id.  A ContextVar isolates coroutines and is copied
-    by Quart/``asyncio.to_thread`` at the intended async boundaries.  Keeping
-    this tiny property facade avoids breaking diagnostics that only clear or
-    restore ``_thread_ctx.req_id``.
-    """
-
-    @property
-    def req_id(self) -> str:
-        return _request_id_var.get()
-
-    @req_id.setter
-    def req_id(self, value: str) -> None:
-        _request_id_var.set(str(value or ''))
-
-
-_thread_ctx = _RequestContextCompat()
 
 def set_req_id(rid: str = None) -> str:
     """Set a request ID for the current execution context.
@@ -198,6 +190,8 @@ def set_req_id(rid: str = None) -> str:
     """
     if rid is None:
         rid = uuid.uuid4().hex[:8]
+    else:
+        rid = _bounded_context_scalar(rid, 64)
     _request_id_var.set(rid)
     return rid
 
@@ -209,6 +203,120 @@ def req_id() -> str:
     """
     return _request_id_var.get()
 
+
+# ══════════════════════════════════════════
+#  Principal — per-request authenticated identity
+# ══════════════════════════════════════════
+
+_principal_var: ContextVar = ContextVar('tofu_principal', default=None)
+_log_fields_var: ContextVar = ContextVar('tofu_log_fields', default=None)
+
+
+def set_principal(key_id: str = '', user_id: object = '') -> None:
+    """Bind the authenticated principal to the current execution context.
+
+    Mirrors the request-id ContextVar pattern above: the auth middleware
+    (``routes/api_v1/auth.py``) and the push-WS handshake (``routes/push.py``)
+    call this once per connection so ``audit_log`` attaches ``key_id`` /
+    ``user_id`` automatically (docs/ENTERPRISE_READINESS_AUDIT.md, R11) —
+    event callers no longer need to remember identity by hand.
+    """
+    _principal_var.set((_bounded_context_scalar(key_id, 128),
+                        _bounded_context_scalar(user_id, 128)))
+
+
+def principal() -> tuple:
+    """Return ``(key_id, user_id)`` for this context, else ``('', '')``."""
+    value = _principal_var.get()
+    return value if value is not None else ('', '')
+
+
+def log_fields() -> dict:
+    """Return a copy of structured fields bound to this execution context."""
+    value = _log_fields_var.get()
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def set_log_context(**fields) -> None:
+    """Replace ambient correlation fields for a long-lived worker lane."""
+    _log_fields_var.set({
+        str(key): value for key, value in fields.items()
+        if value not in (None, '')
+    })
+
+
+def clear_log_context() -> None:
+    """Clear worker correlation before a pooled thread is reused."""
+    _log_fields_var.set(None)
+
+
+@contextmanager
+def bind_log_context(**fields):
+    """Temporarily add structured correlation fields to every emitted record.
+
+    This is the evolution seam for background work that has no HTTP request
+    context.  Task/turn launchers can bind ``conversation_id`` / ``task_id`` /
+    ``trace_id`` once instead of interpolating them into every message.
+    """
+    merged = log_fields()
+    merged.update({str(key): value for key, value in fields.items()
+                   if value not in (None, '')})
+    token = _log_fields_var.set(merged)
+    try:
+        yield merged
+    finally:
+        _log_fields_var.reset(token)
+
+
+class LogContextFilter(logging.Filter):
+    """Stamp ContextVar identity before a record crosses the async queue."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        rid = req_id()
+        key_id, user_id = principal()
+        ambient = log_fields()
+        record.tofu_request_id = _bounded_context_scalar(
+            getattr(record, 'tofu_request_id', '') or rid or '', 64)
+        record.tofu_key_id = _bounded_context_scalar(
+            getattr(record, 'tofu_key_id', '') or key_id or '', 128)
+        record.tofu_user_id = _bounded_context_scalar(
+            getattr(record, 'tofu_user_id', '') or user_id or
+            ambient.get('user_id') or '', 128)
+        explicit_fields = getattr(record, 'tofu_event_fields', None)
+        try:
+            merged_fields = dict(ambient)
+            if isinstance(explicit_fields, dict):
+                merged_fields.update(explicit_fields)
+            safe_fields = sanitize_value(
+                merged_fields, field_name='event_fields', max_items=30,
+                max_string_chars=600)
+        except Exception:
+            # Logging context is diagnostic metadata. A hostile ``extra``
+            # mapping must never make the business operation itself fail.
+            safe_fields = {'<context-unavailable>': True}
+        record.tofu_event_fields = (
+            safe_fields if isinstance(safe_fields, dict) else {})
+        record.tofu_event_name = _bounded_context_scalar(
+            getattr(record, 'tofu_event_name', '') or '', 128)
+        if not hasattr(record, 'tofu_coalesce_note'):
+            record.tofu_coalesce_note = ''
+        else:
+            record.tofu_coalesce_note = _bounded_context_scalar(
+                record.tofu_coalesce_note, 256)
+
+        prefix = ''
+        if record.tofu_request_id:
+            try:
+                message = record.getMessage()
+            except Exception:
+                message = str(record.msg)
+            rid_token = record.tofu_request_id
+            if (f'[rid:{rid_token}]' not in message
+                    and f'[{rid_token}]' not in message
+                    and f'rid={rid_token}' not in message):
+                prefix = f'[rid:{rid_token}] '
+        record.tofu_correlation_prefix = prefix
+        return True
 
 
 def _rid_prefix() -> str:
@@ -277,6 +385,26 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
+def log_event(logger: logging.Logger, level: int, event: str,
+              message: str = '', *args, **fields) -> None:
+    """Emit a human message plus stable machine-readable event metadata."""
+    event_name = str(event or '').strip()[:128]
+    if not event_name:
+        raise ValueError('event name is required')
+    logging_kwargs = {
+        key: fields.pop(key) for key in ('exc_info', 'stack_info', 'stacklevel')
+        if key in fields
+    }
+    logger.log(
+        level,
+        message or '[event:%s]',
+        *(args if message else (event_name,)),
+        extra={'tofu_event_name': event_name,
+               'tofu_event_fields': dict(fields)},
+        **logging_kwargs,
+    )
+
+
 # ══════════════════════════════════════════
 #  Exception Logging
 # ══════════════════════════════════════════
@@ -343,45 +471,20 @@ def _audit_queue_capacity() -> int:
 
 def _audit_rotation_limits():
     """Return bounded, dependency-free audit-log rotation settings."""
-    try:
-        max_bytes = int(os.environ.get('TOFU_AUDIT_LOG_MAX_BYTES', '')
-                        or str(64 * 1024 * 1024))
-    except (TypeError, ValueError) as e:
-        logging.getLogger('lib.log').debug(
-            'invalid TOFU_AUDIT_LOG_MAX_BYTES; using 64 MiB: %s', e)
-        max_bytes = 64 * 1024 * 1024
-    try:
-        backups = int(os.environ.get('TOFU_AUDIT_LOG_BACKUPS', '') or '4')
-    except (TypeError, ValueError) as e:
-        logging.getLogger('lib.log').debug(
-            'invalid TOFU_AUDIT_LOG_BACKUPS; using 4: %s', e)
-        backups = 4
-    return max(1 << 20, min(1 << 30, max_bytes)), max(1, min(20, backups))
+    from lib.log_policy import stream_backup_count, stream_max_bytes
+    return stream_max_bytes('audit'), stream_backup_count('audit')
 
 
 def _rotate_audit_log_if_needed(incoming_bytes: int) -> None:
     """Size-rotate ``audit.log`` before one append; caller serializes writes."""
     max_bytes, backups = _audit_rotation_limits()
     try:
-        if os.path.getsize(AUDIT_LOG_FILE) + incoming_bytes <= max_bytes:
-            return
-    except FileNotFoundError as e:
-        logging.getLogger('lib.log').debug(
-            'audit log absent before append: %s', e)
-        return
-    except OSError as e:
-        logging.getLogger('lib.log').debug(
-            'audit log size probe failed; skip rotation: %s', e)
-        return
-    try:
-        oldest = f'{AUDIT_LOG_FILE}.{backups}'
-        if os.path.exists(oldest):
-            os.remove(oldest)
-        for index in range(backups - 1, 0, -1):
-            source = f'{AUDIT_LOG_FILE}.{index}'
-            if os.path.exists(source):
-                os.replace(source, f'{AUDIT_LOG_FILE}.{index + 1}')
-        os.replace(AUDIT_LOG_FILE, f'{AUDIT_LOG_FILE}.1')
+        from lib.log_retention import copytruncate_if_oversize
+        copytruncate_if_oversize(
+            AUDIT_LOG_FILE,
+            max_bytes=max_bytes,
+            trigger_bytes=max(1, max_bytes - max(0, int(incoming_bytes))),
+            backup_count=backups)
     except OSError as exc:
         logging.getLogger('lib.log').debug(
             '[audit] size rotation failed: %s', exc)
@@ -397,10 +500,13 @@ def _audit_sync_writes() -> bool:
 def _audit_write_line(line: str) -> None:
     """Append one JSON line to the audit file (the actual disk I/O). Reads
     the module-level paths at call time so tests can monkeypatch them."""
-    os.makedirs(LOG_DIR, exist_ok=True)
-    _rotate_audit_log_if_needed(len(line.encode('utf-8', errors='replace')))
-    with open(AUDIT_LOG_FILE, 'a', encoding='utf-8') as f:
-        f.write(line)
+    from lib.log_retention import (
+        append_bytes_locked, ensure_private_log_directory,
+    )
+    ensure_private_log_directory(LOG_DIR)
+    payload = line.encode('utf-8', errors='replace')
+    _rotate_audit_log_if_needed(len(payload))
+    append_bytes_locked(AUDIT_LOG_FILE, payload)
 
 
 def _audit_writer_loop(q: '_queue_mod.Queue') -> None:
@@ -412,7 +518,15 @@ def _audit_writer_loop(q: '_queue_mod.Queue') -> None:
             _audit_write_line(line)
         except Exception:
             logging.getLogger('audit').error(
-                'Failed to write audit log: %s', line, exc_info=True)
+                'Failed to write audit log record (%d bytes)',
+                len(line.encode('utf-8', errors='replace')), exc_info=True,
+                extra={
+                    'tofu_event_name': 'logging.audit_write_failed',
+                    'tofu_event_fields': {
+                        'record_bytes': len(line.encode(
+                            'utf-8', errors='replace')),
+                    },
+                })
         finally:
             q.task_done()
 
@@ -512,14 +626,52 @@ def audit_log(event: str, **details) -> None:
         **details: Arbitrary key-value pairs to include in the audit entry.
     """
     rid = req_id()
+    from lib.log_redaction import redact_text, sanitize_value
+
+    safe_details = sanitize_value(
+        details, field_name='audit_details', max_items=50,
+        max_string_chars=2_000)
     entry = {
+        **safe_details,
+        # Caller details may enrich an audit event but never forge its
+        # authoritative clock or event identity.
         'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
-        'event': event,
-        **details,
+        'event': redact_text(event, max_chars=128)[:128],
     }
     if rid:
-        entry['request_id'] = rid
-    line = json.dumps(entry, ensure_ascii=False, default=str) + '\n'
+        entry['request_id'] = redact_text(rid, max_chars=128)[:64]
+    # Auto-attach the authenticated principal (ENTERPRISE_READINESS_AUDIT
+    # R11): explicit caller-supplied key_id/user_id always win, and empty
+    # synthetic identities attach nothing.
+    if 'key_id' not in entry or 'user_id' not in entry:
+        p_key_id, p_user_id = principal()
+        ambient = log_fields()
+        if not p_key_id:
+            p_key_id = _bounded_context_scalar(ambient.get('key_id') or '', 128)
+        if not p_user_id:
+            p_user_id = _bounded_context_scalar(ambient.get('user_id') or '', 128)
+        if p_key_id and 'key_id' not in entry:
+            entry['key_id'] = redact_text(
+                p_key_id, max_chars=128)[:128]
+        if p_user_id and 'user_id' not in entry:
+            entry['user_id'] = redact_text(
+                p_user_id, max_chars=128)[:128]
+    line = json.dumps(entry, ensure_ascii=False, default=str,
+                      separators=(',', ':')) + '\n'
+    # Keep every physical JSONL row bounded and valid.  If a caller supplied a
+    # giant diagnostic blob, retain identity + field names rather than slicing
+    # serialized JSON into an unparsable fragment.
+    max_line_bytes = 32 * 1024
+    encoded_size = len(line.encode('utf-8', errors='replace'))
+    if encoded_size > max_line_bytes:
+        core_keys = ('timestamp', 'event', 'request_id', 'key_id', 'user_id')
+        compact = {key: entry[key] for key in core_keys if key in entry}
+        compact['details_truncated'] = True
+        compact['detail_keys'] = [
+            str(key)[:128] for key in entry if key not in core_keys][:100]
+        compact['original_bytes'] = encoded_size
+        line = json.dumps(compact, ensure_ascii=False, default=str,
+                          separators=(',', ':')) + '\n'
     if _audit_sync_writes():
         try:
             with _audit_lock:

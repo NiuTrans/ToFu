@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import type { I18nKey } from '../../i18n';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
 
 interface PrivateHostRow {
@@ -44,7 +45,7 @@ function privateHostsApi(): PrivateHostsApi {
   return api;
 }
 
-function translate(key: string, fallback: string): string {
+function translate(key: I18nKey, fallback: string): string {
   const translated = globals().t?.(key);
   return translated || fallback;
 }

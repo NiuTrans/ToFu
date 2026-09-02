@@ -5,7 +5,7 @@ OAuth flow is identical to Claude, but the API usage is different:
   • Format: Responses API (NOT Chat Completions)
 
 The Chat Completions ↔ Responses API translation layer was EXTRACTED to
-``lib/llm/responses_outbound/`` (2026-07-31, epic pt_b7a29ea7) — this module
+``lib/llm/responses_outbound/`` (2026-07-31, ) — this module
 keeps only the OAuth flow + re-export facades for the legacy names
 (``codex_translate_request`` / ``CodexSSETranslator`` /
 ``codex_translate_sse_event``).
@@ -28,6 +28,8 @@ logger = get_logger(__name__)
 __all__ = [
     'CODEX_OAUTH_CONFIG',
     'codex_build_auth_url',
+    'codex_device_request_user_code',
+    'codex_device_poll_token',
     'codex_exchange_code',
     'codex_store_token',
     'codex_refresh_token',
@@ -49,7 +51,21 @@ CODEX_OAUTH_CONFIG = {
     'redirect_uri': 'http://localhost:1455/auth/callback',
     'scope': 'openid email profile offline_access',
     'provider': 'codex',
-    'api_base': 'https://chatgpt.com/backend-api/codex',
+    "api_base": "https://chatgpt.com/backend-api/codex",
+    # Structured account usage + earned reset-credit control plane.  This is
+    # deliberately explicit rather than derived from api_base: `/wham` is a
+    # sibling private API whose path may drift independently of `/codex`.
+    "account_api_base": "https://chatgpt.com/backend-api/wham",
+    # Device-authorization flow (OpenAI deviceauth API, CLIProxyAPI
+    # sdk/auth/codex_device.go parity): the ONLY login path that works when
+    # the browser and the Tofu server are on different machines, because it
+    # never touches the localhost:1455 redirect.
+    'device_usercode_url': 'https://auth.openai.com/api/accounts/deviceauth/usercode',
+    'device_token_url': 'https://auth.openai.com/api/accounts/deviceauth/token',
+    'device_verification_url': 'https://auth.openai.com/codex/device',
+    'device_redirect_uri': 'https://auth.openai.com/deviceauth/callback',
+    'device_poll_interval': 5,      # seconds, when upstream omits `interval`
+    'device_flow_timeout': 900,     # 15 minutes (CLIProxyAPI parity)
 }
 
 _TOKEN_REFRESH_BUFFER = 300  # 5 minutes
@@ -93,6 +109,12 @@ def codex_build_auth_url() -> dict:
         'code_challenge': pkce['code_challenge'],
         'code_challenge_method': 'S256',
         'audience': 'https://api.openai.com/v1',
+        # Official Codex CLI / CLIProxyAPI parity (openai_auth.go
+        # GenerateAuthURL): without these the authorize request walks the
+        # legacy consent path.
+        'prompt': 'login',
+        'id_token_add_organizations': 'true',
+        'codex_cli_simplified_flow': 'true',
     }
 
     query = '&'.join(f'{k}={requests.utils.quote(str(v), safe="")}' for k, v in params.items())
@@ -117,13 +139,137 @@ def codex_build_auth_url() -> dict:
     }
 
 
+def _oauth_http_post_json(url: str, obj: dict, *, timeout: float = 30,
+                          user_id: str = ''):
+    """JSON POST variant of :func:`_oauth_http_post` — the deviceauth
+    endpoints speak JSON, not form encoding."""
+    from lib.desktop import egress as _eg
+    route = _eg.route_request(url, user_id=user_id)
+    if route == 'direct':
+        return http_post(url, json=obj, timeout=timeout)
+    return _eg.egress_http(
+        url, method='POST',
+        headers={'Content-Type': 'application/json',
+                 'Accept': 'application/json'},
+        body=json.dumps(obj).encode(),
+        timeout=timeout, user_id=user_id)
+
+
+def codex_device_request_user_code(user_id: str = '') -> dict:
+    """Start a device-authorization flow: mint a user code.
+
+    Returns:
+        dict with 'device_auth_id', 'user_code', 'interval' (seconds).
+
+    Raises:
+        OAuthExchangeError: on network failure or an upstream non-2xx.
+    """
+    url = CODEX_OAUTH_CONFIG['device_usercode_url']
+    try:
+        resp = _oauth_http_post_json(
+            url, {'client_id': CODEX_OAUTH_CONFIG['client_id']},
+            timeout=30, user_id=user_id)
+    except Exception as e:
+        logger.error('[Codex OAuth] device usercode request failed: %s', e)
+        raise OAuthExchangeError(
+            'Could not reach OpenAI device login: %s' % e, status_code=0) from e
+    if not 200 <= resp.status_code < 300:
+        logger.error('[Codex OAuth] device usercode HTTP %d: %.500s',
+                     resp.status_code, resp.text)
+        raise OAuthExchangeError(
+            _explain_exchange_failure(resp.status_code, resp.text, 'codex'),
+            status_code=resp.status_code, detail=resp.text[:500])
+    try:
+        data = resp.json()
+    except Exception as e:
+        logger.error('[Codex OAuth] device usercode bad JSON: %s', e)
+        raise OAuthExchangeError(
+            'OpenAI device login returned an unreadable response',
+            status_code=resp.status_code) from e
+    device_auth_id = (data.get('device_auth_id') or '').strip()
+    # Upstream has used both spellings (CLIProxyAPI reads user_code then
+    # usercode as a fallback) — accept either.
+    user_code = (data.get('user_code') or data.get('usercode') or '').strip()
+    if not device_auth_id or not user_code:
+        logger.error('[Codex OAuth] device usercode missing fields: %.300s',
+                     resp.text)
+        raise OAuthExchangeError(
+            'OpenAI device login did not return a code',
+            status_code=resp.status_code, detail=resp.text[:300])
+    interval = CODEX_OAUTH_CONFIG['device_poll_interval']
+    raw_interval = data.get('interval')
+    try:
+        parsed = int(str(raw_interval).strip())
+        if parsed > 0:
+            interval = parsed
+    except (TypeError, ValueError) as e:
+        logger.debug('[Codex OAuth] device interval unparsable (%r): %s',
+                     raw_interval, e)
+    logger.info('[Codex OAuth] device flow started (interval=%ds)', interval)
+    return {'device_auth_id': device_auth_id, 'user_code': user_code,
+            'interval': interval}
+
+
+def codex_device_poll_token(device_auth_id: str, user_code: str,
+                            user_id: str = '') -> dict | None:
+    """One poll of the device-token endpoint.
+
+    Returns:
+        dict with 'authorization_code', 'code_verifier', 'code_challenge'
+        once the user has authorized; None while authorization is still
+        pending (upstream answers 403/404).
+
+    Raises:
+        OAuthExchangeError: on network failure or a non-pending error.
+    """
+    url = CODEX_OAUTH_CONFIG['device_token_url']
+    try:
+        resp = _oauth_http_post_json(
+            url, {'device_auth_id': device_auth_id, 'user_code': user_code},
+            timeout=30, user_id=user_id)
+    except Exception as e:
+        logger.warning('[Codex OAuth] device poll failed: %s', e)
+        raise OAuthExchangeError(
+            'Could not reach OpenAI device login: %s' % e, status_code=0) from e
+    if resp.status_code in (403, 404):
+        return None  # still waiting for the user
+    if not 200 <= resp.status_code < 300:
+        logger.error('[Codex OAuth] device poll HTTP %d: %.500s',
+                     resp.status_code, resp.text)
+        raise OAuthExchangeError(
+            _explain_exchange_failure(resp.status_code, resp.text, 'codex'),
+            status_code=resp.status_code, detail=resp.text[:500])
+    try:
+        data = resp.json()
+    except Exception as e:
+        logger.error('[Codex OAuth] device poll bad JSON: %s', e)
+        raise OAuthExchangeError(
+            'OpenAI device login returned an unreadable response',
+            status_code=resp.status_code) from e
+    code = (data.get('authorization_code') or '').strip()
+    verifier = (data.get('code_verifier') or '').strip()
+    if not code or not verifier:
+        logger.error('[Codex OAuth] device poll missing fields: %.300s',
+                     resp.text)
+        raise OAuthExchangeError(
+            'OpenAI device login did not return an authorization code',
+            status_code=resp.status_code, detail=resp.text[:300])
+    logger.info('[Codex OAuth] device flow authorized — exchanging code')
+    return {'authorization_code': code, 'code_verifier': verifier,
+            'code_challenge': data.get('code_challenge', '')}
+
+
 def codex_exchange_code(code: str, pkce_verifier: str,
-                        user_id: str = '') -> dict | None:
+                        user_id: str = '',
+                        redirect_uri: str = '') -> dict | None:
     """Exchange authorization code for Codex tokens.
 
     Args:
         code: Authorization code from OAuth callback.
         pkce_verifier: PKCE code verifier.
+        redirect_uri: Override for the registered callback — the device
+            flow must echo its own deviceauth redirect instead of the
+            localhost one.
 
     Returns:
         Token dict or None on failure.
@@ -131,7 +277,7 @@ def codex_exchange_code(code: str, pkce_verifier: str,
     payload = {
         'grant_type': 'authorization_code',
         'code': code,
-        'redirect_uri': CODEX_OAUTH_CONFIG['redirect_uri'],
+        'redirect_uri': redirect_uri or CODEX_OAUTH_CONFIG['redirect_uri'],
         'client_id': CODEX_OAUTH_CONFIG['client_id'],
         'code_verifier': pkce_verifier,
     }
@@ -379,7 +525,7 @@ def codex_get_valid_token(user_id: str = '') -> str | None:
 
 # ══════════════════════════════════════════════════════════
 #  Request Translator: Chat Completions → Responses API
-#  EXTRACTED to lib/llm/responses_outbound/ (2026-07-31, epic pt_b7a29ea7)
+#  EXTRACTED to lib/llm/responses_outbound/ (2026-07-31, )
 #  — the shared boundary for EVERY Responses-speaking provider. The Codex
 #  OAuth path is now just the ``profile='codex'`` caller; these re-exports
 #  keep the legacy import surface working. Semantics changes belong in

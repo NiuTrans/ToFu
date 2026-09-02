@@ -13,6 +13,9 @@ import threading
 import time
 
 from lib.log import LOG_DIR, get_logger
+from lib.log_policy import stream_backup_count, stream_max_bytes
+from lib.log_redaction import redact_text, sanitize_value
+from lib.log_retention import append_bytes_locked, copytruncate_if_oversize
 
 logger = get_logger(__name__)
 
@@ -26,57 +29,49 @@ _RAW_SSE_FILTER = os.environ.get('LLM_DEBUG_RAW_SSE', '').strip()
 # Anomaly buffer bounds
 _ANOMALY_RING_LINES = 400
 _ANOMALY_RING_BYTES = 256 * 1024  # 256 KB
+_ANOMALY_BLOCK_MAX_CHARS = 512 * 1024
+_RAW_SSE_LINE_MAX_CHARS = 64 * 1024
 _ANOMALY_WRITE_LOCK = threading.Lock()
+_RAW_SSE_WRITE_LOCK = threading.Lock()
+
+
+def _lock_raw_file(handle, *, acquire: bool) -> None:
+    """Coordinate app-owned raw writes with retention's copy-truncate lock."""
+    try:
+        import fcntl
+        operation = fcntl.LOCK_EX if acquire else fcntl.LOCK_UN
+        fcntl.flock(handle.fileno(), operation)
+    except (ImportError, OSError, ValueError):
+        pass
 
 
 def _anomaly_rotation_limits():
     """Bound the always-on raw anomaly trail without install-time tuning."""
-    try:
-        max_bytes = int(os.environ.get('TOFU_RAW_SSE_ANOMALY_MAX_BYTES', '')
-                        or str(32 * 1024 * 1024))
-    except (TypeError, ValueError) as e:
-        logger.debug('[SSEDiag] invalid anomaly max-bytes setting: %s', e)
-        max_bytes = 32 * 1024 * 1024
-    try:
-        backups = int(os.environ.get('TOFU_RAW_SSE_ANOMALY_BACKUPS', '') or '2')
-    except (TypeError, ValueError) as e:
-        logger.debug('[SSEDiag] invalid anomaly backup setting: %s', e)
-        backups = 2
-    return max(1 << 20, min(1 << 30, max_bytes)), max(1, min(20, backups))
+    return (stream_max_bytes('raw_sse_anomaly'),
+            stream_backup_count('raw_sse_anomaly'))
 
 
 def _rotate_anomaly_if_needed(path, incoming_bytes):
     """Rotate one append target; caller holds ``_ANOMALY_WRITE_LOCK``."""
     max_bytes, backups = _anomaly_rotation_limits()
     try:
-        if os.path.getsize(path) + incoming_bytes <= max_bytes:
-            return
-    except FileNotFoundError as e:
-        logger.debug('[SSEDiag] anomaly log absent before append: %s', e)
-        return
-    except OSError as e:
-        logger.debug('[SSEDiag] anomaly size probe failed; skip rotation: %s', e)
-        return
-    try:
-        oldest = f'{path}.{backups}'
-        if os.path.exists(oldest):
-            os.remove(oldest)
-        for index in range(backups - 1, 0, -1):
-            source = f'{path}.{index}'
-            if os.path.exists(source):
-                os.replace(source, f'{path}.{index + 1}')
-        os.replace(path, f'{path}.1')
+        copytruncate_if_oversize(
+            path,
+            max_bytes=max_bytes,
+            trigger_bytes=max(1, max_bytes - max(0, int(incoming_bytes))),
+            backup_count=backups)
     except OSError as exc:
         logger.debug('[RawSSE] anomaly-log rotation failed: %s', exc)
 
 
 def _append_anomaly(path, text):
     """Atomically append one bounded anomaly block across concurrent turns."""
-    encoded_size = len(text.encode('utf-8', errors='replace'))
+    text = redact_text(text, max_chars=_ANOMALY_BLOCK_MAX_CHARS)
+    payload = text.encode('utf-8', errors='replace')
+    encoded_size = len(payload)
     with _ANOMALY_WRITE_LOCK:
         _rotate_anomaly_if_needed(path, encoded_size)
-        with open(path, 'a', encoding='utf-8') as fh:
-            fh.write(text)
+        append_bytes_locked(path, payload)
 
 
 def _raw_sse_enabled(model: str) -> bool:
@@ -120,7 +115,15 @@ class RawSSEDumper:
             import pathlib
             log_dir = pathlib.Path(LOG_DIR)
             log_dir.mkdir(parents=True, exist_ok=True)
-            self._fh = open(log_dir / 'raw_sse.log', 'a', encoding='utf-8', buffering=1)
+            path = log_dir / 'raw_sse.log'
+            copytruncate_if_oversize(
+                path, max_bytes=stream_max_bytes('raw_sse'),
+                backup_count=stream_backup_count('raw_sse'))
+            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+            flags |= getattr(os, 'O_NOFOLLOW', 0)
+            descriptor = os.open(path, flags, 0o600)
+            self._fh = os.fdopen(
+                descriptor, 'a', encoding='utf-8', buffering=1)
         except Exception as e:
             logger.warning('[RawSSE] Failed to open logs/raw_sse.log: %s', e)
             self.enabled = False
@@ -131,46 +134,66 @@ class RawSSEDumper:
         snapshot = {k: self.body.get(k) for k in _keys if k in self.body}
         snapshot['_messages_count'] = len(self.body.get('messages', []))
         snapshot['_tools_count'] = len(self.body.get('tools', []) or [])
-        return snapshot
+        safe = sanitize_value(
+            snapshot, field_name='raw_sse_request', max_items=20,
+            max_string_chars=1_000)
+        return safe if isinstance(safe, dict) else {}
 
     def start(self):
         if not self.enabled:
             return
-        self._open()
-        if not self._fh:
-            return
-        try:
-            ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
-            snapshot = self._body_snapshot()
-            self._fh.write(f'\n{"=" * 80}\n')
-            self._fh.write(f'[{ts}] REQUEST model={self.model} trace={self.trace_id}\n')
-            self._fh.write(f'body={json.dumps(snapshot, ensure_ascii=False)}\n')
-            self._fh.write(f'{"-" * 80}\n')
-            self.t0 = time.time()
-        except Exception as e:
-            logger.warning('[RawSSE] Failed to write header: %s', e)
+        with _RAW_SSE_WRITE_LOCK:
+            self._open()
+            if not self._fh:
+                return
+            _lock_raw_file(self._fh, acquire=True)
+            try:
+                ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+                snapshot = self._body_snapshot()
+                model = redact_text(self.model, max_chars=256)
+                trace_id = redact_text(self.trace_id, max_chars=256)
+                self._fh.write(f'\n{"=" * 80}\n')
+                self._fh.write(
+                    f'[{ts}] REQUEST model={model} trace={trace_id}\n')
+                self._fh.write(
+                    f'body={json.dumps(snapshot, ensure_ascii=False)}\n')
+                self._fh.write(f'{"-" * 80}\n')
+                self.t0 = time.time()
+            except Exception as e:
+                logger.warning('[RawSSE] Failed to write header: %s', e)
+            finally:
+                _lock_raw_file(self._fh, acquire=False)
 
     def line(self, sse_line: str):
         if sse_line is None:
             sse_line = ''
+        safe_line = redact_text(sse_line, max_chars=_RAW_SSE_LINE_MAX_CHARS)
         try:
-            self._ring.append(sse_line)
-            self._ring_bytes += len(sse_line)
+            self._ring.append(safe_line)
+            self._ring_bytes += len(safe_line.encode('utf-8', errors='replace'))
             while self._ring_bytes > _ANOMALY_RING_BYTES and self._ring:
                 _evicted = self._ring.popleft()
-                self._ring_bytes -= len(_evicted)
+                self._ring_bytes -= len(
+                    _evicted.encode('utf-8', errors='replace'))
         except Exception as e:
             logger.debug('[RawSSE] Failed to ring-buffer line: %s', e)
 
         if not self.enabled or not self._fh:
             return
-        try:
-            self._fh.write(sse_line)
-            self._fh.write('\n')
-            self.chunk_count += 1
-            self.byte_count += len(sse_line)
-        except Exception as e:
-            logger.debug('[RawSSE] Failed to write line: %s', e)
+        with _RAW_SSE_WRITE_LOCK:
+            if not self._fh:
+                return
+            _lock_raw_file(self._fh, acquire=True)
+            try:
+                self._fh.write(safe_line)
+                self._fh.write('\n')
+                self.chunk_count += 1
+                self.byte_count += len(
+                    safe_line.encode('utf-8', errors='replace'))
+            except Exception as e:
+                logger.debug('[RawSSE] Failed to write line: %s', e)
+            finally:
+                _lock_raw_file(self._fh, acquire=False)
 
     def dump_anomaly(self, reason: str, **summary):
         """Flush the ring buffer to logs/raw_sse_anomaly.log.
@@ -188,12 +211,18 @@ class RawSSEDumper:
             ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
             elapsed = time.time() - self._t0_wall
             snapshot = self._body_snapshot()
+            safe_summary = sanitize_value(
+                summary, field_name='raw_sse_summary', max_items=30,
+                max_string_chars=2_000)
+            model = redact_text(self.model, max_chars=256)
+            trace_id = redact_text(self.trace_id, max_chars=256)
+            safe_reason = redact_text(reason, max_chars=128)
             parts = [
                 f'\n{"=" * 80}\n',
-                f'[{ts}] ANOMALY reason={reason} model={self.model} '
-                f'trace={self.trace_id} elapsed={elapsed:.2f}s\n',
+                f'[{ts}] ANOMALY reason={safe_reason} model={model} '
+                f'trace={trace_id} elapsed={elapsed:.2f}s\n',
                 f'body={json.dumps(snapshot, ensure_ascii=False)}\n',
-                f'summary={json.dumps(summary, ensure_ascii=False, default=str)}\n',
+                f'summary={json.dumps(safe_summary, ensure_ascii=False)}\n',
                 f'ring_lines={len(self._ring)} ring_bytes={self._ring_bytes}\n',
                 f'{"-" * 80}\n',
             ]
@@ -202,7 +231,7 @@ class RawSSEDumper:
             _append_anomaly(path, ''.join(parts))
             logger.warning('[RawSSE] Anomaly dump written: reason=%s trace=%s '
                            'lines=%d bytes=%d → %s',
-                           reason, self.trace_id, len(self._ring),
+                           safe_reason, trace_id, len(self._ring),
                            self._ring_bytes, path)
         except Exception as e:
             logger.warning('[RawSSE] Failed to dump anomaly buffer: %s', e, exc_info=True)
@@ -210,15 +239,34 @@ class RawSSEDumper:
     def finish(self, **summary):
         if not self.enabled or not self._fh:
             return
-        try:
-            elapsed = time.time() - self.t0 if self.t0 else 0
-            self._fh.write(f'{"-" * 80}\n')
-            self._fh.write(f'SUMMARY elapsed={elapsed:.2f}s lines={self.chunk_count} '
-                           f'bytes={self.byte_count} {summary}\n')
-            self._fh.write(f'{"=" * 80}\n')
-            self._fh.flush()
-            self._fh.close()
-        except Exception as e:
-            logger.debug('[RawSSE] Failed to write footer: %s', e)
-        finally:
-            self._fh = None
+        with _RAW_SSE_WRITE_LOCK:
+            handle = self._fh
+            _lock_raw_file(handle, acquire=True)
+            try:
+                elapsed = time.time() - self.t0 if self.t0 else 0
+                safe_summary = sanitize_value(
+                    summary, field_name='raw_sse_summary', max_items=30,
+                    max_string_chars=2_000)
+                handle.write(f'{"-" * 80}\n')
+                handle.write(
+                    f'SUMMARY elapsed={elapsed:.2f}s lines={self.chunk_count} '
+                    f'bytes={self.byte_count} '
+                    f'{json.dumps(safe_summary, ensure_ascii=False)}\n')
+                handle.write(f'{"=" * 80}\n')
+                handle.flush()
+            except Exception as e:
+                logger.debug('[RawSSE] Failed to write footer: %s', e)
+            finally:
+                _lock_raw_file(handle, acquire=False)
+                try:
+                    handle.close()
+                except Exception as exc:
+                    logger.debug('[RawSSE] close failed: %s', exc)
+                self._fh = None
+                try:
+                    path = os.path.join(LOG_DIR, 'raw_sse.log')
+                    copytruncate_if_oversize(
+                        path, max_bytes=stream_max_bytes('raw_sse'),
+                        backup_count=stream_backup_count('raw_sse'))
+                except Exception as e:
+                    logger.debug('[RawSSE] final retention pass failed: %s', e)

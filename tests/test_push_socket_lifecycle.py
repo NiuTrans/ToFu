@@ -38,7 +38,7 @@ def test_push_client_drain_cancellation_reaps_queue_getter():
     from lib.agent_core.push import PushClient
 
     async def scenario():
-        client = PushClient()
+        client = PushClient(user_id=1)
         baseline = asyncio.all_tasks()
         drain_task = asyncio.create_task(client.drain())
         await asyncio.sleep(0)
@@ -58,7 +58,7 @@ def test_push_client_control_wakeup_reaps_queue_getter():
     from lib.agent_core.push import PushClient
 
     async def scenario():
-        client = PushClient()
+        client = PushClient(user_id=1)
         baseline = asyncio.all_tasks()
         drain_task = asyncio.create_task(client.drain())
         await asyncio.sleep(0)

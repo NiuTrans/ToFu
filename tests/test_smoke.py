@@ -55,7 +55,6 @@ class TestImportValidation:
     _TOP_LEVEL_MODULES = [
         "lib.browser",
         "lib.conv_ref",
-        "lib.database",
         "lib.embeddings",
         "lib.image_gen",
         "lib.llm",
@@ -153,7 +152,7 @@ class TestPythonSyntax:
         "offline_pkgs", "logs", ".project_sessions", ".tofu", "uploads",
         # Generated / eval scratch trees — large and on slow FUSE mounts,
         # not part of the project source. Walking them times the test out.
-        "outputs", "overleaf_cache", "paper", "build", "dist",
+        "outputs", "overleaf_cache", "paper", "autoharness", "build", "dist",
         ".ruff_cache", ".pytest_cache", "data", "venv", ".venv",
     }
 

@@ -1,6 +1,6 @@
 """Post-stream analysis: premature close / abort / normal exit decision.
 
-Extracted 2026-07-31 (pt_03f4cdf1 slice 25) from
+Extracted 2026-07-31 ( slice 25) from
 ``lib/tasks_pkg/orchestrator/_run.py`` run_task stream loop.
 
 Runs after the streaming-accumulator settle and BEFORE the per-round
@@ -34,7 +34,7 @@ from __future__ import annotations
 from typing import Any
 
 from lib.log import get_logger
-from lib.tasks_pkg.stream_handler import analyse_stream_result
+from lib.tasks_pkg.stream_handler.api import RecoveryAction, analyse_stream_result
 
 logger = get_logger(__name__)
 
@@ -72,21 +72,22 @@ def apply_stream_decision(
         ``(action, new_premature_retry_count)`` — action is 'break',
         'continue', 'program_continue', or 'proceed'.
     """
-    # ★ Post-stream analysis: premature close, abort, normal exit
+    # Post-stream analysis: premature close, abort, normal exit
     stream_decision = analyse_stream_result(
         rs.assistant_msg, rs.last_finish_reason, task, tid, rs.model,
         round_num, premature_retry_count, messages,
         usage=rs.last_usage,
+        stream_result=rs.last_stream_result,
     )
-    new_count = stream_decision['premature_retry_count']
-    rs.last_finish_reason = stream_decision['last_finish_reason']
-    if stream_decision['abort_detected_phase']:
-        rs.abort_phase = stream_decision['abort_detected_phase']
-    if stream_decision['action'] == 'break':
-        rs.exit_reason = stream_decision['loop_exit_reason']
+    new_count = stream_decision.premature_retry_count
+    rs.last_finish_reason = stream_decision.last_finish_reason
+    if stream_decision.abort_detected_phase:
+        rs.abort_phase = stream_decision.abort_detected_phase
+    if stream_decision.action is RecoveryAction.BREAK:
+        rs.exit_reason = stream_decision.loop_exit_reason
         return 'break', new_count
-    if stream_decision['action'] == 'continue':
+    if stream_decision.action is RecoveryAction.CONTINUE:
         return 'continue', new_count
-    if stream_decision['action'] == 'program_continue':
+    if stream_decision.action is RecoveryAction.PROGRAM_CONTINUE:
         return 'program_continue', new_count
     return 'proceed', new_count

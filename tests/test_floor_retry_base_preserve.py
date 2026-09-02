@@ -70,9 +70,12 @@ _HIT_USAGE = {'prompt_tokens': 10, 'cache_read_tokens': 150000,
 
 
 def _seed_wire_fp(conv_id, fp):
-    from lib.tasks_pkg.cache_tracking import _cache_lock, _cache_states
+    from lib.tasks_pkg.cache_tracking._state import (
+        _cache_lock,
+        _cache_states,
+    )
     from lib.tasks_pkg.cache_tracking._state import CacheState, _state_key
-    key = _state_key(conv_id)
+    key = _state_key(conv_id, user_id=1)
     with _cache_lock:
         st = _cache_states.get(key)
         if st is None:
@@ -86,7 +89,7 @@ def _run_stream_with_script(task, monkeypatch, dispatch_seq, *, enabled=True):
     Mirrors the harness in tests/test_floor_retry_residue.py: the primary
     attempt (seq[0]) may stream deltas; resends stream nothing (production
     Layer-1 discipline: on_content=None)."""
-    import lib.tasks_pkg.manager as _mgr
+    import lib.tasks_pkg.manager._stream as _mgr
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY', '1' if enabled else '0')
     monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY_MAX', '2')
     calls = {'n': 0}
@@ -124,7 +127,7 @@ def _run_stream_with_script(task, monkeypatch, dispatch_seq, *, enabled=True):
 def _mk_accumulated_task(conv_id, content, thinking):
     """A task mid-turn: content/thinking already hold PRIOR rounds' prose
     (the main orchestrator never resets them between rounds)."""
-    return {'id': f'task-bp-{conv_id}', 'convId': conv_id,
+    return {'id': f'task-bp-{conv_id}', 'convId': conv_id, '_userId': 1,
             'content': content, 'thinking': thinking,
             'config': {}, 'events': [], 'toolRounds': [],
             'content_lock': _thr.Lock(), 'events_lock': _thr.Lock()}

@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
-"""Unit tests for lib.task_runtime.TaskRuntime.
+"""Executable lifecycle contract for TaskRuntime.
 
-Validates every lifecycle path before migrating production code (chat,
-paper, translate, trading_simulator) onto this runtime. Run standalone:
+Validates the shared authority used by chat, paper, translation, production,
+and other background capabilities. Run standalone:
 
     python tests/test_task_runtime.py
 """
 
 import asyncio
+import logging
 import os
 import sys
 import threading
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.task_runtime import TaskRuntime  # noqa: E402
+from lib.agent_core.task_runtime import TaskRuntime  # noqa: E402
+
+
+pytestmark = pytest.mark.unit
 
 
 def _color(s, c):
@@ -28,12 +34,16 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 
 def test_create_and_get():
     rt = TaskRuntime('test-kind', ttl=60)
-    task = rt.create(meta={'foo': 'bar'})
+    task = rt.create(user_id=1, meta={'foo': 'bar'})
     assert task['id']
     assert task['kind'] == 'test-kind'
     assert task['status'] == 'pending'
     assert task['events'] == []
     assert task['meta']['foo'] == 'bar'
+    assert task['_principalContext'] == {
+        'kind': 'user', 'subject_id': 'user:1', 'owner_user_id': 1,
+        'tenant_id': None, 'scopes': [],
+    }
     assert task['error'] is None
     assert task['result'] is None
     assert task['finished_at'] is None
@@ -46,15 +56,62 @@ def test_create_and_get():
 
 def test_explicit_task_id():
     rt = TaskRuntime('test')
-    task = rt.create(task_id='custom-id-123')
+    task = rt.create(user_id=1, task_id='custom-id-123')
     assert task['id'] == 'custom-id-123'
     assert rt.get('custom-id-123') is task
     _ok('create() with explicit task_id')
 
 
+def test_custom_fields_are_atomic_and_cannot_override_lifecycle():
+    rt = TaskRuntime('test-kind')
+    task = rt.create(user_id=1)
+
+    assert rt.mark_running(task['id'], fields={'progress': '1/3'}) is True
+    assert rt.update_fields(
+        task['id'],
+        fields={'progress': '2/3', 'statusMessage': 'working'},
+        only_if_status='running',
+    ) is True
+    assert task['progress'] == '2/3'
+
+    with pytest.raises(ValueError, match='runtime-owned fields: status'):
+        rt.update_fields(task['id'], fields={'status': 'done'})
+
+    assert rt.finish(task['id'], result='complete') is True
+    assert rt.update_fields(
+        task['id'], fields={'progress': '3/3'},
+        only_if_status='running') is False
+    assert task['progress'] == '2/3'
+    _ok('custom fields cannot bypass atomic lifecycle transitions')
+
+
+def test_terminal_event_fields_cannot_spoof_runtime_verdict():
+    rt = TaskRuntime('test-kind', push_channel='')
+    task = rt.create(user_id=1)
+    rt.mark_running(task['id'])
+
+    assert rt.finish(
+        task['id'],
+        result='translated',
+        terminal_event_fields={
+            'type': 'error',
+            'status': 'error',
+            'result': 'spoofed',
+            'convId': 'conversation-1',
+        },
+    ) is True
+
+    terminal_event = task['events'][-1]
+    assert terminal_event['type'] == 'done'
+    assert terminal_event['status'] == 'done'
+    assert terminal_event['result'] == 'translated'
+    assert terminal_event['convId'] == 'conversation-1'
+    _ok('terminal correlation is extensible but verdict is runtime-owned')
+
+
 def test_append_event_assigns_seq():
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     s0 = rt.append_event(task['id'], {'type': 'progress', 'msg': 'one'})
     s1 = rt.append_event(task['id'], {'type': 'progress', 'msg': 'two'})
     s2 = rt.append_event(task['id'], {'type': 'progress', 'msg': 'three'})
@@ -68,7 +125,7 @@ def test_append_event_assigns_seq():
 
 def test_append_event_transitions_to_running():
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     assert task['status'] == 'pending'
     rt.append_event(task['id'], {'type': 'started'})
     assert task['status'] == 'running'
@@ -82,9 +139,35 @@ def test_append_event_unknown_task():
     _ok('append_event() on unknown task returns None')
 
 
+def test_stale_attempt_persistence_fence_is_not_duplicated_as_error(caplog):
+    """The authority boundary already emits the one actionable WARNING."""
+    rt = TaskRuntime('test')
+    task = rt.create(user_id=1)
+
+    def reject_stale_attempt(_sequence):
+        raise RuntimeError(
+            'conversation event rejected: attempt is stale or no longer current')
+
+    with caplog.at_level(logging.DEBUG, logger='lib.agent_core.task_runtime'):
+        sequence = rt.append_event(
+            task['id'],
+            {'type': 'round_committed', 'attemptId': 'attempt-stale'},
+            before_push=reject_stale_attempt,
+        )
+
+    persistence_records = [
+        record for record in caplog.records
+        if 'authoritative persistence failed' in record.getMessage()
+    ]
+    assert sequence == 0
+    assert task['_pushWithheldCount'] == 1
+    assert len(persistence_records) == 1
+    assert persistence_records[0].levelno == logging.DEBUG
+
+
 def test_finish_done():
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     ok = rt.finish(task['id'], result={'output': 42})
     assert ok
     assert task['status'] == 'done'
@@ -101,7 +184,7 @@ def test_finish_done():
 
 def test_finish_error_string():
     rt = TaskRuntime('test', error_source='unit_test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.finish(task['id'], error='something broke')
     assert task['status'] == 'error'
     assert task['error'] is not None
@@ -113,7 +196,7 @@ def test_finish_error_string():
 
 def test_finish_error_exception():
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     try:
         raise ValueError('oh no')
     except ValueError as e:
@@ -126,7 +209,7 @@ def test_finish_error_exception():
 
 def test_finish_error_dict():
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     # A COMPLETE envelope (kind + string message) passes through verbatim —
     # that is what make_envelope/from_exception produced upstream.
     envelope = {'kind': 'ratelimit', 'message': '⚠️ API 请求已达限频（429）',
@@ -139,7 +222,7 @@ def test_finish_error_dict():
     # make_envelope — the frontend's isErrorEnvelope requires a string
     # message, so the old verbatim passthrough rendered these as
     # 'Unknown error' + a JSON blob (the worker_lost stall-reap defect).
-    task2 = rt.create()
+    task2 = rt.create(user_id=1)
     rt.finish(task2['id'], error={'kind': 'worker_lost', 'detail': 'stalled'})
     env2 = task2['error']
     assert env2['kind'] == 'worker_lost'
@@ -149,7 +232,7 @@ def test_finish_error_dict():
 
     # A domain extension may travel with the envelope, but it must not expand
     # the closed error-kind vocabulary.
-    task3 = rt.create()
+    task3 = rt.create(user_id=1)
     rt.finish(task3['id'], error={
         'kind': 'unregistered_domain_error',
         'message': 'domain failure',
@@ -165,7 +248,7 @@ def test_finish_error_dict():
 
 def test_finish_idempotent():
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     assert rt.finish(task['id'], result='first') is True
     # Second finish should be ignored
     assert rt.finish(task['id'], result='second') is False
@@ -175,7 +258,7 @@ def test_finish_idempotent():
 
 def test_abort_then_finish_marks_aborted():
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.abort(task['id'])
     assert task['abort_event'].is_set()
     rt.finish(task['id'])  # No error → should become 'aborted'
@@ -186,7 +269,7 @@ def test_abort_then_finish_marks_aborted():
 
 def test_abort_then_finish_with_error_marks_error():
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.abort(task['id'])
     rt.finish(task['id'], error='crashed during abort')
     # Errors take precedence over abort
@@ -202,7 +285,7 @@ def test_abort_unknown_task():
 
 def test_abort_already_finished():
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.finish(task['id'], result='ok')
     assert rt.abort(task['id']) is False
     _ok('abort() on finished task returns False')
@@ -210,7 +293,7 @@ def test_abort_already_finished():
 
 def test_poll_cursor_replay():
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     for i in range(5):
         rt.append_event(task['id'], {'type': 'progress', 'i': i})
 
@@ -238,7 +321,7 @@ def test_poll_cursor_replay():
 
 def test_poll_future_cursor_resets_before_later_events_arrive():
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.append_event(task['id'], {'type': 'progress', 'i': 0})
 
     corrected = rt.poll(task['id'], cursor=99)
@@ -264,7 +347,7 @@ def test_poll_future_cursor_resets_before_later_events_arrive():
 
 def test_poll_after_done():
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.append_event(task['id'], {'type': 'progress'})
     rt.finish(task['id'], result={'value': 99})
 
@@ -280,7 +363,7 @@ def test_poll_after_done():
 
 def test_poll_after_error():
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.finish(task['id'], error='something failed')
     r = rt.poll(task['id'], cursor=0)
     assert r['done'] is True
@@ -307,7 +390,7 @@ def test_poll_surfaces_model():
     A task with no model concept must NOT grow the field (frames stay
     minimal for every other kind)."""
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     task['model'] = 'm-alpha'
     rt.append_event(task['id'], {'type': 'progress'})
 
@@ -322,7 +405,7 @@ def test_poll_surfaces_model():
         f'done frame lost the model: {done!r}'
 
     # Complement pin: no model → no key at all.
-    plain = rt.create()
+    plain = rt.create(user_id=1)
     rt.append_event(plain['id'], {'type': 'progress'})
     r2 = rt.poll(plain['id'], cursor=0)
     assert 'model' not in r2, f"model-less task grew a model field: {r2!r}"
@@ -361,7 +444,7 @@ def test_NEUTER_poll_model_line_loadbearing():
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         rt = mod.TaskRuntime('neuter')
-        task = rt.create()
+        task = rt.create(user_id=1)
         task['model'] = 'm-alpha'
         rt.finish(task['id'], result='ok')
         frame = rt.poll(task['id'], cursor=0)
@@ -381,7 +464,7 @@ def test_NEUTER_poll_model_line_loadbearing():
 def test_spawn_outside_event_loop():
     """Spawn falls back to daemon thread when no asyncio loop is running."""
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     completed = threading.Event()
 
     def worker(tid):
@@ -403,7 +486,7 @@ def test_spawn_inside_event_loop():
     rt = TaskRuntime('test')
 
     async def _runner():
-        task = rt.create()
+        task = rt.create(user_id=1)
         completed = threading.Event()
 
         def worker():
@@ -441,7 +524,7 @@ def test_spawn_does_not_inherit_request_contextvars():
     async def _runner():
         completed = threading.Event()
         observed = {}
-        task = rt.create()
+        task = rt.create(user_id=1)
         token = request_marker.set('request-context')
         try:
             def worker():
@@ -481,7 +564,7 @@ def test_spawn_holds_strong_ref_under_gc():
         completed = [threading.Event() for _ in range(N)]
         ids = []
         for i in range(N):
-            task = rt.create()
+            task = rt.create(user_id=1)
             ids.append(task['id'])
 
             def worker(idx, tid):
@@ -516,7 +599,7 @@ def test_spawn_holds_strong_ref_under_gc():
 def test_spawn_worker_crash_caught():
     """If the worker raises uncaught, finish(error=) is auto-called."""
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
 
     def bad_worker():
         raise RuntimeError('worker exploded')
@@ -536,7 +619,7 @@ def test_spawn_worker_crash_caught():
 def test_abort_event_signal():
     """Worker can poll task['abort_event'] to detect abort requests."""
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     iterations = []
 
     def worker(tid):
@@ -564,9 +647,9 @@ def test_abort_event_signal():
 
 def test_cleanup_stale():
     rt = TaskRuntime('test', ttl=0.1)  # 100ms TTL for testing
-    t1 = rt.create()
-    t2 = rt.create()
-    t3 = rt.create()
+    t1 = rt.create(user_id=1)
+    t2 = rt.create(user_id=1)
+    t3 = rt.create(user_id=1)
     rt.finish(t1['id'])
     rt.finish(t2['id'], error='boom')
     # t3 still pending — should NOT be cleaned even after TTL
@@ -584,12 +667,12 @@ def test_cleanup_stale():
 
 def test_stats():
     rt = TaskRuntime('test')
-    rt.create()  # pending
-    t2 = rt.create()
+    rt.create(user_id=1)  # pending
+    t2 = rt.create(user_id=1)
     rt.append_event(t2['id'], {'type': 'started'})  # → running
-    t3 = rt.create()
+    t3 = rt.create(user_id=1)
     rt.finish(t3['id'])
-    t4 = rt.create()
+    t4 = rt.create(user_id=1)
     rt.finish(t4['id'], error='x')
 
     s = rt.stats()
@@ -604,10 +687,10 @@ def test_stats():
 
 def test_list_running():
     rt = TaskRuntime('test')
-    t1 = rt.create()
-    t2 = rt.create()
+    t1 = rt.create(user_id=1)
+    t2 = rt.create(user_id=1)
     rt.append_event(t2['id'], {'type': 'started'})
-    t3 = rt.create()
+    t3 = rt.create(user_id=1)
     rt.finish(t3['id'])
 
     running = rt.list_running()
@@ -620,7 +703,7 @@ def test_list_running():
 def test_concurrent_append_events():
     """Stress test: multiple threads appending events concurrently."""
     rt = TaskRuntime('test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     NUM_THREADS = 8
     EVENTS_PER_THREAD = 50
 
@@ -651,39 +734,38 @@ def test_concurrent_append_events():
 def test_push_integration():
     """Verify events are pushed to push_event when push_channel set.
 
-    TaskRuntime.append_event imports push_event from its canonical home
-    (lib.agent_core.push) — the leaf was relocated there 2026-06, with
-    lib.push kept as a re-export shim — so the capture patch targets that
-    module.
+    TaskRuntime imports push_event from its sole owner,
+    ``lib.agent_core.push``.
     """
-    from lib.agent_core import push as push_module
+    import lib.agent_core.push as push_module
     received = []
 
     # Monkey-patch push_event to capture calls
     original = push_module.push_event
 
-    def capture(channel, task_id, event):
-        received.append((channel, task_id, event))
+    def capture(channel, task_id, event, *, user_id):
+        received.append((channel, task_id, event, user_id))
 
     push_module.push_event = capture
     try:
         rt = TaskRuntime('test', push_channel='paper')
-        task = rt.create()
+        task = rt.create(user_id=1)
         rt.append_event(task['id'], {'type': 'progress'})
         rt.finish(task['id'], result='ok')
 
         assert len(received) >= 2
-        for channel, tid, _ in received:
+        for channel, tid, _, user_id in received:
             assert channel == 'paper'
             assert tid == task['id']
-        _ok('push_channel auto-pushes events to lib.push.push_event')
+            assert user_id == 1
+        _ok('push_channel auto-pushes events to lib.agent_core.push.push_event')
     finally:
         push_module.push_event = original
 
 
 def test_no_push_channel():
     """When push_channel=None, events are NOT pushed."""
-    from lib import push as push_module
+    import lib.agent_core.push as push_module
     received = []
     original = push_module.push_event
 
@@ -694,7 +776,7 @@ def test_no_push_channel():
     try:
         rt = TaskRuntime('test', push_channel='')  # explicit empty string
         # Empty push_channel still falsy, so push_event won't be called
-        task = rt.create()
+        task = rt.create(user_id=1)
         rt.append_event(task['id'], {'type': 'x'})
         rt.finish(task['id'])
         assert len(received) == 0
@@ -715,6 +797,8 @@ def main():
     tests = [
         test_create_and_get,
         test_explicit_task_id,
+        test_custom_fields_are_atomic_and_cannot_override_lifecycle,
+        test_terminal_event_fields_cannot_spoof_runtime_verdict,
         test_append_event_assigns_seq,
         test_append_event_transitions_to_running,
         test_append_event_unknown_task,

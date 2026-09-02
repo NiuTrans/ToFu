@@ -18,15 +18,25 @@ import json
 import os
 import sys
 import time
+import uuid
 
 import pytest
 
 # Ensure project root on sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from routes.conversations import build_search_text
+from lib.conversations import build_search_text
+from tests._seed import seed_conversation, wait_for_conversation_search
 
-from routes.conversations_search import _head_cap_sql, _snippet_projection_sql
+pytest_plugins = ('tests._chat_sidecar',)
+
+_SEARCH_OWNER_USER_ID = 1
+
+
+def _storage_client():
+    from lib.storage import get_storage_client
+
+    return get_storage_client(write=True)
 
 
 def _search_items(resp):
@@ -213,12 +223,20 @@ class TestBuildSearchText:
 
 @pytest.mark.api
 class TestSearchEndpoint:
-    """API tests for the conversation search endpoint."""
+    """API tests for the conversation search endpoint.
+
+    The search route is served by the storage Sidecar (``conversation.search``
+    op — the legacy-engine scan was removed in the sidecar cutover), so these
+    tests run against a real sidecar runtime. ``chat_sidecar`` is an EXPLICIT
+    dependency of the seeding fixture (not a usefixtures mark) so the
+    Sidecar authority is guaranteed active before semantic seeds run.
+    """
 
     @pytest.fixture(autouse=True)
-    def setup_test_conversations(self, flask_client):
-        """Create a set of test conversations for search tests."""
+    def setup_test_conversations(self, chat_sidecar):
+        """Create owner-scoped fixtures through semantic Sidecar operations."""
         now = int(time.time() * 1000)
+        storage = _storage_client()
         self.conv_ids = []
 
         test_data = [
@@ -265,23 +283,42 @@ class TestSearchEndpoint:
         ]
 
         for conv in test_data:
-            resp = flask_client.put(
-                f"/api/v1/conversations/{conv['id']}",
-                json={
-                    "title": conv["title"],
-                    "messages": conv["messages"],
-                    "createdAt": now,
-                    "updatedAt": now,
-                },
+            seed_conversation(
+                conv['id'],
+                user_id=_SEARCH_OWNER_USER_ID,
+                title=conv['title'],
+                messages=conv['messages'],
+                created_at=now,
+                updated_at=now,
             )
-            assert resp.status_code == 200, f"Failed to save conv {conv['id']}: {resp.data}"
-            self.conv_ids.append(conv["id"])
+            self.conv_ids.append(conv['id'])
 
-        yield
+        readiness_checks = (
+            ('decorators', 'alpha'),
+            ('gradient', 'beta'),
+            ('PostgreSQL', 'gamma'),
+            ('搜索引擎', 'unicode'),
+            ('xylophone_zebra_quantum', 'unique'),
+        )
+        for query, id_fragment in readiness_checks:
+            expected_id = next(
+                conv_id for conv_id in self.conv_ids
+                if id_fragment in conv_id)
+            wait_for_conversation_search(
+                query,
+                user_id=_SEARCH_OWNER_USER_ID,
+                expected_ids=(expected_id,),
+                client=storage,
+            )
 
-        # Cleanup
-        for conv_id in self.conv_ids:
-            flask_client.delete(f"/api/v1/conversations/{conv_id}")
+        try:
+            yield
+        finally:
+            for conv_id in self.conv_ids:
+                storage.command('conversation.purge', {
+                    'conv_id': conv_id,
+                    'user_id': _SEARCH_OWNER_USER_ID,
+                }, f'search-cleanup:{conv_id}:{uuid.uuid4().hex[:10]}')
 
     def test_search_finds_matching_content(self, flask_client):
         """Search returns conversations matching the query."""
@@ -434,13 +471,23 @@ class TestSearchEndpoint:
         conv_id = f"search-test-update-{now}"
         self.conv_ids.append(conv_id)
 
-        # Create with original content
-        flask_client.put(f"/api/v1/conversations/{conv_id}", json={
-            "title": "Update Test",
-            "messages": [{"role": "user", "content": "original_platypus_content", "timestamp": now}],
-            "createdAt": now,
-            "updatedAt": now,
-        })
+        seed_conversation(
+            conv_id,
+            user_id=_SEARCH_OWNER_USER_ID,
+            title='Update Test',
+            messages=[{
+                'role': 'user',
+                'content': 'original_platypus_content',
+                'timestamp': now,
+            }],
+            created_at=now,
+            updated_at=now,
+        )
+        wait_for_conversation_search(
+            'original_platypus_content',
+            user_id=_SEARCH_OWNER_USER_ID,
+            expected_ids=(conv_id,),
+        )
 
         # Should find original content
         resp = flask_client.get("/api/v1/conversations/search?q=original_platypus_content")
@@ -448,13 +495,32 @@ class TestSearchEndpoint:
         ids = [r["id"] for r in _search_items(resp)]
         assert conv_id in ids
 
-        # Update with new content
-        flask_client.put(f"/api/v1/conversations/{conv_id}", json={
-            "title": "Update Test",
-            "messages": [{"role": "user", "content": "updated_narwhal_content", "timestamp": now}],
-            "createdAt": now,
-            "updatedAt": now + 1,
+        # Use the canonical settled-Turn CAS edit.  Search projection refresh
+        # is part of the same Sidecar transaction.
+        client = _storage_client()
+        turns = client.query('turn.list', {
+            'conversation_id': conv_id,
+            'user_id': _SEARCH_OWNER_USER_ID,
         })
+        assert len(turns) == 1
+        original_turn = turns[0]
+        client.command('turn.projection.update', {
+            'conversation_id': conv_id,
+            'user_id': _SEARCH_OWNER_USER_ID,
+            'turn_id': original_turn['turnId'],
+            'expected_projection_revision': original_turn[
+                'projectionRevision'],
+            'projection': {
+                'content': 'updated_narwhal_content',
+                'timestamp': now + 1,
+            },
+        }, f'search-update:{conv_id}:{uuid.uuid4().hex[:10]}')
+        wait_for_conversation_search(
+            'updated_narwhal_content',
+            user_id=_SEARCH_OWNER_USER_ID,
+            expected_ids=(conv_id,),
+            client=client,
+        )
 
         # Should find new content
         resp = flask_client.get("/api/v1/conversations/search?q=updated_narwhal_content")
@@ -468,112 +534,100 @@ class TestSearchEndpoint:
         ids = [r["id"] for r in _search_items(resp)]
         assert conv_id not in ids
 
+    def test_storage_timeout_is_typed_retryable_503(
+            self, flask_client, monkeypatch):
+        """A sidecar wedge is never laundered into an empty successful hit
+        list (or an opaque 500)."""
+        from lib.storage.errors import StorageError
+        import lib.storage
+
+        def fail_client(*_args, **_kwargs):
+            raise StorageError(
+                'database_timeout', 'search deadline exceeded',
+                retryable=True, retry_after_ms=125,
+                operation_id='search-timeout-test')
+
+        monkeypatch.setattr(lib.storage, 'get_storage_client', fail_client)
+        response = flask_client.get(
+            '/api/v1/conversations/search?q=typed-timeout')
+
+        assert response.status_code == 503
+        assert response.headers['Retry-After'] == '1'
+        body = response.get_json()
+        assert body['error']['kind'] == 'server_busy'
+        assert body['storageCode'] == 'database_timeout'
+        assert body['operationId'] == 'search-timeout-test'
+
+    def test_search_threads_request_owner_to_storage(
+            self, flask_client, monkeypatch):
+        """The route never hardcodes the personal-server owner in core I/O."""
+        import lib.storage
+        import routes.conversations_search as search_routes
+
+        observed = []
+
+        class Client:
+            def query(self, operation, payload):
+                observed.append((operation, dict(payload)))
+                return []
+
+        monkeypatch.setattr(lib.storage, 'get_storage_client', lambda: Client())
+        monkeypatch.setattr(search_routes, '_request_user_id', lambda: 42)
+
+        response = flask_client.get(
+            '/api/v1/conversations/search?q=owner-scope')
+
+        assert response.status_code == 200
+        assert observed == [('conversation.search', {
+            'user_id': 42,
+            'query': 'owner-scope',
+            'limit': 50,
+            'snippet_radius': 40,
+        })]
+
     def test_search_after_delete(self, flask_client):
         """Deleted conversations don't appear in search results."""
         now = int(time.time() * 1000)
         conv_id = f"search-test-delete-{now}"
+        self.conv_ids.append(conv_id)
 
-        # Create
-        flask_client.put(f"/api/v1/conversations/{conv_id}", json={
-            "title": "Delete Test",
-            "messages": [{"role": "user", "content": "ephemeral_flamingo_search", "timestamp": now}],
-            "createdAt": now,
-            "updatedAt": now,
-        })
+        seed_conversation(
+            conv_id,
+            user_id=_SEARCH_OWNER_USER_ID,
+            title='Delete Test',
+            messages=[{
+                'role': 'user',
+                'content': 'ephemeral_flamingo_search',
+                'timestamp': now,
+            }],
+            created_at=now,
+            updated_at=now,
+        )
+        wait_for_conversation_search(
+            'ephemeral_flamingo_search',
+            user_id=_SEARCH_OWNER_USER_ID,
+            expected_ids=(conv_id,),
+        )
 
         # Verify it's findable
         resp = flask_client.get("/api/v1/conversations/search?q=ephemeral_flamingo_search")
         assert resp.status_code == 200
         assert any(r["id"] == conv_id for r in _search_items(resp))
 
-        # Delete
-        flask_client.delete(f"/api/v1/conversations/{conv_id}")
+        _storage_client().command('conversation.delete', {
+            'conv_id': conv_id,
+            'user_id': _SEARCH_OWNER_USER_ID,
+        }, f'search-delete:{conv_id}:{uuid.uuid4().hex[:10]}')
+        wait_for_conversation_search(
+            'ephemeral_flamingo_search',
+            user_id=_SEARCH_OWNER_USER_ID,
+            absent_ids=(conv_id,),
+        )
 
         # Should no longer appear
         resp = flask_client.get("/api/v1/conversations/search?q=ephemeral_flamingo_search")
         assert resp.status_code == 200
         assert not any(r["id"] == conv_id for r in _search_items(resp))
-
-    def test_search_pg_phase1_uses_tsvector_index(self, flask_client):
-        """On PG, a whole-word query must be served by the index-backed
-        Phase-1 (search_tsv), NOT a sequential scan. This pins the fix for
-        the ~790ms full Seq Scan that PG searches previously paid on every
-        keystroke. Skips on SQLite (different Phase-1 path)."""
-        from lib.database import _BACKEND
-        if _BACKEND != 'pg':
-            pytest.skip('PG-specific index path')
-
-        import asyncio
-
-        from lib.database import DOMAIN_CHAT, async_transaction
-
-        # The endpoint builds 'word:*' prefix tsquery terms; mirror that and
-        # assert the GIN index (idx_conv_search_tsv) is USABLE for Phase-1.
-        #
-        # We force ``enable_seqscan = off`` for the EXPLAIN: on the tiny test
-        # fixture (~a dozen rows) PG's cost-based planner correctly prefers a
-        # Seq Scan — an index probe is genuinely more expensive than scanning
-        # a handful of rows — so asserting the plan *chose* the index is
-        # non-deterministic and table-size-dependent. The durable property
-        # this test pins is that the index EXISTS and APPLIES to the query
-        # (the regression target is the index being dropped or the column
-        # losing its GIN index), which surfaces deterministically once seqscan
-        # is disabled. ``SET LOCAL`` inside async_transaction scopes the
-        # override to this txn and rolls it back, so it never leaks onto the
-        # pooled connection and skews unrelated queries.
-        async def _plan():
-            async with async_transaction(domain=DOMAIN_CHAT) as conn:
-                await conn.execute('SET LOCAL enable_seqscan = off')
-                rows = await conn.fetchall(
-                    "EXPLAIN SELECT id FROM conversations "
-                    "WHERE user_id=? AND search_tsv @@ to_tsquery('simple', ?) "
-                    "ORDER BY updated_at DESC LIMIT 50",
-                    (1, 'gradient:*'))
-            return rows
-
-        rows = asyncio.run(_plan())
-        plan = '\n'.join(str(r[0]) for r in rows)
-        assert 'idx_conv_search_tsv' in plan or 'Bitmap Index Scan' in plan, (
-            f'Phase-1 PG search cannot use the tsvector GIN index '
-            f'(index missing or dropped?):\n{plan}')
-
-
-    def test_search_pg_fallback_uses_head_trgm_index(self, flask_client):
-        """On PG, the Phase-2 substring fallback (`lower(left(search_text,
-        10000)) LIKE ?`) must be served by the expression trgm index
-        ``idx_conv_search_head_trgm``, NOT a full Seq Scan that detoasts every
-        row. This pins the fix for the ~1.2s fallback scan. The index
-        expression MUST match the query predicate (same lower(left(...,10000))
-        shape) or the planner won't use it.
-
-        Like the tsvector test above, we force ``enable_seqscan = off`` so the
-        assertion is about the index being USABLE/APPLICABLE (the regression
-        target: index dropped, or the 10000 cap drifting out of sync with the
-        SQL in conversations_search.py), not about the cost-based planner's
-        choice on the tiny test fixture."""
-        from lib.database import _BACKEND
-        if _BACKEND != 'pg':
-            pytest.skip('PG-specific index path')
-
-        import asyncio
-
-        from lib.database import DOMAIN_CHAT, async_transaction
-
-        async def _plan():
-            async with async_transaction(domain=DOMAIN_CHAT) as conn:
-                await conn.execute('SET LOCAL enable_seqscan = off')
-                rows = await conn.fetchall(
-                    "EXPLAIN SELECT id FROM conversations "
-                    "WHERE user_id=? AND lower(left(search_text, 10000)) LIKE ? "
-                    "ORDER BY updated_at DESC LIMIT 50",
-                    (1, '%gradient%'))
-            return rows
-
-        rows = asyncio.run(_plan())
-        plan = '\n'.join(str(r[0]) for r in rows)
-        assert 'idx_conv_search_head_trgm' in plan or 'Bitmap Index Scan' in plan, (
-            f'Phase-2 PG search fallback cannot use the head-trgm GIN index '
-            f'(index missing, or left(...) cap out of sync with the SQL?):\n{plan}')
 
     def test_slow_search_threshold_log(self):
         """The timing helper logs WARNING above the threshold, DEBUG below —
@@ -611,13 +665,23 @@ class TestSearchEndpoint:
         conv_id = f"search-test-substr-{now}"
         self.conv_ids.append(conv_id)
 
-        # Create conv with a compound word
-        flask_client.put(f"/api/v1/conversations/{conv_id}", json={
-            "title": "Substring Test",
-            "messages": [{"role": "user", "content": "The superbacktesting framework is great", "timestamp": now}],
-            "createdAt": now,
-            "updatedAt": now,
-        })
+        seed_conversation(
+            conv_id,
+            user_id=_SEARCH_OWNER_USER_ID,
+            title='Substring Test',
+            messages=[{
+                'role': 'user',
+                'content': 'The superbacktesting framework is great',
+                'timestamp': now,
+            }],
+            created_at=now,
+            updated_at=now,
+        )
+        wait_for_conversation_search(
+            'superbacktest',
+            user_id=_SEARCH_OWNER_USER_ID,
+            expected_ids=(conv_id,),
+        )
 
         # Search for a substring that appears mid-word
         # tsvector won't match "backtest" inside "superbacktesting", but ILIKE will
@@ -626,179 +690,3 @@ class TestSearchEndpoint:
         data = _search_items(resp)
         ids = [r["id"] for r in data]
         assert conv_id in ids, f"Substring match not found. Results: {data}"
-
-
-
-@pytest.mark.api
-class TestUpsertRetryCrossConnectionVisibility:
-    """Regression pin for the retry=True durability bug (2026-06-10).
-
-    `upsert(..., retry=True)` routes through db_execute_with_retry. A bug where
-    the retry branch forwarded the default `commit=False` left the write
-    UNCOMMITTED: visible to the writing thread-local sync connection (same txn)
-    but INVISIBLE to any OTHER connection — notably the async read pool
-    (lib/database/aio.async_fetchall borrows a separate pooled connection).
-    This surfaced as conversation-search returning 0 hits for freshly-seeded
-    rows. The fix makes retry=True always commit. This test fails if that ever
-    regresses: it seeds via upsert(retry=True) on the sync connection and reads
-    back via async_fetchall on a DIFFERENT connection.
-    """
-
-    def test_retry_upsert_is_visible_to_async_pool(self, flask_client):
-        import asyncio
-
-        from lib.database import DOMAIN_CHAT, async_fetchall, get_thread_db
-        from lib.database._core_schema import CONVERSATIONS, upsert
-
-        conv_id = f'__retry_visibility_probe_{int(time.time()*1000)}__'
-        marker = 'zzqretryvisibilityprobe'
-        db = get_thread_db(DOMAIN_CHAT)
-        now = int(time.time() * 1000)
-        try:
-            # Seed via the exact path the converted call-sites use.
-            upsert(db, CONVERSATIONS, {
-                'id': conv_id, 'user_id': 1, 'title': 'retry-probe',
-                'messages': '[]', 'created_at': now, 'updated_at': now,
-                'settings': '{}', 'msg_count': 1,
-                'search_text': f'hello {marker} world',
-            }, insert_cols=['id', 'user_id', 'title', 'messages', 'created_at',
-                            'updated_at', 'settings', 'msg_count', 'search_text'],
-               retry=True)
-
-            # Read back on a SEPARATE (async-pool) connection. If retry=True did
-            # not commit, this returns nothing even though the sync conn sees it.
-            async def _read():
-                return await async_fetchall(
-                    'SELECT id FROM conversations WHERE user_id=? '
-                    'AND lower(search_text) LIKE ? LIMIT 50',
-                    (1, f'%{marker}%'), domain=DOMAIN_CHAT)
-
-            rows = asyncio.run(_read())
-            assert any(r['id'] == conv_id for r in rows), (
-                'upsert(retry=True) write not visible to async_fetchall — '
-                'retry path is not committing (durability regression)')
-        finally:
-            db.execute('DELETE FROM conversations WHERE id=?', (conv_id,))
-            db.commit()
-
-
-
-# ═══════════════════════════════════════════════════════════
-#  Cross-backend Phase-2 head-cap (SQLite has no left())
-# ═══════════════════════════════════════════════════════════
-
-@pytest.mark.unit
-class TestPhase2HeadCapCrossBackend:
-    """Regression pin for the ``no such function: left`` bug.
-
-    The Phase-2 substring fallback caps the scan to the first 10000 chars of
-    ``search_text``. It previously spelled that cap ``left(search_text, 10000)``
-    unconditionally — but ``left()`` is a PostgreSQL/MySQL builtin that SQLite
-    does NOT have. On every SQLite-fallback deployment the fallback query raised
-    ``OperationalError: no such function: left``, which the ``except`` swallowed
-    at WARNING → the substring search silently returned nothing (degraded search
-    that no test caught, but which fired dozens of times in logs/error.log on
-    the async DB threads).
-
-    The fix (routes/conversations_search.py::_head_cap_sql) makes the head-cap
-    backend-aware: ``left(...)`` on PG (so it still hits the expression index
-    ``idx_conv_search_head_trgm``) and portable ``substr(..., 1, 10000)`` on
-    SQLite.
-    """
-
-    def test_head_cap_maps_by_backend(self):
-        """PG keeps left() (index-matching); everything else uses substr()."""
-        assert _head_cap_sql('pg') == 'left(search_text, 10000)'
-        assert _head_cap_sql('sqlite') == 'substr(search_text, 1, 10000)'
-        # Any non-pg backend string falls to the portable form (fail-safe).
-        assert _head_cap_sql('') == 'substr(search_text, 1, 10000)'
-
-    def test_sqlite_left_form_raises_but_substr_form_works(self):
-        """Execute both head-cap forms against real in-memory SQLite.
-
-        This is the crux of the bug: the PG form is a hard runtime error on
-        SQLite, while the chosen SQLite form runs and correctly bounds the
-        substring match. Proves the fix independent of the (PG) test harness.
-        """
-        import sqlite3
-
-        conn = sqlite3.connect(':memory:')
-        conn.execute('CREATE TABLE conversations '
-                     '(id TEXT, user_id INTEGER, search_text TEXT, updated_at INTEGER)')
-        conn.execute("INSERT INTO conversations VALUES "
-                     "('c1', 1, 'the superbacktesting framework is great', 1)")
-        conn.commit()
-
-        pattern = '%superbacktest%'
-
-        # 1. The OLD unconditional PG form must fail on SQLite (the bug).
-        pg_sql = ('SELECT id FROM conversations WHERE user_id=1 '
-                  f'AND lower({_head_cap_sql("pg")}) LIKE ?')
-        with pytest.raises(sqlite3.OperationalError) as exc:
-            conn.execute(pg_sql, (pattern,)).fetchall()
-        assert 'left' in str(exc.value).lower()
-
-        # 2. The NEW SQLite form runs and finds the substring match.
-        sqlite_sql = ('SELECT id FROM conversations WHERE user_id=1 '
-                      f'AND lower({_head_cap_sql("sqlite")}) LIKE ?')
-        rows = conn.execute(sqlite_sql, (pattern,)).fetchall()
-        assert [r[0] for r in rows] == ['c1'], (
-            'substr() head-cap form must find the substring match on SQLite')
-        conn.close()
-
-    def test_head_cap_bounds_to_10000_chars_on_sqlite(self):
-        """The substr cap actually bounds the scan: a match past char 10000
-        (beyond the cap) is NOT found, mirroring the PG left()-cap semantics."""
-        import sqlite3
-
-        conn = sqlite3.connect(':memory:')
-        conn.execute('CREATE TABLE conversations (id TEXT, search_text TEXT)')
-        # Marker sits AFTER the 10000-char cap → must be excluded.
-        far = 'x' * 10000 + ' needle_far'
-        near = 'needle_near ' + 'y' * 20
-        conn.execute("INSERT INTO conversations VALUES ('far', ?)", (far,))
-        conn.execute("INSERT INTO conversations VALUES ('near', ?)", (near,))
-        conn.commit()
-
-        cap = _head_cap_sql('sqlite')
-        got_far = conn.execute(
-            f'SELECT id FROM conversations WHERE lower({cap}) LIKE ?',
-            ('%needle_far%',)).fetchall()
-        got_near = conn.execute(
-            f'SELECT id FROM conversations WHERE lower({cap}) LIKE ?',
-            ('%needle_near%',)).fetchall()
-        conn.close()
-        assert got_far == [], 'match beyond the 10000-char cap must be excluded'
-        assert [r[0] for r in got_near] == ['near']
-
-    def test_snippet_projection_is_bounded_and_sqlite_executable(self):
-        """Only the short snippet, never the full search blob, is returned."""
-        import sqlite3
-
-        conn = sqlite3.connect(':memory:')
-        conn.row_factory = sqlite3.Row
-        conn.execute('CREATE TABLE conversations '
-                     '(id TEXT, user_id INTEGER, search_text TEXT)')
-        huge = ('a' * 200_000) + ' needle_here ' + ('z' * 200_000)
-        conn.execute('INSERT INTO conversations VALUES (?, ?, ?)',
-                     ('huge', 1, huge))
-        radius = 40
-        width = (2 * radius) + len('needle_here')
-        sql = _snippet_projection_sql('sqlite', '?')
-        row = conn.execute(
-            sql, (radius, width, 'needle_here', 1, 'huge')
-        ).fetchone()
-        conn.close()
-
-        assert row is not None and 'needle_here' in row['snippet']
-        assert len(row['snippet']) <= width
-        assert len(row['snippet']) * 1000 < len(huge), (
-            'snippet projection accidentally returned a large fraction of '
-            'the authoritative search blob')
-
-    def test_pg_snippet_projection_uses_server_side_substring(self):
-        sql = _snippet_projection_sql('pg', '?,?')
-        assert sql.startswith('SELECT id, CASE WHEN match_pos > 0')
-        assert 'substring(search_text FROM GREATEST' in sql
-        assert "strpos(lower(search_text), ?)" in sql
-        assert 'AS snippet' in sql

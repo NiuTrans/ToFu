@@ -13,7 +13,11 @@ import os
 import re
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+pytestmark = pytest.mark.unit
 
 _HEX = set('0123456789abcdef')
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -91,7 +95,7 @@ def test_migrated_sites_have_no_raw_idiom():
         'lib/agent_core/task_runtime.py',
         'lib/tasks_pkg/handlers/code_exec.py',
         'lib/tasks_pkg/compaction/_layer2/_compact.py',
-        'lib/tasks_pkg/endpoint/_sync.py',
+        'lib/tasks_pkg/sync_run.py',
         'lib/tasks_pkg/handlers/misc/_human.py',
         'lib/tasks_pkg/handlers/misc/_brain.py',
         'routes/compat_anthropic.py', 'routes/compat_openai.py',

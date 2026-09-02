@@ -43,6 +43,9 @@ from tests._nc_harness import patch_restore as _patch_restore
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _BOARD_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_board.py')
@@ -59,22 +62,10 @@ _LONG_TITLE = (
 _PROJ = '/tmp/tofu-board-diet-guard'
 
 
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
-
-
 @pytest.fixture(autouse=True)
-def _clean(flask_app):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_tasks')
-        db.execute('DELETE FROM project_events')
-        db.commit()
+def _clean(chat_sidecar):
+    from tests._seed import clear_board
+    clear_board(_PROJ, user_id=TEST_OWNER_USER_ID)
     yield
 
 
@@ -86,7 +77,7 @@ def _stub_push(monkeypatch):
 def _seed(flask_app, title=_LONG_TITLE):
     from lib.conversations.project_board import post_task
     with flask_app.app_context():
-        r = post_task(_PROJ, 'cA', title)
+        r = post_task(_PROJ, 'cA', title, user_id=TEST_OWNER_USER_ID)
     assert r['ok'], r
     return r['id']
 
@@ -94,14 +85,14 @@ def _seed(flask_app, title=_LONG_TITLE):
 def _injected(flask_app, conv='cREADER'):
     from lib.conversations.project_board import render_board_injection_block
     with flask_app.app_context():
-        return render_board_injection_block(_PROJ, current_conv_id=conv)
+        return render_board_injection_block(_PROJ, current_conv_id=conv, user_id=TEST_OWNER_USER_ID)
 
 
 def _tool_output(flask_app, conv='cREADER'):
     from lib.conversations.project_board import execute_board_tool
     with flask_app.app_context():
         return execute_board_tool('project_board_read', {},
-                                  current_conv_id=conv, project_path=_PROJ)
+                                  current_conv_id=conv, project_path=_PROJ, user_id=TEST_OWNER_USER_ID)
 
 
 def test_the_injection_does_not_carry_the_full_spec(flask_app):
@@ -124,7 +115,7 @@ def test_the_injection_still_carries_what_coordination_needs(flask_app):
     from lib.conversations.project_board import claim_task
     tid = _seed(flask_app)
     with flask_app.app_context():
-        claim_task(_PROJ, 'cOWNER', tid)
+        claim_task(_PROJ, 'cOWNER', tid, user_id=TEST_OWNER_USER_ID)
 
     block = _injected(flask_app)
     assert '[PROJECT BOARD]' in block, 'the marker must survive'
@@ -182,7 +173,7 @@ def test_storage_remains_byte_identical(flask_app):
     from lib.conversations.project_board import read_board
     _seed(flask_app)
     with flask_app.app_context():
-        stored = read_board(_PROJ)['tasks'][0]['title']
+        stored = read_board(_PROJ, user_id=TEST_OWNER_USER_ID)['tasks'][0]['title']
     assert stored == _LONG_TITLE, 'stored title must be BYTE-IDENTICAL (uncapped)'
 
 
@@ -228,6 +219,6 @@ def test_NC2_abridging_the_tool_output_breaks_the_detail_channel(flask_app):
 
     _patch_restore(
         _BOARD_SRC,
-        "            block = render_board_block(project_path, current_conv_id)",
-        "            block = render_board_injection_block(project_path, current_conv_id)",
+        "            block = render_board_block(project_path, current_conv_id, user_id=user_id)",
+        "            block = render_board_injection_block(project_path, current_conv_id, user_id=user_id)",
         run)

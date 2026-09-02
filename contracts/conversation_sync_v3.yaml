@@ -1,0 +1,1492 @@
+openapi: 3.1.0
+info:
+  title: Tofu Conversation Sync API
+  version: 3.0.0
+  description: >-
+    Canonical command, snapshot, ordered-event, invalidation, and connection
+    health contract for turn-native conversations. This file is the only
+    authoring source for the Python and TypeScript generated artifacts.
+x-tofu-contract: tofu.conversation-sync/v3
+x-tofu-stream:
+  cursor: opaque
+  ordering: conversation-scoped-monotonic
+  heartbeatIntervalMs: 15000
+  reconnectGraceMs: 37500
+  replayRetentionMs: 604800000
+  eventSource: /api/v3/conversations/{conversationId}/events
+  gapEvent: sync.reset_required
+  streamClientIdQuery: streamClientId
+  streamGenerationQuery: streamGeneration
+  capacityStopStatus: 204
+x-tofu-command-retry:
+  maxAttempts: 3
+  baseDelayMs: 250
+  minDelayMs: 50
+  maxDelayMs: 2000
+  jitterRatio: 0.2
+  httpStatuses: [502, 503, 504]
+  storageCodes: [database_busy, database_unavailable, database_timeout]
+  transportCodes: [network]
+x-tofu-invariants:
+  - A conversation mutation and its change-log row commit atomically.
+  - A snapshot cursor is captured in the same read transaction as its rows.
+  - Only the conversation event stream writes live turn projections.
+  - Push and BroadcastChannel frames are invalidation hints, never projection data.
+  - Projection patches apply only when baseRevision equals the local revision.
+  - Existing turn projections are never embedded in retained incremental events.
+  - Idempotent retries reuse one validated request snapshot and commandId.
+  - A newer stream generation supersedes older connections from the same page and conversation on the receiving replica; the shared lease cap bounds cross-replica overlap.
+  - Plan execution names one terminal source turn and projection revision; lane-tail CAS prevents executing a superseded plan.
+paths:
+  /api/v3/conversations/{conversationId}/sync:
+    get:
+      operationId: conversationSyncSnapshot
+      x-tofu-client: snapshot
+      x-tofu-contract: tofu.conversation-sync.snapshot/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      responses:
+        '200':
+          description: Authoritative turn snapshot and replay cursor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationSyncSnapshot'
+  /api/v3/conversations/{conversationId}/events:
+    get:
+      operationId: conversationSyncEvents
+      x-tofu-client: eventsUrl
+      x-tofu-contract: tofu.conversation-sync.events/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: streamClientId
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]{0,63}$'
+        - name: streamGeneration
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 2147483647
+      responses:
+        '200':
+          description: Ordered replayable Server-Sent Events.
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ConversationSyncEvent'
+        '204':
+          description: Superseded or capacity-limited stream; native EventSource must stop reconnecting.
+  /api/v3/conversations/{conversationId}/turns:
+    post:
+      operationId: conversationTurnCreate
+      x-tofu-client: createTurn
+      x-tofu-idempotent-retry: true
+      x-tofu-client-timeout-ms: 0
+      x-tofu-contract: tofu.conversation-sync.command.create-turn/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTurnRequest'
+      responses:
+        '200':
+          description: Accepted or idempotently replayed command.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnCommandResponse'
+  /api/v3/conversations/{conversationId}/turns/settled:
+    post:
+      operationId: conversationSettledTurnAppend
+      x-tofu-client: appendSettledTurn
+      x-tofu-idempotent-retry: true
+      x-tofu-contract: tofu.conversation-sync.command.append-settled-turn/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppendSettledTurnRequest'
+      responses:
+        '200':
+          description: Appended or idempotently replayed terminal turn.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnMutationResponse'
+  /api/v3/conversations/{conversationId}/turns/{turnId}:
+    patch:
+      operationId: conversationTurnUpdate
+      x-tofu-client: updateTurn
+      x-tofu-contract: tofu.conversation-sync.command.update-turn/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/TurnId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTurnRequest'
+      responses:
+        '200':
+          description: Updated turn.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnMutationResponse'
+  /api/v3/conversations/{conversationId}/turns/{turnId}/plan/execute:
+    post:
+      operationId: conversationPlanExecute
+      x-tofu-client: executePlan
+      x-tofu-idempotent-retry: true
+      x-tofu-client-timeout-ms: 0
+      x-tofu-contract: tofu.conversation-sync.command.execute-plan/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/TurnId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecutePlanRequest'
+      responses:
+        '200':
+          description: Accepted or idempotently replayed execution of the exact proposed plan.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnCommandResponse'
+  /api/v3/conversations/{conversationId}/turns/{turnId}/attempts:
+    post:
+      operationId: conversationAttemptCreate
+      x-tofu-client: createAttempt
+      x-tofu-idempotent-retry: true
+      x-tofu-client-timeout-ms: 0
+      x-tofu-contract: tofu.conversation-sync.command.create-attempt/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/TurnId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAttemptRequest'
+      responses:
+        '200':
+          description: Accepted or idempotently replayed attempt command.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnCommandResponse'
+  /api/v3/conversations/{conversationId}/turns/{turnId}/lanes:
+    post:
+      operationId: conversationLaneCreate
+      x-tofu-client: createLane
+      x-tofu-contract: tofu.conversation-sync.command.create-lane/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/TurnId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLaneRequest'
+      responses:
+        '200':
+          description: Created branch lane.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnMutationResponse'
+  /api/v3/conversations/{conversationId}/turns/{turnId}/lanes/{laneId}:
+    delete:
+      operationId: conversationLaneDelete
+      x-tofu-client: deleteLane
+      x-tofu-contract: tofu.conversation-sync.command.delete-lane/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/TurnId'
+        - $ref: '#/components/parameters/LaneId'
+      responses:
+        '200':
+          description: Deleted branch lane.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnMutationResponse'
+  /api/v3/conversations/{conversationId}/turns/{turnId}/file-changes/undo:
+    post:
+      operationId: conversationFileChangesUndo
+      x-tofu-client: undoFileChanges
+      x-tofu-idempotent-retry: true
+      x-tofu-contract: tofu.conversation-sync.command.file-changes-undo/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/TurnId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FileChangesCommandRequest'
+      responses:
+        '200':
+          description: Undid this turn's file changes and updated its projection.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnMutationResponse'
+  /api/v3/conversations/{conversationId}/turns/{turnId}/file-changes/redo:
+    post:
+      operationId: conversationFileChangesRedo
+      x-tofu-client: redoFileChanges
+      x-tofu-idempotent-retry: true
+      x-tofu-contract: tofu.conversation-sync.command.file-changes-redo/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/TurnId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FileChangesCommandRequest'
+      responses:
+        '200':
+          description: Reapplied this turn's file changes and updated its projection.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnMutationResponse'
+  /api/v3/conversations/{conversationId}/turns/delete:
+    post:
+      operationId: conversationTurnsDelete
+      x-tofu-client: deleteTurns
+      x-tofu-contract: tofu.conversation-sync.command.delete-turns/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteTurnsRequest'
+      responses:
+        '200':
+          description: Deleted turns.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnMutationResponse'
+  /api/v3/attempts/{attemptId}/abort:
+    post:
+      operationId: conversationAttemptAbort
+      x-tofu-client: abortAttempt
+      x-tofu-contract: tofu.conversation-sync.command.abort-attempt/v1
+      parameters:
+        - $ref: '#/components/parameters/AttemptId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '200':
+          description: Abort request result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AbortAttemptResponse'
+components:
+  parameters:
+    ConversationId:
+      name: conversationId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 256
+    TurnId:
+      name: turnId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    AttemptId:
+      name: attemptId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    LaneId:
+      name: laneId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+  schemas:
+    JsonObject:
+      type: object
+      additionalProperties: true
+    TurnStatus:
+      type: string
+      enum: [pending, running, completed, interrupted, truncated, failed]
+    AttemptStatus:
+      type: string
+      enum: [pending, running, completed, interrupted, truncated, failed, superseded]
+    TurnActor:
+      type: string
+      enum: [human, assistant, planner, critic, virtual_user]
+    TurnToolResult:
+      type: object
+      additionalProperties: true
+      properties:
+        content: {}
+        status: {type: string}
+        rejection: {$ref: '#/components/schemas/TurnToolRejection'}
+        _rejected:
+          deprecated: true
+          $ref: '#/components/schemas/TurnToolRejection'
+        rejected:
+          deprecated: true
+          $ref: '#/components/schemas/TurnToolRejection'
+    TurnToolRejection:
+      type: object
+      additionalProperties: true
+      required: [kind]
+      properties:
+        kind: {type: string, minLength: 1, maxLength: 128}
+        tool: {type: string, maxLength: 256}
+        attempted: {type: string, maxLength: 256}
+        reason: {type: string, maxLength: 4096}
+        retryable: {type: boolean}
+        suggestions:
+          type: array
+          maxItems: 16
+          items: {type: string, maxLength: 256}
+    TurnToolRound:
+      type: object
+      additionalProperties: true
+      properties:
+        roundNum: {type: integer, minimum: 0}
+        llmRound:
+          oneOf: [{type: integer, minimum: 0}, {type: 'null'}]
+        toolCallId: {type: string}
+        toolName: {type: string}
+        toolArgs: {}
+        toolContent: {}
+        query: {type: string}
+        status: {type: string}
+        rejection: {$ref: '#/components/schemas/TurnToolRejection'}
+        _rejected:
+          deprecated: true
+          $ref: '#/components/schemas/TurnToolRejection'
+        assistantContent: {type: string}
+        thinking: {type: string}
+        thinkingSignature: {type: string}
+        result: {$ref: '#/components/schemas/TurnToolResult'}
+        results:
+          type: array
+          items: {}
+        tStart: {type: number}
+        execStartTs: {type: number}
+        deadlineTs: {type: number}
+    TurnTextSegment:
+      type: object
+      additionalProperties: true
+      required: [type, blockId, text]
+      properties:
+        type: {const: text}
+        blockId: {type: string}
+        text: {type: string}
+        translatedText: {type: string}
+        deliverable: {type: boolean}
+        terminal: {type: boolean}
+        resumable: {type: boolean}
+        llmRound:
+          oneOf: [{type: integer, minimum: 0}, {type: 'null'}]
+    TurnThinkingSegment:
+      type: object
+      additionalProperties: true
+      required: [type, blockId, text]
+      properties:
+        type: {const: thinking}
+        blockId: {type: string}
+        text: {type: string}
+        translatedText: {type: string}
+        deliverable: {type: boolean}
+        terminal: {type: boolean}
+        signature: {type: string}
+        llmRound:
+          oneOf: [{type: integer, minimum: 0}, {type: 'null'}]
+    TurnToolUseSegment:
+      type: object
+      additionalProperties: true
+      required: [type, blockId, id, name, result]
+      properties:
+        type: {const: tool_use}
+        blockId: {type: string}
+        id: {type: string}
+        name: {type: string}
+        input: {}
+        llmRound:
+          oneOf: [{type: integer, minimum: 0}, {type: 'null'}]
+        result: {$ref: '#/components/schemas/TurnToolResult'}
+        _round: {$ref: '#/components/schemas/TurnToolRound'}
+    TurnContentSegment:
+      oneOf:
+        - $ref: '#/components/schemas/TurnTextSegment'
+        - $ref: '#/components/schemas/TurnThinkingSegment'
+        - $ref: '#/components/schemas/TurnToolUseSegment'
+    BranchLaneDescriptor:
+      type: object
+      additionalProperties: true
+      required: [laneId]
+      properties:
+        laneId: {type: string}
+        title: {type: string}
+        label: {type: string}
+        icon: {type: string}
+        kind: {type: string}
+        anchorText: {type: string}
+        parentSelection: {type: string}
+    TurnImageAttachment:
+      type: object
+      additionalProperties: true
+      properties:
+        attachmentId: {type: string}
+        preview: {type: string}
+        caption: {type: string}
+        sizeKB:
+          oneOf: [{type: number}, {type: string}]
+        pdfPage: {type: integer, minimum: 1}
+        pdfTotal: {type: integer, minimum: 1}
+        pdfName: {type: string}
+        pdfImageSource: {type: string}
+    TurnVideoAttachment:
+      type: object
+      additionalProperties: true
+      properties:
+        video_id: {type: string}
+        name: {type: string}
+        video_url: {type: string}
+        poster: {type: string}
+        duration_s: {type: number, minimum: 0}
+        width: {type: integer, minimum: 0}
+        height: {type: integer, minimum: 0}
+        frames:
+          type: array
+          items: {}
+        frame_count: {type: integer, minimum: 0}
+        avg_frame_bytes: {type: number, minimum: 0}
+        transcript: {type: string}
+        transcript_status: {type: string}
+        transcript_model: {type: string}
+        storyboard: {type: string}
+        storyboard_model: {type: string}
+    TurnDocumentAttachment:
+      type: object
+      additionalProperties: true
+      properties:
+        name: {type: string}
+        text: {type: string}
+        textLength: {type: integer, minimum: 0}
+        pages: {type: integer, minimum: 0}
+        isScanned: {type: boolean}
+        method: {type: string}
+    TurnConversationReference:
+      type: object
+      additionalProperties: true
+      properties:
+        id: {type: string}
+        title: {type: string}
+    TurnInjectionPreview:
+      type: object
+      additionalProperties: true
+      properties:
+        text: {type: string}
+        agentId: {type: string}
+        fromConv: {type: string}
+    TurnMessageInjection:
+      type: object
+      additionalProperties: true
+      required: [blockId]
+      properties:
+        blockId: {type: string}
+        round: {type: integer, minimum: 0}
+        count: {type: integer, minimum: 0}
+        agentIds:
+          type: array
+          items: {type: string}
+        previews:
+          type: array
+          items: {$ref: '#/components/schemas/TurnInjectionPreview'}
+    TurnStallInjection:
+      type: object
+      additionalProperties: true
+      required: [blockId]
+      properties:
+        blockId: {type: string}
+        round: {type: integer, minimum: 0}
+        tool: {type: string}
+        failedRound: {type: integer, minimum: 0}
+        badge: {type: string}
+        prompt: {type: string}
+        max: {type: integer, minimum: 0}
+    TurnFileChange:
+      type: object
+      additionalProperties: true
+      required: [path]
+      properties:
+        path: {type: string}
+        action: {type: string}
+        root: {type: string}
+        count: {type: integer, minimum: 0}
+        ok: {type: boolean}
+        pending: {type: boolean}
+    TurnFileChangesBlock:
+      type: object
+      additionalProperties: false
+      required: [blockId, count, files]
+      properties:
+        blockId: {type: string}
+        taskId: {type: string}
+        count: {type: integer, minimum: 0}
+        state:
+          type: string
+          enum: [applied, undoing, undone, redoing, error]
+        commandId: {type: string}
+        error: {}
+        effect: {$ref: '#/components/schemas/JsonObject'}
+        files:
+          type: array
+          items: {$ref: '#/components/schemas/TurnFileChange'}
+    TurnOrchestration:
+      type: object
+      additionalProperties: false
+      properties:
+        iteration:
+          oneOf: [{type: integer, minimum: 0}, {type: string}]
+        approved: {type: boolean}
+        nextPhase: {type: string}
+        stuck: {type: boolean}
+        flowNodeId: {type: string}
+        flowRunId: {type: string}
+    TurnProvenance:
+      type: object
+      additionalProperties: false
+      required: [blockId]
+      properties:
+        blockId: {type: string}
+        memoryPrefetch: {$ref: '#/components/schemas/JsonObject'}
+        mcpLoginHint: {$ref: '#/components/schemas/JsonObject'}
+        preferencesApplied: {$ref: '#/components/schemas/JsonObject'}
+        preferencesLearned:
+          type: array
+          items: {$ref: '#/components/schemas/JsonObject'}
+        relatedConversations: {$ref: '#/components/schemas/JsonObject'}
+    TurnBrainDispatch:
+      type: object
+      additionalProperties: false
+      properties:
+        epicId: {type: string}
+        epicTitle: {type: string}
+        originatorConv: {type: string}
+        originatorTitle: {type: string}
+        route: {type: string}
+        method: {type: string}
+        answered: {type: boolean}
+    TurnOrigin:
+      type: object
+      additionalProperties: false
+      required: [blockId, initiator]
+      properties:
+        blockId: {type: string}
+        initiator:
+          type: string
+          enum: [human, autopilot, proactive, timer, brain, peer, operator, swarm]
+        sourceConversationId: {type: string}
+        peerHuman: {type: boolean}
+        brain: {$ref: '#/components/schemas/TurnBrainDispatch'}
+        autopilotRunId: {type: string}
+        boardTaskId: {type: string}
+        scheduledTaskId: {type: string}
+    TurnContextSnapshot:
+      type: object
+      additionalProperties: false
+      required: [blockId, snapshot]
+      properties:
+        blockId: {type: string}
+        snapshot: {$ref: '#/components/schemas/JsonObject'}
+    TurnCompaction:
+      type: object
+      additionalProperties: false
+      required: [blockId]
+      properties:
+        blockId: {type: string}
+        archiveId: {type: string}
+        conversationId: {type: string}
+        trigger: {type: string}
+        timestamp: {type: integer, minimum: 0}
+        tokensBefore: {type: integer, minimum: 0}
+        tokensAfter: {type: integer, minimum: 0}
+        messagesBefore: {type: integer, minimum: 0}
+        messagesAfter: {type: integer, minimum: 0}
+        reductionPercent: {type: integer, minimum: 0, maximum: 100}
+        foldedToolRounds: {type: integer, minimum: 0}
+        estimatedPromptTokens: {type: integer, minimum: 0}
+    TurnTranslation:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [pending, completed, skipped, failed]
+        model: {type: string}
+        error: {}
+        taskId: {type: string}
+        statusMessage: {type: string}
+        statusKind: {type: string}
+        partial: {type: string}
+        partialByRound: {$ref: '#/components/schemas/JsonObject'}
+        sendFailure: {}
+        skippedReason: {type: string}
+    TurnImageGenerationResult:
+      type: object
+      additionalProperties: false
+      required: [ok, prompt, model]
+      properties:
+        ok: {type: boolean}
+        prompt: {type: string}
+        model: {type: string}
+        providerId: {type: string}
+        aspectRatio: {type: string}
+        resolution: {type: string}
+        imageUrl: {type: string}
+        remoteImageUrl: {type: string}
+        fileSize: {type: integer, minimum: 0}
+        elapsedSeconds: {type: number, minimum: 0}
+        responseText: {type: string}
+        error: {type: string}
+        errorType: {type: string}
+    TurnImageGeneration:
+      type: object
+      additionalProperties: false
+      required: [blockId, mode, status, results]
+      properties:
+        blockId: {type: string}
+        mode:
+          type: string
+          enum: [generate, edit, batch]
+        status:
+          type: string
+          enum: [running, completed, failed, cancelled]
+        results:
+          type: array
+          items: {$ref: '#/components/schemas/TurnImageGenerationResult'}
+        error: {}
+    PlanId:
+      type: string
+      pattern: '^plan_[0-9a-f]{24}$'
+    TurnProposedPlan:
+      type: object
+      additionalProperties: false
+      required: [blockId, planId, revision, format, text]
+      properties:
+        blockId: {const: proposed-plan}
+        planId: {$ref: '#/components/schemas/PlanId'}
+        revision: {const: 1}
+        format: {const: markdown}
+        text: {type: string, minLength: 1, maxLength: 64000}
+    TurnPlanExecution:
+      type: object
+      additionalProperties: false
+      required: [blockId, planId, sourceTurnId, sourceProjectionRevision, contextMode, planText]
+      properties:
+        blockId: {const: plan-execution}
+        planId: {$ref: '#/components/schemas/PlanId'}
+        sourceTurnId: {type: string}
+        sourceProjectionRevision: {type: integer, minimum: 0}
+        contextMode:
+          type: string
+          enum: [current, fresh]
+        planText: {type: string, minLength: 1, maxLength: 64000}
+    TurnActivityEntry:
+      type: object
+      additionalProperties: false
+      required: [id, spanId, seq, occurredAt, kind, status, severity, count]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 160}
+        spanId: {type: string, minLength: 1, maxLength: 160}
+        parentSpanId: {type: string, maxLength: 160}
+        seq: {type: integer, minimum: 0, maximum: 9007199254740991}
+        occurredAt: {type: integer, minimum: 0, maximum: 9007199254740991}
+        startedAt: {type: integer, minimum: 0, maximum: 9007199254740991}
+        endedAt: {type: integer, minimum: 0, maximum: 9007199254740991}
+        kind:
+          type: string
+          enum: [model, tool, status, error, system]
+        status:
+          type: string
+          enum: [started, running, waiting, succeeded, failed, skipped, switched, aborted]
+        severity:
+          type: string
+          enum: [info, warning, error]
+        summary: {type: string, maxLength: 180}
+        summaryKey: {type: string, maxLength: 160}
+        summaryArgs: {$ref: '#/components/schemas/JsonObject'}
+        detail: {type: string, maxLength: 400}
+        detailKey: {type: string, maxLength: 160}
+        detailArgs: {$ref: '#/components/schemas/JsonObject'}
+        roundNum: {type: integer, minimum: 0, maximum: 9007199254740991}
+        # 0-based model round this entry is anchored to for inline display
+        # (roundNum is the 1-based R{n} request-tag round; llmRound = roundNum - 1).
+        llmRound: {type: integer, minimum: 0, maximum: 9007199254740991}
+        model: {type: string, maxLength: 160}
+        providerId: {type: string, maxLength: 160}
+        toolName: {type: string, maxLength: 160}
+        toolCallId: {type: string, maxLength: 160}
+        reasonCode: {type: string, maxLength: 160}
+        action: {type: string, maxLength: 48}
+        fromModel: {type: string, maxLength: 160}
+        toModel: {type: string, maxLength: 160}
+        requestTag: {type: string, maxLength: 80}
+        phase: {type: string, maxLength: 80}
+        # A completed context-compaction entry is an inspectable Turn fact.
+        # These fields intentionally carry accounting only; transcript/archive
+        # payloads stay behind the owner-scoped compaction endpoint.
+        archiveId: {type: string, maxLength: 160}
+        trigger: {type: string, maxLength: 80}
+        tokenCountKind: {type: string, maxLength: 24}
+        tokensBefore: {type: integer, minimum: 0, maximum: 9007199254740991}
+        tokensAfter: {type: integer, minimum: 0, maximum: 9007199254740991}
+        messagesBefore: {type: integer, minimum: 0, maximum: 9007199254740991}
+        messagesAfter: {type: integer, minimum: 0, maximum: 9007199254740991}
+        reductionPercent: {type: integer, minimum: 0, maximum: 100}
+        # 'occurrences' marks a coalesced retry/recovery row: durationMs is the
+        # sum of actual backoffs, never one continuous wall-clock wait.
+        timingMode: {type: string, maxLength: 24}
+        # Credential-free model-route diagnostics on model completion rows.
+        routeId: {type: string, maxLength: 160}
+        routeMode: {type: string, maxLength: 24}
+        routeDecision: {type: string, maxLength: 80}
+        failureStage: {type: string, maxLength: 80}
+        count: {type: integer, minimum: 1, maximum: 2147483647}
+        durationMs: {type: integer, minimum: 0, maximum: 9007199254740991}
+        statusCode: {type: integer, minimum: 0, maximum: 9007199254740991}
+    TurnActivityTimeline:
+      type: object
+      additionalProperties: false
+      required: [blockId, version, entries]
+      properties:
+        blockId: {const: activity-timeline}
+        version: {const: 1}
+        entries:
+          type: array
+          maxItems: 128
+          items: {$ref: '#/components/schemas/TurnActivityEntry'}
+        droppedCount: {type: integer, minimum: 0, maximum: 2147483647}
+    TurnProjection:
+      type: object
+      # This is the public backend/frontend ownership boundary. Historical
+      # message overlays are normalized before decode; unknown top-level fields
+      # fail closed instead of silently selecting a different renderer.
+      additionalProperties: false
+      properties:
+        content: {type: string}
+        thinking: {type: string}
+        toolRounds:
+          type: array
+          items: {$ref: '#/components/schemas/TurnToolRound'}
+        activityTimeline: {$ref: '#/components/schemas/TurnActivityTimeline'}
+        segments:
+          type: array
+          items: {$ref: '#/components/schemas/TurnContentSegment'}
+        usage: {$ref: '#/components/schemas/JsonObject'}
+        apiRounds:
+          type: array
+          items: {$ref: '#/components/schemas/JsonObject'}
+        lastRoundUsage: {$ref: '#/components/schemas/JsonObject'}
+        model: {type: string}
+        preset: {type: string}
+        providerId: {type: string}
+        # Deprecated request-only alias; public projections emit providerId.
+        provider_id: {type: string}
+        thinkingDepth:
+          oneOf: [{type: string}, {type: number}]
+        modifiedFiles: {type: integer, minimum: 0}
+        modifiedFileList:
+          type: array
+          items: {$ref: '#/components/schemas/TurnFileChange'}
+        fileChanges: {$ref: '#/components/schemas/TurnFileChangesBlock'}
+        todoState: {$ref: '#/components/schemas/JsonObject'}
+        fallbackModel: {type: string}
+        fallbackFrom: {type: string}
+        fallbackReason: {type: string}
+        fallbackKind: {type: string}
+        translatedContent: {type: string}
+        originalContent: {type: string}
+        translation: {$ref: '#/components/schemas/TurnTranslation'}
+        imageGeneration: {$ref: '#/components/schemas/TurnImageGeneration'}
+        proposedPlan: {$ref: '#/components/schemas/TurnProposedPlan'}
+        planExecution: {$ref: '#/components/schemas/TurnPlanExecution'}
+        # Deprecated request aliases accepted during producer migration. The
+        # projection normalizer maps them into TurnTranslation and never emits
+        # them publicly.
+        _translateDone: {type: boolean}
+        _translateSkippedReason: {type: string}
+        _translateModel: {type: string}
+        _translateFailed: {}
+        _translateError: {}
+        _translateTaskId: {type: string}
+        _translateStatus: {type: string}
+        _translateStatusKind: {type: string}
+        _translatePartial: {type: string}
+        _translatePartialByRound: {$ref: '#/components/schemas/JsonObject'}
+        _showingTranslation: {type: boolean}
+        timestamp:
+          oneOf: [{type: number}, {type: string}]
+        images:
+          type: array
+          items: {$ref: '#/components/schemas/TurnImageAttachment'}
+        videos:
+          type: array
+          items: {$ref: '#/components/schemas/TurnVideoAttachment'}
+        pdfTexts:
+          type: array
+          items: {$ref: '#/components/schemas/TurnDocumentAttachment'}
+        convRefs:
+          type: array
+          items: {$ref: '#/components/schemas/TurnConversationReference'}
+        replyQuotes:
+          type: array
+          items: {type: string}
+        _branchLanes:
+          type: array
+          items: {$ref: '#/components/schemas/BranchLaneDescriptor'}
+        orchestration: {$ref: '#/components/schemas/TurnOrchestration'}
+        provenance: {$ref: '#/components/schemas/TurnProvenance'}
+        origin: {$ref: '#/components/schemas/TurnOrigin'}
+        contextSnapshot: {$ref: '#/components/schemas/TurnContextSnapshot'}
+        compaction: {$ref: '#/components/schemas/TurnCompaction'}
+        # Deprecated legacy origin/context/compaction inputs. They are named so
+        # old clients receive a deterministic migration path, then normalized
+        # into the typed documents above before public output.
+        _initiator: {type: string}
+        _peerMessage: {type: boolean}
+        _peerHuman: {type: boolean}
+        _fromConv: {type: string}
+        _brainDispatch: {type: boolean}
+        _brainEpic: {$ref: '#/components/schemas/JsonObject'}
+        _boardTaskId: {type: string}
+        boardTaskId: {type: string}
+        _isVirtualUser: {type: boolean}
+        _autopilotRunId: {type: string}
+        _proactive: {type: boolean}
+        _proactiveTaskId: {type: string}
+        _timer: {type: boolean}
+        _swarmAutoContinue: {type: boolean}
+        _ctx: {$ref: '#/components/schemas/JsonObject'}
+        _isCompactionSummary: {type: boolean}
+        _compactionArchiveId: {type: string}
+        _estimatedPromptTokens: {type: integer, minimum: 0}
+        _compactions:
+          type: array
+          items: {$ref: '#/components/schemas/JsonObject'}
+        _foldedToolRounds: {type: integer, minimum: 0}
+        # Internal Flow actor markers are consumed by authority writers and
+        # stripped from public projection identity.
+        _isFlowReview: {type: boolean}
+        _isFlowPlanner: {type: boolean}
+        _flowNodeId: {type: string}
+        _flowRunId: {type: string}
+        _flowIteration:
+          oneOf: [{type: integer, minimum: 0}, {type: string}]
+        _flowPlannerIteration:
+          oneOf: [{type: integer, minimum: 0}, {type: string}]
+        _flowApproved: {type: boolean}
+        _flowNextPhase: {type: string}
+        _isStuck: {type: boolean}
+        error: {}
+        _inboxInjects:
+          type: array
+          items: {$ref: '#/components/schemas/TurnMessageInjection'}
+        _peerInjects:
+          type: array
+          items: {$ref: '#/components/schemas/TurnMessageInjection'}
+        _userSteerInjects:
+          type: array
+          items: {$ref: '#/components/schemas/TurnMessageInjection'}
+        _stallNudges:
+          type: array
+          items: {$ref: '#/components/schemas/TurnStallInjection'}
+    TurnResumeOperation:
+      type: string
+      enum: [continue, checkpoint_resume, regenerate]
+    TurnResumeOption:
+      type: object
+      additionalProperties: false
+      required: [operation, anchor]
+      properties:
+        operation: {$ref: '#/components/schemas/TurnResumeOperation'}
+        anchor: {$ref: '#/components/schemas/JsonObject'}
+    TurnContinuation:
+      type: object
+      additionalProperties: false
+      required: [turnId, attemptId]
+      properties:
+        turnId: {type: string}
+        attemptId: {type: string}
+    ProviderStreamState:
+      type: string
+      enum:
+        - provider_finished
+        - client_aborted
+        - premature_close
+        - malformed_stream
+        - semantic_progress_timeout
+        # Historical read compatibility; new writes use
+        # semantic_progress_timeout.
+        - no_actionable_output
+        - empty_response
+        - tool_payload_missing
+        - unknown
+    TurnOutcome:
+      type: string
+      enum: [completed, interrupted, truncated, failed]
+    TurnTerminationEvidence:
+      type: string
+      enum:
+        - provider_finish
+        - legacy_finish
+        - provider_limit
+        - user_abort
+        - provider_stream_failure
+        - generation_error
+        - missing_completion_evidence
+        - external_authority
+        - system_recovery
+    TurnSettlement:
+      type: object
+      additionalProperties: false
+      properties:
+        outcome: {$ref: '#/components/schemas/TurnOutcome'}
+        cause: {type: string}
+        evidence: {$ref: '#/components/schemas/TurnTerminationEvidence'}
+        streamState:
+          oneOf:
+            - $ref: '#/components/schemas/ProviderStreamState'
+            - {type: 'null'}
+        providerFinishReason:
+          oneOf: [{type: string}, {type: 'null'}]
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/JsonObject'
+            - {type: string}
+            - {type: 'null'}
+        resumeOptions:
+          type: array
+          items: {$ref: '#/components/schemas/TurnResumeOption'}
+        continuation: {$ref: '#/components/schemas/TurnContinuation'}
+    ConversationQueueItem:
+      type: object
+      additionalProperties: false
+      required: [queueId, position, kind, priority, timestamp, text]
+      properties:
+        queueId: {type: string}
+        position: {type: integer, minimum: 1}
+        kind: {type: string}
+        priority: {type: integer, minimum: 0}
+        timestamp: {type: integer, minimum: 0}
+        text: {type: string}
+        sourceMessageId: {type: string}
+        hasImages: {type: boolean}
+        hasPdfs: {type: boolean}
+        hasRefs: {type: boolean}
+        hasQuotes: {type: boolean}
+        isPeerMessage: {type: boolean}
+        fromConv: {type: string}
+        isPeerHuman: {type: boolean}
+    AttemptOperation:
+      type: string
+      # ``ingest`` identifies already-settled assistant/planner imports. It is
+      # observable in snapshots but is never accepted by CreateAttemptRequest.
+      enum: [generate, continue, checkpoint_resume, regenerate, ingest]
+    ProjectionPatchPath:
+      type: array
+      items:
+        oneOf:
+          - type: string
+          - type: integer
+            minimum: 0
+    ProjectionPatchOperation:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [op, path, value]
+          properties:
+            op: {const: set}
+            path: {$ref: '#/components/schemas/ProjectionPatchPath'}
+            value: {}
+        - type: object
+          additionalProperties: false
+          required: [op, path]
+          properties:
+            op: {const: remove}
+            path: {$ref: '#/components/schemas/ProjectionPatchPath'}
+        - type: object
+          additionalProperties: false
+          required: [op, path, value]
+          properties:
+            op: {const: append}
+            path: {$ref: '#/components/schemas/ProjectionPatchPath'}
+            value:
+              type: array
+              items: {}
+        - type: object
+          additionalProperties: false
+          required: [op, path, length]
+          properties:
+            op: {const: truncate}
+            path: {$ref: '#/components/schemas/ProjectionPatchPath'}
+            length: {type: integer, minimum: 0}
+        - type: object
+          additionalProperties: false
+          required: [op, path, value]
+          properties:
+            op: {const: append_text}
+            path: {$ref: '#/components/schemas/ProjectionPatchPath'}
+            value: {type: string}
+    ProjectionPatch:
+      type: object
+      additionalProperties: false
+      required: [version, baseRevision, targetRevision, operations]
+      properties:
+        version: {const: 1}
+        baseRevision: {type: integer, minimum: 0}
+        targetRevision: {type: integer, minimum: 0}
+        operations:
+          type: array
+          maxItems: 20000
+          items:
+            $ref: '#/components/schemas/ProjectionPatchOperation'
+    TurnProjectionChange:
+      type: object
+      additionalProperties: false
+      required:
+        - turnId
+        - baseProjectionRevision
+        - targetProjectionRevision
+        - updatedAt
+        - projectionPatch
+      properties:
+        turnId: {type: string}
+        baseProjectionRevision: {type: integer, minimum: 0}
+        targetProjectionRevision: {type: integer, minimum: 0}
+        updatedAt: {type: integer, minimum: 0}
+        projectionPatch: {$ref: '#/components/schemas/ProjectionPatch'}
+    TurnRuntimeStateChange:
+      type: object
+      additionalProperties: false
+      required: [turnId, status, currentAttemptId, settlement, updatedAt]
+      properties:
+        turnId: {type: string}
+        status: {$ref: '#/components/schemas/TurnStatus'}
+        currentAttemptId:
+          oneOf: [{type: string}, {type: 'null'}]
+        settlement: {$ref: '#/components/schemas/TurnSettlement'}
+        updatedAt: {type: integer, minimum: 0}
+    TurnRecord:
+      type: object
+      additionalProperties: false
+      required:
+        - turnId
+        - conversationId
+        - laneId
+        - ordinal
+        - actor
+        - kind
+        - runId
+        - status
+        - projection
+        - projectionRevision
+        - settlement
+        - createdAt
+        - updatedAt
+      properties:
+        turnId: {type: string}
+        conversationId: {type: string}
+        laneId: {type: string}
+        parentTurnId:
+          oneOf: [{type: string}, {type: 'null'}]
+        ordinal: {type: integer, minimum: 0}
+        actor: {$ref: '#/components/schemas/TurnActor'}
+        kind: {type: string}
+        runId: {type: string}
+        status: {$ref: '#/components/schemas/TurnStatus'}
+        currentAttemptId:
+          oneOf: [{type: string}, {type: 'null'}]
+        projection: {$ref: '#/components/schemas/TurnProjection'}
+        projectionRevision: {type: integer, minimum: 0}
+        settlement: {$ref: '#/components/schemas/TurnSettlement'}
+        createdAt: {type: integer, minimum: 0}
+        updatedAt: {type: integer, minimum: 0}
+    AttemptRecord:
+      type: object
+      additionalProperties: false
+      required:
+        - attemptId
+        - conversationId
+        - turnId
+        - commandId
+        - taskId
+        - operation
+        - status
+        - baseProjectionRevision
+        - resumeAnchor
+        - createdAt
+      properties:
+        attemptId: {type: string}
+        conversationId: {type: string}
+        turnId: {type: string}
+        commandId: {type: string}
+        taskId: {type: string}
+        operation: {$ref: '#/components/schemas/AttemptOperation'}
+        status: {$ref: '#/components/schemas/AttemptStatus'}
+        baseProjectionRevision: {type: integer, minimum: 0}
+        resumeAnchor: {$ref: '#/components/schemas/JsonObject'}
+        createdAt: {type: integer, minimum: 0}
+        startedAt:
+          oneOf: [{type: integer, minimum: 0}, {type: 'null'}]
+        settledAt:
+          oneOf: [{type: integer, minimum: 0}, {type: 'null'}]
+    AttemptEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - conversationId
+        - turnId
+        - attemptId
+        - seq
+        - projectionRevision
+        - type
+        - payload
+      properties:
+        conversationId: {type: string}
+        turnId: {type: string}
+        attemptId: {type: string}
+        seq: {type: integer, minimum: 1}
+        projectionRevision: {type: integer, minimum: 0}
+        type:
+          type: string
+          enum: [projection_updated, interaction_request, status_changed, terminal_settlement]
+        payload:
+          type: object
+          additionalProperties: true
+          properties:
+            projection: {$ref: '#/components/schemas/TurnProjection'}
+            projectionPatch: {$ref: '#/components/schemas/ProjectionPatch'}
+            turnState: {$ref: '#/components/schemas/TurnRuntimeStateChange'}
+            status: {$ref: '#/components/schemas/TurnStatus'}
+            settlement: {$ref: '#/components/schemas/TurnSettlement'}
+            request: {}
+            turns:
+              type: array
+              items: {$ref: '#/components/schemas/TurnRecord'}
+            attempts:
+              type: array
+              items: {$ref: '#/components/schemas/AttemptRecord'}
+            phase: {}
+    ConversationChangeType:
+      type: string
+      enum:
+        - turn.upsert
+        - turn.patch
+        - turn.deleted
+        - attempt.event
+        - conversation.activity
+    ConversationChange:
+      type: object
+      additionalProperties: false
+      required: [contract, type, conversationId, syncSeq, occurredAt, payload]
+      properties:
+        contract: {const: tofu.conversation-sync.event/v1}
+        type: {$ref: '#/components/schemas/ConversationChangeType'}
+        conversationId: {type: string}
+        syncSeq: {type: integer, minimum: 1}
+        occurredAt: {type: integer, minimum: 0}
+        turnId: {type: string}
+        attemptId: {type: string}
+        payload: {$ref: '#/components/schemas/JsonObject'}
+    SyncHeartbeat:
+      type: object
+      additionalProperties: false
+      required: [contract, type, conversationId, cursor, serverBootId, degraded]
+      properties:
+        contract: {const: tofu.conversation-sync.event/v1}
+        type: {const: sync.heartbeat}
+        conversationId: {type: string}
+        cursor: {type: string}
+        serverBootId: {type: string}
+        degraded: {type: boolean}
+        # True while the conversation's live task has authoritative frames
+        # withheld on a storage-write wedge (durable-before-visible). Read-
+        # side signal only — the write path itself cannot carry it.
+        pushWithheld: {type: boolean}
+    SyncResetRequired:
+      type: object
+      additionalProperties: false
+      required: [contract, type, conversationId, cursor, reason]
+      properties:
+        contract: {const: tofu.conversation-sync.event/v1}
+        type: {const: sync.reset_required}
+        conversationId: {type: string}
+        cursor: {type: string}
+        reason:
+          type: string
+          enum: [cursor_expired, cursor_invalid, server_restarted, protocol_mismatch]
+    ConversationSyncEvent:
+      oneOf:
+        - $ref: '#/components/schemas/ConversationChange'
+        - $ref: '#/components/schemas/SyncHeartbeat'
+        - $ref: '#/components/schemas/SyncResetRequired'
+    ConversationSyncSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - ok
+        - contract
+        - conversationId
+        - conversationRevision
+        - syncSeq
+        - cursor
+        - serverBootId
+        - heartbeatIntervalMs
+        - settings
+        - turns
+        - attempts
+        - queueItems
+      properties:
+        ok: {const: true}
+        contract: {const: tofu.conversation-sync.snapshot/v1}
+        conversationId: {type: string}
+        conversationRevision: {type: integer, minimum: 0}
+        syncSeq: {type: integer, minimum: 0}
+        cursor: {type: string}
+        serverBootId: {type: string}
+        heartbeatIntervalMs: {type: integer, minimum: 1000}
+        settings: {$ref: '#/components/schemas/JsonObject'}
+        turns:
+          type: array
+          items: {$ref: '#/components/schemas/TurnRecord'}
+        attempts:
+          type: array
+          items: {$ref: '#/components/schemas/AttemptRecord'}
+        queueItems:
+          type: array
+          items: {$ref: '#/components/schemas/ConversationQueueItem'}
+        # Same write-wedge signal as SyncHeartbeat.pushWithheld, shipped on
+        # the snapshot so a client that (re)connects mid-wedge renders the
+        # honest status instead of the generic waiting placeholder.
+        pushWithheld: {type: boolean}
+    ConversationInvalidation:
+      type: object
+      additionalProperties: false
+      required: [channel, taskId, contract, type, conversationId, cursorHint, userId]
+      properties:
+        channel: {const: notify}
+        taskId: {type: string}
+        contract: {const: tofu.conversation-sync.invalidation/v1}
+        type: {const: conversation.invalidated}
+        conversationId: {type: string}
+        cursorHint: {type: string}
+        userId:
+          oneOf: [{type: string}, {type: integer}]
+    ConnectionHealthState:
+      type: string
+      enum: [idle, connecting, live, recovering, degraded, offline, closed]
+    ConnectionHealth:
+      type: object
+      additionalProperties: false
+      required: [state, transport, observedAt, generation]
+      properties:
+        state: {$ref: '#/components/schemas/ConnectionHealthState'}
+        transport:
+          type: string
+          enum: [conversation-sse, task-sse, push-websocket]
+        observedAt: {type: number, minimum: 0}
+        generation: {type: integer, minimum: 0}
+        lastFrameAt: {type: number, minimum: 0}
+        retryCount: {type: integer, minimum: 0}
+        reason: {type: string}
+    CreateTurnRequest:
+      type: object
+      additionalProperties: false
+      required: [commandId, config]
+      properties:
+        commandId: {type: string, minLength: 1, maxLength: 256}
+        inputTurn: {}
+        message: {}
+        config: {$ref: '#/components/schemas/JsonObject'}
+        laneId: {type: string}
+        parentTurnId:
+          oneOf: [{type: string}, {type: 'null'}]
+        kind: {type: string}
+        actor: {$ref: '#/components/schemas/TurnActor'}
+        runId: {type: string}
+        injectMode:
+          type: string
+          enum: [steer, queue]
+        conversation: {$ref: '#/components/schemas/JsonObject'}
+    AppendSettledTurnRequest:
+      type: object
+      additionalProperties: false
+      required: [commandId, actor, projection]
+      properties:
+        commandId: {type: string, minLength: 1, maxLength: 256}
+        actor: {$ref: '#/components/schemas/TurnActor'}
+        projection: {$ref: '#/components/schemas/TurnProjection'}
+        kind: {type: string}
+        status:
+          type: string
+          enum: [completed, interrupted, truncated, failed]
+        settlement: {$ref: '#/components/schemas/TurnSettlement'}
+        createdAt: {type: integer, minimum: 0}
+        laneId: {type: string}
+        runId: {type: string}
+        conversation: {$ref: '#/components/schemas/JsonObject'}
+    UpdateTurnRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedProjectionRevision, projection]
+      properties:
+        expectedProjectionRevision: {type: integer, minimum: 0}
+        projection: {$ref: '#/components/schemas/TurnProjection'}
+    FileChangesCommandRequest:
+      type: object
+      additionalProperties: false
+      required: [commandId, expectedProjectionRevision]
+      properties:
+        commandId: {type: string, minLength: 1, maxLength: 256}
+        expectedProjectionRevision: {type: integer, minimum: 0}
+    ExecutePlanRequest:
+      type: object
+      additionalProperties: false
+      required: [commandId, expectedProjectionRevision, planId, contextMode, config]
+      properties:
+        commandId: {type: string, minLength: 1, maxLength: 256}
+        expectedProjectionRevision: {type: integer, minimum: 0}
+        planId: {$ref: '#/components/schemas/PlanId'}
+        contextMode:
+          type: string
+          enum: [current, fresh]
+        config: {$ref: '#/components/schemas/JsonObject'}
+    CreateAttemptRequest:
+      type: object
+      additionalProperties: false
+      required: [commandId, operation, expectedProjectionRevision, config]
+      properties:
+        commandId: {type: string, minLength: 1, maxLength: 256}
+        operation: {$ref: '#/components/schemas/TurnResumeOperation'}
+        expectedProjectionRevision: {type: integer, minimum: 0}
+        config: {$ref: '#/components/schemas/JsonObject'}
+        resumeAnchor: {$ref: '#/components/schemas/JsonObject'}
+        inputUpdate: {}
+        expectedInputProjectionRevision: {type: integer, minimum: 0}
+    CreateLaneRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedProjectionRevision]
+      properties:
+        expectedProjectionRevision: {type: integer, minimum: 0}
+        title: {type: string, maxLength: 500}
+        anchorText: {type: string}
+        parentSelection: {type: string}
+        kind: {type: string}
+    DeleteTurnsRequest:
+      type: object
+      additionalProperties: false
+      required: [turnIds]
+      properties:
+        turnIds:
+          type: array
+          maxItems: 2000
+          items: {type: string}
+    TurnCommandResponse:
+      type: object
+      additionalProperties: true
+      required: [ok, conversationId, conversationRevision]
+      properties:
+        ok: {const: true}
+        conversationId: {type: string}
+        conversationRevision: {type: integer, minimum: 0}
+        cursor: {type: string}
+        submittedTurn: {$ref: '#/components/schemas/TurnRecord'}
+        turn: {$ref: '#/components/schemas/TurnRecord'}
+        attempt: {$ref: '#/components/schemas/AttemptRecord'}
+        idempotentReplay: {type: boolean}
+        aborted: {type: boolean}
+        steered: {type: boolean}
+        queued: {type: boolean}
+        queueId: {type: string}
+        position: {type: integer, minimum: 0}
+        queueItem: {$ref: '#/components/schemas/ConversationQueueItem'}
+        latestTurn: {$ref: '#/components/schemas/TurnRecord'}
+        deletedTurnIds:
+          description: >-
+            Turns discarded atomically by this command. A regenerate retry
+            supersedes the whole lane tail: every turn after the regenerated
+            turn (plus branch lanes rooted inside that tail) is truncated in
+            the same transaction, so no client can observe a half-rewritten
+            history.
+          type: array
+          items: {type: string}
+    TurnMutationResponse:
+      type: object
+      additionalProperties: true
+      required: [ok, conversationRevision]
+      properties:
+        ok: {const: true}
+        conversationRevision: {type: integer, minimum: 0}
+        cursor: {type: string}
+        turn: {$ref: '#/components/schemas/TurnRecord'}
+        turns:
+          type: array
+          items: {$ref: '#/components/schemas/TurnRecord'}
+        deletedTurnIds:
+          type: array
+          items: {type: string}
+    AbortAttemptResponse:
+      type: object
+      additionalProperties: true
+      required: [ok]
+      properties:
+        ok: {const: true}

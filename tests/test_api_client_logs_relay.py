@@ -123,12 +123,22 @@ def test_missing_entries_is_a_clean_400():
     assert 'entries' in str(body)
 
 
-def test_entries_cap_rejects_oversized_batches():
-    code, _ = _post(_app(), {
+def test_entries_cap_truncates_to_the_newest_200(frontend_log_sink):
+    # A burst must not be rejected: the browser ring buffer re-POSTs until it
+    # gets a 2xx, so a 400 looped the same oversized batch forever and lost
+    # every line.  The documented 200-entry cap keeps the NEWEST entries.
+    code, body = _post(_app(), {
         'session': 's',
-        'entries': [{'lv': 'info', 'msg': 'x'}] * 201,
+        'entries': [{'lv': 'info', 'msg': f'line {i}'} for i in range(250)],
     })
-    assert code == 400
+    assert code == 200, body
+    assert body.get('relayed') == 200
+    assert body.get('dropped') == 50
+    msgs = [r.getMessage() for r in frontend_log_sink]
+    assert any('line 249' in m for m in msgs)
+    assert any('line 50' in m for m in msgs)
+    assert not any('line 49' in m and 'truncated' not in m for m in msgs)
+    assert any('truncated' in m and 'dropped 50' in m for m in msgs)
 
 
 def test_kill_switch_drops_everything(monkeypatch, frontend_log_sink):

@@ -1,46 +1,19 @@
-"""lib.conversations.project_summary — cross-conversation project awareness.
+"""Owner-scoped conversation summaries and bounded project digests.
 
-Layer 2 of the cross-conversation work (see ``docs/CROSS_CONV_AWARENESS.md``).
-Where Layer 1 made ``list_conversations`` project-aware, this module gives the
-model *ambient* awareness of sibling conversations of the same project, without
-the user attaching anything.
-
-Two pieces:
-
-  • **Lazy summary generation** — ``ensure_summary(conv_id)`` produces a 1-3
-    sentence "outcome + key decisions" description of a conversation via the
-    cheap model (reusing the ``title_gen`` dispatch pattern) and caches it in
-    ``settings.projectSummary = {text, generated_at, msg_count_at_gen, lang}``.
-    It regenerates only when the conversation has grown *materially* past the
-    msg_count it was last summarized at — so a static conversation is never
-    re-summarized. Triggered lazily (post-first-reply, and on first
-    ``get_conversation`` of a sibling), never eagerly for every conversation.
-
-  • **Bounded project digest** — ``build_project_digest(project_path, ...)``
-    returns a compact, bounded list (top ``DIGEST_MAX_SIBLINGS``) of the most
-    recently-updated *other* conversations of the same project, each rendered
-    as ``title — summary [id]``. Injected always-on in project mode by
-    ``lib/tasks_pkg/system_context.py`` so the model knows the siblings exist.
-    Its header only instructs the model to ``get_conversation(id)`` /
-    ``list_conversations()`` when those tools are actually registered for the
-    turn (``conv_tools_available``); otherwise the siblings are surfaced for
-    ambient awareness only, naming no tool the model cannot call.
-
-Design notes / tradeoffs are documented in ``docs/CROSS_CONV_AWARENESS.md``.
+Settled project turns schedule summary refreshes on a fixed worker lane. Jobs
+coalesce by ``(user_id, conversation_id)`` so bursts cannot create unbounded
+threads or duplicate LLM work. Prompt assembly only reads cached summaries.
 """
 
 from __future__ import annotations
 
-import threading
 import time
+from dataclasses import dataclass
 
-from lib.database import DOMAIN_CHAT, get_thread_db
+from lib.conversations._bounded_lane import BoundedCoalescingLane
 from lib.log import get_logger
-from lib.utils import safe_json
-
+from runtime_guards import resolve_resource_budget
 logger = get_logger(__name__)
-
-DEFAULT_USER_ID = 1  # mirrors lib.conv_ref / routes.common
 
 # Hard cap on a stored summary (chars). A digest of 10 of these must stay
 # small enough to be cache-friendly in the system prompt.
@@ -68,6 +41,14 @@ _DIGEST_SCAN_LIMIT = 24
 # than an empty digest.
 _DIGEST_RECENCY_FLOOR = 3
 
+
+@dataclass(frozen=True, slots=True)
+class ProjectDigestProjection:
+    """One sibling snapshot projected into prompt text and UI metadata."""
+
+    text: str
+    entries: tuple[dict[str, str], ...]
+
 _SYSTEM_PROMPT = (
     'You write a ONE to THREE sentence summary of a chat conversation, used so '
     'an AI assistant working on the same project can tell at a glance what this '
@@ -85,6 +66,53 @@ _SYSTEM_PROMPT = (
     '- No markdown, no bullet points, no trailing label. Output ONLY the '
     'summary sentences.'
 )
+
+
+_SUMMARY_WORKERS = 2
+_SUMMARY_CAPACITY = resolve_resource_budget(
+    'TOFU_PROJECT_REFRESH_QUEUE_CAPACITY', maximum=4096)
+
+
+def _merge_summary_request(current: bool, newest: bool) -> bool:
+    return bool(current or newest)
+
+
+def _consume_summary_request(scope: tuple[int, str], force: bool) -> None:
+    user_id, conv_id = scope
+    _ensure_summary_blocking(conv_id, user_id=user_id, force=bool(force))
+
+
+def _report_summary_failure(
+    scope: tuple[int, str], error: Exception
+) -> None:
+    logger.warning(
+        '[ProjSummary] background refresh failed conv=%s: %s',
+        scope[1][:8], error, exc_info=True)
+
+
+_summary_lane = BoundedCoalescingLane[tuple[int, str], bool](
+    name='project-summary',
+    workers=_SUMMARY_WORKERS,
+    capacity=_SUMMARY_CAPACITY,
+    merge=_merge_summary_request,
+    consume=_consume_summary_request,
+    on_error=_report_summary_failure,
+)
+
+
+def _schedule_summary(conv_id: str, *, user_id: int, force: bool) -> bool:
+    scope = (int(user_id), conv_id)
+    return _summary_lane.submit(scope, bool(force))
+
+
+def _wait_for_background_summaries(timeout: float = 5.0) -> bool:
+    """Wait for the summary lane to become idle; test/lifecycle diagnostic."""
+    return _summary_lane.wait_idle(timeout)
+
+
+def background_summary_lane_snapshot() -> dict[str, float | int | str]:
+    """Operational counters for capacity, saturation, and coalescing."""
+    return _summary_lane.snapshot()
 
 
 def _msg_text(msg: dict) -> str:
@@ -207,7 +235,7 @@ def _is_stale(stored: dict | None, msg_count: int) -> bool:
     return (msg_count - prev_count) >= SUMMARY_STALE_GROWTH
 
 
-def ensure_summary(conv_id: str, *, force: bool = False,
+def ensure_summary(conv_id: str, *, user_id: int, force: bool = False,
                    blocking: bool = True) -> str | None:
     """Ensure ``conv_id`` has a fresh ``settings.projectSummary``; return it.
 
@@ -218,10 +246,8 @@ def ensure_summary(conv_id: str, *, force: bool = False,
     Args:
         conv_id: conversation to summarize.
         force: regenerate even if the cached summary looks fresh.
-        blocking: when True (default) generate inline and return the text;
-            when False, spawn a daemon thread and return the cached text (or
-            None) immediately — used by hot paths that must not wait on an LLM
-            call (post-first-reply, get_conversation).
+        blocking: when True generate inline; when False, coalesce a refresh on
+            the bounded worker lane and immediately return the cached text.
 
     Returns:
         The summary text, or None when unavailable (too short, generation
@@ -231,28 +257,22 @@ def ensure_summary(conv_id: str, *, force: bool = False,
         return None
 
     if not blocking:
-        # Fire-and-forget: return whatever is cached now, generate in the bg.
-        cached = _read_cached_summary(conv_id)
-        threading.Thread(
-            target=_ensure_summary_blocking,
-            args=(conv_id,), kwargs={'force': force},
-            name=f'projsummary-{conv_id[:8]}', daemon=True,
-        ).start()
+        cached = _read_cached_summary(conv_id, user_id=user_id)
+        _schedule_summary(conv_id, user_id=user_id, force=force)
         return cached
 
-    return _ensure_summary_blocking(conv_id, force=force)
+    return _ensure_summary_blocking(conv_id, user_id=user_id, force=force)
 
 
-def _read_cached_summary(conv_id: str) -> str | None:
+def _read_cached_summary(conv_id: str, *, user_id: int) -> str | None:
     """Return the stored summary text without generating, or None."""
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT settings FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, DEFAULT_USER_ID)).fetchone()
-        if not row:
+        from lib.conversations.repository import get_conversation
+        snapshot = get_conversation(
+            conv_id, user_id=int(user_id), include_messages=False)
+        if snapshot is None:
             return None
-        settings = safe_json(row['settings'], default={}, label='projsummary-settings')
+        settings = snapshot.get('settings') or {}
         ps = settings.get('projectSummary') if isinstance(settings, dict) else None
         if isinstance(ps, dict) and ps.get('text'):
             return ps['text']
@@ -262,14 +282,13 @@ def _read_cached_summary(conv_id: str) -> str | None:
     return None
 
 
-def _ensure_summary_blocking(conv_id: str, *, force: bool = False) -> str | None:
+def _ensure_summary_blocking(
+    conv_id: str, *, user_id: int, force: bool = False
+) -> str | None:
     """Inline generate-if-stale + persist. Returns the (possibly new) text."""
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        from lib.database.conversation_repository import load_conversation
-        row = load_conversation(
-            db, conv_id, user_id=DEFAULT_USER_ID,
-            metadata_columns=('title', 'settings'))
+        from lib.conversations.repository import get_conversation
+        row = get_conversation(conv_id, user_id=int(user_id))
     except Exception as e:
         logger.warning('[ProjSummary] load failed conv=%s: %s', conv_id[:8], e)
         return None
@@ -277,7 +296,7 @@ def _ensure_summary_blocking(conv_id: str, *, force: bool = False) -> str | None
         return None
 
     messages = row.messages
-    settings = safe_json(row['settings'], default={}, label='projsummary-settings')
+    settings = row.get('settings') or {}
     if not isinstance(settings, dict):
         settings = {}
     stored = settings.get('projectSummary')
@@ -294,11 +313,19 @@ def _ensure_summary_blocking(conv_id: str, *, force: bool = False) -> str | None
         # Keep any previous text rather than wiping it on a transient failure.
         return stored.get('text') if isinstance(stored, dict) else None
 
-    _persist_summary(conv_id, summary, msg_count)
+    _persist_summary(
+        conv_id,
+        summary,
+        msg_count,
+        user_id=user_id,
+        expected_rev=row.get('rev'),
+    )
     return summary
 
 
-def _persist_summary(conv_id: str, summary: str, msg_count: int) -> None:
+def _persist_summary(conv_id: str, summary: str, msg_count: int,
+                     *, user_id: int,
+                     expected_rev: int | None = None) -> None:
     """Read-modify-write ``settings.projectSummary`` for one conversation.
 
     Only the ``settings`` column is touched (not ``messages`` / ``updated_at``),
@@ -315,12 +342,20 @@ def _persist_summary(conv_id: str, summary: str, msg_count: int) -> None:
         'msg_count_at_gen': msg_count,
     }
     try:
-        from lib.conversations import set_conversation_settings
-        # notify=False: projectSummary is pure prompt-assembly state (never
-        # rendered in the UI), so invalidate the local sidebar cache (its blob
-        # now carries the new summary) but do NOT push a cross-device frame.
-        set_conversation_settings(conv_id, {'projectSummary': record},
-                                  user_id=DEFAULT_USER_ID, notify=False)
+        from lib.storage import StorageError, get_storage_client
+        payload = {'conv_id': conv_id, 'user_id': int(user_id),
+                   'updates': {'projectSummary': record}}
+        if expected_rev is not None:
+            payload['expected_rev'] = int(expected_rev)
+        try:
+            get_storage_client(write=True).command(
+                'conversation.settings.update', payload,
+                f'project-summary:{conv_id}:{expected_rev}:{record["generated_at"]}')
+        except StorageError as exc:
+            if exc.code == 'database_conflict':
+                logger.debug('[ProjSummary] settings CAS lost conv=%s', conv_id[:8])
+                return
+            raise
         logger.debug('[ProjSummary] persisted summary conv=%s (msg_count=%d)',
                      conv_id[:8], msg_count)
     except Exception as e:
@@ -328,7 +363,40 @@ def _persist_summary(conv_id: str, summary: str, msg_count: int) -> None:
                        conv_id[:8], e)
 
 
-def project_digest_entries(project_path: str,
+def _rank_digest_candidates(candidates: list[dict], limit: int,
+                            query: str | None) -> list[dict]:
+    if not candidates:
+        return []
+    if not query or not query.strip():
+        return candidates[:limit]
+    try:
+        from lib.memory.relevance import score_items
+        docs = [f'{c["title"]} {c["summary"]}'.strip() for c in candidates]
+        scored = score_items(query, docs)
+    except Exception as e:
+        logger.debug('[ProjSummary] digest relevance scoring failed: %s', e)
+        return candidates[:limit]
+    ordered: list[dict] = []
+    seen: set[str] = set()
+    for idx, _score in scored:
+        c = candidates[idx]
+        if c['id'] in seen:
+            continue
+        seen.add(c['id'])
+        ordered.append(c)
+        if len(ordered) >= limit:
+            return ordered
+    for c in candidates[:_DIGEST_RECENCY_FLOOR]:
+        if c['id'] in seen:
+            continue
+        seen.add(c['id'])
+        ordered.append(c)
+        if len(ordered) >= limit:
+            break
+    return ordered[:limit]
+
+
+def project_digest_entries(project_path: str, *, user_id: int,
                            current_conv_id: str | None = None,
                            limit: int = DIGEST_MAX_SIBLINGS,
                            query: str | None = None) -> list[dict]:
@@ -360,12 +428,21 @@ def project_digest_entries(project_path: str,
         return []
     limit = max(1, min(int(limit or DIGEST_MAX_SIBLINGS), DIGEST_MAX_SIBLINGS))
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        rows = db.execute(
-            "SELECT id, title, settings FROM conversations "
-            "WHERE user_id=? AND json_extract(settings, '$.projectPath') = ? "
-            "ORDER BY updated_at DESC LIMIT ?",
-            (DEFAULT_USER_ID, project_path, _DIGEST_SCAN_LIMIT)).fetchall()
+        from lib.conversations.repository import list_conversations
+        rows = list_conversations(
+            user_id=int(user_id),
+            project_path=project_path,
+            order_by='updated_at_desc',
+            limit=_DIGEST_SCAN_LIMIT,
+            include_messages=False,
+            settings_keys=['projectPath', 'projectSummary'],
+        )
+        # Keep a fail-closed witness during mixed-version rollouts: a prior
+        # Sidecar ignores an unknown optional filter instead of applying it.
+        rows = [
+            row for row in rows
+            if (row.get('settings') or {}).get('projectPath') == project_path
+        ]
     except Exception as e:
         logger.warning('[ProjSummary] digest query failed: %s', e)
         return []
@@ -378,90 +455,29 @@ def project_digest_entries(project_path: str,
         if current_conv_id and cid == current_conv_id:
             continue
         title = (r['title'] or '(untitled)').strip()
-        settings = safe_json(r['settings'], default={}, label='projsummary-digest')
+        settings = r.get('settings') or {}
         ps = settings.get('projectSummary') if isinstance(settings, dict) else None
         summary = (ps.get('text') if isinstance(ps, dict) else '') or ''
         candidates.append({'id': cid, 'title': title, 'summary': summary})
 
-    if not candidates:
-        return []
-
-    # No query → pure recency (unchanged legacy behaviour).
-    if not query or not query.strip():
-        return candidates[:limit]
-
-    # Relevance-gate: BM25 over "title + summary" per candidate.
-    try:
-        from lib.memory.relevance import score_items
-        docs = [f'{c["title"]} {c["summary"]}'.strip() for c in candidates]
-        scored = score_items(query, docs)  # [(idx, score)], score>0, desc
-    except Exception as e:
-        logger.debug('[ProjSummary] digest relevance scoring failed: %s', e)
-        return candidates[:limit]
-
-    ordered: list[dict] = []
-    seen: set[str] = set()
-    # 1) Relevance-ranked positive matches first.
-    for idx, _score in scored:
-        c = candidates[idx]
-        if c['id'] in seen:
-            continue
-        seen.add(c['id'])
-        ordered.append(c)
-        if len(ordered) >= limit:
-            return ordered
-    # 2) Recency floor: keep the most-recent few unconditionally so a fresh /
-    #    off-topic turn is never empty (candidates is already recency-ordered).
-    for c in candidates[:_DIGEST_RECENCY_FLOOR]:
-        if c['id'] in seen:
-            continue
-        seen.add(c['id'])
-        ordered.append(c)
-        if len(ordered) >= limit:
-            break
-    return ordered[:limit]
+    return _rank_digest_candidates(candidates, limit, query)
 
 
-def build_project_digest(project_path: str, current_conv_id: str | None = None,
-                         limit: int = DIGEST_MAX_SIBLINGS,
-                         conv_tools_available: bool = True,
-                         query: str | None = None) -> str:
-    """Build a bounded digest of sibling conversations of the same project.
-
-    Returns a compact block listing up to ``limit`` of the most recently
-    updated OTHER conversations of ``project_path`` that have a summary (or at
-    least a title), each as ``• "title" — summary [id]``. Returns '' when there
-    are no usable siblings (so the caller can skip injection entirely).
-
-    Does NOT generate summaries (that's ``ensure_summary``'s job, run lazily on
-    the trigger paths) — it only reads what's already cached, so it stays fast
-    and side-effect-free on the hot prompt-assembly path.
-
-    Args:
-        conv_tools_available: Whether the ``list_conversations`` /
-            ``get_conversation`` tools are registered for THIS turn. When True
-            the header instructs the model to call them to drill in. When False
-            (the common case — the conv-ref tools only register once the user
-            @-attached a conversation; see ``lib/tools/registry.py``
-            ``_build_conv_ref``) the header is tool-free: the siblings are
-            surfaced for ambient awareness ONLY, naming no tool the model can't
-            actually call. Defaults to True for back-compat with direct callers.
-            Both header variants share the substring ``related conversation(s)``
-            so the injection-side idempotency probe (``_DIGEST_MARKER`` in
-            ``lib/tasks_pkg/system_context.py``) matches either one.
-    """
-    structured = project_digest_entries(project_path, current_conv_id, limit,
-                                        query=query)
+def _render_project_digest(
+    structured: tuple[dict[str, str], ...], *, conv_tools_available: bool
+) -> str:
     if not structured:
         return ''
     entries = []
-    for e in structured:
-        if e.get('summary'):
-            entries.append(f'• "{e["title"]}" — {e["summary"]} [{e["id"]}]')
+    for entry in structured:
+        if entry.get('summary'):
+            entries.append(
+                f'• "{entry["title"]}" — {entry["summary"]} [{entry["id"]}]'
+            )
         else:
             # No summary yet (not referenced/summarized) — still surface the
             # title so the model knows the sibling exists.
-            entries.append(f'• "{e["title"]}" [{e["id"]}]')
+            entries.append(f'• "{entry["title"]}" [{entry["id"]}]')
 
     if conv_tools_available:
         header = (
@@ -482,9 +498,77 @@ def build_project_digest(project_path: str, current_conv_id: str | None = None,
     return header + '\n' + '\n'.join(entries)
 
 
+def build_project_digest_projection(
+    project_path: str,
+    *,
+    user_id: int,
+    current_conv_id: str | None = None,
+    limit: int = DIGEST_MAX_SIBLINGS,
+    conv_tools_available: bool = True,
+    query: str | None = None,
+) -> ProjectDigestProjection:
+    """Read siblings once and derive the prompt and UI views from that snapshot."""
+    structured = tuple(
+        dict(entry)
+        for entry in project_digest_entries(
+            project_path,
+            user_id=user_id,
+            current_conv_id=current_conv_id,
+            limit=limit,
+            query=query,
+        )
+    )
+    return ProjectDigestProjection(
+        text=_render_project_digest(
+            structured, conv_tools_available=conv_tools_available
+        ),
+        entries=structured,
+    )
+
+
+def build_project_digest(project_path: str, *, user_id: int,
+                         current_conv_id: str | None = None,
+                         limit: int = DIGEST_MAX_SIBLINGS,
+                         conv_tools_available: bool = True,
+                         query: str | None = None) -> str:
+    """Build a bounded digest of sibling conversations of the same project.
+
+    Returns a compact block listing up to ``limit`` of the most recently
+    updated OTHER conversations of ``project_path`` that have a summary (or at
+    least a title), each as ``• "title" — summary [id]``. Returns '' when there
+    are no usable siblings (so the caller can skip injection entirely).
+
+    Does NOT generate summaries (that's ``ensure_summary``'s job, run lazily on
+    the trigger paths) — it only reads what's already cached, so it stays fast
+    and side-effect-free on the hot prompt-assembly path.
+
+    Args:
+        conv_tools_available: Whether the ``list_conversations`` /
+            ``get_conversation`` tools are registered for THIS turn. When True
+            the header instructs the model to call them to drill in. When False
+            (the common case — the conv-ref tools only register once the user
+            @-attached a conversation; see ``lib/tools/registry/``
+            ``_build_conv_ref``) the header is tool-free: the siblings are
+            surfaced for ambient awareness ONLY, naming no tool the model can't
+            actually call. Defaults to True for back-compat with direct callers.
+            Both header variants share the substring ``related conversation(s)``
+            so the injection-side idempotency probe (``_DIGEST_MARKER`` in
+            ``lib/tasks_pkg/context_composer``) matches either one.
+    """
+    return build_project_digest_projection(
+        project_path,
+        user_id=user_id,
+        current_conv_id=current_conv_id,
+        limit=limit,
+        conv_tools_available=conv_tools_available,
+        query=query,
+    ).text
+
+
 __all__ = [
     'ensure_summary', 'generate_summary', 'build_project_digest',
-    'project_digest_entries',
+    'build_project_digest_projection', 'project_digest_entries',
+    'ProjectDigestProjection',
     'SUMMARY_MAX_CHARS', 'SUMMARY_STALE_GROWTH', 'SUMMARY_MIN_MESSAGES',
     'DIGEST_MAX_SIBLINGS',
 ]

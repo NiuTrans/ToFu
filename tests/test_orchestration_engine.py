@@ -8,8 +8,13 @@ fully exercised with zero LLM calls.
 import threading
 import unittest
 
-from lib.orchestration import layout_definition
+import pytest
+
+from lib.orchestration._layout import layout_definition
 from lib.orchestration_engine import FlowExecutor, FlowExecutionError, compile_plan
+
+
+pytestmark = pytest.mark.unit
 
 
 def _n(nid, **kw):
@@ -87,8 +92,8 @@ class LinearTest(unittest.TestCase):
 
 
 class LoopTest(unittest.TestCase):
-    def _endpoint(self):
-        return {'schema': 'tofu.orchestration/v1', 'name': 'EP', 'nodes': [
+    def _loop_definition(self):
+        return {'schema': 'tofu.orchestration/v1', 'name': 'Loop', 'nodes': [
             _ctrl('s', 'start'), _ctrl('l', 'loop', max_iterations=5),
             _role('w', 'worker', isolation='shared-context'),
             _role('c', 'critic'), _ctrl('e', 'stop')],
@@ -99,7 +104,7 @@ class LoopTest(unittest.TestCase):
     def test_loop_stops_on_verdict_stop(self):
         # critic says CONTINUE once, then STOP → 2 iterations.
         r = _MockRunner(verifier_script=['needs work: CONTINUE', 'VERDICT: STOP'])
-        out = FlowExecutor(self._endpoint(), agent_runner=r).run()
+        out = FlowExecutor(self._loop_definition(), agent_runner=r).run()
         self.assertTrue(out['ok'])
         worker_calls = [c for c in r.calls if c['role'] == 'worker']
         self.assertEqual(len(worker_calls), 2)
@@ -110,7 +115,7 @@ class LoopTest(unittest.TestCase):
         words = ('alpha beta gamma delta epsilon zeta eta theta iota kappa '
                  'lambda mu nu xi omicron pi rho sigma tau upsilon').split()
         r = _MockRunner(verifier_script=[f'CONTINUE {words[i]} {words[i+1]}' for i in range(15)])
-        out = FlowExecutor(self._endpoint(), agent_runner=r,
+        out = FlowExecutor(self._loop_definition(), agent_runner=r,
                            max_iterations=99).run()
         worker_calls = [c for c in r.calls if c['role'] == 'worker']
         self.assertEqual(len(worker_calls), 5)  # node param caps at 5
@@ -118,7 +123,7 @@ class LoopTest(unittest.TestCase):
     def test_global_max_iterations_caps_node_param(self):
         words = 'red orange yellow green blue indigo violet white black gray'.split()
         r = _MockRunner(verifier_script=[f'CONTINUE {words[i]} {words[i+1]}' for i in range(8)])
-        out = FlowExecutor(self._endpoint(), agent_runner=r,
+        out = FlowExecutor(self._loop_definition(), agent_runner=r,
                            max_iterations=3).run()
         worker_calls = [c for c in r.calls if c['role'] == 'worker']
         self.assertEqual(len(worker_calls), 3)  # global cap wins
@@ -126,11 +131,11 @@ class LoopTest(unittest.TestCase):
 
 class SharedContextTest(unittest.TestCase):
     """The loop worker must accumulate its own prior attempt + verifier
-    feedback across iterations (endpoint behavior), and fresh-context
+    feedback across iterations (Flow behavior), and fresh-context
     nodes must NOT."""
 
-    def _endpoint(self, isolation):
-        return {'schema': 'tofu.orchestration/v1', 'name': 'EP', 'nodes': [
+    def _loop_definition(self, isolation):
+        return {'schema': 'tofu.orchestration/v1', 'name': 'Loop', 'nodes': [
             _ctrl('s', 'start'), _ctrl('l', 'loop', max_iterations=4),
             _role('w', 'worker', isolation=isolation),
             _role('c', 'critic'), _ctrl('e', 'stop')],
@@ -155,7 +160,8 @@ class SharedContextTest(unittest.TestCase):
             if node.get('role') == 'worker':
                 seen.append(ctx)
             return r
-        out = FlowExecutor(self._endpoint('shared-context'), agent_runner=capture).run()
+        out = FlowExecutor(
+            self._loop_definition('shared-context'), agent_runner=capture).run()
         self.assertTrue(out['ok'])
         # 2nd worker call must contain its prior attempt + the critic feedback
         self.assertGreaterEqual(len(seen), 2)
@@ -174,17 +180,18 @@ class SharedContextTest(unittest.TestCase):
                 return {'output': f'ATTEMPT{seq["i"]}', 'status': 'completed', 'error': ''}
             verdict = 'CONTINUE: fix it' if seq['i'] < 2 else 'VERDICT: STOP'
             return {'output': verdict, 'status': 'completed', 'error': ''}
-        FlowExecutor(self._endpoint('fresh-context'), agent_runner=runner).run()
+        FlowExecutor(
+            self._loop_definition('fresh-context'), agent_runner=runner).run()
         # fresh worker's 2nd call must NOT carry its own prior attempt marker
         self.assertGreaterEqual(len(seen), 2)
         self.assertNotIn('previous attempt', seen[1].lower())
 
 
 class DeliverablesTest(unittest.TestCase):
-    """Engine ports endpoint's deliverables tracking + zero-deliverable guard."""
+    """Engine applies Flow deliverable tracking and the zero-work guard."""
 
-    def _endpoint(self, max_iter=5):
-        return {'schema': 'tofu.orchestration/v1', 'name': 'EP', 'nodes': [
+    def _loop_definition(self, max_iter=5):
+        return {'schema': 'tofu.orchestration/v1', 'name': 'Loop', 'nodes': [
             _ctrl('s', 'start'), _ctrl('l', 'loop', max_iterations=max_iter),
             _role('w', 'worker', isolation='shared-context'),
             _role('c', 'critic'), _ctrl('e', 'stop')],
@@ -207,7 +214,7 @@ class DeliverablesTest(unittest.TestCase):
                 critic_ctx.append(ctx)
                 return {'output': 'VERDICT: STOP', 'status': 'completed', 'error': ''}
             return {'output': 'x', 'status': 'completed', 'error': ''}
-        FlowExecutor(self._endpoint(), agent_runner=runner).run()
+        FlowExecutor(self._loop_definition(), agent_runner=runner).run()
         self.assertTrue(critic_ctx)
         self.assertIn('Deliverables Snapshot', critic_ctx[0])
         self.assertIn('0 state-changing', critic_ctx[0])
@@ -230,8 +237,9 @@ class DeliverablesTest(unittest.TestCase):
                 critic_calls['n'] += 1
                 return {'output': 'CONTINUE: keep going', 'status': 'completed', 'error': ''}
             return {'output': 'x', 'status': 'completed', 'error': ''}
-        out = FlowExecutor(self._endpoint(max_iter=5), agent_runner=runner,
-                           on_event=events.append).run()
+        out = FlowExecutor(
+            self._loop_definition(max_iter=5), agent_runner=runner,
+            on_event=events.append).run()
         # The directive reached a later worker context (the core behavior).
         self.assertTrue(any('START EXECUTING' in c for c in worker_ctx))
         # The guard event fired after the zero-deliverable streak.
@@ -253,7 +261,8 @@ class DeliverablesTest(unittest.TestCase):
                 return {'output': ('CONTINUE: keep going' if seq['w'] < 2 else 'VERDICT: STOP'),
                         'status': 'completed', 'error': ''}
             return {'output': 'x', 'status': 'completed', 'error': ''}
-        out = FlowExecutor(self._endpoint(max_iter=6), agent_runner=runner).run()
+        out = FlowExecutor(
+            self._loop_definition(max_iter=6), agent_runner=runner).run()
         self.assertEqual(seq['w'], 2)
 
 
@@ -378,10 +387,10 @@ class ParallelBodyVerdictTest(unittest.TestCase):
 
 
 class ReplanTest(unittest.TestCase):
-    """Engine ports endpoint's CONTINUE_PLANNER + PLAN_DEFECT gate."""
+    """Flow loops enforce the CONTINUE_PLANNER + PLAN_DEFECT gate."""
 
-    def _endpoint(self, max_iter=6):
-        return {'schema': 'tofu.orchestration/v1', 'name': 'EP', 'nodes': [
+    def _loop_definition(self, max_iter=6):
+        return {'schema': 'tofu.orchestration/v1', 'name': 'Loop', 'nodes': [
             _ctrl('s', 'start'), _role('p', 'planner'),
             _ctrl('l', 'loop', max_iterations=max_iter),
             _role('w', 'worker', isolation='shared-context'),
@@ -404,7 +413,7 @@ class ReplanTest(unittest.TestCase):
                             'status': 'completed', 'error': ''}
                 return {'output': '[VERDICT: STOP]', 'status': 'completed', 'error': ''}
             return {'output': node.get('role') + '-out', 'status': 'completed', 'error': ''}
-        out = FlowExecutor(self._endpoint(), agent_runner=runner,
+        out = FlowExecutor(self._loop_definition(), agent_runner=runner,
                            on_event=events.append).run()
         self.assertTrue(out['ok'])
         ran = [e['role'] for e in out['transcript']]
@@ -423,7 +432,7 @@ class ReplanTest(unittest.TestCase):
                     return {'output': '[VERDICT: CONTINUE_PLANNER]', 'status': 'completed', 'error': ''}
                 return {'output': '[VERDICT: STOP]', 'status': 'completed', 'error': ''}
             return {'output': node.get('role') + '-out', 'status': 'completed', 'error': ''}
-        out = FlowExecutor(self._endpoint(), agent_runner=runner).run()
+        out = FlowExecutor(self._loop_definition(), agent_runner=runner).run()
         ran = [e['role'] for e in out['transcript']]
         self.assertEqual(ran.count('planner'), 1)   # no replan
 
@@ -439,7 +448,7 @@ class ReplanTest(unittest.TestCase):
                             'status': 'completed', 'error': ''}
                 return {'output': '[VERDICT: STOP]', 'status': 'completed', 'error': ''}
             return {'output': node.get('role') + '-out', 'status': 'completed', 'error': ''}
-        out = FlowExecutor(self._endpoint(), agent_runner=runner).run()
+        out = FlowExecutor(self._loop_definition(), agent_runner=runner).run()
         ran = [e['role'] for e in out['transcript']]
         self.assertEqual(ran.count('planner'), 1)   # defect rejected → no replan
 
@@ -451,8 +460,9 @@ class ReplanTest(unittest.TestCase):
                 return {'output': '[PLAN_DEFECT: structural gap #%d]\n[VERDICT: CONTINUE_PLANNER]' % id(ctx),
                         'status': 'completed', 'error': ''}
             return {'output': node.get('role') + '-out', 'status': 'completed', 'error': ''}
-        out = FlowExecutor(self._endpoint(max_iter=20), agent_runner=runner,
-                           max_iterations=20).run()
+        out = FlowExecutor(
+            self._loop_definition(max_iter=20), agent_runner=runner,
+            max_iterations=20).run()
         ran = [e['role'] for e in out['transcript']]
         # initial planner + at most _MAX_REPLANS replans
         self.assertLessEqual(ran.count('planner'), 4)
@@ -460,7 +470,7 @@ class ReplanTest(unittest.TestCase):
 
     def test_replan_kill_switch(self):
         import os
-        os.environ['TOFU_ENDPOINT_REPLAN'] = '0'
+        os.environ['TOFU_FLOW_REPLAN'] = '0'
         try:
             seq = {'c': 0}
             def runner(node, ctx, it):
@@ -472,18 +482,19 @@ class ReplanTest(unittest.TestCase):
                                 'status': 'completed', 'error': ''}
                     return {'output': '[VERDICT: STOP]', 'status': 'completed', 'error': ''}
                 return {'output': node.get('role') + '-out', 'status': 'completed', 'error': ''}
-            out = FlowExecutor(self._endpoint(), agent_runner=runner).run()
+            out = FlowExecutor(
+                self._loop_definition(), agent_runner=runner).run()
             ran = [e['role'] for e in out['transcript']]
             self.assertEqual(ran.count('planner'), 1)   # kill-switch → no replan
         finally:
-            os.environ.pop('TOFU_ENDPOINT_REPLAN', None)
+            os.environ.pop('TOFU_FLOW_REPLAN', None)
 
 
 class StuckTest(unittest.TestCase):
-    """Engine ports endpoint's _detect_stuck (repeating critic → break)."""
+    """Flow loops break when verifier feedback repeats without progress."""
 
-    def _endpoint(self, max_iter=10):
-        return {'schema': 'tofu.orchestration/v1', 'name': 'EP', 'nodes': [
+    def _loop_definition(self, max_iter=10):
+        return {'schema': 'tofu.orchestration/v1', 'name': 'Loop', 'nodes': [
             _ctrl('s', 'start'), _ctrl('l', 'loop', max_iterations=max_iter),
             _role('w', 'worker', isolation='shared-context'),
             _role('c', 'critic'), _ctrl('e', 'stop')],
@@ -501,7 +512,7 @@ class StuckTest(unittest.TestCase):
                 return {'output': 'CONTINUE: please fix the same foo bar baz issue again',
                         'status': 'completed', 'error': ''}
             return {'output': 'work', 'status': 'completed', 'error': ''}
-        out = FlowExecutor(self._endpoint(), agent_runner=runner,
+        out = FlowExecutor(self._loop_definition(), agent_runner=runner,
                            on_event=events.append).run()
         self.assertTrue(any(e['type'] == 'stuck_detected' for e in events))
         worker_runs = sum(1 for e in events if e['type'] == 'step_start'
@@ -521,7 +532,7 @@ class StuckTest(unittest.TestCase):
                 return {'output': m, 'status': 'completed', 'error': ''}
             return {'output': 'work', 'status': 'completed', 'error': ''}
         events = []
-        out = FlowExecutor(self._endpoint(), agent_runner=runner,
+        out = FlowExecutor(self._loop_definition(), agent_runner=runner,
                            on_event=events.append).run()
         self.assertFalse(any(e['type'] == 'stuck_detected' for e in events))
 
@@ -658,14 +669,16 @@ class BranchAndCapsTest(unittest.TestCase):
         self.assertEqual(out['status'], 'aborted')
 
 
-class EndpointAsFlowTest(unittest.TestCase):
-    """The canonical endpoint definition must run faithfully on FlowExecutor:
+class VerifierLoopFlowTest(unittest.TestCase):
+    """A planner/worker/verifier graph must run faithfully on FlowExecutor:
     planner once, worker/critic loop with shared-context carry-forward, STOP
     on a clean verdict."""
 
-    def test_canonical_endpoint_runs(self):
-        from lib.orchestration import build_endpoint_definition
-        defn = build_endpoint_definition(max_iterations=5)
+    def test_verifier_loop_runs(self):
+        from tests.support.orchestration_definitions import (
+            build_verifier_loop_definition,
+        )
+        defn = build_verifier_loop_definition(max_iterations=5)
         seq = {'w': 0}
         seen_worker_ctx = []
         def runner(node, ctx, it):
@@ -688,8 +701,10 @@ class EndpointAsFlowTest(unittest.TestCase):
 
     def test_stop_with_unresolved_marker_is_overridden(self):
         # critic emits STOP but leaves a ❌ → must NOT stop on iteration 1.
-        from lib.orchestration import build_endpoint_definition
-        defn = build_endpoint_definition(max_iterations=4)
+        from tests.support.orchestration_definitions import (
+            build_verifier_loop_definition,
+        )
+        defn = build_verifier_loop_definition(max_iterations=4)
         seq = {'w': 0}
         def runner(node, ctx, it):
             role = node.get('role')
@@ -858,7 +873,7 @@ class IsolatedSubflowTest(unittest.TestCase):
         self.assertIn('SEEDMARK', child_first['context'])
 
     def test_isolated_subflow_with_inner_loop(self):
-        # The black box can contain a full endpoint loop — the nested engine
+        # The black box can contain a full verifier loop — the nested engine
         # runs the loop/verdict machinery for free.
         child = {'schema': 'tofu.orchestration/v1', 'name': 'InnerLoop', 'nodes': [
             _ctrl('cs', 'start'), _ctrl('cl', 'loop', max_iterations=4),

@@ -10,26 +10,24 @@ from lib.billing.payments._common import (
     mark_payment_settled,
     record_payment,
 )
-from lib.database import DOMAIN_SYSTEM, close_thread_db, pooled_db
+from lib.billing import get_balance
+from lib.billing.ledger import list_entries
 
 
 pytestmark = pytest.mark.unit
 
 
 def _concurrent_record(barrier, kwargs):
-    try:
-        barrier.wait()
-        return record_payment(**kwargs)
-    finally:
-        close_thread_db()
+    barrier.wait()
+    return record_payment(**kwargs)
 
 
 def _concurrent_settle(barrier, payment_id):
-    try:
-        barrier.wait()
-        mark_payment_settled(payment_id)
-    finally:
-        close_thread_db()
+    barrier.wait()
+    mark_payment_settled(payment_id)
+
+
+pytest_plugins = ('tests._billing_user_sidecar',)
 
 
 def test_provider_id_unique_constraint_selects_one_concurrent_winner(flask_app):
@@ -42,12 +40,9 @@ def test_provider_id_unique_constraint_selects_one_concurrent_winner(flask_app):
         records = list(pool.map(
             lambda _: _concurrent_record(barrier, kwargs), range(8)))
     assert len({record.id for record in records}) == 1
-    with pooled_db(DOMAIN_SYSTEM) as db:
-        row = db.execute(
-            'SELECT COUNT(*) AS n FROM billing_payments '
-            'WHERE provider=? AND provider_id=?',
-            ('test', kwargs['provider_id'])).fetchone()
-    assert int(row['n']) == 1
+    from lib.billing.payments._common import list_payments
+    rows = list_payments(provider='test')
+    assert sum(row.provider_id == kwargs['provider_id'] for row in rows) == 1
 
 
 def test_concurrent_settlement_credits_wallet_and_ledger_once(flask_app):
@@ -62,17 +57,12 @@ def test_concurrent_settlement_credits_wallet_and_ledger_once(flask_app):
         list(pool.map(
             lambda _: _concurrent_settle(barrier, payment.id), range(8)))
 
-    with pooled_db(DOMAIN_SYSTEM) as db:
-        payment_row = db.execute(
-            'SELECT status FROM billing_payments WHERE id=?',
-            (payment.id,)).fetchone()
-        wallet_row = db.execute(
-            'SELECT balance_micro FROM billing_wallets WHERE user_id=?',
-            (user_id,)).fetchone()
-        ledger_row = db.execute(
-            "SELECT COUNT(*) AS n FROM billing_ledger WHERE user_id=? "
-            "AND kind='topup' AND ref_type='payment' AND ref_id=?",
-            (user_id, provider_id)).fetchone()
-    assert payment_row['status'] == 'settled'
-    assert int(wallet_row['balance_micro']) == payment.credit_micro
-    assert int(ledger_row['n']) == 1
+    from lib.billing.payments._common import list_payments
+    payment_row = next(row for row in list_payments(user_id=user_id)
+                       if row.id == payment.id)
+    ledger_rows = list_entries(user_id, kinds=['topup'])
+    assert payment_row.status == 'settled'
+    assert get_balance(user_id) == payment.credit_micro
+    assert sum(
+        row.ref_type == 'payment' and row.ref_id == provider_id
+        for row in ledger_rows) == 1

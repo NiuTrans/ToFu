@@ -23,7 +23,6 @@ import pytest
 # test_api_v1_integration.py instantiates ``Quart(__name__)`` directly,
 # which trips a Quart/Flask version mismatch in some environments; going
 # through ``server`` sidesteps that.
-os.environ.setdefault('TUNNEL_TOKEN', 'test-tunnel-not-real')
 
 try:
     import server  # noqa: E402

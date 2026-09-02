@@ -10,7 +10,7 @@ the request's wire bytes are byte-IDENTICAL to a previously-cached request and
 the block geometry is inside Anthropic's ~20-block lookback. Real-gateway
 replay of the SAME bytes four times collapses DIFFERENT rounds at 13-40% — i.e.
 it is a SERVER-SIDE stochastic cache-write-visibility race (Anthropic SDK
-#1451), not a client layout bug. See docs/CACHE_GATEWAY_STOCHASTIC_REPORT.md.
+#1451), not a client layout bug. See docs/LLM_COST_OPTIMIZATION.md.
 
 Because the collapse is independent per request, RESENDING the identical
 byte-stable body re-rolls the dice and usually hits the now-visible cache write
@@ -54,14 +54,15 @@ Public API
   * ``floor_retry_enabled()`` — env gate.
   * ``floor_retry_max()`` — capped resend count.
   * ``is_floor_collapse(usage)`` — the read-at-floor + big-write predicate.
-  * ``wire_prefix_stable(usage)`` — True when this round's usage carries the
-    proof its wire prefix was byte-identical to the previous round (safe to
-    resend). Consults the live cache-tracking state, non-destructively.
+  * ``wire_prefix_stable(conv_id, usage, user_id=...)`` — True when this
+    owner's conversation carries proof that the wire prefix was byte-identical
+    to the previous round. Consults live cache state non-destructively.
 """
 from __future__ import annotations
 
+import os
+
 from lib.cost import normalize_usage
-from lib.env_compat import getenv_compat
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -87,7 +88,7 @@ def floor_retry_enabled() -> bool:
     minimisation is the North-Star; report-only wins do not justify default-on.
     Set ``TOFU_CACHE_FLOOR_RETRY=1`` to opt in for future controlled A/B tests.
     """
-    raw = (getenv_compat('TOFU_CACHE_FLOOR_RETRY', default='0') or '0').strip().lower()
+    raw = (os.environ.get('TOFU_CACHE_FLOOR_RETRY', '0') or '0').strip().lower()
     return raw in ('1', 'true', 'yes', 'on')
 
 
@@ -99,7 +100,7 @@ def floor_retry_max() -> int:
     cap of 1 would let those rounds slip through. The stop-on-throttle guard +
     the hard cap of 3 keep the cost bounded.
     """
-    raw = (getenv_compat('TOFU_CACHE_FLOOR_RETRY_MAX', default='2') or '2').strip()
+    raw = (os.environ.get('TOFU_CACHE_FLOOR_RETRY_MAX', '2') or '2').strip()
     try:
         n = int(raw)
     except (ValueError, TypeError) as _e:
@@ -121,7 +122,7 @@ def is_floor_collapse(usage) -> bool:
     return cw > _FLOOR_WRITE_LO and cr <= _FLOOR_READ_HI
 
 
-def wire_prefix_stable(conv_id, usage) -> bool:
+def wire_prefix_stable(conv_id, usage, *, user_id: int) -> bool:
     """True when the round's wire prefix is byte-IDENTICAL to the previous
     round — so a resend of the same body is legitimate (not masking a real
     client-side prefix change).
@@ -146,9 +147,12 @@ def wire_prefix_stable(conv_id, usage) -> bool:
     if not conv_id:
         return False
     try:
-        from lib.tasks_pkg.cache_tracking import _cache_lock, _cache_states
+        from lib.tasks_pkg.cache_tracking._state import (
+            _cache_lock,
+            _cache_states,
+        )
         from lib.tasks_pkg.cache_tracking._state import _state_key
-        key = _state_key(conv_id)
+        key = _state_key(conv_id, user_id=user_id)
         with _cache_lock:
             prev = _cache_states.get(key)
             prev_fp = getattr(prev, 'wire_fp', None) if prev else None

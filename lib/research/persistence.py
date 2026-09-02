@@ -1,6 +1,6 @@
 """lib/research/persistence.py — durable home for auto-research artifacts.
 
-WHY THIS MODULE EXISTS (epic pt_a40dbd9569194b52)
+WHY THIS MODULE EXISTS ()
 -------------------------------------------------
 Every R1–R4 artifact used to live ONLY in the in-process task dict of
 ``ProductionRuntime('research', ttl=7200)``. ``cleanup_stale()`` evicts
@@ -9,7 +9,7 @@ terminal tasks past TTL, so roughly two hours after a run finished — and
 with its four-axis rubric scores, the survey markdown and the open-gap map
 were gone for good.
 
-That was never the design. ``docs/AUTO_RESEARCH_SYSTEM_DESIGN.md`` §5 places
+That was never the design. ``docs/modules/ingest_media.md`` §5 places
 these artifacts in ``paper_reports`` under composite ``lang`` keys, explicitly
 noting it needs "not one line of new schema". Both key functions
 (:func:`lib.paper.survey.survey_lang_key`, :func:`lib.paper.ideate.ideate_lang_key`)
@@ -53,6 +53,7 @@ import time
 import uuid
 
 from lib.log import get_logger
+from lib.identity import require_user_id
 
 logger = get_logger(__name__)
 
@@ -60,7 +61,7 @@ __all__ = ['research_direction_hash', 'persist_survey', 'persist_ideate',
            'load_research_artifacts', 'list_research_directions']
 
 #: Namespace prefix for direction identities. Keeps a direction's hash in a
-#: different space from ``lib.paper.hashing._paper_hash`` (paper CONTENT), so a
+#: different space from ``lib.paper_identity._paper_hash`` (paper CONTENT), so a
 #: research row can never be written onto a real paper's report row.
 _DIRECTION_NS = 'tofu-research-direction:v1:'
 
@@ -84,13 +85,14 @@ def research_direction_hash(direction) -> str:
 
 
 def _upsert_row(phash: str, lang_key: str, report: str, meta: dict,
-                model: str) -> None:
+                model: str, *, user_id: int) -> None:
     """Write one row through the Sidecar's research artifact operation.
 
     Isolated as its own function so the failure posture above is testable
     (a guard patches this to raise and asserts the artifact still survives).
     """
     _storage(write=True).command('research.artifact.upsert', {
+        'user_id': require_user_id(user_id, context='research artifact owner'),
         'paper_hash': phash,
         'lang_key': lang_key,
         'report': report or '',
@@ -106,7 +108,8 @@ def _storage(*, write: bool = False):
 
 
 def persist_survey(direction: str, lang: str, survey_md: str, open_gaps: dict,
-                   *, usage: dict | None = None, model: str = '') -> bool:
+                   *, usage: dict | None = None, model: str = '',
+                   user_id: int) -> bool:
     """Persist a survey + its open-gap map under ``survey:<lang>``.
 
     The gap map is R3's frozen input contract, so it is stored verbatim in
@@ -127,7 +130,9 @@ def persist_survey(direction: str, lang: str, survey_md: str, open_gaps: dict,
                 'open_gaps': open_gaps or {}}
         if usage:
             meta['usage'] = usage
-        _upsert_row(phash, survey_lang_key(lang), survey_md or '', meta, model)
+        _upsert_row(
+            phash, survey_lang_key(lang), survey_md or '', meta, model,
+            user_id=user_id)
     except Exception as e:
         logger.error('[Research:Persist] survey persist FAILED for %.60s: %s',
                      direction, e, exc_info=True)
@@ -140,7 +145,7 @@ def persist_survey(direction: str, lang: str, survey_md: str, open_gaps: dict,
 
 
 def persist_ideate(direction: str, lang: str, artifact: dict, *,
-                   model: str = '') -> bool:
+                   model: str = '', user_id: int) -> bool:
     """Persist a scored-idea pass under ``ideate:<lang>``.
 
     The whole artifact — accepted ideas, the rejection audit WITH per-axis
@@ -172,7 +177,7 @@ def persist_ideate(direction: str, lang: str, artifact: dict, *,
         meta['degraded_reason'] = art.get('degraded_reason') or ''
     try:
         _upsert_row(phash, ideate_lang_key(lang), _ideate_digest(art), meta,
-                    model)
+                    model, user_id=user_id)
     except Exception as e:
         logger.error('[Research:Persist] ideate persist FAILED for %.60s: %s',
                      direction, e, exc_info=True)
@@ -208,7 +213,7 @@ def _ideate_digest(artifact: dict) -> str:
     return '\n'.join(lines)
 
 
-def list_research_directions(limit: int = 50) -> list:
+def list_research_directions(*, user_id: int, limit: int = 50) -> list:
     """Every direction that has ever been researched, newest first.
 
     WHY THIS IS NOT OPTIONAL. The persisted rows are keyed by
@@ -235,14 +240,20 @@ def list_research_directions(limit: int = 50) -> list:
             logger.debug('[Research:Persist] invalid direction limit: %s', e)
             normalized_limit = 50
         rows = _storage().query(
-            'research.directions.list', {'limit': normalized_limit})
+            'research.directions.list', {
+                'user_id': require_user_id(
+                    user_id, context='research direction owner'),
+                'limit': normalized_limit,
+            })
     except Exception as e:
         logger.warning('[Research:Persist] list failed: %s', e)
         return []
     return rows if isinstance(rows, list) else []
 
 
-def load_research_artifacts(direction: str, lang: str = 'en') -> dict:
+def load_research_artifacts(
+    direction: str, lang: str = 'en', *, user_id: int,
+) -> dict:
     """Read back everything persisted for a direction.
 
     This is the re-attach path: it answers "has this direction been researched
@@ -266,6 +277,8 @@ def load_research_artifacts(direction: str, lang: str = 'en') -> dict:
         return out
     try:
         rows = _storage().query('research.artifacts.get', {
+            'user_id': require_user_id(
+                user_id, context='research artifact owner'),
             'paper_hash': phash, 'lang': lang,
         })
     except Exception as e:

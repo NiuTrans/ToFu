@@ -19,6 +19,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
+
+TEST_OWNER_USER_ID = 1
 sys.modules.setdefault('flask', _quart)
 
 
@@ -28,14 +30,14 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 
 
 def _make_task(tid):
-    from lib.paper import _new_report_task
+    from lib.paper.report_runtime import _new_report_task
     # paperInsightEnabled=False: the gated insight second pass dispatches a
     # REAL LLM — offline here by contract, and on CI (placeholder key → 401)
     # the dispatcher's cooldown cycle never exits → 600s timeout (233daa6).
     return _new_report_task(tid, 'phashabort00000000000000000000000', 'en', None,
                             client_title='Test Paper',
                             config={'paperInsightEnabled': False,
-                                      'paperCheckpointsEnabled': False})
+                                      'paperCheckpointsEnabled': False}, user_id=TEST_OWNER_USER_ID)
 
 
 REPORT_BODY = '## ⚡ TL;DR\nPartial content so far.\n'
@@ -43,7 +45,7 @@ REPORT_BODY = '## ⚡ TL;DR\nPartial content so far.\n'
 
 def test_abort_before_first_round():
     """Abort set before generation starts → aborted status, no persist."""
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     orig = re_mod.dispatch_stream
 
     def _should_not_run(*a, **k):
@@ -53,7 +55,7 @@ def test_abort_before_first_round():
     try:
         task = _make_task('rpt_abort_1')
         task['abort_event'].set()
-        re_mod._run_report_task(task, [
+        re_mod.run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper'},
         ], [])
@@ -69,7 +71,7 @@ def test_abort_before_first_round():
 
 def test_abort_mid_stream_keeps_partial():
     """Abort detected after a streamed chunk → partial text preserved."""
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     orig = re_mod.dispatch_stream
 
     def _fake_dispatch(messages, on_content=None, on_thinking=None, abort_check=None, **kw):
@@ -90,7 +92,7 @@ def test_abort_mid_stream_keeps_partial():
     try:
         task = _make_task('rpt_abort_2')
         _abort_holder['set'] = task['abort_event'].set
-        re_mod._run_report_task(task, [
+        re_mod.run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper'},
         ], [])
@@ -114,9 +116,9 @@ def test_abort_between_tool_calls_stops_before_running_tools():
     a slow web_search/fetch_url was only noticed at the NEXT round boundary, so
     every queued tool ran and another dispatch fired first.
     """
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     orig = re_mod.dispatch_stream
-    orig_exec = re_mod._execute_report_tool
+    orig_exec = re_mod.execute_paper_tool
     state = {'dispatch_calls': 0, 'tool_calls': 0}
 
     # A round that issues TWO tool calls; the FIRST tool press "Stop" (sets the
@@ -140,12 +142,12 @@ def test_abort_between_tool_calls_stops_before_running_tools():
         return ('r', [], None, None, None)
 
     re_mod.dispatch_stream = _fake_dispatch
-    re_mod._execute_report_tool = _spy_exec
+    re_mod.execute_paper_tool = _spy_exec
     _holder = {}
     try:
         task = _make_task('rpt_abort_4')
         _holder['set'] = task['abort_event'].set
-        re_mod._run_report_task(task, [
+        re_mod.run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper'},
         ], [])
@@ -159,7 +161,7 @@ def test_abort_between_tool_calls_stops_before_running_tools():
         assert 'aborted' in types and 'done' not in types, types
     finally:
         re_mod.dispatch_stream = orig
-        re_mod._execute_report_tool = orig_exec
+        re_mod.execute_paper_tool = orig_exec
     _ok('abort between tool calls → 2nd tool skipped, no extra round, clean aborted')
 
 
@@ -211,7 +213,7 @@ def test_batch_runner_no_abort_runs_all():
 
 def test_aborted_error_mid_retry():
     """A dispatcher AbortedError is treated as a clean stop, not an error."""
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     from lib.llm_errors import AbortedError
     orig = re_mod.dispatch_stream
 
@@ -221,7 +223,7 @@ def test_aborted_error_mid_retry():
 
     try:
         task = _make_task('rpt_abort_3')
-        re_mod._run_report_task(task, [
+        re_mod.run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper'},
         ], [])

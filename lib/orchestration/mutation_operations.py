@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from lib.identity import require_user_id
 from lib.orchestration.mutation_result import (
     MUTATION_ACTION_ABORT_RUN,
     MUTATION_NOT_FOUND,
@@ -33,16 +34,19 @@ def resolved_mutation(
 def runtime_abort_mutation(
     runtime: TaskAbortRuntimePort,
     task_id: str,
+    owner_user_id: int,
 ) -> OrchestrationMutationResult:
-    """Classify the TaskRuntime abort race for an orchestration run."""
-    if runtime.abort(task_id):
+    """Classify an owner-scoped TaskRuntime abort race."""
+    owner_user_id = require_user_id(
+        owner_user_id, context='orchestration runtime mutation owner')
+    if runtime.abort_owned(task_id, user_id=owner_user_id):
         return OrchestrationMutationResult(
             True,
             run_status='aborting',
             action=MUTATION_ACTION_ABORT_RUN,
             target_id=task_id,
         )
-    task = runtime.get(task_id)
+    task = runtime.get_owned(task_id, user_id=owner_user_id)
     if task is None:
         return OrchestrationMutationResult(
             False,

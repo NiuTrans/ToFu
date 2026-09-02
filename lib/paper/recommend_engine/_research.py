@@ -1,5 +1,4 @@
-"""Agentic interpretation stage — research the current literature, then return
-the model's structured candidate/correction JSON.
+"""Research current literature and return structured recommendation candidates.
 
 Instead of guessing candidate titles from the model's frozen training memory
 (which cannot know about a conference happening *today* or papers posted last
@@ -8,19 +7,24 @@ and told to actually RESEARCH the current literature BEFORE it proposes
 candidates. A "current date" anchor is injected so it never treats an
 in-progress year as the future. The final turn returns strict JSON.
 
-The patchable seams (``dispatch_stream`` / ``_execute_report_tool`` /
-``_RESEARCH_VERTICAL``) are resolved THROUGH the package facade at call time
-(``import lib.paper.recommend_engine as _pkg``) so a test patching
-``re_mod.dispatch_stream`` / ``re_mod._execute_report_tool`` — or setting
-``re_mod._RESEARCH_VERTICAL = None`` — bites here exactly as in the flat module.
 """
 
+import hashlib
+
 from lib.agent_loop import AbortSignal, run_agent_loop
+from lib.llm_dispatch.api import dispatch_stream
 from lib.log import get_logger
 from lib.llm.json_extract import extract_first_json_object
 
-from ..prompts import _REPORT_TOOLS, date_anchor_clause
-from ..tools import make_research_tool_executor
+from ..prompts import date_anchor_clause
+from ..tools import (
+    PaperToolResultBudgetV2,
+    build_research_tool_schemas,
+    execute_paper_tool,
+    freeze_paper_tool_epoch,
+    make_paper_exec_shim,
+    make_research_tool_executor,
+)
 from ._ground import _detect_lang
 
 logger = get_logger(__name__)
@@ -98,12 +102,13 @@ def _parse_llm_json(content):
     return extract_first_json_object(content, log_prefix='[Paper:Recommend]', log=logger)
 
 
-def _research_and_interpret(description, max_results, *, abort=None, on_tool_event=None):
+def _research_and_interpret(description, max_results, *, abort=None,
+                            on_tool_event=None, user_id=None):
     """Agentic interpretation: research the current literature, then return the
     model's structured candidate/correction JSON.
 
     Runs the shared tool-calling loop (``web_search`` / ``fetch_url`` via the
-    report engine's ``_execute_report_tool``) with a date-anchored system
+    report engine's ``execute_paper_tool``) with a date-anchored system
     prompt, so the model surfaces genuinely current papers instead of guessing
     from stale training memory. This is the single seam the streaming pipeline
     and the blocking wrapper both go through, and the one tests monkeypatch to
@@ -128,12 +133,6 @@ def _research_and_interpret(description, max_results, *, abort=None, on_tool_eve
             clean empty finish, not an error).
         Exception: any hard LLM dispatch failure (caller flags ``llmError``).
     """
-    # Resolve patchable seams through the facade so ``re_mod.dispatch_stream`` /
-    # ``re_mod._execute_report_tool`` / ``re_mod._RESEARCH_VERTICAL`` bite here.
-    import lib.paper.recommend_engine as _pkg
-    dispatch_stream = _pkg.dispatch_stream
-    _execute_report_tool = _pkg._execute_report_tool
-
     ui_lang = _detect_lang(description)
     system = date_anchor_clause(ui_lang) + _RECOMMEND_SYSTEM
     messages = [
@@ -142,6 +141,15 @@ def _research_and_interpret(description, max_results, *, abort=None, on_tool_eve
     ]
     abort_signal = AbortSignal.from_callback(abort)
     user_question = description[:300]
+    paper_tools, paper_contracts = freeze_paper_tool_epoch(
+        build_research_tool_schemas(), owner_user_id=user_id)
+    _exec_shim = make_paper_exec_shim(
+        task_id=('paper-recommend-' + hashlib.sha256(
+            description.encode('utf-8')).hexdigest()[:16]),
+        abort=abort_signal.is_set, owner_user_id=user_id,
+        tool_contract_documents_by_name=paper_contracts)
+    _result_budget = PaperToolResultBudgetV2(owner_user_id=user_id)
+    contracts_by_round = {}
 
     # Per-round content buffer (reset each dispatch). The FINAL (no-tool) round's
     # content is the JSON answer; interim prose emitted alongside a tool call is
@@ -153,23 +161,27 @@ def _research_and_interpret(description, max_results, *, abort=None, on_tool_eve
 
     def _dispatch(rnd, tools):
         _round['content'] = ''
+        effective_tools, contracts_by_round[rnd] = freeze_paper_tool_epoch(
+            tools, owner_user_id=user_id)
 
         def _on_content(text):
             _round['content'] += text
 
         logger.info('[Paper:Recommend] Research round %d — msgs=%d tools=%s',
-                    rnd + 1, len(messages), 'yes' if tools else 'no')
-        return dispatch_stream(
+                    rnd + 1, len(messages),
+                    'yes' if effective_tools else 'no')
+        from lib.llm.stream_result import ensure_provider_stream_result
+        return ensure_provider_stream_result(dispatch_stream(
             messages,
             on_content=_on_content,
             abort_check=abort_signal.is_set,
             capability='text',
-            tools=tools,
+            tools=effective_tools,
             max_tokens=4000,
             temperature=0,
             thinking_enabled=False,
             log_prefix='[Paper:Recommend]',
-        )
+        ))
 
     def _on_round_result(rnd, msg, finish, usage):
         _last['msg'] = msg
@@ -181,23 +193,24 @@ def _research_and_interpret(description, max_results, *, abort=None, on_tool_eve
         _round['content'] = ''
         messages.append(msg)
 
-    # Shared research tool-round executor (see lib/paper/tools.make_research_tool_executor):
-    # recommend FORCES the academic vertical (resolved through the facade at call
-    # time so re_mod._RESEARCH_VERTICAL patches bite) and passes its facade
-    # _execute_report_tool so re_mod._execute_report_tool patches bite.
+    # Shared research tool-round executor. Recommendation forces the academic
+    # vertical so known-title lookup does not depend on general web availability.
     _execute_tool = make_research_tool_executor(
         messages, user_question=user_question, abort_signal=abort_signal,
-        execute_report_tool=_execute_report_tool,
+        result_budget=_result_budget, exec_shim=_exec_shim,
+        paper_tool_executor=execute_paper_tool,
         on_tool_event=on_tool_event, log_prefix='[Paper:Recommend]',
-        force_vertical=_pkg._RESEARCH_VERTICAL)
+        force_vertical=_RESEARCH_VERTICAL,
+        contract_documents_for_round=contracts_by_round.get)
 
     run_agent_loop(
         abort=abort_signal,
-        round_tools=_REPORT_TOOLS,
+        round_tools=paper_tools,
         dispatch=_dispatch,
         execute_tool=_execute_tool,
         on_round_result=_on_round_result,
         on_tool_round=_begin_tool_round,
+        on_round_end=_result_budget.finish_round,
     )
 
     content = _round['content']

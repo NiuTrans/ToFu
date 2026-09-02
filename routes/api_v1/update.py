@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import threading
 import time
 import uuid
@@ -37,10 +36,10 @@ from lib.api_response import (
 )
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
-from lib.push import push_event
+from lib.agent_core.push import push_event
 from lib.request_parser import parse_body
 
-from .auth import require_auth, require_scope
+from .auth import request_user_id, require_auth, require_scope
 
 logger = get_logger(__name__)
 
@@ -195,6 +194,7 @@ def update_apply():
     ``pushSubscribe('update', taskId)`` and renders a live stepper.
     """
     task_id = uuid.uuid4().hex
+    owner_user_id = request_user_id()
 
     def _progress(stage: str, status: str, detail: str = '', meta=None):
         frame = {
@@ -209,7 +209,8 @@ def update_apply():
             for k in ('pct', 'loaded', 'total', 'speed', 'phase'):
                 if meta.get(k) is not None:
                     frame[k] = meta[k]
-        push_event(UPDATE_CHANNEL, task_id, frame)
+        push_event(
+            UPDATE_CHANNEL, task_id, frame, user_id=owner_user_id)
 
     def _worker():
         from lib.self_update import apply_update
@@ -229,7 +230,7 @@ def update_apply():
                 'type': 'done', 'ok': False,
                 'error': 'Update failed unexpectedly. Check the server log.',
                 'detail': str(e)[:300],
-            })
+            }, user_id=owner_user_id)
             _ACTIVE_APPLIES.pop(task_id, None)
             return
         # Terminal state is written BEFORE the registry pop: a concurrent
@@ -237,7 +238,12 @@ def update_apply():
         # with no live thread and rewrite it to 'interrupted'.
         _write_apply_state({'status': 'done', 'task_id': task_id,
                             'finished_at': time.time(), **result})
-        push_event(UPDATE_CHANNEL, task_id, {'type': 'done', **result})
+        push_event(
+            UPDATE_CHANNEL,
+            task_id,
+            {'type': 'done', **result},
+            user_id=owner_user_id,
+        )
         _ACTIVE_APPLIES.pop(task_id, None)
 
     t = threading.Thread(target=_worker, name=f'tofu-update-{task_id[:8]}',
@@ -248,117 +254,57 @@ def update_apply():
     return api_ok({'taskId': task_id, 'started': True})
 
 
-def _close_inheritable_listen_sockets():
-    """Mark inherited-across-exec FDs (Hypercorn's listen socket) close-on-exec.
-
-    Hypercorn's ``Config._create_sockets`` calls ``sock.set_inheritable(True)``
-    on its listening socket (hypercorn/config.py). Since PEP 446 (Python 3.4)
-    every other FD is created non-inheritable by default, so the ONLY
-    inheritable FDs above the std streams are exactly Hypercorn's bound
-    listeners. If we don't clear that flag, ``os.execv`` leaks the still-bound
-    listen socket into the fresh server image: the old port stays occupied by
-    our own inherited FD, ``_wait_port_free`` in server.py times out, and the
-    restart silently shifts to port+1 (15002 → 15003) on every restart.
-
-    Resetting the inheritable flag makes execv close these FDs, freeing the
-    port so the new image reclaims it.
-    """
-    # Only inspect actually-open FDs. /proc/self/fd (Linux) avoids scanning a
-    # potentially huge SC_OPEN_MAX range; fall back to a bounded range elsewhere.
-    try:
-        fds = [int(name) for name in os.listdir('/proc/self/fd') if name.isdigit()]
-    except OSError as e:
-        logger.debug('[Update] /proc/self/fd unavailable (%s) — scanning bounded FD range', e)
-        _max = os.sysconf('SC_OPEN_MAX') if hasattr(os, 'sysconf') else 4096
-        fds = range(3, min(_max, 65536))
-    closed = 0
-    for fd in fds:
-        if fd < 3:
-            continue
-        try:
-            if os.get_inheritable(fd):
-                os.set_inheritable(fd, False)
-                closed += 1
-        except OSError as e:
-            logger.debug('[Update] could not clear inheritable flag on fd %d: %s', fd, e)
-            continue
-    if closed:
-        logger.info('[Update] Cleared inheritable flag on %d FD(s) before re-exec '
-                    '(prevents leaked listen socket holding the port)', closed)
-
-
 def _perform_server_reexec(reason: str) -> bool:
-    """Re-exec the current process (unconditional).
+    """Request a graceful in-place process replacement.
 
     The caller must have verified there is no in-flight work — see
     update_restart's list_running_tasks guard and lib/auto_restart.py's
-    precondition bundle. Extracted from _deferred_reexec so the HEAD-moved
-    auto-restart watcher shares the exact same exec contract: clean
-    dirty-bit, env-reexec guard reset, listen-socket close-on-exec, port
-    reclaim hint, same interpreter + argv. Returns False when execv fails
-    (the process keeps running); on success it never returns at all (the
-    process image is replaced).
+    precondition bundle.  The serving loop stops accepting connections and
+    runs Quart's bounded production shutdown stack before ``server.py`` calls
+    ``execv`` from the main thread.  Returns ``False`` only when that shutdown
+    bridge is unavailable; an accepted request returns immediately while the
+    lifecycle drains.
     """
-    logger.info('[Update] Re-execing server (%s): %s %s',
-                reason, sys.executable, ' '.join(sys.argv))
-    # Carry write-freshness tokens across the restart — os.execv replaces
-    # the process image WITHOUT running atexit handlers, so the snapshot
-    # must be written explicitly here (the signal path is covered by the
-    # atexit hook in server.py). Best-effort: never blocks a restart.
+    from lib.server_reexec import (
+        begin_server_reexec,
+        finish_server_reexec_preparation,
+    )
+
+    if not begin_server_reexec(reason):
+        return False
+    logger.info(
+        '[Update] Graceful server re-exec requested (%s); draining lifecycle',
+        reason,
+    )
+    # The shutdown event and its hard deadline are armed above before these
+    # best-effort writes touch the data volume.  ``execv`` skips atexit, so the
+    # freshness snapshot still has to land before the main thread replaces the
+    # process image.
     try:
         from lib import write_freshness as _wf
         _wf.save_snapshot()
     except Exception as _wf_e:
         logger.warning('[Update] write-freshness snapshot save failed: %s', _wf_e)
-    # Flip the clean-shutdown dirty-bit: an in-place re-exec is a controlled
-    # exit, so the fresh image must NOT flag the previous PID as an OS kill.
-    try:
-        from lib.shutdown_marker import mark_clean
-        mark_clean('restart')
-    except Exception as _sm_e:
-        logger.warning('[Update] mark_clean(restart) failed: %s', _sm_e)
-    # re-exec marker (pt_aa3cd224b3b346e7): tofu_guard must not relaunch into
-    # the re-exec window (old process dead → new one not yet exec'd/bound).
+    # tofu_guard must not relaunch into the drain / fresh-boot window.
     # execv KEEPS the pid, so the guard's process-age check can never see a
     # re-exec — this marker is the only truthful signal. The fresh image
     # clears it at boot-ready (server.py); the guard ignores markers older
-    # than 300s. Best-effort: a write failure degrades to the pre-marker
-    # behavior (a duplicate relaunch that dies harmlessly on the instance
-    # lock), never blocks the restart.
+    # than 300s. Best-effort: the live instance lock remains the second fence.
     try:
         with open(os.path.join(data_root(), '.reexec_in_progress'), 'w') as _fh:
             json.dump({'pid': os.getpid(), 'ts': time.time()}, _fh)
     except Exception as _mk_e:
         logger.warning('[Update] re-exec marker write failed (guard may race): %s',
                        _mk_e)
-    try:
-        # Let the env-reexec guard run again from a clean slate.
-        os.environ.pop('_TOFU_ENV_REEXEC', None)
-        # Drop Hypercorn's inheritable listen socket so execv frees the port;
-        # otherwise the new image inherits our bound socket and shifts to
-        # port+1. MUST run before execv. See _close_inheritable_listen_sockets.
-        _close_inheritable_listen_sockets()
-        # Tell the fresh image which port we were serving so it reclaims it
-        # (waits for our lingering listener to drain) instead of letting the
-        # connect-probe shift the port (15000 → 15001). See server.py.
-        _runtime_port = (os.environ.get('_TOFU_RUNTIME_PORT', '') or '').strip()
-        if _runtime_port:
-            os.environ['_TOFU_REEXEC_PORT'] = _runtime_port
-        os.execv(sys.executable, [sys.executable, *sys.argv])
-    except OSError as e:
-        # execv only returns on failure — log loudly; the process keeps running.
-        logger.critical('[Update] Re-exec failed, server NOT restarted: %s',
-                        e, exc_info=True)
-        return False
+    finish_server_reexec_preparation()
     return True
 
 
 def _deferred_reexec(delay: float = 0.6):
-    """Re-exec the current process after a short delay.
+    """Request process replacement after the HTTP response can flush.
 
-    Runs in a daemon thread so the HTTP response flushes first. Mirrors
-    server.py's launch contract: same interpreter, same argv. The instance
-    lock fd is close-on-exec, so it releases before the new image re-acquires.
+    The main serving thread owns the actual exec after the production shutdown
+    stack has released child authorities and transport sockets.
     """
     time.sleep(delay)
     _perform_server_reexec('update')
@@ -439,7 +385,7 @@ def update_restart():
     # silently interrupts all its long-running siblings. The caller's own
     # conversation (if any) is excluded so it can restart itself.
     #
-    # HUMAN-APPROVAL GATE (pt_40d00fd526e5479a, 2026-07-28 incident: an
+    # HUMAN-APPROVAL GATE (, 2026-07-28 incident: an
     # autopilot conv curl'ed this endpoint twice in 3 minutes, killing 23
     # in-flight tasks; the "approval" came from its own VU, not a human):
     # without a valid ``approvalId`` the request only REGISTERS a pending
@@ -565,7 +511,7 @@ def _deferred_shutdown(delay: float = 0.6):
     tags=['system'],
 )
 def update_shutdown():
-    # Same human-approval gate as restart (pt_40d00fd526e5479a) — a shutdown
+    # Same human-approval gate as restart () — a shutdown
     # strands every user and in-flight task, so a unilateral agent call must
     # not be able to trigger it. No cooldown: a shutdown is one-way.
     body = parse_body()

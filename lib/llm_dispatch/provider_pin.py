@@ -31,7 +31,7 @@ A :class:`threading.local`. ``run_task`` (the orchestrator's per-task
 worker thread) sets the pin from ``task['_pinned_provider_id']`` and
 clears it on exit; ``_pick`` / ``has_capable_slots`` read it. Aux LLM
 calls made synchronously on the same thread (Layer-2 / advanced
-compaction summarizers, endpoint Planner/Worker/Critic turns) inherit
+compaction summarizers, Flow planner/worker/critic turns) inherit
 it automatically. Swarm sub-agents run on their OWN threads, so the
 master orchestrator forwards the pin and each :class:`SubAgent` re-enters
 :func:`provider_pin` at the top of its run loop.

@@ -14,17 +14,31 @@ import threading
 import time
 import unittest
 
-from lib.agent_core import admission
+import lib.agent_core.admission as admission
 
 
 def test_personal_server_default_is_bounded(monkeypatch):
     monkeypatch.delenv('TOFU_MAX_INFLIGHT_TASKS', raising=False)
-    assert admission._default_max_inflight() == 16
+    monkeypatch.delenv('TOFU_DEPLOYMENT_MODE', raising=False)
+    monkeypatch.setattr(
+        admission, 'deployment_resource_default', lambda *_args: 4)
+    assert admission._default_max_inflight() == 4
 
 
 def test_invalid_inflight_config_falls_back_safely(monkeypatch):
     monkeypatch.setenv('TOFU_MAX_INFLIGHT_TASKS', 'not-an-int')
-    assert admission._default_max_inflight() == 16
+    monkeypatch.delenv('TOFU_DEPLOYMENT_MODE', raising=False)
+    monkeypatch.setattr(
+        admission, 'deployment_resource_default', lambda *_args: 4)
+    assert admission._default_max_inflight() == 4
+
+
+def test_zero_inflight_config_cannot_disable_production_admission(monkeypatch):
+    monkeypatch.setenv('TOFU_MAX_INFLIGHT_TASKS', '0')
+    monkeypatch.delenv('TOFU_DEPLOYMENT_MODE', raising=False)
+    monkeypatch.setattr(
+        admission, 'deployment_resource_default', lambda *_args: 4)
+    assert admission._default_max_inflight() == 4
 
 
 def test_memory_pressure_gate_fails_closed_and_is_disableable(monkeypatch):

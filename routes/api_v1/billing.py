@@ -24,6 +24,7 @@ customer dashboard can render before the user has logged in.
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 
@@ -35,12 +36,13 @@ from lib.api_response import (
 from lib.billing import (
     cost as _cost,
     InsufficientFunds,
+    RedeemCodeAlreadyUsed,
+    RedeemCodeExpired,
+    RedeemCodeNotFound,
     deposit, debit, get_wallet, list_entries,
+    list_redeem_codes, mint_redeem_codes, redeem_code,
 )
 from lib.billing.users import get_user
-from lib.database import (
-    DOMAIN_SYSTEM, async_execute, async_fetchall, async_fetchone,
-)
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
@@ -92,14 +94,10 @@ def _resolve_target_user() -> str:
         return requested
     if ctx is None:
         return ''
-    # The user_id is stamped on the API-key row by the
-    # ``create_user_key()`` helper in :mod:`lib.api_keys`. Fall back to
-    # an empty string when missing (legacy keys / open mode).
-    return getattr(ctx, 'user_id', '') or ''
+    return ctx.account_user_id or ''
 
 
-def _wallet_payload(user_id: str) -> dict:
-    snap = get_wallet(user_id)
+def _wallet_snapshot_payload(snap) -> dict:
     return {
         'user_id': snap.user_id,
         'balance_micro': snap.balance_micro,
@@ -108,6 +106,10 @@ def _wallet_payload(user_id: str) -> dict:
         'low_balance_alert_micro': snap.low_balance_alert_micro,
         'updated_at': snap.updated_at,
     }
+
+
+def _wallet_payload(user_id: str) -> dict:
+    return _wallet_snapshot_payload(get_wallet(user_id))
 
 
 # ── Pricing (public) ────────────────────────────────────────────────
@@ -261,33 +263,22 @@ async def redeem_route():
     code = require_str(body, 'code', max_len=64).strip()
     if not code:
         return api_bad_request('code required', field='code')
-    row = await async_fetchone(
-        'SELECT amount_micro, expires_at, redeemed_by '
-        '  FROM billing_redeem_codes WHERE code = ?',
-        (code,), domain=DOMAIN_SYSTEM)
-    if row is None:
+    try:
+        redemption = await asyncio.to_thread(
+            redeem_code, code, user_id=user_id, redeemed_at=int(time.time()))
+    except RedeemCodeNotFound:
         return api_not_found('No such code', error_kind='code_not_found')
-    amount = int(row[0] if not hasattr(row, 'keys') else row['amount_micro'])
-    expires_at = int(row[1] if not hasattr(row, 'keys') else row['expires_at'])
-    redeemed_by = (row[2] if not hasattr(row, 'keys') else row['redeemed_by']) or ''
-    if redeemed_by:
+    except RedeemCodeAlreadyUsed:
         return api_bad_request(
-            f'Code already redeemed by {redeemed_by}',
+            'Code already redeemed',
             error_kind='already_redeemed')
-    if expires_at and expires_at < int(time.time()):
+    except RedeemCodeExpired:
         return api_bad_request('Code expired', error_kind='expired')
-    deposit(user_id, amount, kind='redeem',
-            ref_type='redeem_code', ref_id=code,
-            note=f'redeemed code {code}')
-    await async_execute(
-        'UPDATE billing_redeem_codes '
-        '   SET redeemed_by = ?, redeemed_at = ? '
-        ' WHERE code = ?',
-        (user_id, int(time.time()), code), domain=DOMAIN_SYSTEM)
+    amount = redemption.code.amount_micro
     audit_log('redeem_code_used', user_id=user_id, code=code,
               amount_micro=amount)
     return api_ok(
-        wallet=_wallet_payload(user_id),
+        wallet=_wallet_snapshot_payload(redemption.wallet),
         redeemed={'code': code, 'amount_micro': amount,
                    'amount_credits': _cost.micro_to_credits(amount)},
     )
@@ -383,26 +374,23 @@ async def mint_codes_route():
     created_by = (ctx.key_id if ctx else '') or ''
     now = int(time.time())
     expires_at = now + expires_in_days * 86400 if expires_in_days else 0
-    codes = []
-    for _ in range(count):
-        # Loop until unique. Collision space is huge; loop almost never iterates.
-        while True:
-            code = _gen_code()
-            try:
-                await async_execute(
-                    'INSERT INTO billing_redeem_codes '
-                    '  (code, amount_micro, batch, created_by, '
-                    '   created_at, expires_at, note) '
-                    'VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    (code, amount_micro, batch, created_by,
-                     now, expires_at, note), domain=DOMAIN_SYSTEM)
-                break
-            except Exception as e:
-                if 'UNIQUE' in str(e) or 'duplicate' in str(e).lower():
-                    continue
-                logger.error('[Billing] mint failed: %s', e, exc_info=True)
-                raise
-        codes.append(code)
+    codes: list[str] = []
+    seen: set[str] = set()
+    while len(codes) < count:
+        code = _gen_code()
+        if code not in seen:
+            seen.add(code)
+            codes.append(code)
+    codes = await asyncio.to_thread(
+        mint_redeem_codes,
+        codes,
+        amount_micro=amount_micro,
+        batch=batch,
+        created_by=created_by,
+        created_at=now,
+        expires_at=expires_at,
+        note=note,
+    )
     audit_log('redeem_codes_minted', batch=batch, count=count,
               amount_micro=amount_micro, by=created_by)
     return api_created(
@@ -422,51 +410,32 @@ async def mint_codes_route():
 async def list_codes_route():
     batch = (request.args.get('batch') or '').strip()
     status = (request.args.get('status') or 'all').strip().lower()
+    if status not in {'all', 'redeemed', 'unredeemed'}:
+        return api_bad_request(
+            'status must be all, redeemed, or unredeemed', field='status')
     try:
         limit = max(1, min(int(request.args.get('limit') or 100), 1000))
         offset = max(0, int(request.args.get('offset') or 0))
     except (ValueError, TypeError):
         return api_bad_request('limit/offset must be integers', field='limit')
-    where = []
-    params: list = []
-    if batch:
-        where.append('batch = ?')
-        params.append(batch)
-    if status == 'unredeemed':
-        where.append("(redeemed_by = '' OR redeemed_by IS NULL)")
-    elif status == 'redeemed':
-        where.append("redeemed_by != ''")
-    sql = ('SELECT code, amount_micro, batch, created_by, created_at, '
-           '       expires_at, redeemed_by, redeemed_at, note '
-           '  FROM billing_redeem_codes')
-    if where:
-        sql += ' WHERE ' + ' AND '.join(where)
-    sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
-    params.extend([limit, offset])
-    rows = await async_fetchall(sql, tuple(params), domain=DOMAIN_SYSTEM)
-    out = []
-    for r in rows:
-        if hasattr(r, 'keys'):
-            out.append({
-                'code': r['code'],
-                'amount_micro': int(r['amount_micro']),
-                'batch': r['batch'] or '',
-                'created_by': r['created_by'] or '',
-                'created_at': int(r['created_at']),
-                'expires_at': int(r['expires_at']),
-                'redeemed_by': r['redeemed_by'] or '',
-                'redeemed_at': int(r['redeemed_at']),
-                'note': r['note'] or '',
-            })
-        else:
-            out.append({
-                'code': r[0], 'amount_micro': int(r[1]),
-                'batch': r[2] or '', 'created_by': r[3] or '',
-                'created_at': int(r[4]), 'expires_at': int(r[5]),
-                'redeemed_by': r[6] or '', 'redeemed_at': int(r[7]),
-                'note': r[8] or '',
-            })
-    return api_ok(codes=out, limit=limit, offset=offset)
+    rows = await asyncio.to_thread(
+        list_redeem_codes,
+        batch=batch,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+    return api_ok(codes=[{
+        'code': row.code,
+        'amount_micro': row.amount_micro,
+        'batch': row.batch,
+        'created_by': row.created_by,
+        'created_at': row.created_at,
+        'expires_at': row.expires_at,
+        'redeemed_by': row.redeemed_by,
+        'redeemed_at': row.redeemed_at,
+        'note': row.note,
+    } for row in rows], limit=limit, offset=offset)
 
 
 # ── Payment webhooks ────────────────────────────────────────────────

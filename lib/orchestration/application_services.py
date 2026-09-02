@@ -66,8 +66,12 @@ class OrchestrationApplicationServices:
             run_service=self.runs,
         )
 
-    def runtime_mutations(self) -> RuntimeMutationServicePort:
-        return OrchestrationRuntimeMutationService(self.runtime)
+    def runtime_mutations(
+        self,
+        owner_user_id: int,
+    ) -> RuntimeMutationServicePort:
+        return OrchestrationRuntimeMutationService(
+            self.runtime, owner_user_id)
 
     def resolve_definition(self, body: dict) -> ResolvedDefinitionPort:
         inline, stored_id = definition_selection_values(body)

@@ -13,7 +13,7 @@ from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import parse_body
 
-from .auth import require_auth
+from .auth import request_user_id, require_auth
 
 logger = get_logger(__name__)
 
@@ -30,12 +30,13 @@ _DOCUMENT_SORTS = {'updated_desc', 'created_desc', 'name_asc', 'size_desc'}
 
 
 def _status_payload(
-    *, page: int = 1, page_size: int = 30, query: str = '',
+    *, user_id: int, page: int = 1, page_size: int = 30, query: str = '',
     category: str = 'all', sort: str = 'updated_desc',
 ) -> dict:
     from lib.knowledge import get_status
     from lib.knowledge.ingest import SUPPORTED_EXTENSIONS
     status = get_status(
+        user_id=user_id,
         page=page, page_size=page_size, query=query,
         category=category, sort=sort)
     return {
@@ -57,6 +58,7 @@ def _status_payload(
 @require_auth
 @api_meta(summary='Local knowledge-base status', tags=['knowledge'])
 def knowledge_status_v1():
+    owner_user_id = int(request_user_id())
     query = str(request.args.get('query') or '').strip()
     category = str(request.args.get('category') or 'all').lower()
     sort = str(request.args.get('sort') or 'updated_desc').lower()
@@ -79,6 +81,7 @@ def knowledge_status_v1():
         return api_bad_request(
             'page_size must be from 1 to 100', field='page_size')
     return api_ok(_status_payload(
+        user_id=owner_user_id,
         page=page, page_size=page_size, query=query,
         category=category, sort=sort))
 
@@ -88,13 +91,14 @@ def knowledge_status_v1():
 @api_meta(summary='Local knowledge background activity', tags=['knowledge'])
 def knowledge_activity_v1():
     from lib.knowledge import get_activity
-    return api_ok(get_activity())
+    return api_ok(get_activity(user_id=int(request_user_id())))
 
 
 @api_v1_knowledge_bp.route('/api/v1/knowledge/settings', methods=['POST'])
 @require_auth
 @api_meta(summary='Enable or disable local knowledge retrieval', tags=['knowledge'])
 def knowledge_settings_v1():
+    owner_user_id = int(request_user_id())
     body = parse_body()
     has_enabled = 'enabled' in body
     has_visual = 'visual_enrichment' in body
@@ -109,16 +113,18 @@ def knowledge_settings_v1():
             field='visual_enrichment')
     from lib.knowledge import set_enabled, set_visual_enrichment
     if has_enabled:
-        set_enabled(body['enabled'])
+        set_enabled(body['enabled'], user_id=owner_user_id)
     if has_visual:
-        set_visual_enrichment(body['visual_enrichment'])
-    return api_ok(_status_payload())
+        set_visual_enrichment(
+            body['visual_enrichment'], user_id=owner_user_id)
+    return api_ok(_status_payload(user_id=owner_user_id))
 
 
 @api_v1_knowledge_bp.route('/api/v1/knowledge/search', methods=['POST'])
 @require_auth
 @api_meta(summary='Preview the local knowledge index', tags=['knowledge'])
 def knowledge_search_v1():
+    owner_user_id = int(request_user_id())
     body = parse_body()
     query = str(body.get('query') or '').strip()
     if not query:
@@ -135,7 +141,8 @@ def knowledge_search_v1():
     if not 1 <= limit <= 10:
         return api_bad_request('limit must be an integer from 1 to 10', field='limit')
     from lib.knowledge.search import search
-    results = search(query, limit=limit, require_enabled=False)
+    results = search(
+        query, limit=limit, require_enabled=False, user_id=owner_user_id)
     return api_ok({'query': query, 'count': len(results), 'results': results})
 
 
@@ -145,7 +152,7 @@ def knowledge_search_v1():
 @api_meta(summary='Read an authenticated knowledge image asset', tags=['knowledge'])
 def knowledge_asset_v1(asset_id: str):
     from lib.knowledge import read_asset
-    loaded = read_asset(asset_id)
+    loaded = read_asset(asset_id, user_id=int(request_user_id()))
     if loaded is None:
         return api_not_found('Knowledge asset not found')
     row, raw = loaded
@@ -206,6 +213,7 @@ def _uploaded_files() -> list:
     tags=['knowledge'],
 )
 def knowledge_upload_v1():
+    owner_user_id = int(request_user_id())
     uploads = _uploaded_files()
     if not uploads:
         return api_bad_request('No files provided', field='files')
@@ -233,7 +241,8 @@ def knowledge_upload_v1():
             errors.append({'name': name, 'error': 'Upload batch exceeded 200 MB'})
             continue
         try:
-            indexed.append(add_document(raw, name))
+            indexed.append(add_document(
+                raw, name, user_id=owner_user_id))
         except KnowledgeIngestError as exc:
             errors.append({'name': name, 'error': str(exc)})
         except Exception as exc:
@@ -244,7 +253,7 @@ def knowledge_upload_v1():
     return api_ok({
         'indexed': indexed,
         'errors': errors,
-        **_status_payload(),
+        **_status_payload(user_id=owner_user_id),
     })
 
 
@@ -253,6 +262,7 @@ def knowledge_upload_v1():
 @require_auth
 @api_meta(summary='Inspect parsed local knowledge content', tags=['knowledge'])
 def knowledge_content_v1(document_id: str):
+    owner_user_id = int(request_user_id())
     from lib.knowledge import get_document_content
     try:
         offset = int(request.args.get('offset', 0))
@@ -265,7 +275,7 @@ def knowledge_content_v1(document_id: str):
     if not 1 <= limit <= 200:
         return api_bad_request('limit must be from 1 to 200', field='limit')
     content = get_document_content(
-        document_id, offset=offset, limit=limit)
+        document_id, user_id=owner_user_id, offset=offset, limit=limit)
     if content is None:
         return api_not_found('Knowledge document not found')
     return api_ok(content)
@@ -276,15 +286,19 @@ def knowledge_content_v1(document_id: str):
 @require_auth
 @api_meta(summary='Re-parse and reindex one local document', tags=['knowledge'])
 def knowledge_reindex_v1(document_id: str):
+    owner_user_id = int(request_user_id())
     from lib.knowledge import reindex_document
     from lib.knowledge.ingest import KnowledgeIngestError
     try:
-        document = reindex_document(document_id)
+        document = reindex_document(document_id, user_id=owner_user_id)
     except KnowledgeIngestError as exc:
         return api_bad_request(str(exc))
     if document is None:
         return api_not_found('Knowledge document not found')
-    return api_ok({'reindexed': document, **_status_payload()})
+    return api_ok({
+        'reindexed': document,
+        **_status_payload(user_id=owner_user_id),
+    })
 
 
 @api_v1_knowledge_bp.route(
@@ -293,9 +307,10 @@ def knowledge_reindex_v1(document_id: str):
 @api_meta(summary='Delete one local knowledge document', tags=['knowledge'])
 def knowledge_delete_v1(document_id: str):
     from lib.knowledge import delete_document
-    if not delete_document(document_id):
+    owner_user_id = int(request_user_id())
+    if not delete_document(document_id, user_id=owner_user_id):
         return api_not_found('Knowledge document not found')
-    return api_ok(_status_payload())
+    return api_ok(_status_payload(user_id=owner_user_id))
 
 
 __all__ = ['api_v1_knowledge_bp']

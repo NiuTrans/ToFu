@@ -70,8 +70,7 @@ def test_run_status_openapi_schema_is_derived_and_detached():
 def test_persistence_and_http_replay_use_canonical_terminal_predicate():
     run_persistence = ''.join(open(os.path.join(ROOT, path),
                                    encoding='utf-8').read() for path in (
-        'lib/orchestration/run_header_repository.py',
-        'lib/orchestration/run_store_codec.py',
+        'lib/storage_sidecar/operations_pkg/_runs.py',
     ))
     route = open(os.path.join(
         ROOT, 'routes/api_v1/orchestrations.py'), encoding='utf-8').read()
@@ -107,7 +106,8 @@ def test_persistence_and_http_replay_use_canonical_terminal_predicate():
     assert 'is_terminal_run_status(status)' in run_persistence
     assert 'is_run_status(status)' in run_persistence
     assert 'TERMINAL_RUN_STATUSES' in run_persistence
-    assert 'terminal transition fenced' in run_persistence
+    assert 'Terminal orchestration status requires an explicit transition' in \
+        run_persistence
     assert "frozenset({'done', 'error', 'aborted'})" not in run_persistence
     assert "status in ('done', 'error', 'aborted')" not in (
         task_routes + mutation_routes)
@@ -117,8 +117,9 @@ def test_persistence_and_http_replay_use_canonical_terminal_predicate():
     assert 'task_replay_http_status(payload)' in shared_task_http
     assert 'task_replay_response(resp)' in generic_task_routes
     assert "resp.get('error') == 'not_found'" not in generic_task_routes
-    assert 'runtime_mutation_service().abort(task_id)' in mutation_routes
-    assert 'runtime_abort_mutation(self._runtime, task_id)' in mutation_service
+    assert 'runtime_mutation_service(owner_user_id).abort(task_id)' in \
+        mutation_routes
+    assert 'self._runtime, task_id, self.owner_user_id' in mutation_service
     assert 'is_terminal_run_status(status)' in mutation
     assert 'is_terminal_run_status(status)' in outcome
     assert "status in {'done', 'error', 'aborted'}" not in outcome

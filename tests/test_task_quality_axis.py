@@ -46,7 +46,7 @@ def _run(coro):
 def test_degraded_job_keeps_lifecycle_status_done():
     """The whole point: quality must NOT leak into the lifecycle axis."""
     rt = TaskRuntime('quality-test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.finish(task['id'], result={'accepted': []}, degraded=True,
               degraded_reason='structural gate rejected every idea')
 
@@ -60,7 +60,7 @@ def test_degraded_job_keeps_lifecycle_status_done():
 
 def test_clean_job_is_assessed_and_healthy():
     rt = TaskRuntime('quality-test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.finish(task['id'], result={'ok': 1}, degraded=False)
     assert task['status'] == 'done'
     assert task['artifact_quality'] == {'degraded': False, 'reason': ''}
@@ -73,7 +73,7 @@ def test_unassessed_job_reports_no_quality_verdict():
     look explicitly-healthy by omission.
     """
     rt = TaskRuntime('quality-test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.finish(task['id'], result={'ok': 1})
     assert task['status'] == 'done'
     assert task['artifact_quality'] is None
@@ -85,7 +85,7 @@ def test_unassessed_job_reports_no_quality_verdict():
 def test_terminal_event_and_poll_carry_the_verdict():
     """A live SSE/WS subscriber must learn the verdict without a second GET."""
     rt = TaskRuntime('quality-test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.finish(task['id'], result={'x': 1}, degraded=True,
               degraded_reason='narration degraded to silent')
 
@@ -104,7 +104,7 @@ def test_terminal_event_and_poll_carry_the_verdict():
 def test_error_path_still_wins_over_quality():
     """A real failure is an ERROR, not a degraded success."""
     rt = TaskRuntime('quality-test')
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.finish(task['id'], error='harvest exploded', degraded=True,
               degraded_reason='should not mask the error')
     assert task['status'] == 'error'
@@ -137,7 +137,7 @@ def _tasks_app(runtime):
     and would make this file a false-green (pt_f6742ab638114f0f). Granting
     the scope on purpose keeps the test about the RESPONSE SHAPE.
     """
-    from quart import Quart, g
+    from quart import Quart, g, request
 
     import routes.api_v1.tasks as tasks_mod
     from lib.api_keys import local_admin_context
@@ -148,7 +148,9 @@ def _tasks_app(runtime):
 
     @app.before_request
     async def _grant():
-        g.auth_ctx = local_admin_context()
+        context = local_admin_context()
+        context.user_id = request.headers.get('X-Test-User', '1')
+        g.auth_ctx = context
         g.rate_decision = None
 
     app.register_blueprint(api_v1_tasks_bp)
@@ -172,7 +174,7 @@ def test_degraded_job_is_visible_through_the_task_api(api):
     indistinguishable from a clean one over HTTP.
     """
     app, rt = api
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.finish(task['id'], result={'accepted': [], 'rejected': []},
               degraded=True,
               degraded_reason='novelty retrieval returned nothing for every idea')
@@ -192,6 +194,28 @@ def test_degraded_job_is_visible_through_the_task_api(api):
     assert 'novelty retrieval' in quality['reason']
 
 
+def test_running_task_detail_omits_private_set_state(api):
+    """Private runtime state must neither leak nor turn polling into HTTP 500."""
+    app, rt = api
+    task = rt.create(user_id=1)
+    task['_budgetWarnings'] = {'max_tokens', 'max_rounds'}
+    task['_nestedRuntimeState'] = {
+        'excluded_pairs': {('provider-b', 'model-2'), ('provider-a', 'model-1')},
+    }
+
+    async def go():
+        response = await app.test_client().get(
+            f'/api/v1/tasks/{task["id"]}')
+        assert response.status_code == 200
+        return await response.get_json()
+
+    body = _run(go())
+    assert '_budgetWarnings' not in body
+    assert '_nestedRuntimeState' not in body
+    assert body['id'] == task['id']
+    assert body['status'] == 'pending'
+
+
 def test_task_list_surface_also_shows_the_verdict(api):
     """The list view hand-lists its fields, so it needs its own guard.
 
@@ -200,9 +224,9 @@ def test_task_list_surface_also_shows_the_verdict(api):
     green.
     """
     app, rt = api
-    clean = rt.create()
+    clean = rt.create(user_id=1)
     rt.finish(clean['id'], result={'ok': 1}, degraded=False)
-    sick = rt.create()
+    sick = rt.create(user_id=1)
     rt.finish(sick['id'], result={'ok': 1}, degraded=True,
               degraded_reason='every section came back empty')
 
@@ -219,6 +243,35 @@ def test_task_list_surface_also_shows_the_verdict(api):
     assert by_id[sick['id']]['status'] == 'done'
 
 
+def test_task_routes_never_expose_or_mutate_another_owner(api):
+    app, rt = api
+    own = rt.create(user_id=1)
+    foreign = rt.create(user_id=2)
+
+    async def go():
+        client = app.test_client()
+        headers = {'X-Test-User': '1'}
+        listing = await client.get('/api/v1/tasks', headers=headers)
+        detail = await client.get(
+            f'/api/v1/tasks/{foreign["id"]}', headers=headers)
+        events = await client.get(
+            f'/api/v1/tasks/{foreign["id"]}/events', headers=headers)
+        abort = await client.post(
+            f'/api/v1/tasks/{foreign["id"]}/abort', headers=headers)
+        delete = await client.delete(
+            f'/api/v1/tasks/{foreign["id"]}', headers=headers)
+        return (
+            await listing.get_json(), detail.status_code, events.status_code,
+            abort.status_code, delete.status_code,
+        )
+
+    body, detail_status, events_status, abort_status, delete_status = _run(go())
+    assert [item['id'] for item in body['tasks']] == [own['id']]
+    assert {detail_status, events_status, abort_status, delete_status} == {404}
+    assert rt.get(foreign['id']) is foreign
+    assert not foreign['abort_event'].is_set()
+
+
 # ── The three consumers wire the same shape ──
 
 def test_research_engine_reports_its_degraded_verdict(monkeypatch, tmp_path):
@@ -227,9 +280,10 @@ def test_research_engine_reports_its_degraded_verdict(monkeypatch, tmp_path):
     import lib.research.engine as eng
     from lib.research.runtime import _research_runtime
 
-    task = _research_runtime.create(task_id='research-quality-1')
+    task = _research_runtime.create(user_id=1, task_id='research-quality-1')
     task.update({'task_id': 'research-quality-1', 'direction': 'x',
-                 'workdir': str(tmp_path), 'lang': 'en', 'n_ideas': 2})
+                 'workdir': str(tmp_path), 'lang': 'en', 'n_ideas': 2,
+                 'user_id': 1})
 
     monkeypatch.setattr(eng, '_write_manifest', lambda *a, **k: None)
     monkeypatch.setattr(eng, '_emit', lambda *a, **k: None)
@@ -253,7 +307,7 @@ def test_longform_engine_flags_a_report_missing_sections(monkeypatch, tmp_path):
     import lib.longform.engine as eng
     from lib.longform.runtime import _longform_runtime
 
-    task = _longform_runtime.create(task_id='longform-quality-1')
+    task = _longform_runtime.create(user_id=1, task_id='longform-quality-1')
     task.update({'task_id': 'longform-quality-1', 'topic': 't',
                  'workdir': str(tmp_path), 'lang': 'zh', 'depth': 'brief',
                  'conv_id': ''})
@@ -278,7 +332,7 @@ def test_longform_complete_report_is_not_flagged(monkeypatch, tmp_path):
     import lib.longform.engine as eng
     from lib.longform.runtime import _longform_runtime
 
-    task = _longform_runtime.create(task_id='longform-quality-2')
+    task = _longform_runtime.create(user_id=1, task_id='longform-quality-2')
     task.update({'task_id': 'longform-quality-2', 'topic': 't',
                  'workdir': str(tmp_path), 'lang': 'zh', 'depth': 'brief',
                  'conv_id': ''})
@@ -307,7 +361,7 @@ def test_motion_video_narration_degrade_is_a_quality_verdict():
     """
     from lib.motion_video.runtime import _motion_runtime
 
-    task = _motion_runtime.create(task_id='motion-quality-1')
+    task = _motion_runtime.create(user_id=1, task_id='motion-quality-1')
     _motion_runtime.finish(
         'motion-quality-1', result={'narrated': False, 'burn_in_auto': True},
         degraded=True,

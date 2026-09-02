@@ -201,6 +201,47 @@ def test_discover_reports_effective_base_url(monkeypatch):
 
 
 @pytest.mark.unit
+def test_periodic_discovery_can_silence_only_clean_not_found(monkeypatch,
+                                                            caplog):
+    """An unrelated listener on a well-known port is expected probe noise.
+
+    The opt-in must suppress both fallback 404s without weakening visibility
+    for a genuine upstream/server failure.
+    """
+    import logging
+    import lib.llm_dispatch.discovery as disco_pkg
+    from lib.llm_dispatch.discovery import discover_models
+
+    monkeypatch.setattr(
+        disco_pkg, 'http_get',
+        lambda *_a, **_k: _Resp(False, 404), raising=False)
+    with caplog.at_level(logging.DEBUG):
+        assert discover_models(
+            'http://10.0.0.5:11434', '', quiet_not_found=True) == []
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert sum('returned HTTP 404' in r.getMessage()
+               for r in caplog.records) == 2
+    assert not [
+        r for r in caplog.records
+        if r.levelno >= logging.INFO
+        and ('Fetching models' in r.getMessage()
+             or 'Received ' in r.getMessage()
+             or 'usable models' in r.getMessage())
+    ], 'best-effort background discovery must keep routine fetch logs at DEBUG'
+
+    caplog.clear()
+    monkeypatch.setattr(
+        disco_pkg, 'http_get',
+        lambda *_a, **_k: _Resp(False, 503), raising=False)
+    with caplog.at_level(logging.DEBUG):
+        assert discover_models(
+            'http://10.0.0.5:11434', '', quiet_not_found=True) == []
+    assert any(r.levelno >= logging.WARNING and
+               'returned HTTP 503' in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.unit
 def test_probe_result_carries_effective_v1_base_url(monkeypatch):
     import lib.llm_dispatch.discovery as disco_pkg
     fake, _ = _fake_http_get()

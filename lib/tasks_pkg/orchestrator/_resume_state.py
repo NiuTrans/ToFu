@@ -1,4 +1,4 @@
-"""Resume-state hydration — pt_03f4cdf1 slice 10.
+"""Resume-state hydration —  slice 10.
 
 Extracted from ``lib/tasks_pkg/orchestrator/_run.py`` (previously inline in
 ``run_task`` between the Section 3.5 eligibility-drift guard and the
@@ -55,7 +55,7 @@ def apply_resume_state(
     inside the function to keep import cost off run_task's cold path when
     resumePrefill is empty (the overwhelmingly common case).
     """
-    # ★ Apply preserved content prefix from Continue — ensures backend checkpoints
+    # Apply preserved content prefix from Continue — ensures backend checkpoints
     #   include text the LLM generated alongside completed tool rounds in the prior
     #   task, so page-refresh mid-stream doesn't lose that content.
     #
@@ -77,7 +77,7 @@ def apply_resume_state(
         logger.debug('[%s] conv=%s Applied contentPrefix (%d chars) from continue checkpoint',
                      tid, task.get('convId', ''), len(_content_prefix))
 
-    # ★ Resume-prefill (epic pt_cb8f98b0cb9b47fb): the capability-gated
+    # Resume-prefill (): the capability-gated
     #   exception to the "never inject contentPrefix as a trailing assistant
     #   turn" rule above. resumePrefill is set ONLY when routes/chat.py's
     #   resume_prefill_from_segments already confirmed the target provider
@@ -111,7 +111,7 @@ def apply_resume_state(
                         '— falling back to regenerate-from-checkpoint (contentPrefix seed only)',
                         tid, task.get('convId', ''), model)
 
-    # ★ Stash checkpoint metadata for merging into done event and DB persistence.
+    # Stash checkpoint metadata for merging into done event and DB persistence.
     #   NOTE: we do NOT pre-populate task['toolRounds'] with checkpoint rounds
     #   because the frontend's state/delta handlers would double-count them
     #   (frontend does _continueToolRounds.concat(ev.toolRounds)).  Instead,

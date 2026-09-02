@@ -31,7 +31,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-from lib.tasks_pkg.conv_message_builder import (
+from lib.tasks_pkg.conv_message_builder._toolcalls import (
     build_assistant_tool_call_message,
     _reconstruct_tool_call_messages,
 )

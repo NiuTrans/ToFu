@@ -40,7 +40,7 @@ _FUNCS_NO_TOOLS = ['_is_dangerous_command', '_mask_quoted_literals']
 # Module-level constants/regexes: shared between command_analysis and the
 # run_command re-export (tools.py never re-exported these bare names).
 _MOVED_CONSTS = [
-    '_ANSI_ESC_RE', '_DANGEROUS_RE', '_DELETE_COMMANDS', '_DEVICE_RE',
+    '_ANSI_ESC_RE', '_AWK_INPLACE', '_DANGEROUS_RE', '_DELETE_COMMANDS', '_DEVICE_RE',
     '_FS_HEAVY_RE', '_GIT_DESTRUCTIVE_SUBCOMMANDS', '_GIT_READONLY_SUBCOMMANDS',
     '_MIN_DELETE_DEPTH', '_PROGRESS_RE', '_READONLY_COMMANDS',
     '_REDIRECT_PATTERN', '_REDIRECT_TO_DEV_NULL', '_SED_INPLACE',

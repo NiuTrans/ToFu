@@ -19,10 +19,9 @@ guard passed the round through:
 Two defense lines under test here:
 
   1. **Observation** — ``SSEAccumulator.finalize`` raises the fifth anomaly
-     class ``tool_calls_no_payload`` (raw-frame dump + WARNING) and stamps
-     ``usage['_tool_calls_void']`` distinguishing 'gateway_no_payload' (the
-     wire carried no deltas) from 'filtered' (OUR phantom filter dropped
-     every entry — its own WARNINGs then exist in the log).
+     class ``tool_calls_no_payload`` (raw-frame dump + WARNING); typed evidence
+     projects ``usage['_tool_calls_void']`` as 'gateway_no_payload' (the wire
+     carried no deltas) or 'filtered' (OUR phantom filter dropped every entry).
   2. **Behaviour** — ``analyse_stream_result`` treats the shape like the
      other transport-lying buckets: transparent round retry (bounded,
      per-phase counter, content reset to round base), honest
@@ -42,14 +41,17 @@ import sys
 import threading
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.llm._sse_core import SSEAccumulator  # noqa: E402
 from lib.llm.diagnostics import RawSSEDumper  # noqa: E402
-from lib.tasks_pkg.stream_handler import (  # noqa: E402
-    _TOOL_CALLS_NO_PAYLOAD_RETRY_MAX,
-    analyse_stream_result,
-)
+from lib.tasks_pkg.stream_handler.api import analyse_stream_result  # noqa: E402
+from lib.tasks_pkg.stream_handler._budget import _TOOL_CALLS_NO_PAYLOAD_RETRY_MAX  # noqa: E402
+
+
+pytestmark = pytest.mark.unit
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -91,8 +93,10 @@ def test_tool_calls_finish_without_payload_dumps_anomaly():
     _feed(acc, {}, finish_reason='tool_calls',
           usage={'prompt_tokens': 106691, 'completion_tokens': 213})
     acc.saw_done = True
+    acc.progress.mark_done()
 
-    msg, finish_reason, usage = acc.finalize()
+    result = acc.finalize()
+    msg, finish_reason, usage = result
 
     assert finish_reason == 'tool_calls'
     assert 'tool_calls' not in msg
@@ -101,6 +105,8 @@ def test_tool_calls_finish_without_payload_dumps_anomaly():
     assert kw['cause'] == 'gateway_no_payload'
     assert kw['pre_filter_count'] == 0
     assert usage.get('_tool_calls_void') == 'gateway_no_payload', usage
+    assert result.evidence.tool_payload_missing is True
+    assert result.evidence.tool_payload_missing_cause == 'gateway_no_payload'
 
 
 def test_filtered_cause_when_own_filter_dropped_every_entry():
@@ -115,14 +121,18 @@ def test_filtered_cause_when_own_filter_dropped_every_entry():
     _feed(acc, {}, finish_reason='tool_calls',
           usage={'prompt_tokens': 10, 'completion_tokens': 5})
     acc.saw_done = True
+    acc.progress.mark_done()
 
-    msg, finish_reason, usage = acc.finalize()
+    result = acc.finalize()
+    msg, finish_reason, usage = result
 
     assert 'tool_calls' not in msg  # every entry was filtered out
     assert [r for r, _ in dumps] == ['tool_calls_no_payload'], dumps
     assert dumps[0][1]['cause'] == 'filtered'
     assert dumps[0][1]['pre_filter_count'] == 1
     assert usage.get('_tool_calls_void') == 'filtered'
+    assert result.evidence.tool_payload_missing is True
+    assert result.evidence.tool_payload_missing_cause == 'filtered'
 
 
 def test_tool_calls_finish_with_payload_is_silent():
@@ -139,6 +149,7 @@ def test_tool_calls_finish_with_payload_is_silent():
     _feed(acc, {}, finish_reason='tool_calls',
           usage={'prompt_tokens': 10, 'completion_tokens': 5})
     acc.saw_done = True
+    acc.progress.mark_done()
 
     msg, finish_reason, usage = acc.finalize()
 
@@ -155,6 +166,7 @@ def test_stop_finish_with_content_is_silent():
     _feed(acc, {}, finish_reason='stop',
           usage={'prompt_tokens': 10, 'completion_tokens': 5})
     acc.saw_done = True
+    acc.progress.mark_done()
 
     _msg, finish_reason, usage = acc.finalize()
 
@@ -168,10 +180,13 @@ def test_stop_finish_with_content_is_silent():
 # ─────────────────────────────────────────────────────────────────────
 
 def _fresh_task(phase_counter: int = 0) -> dict:
-    return {
+    task = {
         'id': 'void-test',
         'convId': 'conv-void',
+        '_userId': 1,
+        '_transientRuntime': True,
         'aborted': False,
+        'status': 'running',
         'content': '',
         'thinking': '',
         'error': None,
@@ -180,6 +195,10 @@ def _fresh_task(phase_counter: int = 0) -> dict:
         'content_lock': threading.Lock(),
         '_premature_retry_count_phase': phase_counter,
     }
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+    with tasks_lock:
+        tasks[task['id']] = task
+    return task
 
 
 def _usage(cause='gateway_no_payload'):

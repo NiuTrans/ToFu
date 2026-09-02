@@ -63,13 +63,17 @@ _THINKING_MODELS_TO_EXCLUDE = frozenset({
     'qwen-plus',
     # Gemini (2.5-pro is cheap+thinking; 2.5-flash & 3.1-flash-lite are cheap-only)
     'gemini-2.5-pro',
+    # Gemini 3.7 Flash (2026-08-13 release; cheap+thinking in both the
+    # builtin Gemini template and the OpenRouter relay)
+    'gemini-3.7-flash',
     # xAI (grok-4.20 is cheap+thinking; 4.1-mini is cheap-only)
     'grok-4.20',
     # Doubao (pro is cheap+thinking; lite is cheap-only)
     'doubao-seed-2-0-pro-260215',
-    # OpenRouter relay (google/gemini-3.1-pro-preview is the only
-    # cheap+thinking entry in the OpenRouter builtin template)
+    # OpenRouter relay (the cheap+thinking entries in the OpenRouter
+    # builtin template)
     'google/gemini-3.1-pro-preview',
+    'google/gemini-3.7-flash',
 })
 
 _SYSTEM_PROMPT_BASE = (

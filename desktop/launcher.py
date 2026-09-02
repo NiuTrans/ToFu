@@ -51,6 +51,9 @@ else:
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+from runtime_guards import install_process_resource_defaults  # noqa: E402
+from tofu_dotenv import load_dotenv_file  # noqa: E402
+
 # ── Portable data directory (next to the executable, not inside _internal) ──
 _EXE_DIR = (os.path.dirname(sys.executable)
             if getattr(sys, 'frozen', False) else BASE_DIR)
@@ -87,9 +90,23 @@ def _log(msg: str) -> None:
     global _log_fh
     if _log_fh is None:
         try:
+            from lib.log_retention import register_external_log
+            register_external_log(_LOG_PATH, 'desktop_console')
             _log_fh = open(_LOG_PATH, 'a', encoding='utf-8', buffering=1)
         except OSError:
             _log_fh = False  # give up on the file, still try stderr
+        except Exception:
+            # A retention helper failure must not make a windowed launcher
+            # silent; the open below remains its last-resort diagnostic sink.
+            try:
+                _log_fh = open(_LOG_PATH, 'a', encoding='utf-8', buffering=1)
+            except OSError:
+                _log_fh = False
+    try:
+        from lib.log_redaction import redact_text
+        line = redact_text(line, max_chars=4096)
+    except Exception:
+        pass
     try:
         if _log_fh:
             _log_fh.write(line)
@@ -155,6 +172,9 @@ def _server_command(port: int):
     Source:  run server.py directly with the current interpreter.
     """
     env = os.environ.copy()
+    load_dotenv_file(os.path.join(BASE_DIR, '.env'), env)
+    env['TOFU_PROJECT_PATH'] = _EXE_DIR
+    install_process_resource_defaults(env)
     env['PORT'] = str(port)
     env['BIND_HOST'] = '127.0.0.1'
     # Plain HTTP on loopback — no self-signed cert warnings for a local app.
@@ -164,6 +184,8 @@ def _server_command(port: int):
     # handle and Quit can stop exactly the server it launched.
     env['TOFU_SERVER_WORKER'] = '1'
     env['TOFU_MANAGED_BY'] = 'desktop'
+    env['TOFU_EXTERNAL_CONSOLE_LOG'] = _LOG_PATH
+    env['TOFU_EXTERNAL_CONSOLE_STREAM'] = 'desktop_console'
 
     if getattr(sys, 'frozen', False):
         env['TOFU_RUN_SERVER'] = '1'
@@ -178,6 +200,11 @@ def _spawn_server(port: int) -> subprocess.Popen:
     # Tee child stdout/stderr into the desktop log (its own stderr may be a
     # dead handle in windowed mode, so give it a real file).
     try:
+        try:
+            from lib.log_retention import register_external_log
+            register_external_log(_LOG_PATH, 'desktop_console')
+        except Exception:
+            pass
         out = open(_LOG_PATH, 'a', encoding='utf-8', buffering=1)
     except OSError:
         out = subprocess.DEVNULL
@@ -312,7 +339,8 @@ def _start_computer_control(port: int, state: dict) -> None:
     # none configured we poll the server this app just started, which is the
     # packaged-app default and must stay untouched.
     server_url = f'http://127.0.0.1:{port}'
-    bridge_secret = (os.environ.get('TOFU_BRIDGE_SECRET') or '').strip()
+    from lib.bridge_auth import process_agent_token
+    bridge_secret = process_agent_token()
     try:
         from lib.desktop_agent.config import remote_server
         _rurl, _rsecret = remote_server()

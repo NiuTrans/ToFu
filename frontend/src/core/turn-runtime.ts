@@ -1,8 +1,18 @@
-import {
-  createAttemptEventStream,
-  type AttemptContinuation,
-  type AttemptStreamConnection,
-} from './attempt-stream';
+import type {
+  AppendSettledTurnRequest,
+  ConnectionHealth,
+  ConversationSyncApi,
+  CreateAttemptRequest,
+  CreateLaneRequest,
+  CreateTurnRequest,
+  DeleteTurnsRequest,
+  ExecutePlanRequest,
+  FileChangesCommandRequest,
+  UpdateTurnRequest,
+  TurnRecord,
+} from '../api/conversation-sync.generated';
+import { assertConversationSyncSchema } from '../api/conversation-sync.generated';
+import type { RequestOptions } from '../api/transport';
 import {
   buildTurnOperationRequest,
   buildTurnSubmitRequest,
@@ -10,11 +20,14 @@ import {
 } from './turn-command';
 import {
   applyTurnStateProjection,
-  type LegacyTurnConversation,
-  type ProjectionTurn,
+  type ProjectedConversation,
 } from './turn-projection';
 import { presentTurnFinish, resumeTurnOptions } from './turn-presentation';
 import { renderTurnStateInto, type TurnRenderer } from './turn-render';
+import {
+  ConversationSyncCoordinator,
+  type ConversationSyncConnection,
+} from './conversation-sync';
 import {
   createTurnState,
   createTurnStore,
@@ -26,64 +39,44 @@ import {
 } from './turn-state';
 
 type UnknownRecord = Record<string, unknown>;
-type RuntimeStore = TurnStore & { _snapshotLoaded?: boolean };
+type RuntimeStore = TurnStore & {
+  _snapshotLoaded?: boolean;
+};
 
-export interface RuntimeConversation extends LegacyTurnConversation {
+export interface RuntimeConversation extends ProjectedConversation {
   id: string;
   title?: string;
   createdAt?: number;
   _localOnly?: boolean;
-  _activeAttemptId?: string | null;
-  _activeBranchAttemptIds?: Set<string>;
-}
-
-export interface TurnsV2Transport {
-  list(conversationId: string): Promise<unknown>;
-  submit(
-    conversationId: string,
-    payload: UnknownRecord,
-    requestOptions?: unknown,
-  ): Promise<unknown>;
-  attempt(
-    conversationId: string,
-    turnId: string,
-    payload: UnknownRecord,
-  ): Promise<unknown>;
-  streamUrl(attemptId: string, after?: number): string;
-  update(
-    conversationId: string,
-    turnId: string,
-    payload: UnknownRecord,
-  ): Promise<unknown>;
-  createLane(
-    conversationId: string,
-    parentTurnId: string,
-    payload: UnknownRecord,
-  ): Promise<unknown>;
-  deleteLane(
-    conversationId: string,
-    parentTurnId: string,
-    laneId: string,
-  ): Promise<unknown>;
-  deleteTurns(conversationId: string, turnIds: readonly string[]): Promise<unknown>;
-  abort(attemptId: string): Promise<unknown>;
 }
 
 export interface TurnRuntimeOptions {
-  api: TurnsV2Transport;
+  api: ConversationSyncApi;
+  streamClientId?: string;
   findConversation?(conversationId: string): RuntimeConversation | null;
   persist?(conversation: RuntimeConversation): void;
   isActive?(conversation: RuntimeConversation): boolean;
+  isDomStale?(conversation: RuntimeConversation): boolean;
   replaceAll?(
     conversation: RuntimeConversation,
     repaint?: { force?: boolean },
   ): void;
+  /** Preferred production DOM port; false explicitly requests legacy fallback. */
+  renderState?(
+    conversation: RuntimeConversation,
+    state: TurnState,
+    render?: { force?: boolean },
+  ): boolean | void;
+  disposeRenderedState?(conversationId: string): void;
   deferTerminalRelease?(release: () => void): void;
   buildNavigation?(conversation: RuntimeConversation): void;
   renderConversationList?(): void;
   updateSendButton?(): void;
   onProtocolError?(error: Error): void;
   onResyncError?(error: unknown, turnId: string): void;
+  onHealth?(conversationId: string, health: ConnectionHealth): void;
+  onTurnSettled?(conversation: RuntimeConversation, turn: UnknownRecord): void;
+  applySettings?(conversation: RuntimeConversation, settings: UnknownRecord): void;
   eventSourceFactory?: (url: string) => EventSource;
 }
 
@@ -108,9 +101,8 @@ export interface TurnRuntime {
   connect(
     store: TurnStore,
     attemptId: string,
-    after?: number,
     hooks?: TurnConnectionHooks,
-  ): AttemptStreamConnection;
+  ): ConversationSyncConnection;
   renderInto(
     container: Element,
     state: TurnState,
@@ -118,11 +110,17 @@ export interface TurnRuntime {
   ): void;
   finishPresentation: typeof presentTurnFinish;
   resumeOptions: typeof resumeTurnOptions;
-  hydrateConversation(conversation: RuntimeConversation): Promise<RuntimeStore | null>;
+  hydrateConversation(conversation: RuntimeConversation): Promise<RuntimeStore>;
   submitConversation(
     conversation: RuntimeConversation,
     message: unknown,
     config: unknown,
+    extra?: UnknownRecord,
+  ): Promise<UnknownRecord>;
+  appendSettledConversationTurn(
+    conversation: RuntimeConversation,
+    actor: AppendSettledTurnRequest['actor'],
+    projection: unknown,
     extra?: UnknownRecord,
   ): Promise<UnknownRecord>;
   submitBranch(
@@ -140,10 +138,23 @@ export interface TurnRuntime {
     config?: unknown,
     options?: UnknownRecord,
   ): Promise<UnknownRecord>;
+  executeConversationPlan(
+    conversation: RuntimeConversation,
+    sourceTurnId: string,
+    expectedPlanId: string,
+    expectedProjectionRevision: number,
+    contextMode: 'current' | 'fresh',
+    config?: unknown,
+  ): Promise<UnknownRecord>;
   updateConversationTurn(
     conversation: RuntimeConversation,
     turnId: string,
     projection: unknown,
+  ): Promise<UnknownRecord>;
+  mutateConversationFileChanges(
+    conversation: RuntimeConversation,
+    turnId: string,
+    operation: 'undo' | 'redo',
   ): Promise<UnknownRecord>;
   createBranchLane(
     conversation: RuntimeConversation,
@@ -167,15 +178,18 @@ export interface TurnRuntime {
   markCommandFailed(conversation: RuntimeConversation, turnId: string): void;
   abortConversation(conversation: RuntimeConversation): Promise<unknown>;
   abortAttempt(attemptId: string): Promise<unknown>;
+  readRuntimeState(conversationId: string): TurnState | null;
+  hasAuthoritativeCommand(conversationId: string, commandId: string): boolean;
   ensureRuntimeStore(conversationId: string): RuntimeStore;
+  invalidateConversation(conversationId: string, cursorHint?: string): void;
+  disposeConversation(conversationId: string): void;
+  hasLiveConnection(conversationId: string): boolean;
   findConversation(conversationId: string): RuntimeConversation | null;
   readonly TERMINAL: ReadonlySet<string>;
-  isCutoverActive(): boolean;
 }
 
 interface TurnConnectionHooks {
   onTerminal?(event: TurnEvent): void;
-  onContinuation?(continuation: AttemptContinuation): void;
 }
 
 function record(value: unknown): UnknownRecord {
@@ -190,12 +204,30 @@ function stringValue(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-function latestTurnFrom(error: unknown): UnknownRecord | null {
+/**
+ * A new-conversation shell owns a display placeholder, not a durable title.
+ * Leave that placeholder empty on the first Turn command so the command
+ * service can derive the authoritative fallback from the user's message.
+ */
+function titleForTurnConversationCreate(
+  conversation: RuntimeConversation,
+): string {
+  const title = stringValue(conversation.title).trim();
+  if (conversation._localOnly && (!title || title === 'New Chat')) return '';
+  return title || 'New Chat';
+}
+
+function latestTurnFrom(error: unknown): TurnRecord | null {
   const failure = record(error);
   const body = record(failure.body);
   const response = record(failure.response);
   const latest = body.latestTurn || response.latestTurn;
-  return latest && typeof latest === 'object' ? latest as UnknownRecord : null;
+  if (!latest || typeof latest !== 'object') return null;
+  try {
+    return assertConversationSyncSchema<TurnRecord>('TurnRecord', latest);
+  } catch {
+    return null;
+  }
 }
 
 /** Create the complete Turn/Attempt runtime without reading ambient globals. */
@@ -204,13 +236,16 @@ export function createConversationTurnRuntime(
 ): TurnRuntime {
   const terminal = new Set(['completed', 'interrupted', 'truncated', 'failed']);
   const runtimeStores = new Map<string, RuntimeStore>();
-  const runtimeConnections = new Map<string, AttemptStreamConnection>();
+  const coordinators = new Map<string, ConversationSyncCoordinator>();
+  const attemptConnectionLeases = new Map<string, ConversationSyncConnection>();
+  const attemptHooks = new Map<string, TurnConnectionHooks>();
   const boundConversations = new WeakMap<RuntimeConversation, {
     store: RuntimeStore;
     unsubscribe: () => void;
   }>();
   const scheduledTerminalReleases = new WeakMap<RuntimeConversation, string>();
-  let runtimeCutoverActive = false;
+  const boundConversationById = new Map<string, RuntimeConversation>();
+  const observedLiveAttempts = new Set<string>();
 
   const projectConversation = (
     conversation: RuntimeConversation,
@@ -225,6 +260,16 @@ export function createConversationTurnRuntime(
     }
     const active = options.isActive?.(conversation) ?? false;
     let terminalRepainted = false;
+    let stateRendered = false;
+    const renderActiveState = (force = false): void => {
+      if (!active) return;
+      const handled = options.renderState?.(conversation, state, { force });
+      if (handled !== false && options.renderState) {
+        stateRendered = true;
+        return;
+      }
+      options.replaceAll?.(conversation, force ? { force: true } : undefined);
+    };
     const scheduleTerminalRelease = (): void => {
       if (!terminalSettled || !finishingAttemptId) return;
       if (scheduledTerminalReleases.get(conversation) === finishingAttemptId) return;
@@ -237,7 +282,7 @@ export function createConversationTurnRuntime(
         // Reconcile once more immediately before exposing Send. Async cost,
         // transport, and snapshot work may have repainted between settlement
         // and the next browser frame.
-        if (active) options.replaceAll?.(conversation, { force: true });
+        renderActiveState(true);
         conversation._finishingStream = false;
         conversation._finishingAttemptId = null;
         options.updateSendButton?.();
@@ -245,13 +290,14 @@ export function createConversationTurnRuntime(
       if (options.deferTerminalRelease) options.deferTerminalRelease(release);
       else release();
     };
-    applyTurnStateProjection({
+    const projectionChanged = applyTurnStateProjection({
       conversation,
       state,
       active,
+      domStale: options.isDomStale?.(conversation) ?? false,
       persist: options.persist,
       replaceAll: () => {
-        options.replaceAll?.(conversation, { force: terminalSettled });
+        renderActiveState(terminalSettled);
         if (terminalSettled) {
           terminalRepainted = true;
           scheduleTerminalRelease();
@@ -261,28 +307,105 @@ export function createConversationTurnRuntime(
       renderConversationList: options.renderConversationList,
       updateSendButton: options.updateSendButton,
     });
+    /* Transport-only frames may not change the shell fingerprint, but the
+     * typed surface still consumes the authoritative state directly. */
+    if (active && options.renderState && !stateRendered) {
+      renderActiveState(terminalSettled);
+    }
     // A duplicate terminal snapshot can have the same projection fingerprint.
     // The DOM may still own a transient streaming bubble, so settling must force
     // one repaint even when the state projection itself is unchanged. Keep the
     // Stop latch set until that repaint returns; button polling must never
     // observe Send while the terminal answer is still absent from the DOM.
     if (terminalSettled && !terminalRepainted) {
-      if (active) options.replaceAll?.(conversation, { force: true });
+      renderActiveState(true);
       scheduleTerminalRelease();
+    }
+    const hasLiveTurn = Object.values(state.turnsById).some((turn) =>
+      turn && (turn.status === 'pending' || turn.status === 'running'));
+    for (const turn of Object.values(state.turnsById)) {
+      const attemptId = stringValue(turn?.currentAttemptId);
+      if (!turn || !attemptId) continue;
+      if (turn.status === 'pending' || turn.status === 'running') {
+        observedLiveAttempts.add(attemptId);
+      } else if (terminal.has(turn.status || '') && observedLiveAttempts.delete(attemptId)) {
+        options.onTurnSettled?.(conversation, turn);
+      }
+    }
+    const coordinator = coordinators.get(conversation.id);
+    if (coordinator) {
+      if (active || hasLiveTurn) void coordinator.resume().catch(options.onProtocolError);
+      else coordinator.pause();
     }
   };
 
   const ensureRuntimeStore = (conversationId: string): RuntimeStore => {
     const existing = runtimeStores.get(conversationId);
     if (existing) return existing;
+    let coordinator: ConversationSyncCoordinator;
     const store = createTurnStore(conversationId, {
-      fetchSnapshot: async () => record(await options.api.list(conversationId)),
+      fetchSnapshot: async () => {
+        const snapshot = await coordinator.recover('turn-store-resync');
+        return { ...snapshot, authoritativeFull: true };
+      },
       onResyncError: options.onResyncError,
     }) as RuntimeStore;
+    coordinator = new ConversationSyncCoordinator({
+      conversationId,
+      streamClientId: options.streamClientId,
+      api: options.api,
+      onSnapshot(snapshot) {
+        store._snapshotLoaded = true;
+        const conversation = boundConversationById.get(conversationId);
+        if (conversation) options.applySettings?.(
+          conversation, record(snapshot.settings),
+        );
+        store.dispatch({ type: 'snapshot', snapshot });
+      },
+      onAttemptEvent(event) {
+        store.dispatch({ type: 'event', event: event as TurnEvent });
+        const turn = store.getState().turnsById[event.turnId];
+        const applied = Number(turn?.projectionRevision || 0)
+          >= Number(event.projectionRevision || 0);
+        if (event.type === 'terminal_settlement') {
+          attemptHooks.get(event.attemptId)?.onTerminal?.(event as TurnEvent);
+          attemptHooks.delete(event.attemptId);
+          attemptConnectionLeases.delete(event.attemptId);
+        }
+        return applied;
+      },
+      onTurnDelta(delta) {
+        store.dispatch({ type: 'snapshot', snapshot: delta });
+        const state = store.getState();
+        return records(delta.turnPatches).every((change) => {
+          const turnId = stringValue(change.turnId);
+          const target = Number(change.targetProjectionRevision || 0);
+          return Boolean(turnId && target > 0
+            && Number(state.turnsById[turnId]?.projectionRevision || 0) >= target);
+        });
+      },
+      onProtocolError: options.onProtocolError,
+      onHealth: options.onHealth,
+      onPushWithheld(withheld) {
+        store.dispatch({ type: 'push_withheld', pushWithheld: withheld });
+      },
+      eventSourceFactory: options.eventSourceFactory,
+    });
+    // Constructors do not publish externally. Register the complete pair
+    // first so health-driven renders can safely re-enter any runtime method.
     store._snapshotLoaded = false;
     runtimeStores.set(conversationId, store);
+    coordinators.set(conversationId, coordinator);
+    coordinator.announceInitialHealth();
     return store;
   };
+
+  // Pure read seam for catalog/sidebar consumers. A read must never create a
+  // coordinator: construction publishes initial health, whose render callback
+  // can re-enter a 500-row catalog scan and recursively construct the next
+  // store until the browser stack overflows.
+  const readRuntimeState = (conversationId: string): TurnState | null =>
+    runtimeStores.get(conversationId)?.getState() ?? null;
 
   const bindConversation = (
     conversation: RuntimeConversation,
@@ -291,6 +414,7 @@ export function createConversationTurnRuntime(
     const previous = boundConversations.get(conversation);
     if (previous?.store === store) return;
     previous?.unsubscribe();
+    boundConversationById.set(conversation.id, conversation);
     const unsubscribe = store.subscribe(
       (state) => projectConversation(conversation, state),
     );
@@ -301,53 +425,39 @@ export function createConversationTurnRuntime(
   const connect = (
     store: TurnStore,
     attemptId: string,
-    after = 0,
     hooks: TurnConnectionHooks = {},
-  ): AttemptStreamConnection => createAttemptEventStream({
-    attemptId,
-    url: options.api.streamUrl(attemptId, after),
-    after,
-    onTransport(status) {
-      store.dispatch({ type: 'transport', status });
-    },
-    onEvent(event) {
-      store.dispatch({ type: 'event', event: event as TurnEvent });
-    },
-    fetchSnapshot: store._fetchSnapshot,
-    onSnapshot(snapshot) {
-      store.dispatch({ type: 'snapshot', snapshot: record(snapshot) });
-    },
-    onTerminal(event) {
-      hooks.onTerminal?.(event as TurnEvent);
-    },
-    onContinuation(continuation) {
-      if (hooks.onContinuation) hooks.onContinuation(continuation);
-      else connect(store, continuation.attemptId, 0, hooks);
-    },
-    onProtocolError: options.onProtocolError,
-    eventSourceFactory: options.eventSourceFactory,
-  });
+  ): ConversationSyncConnection => {
+    const conversationId = store.getState().conversationId;
+    const coordinator = coordinators.get(conversationId);
+    if (!coordinator) throw new Error('Conversation coordinator is not initialized.');
+    if (attemptId) attemptHooks.set(attemptId, hooks);
+    void coordinator.resume().catch(options.onProtocolError);
+    let leaseClosed = false;
+    return {
+      close() {
+        if (leaseClosed) return;
+        leaseClosed = true;
+        if (attemptId) attemptHooks.delete(attemptId);
+      },
+      get cursor() { return coordinator.cursor; },
+    };
+  };
 
   const connectAttempt = (
     conversation: RuntimeConversation,
     store: RuntimeStore,
     attemptId: string,
-    after = 0,
-  ): AttemptStreamConnection | null => {
+  ): ConversationSyncConnection | null => {
     if (!attemptId) return null;
-    const previous = runtimeConnections.get(attemptId);
+    const previous = attemptConnectionLeases.get(attemptId);
     if (previous) return previous;
-    const connection = connect(store, attemptId, after, {
+    const connection = connect(store, attemptId, {
       onTerminal() {
-        runtimeConnections.delete(attemptId);
+        attemptConnectionLeases.delete(attemptId);
         projectConversation(conversation, store.getState());
       },
-      onContinuation(continuation) {
-        runtimeConnections.delete(attemptId);
-        connectAttempt(conversation, store, continuation.attemptId, 0);
-      },
     });
-    runtimeConnections.set(attemptId, connection);
+    attemptConnectionLeases.set(attemptId, connection);
     return connection;
   };
 
@@ -359,10 +469,10 @@ export function createConversationTurnRuntime(
     requestOptions: unknown = {},
   ): Promise<UnknownRecord> => {
     const payload = buildTurnSubmitRequest(inputTurn, config, extra);
-    const response = record(await options.api.submit(
+    const response = record(await options.api.createTurn(
       store.getState().conversationId,
-      payload,
-      requestOptions,
+      payload as unknown as CreateTurnRequest,
+      requestOptions as RequestOptions,
     ));
     store.dispatch({ type: 'command_response', response });
     return response;
@@ -379,10 +489,12 @@ export function createConversationTurnRuntime(
     if (!turn) throw new Error('Unknown turn; refresh the authoritative snapshot.');
     store.dispatch({ type: 'command_pending', turnId, operation });
     try {
-      const response = record(await options.api.attempt(
+      const response = record(await options.api.createAttempt(
         stringValue(turn.conversationId),
         turnId,
-        buildTurnOperationRequest(turn, operation, config, operationOptions),
+        buildTurnOperationRequest(
+          turn, operation, config, operationOptions,
+        ) as unknown as CreateAttemptRequest,
       ));
       store.dispatch({ type: 'command_response', response });
       return response;
@@ -399,26 +511,60 @@ export function createConversationTurnRuntime(
     }
   };
 
-  const hydrateConversation = async (
+  const runHydrate = async (
     conversation: RuntimeConversation,
-  ): Promise<RuntimeStore | null> => {
-    if (!conversation?.id) return null;
+  ): Promise<RuntimeStore> => {
+    if (!conversation?.id) throw new Error('Conversation is required.');
     const store = ensureRuntimeStore(conversation.id);
-    const snapshot = record(await options.api.list(conversation.id));
-    if (snapshot.cutoverActive) runtimeCutoverActive = true;
+    const coordinator = coordinators.get(conversation.id);
+    if (!coordinator) throw new Error('Conversation coordinator is not initialized.');
+    const snapshot = await coordinator.hydrate(false);
     const turns = records(snapshot.turns);
-    if (!snapshot.cutoverActive && !turns.length) return null;
-    store._snapshotLoaded = true;
-    store.dispatch({ type: 'snapshot', snapshot });
+    options.applySettings?.(conversation, record(snapshot.settings));
     bindConversation(conversation, store);
+    if (options.isActive?.(conversation)) void coordinator.resume();
     for (const turn of turns) {
       const status = stringValue(turn.status);
       const attemptId = stringValue(turn.currentAttemptId);
       if ((status === 'pending' || status === 'running') && attemptId) {
-        connectAttempt(conversation, store, attemptId, 0);
+        connectAttempt(conversation, store, attemptId);
       }
     }
     return store;
+  };
+
+  /* Explicit snapshot calls coalesce into one lane. Live changes never enter
+   * this scheduler: the conversation coordinator owns their ordered SSE.
+   *
+   * The lane MUST be published before runHydrate starts. runHydrate announces
+   * `connecting` synchronously; presentation hooks may re-enter
+   * hydrateConversation while handling that health frame. Starting the work
+   * before claiming the lane recursively launched hundreds of full snapshots
+   * on a cold page and eventually overflowed the browser stack.
+   *
+   * Overlapping callers share the same authoritative snapshot. A trailing
+   * snapshot is unnecessary: the coordinator opens its ordered event stream
+   * from the snapshot cursor, so commits racing the read are replayed there. */
+  const hydrateLanes = new Map<string, Promise<RuntimeStore>>();
+
+  const hydrateConversation = (
+    conversation: RuntimeConversation,
+  ): Promise<RuntimeStore> => {
+    if (!conversation?.id) return Promise.reject(
+      new Error('Conversation is required.'),
+    );
+    const id = conversation.id;
+    const existing = hydrateLanes.get(id);
+    if (existing) return existing;
+    // Promise.then defers runHydrate until after hydrateLanes.set below. This
+    // ordering is the re-entrancy boundary; do not inline runHydrate here.
+    const running = Promise.resolve()
+      .then(() => runHydrate(conversation))
+      .finally(() => {
+        if (hydrateLanes.get(id) === running) hydrateLanes.delete(id);
+      });
+    hydrateLanes.set(id, running);
+    return running;
   };
 
   const submitConversation = async (
@@ -432,10 +578,10 @@ export function createConversationTurnRuntime(
     if (!store._snapshotLoaded) {
       if (!conversation._localOnly) {
         try {
-          store.dispatch({
-            type: 'snapshot',
-            snapshot: record(await options.api.list(conversation.id)),
-          });
+          const coordinator = coordinators.get(conversation.id);
+          if (!coordinator) throw new Error(
+            'Conversation coordinator is not initialized.');
+          await coordinator.hydrate(false);
         } catch (error) {
           if (Number(record(error).status || 0) !== 404) throw error;
         }
@@ -443,17 +589,20 @@ export function createConversationTurnRuntime(
       store._snapshotLoaded = true;
     }
     try {
-      const requestOptions = extra.requestOptions;
+      const {
+        requestOptions,
+        settings,
+        ...commandExtra
+      } = extra;
       const response = await submit(store, null, config, {
-        ...extra,
-        requestOptions: undefined,
+        ...commandExtra,
         commandId: extra.commandId || createTurnCommandId(),
         message,
         conversation: {
           allowCreate: true,
-          title: conversation.title || 'New Chat',
+          title: titleForTurnConversationCreate(conversation),
           createdAt: conversation.createdAt || Date.now(),
-          settings: extra.settings || {},
+          settings: settings || {},
         },
       }, requestOptions);
       conversation._localOnly = false;
@@ -462,7 +611,6 @@ export function createConversationTurnRuntime(
         conversation,
         store,
         stringValue(record(response.attempt).attemptId),
-        Number(response.streamCursor || 0),
       );
       return response;
     } catch (error) {
@@ -496,10 +644,6 @@ export function createConversationTurnRuntime(
     bindConversation(conversation, store);
     const laneId = stringValue(branch._laneId || branch.laneId || branch.id);
     if (!laneId) throw new Error('Branch is missing its stable lane identity.');
-    branch._laneId = laneId;
-    const laneMeta = conversation._v2LaneMeta
-      ?? (conversation._v2LaneMeta = Object.create(null) as Record<string, never>);
-    laneMeta[laneId] = { ...branch, messages: undefined, parentTurnId };
     const response = await submit(store, null, config, {
       ...extra,
       commandId: extra.commandId || createTurnCommandId(),
@@ -513,7 +657,6 @@ export function createConversationTurnRuntime(
       conversation,
       store,
       stringValue(record(response.attempt).attemptId),
-      Number(response.streamCursor || 0),
     );
     return response;
   };
@@ -549,7 +692,6 @@ export function createConversationTurnRuntime(
       conversation,
       store,
       stringValue(record(response.attempt).attemptId),
-      Number(response.streamCursor || 0),
     );
     return response;
   };
@@ -566,14 +708,154 @@ export function createConversationTurnRuntime(
     const turn = store.getState().turnsById[turnId];
     if (!turn) throw new Error('Unknown turn; refresh the authoritative snapshot.');
     try {
-      const response = record(await options.api.update(
+      const response = record(await options.api.updateTurn(
         conversation.id,
         turnId,
         {
           expectedProjectionRevision: turn.projectionRevision,
-          projection,
-        },
+          projection: record(projection),
+        } as UpdateTurnRequest,
       ));
+      store.dispatch({ type: 'command_response', response });
+      return response;
+    } catch (error) {
+      const latest = latestTurnFrom(error);
+      if (latest) {
+        store.dispatch({ type: 'snapshot', snapshot: {
+          conversationRevision: store.getState().conversationRevision,
+          turns: [latest],
+        } });
+      }
+      throw error;
+    }
+  };
+
+  const executeConversationPlan = async (
+    conversation: RuntimeConversation,
+    sourceTurnId: string,
+    expectedPlanId: string,
+    expectedProjectionRevision: number,
+    contextMode: 'current' | 'fresh',
+    config: unknown = {},
+  ): Promise<UnknownRecord> => {
+    if (!conversation?.id || !sourceTurnId || !expectedPlanId) {
+      throw new Error('An exact proposed-plan identity is required.');
+    }
+    const store = await ensureTurn(conversation, sourceTurnId);
+    const source = store.getState().turnsById[sourceTurnId];
+    const proposedPlan = source?.projection.proposedPlan;
+    if (!source || source.projectionRevision !== expectedProjectionRevision
+        || proposedPlan?.planId !== expectedPlanId) {
+      throw new Error('The proposed plan changed; review the latest plan first.');
+    }
+    const operation = `execute-plan-${contextMode}`;
+    store.dispatch({ type: 'command_pending', turnId: sourceTurnId, operation });
+    try {
+      const body: ExecutePlanRequest = {
+        commandId: createTurnCommandId(),
+        expectedProjectionRevision,
+        planId: expectedPlanId,
+        contextMode,
+        config: record(config),
+      };
+      const response = record(await options.api.executePlan(
+        conversation.id, sourceTurnId, body,
+      ));
+      store.dispatch({ type: 'command_response', response });
+      options.applySettings?.(conversation, {
+        planMode: false,
+        autopilotEnabled: false,
+        activeFlow: '',
+        imageGenMode: false,
+      });
+      bindConversation(conversation, store);
+      connectAttempt(
+        conversation,
+        store,
+        stringValue(record(response.attempt).attemptId),
+      );
+      return response;
+    } catch (error) {
+      store.dispatch({ type: 'command_failed', turnId: sourceTurnId });
+      const latest = latestTurnFrom(error);
+      if (latest) {
+        store.dispatch({ type: 'snapshot', snapshot: {
+          conversationRevision: store.getState().conversationRevision,
+          turns: [latest],
+        } });
+      }
+      throw error;
+    }
+  };
+
+  const appendSettledConversationTurn = async (
+    conversation: RuntimeConversation,
+    actor: AppendSettledTurnRequest['actor'],
+    projection: unknown,
+    extra: UnknownRecord = {},
+  ): Promise<UnknownRecord> => {
+    if (!conversation?.id) throw new Error('Conversation is required.');
+    const store = ensureRuntimeStore(conversation.id);
+    if (!store._snapshotLoaded && !conversation._localOnly) {
+      try {
+        await hydrateConversation(conversation);
+      } catch (error) {
+        if (Number(record(error).status || 0) !== 404) throw error;
+      }
+    }
+    store._snapshotLoaded = true;
+    const body: AppendSettledTurnRequest = {
+      commandId: stringValue(extra.commandId) || createTurnCommandId(),
+      actor,
+      projection: record(projection),
+      ...(extra.kind ? { kind: stringValue(extra.kind) } : {}),
+      ...(extra.status ? {
+        status: extra.status as AppendSettledTurnRequest['status'],
+      } : {}),
+      ...(extra.settlement ? {
+        settlement: extra.settlement as AppendSettledTurnRequest['settlement'],
+      } : {}),
+      ...(Number.isFinite(Number(extra.createdAt)) ? {
+        createdAt: Number(extra.createdAt),
+      } : {}),
+      ...(extra.laneId ? { laneId: stringValue(extra.laneId) } : {}),
+      ...(extra.runId ? { runId: stringValue(extra.runId) } : {}),
+      conversation: {
+        allowCreate: true,
+        title: conversation.title || 'New Chat',
+        createdAt: conversation.createdAt || Date.now(),
+        settings: record(extra.settings),
+      },
+    };
+    const response = record(await options.api.appendSettledTurn(
+      conversation.id, body,
+    ));
+    store.dispatch({ type: 'command_response', response });
+    conversation._localOnly = false;
+    bindConversation(conversation, store);
+    return response;
+  };
+
+  const mutateConversationFileChanges = async (
+    conversation: RuntimeConversation,
+    turnId: string,
+    operation: 'undo' | 'redo',
+  ): Promise<UnknownRecord> => {
+    if (!conversation?.id || !turnId) {
+      throw new Error('A stable turnId is required.');
+    }
+    const store = await ensureTurn(conversation, turnId);
+    const turn = store.getState().turnsById[turnId];
+    if (!turn) throw new Error('Unknown turn; refresh the authoritative snapshot.');
+    const body: FileChangesCommandRequest = {
+      commandId: createTurnCommandId(),
+      expectedProjectionRevision: turn.projectionRevision,
+    };
+    const command = operation === 'undo'
+      ? options.api.undoFileChanges
+      : options.api.redoFileChanges;
+    try {
+      const response = record(await command(conversation.id, turnId, body));
       store.dispatch({ type: 'command_response', response });
       return response;
     } catch (error) {
@@ -602,7 +884,7 @@ export function createConversationTurnRuntime(
       {
         ...descriptor,
         expectedProjectionRevision: parent.projectionRevision,
-      },
+      } as CreateLaneRequest,
     ));
     store.dispatch({ type: 'command_response', response });
     return response;
@@ -617,10 +899,7 @@ export function createConversationTurnRuntime(
     const response = record(await options.api.deleteLane(
       conversation.id, parentTurnId, laneId,
     ));
-    store.dispatch({
-      type: 'snapshot',
-      snapshot: record(await options.api.list(conversation.id)),
-    });
+    store.dispatch({ type: 'command_response', response });
     return response;
   };
 
@@ -631,11 +910,11 @@ export function createConversationTurnRuntime(
     const store = ensureRuntimeStore(conversation.id);
     if (!store._snapshotLoaded) await hydrateConversation(conversation);
     bindConversation(conversation, store);
-    const response = record(await options.api.deleteTurns(conversation.id, turnIds));
-    store.dispatch({
-      type: 'snapshot',
-      snapshot: record(await options.api.list(conversation.id)),
-    });
+    const response = record(await options.api.deleteTurns(
+      conversation.id,
+      { turnIds: [...turnIds] } as DeleteTurnsRequest,
+    ));
+    store.dispatch({ type: 'command_response', response });
     return response;
   };
 
@@ -651,9 +930,12 @@ export function createConversationTurnRuntime(
     resumeOptions: resumeTurnOptions,
     hydrateConversation,
     submitConversation,
+    appendSettledConversationTurn,
     submitBranch,
     operateConversation,
+    executeConversationPlan,
     updateConversationTurn,
+    mutateConversationFileChanges,
     createBranchLane,
     deleteBranchLane,
     deleteConversationTurns,
@@ -674,18 +956,60 @@ export function createConversationTurnRuntime(
       });
     },
     abortConversation(conversation: RuntimeConversation) {
-      return conversation?._activeAttemptId
-        ? options.api.abort(conversation._activeAttemptId)
-        : Promise.resolve(null);
+      if (!conversation?.id) return Promise.resolve(null);
+      const state = ensureRuntimeStore(conversation.id).getState();
+      const activeAttemptId = [...(state.laneOrder.main ?? [])].reverse()
+        .map((turnId) => state.turnsById[turnId])
+        .find((turn) => turn && (turn.status === 'pending' || turn.status === 'running')
+          && turn.currentAttemptId)?.currentAttemptId;
+      return activeAttemptId
+        ? options.api.abortAttempt(activeAttemptId) : Promise.resolve(null);
     },
     abortAttempt(attemptId: string) {
-      return attemptId ? options.api.abort(attemptId) : Promise.resolve(null);
+      return attemptId ? options.api.abortAttempt(attemptId) : Promise.resolve(null);
+    },
+    readRuntimeState,
+    hasAuthoritativeCommand(conversationId: string, commandId: string) {
+      const state = readRuntimeState(conversationId);
+      if (!state || !commandId) return false;
+      return state.queueItems.some((item) => item.sourceMessageId === commandId)
+        || Object.values(state.attemptsById).some(
+          (attempt) => attempt?.commandId === commandId,
+        );
     },
     ensureRuntimeStore,
+    invalidateConversation(conversationId: string, cursorHint?: string) {
+      coordinators.get(conversationId)?.invalidate(cursorHint);
+      const conversation = options.findConversation?.(conversationId) ?? null;
+      if (conversation) {
+        void hydrateConversation(conversation).catch(options.onProtocolError);
+      }
+    },
+    disposeConversation(conversationId: string) {
+      options.disposeRenderedState?.(conversationId);
+      const conversation = options.findConversation?.(conversationId) ?? null;
+      if (conversation) {
+        boundConversations.get(conversation)?.unsubscribe();
+        boundConversations.delete(conversation);
+      }
+      const state = runtimeStores.get(conversationId)?.getState();
+      for (const attemptId of Object.keys(state?.attemptsById ?? {})) {
+        attemptConnectionLeases.get(attemptId)?.close();
+        attemptConnectionLeases.delete(attemptId);
+        attemptHooks.delete(attemptId);
+      }
+      coordinators.get(conversationId)?.close();
+      coordinators.delete(conversationId);
+      runtimeStores.delete(conversationId);
+      hydrateLanes.delete(conversationId);
+      boundConversationById.delete(conversationId);
+    },
+    hasLiveConnection(conversationId: string) {
+      return coordinators.get(conversationId)?.connected ?? false;
+    },
     findConversation(conversationId: string) {
       return options.findConversation?.(conversationId) ?? null;
     },
     TERMINAL: terminal,
-    isCutoverActive: () => runtimeCutoverActive,
   });
 }

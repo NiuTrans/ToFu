@@ -23,6 +23,12 @@ from routes.api_v1.config import api_v1_config_bp as config_bp  # noqa: E402
 
 _SERVER_CONFIG_PATH = _config_path('server_config.json')
 
+# Absorbs the settings-panel reopen / refresh burst: computing the report is
+# cheap (bounded task_results projection), but every panel open fires it.
+from lib.ttl_cache import TTLCache as _TTLCache  # noqa: E402
+_COST_EXPERIMENT_REPORT_CACHE = _TTLCache(
+    30, max_size=64, name='cost_experiment_report')
+
 
 # ══════════════════════════════════════════════════════
 #  Config File I/O
@@ -125,6 +131,7 @@ def _merge_server_owned_providers(existing: list, incoming: list) -> list:
             for key in (
                     'claim_token', 'last_attempt_at', 'last_success_at',
                     'last_finished_at', 'last_error', 'consecutive_failures',
+                    'unchanged_successes', 'next_attempt_at',
                     'pending_removals', 'last_added', 'last_removed',
                     'catalog_size'):
                 state.pop(key, None)
@@ -203,6 +210,33 @@ from lib.provider_defaults import (  # noqa: E402
     reeval_cheap_tags as _reeval_cheap_tags,
 )
 from lib.provider_balance import normalize_balance as _normalize_balance  # noqa: E402
+
+
+def _build_per_model_context_policy(dropdown_models: list) -> dict:
+    """Assemble the ``per_model`` map for the server-config context policy.
+
+    Keys are ``provider::model`` — the exact lookup the frontend's
+    ``_resolveContextProfile`` tries FIRST. A BARE ``model_id`` alias is
+    also written for every row: that is the frontend's documented
+    second-step fallback (``p.per_model[modelId]``), which legacy
+    conversations depend on because they never persisted ``provider_id``
+    in their settings (fleet-wide NULL — the context gauge showed "—"
+    forever). Without the alias the fallback could never hit and the
+    contract was one-sided. First registration wins on a cross-provider
+    name collision (``dict.setdefault``) — a bare key is a best-effort
+    hint, the scoped key stays authoritative.
+    """
+    from lib.tasks_pkg.compaction.api import resolve_model_context_profile
+    per_model = {}
+    for dm in dropdown_models:
+        mid = dm.get('model_id', '')
+        pid = dm.get('provider_id', '') or ''
+        if not mid:
+            continue
+        profile = resolve_model_context_profile(mid, pid)
+        per_model['%s::%s' % (pid, mid)] = profile
+        per_model.setdefault(mid, profile)
+    return per_model
 
 
 def _canonical_model_registrations(providers: list, *,
@@ -315,7 +349,27 @@ def get_server_config():
     cost_experiment = normalize_cost_experiment_config(
         saved.get('cost_experiment'))
 
-    if 'providers' in saved and any('models' in p for p in saved.get('providers', [])):
+    # Normalized model catalog. When ``model_catalog`` is persisted it is the
+    # authored authority and the provider snapshot below is projected from it;
+    # otherwise the catalog is migrated in memory from the legacy provider
+    # snapshot (no write) and the snapshot stays authoritative for the UI.
+    from lib.model_catalog import (
+        provider_shells as _catalog_provider_shells,
+        project_providers as _catalog_project_providers,
+        resolve_catalog as _catalog_resolve,
+    )
+    try:
+        model_catalog = _catalog_resolve(saved)
+    except Exception as e:
+        logger.warning('[ServerConfig] model catalog unavailable: %s', e)
+        model_catalog = None
+
+    if (model_catalog is not None
+            and isinstance(saved.get('model_catalog'), dict)):
+        providers = _catalog_project_providers(
+            _catalog_provider_shells(saved), model_catalog)
+        presets = saved.get('presets', {})
+    elif 'providers' in saved and any('models' in p for p in saved.get('providers', [])):
         providers = saved['providers']
         presets = saved.get('presets', {})
     elif 'providers' in saved and 'models_registry' in saved:
@@ -401,15 +455,17 @@ def get_server_config():
         # Apply saved llm_content_filter on config load (page refresh / startup)
         if 'llm_content_filter' in saved['search']:
             _lib.LLM_CONTENT_FILTER_ENABLED = bool(saved['search']['llm_content_filter'])
-            from lib.search_bridge import sync_search_config
-            sync_search_config()
+            from lib.search_runtime import sync_search_config_if_loaded
+            sync_search_config_if_loaded()
 
     # Live backend search status (tofu-search version / engines / extension
     # reachability / filter model+mode) — the piece that lets the Settings UI
     # show what the backend will ACTUALLY do, not just the saved knobs.
     try:
         from lib.search_settings import status_payload as _ss_status
-        search_status = _ss_status()
+        from routes.api_v1.auth import current_auth
+        search_status = _ss_status(
+            owner_user_id=current_auth().owner_user_id)
     except Exception as _e:
         logger.warning('[ServerConfig] search status unavailable: %s', _e)
         search_status = {'ok': False, 'error': str(_e)}
@@ -429,7 +485,14 @@ def get_server_config():
                len(providers), len(presets), total_models)
     feishu_info = _get_feishu_config(saved)
 
+    # Display-fold inputs (routing pool / explicit-pool flags) — see
+    # lib/model_info/_folds.py for the fold contract.
+    from lib.llm_dispatch.model_entry import (
+        has_explicit_pool as _has_explicit_pool,
+        routing_group as _routing_group,
+    )
     dropdown_models = []
+    _fold_inputs = []
     for prov in providers:
         if not prov.get('enabled', True):
             continue
@@ -458,11 +521,49 @@ def get_server_config():
                     'provider_id': prov_id,
                     'provider_name': prov_name,
                 })
+                _fold_inputs.append({
+                    'scope': prov_id,
+                    'model_id': mid,
+                    'capabilities': m.get('capabilities', ['text']),
+                    'thinking_default': m.get('thinking_default', False),
+                    'routing': _routing_group(m),
+                    'explicit_pool': _has_explicit_pool(m),
+                    'recommended': bool(m.get('recommended')),
+                })
 
+    # Display-fold metadata — alias mirrors collapse into one picker row,
+    # older versions under the family's primary row (lib/model_info/_folds.py,
+    # SSOT). Inline on each dropdown entry for the toolbar picker; the
+    # scope::model_id map lets the Settings visibility lists fold the same way
+    # without polluting the saved provider config.
+    try:
+        from lib.llm_dispatch.config import MODEL_ALIASES
+        from lib.model_info import build_fold_index
+        model_folds = build_fold_index(_fold_inputs, MODEL_ALIASES)
+    except Exception as e:
+        logger.warning('[ServerConfig] fold index unavailable: %s', e)
+        model_folds = {}
+    for dm in dropdown_models:
+        _f = model_folds.get(dm['provider_id'] + '::' + dm['model_id'])
+        if _f:
+            dm.update(_f)
     hidden_models = saved.get('hidden_models', [])
     hidden_ig_models = saved.get('hidden_ig_models', [])
 
-    model_pricing = {}
+    # Settings converts provider-template prices only for presentation. The
+    # canonical model row keeps its declared USD/CNY currency; this bounded
+    # USD-pivot card lets the browser round-trip edits without owning rates.
+    try:
+        from lib.pricing import get_model_price_display_policy
+        model_price_display = get_model_price_display_policy()
+    except Exception as e:
+        logger.warning('[ServerConfig] price display policy unavailable: %s', e)
+        model_price_display = {
+            'base_currency': 'USD', 'usd_rates': {'USD': 1.0},
+            'updated_at': 0, 'source': 'unavailable',
+        }
+
+    model_pricing: dict = {}
     for model_name, info in getattr(_lib, 'MODEL_PRICING', {}).items():
         model_pricing[model_name] = {
             'input': info.get('input', 0),
@@ -562,12 +663,6 @@ def get_server_config():
     except Exception as _e:
         logger.debug('get server config: failed (%s)', _e)
         pass
-    try:
-        from lib.netmirrors import status_summary as _nm_status
-        network_info['netmirrors'] = _nm_status()
-    except Exception as _e:
-        logger.debug('get server config: netmirrors view failed (%s)', _e)
-        pass
 
     # Machine translation provider config
     mt_provider_cfg = getattr(_lib, 'MT_PROVIDER_CONFIG', {})
@@ -596,18 +691,9 @@ def get_server_config():
     # ``per_model`` carries the resolved limit (static preset + auto-learned
     # override) for every model in the dropdown, so the gauge never re-derives.
     try:
-        from lib.tasks_pkg.compaction import (
-            build_context_policy, resolve_model_context_profile,
-        )
+        from lib.tasks_pkg.compaction.api import build_context_policy
         context_policy = build_context_policy()
-        per_model = {}
-        for dm in dropdown_models:
-            mid = dm.get('model_id', '')
-            pid = dm.get('provider_id', '') or ''
-            if not mid:
-                continue
-            per_model['%s::%s' % (pid, mid)] = resolve_model_context_profile(mid, pid)
-        context_policy['per_model'] = per_model
+        context_policy['per_model'] = _build_per_model_context_policy(dropdown_models)
     except Exception as e:
         logger.warning('[ServerConfig] context policy unavailable: %s', e)
         context_policy = {}
@@ -661,10 +747,12 @@ def get_server_config():
         'feishu': feishu_info,
         'face_refusals': face_refusals,
         'dropdown_models': dropdown_models,
+        'model_folds': model_folds,
         'hidden_models': hidden_models,
         'hidden_ig_models': hidden_ig_models,
-        'model_pricing': model_pricing,
         'provider_pricing': provider_pricing,
+        'model_pricing': model_pricing,
+        'model_price_display': model_price_display,
         'model_limits': model_limits,
         'model_context_limits': model_context_limits,
         'model_defaults': model_defaults,
@@ -676,7 +764,17 @@ def get_server_config():
         'langDetect': lang_detect_policy,
         'capability_taxonomy': capability_taxonomy,
         'cost_experiment': cost_experiment,
+        'model_catalog': model_catalog if isinstance(model_catalog, dict) else {},
     })
+
+
+@config_bp.route('/api/v1/experiments/capabilities')
+@safe_route
+def experiment_capabilities():
+    """Return callback-free metadata for installed experiment plugins."""
+    from lib.experiments import registry
+
+    return api_ok(registry().catalog())
 
 
 @config_bp.route('/api/v1/cost-experiments/report')
@@ -684,9 +782,16 @@ def get_server_config():
 async def cost_experiment_report():
     """Aggregate persisted, provider-priced outcomes for the visible A/B UI.
 
-    Conversation is the sampling unit. The bounded row cap protects the
-    settings request on unusually large installations and is disclosed in the
-    response instead of silently presenting a partial report as complete.
+    The data source is the per-task ``metadata.costExperiment`` outcome that
+    the terminal persist already writes into ``task_results`` — a compact
+    projection — rather than the retired full-transcript conversation scan
+    (N+1 conversation loads in legacy mode; one event-loop-stalling,
+    frame-cap-busting ``conversation.list(include_messages=True)`` RPC in
+    sidecar mode, which was also BLIND to turn-native v2 conversations).
+    Conversation remains the sampling unit. The bounded row cap protects
+    the settings request on unusually large installations and is disclosed
+    in the response instead of silently presenting a partial report as
+    complete.
     """
     import asyncio
     import time
@@ -694,9 +799,9 @@ async def cost_experiment_report():
     from lib.cost_experiments import (
         aggregate_cost_experiment_rows,
         normalize_cost_experiment_config,
+        task_outcome_report_rows,
     )
-    from lib.database import run_pooled
-    from routes.common import _request_user_id
+    from routes.api_v1.auth import request_user_id
 
     try:
         days = int(request.args.get('days', 14))
@@ -707,40 +812,54 @@ async def cost_experiment_report():
 
     exp = normalize_cost_experiment_config(
         _read_server_config().get('cost_experiment'))
-    now_ms = int(time.time() * 1000)
-    cutoff_ms = now_ms - days * 86_400_000
-    row_cap = 5_000
-    owner_id = _request_user_id()
-    def _load_rows(db):
-        from lib.database.conversation_repository import load_conversation
-        ids = db.execute(
-            'SELECT id, updated_at FROM conversations '
-            'WHERE user_id=? AND updated_at>=? '
-            'ORDER BY updated_at DESC LIMIT ?',
-            (owner_id, cutoff_ms, row_cap + 1)).fetchall()
-        result = []
-        for item in ids:
-            snapshot = load_conversation(db, item['id'], user_id=owner_id)
-            if snapshot is not None:
-                result.append({
-                    'id': item['id'], 'messages': snapshot.messages,
-                    'updated_at': item['updated_at'],
-                })
-        return result
+    owner_id = request_user_id()
+    cache_key = (owner_id, days, exp['enabled'], exp.get('lifecycle'),
+                 exp.get('started_at_ms'), exp.get('sealed_at_ms'),
+                 exp['experiment_id'], exp.get('spec_digest'))
+    cached = _COST_EXPERIMENT_REPORT_CACHE.get(cache_key)
+    if cached is not None:
+        return api_ok(cached)
 
-    rows = await run_pooled(_load_rows)
-    truncated = len(rows) > row_cap
+    now_ms = int(time.time() * 1000)
+    cutoff_ms = int(exp.get('started_at_ms') or 0) \
+        or (now_ms - days * 86_400_000)
+    row_cap = 5_000
+    invalid_records = 0
+
+    from lib.storage import get_storage_client
+    # The blocking RPC stays off the event loop; its projection keeps heavy
+    # task content and thinking inside the authority.
+    result = await asyncio.to_thread(
+        get_storage_client().query,
+        'task_results.cost_experiment_scan',
+        {'user_id': owner_id, 'completed_at_gte': cutoff_ms,
+         'experiment_id': exp['experiment_id'], 'limit': row_cap + 1})
+    result = result if isinstance(result, dict) else {}
+    records = result.get('records') or []
+    invalid_records += int(result.get('invalid') or 0)
+    truncated = bool(result.get('capped')) or len(records) > row_cap
+    report_rows, invalid = task_outcome_report_rows(records[:row_cap])
     report = await asyncio.to_thread(
         aggregate_cost_experiment_rows,
-        list(rows[:row_cap]),
+        report_rows,
         experiment_id=exp['experiment_id'],
         days=days,
         now_ms=now_ms,
         min_sample_size=exp['min_sample_size'],
+        experiment_spec=exp.get('spec'),
+        analysis_closed=exp.get('lifecycle') == 'sealed',
+        analysis_start_ms=exp.get('started_at_ms') or 0,
+        analysis_sealed_ms=exp.get('sealed_at_ms') or 0,
+        truncated=truncated,
+        source_invalid_rows=invalid + invalid_records,
     )
     report['enabled'] = exp['enabled']
-    report['truncated'] = truncated
+    report['lifecycle'] = exp.get('lifecycle')
+    if exp.get('invalid_reason'):
+        report['configurationError'] = exp['invalid_reason']
     report['rowCap'] = row_cap
+    report['source'] = 'task_results'
+    _COST_EXPERIMENT_REPORT_CACHE.set(cache_key, report)
     return api_ok(report)
 
 
@@ -749,7 +868,7 @@ async def cost_experiment_report():
 def feishu_status():
     """Return Feishu bot runtime status.
 
-    @safe_route (pt_63eb7f02 batch 5): the ad-hoc "except Exception →
+    @safe_route ( batch 5): the ad-hoc "except Exception →
     api_internal_error(e)" wrap around the body was a pure logger.warning
     + api_internal_error with no distinct context / side effects; the
     decorator reproduces it via fn.__qualname__.
@@ -821,7 +940,7 @@ def check_provider_balance():
 def discover_models_endpoint():
     """Auto-discover models from a provider's /v1/models endpoint.
 
-    @safe_route (pt_63eb7f02 batch 5): the ad-hoc "except Exception \u2192
+    @safe_route ( batch 5): the ad-hoc "except Exception \u2192
     api_internal_error(e)" wrapping the discover_models + enrich pass was
     pure logger.error + api_internal_error; @safe_route reproduces it.
     """ 
@@ -836,7 +955,7 @@ def discover_models_endpoint():
         return api_bad_request('api_key is required')
 
     # @safe_route on the enclosing view catches any exception from either
-    # discover_models or enrich_models_with_pricing (pt_63eb7f02 batch 5).
+    # discover_models or enrich_models_with_pricing ( batch 5).
     from lib.llm_dispatch.discovery import discover_models, enrich_models_with_pricing
     models = discover_models(base_url, api_key, models_path=models_path)
     if not models:
@@ -1452,7 +1571,7 @@ def probe_provider_cells_status():
 
 @config_bp.route('/api/v1/providers/templates')
 def get_provider_templates():
-    """Serve external provider templates from static/provider_templates/*.json.
+    """Serve package-owned plus external provider templates.
 
     Pricing-tier tags ('cheap', plus any future PRICING_TIERS row) are
     re-evaluated on every request against live MODEL_PRICING data, so a
@@ -1466,18 +1585,31 @@ def get_provider_templates():
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         'static', 'provider_templates'
     )
-    result = []
-    if not os.path.isdir(templates_dir):
-        # Coordinated bare-array migration (batch 10): array moves under
-        # ``items``; Api.providers.templates unwraps (with fallback).
-        return api_ok({'items': result})
-    for fname in sorted(os.listdir(templates_dir)):
+    from lib.model_info._openai_gpt56 import OPENAI_TEMPLATE
+
+    template_sources = [('openai.json', dict(OPENAI_TEMPLATE))]
+    for fname in (sorted(os.listdir(templates_dir))
+                  if os.path.isdir(templates_dir) else ()):
         if not fname.endswith('.json'):
             continue
         fpath = os.path.join(templates_dir, fname)
         try:
             with open(fpath, encoding='utf-8') as f:
                 tpl = json.load(f)
+            template_sources.append((fname, tpl))
+        except Exception as e:
+            logger.warning('[ProviderTemplates] Failed to load %s: %s', fname, e)
+
+    # A deployment-local file may intentionally replace a package template.
+    # Preserve deterministic ordering while applying that key-based override.
+    merged_sources = {}
+    for fname, tpl in template_sources:
+        if isinstance(tpl, dict) and tpl.get('key'):
+            merged_sources[str(tpl['key'])] = (fname, tpl)
+
+    result = []
+    for fname, tpl in merged_sources.values():
+        try:
             if not (isinstance(tpl, dict) and tpl.get('key')):
                 continue
             # Normal templates must ship a model list. The 'local' template is
@@ -1544,8 +1676,9 @@ def test_network_proxy():
     an inline ``credential`` (or URL userinfo) is used for this probe only
     and never persisted; a bare ``credential_vault`` reference resolves
     through the vault. Returns ``{ok, results: [{target, label, status,
-    latency_ms, verdict}]}`` — 403 from the canary = geo/policy block, any
-    other HTTP answer = the app layer was reached.
+    latency_ms, verdict}]}`` — 403 from the canary = geo/policy block,
+    407 = the proxy itself rejected our credential (proxy_auth), any other
+    HTTP answer = the app layer was reached.
     """
     data = parse_body()
     from lib.proxy import sanitize_proxy_pool, test_proxy_entry
@@ -1581,6 +1714,7 @@ def save_server_config():
     import lib as _lib
     from lib.log import audit_log
     from lib.json_store import update_json_atomic
+    from lib.model_catalog import ModelCatalogError as _CatalogError
 
     data = parse_body()
     changes = []
@@ -1673,6 +1807,7 @@ def save_server_config():
         nonlocal dispatch_reset_needed
         if not isinstance(existing, dict):
             existing = {}
+        final_cost_experiment = cost_experiment_prep
 
         # Validate before any other config mutation or hot-reload side effect.
         # One experiment ID must describe one stable routing shape; otherwise
@@ -1680,23 +1815,44 @@ def save_server_config():
         # other arm and contaminate both samples.
         if cost_experiment_prep is not None:
             from lib.cost_experiments import validate_cost_experiment_transition
-            validate_cost_experiment_transition(
+            final_cost_experiment = validate_cost_experiment_transition(
                 existing.get('cost_experiment'), cost_experiment_prep)
 
         if provider_prep is not None:
             current = existing.get('providers') or []
-            existing['providers'] = _merge_server_owned_providers(
+            merged_providers = _merge_server_owned_providers(
                 current, provider_prep)
             editable_count = sum(
                 not _is_managed_subscription_provider(p)
-                for p in existing['providers'])
-            managed_count = len(existing['providers']) - editable_count
+                for p in merged_providers)
+            managed_count = len(merged_providers) - editable_count
             total_models = sum(len(p.get('models', []))
-                               for p in existing['providers'])
+                               for p in merged_providers)
             changes.append('providers (%d editable + %d managed with %d models)' % (
                 editable_count, managed_count, total_models))
             dispatch_reset_needed = True
             existing.pop('models_registry', None)
+
+            # Compile + store a fresh catalog revision from the merged
+            # snapshot. ``previous`` enables the ``_catalog_revision``
+            # stale-save protection: a projected row older than the current
+            # catalog cannot overwrite a newer catalog ``enabled`` value.
+            # This compilation is pure (normalize-only); it never activates
+            # the pricing or dispatch registries.
+            from lib.model_catalog import (
+                catalog_from_providers as _catalog_from_providers,
+                project_providers as _catalog_project_providers,
+                strip_provider_models as _catalog_strip_provider_models,
+            )
+            previous_catalog = (
+                existing.get('model_catalog')
+                if isinstance(existing.get('model_catalog'), dict) else None)
+            new_catalog = _catalog_from_providers(
+                merged_providers, previous=previous_catalog, source='config')
+            existing['model_catalog'] = new_catalog
+            existing['providers'] = _catalog_project_providers(
+                _catalog_strip_provider_models(merged_providers),
+                new_catalog)
 
         if 'presets' in data and isinstance(data['presets'], dict):
             existing['presets'] = data['presets']
@@ -1716,8 +1872,8 @@ def save_server_config():
             # LLM content filter is a separate module-level flag
             if 'llm_content_filter' in data['search']:
                 _lib.LLM_CONTENT_FILTER_ENABLED = bool(data['search']['llm_content_filter'])
-                from lib.search_bridge import sync_search_config
-                sync_search_config()
+                from lib.search_runtime import sync_search_config_if_loaded
+                sync_search_config_if_loaded()
                 logger.info('[Config] LLM content filter → %s', _lib.LLM_CONTENT_FILTER_ENABLED)
             changes.append('search.*')
 
@@ -1795,17 +1951,17 @@ def save_server_config():
                         existing['mt_provider']['provider'],
                         existing['mt_provider']['enabled'])
 
-        if cost_experiment_prep is not None:
+        if final_cost_experiment is not None:
             from lib.cost_experiments import normalize_cost_experiment_config
             prior_cost_experiment = normalize_cost_experiment_config(
                 existing.get('cost_experiment'))
-            if cost_experiment_prep != prior_cost_experiment:
-                existing['cost_experiment'] = cost_experiment_prep
+            if final_cost_experiment != prior_cost_experiment:
+                existing['cost_experiment'] = final_cost_experiment
                 changes.append(
-                    'cost_experiment (enabled=%s traffic=%d%% optimized=%d%%)'
-                    % (cost_experiment_prep['enabled'],
-                       cost_experiment_prep['traffic_percent'],
-                       cost_experiment_prep['treatment_percent']))
+                    'cost_experiment (lifecycle=%s traffic=%d%% optimized=%d%%)'
+                    % (final_cost_experiment['lifecycle'],
+                       final_cost_experiment['traffic_percent'],
+                       final_cost_experiment['treatment_percent']))
 
         return existing
 
@@ -1813,6 +1969,9 @@ def save_server_config():
     try:
         update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
         logger.info('[ServerConfig] Saved server_config.json')
+    except _CatalogError as e:
+        logger.warning('[ServerConfig] rejected provider catalog: %s', e)
+        return api_bad_request('providers: %s' % e)
     except CostExperimentTransitionError as e:
         logger.warning('[ServerConfig] rejected cost experiment transition: %s',
                        e)
@@ -1866,6 +2025,15 @@ def save_server_config():
             # Saving config succeeded; a background refresh failure must never
             # turn that durable success into an HTTP error.
             logger.warning('[ServerConfig] model catalogue wake failed: %s', e)
+        try:
+            from lib.llm_dispatch.autodiscover_local import (
+                trigger_local_autodiscovery,
+            )
+            trigger_local_autodiscovery(reset_backoff=True)
+        except Exception as e:
+            # The durable provider save and dispatcher reset already
+            # succeeded; the periodic monitor remains a best-effort follow-up.
+            logger.warning('[ServerConfig] local discovery wake failed: %s', e)
 
     return api_ok({'needs_restart': False, 'changes': changes,
                    'model_catalog_sync_started': catalog_sync_started})

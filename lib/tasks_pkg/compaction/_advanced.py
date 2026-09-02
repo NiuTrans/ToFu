@@ -40,6 +40,9 @@ from lib.tasks_pkg.compaction._steps import (
     make_constants,
     run_steps,
 )
+import lib.tasks_pkg.compaction._constants as compaction_constants
+import lib.tasks_pkg.compaction._faithful_methods  # noqa: F401
+import lib.tasks_pkg.compaction._methods  # noqa: F401
 
 logger = get_logger(__name__)
 
@@ -125,17 +128,19 @@ def advanced_compact(messages: list, conv_id: str = '',
     if not advanced_steps:
         return 0
 
-    import lib.tasks_pkg.compaction as _pkg
-
     # Cache-prefix boundary (same source of truth as L1).
     cache_prefix_count = 0
     if conv_id:
         try:
-            from lib.tasks_pkg.cache_tracking import get_cache_prefix_count
+            from lib.tasks_pkg.cache_tracking._prefix import get_cache_prefix_count
+            from lib.tasks_pkg.manager import task_user_id
             # Clamp the monotonic boundary to the live message count (see
             # get_cache_prefix_count docstring — history-shrink guard).
             cache_prefix_count = get_cache_prefix_count(
-                conv_id, current_msg_count=len(messages))
+                conv_id,
+                user_id=task_user_id(task),
+                current_msg_count=len(messages),
+            )
         except Exception as e:
             logger.debug('[AdvCompact] cache_tracking unavailable: %s', e)
 
@@ -143,7 +148,7 @@ def advanced_compact(messages: list, conv_id: str = '',
         messages=messages,
         conv_id=conv_id,
         task=task,
-        constants=make_constants(_pkg, constant_overrides),
+        constants=make_constants(compaction_constants, constant_overrides),
         cache_prefix_count=cache_prefix_count,
         ignore_cache_prefix=bool(ignore_cache_prefix),
         summarize_fn=_make_summarize_fn(conv_id, task),

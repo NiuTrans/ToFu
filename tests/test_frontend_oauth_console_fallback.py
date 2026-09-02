@@ -75,7 +75,11 @@ for (const id of ['oauthClaudeLoginBtn','oauthClaudeLogoutBtn','oauthClaudeStatu
                   'oauthClaudeAuthUrl','oauthClaudeManualUrl','oauthClaudeEgress',
                   'oauthClaudeCodeHint','oauthClaudePasteRow',
                   'oauthClaudeLoopbackNote','oauthClaudeConsoleFallbackRow',
-                  'oauthClaudeConsoleFallbackBtn']) nodes[id] = el(id);
+                  'oauthClaudeConsoleFallbackBtn',
+                  'oauthCodexLoginBtn','oauthCodexLogoutBtn','oauthCodexStatus',
+                  'oauthCodexInfo','oauthCodexEmail','oauthCodexManual',
+                  'oauthCodexAuthUrl','oauthCodexManualUrl','oauthCodexEgress',
+                  'oauthCodexDeviceBtn']) nodes[id] = el(id);
 
 global.document = {
   getElementById: (id) => nodes[id] || null,
@@ -136,6 +140,14 @@ global.Api = {
       calls.push({ verb: 'storeToken', provider });
       return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
     },
+    deviceLoginPost: (provider) => {
+      calls.push({ verb: 'deviceLoginPost', provider });
+      return Promise.resolve(global._deviceResponse);
+    },
+    deviceLoginGet: (provider) => {
+      calls.push({ verb: 'deviceLoginGet', provider });
+      return Promise.resolve(global._deviceResponse);
+    },
     egressAgentGet: () => Promise.resolve({}),
   },
 };
@@ -167,6 +179,72 @@ _CONSOLE_RESP = {'auth_url': 'https://claude.ai/oauth/authorize?x=2',
                  'status': 'started', 'provider': 'claude',
                  'callback_port': 54545, 'redirect_mode': 'console',
                  'exchange': {}}
+_CODEX_MANUAL_RESP = {
+    'auth_url': 'https://auth.openai.com/oauth/authorize?x=3',
+    'status': 'started', 'provider': 'codex',
+    'callback_port': 1455, 'redirect_mode': 'manual',
+    'exchange': {},
+}
+
+
+class TestCodexRemoteCallbackCapture(unittest.TestCase):
+
+    def test_remote_flow_shows_callback_paste_box_immediately(self):
+        v = _harness(
+            """
+            document.getElementById('oauthCodexManual').style.display = 'none';
+            await _oauthLogin('codex');
+            await new Promise(r => setImmediate(r));
+            console.log(JSON.stringify({
+              manual: document.getElementById('oauthCodexManual').style.display,
+              authUrl: document.getElementById('oauthCodexAuthUrl').value,
+            }));
+            """, _CODEX_MANUAL_RESP)
+        self.assertNotEqual(v['manual'], 'none')
+        self.assertEqual(v['authUrl'], _CODEX_MANUAL_RESP['auth_url'])
+
+    def test_complete_localhost_callback_url_preserves_code_and_state(self):
+        v = _harness(
+            """
+            const captured = [];
+            _completeLogin = (provider, code, state) =>
+              captured.push({ provider, code, state });
+            document.getElementById('oauthCodexManualUrl').value =
+              'http://localhost:1455/auth/callback?code=ac_test&state=st_test';
+            _oauthManualSubmit('codex');
+            console.log(JSON.stringify({ captured }));
+            """, _CODEX_MANUAL_RESP)
+        self.assertEqual(v['captured'], [{
+            'provider': 'codex', 'code': 'ac_test', 'state': 'st_test',
+        }])
+
+    def test_relay_messages_forward_state_into_csrf_validation(self):
+        src = _OAUTH_JS.read_text(encoding='utf-8')
+        self.assertGreaterEqual(
+            src.count('_handleOAuthCode(data.provider, data.code, data.state)'),
+            2)
+
+    def test_device_transport_outage_switches_to_browser_login(self):
+        v = _harness(
+            """
+            global._deviceResponse = {
+              ok: false, status: 503,
+              text: () => Promise.resolve(JSON.stringify({
+                error: 'egress unavailable', status_code: 0,
+              })),
+            };
+            const fallbacks = [];
+            _oauthLogin = (provider) => fallbacks.push(provider);
+            _oauthDeviceLogin('codex');
+            await new Promise(r => setImmediate(r));
+            await new Promise(r => setImmediate(r));
+            console.log(JSON.stringify({ calls, fallbacks }));
+            """, _CODEX_MANUAL_RESP)
+        self.assertEqual(v['fallbacks'], ['codex'])
+        alerts = [call for call in v['calls']
+                  if call['verb'] == 'showAlert']
+        self.assertEqual(len(alerts), 1)
+        self.assertIn('settings.oauthDeviceFallback', alerts[0]['msg'])
 
 
 class TestEscapeHatchIsReachable(unittest.TestCase):

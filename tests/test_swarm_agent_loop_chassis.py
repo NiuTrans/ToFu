@@ -236,6 +236,36 @@ class TestSwarmOnChassis(unittest.TestCase):
         self.assertIn('LLM call failed at round 1',
                       agent.result.error_message or '')
 
+    def test_content_bearing_malformed_stream_never_completes(self):
+        from lib.llm.stream_result import (
+            ProviderStreamResult,
+            ProviderStreamState,
+            UnverifiedProviderStreamError,
+        )
+        from lib.swarm.types import SubAgentStatus
+
+        def dispatch(body, **kw):
+            on_content = kw.get('on_content')
+            if on_content:
+                on_content('safe prefix')
+            return ProviderStreamResult(
+                message={'role': 'assistant', 'content': 'safe prefix'},
+                compatibility_finish_reason='stop',
+                usage={},
+                state=ProviderStreamState.MALFORMED_STREAM,
+                malformed_frame_count=1,
+            )
+
+        agent = _mk_agent(dispatch_fn=dispatch)
+        with self.assertRaises(UnverifiedProviderStreamError):
+            agent._run_loop(time.time())
+
+        self.assertEqual(agent.result.status, SubAgentStatus.PENDING.value)
+        self.assertEqual(agent._tool_batches, [])
+        self.assertFalse(any(
+            message.get('role') == 'assistant'
+            for message in agent.messages))
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

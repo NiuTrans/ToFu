@@ -13,15 +13,6 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-def test_slides_research_path_is_a_compatibility_shim():
-    """There must be one implementation, not two synchronized copies."""
-    from lib.production import research as shared
-    from lib.slides import _research as legacy
-
-    assert legacy.research_topic is shared.research_topic
-    assert legacy.summarise_current_signals is shared.summarise_current_signals
-
-
 def test_shared_research_supports_media_specific_freshness_profiles():
     from lib.production.research import research_topic
 

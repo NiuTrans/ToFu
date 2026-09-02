@@ -1,6 +1,6 @@
 """Per-round LLM call with automatic fallback + deferred-inbox flush.
 
-Extracted 2026-07-31 (pt_03f4cdf1 slice 26) from
+Extracted 2026-07-31 ( slice 26) from
 ``lib/tasks_pkg/orchestrator/_run.py`` run_task stream loop.
 
 Runs after the messages-snapshot emission + body build, inside the
@@ -42,7 +42,11 @@ from typing import Any
 
 from lib.log import get_logger
 from lib.llm import AbortedError
-from lib.tasks_pkg.llm_fallback import _llm_call_with_fallback
+from lib.llm.stream_result import (
+    ProviderStreamResult,
+    ensure_provider_stream_result,
+)
+from lib.tasks_pkg.llm_fallback._call import _llm_call_with_fallback
 from lib.tasks_pkg.orchestrator._deferred_inbox_flush import (
     flush_deferred_peer_and_steer,
 )
@@ -93,7 +97,7 @@ def run_llm_call_with_fallback(
         'break' when the caller must break out of the stream loop
         (fallback-requested break or user abort), 'proceed' otherwise.
     """
-    # ★ LLM call with automatic fallback to Opus on failure
+    # LLM call with automatic fallback to Opus on failure
     try:
         llm_result = _llm_call_with_fallback(
             task, body, rs.model, round_num, max_tokens,
@@ -105,11 +109,18 @@ def run_llm_call_with_fallback(
         rs.assistant_msg = llm_result['assistant_msg']
         rs.last_finish_reason = llm_result['finish_reason']
         rs.last_usage = llm_result['usage'] or rs.last_usage
+        raw_stream_result = llm_result.get('stream_result')
+        rs.last_stream_result = (
+            ensure_provider_stream_result(raw_stream_result)
+            if raw_stream_result is not None
+            else ProviderStreamResult.from_legacy(
+                rs.assistant_msg, rs.last_finish_reason, llm_result['usage'])
+        )
         rs.model = llm_result['model']
         rs.preset = llm_result['preset']
         rs.thinking_enabled = llm_result['thinking_enabled']
 
-        # ── Flush DEFERRED peer + steer inbox (pt_03f4cdf1 slice 12) ──
+        # ── Flush DEFERRED peer + steer inbox ( slice 12) ──
         #   The LLM call above just succeeded, so the peer and
         #   human-steer messages injected into ``messages`` earlier
         #   this round WERE consumed by the model. The helper emits

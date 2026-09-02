@@ -40,11 +40,7 @@ export function createOrchestrationDefinitionRequestClient(
     if (typeof options.definitionWriteContract !== 'function') {
       return options.definitionWriteContract ?? null;
     }
-    try {
-      return options.definitionWriteContract();
-    } catch {
-      return { legacyUnguarded: false };
-    }
+    return options.definitionWriteContract();
   };
   const list = () => requests.request('definition-list');
   const get = (id: unknown) => requests.request('definition-read', [id]);

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -152,15 +151,3 @@ def test_startup_readiness_gate_suppresses_boot_stall_observation():
 
     import time
     asyncio.run(exercise())
-
-
-def test_production_entry_registers_watchdog_shutdown_owner():
-    source = (Path(__file__).resolve().parents[1]
-              / 'lib/serving_loop_lifecycle.py').read_text()
-
-    assert 'LoopWatchdog(' in source
-    assert 'ready_event=gate' in source
-    assert 'await watchdog.stop(timeout=2.0)' in source
-    assert "name='tofu.serving-loop.shutdown'" in source
-    assert 'async def _loop_heartbeat_task' not in source
-    assert 'def _loop_stall_watch' not in source

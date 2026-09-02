@@ -94,7 +94,7 @@ def _hash_prefix_content(messages: list, prefix_count: int) -> str:
     if this hash changes between rounds without a compaction event,
     something is silently mutating messages in the cached prefix.
 
-    ★ Covers the fields that ACTUALLY land on the wire and therefore affect
+    Covers the fields that ACTUALLY land on the wire and therefore affect
     the Anthropic prefix-byte match — not just ``content`` text. A turn's
     ``tool_calls`` (name + arguments + id), ``reasoning_content``,
     ``reasoning_details`` and ``thinking_signature`` are all serialized into

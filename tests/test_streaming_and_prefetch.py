@@ -86,6 +86,41 @@ class TestStreamingToolAccumulator:
         assert hits == 1
         assert len(task['_tool_result_cache']) == 1
 
+    def test_callback_contract_rejection_never_preexecutes(self):
+        """Speculative reads cannot bypass the request execution contract."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+        from lib.tools.contracts import adapt_legacy_tool_contract
+
+        schema = {
+            'type': 'function',
+            'function': {
+                'name': 'list_dir', 'description': 'List a directory.',
+                'parameters': {
+                    'type': 'object',
+                    'properties': {
+                        'path': {'type': 'string', 'minLength': 3},
+                    },
+                    'required': ['path'], 'additionalProperties': False,
+                },
+            },
+        }
+        task = self._make_task()
+        task['_toolContractDocumentsByName'] = {
+            'list_dir': adapt_legacy_tool_contract(schema).search_document()}
+        acc = StreamingToolAccumulator(task, project_path='/tmp')
+        acc._execute_one = MagicMock(return_value='must not run')
+
+        acc.on_tool_call_ready({
+            'id': 'tc_contract_rejected',
+            'function': {
+                'name': 'list_dir',
+                'arguments': json.dumps({'path': '.'}),
+            },
+        })
+
+        assert acc.submitted_count == 0
+        acc._execute_one.assert_not_called()
+
     def test_callback_skips_aborted_task(self):
         """on_tool_call_ready does not submit if task is aborted."""
         from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
@@ -265,14 +300,20 @@ class TestReconcileAnnouncedRounds:
     """
 
     def _make_task(self, tid='reconcile-task-1'):
-        return {
+        task = {
             'id': tid,
+            '_userId': 1,
+            'status': 'running',
             'aborted': False,
             'lastUserQuery': 'q',
             'toolRounds': [],
             'events': [],
             'events_lock': threading.Lock(),
         }
+        from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+        with tasks_lock:
+            tasks[tid] = task
+        return task
 
     def _announce(self, acc, tc_id, fn_name='read_files', args=None):
         """Drive a real early-announce (appends a searching round + tool_start)."""
@@ -466,7 +507,7 @@ class TestConcurrencyPartitioning:
 
     def test_write_tools_frozenset_exists(self):
         """_WRITE_TOOLS frozenset is defined in tool_dispatch."""
-        from lib.tasks_pkg.tool_dispatch import _WRITE_TOOLS
+        from lib.tasks_pkg.tool_dispatch._flags import _WRITE_TOOLS
         assert isinstance(_WRITE_TOOLS, frozenset)
         assert 'write_file' in _WRITE_TOOLS
         assert 'apply_diff' in _WRITE_TOOLS
@@ -474,7 +515,7 @@ class TestConcurrencyPartitioning:
 
     def test_read_tools_not_in_write_set(self):
         """Read-only tools are NOT in the _WRITE_TOOLS set."""
-        from lib.tasks_pkg.tool_dispatch import _WRITE_TOOLS
+        from lib.tasks_pkg.tool_dispatch._flags import _WRITE_TOOLS
         read_tools = {'read_files', 'grep_search', 'find_files',
                       'list_dir', 'web_search', 'fetch_url'}
         assert _WRITE_TOOLS.isdisjoint(read_tools)
@@ -482,7 +523,7 @@ class TestConcurrencyPartitioning:
     def test_streamable_and_write_disjoint(self):
         """_STREAMABLE_TOOLS and _WRITE_TOOLS have no overlap."""
         from lib.tasks_pkg.streaming_tool_executor import _STREAMABLE_TOOLS
-        from lib.tasks_pkg.tool_dispatch import _WRITE_TOOLS
+        from lib.tasks_pkg.tool_dispatch._flags import _WRITE_TOOLS
         assert _STREAMABLE_TOOLS.isdisjoint(_WRITE_TOOLS), \
             f"Overlap: {_STREAMABLE_TOOLS & _WRITE_TOOLS}"
 
@@ -520,20 +561,21 @@ class TestMemoryPrefetch:
         the Claude-Code-style layout, not the system message — so we
         check the entire prompt (all messages) rather than just sys[0].
         """
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
 
         future = Future()
         future.set_result("Prefetched project context here")
 
         task = {
             '_prefetch_project': future,
+            '_userId': 1,
         }
 
         messages = [{'role': 'system', 'content': 'Base system prompt'}]
 
-        _inject_system_contexts(
-            messages, '/tmp/project', True,  # project_enabled
-            False, True, False,              # skills, search, swarm
+        compose_task_context(
+            messages, user_id=1, project_path='/tmp/project',
+            project_enabled=True, memory_enabled=False, search_enabled=True,
             has_real_tools=True,
             conv_id='',
             task=task,
@@ -543,22 +585,24 @@ class TestMemoryPrefetch:
 
     def test_prefetch_fallback_on_failure(self):
         """When prefetch future failed, fallback function is called."""
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
 
         future = Future()
         future.set_exception(RuntimeError("FUSE timeout"))
 
         task = {
             '_prefetch_project': future,
+            '_userId': 1,
         }
 
         messages = [{'role': 'system', 'content': 'Base prompt'}]
 
         with patch('lib.project_mod.get_context_for_prompt',
                    return_value='Fallback project ctx') as mock_fn:
-            _inject_system_contexts(
-                messages, '/tmp/project', True,
-                False, False, False,
+            compose_task_context(
+                messages, user_id=1, project_path='/tmp/project',
+                project_enabled=True, memory_enabled=False,
+                search_enabled=False,
                 has_real_tools=True,
                 conv_id='',
                 task=task,
@@ -568,21 +612,23 @@ class TestMemoryPrefetch:
 
     def test_prefetch_fallback_when_not_done(self):
         """When prefetch future is not done, fallback function is called."""
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
 
         future = Future()  # not set_result'd, never done
 
         task = {
             '_prefetch_project': future,
+            '_userId': 1,
         }
 
         messages = [{'role': 'system', 'content': 'Base prompt'}]
 
         with patch('lib.project_mod.get_context_for_prompt',
                    return_value='Sync fallback ctx') as mock_fn:
-            _inject_system_contexts(
-                messages, '/tmp/project', True,
-                False, False, False,
+            compose_task_context(
+                messages, user_id=1, project_path='/tmp/project',
+                project_enabled=True, memory_enabled=False,
+                search_enabled=False,
                 has_real_tools=True,
                 conv_id='',
                 task=task,
@@ -592,15 +638,16 @@ class TestMemoryPrefetch:
 
     def test_no_prefetch_when_task_is_none(self):
         """When task is None, normal synchronous loading is used."""
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
 
         messages = [{'role': 'system', 'content': 'Base'}]
 
         with patch('lib.project_mod.get_context_for_prompt',
                    return_value='Normal load') as mock_fn:
-            _inject_system_contexts(
-                messages, '/tmp/proj', True,
-                False, False, False,
+            compose_task_context(
+                messages, user_id=0, project_path='/tmp/proj',
+                project_enabled=True, memory_enabled=False,
+                search_enabled=False,
                 has_real_tools=True,
                 task=None,
             )
@@ -616,21 +663,28 @@ class TestMemoryPrefetch:
         @-attach (has_conv_ref) — so a plain project turn told the model to
         call tools absent from its schema. The header is now tool-aware.
         """
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
+        from lib.conversations.project_summary import ProjectDigestProjection
 
         messages = [{'role': 'system', 'content': 'Base'}]
         with patch('lib.project_mod.get_context_for_prompt', return_value=''), \
-             patch('lib.conversations.project_summary.build_project_digest') as mock_digest:
-            mock_digest.return_value = 'For ambient awareness: this project has 2 related conversation(s).'
-            _inject_system_contexts(
-                messages, '/tmp/proj', True,       # project_enabled
-                False, False, False,               # memory, search, swarm
+             patch(
+                 'lib.conversations.project_summary.build_project_digest_projection'
+             ) as mock_digest:
+            mock_digest.return_value = ProjectDigestProjection(
+                'For ambient awareness: this project has 2 related conversation(s).',
+                (),
+            )
+            compose_task_context(
+                messages, user_id=0, project_path='/tmp/proj',
+                project_enabled=True, memory_enabled=False,
+                search_enabled=False,
                 has_real_tools=True,
                 conv_id='',
                 task=None,
                 tool_names={'read_files', 'web_search'},  # NO conv-ref tools
             )
-        # build_project_digest must have been called with conv_tools_available=False.
+        # The shared projection must be tool-free for this turn.
         assert mock_digest.called
         _, kwargs = mock_digest.call_args
         assert kwargs.get('conv_tools_available') is False
@@ -642,15 +696,22 @@ class TestMemoryPrefetch:
     def test_digest_header_advertises_tools_when_conv_tools_present(self):
         """When the conv-ref tools ARE registered, the digest is built with
         conv_tools_available=True so the header can instruct their use."""
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
+        from lib.conversations.project_summary import ProjectDigestProjection
 
         messages = [{'role': 'system', 'content': 'Base'}]
         with patch('lib.project_mod.get_context_for_prompt', return_value=''), \
-             patch('lib.conversations.project_summary.build_project_digest') as mock_digest:
-            mock_digest.return_value = 'This project has 1 related conversation(s) you can consult.'
-            _inject_system_contexts(
-                messages, '/tmp/proj', True,
-                False, False, False,
+             patch(
+                 'lib.conversations.project_summary.build_project_digest_projection'
+             ) as mock_digest:
+            mock_digest.return_value = ProjectDigestProjection(
+                'This project has 1 related conversation(s) you can consult.',
+                (),
+            )
+            compose_task_context(
+                messages, user_id=0, project_path='/tmp/proj',
+                project_enabled=True, memory_enabled=False,
+                search_enabled=False,
                 has_real_tools=True,
                 conv_id='',
                 task=None,
@@ -668,7 +729,7 @@ class TestMemoryPrefetch:
         No listing is injected into the user message (on-demand via
         `search_memories` tool + per-turn memory-prefetch).
         """
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
 
         # Create completed futures
         proj_future = Future()
@@ -676,6 +737,7 @@ class TestMemoryPrefetch:
 
         task = {
             '_prefetch_project': proj_future,
+            '_userId': 1,
         }
 
         messages = [
@@ -683,11 +745,12 @@ class TestMemoryPrefetch:
             {'role': 'user', 'content': 'Help me with flask migration'},
         ]
 
-        with patch('lib.memory.build_memory_context',
+        with patch('lib.memory.injection.build_memory_context',
                    return_value='You have 42 accumulated memories from previous sessions. Use search_memories(query) to find relevant past experience.'):
-            _inject_system_contexts(
-                messages, '/tmp/proj', True,
-                True, False, False,  # memory_enabled=True
+            compose_task_context(
+                messages, user_id=1, project_path='/tmp/proj',
+                project_enabled=True, memory_enabled=True,
+                search_enabled=False,
                 has_real_tools=True,
                 conv_id='',
                 task=task,
@@ -720,7 +783,7 @@ class TestMemoryPrefetch:
         with skills installed AND memory enabled, the listing LANDS; and a
         second assembly of the same messages does not double-splice.
         """
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
 
         listing = ('<available_skills>\n'
                    'The USER has installed the following skill packages.\n'
@@ -728,17 +791,18 @@ class TestMemoryPrefetch:
                    '</available_skills>')
         proj_future = Future()
         proj_future.set_result('Proj ctx')
-        task = {'_prefetch_project': proj_future}
+        task = {'_prefetch_project': proj_future, '_userId': 1}
         messages = [{'role': 'system', 'content': 'Base'},
                     {'role': 'user', 'content': 'Help me'}]
 
         def _assemble():
-            with patch('lib.memory.build_memory_context',
+            with patch('lib.memory.injection.build_memory_context',
                        return_value='You have 42 accumulated memories.'), \
                  patch('lib.skills.build_skills_index', return_value=listing):
-                _inject_system_contexts(
-                    messages, '/tmp/proj', True,
-                    True, False, False,  # memory_enabled=True
+                compose_task_context(
+                    messages, user_id=1, project_path='/tmp/proj',
+                    project_enabled=True, memory_enabled=True,
+                    search_enabled=False,
                     has_real_tools=True, conv_id='', task=task)
 
         _assemble()
@@ -795,7 +859,7 @@ class TestCallbackThreading:
         """_llm_call_with_fallback accepts on_tool_call_ready parameter."""
         import inspect
 
-        from lib.tasks_pkg.llm_fallback import _llm_call_with_fallback
+        from lib.tasks_pkg.llm_fallback._call import _llm_call_with_fallback
         sig = inspect.signature(_llm_call_with_fallback)
         assert 'on_tool_call_ready' in sig.parameters
 
@@ -810,7 +874,7 @@ class TestStreamingIntegration:
 
     def test_cache_key_compatibility(self):
         """StreamingToolAccumulator produces cache keys compatible with tool_dispatch."""
-        from lib.tasks_pkg.tool_dispatch import _make_cache_key
+        from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key
 
         # Verify the cache key function works
         key1 = _make_cache_key('grep_search', {'pattern': 'foo'})
@@ -822,7 +886,7 @@ class TestStreamingIntegration:
 
     def test_prefetch_result_is_found_by_pipeline(self):
         """Results injected by StreamingToolAccumulator are found by dedup check."""
-        from lib.tasks_pkg.tool_dispatch import _make_cache_key
+        from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key
 
         task = {'id': 'test-123', '_tool_result_cache': {}}
 
@@ -840,7 +904,7 @@ class TestStreamingIntegration:
     def test_accumulator_full_cycle(self):
         """Full cycle: submit → execute → inject → cache hit."""
         from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
-        from lib.tasks_pkg.tool_dispatch import _make_cache_key
+        from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key
 
         task = {
             'id': 'test-full-cycle',

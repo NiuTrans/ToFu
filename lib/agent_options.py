@@ -22,7 +22,7 @@ Design constraints
   never reject the request.  Hard rejection would silently break Feishu /
   scheduler / autopilot callers that pass ad-hoc keys.
 * **Single source of truth for OpenAPI**: ``TofuOptions.openapi_schema()``
-  generates the ``TofuConfig`` component used in ``lib/openapi.py``.
+  generates the ``TofuConfig`` component used in ``lib/openapi/``.
 
 Usage
 -----
@@ -34,7 +34,7 @@ Usage
     opts = TofuOptions.from_cfg(request_body.get('config') or {})
 
     # Read typed fields
-    if opts.swarm_enabled and opts.project_path:
+    if opts.memory_enabled and opts.project_path:
         ...
 
     # Hand to the orchestrator (which still wants a dict)
@@ -84,7 +84,6 @@ _FIELDS: list[tuple[str, str, type, Any, Optional[tuple], str]] = [
     ('memoryEnabled',         'memory_enabled',        bool,  True,   None, 'Enable memory tools.'),
     ('browserEnabled',        'browser_enabled',       bool,  False,  None, 'Enable browser-extension tools.'),
     ('desktopEnabled',        'desktop_enabled',       bool,  False,  None, 'Enable desktop-agent tools.'),
-    ('swarmEnabled',          'swarm_enabled',         bool,  False,  None, 'Enable spawn_agents / check_agents.'),
     ('imageGenEnabled',       'image_gen_enabled',     bool,  False,  None, 'Enable image-generation tool.'),
     ('humanGuidanceEnabled',  'human_guidance_enabled', bool, False,  None, 'Enable ask_human tool.'),
     ('schedulerEnabled',      'scheduler_enabled',     bool,  False,  None, 'Enable scheduler tools.'),
@@ -108,8 +107,7 @@ _FIELDS: list[tuple[str, str, type, Any, Optional[tuple], str]] = [
     ('profile',               'profile',               str,   '',     None,
         'Capability profile name (lib/agent_core/profiles.py). Supplies cfg '
         'defaults that explicit keys override. Empty / "default" = no-op.'),
-    ('endpointMode',          'endpoint_mode',         bool,  False,  None, 'Planner→Worker→Critic loop.'),
-    ('autopilot',             'autopilot',             bool,  False,  None, 'Autopilot mode.'),
+    ('autopilot',             'autopilot',             bool,  False,  None, 'Goal mode (virtual-user autonomous loop).'),
 
     # ── Safety / limits ───────────────────────────────────────────
     ('maxBudgetUsd',          'max_budget_usd',        float, 0.0,    None,
@@ -118,7 +116,8 @@ _FIELDS: list[tuple[str, str, type, Any, Optional[tuple], str]] = [
     ('maxPromptTokens',       'max_prompt_tokens',      int,   0,      None,
         'Hard ceiling on accumulated prompt/input tokens; 0 disables.'),
     ('maxApiRounds',          'max_api_rounds',         int,   0,      None,
-        'Hard ceiling on model API rounds per task; 0 disables.'),
+        'Hard ceiling on model API rounds per task; 0/unset inherits the '
+        'deployment profile and every value is capped by the server maximum.'),
     ('maxToolOutputBytes',    'max_tool_output_bytes',  int,   0,      None,
         'Hard ceiling on settled tool-output bytes per task; 0 disables.'),
     ('maxTaskSeconds',        'max_task_seconds',       float, 0.0,    None,
@@ -137,7 +136,6 @@ _FIELDS: list[tuple[str, str, type, Any, Optional[tuple], str]] = [
 
     # ── Misc / advanced ───────────────────────────────────────────
     ('autoApply',             'auto_apply',            bool,  True,   None, 'Apply edits without prompting.'),
-    ('keepToolHistory',       'keep_tool_history',     bool,  True,   None, 'Persist tool rounds in conversation.'),
     ('contentPrefix',         'content_prefix',        str,   '',     None, 'Prefix injected before assistant content.'),
     ('browserClientId',       'browser_client_id',     str,   '',     None, 'Browser-extension client id.'),
     ('excludeLast',           'exclude_last',          bool,  False,  None, 'Exclude last message from context (regen).'),
@@ -217,7 +215,6 @@ class TofuOptions:
     memory_enabled: bool = True
     browser_enabled: bool = False
     desktop_enabled: bool = False
-    swarm_enabled: bool = False
     image_gen_enabled: bool = False
     human_guidance_enabled: bool = False
     scheduler_enabled: bool = False
@@ -235,7 +232,6 @@ class TofuOptions:
 
     # Backend / mode
     profile: str = ''
-    endpoint_mode: bool = False
     autopilot: bool = False
 
     # Safety / limits
@@ -249,7 +245,6 @@ class TofuOptions:
 
     # Misc / advanced
     auto_apply: bool = True
-    keep_tool_history: bool = True
     content_prefix: str = ''
     browser_client_id: str = ''
     exclude_last: bool = False
@@ -339,7 +334,7 @@ class TofuOptions:
     def openapi_schema(cls) -> dict:
         """Return an OpenAPI 3.1 schema fragment describing the wire format.
 
-        Used by ``lib/openapi.py`` so the spec stays in lockstep with the
+        Used by ``lib/openapi/`` so the spec stays in lockstep with the
         actual fields without manual maintenance.
         """
         _PYTYPE_TO_OAS = {
@@ -379,7 +374,7 @@ class TofuOptions:
         Useful for sub-task spawning (e.g. autopilot) that wants to
         override a few flags::
 
-            sub = parent_opts.replace(endpoint_mode=False, autopilot=False)
+            sub = parent_opts.replace(autopilot=False)
         """
         existing = {f.name: getattr(self, f.name) for f in fields(self)}
         existing.update(kwargs)

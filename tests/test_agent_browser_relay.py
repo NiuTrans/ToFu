@@ -115,6 +115,165 @@ def test_timed_out_job_cannot_be_completed_late():
         relay.close()
 
 
+# ── Bootstrap mode: the unattached agent's zero-config attach channel ──
+# While no attachment is configured there is no origin to gate on, so
+# /v1/status and /v1/attach open to any browser origin — the page that
+# served the download must be able to find and provision the agent. The
+# attach policy itself (origin-owns-a-route) lives in _push_attach.py; the
+# broker owns the gate, the throttle, and the status codes.
+
+def _start_attach_relay(attached=False, handler=None, allowed=None):
+    state = {'attached': attached}
+    calls = []
+
+    def _default_handler(payload, origin):
+        calls.append({'payload': payload, 'origin': origin})
+        if handler is not None:
+            return handler(payload, origin)
+        return True, 'attached', 'http://10.0.0.1:15000', 'direct'
+
+    relay = BrowserRelay(
+        lambda: list(allowed if attached else []),
+        port_start=15480, port_end=15489,
+        attach_handler=_default_handler,
+        attach_state=lambda: state['attached'])
+    assert relay.start()
+    return relay, 'http://127.0.0.1:%d' % relay.port, state, calls
+
+
+def test_bootstrap_status_is_open_and_reports_unattached():
+    """The page's discovery probe must find an UNATTACHED broker from the
+    page's own origin — which the agent cannot know in advance."""
+    relay, base, _state, _calls = _start_attach_relay(attached=False)
+    try:
+        r = requests.get(base + '/v1/status', timeout=2,
+                         headers={'Origin': 'https://some-tofu.example'})
+        assert r.status_code == 200
+        body = r.json()
+        assert body['kind'] == 'tofu-agent-browser-relay'
+        assert body['attached'] is False
+        assert r.headers['Access-Control-Allow-Origin'] == \
+            'https://some-tofu.example'
+    finally:
+        relay.close()
+
+
+def test_bootstrap_keeps_the_job_verbs_on_the_strict_gate():
+    """Only status/attach open in bootstrap; /v1/take must never leak a
+    poll job to a page whose origin the agent does not (yet) know."""
+    relay, base, _state, _calls = _start_attach_relay(attached=False)
+    try:
+        r = requests.get(base + '/v1/take', timeout=2,
+                         headers={'Origin': 'https://evil.example'})
+        assert r.status_code == 403
+    finally:
+        relay.close()
+
+
+def test_bootstrap_attach_round_trip():
+    relay, base, _state, calls = _start_attach_relay(attached=False)
+    origin = {'Origin': 'https://tofu.example'}
+    bundle = {'v': 1, 'kind': 'tofu-agent-attach', 'token': 'tofu_live_X',
+              'candidates': ['http://10.0.0.1:15000'],
+              'fallback_candidates': ['https://tofu.example']}
+    try:
+        r = requests.post(base + '/v1/attach',
+                          headers={**origin,
+                                   'Content-Type': 'application/json'},
+                          json=bundle, timeout=2)
+        assert r.status_code == 200
+        body = r.json()
+        assert body['accepted'] is True and body['transport'] == 'direct'
+        assert body['url'] == 'http://10.0.0.1:15000'
+        assert calls == [{'payload': bundle, 'origin': 'https://tofu.example'}]
+    finally:
+        relay.close()
+
+
+def test_attach_refusals_map_to_status_codes():
+    outcomes = iter([
+        (False, 'already_attached', '', ''),
+        (False, 'origin_mismatch', '', ''),
+    ])
+    relay, base, _state, _calls = _start_attach_relay(
+        attached=False, handler=lambda p, o: next(outcomes))
+    origin = {'Origin': 'https://tofu.example',
+              'Content-Type': 'application/json'}
+    try:
+        r = requests.post(base + '/v1/attach', headers=origin,
+                          json={'candidates': ['http://x:1']}, timeout=2)
+        assert r.status_code == 409
+        assert r.json()['reason'] == 'already_attached'
+        # The broker throttles attempts — sleep past the 3 s window so the
+        # second refusal is measured, not the throttle.
+        relay._last_attach_at -= 4.0
+        r = requests.post(base + '/v1/attach', headers=origin,
+                          json={'candidates': ['http://x:1']}, timeout=2)
+        assert r.status_code == 403
+        assert r.json()['reason'] == 'origin_mismatch'
+    finally:
+        relay.close()
+
+
+def test_attach_attempts_are_throttled():
+    relay, base, _state, calls = _start_attach_relay(attached=False)
+    origin = {'Origin': 'https://tofu.example',
+              'Content-Type': 'application/json'}
+    payload = {'candidates': ['http://x:1']}
+    try:
+        first = requests.post(base + '/v1/attach', headers=origin,
+                              json=payload, timeout=2)
+        second = requests.post(base + '/v1/attach', headers=origin,
+                               json=payload, timeout=2)
+        assert first.status_code == 200
+        assert second.status_code == 429
+        assert second.json()['reason'] == 'throttled'
+        assert len(calls) == 1, 'the handler ran despite the throttle'
+    finally:
+        relay.close()
+
+
+def test_an_attached_broker_refuses_foreign_origins_on_attach():
+    """Once configured, the bootstrap openness closes: only the configured
+    server's own page may push (the dead-route repair path)."""
+    relay, base, _state, calls = _start_attach_relay(
+        attached=True, allowed=['https://mine.example/proxy/15000/'])
+    body = {'candidates': ['http://x:1']}
+    try:
+        evil = requests.post(
+            base + '/v1/attach', json=body, timeout=2,
+            headers={'Origin': 'https://evil.example',
+                     'Content-Type': 'application/json'})
+        assert evil.status_code == 403
+        assert not calls, 'a foreign origin must never reach the handler'
+        mine = requests.post(
+            base + '/v1/attach', json=body, timeout=2,
+            headers={'Origin': 'https://mine.example',
+                     'Content-Type': 'application/json'})
+        assert mine.status_code == 200
+        assert len(calls) == 1
+        # …and status now reports attached, so the page never pushes.
+        st = requests.get(base + '/v1/status', timeout=2,
+                          headers={'Origin': 'https://mine.example'})
+        assert st.json()['attached'] is True
+    finally:
+        relay.close()
+
+
+def test_a_handlerless_broker_answers_attach_with_404():
+    """The page maps 404 to 'relay-only build — stop pushing'."""
+    relay, base = _start_relay()
+    try:
+        r = requests.post(
+            base + '/v1/attach', json={'candidates': ['http://x:1']},
+            timeout=2,
+            headers={'Origin': 'https://abc-vscode.example.com',
+                     'Content-Type': 'application/json'})
+        assert r.status_code == 404
+    finally:
+        relay.close()
+
+
 def test_run_agent_prefers_live_browser_transport(monkeypatch, tmp_path):
     from lib.desktop_agent import _run
 

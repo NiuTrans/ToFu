@@ -266,6 +266,32 @@
   font-family: var(--font-mono, monospace);
   font-size: 12px;
 }
+.oauth-egress-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--s-border-color, #ccc);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  color: var(--s-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.oauth-egress-line::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: #8b8b8b;
+}
+.oauth-egress-line.is-ok::before { background: #28a745; }
+.oauth-egress-line.is-checking::before { background: #d39e00; }
+.oauth-egress-line.is-warning::before { background: #e07a1f; }
+.oauth-egress-line.is-error::before { background: #dc3545; }
 
 /* Subscription-quota meter card (Codex). The renderer
    (_renderOAuthQuota in app-runtime.js) emits these classes; without them
@@ -322,7 +348,44 @@
 .oauth-quota-source {
   margin-top: 6px;
   font-size: 10px;
+  line-height: 1.4;
   color: var(--s-muted);
+}
+.oauth-reset-offer {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1.5px solid var(--s-gold-dim);
+  background: rgba(201, 153, 63, .1);
+  box-shadow: var(--s-shadow-xs);
+  color: var(--s-ink);
+}
+.oauth-reset-offer.is-stale {
+  border-color: var(--s-border-color, #aaa);
+  background: var(--s-cream);
+}
+.oauth-reset-offer.is-checking {
+  border-style: dashed;
+  color: var(--s-muted);
+}
+.oauth-reset-offer-title {
+  font-size: 12px;
+  font-weight: 850;
+  margin-bottom: 4px;
+}
+.oauth-reset-offer-copy,
+.oauth-reset-offer-hint {
+  font-size: 11px;
+  line-height: 1.5;
+}
+.oauth-reset-offer-meta {
+  margin-top: 4px;
+  color: var(--s-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+}
+.oauth-reset-offer-hint {
+  margin-top: 5px;
+  color: var(--s-ink-soft);
 }
 .oauth-provider-actions {
   display: flex;
@@ -2430,10 +2493,52 @@
   border-radius: var(--s-radius);
   background: var(--s-white);
 }
-.auth-source-card > strong { flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: 800; color: var(--s-ink); }
-.auth-source-card > span:not(.search-status-badge) { flex: 1 1 auto; min-width: 0; font-size: 12px; font-weight: 600; color: var(--s-ink-soft); }
+.auth-source-card > strong {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--s-ink);
+}
+.auth-source-card > span:not(.search-status-badge) {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--s-ink-soft);
+}
 .auth-source-card .search-status-badge,
 .auth-source-card .stg-btn-secondary { flex: none; }
+.browser-adapter-row {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.browser-adapter-row.needs-upgrade {
+  background: color-mix(in srgb, var(--s-gold) 10%, var(--s-white));
+}
+.browser-adapter-copy {
+  display: flex;
+  flex: 1 1 280px;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+.browser-adapter-name {
+  color: var(--s-ink);
+  font-size: 13px;
+  font-weight: 800;
+}
+.browser-adapter-detail {
+  color: var(--s-ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+.browser-adapter-upgrade-button { white-space: nowrap; }
+@media (max-width: 620px) {
+  .browser-adapter-row .search-status-badge { order: 2; }
+  .browser-adapter-upgrade-button { order: 3; }
+}
 
 /* ── Card — neo-brutalist tofu block ── */
 .auth-src-card {
@@ -3237,8 +3342,18 @@
   color: var(--s-ink);
   box-shadow: var(--s-shadow-xs);
 }
-.search-status-badge.on  { background: color-mix(in srgb, var(--s-done) 22%, var(--s-white)); }
-.search-status-badge.off { background: var(--s-cream); color: var(--s-ink-soft); border-style: dashed; }
+.search-status-badge.on {
+  background: color-mix(in srgb, var(--s-done) 22%, var(--s-white));
+}
+.search-status-badge.warn {
+  background: color-mix(in srgb, var(--s-gold) 28%, var(--s-white));
+  color: var(--s-ink);
+}
+.search-status-badge.off {
+  background: var(--s-cream);
+  color: var(--s-ink-soft);
+  border-style: dashed;
+}
 .search-pipeline-card {
   border: var(--s-border);
   border-radius: var(--s-radius);

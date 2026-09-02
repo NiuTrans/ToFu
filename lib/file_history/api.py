@@ -17,6 +17,7 @@ import uuid
 
 from lib.json_store import write_bytes_atomic
 from lib.log import get_logger
+from lib.error_envelope import from_exception
 
 from lib.file_history.store import (
     COMPACT_CHECK_EVERY,
@@ -387,7 +388,8 @@ def rewind_to(base_path: str, snapshot_id: str) -> dict:
     except Exception as e:
         logger.warning('[FileHistory] rewind_to %s failed: %s',
                        snapshot_id[:8] if snapshot_id else '-', e, exc_info=True)
-        result['error'] = str(e)
+        result['error'] = from_exception(
+            e, context='file-history-rewind', source='file-history')
         return result
 
 
@@ -464,7 +466,8 @@ def restore_from(base_path: str, snapshot_id: str) -> dict:
     except Exception as e:
         logger.warning('[FileHistory] restore_from %s failed: %s',
                        snapshot_id[:8] if snapshot_id else '-', e, exc_info=True)
-        result['error'] = str(e)
+        result['error'] = from_exception(
+            e, context='file-history-restore', source='file-history')
         return result
 
 

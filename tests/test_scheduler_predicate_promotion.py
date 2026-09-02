@@ -13,16 +13,18 @@ Watcher + proactive `agent`):
     sustained ambiguity run, DEMOTES back to hybrid.
   • Layer 3 — the PROACTIVE consumer symmetry (`evaluate_condition_predicate` /
     `apply_reconcile_poll` + `record_poll` audit columns).
-  • Backward-compat: no predicate params → condition_kind='llm', legacy path.
+  • Default tier: no predicate params → condition_kind='llm'.
 
-DB-free: every DB-writing helper the consumers call is monkeypatched to a
-lightweight in-memory fake, mirroring tests/test_timer_poll_agent_loop.py.
+Storage-process-free: consumers receive a lightweight semantic-client fake, so
+the tests assert the public storage contract instead of SQL implementation
+details.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from unittest import mock
 
 import pytest
 
@@ -220,37 +222,30 @@ class TestReconcileMatrix:
 #  Layer 2 — TIMER consumer (poll_timer tiers)
 # ═══════════════════════════════════════════════════════════════════════════
 
-class _FakeDB:
-    """Minimal DB stand-in capturing UPDATE/INSERT SQL for assertions."""
-    def __init__(self, poll_rows=None):
-        self.executed = []
-        self._poll_rows = poll_rows or []
+class _FakeStorageClient:
+    """Capture semantic storage calls made by scheduler consumers."""
 
-    def execute(self, sql, params=None):
-        self.executed.append((sql, list(params or [])))
-        low = sql.strip().lower()
-        if low.startswith('select tier'):
-            return _FakeCursor(self._poll_rows)
-        return _FakeCursor([])
+    def __init__(self, poll_rows=None, task_rows=None):
+        self.commands = []
+        self.poll_rows = list(poll_rows or [])
+        self.task_rows = list(task_rows or [])
 
-    def commit(self):
-        pass
+    def query(self, operation, payload):
+        if operation in {'timer.poll.log', 'scheduler.poll.log'}:
+            return list(self.poll_rows)
+        assert operation == 'scheduler.task.list_all'
+        return list(self.task_rows)
 
-
-class _FakeCursor:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def fetchall(self):
-        return self._rows
-
-    def fetchone(self):
-        return self._rows[0] if self._rows else None
+    def command(self, operation, payload, command_id):
+        self.commands.append((operation, dict(payload), command_id))
+        if operation == 'scheduler.task.claim_due':
+            return {'claimed': True}
+        return {'changed': True, 'inserted': True}
 
 
 def _timer_row(**over):
     row = {
-        'id': 'tmr_pred', 'status': 'active',
+        'id': 'tmr_pred', 'user_id': 1, 'status': 'active',
         'check_instruction': '', 'check_command': '',
         'condition_kind': 'llm', 'condition_command': '',
         'condition_regex': '', 'promotion_streak': 0,
@@ -270,29 +265,28 @@ def _no_llm(monkeypatch):
 
 
 @pytest.fixture
-def _capture_db(monkeypatch):
-    """Route timer _poll DB access to a shared FakeDB; capture reconcile SQL."""
-    db = _FakeDB()
+def _capture_timer_storage(monkeypatch):
+    """Route timer reconciliation through a shared semantic client."""
+    client = _FakeStorageClient()
     import lib.scheduler.timer._poll as _poll
 
-    def _fake_get_thread_db(domain):
-        return db
-    # get_thread_db is imported lazily inside functions from lib.database.
-    import lib.database as _dbmod
-    monkeypatch.setattr(_dbmod, 'get_thread_db', _fake_get_thread_db, raising=True)
-    return db
+    monkeypatch.setattr(
+        _poll, '_timer_client', lambda *, write=False: client, raising=True)
+    return client
 
 
-def test_timer_code_tier_zero_llm_ready(monkeypatch, _no_llm, _capture_db, tmp_path):
+def test_timer_code_tier_zero_llm_ready(
+        monkeypatch, _no_llm, _capture_timer_storage, tmp_path):
     """Pure `code` timer: predicate matched → ready, NO LLM call."""
     f = tmp_path / 'train.log'
     f.write_text('epoch 3 DONE\n')
     row = _timer_row(condition_kind='code',
                      condition_command=f'grep -q DONE {f}')
-    monkeypatch.setattr(timer_mod, '_get_timer_row', lambda tid: row)
+    monkeypatch.setattr(
+        timer_mod, '_get_timer_row', lambda tid, **_kwargs: row)
 
     (ready, reason, tokens, skipped, parse_error, cmd_output,
-     model, tool_trace, raw) = timer_mod.poll_timer('tmr_pred')
+     model, tool_trace, raw) = timer_mod.poll_timer('tmr_pred', user_id=1)
 
     assert ready is True
     assert tokens == 0
@@ -301,24 +295,29 @@ def test_timer_code_tier_zero_llm_ready(monkeypatch, _no_llm, _capture_db, tmp_p
     assert parse_error is False
 
 
-def test_timer_code_tier_not_ready(monkeypatch, _no_llm, _capture_db, tmp_path):
+def test_timer_code_tier_not_ready(
+        monkeypatch, _no_llm, _capture_timer_storage, tmp_path):
     f = tmp_path / 'train.log'
     f.write_text('epoch 3 running\n')
     row = _timer_row(condition_kind='code',
                      condition_command=f'grep -q DONE {f}')
-    monkeypatch.setattr(timer_mod, '_get_timer_row', lambda tid: row)
+    monkeypatch.setattr(
+        timer_mod, '_get_timer_row', lambda tid, **_kwargs: row)
 
-    ready, *_rest = timer_mod.poll_timer('tmr_pred')
+    ready, *_rest = timer_mod.poll_timer('tmr_pred', user_id=1)
     assert ready is False
 
 
-def test_timer_code_tier_ambiguous_never_fires(monkeypatch, _no_llm, _capture_db):
+def test_timer_code_tier_ambiguous_never_fires(
+        monkeypatch, _no_llm, _capture_timer_storage):
     """A broken predicate (exit 127) must NOT trigger and must NOT raise."""
     row = _timer_row(condition_kind='code',
                      condition_command='this_cmd_does_not_exist_xyz')
-    monkeypatch.setattr(timer_mod, '_get_timer_row', lambda tid: row)
+    monkeypatch.setattr(
+        timer_mod, '_get_timer_row', lambda tid, **_kwargs: row)
 
-    ready, reason, tokens, skipped, parse_error, *_ = timer_mod.poll_timer('tmr_pred')
+    ready, reason, tokens, skipped, parse_error, *_ = timer_mod.poll_timer(
+        'tmr_pred', user_id=1)
     assert ready is False           # never a false-positive trigger
     assert tokens == 0
 
@@ -328,19 +327,21 @@ def test_timer_code_tier_demotes_after_sustained_ambiguity(monkeypatch, _no_llm,
     # Ledger already holds (threshold-1) trailing ambiguous code polls.
     thr = shared.fallback_streak_threshold()
     prior = [{'tier': 'code', 'predicate_matched': -1} for _ in range(thr - 1)]
-    db = _FakeDB(poll_rows=prior)
-    import lib.database as _dbmod
-    monkeypatch.setattr(_dbmod, 'get_thread_db', lambda d: db, raising=True)
+    client = _FakeStorageClient(poll_rows=prior)
+    import lib.scheduler.timer._poll as _poll
+    monkeypatch.setattr(
+        _poll, '_timer_client', lambda *, write=False: client, raising=True)
 
     row = _timer_row(condition_kind='code',
                      condition_command='this_cmd_does_not_exist_xyz')
-    monkeypatch.setattr(timer_mod, '_get_timer_row', lambda tid: row)
+    monkeypatch.setattr(
+        timer_mod, '_get_timer_row', lambda tid, **_kwargs: row)
 
-    ready, *_ = timer_mod.poll_timer('tmr_pred')
+    ready, *_ = timer_mod.poll_timer('tmr_pred', user_id=1)
     assert ready is False
-    # A demotion UPDATE to condition_kind='hybrid' must have been issued.
-    joined = ' '.join(sql.lower() for sql, _ in db.executed)
-    assert "condition_kind='hybrid'" in joined, (
+    updates = [payload for operation, payload, _ in client.commands
+               if operation == 'timer.update']
+    assert any(payload.get('condition_kind') == 'hybrid' for payload in updates), (
         'sustained ambiguity must demote the promoted predicate back to hybrid')
 
 
@@ -359,9 +360,10 @@ def test_timer_hybrid_promotes_after_consecutive_agreement(monkeypatch, tmp_path
     thr = shared.promotion_streak_threshold()
     f = tmp_path / 'train.log'
     f.write_text('DONE\n')
-    db = _FakeDB()
-    import lib.database as _dbmod
-    monkeypatch.setattr(_dbmod, 'get_thread_db', lambda d: db, raising=True)
+    client = _FakeStorageClient()
+    import lib.scheduler.timer._poll as _poll
+    monkeypatch.setattr(
+        _poll, '_timer_client', lambda *, write=False: client, raising=True)
     # Predicate matches (grep DONE exit 0); LLM also says ready.
     _install_scripted_llm(monkeypatch, ready_value=True)
     monkeypatch.setattr(timer_mod, '_build_poll_tools', lambda cfg: None)
@@ -370,12 +372,15 @@ def test_timer_hybrid_promotes_after_consecutive_agreement(monkeypatch, tmp_path
     row = _timer_row(condition_kind='hybrid', promotion_streak=thr - 1,
                      condition_command=f'grep -q DONE {f}',
                      check_instruction='done?')
-    monkeypatch.setattr(timer_mod, '_get_timer_row', lambda tid: row)
+    monkeypatch.setattr(
+        timer_mod, '_get_timer_row', lambda tid, **_kwargs: row)
 
-    ready, *_ = timer_mod.poll_timer('tmr_pred')
+    ready, *_ = timer_mod.poll_timer('tmr_pred', user_id=1)
     assert ready is True
-    joined = ' '.join(sql.lower() for sql, _ in db.executed)
-    assert "condition_kind='code'" in joined, 'threshold agreement must promote to code'
+    updates = [payload for operation, payload, _ in client.commands
+               if operation == 'timer.update']
+    assert any(payload.get('condition_kind') == 'code' for payload in updates), (
+        'threshold agreement must promote to code')
 
 
 def test_NEUTER_timer_hybrid_disagreement_blocks_promotion(monkeypatch, tmp_path):
@@ -388,25 +393,27 @@ def test_NEUTER_timer_hybrid_disagreement_blocks_promotion(monkeypatch, tmp_path
     thr = shared.promotion_streak_threshold()
     f = tmp_path / 'train.log'
     f.write_text('still running\n')          # predicate: grep DONE → exit 1 (False)
-    db = _FakeDB()
-    import lib.database as _dbmod
-    monkeypatch.setattr(_dbmod, 'get_thread_db', lambda d: db, raising=True)
+    client = _FakeStorageClient()
+    import lib.scheduler.timer._poll as _poll
+    monkeypatch.setattr(
+        _poll, '_timer_client', lambda *, write=False: client, raising=True)
     _install_scripted_llm(monkeypatch, ready_value=True)   # LLM says ready
     monkeypatch.setattr(timer_mod, '_build_poll_tools', lambda cfg: None)
 
     row = _timer_row(condition_kind='hybrid', promotion_streak=thr - 1,
                      condition_command=f'grep -q DONE {f}',
                      check_instruction='done?')
-    monkeypatch.setattr(timer_mod, '_get_timer_row', lambda tid: row)
+    monkeypatch.setattr(
+        timer_mod, '_get_timer_row', lambda tid, **_kwargs: row)
 
-    ready, *_ = timer_mod.poll_timer('tmr_pred')
+    ready, *_ = timer_mod.poll_timer('tmr_pred', user_id=1)
     assert ready is True                      # LLM still authoritative this poll
-    joined = ' '.join(sql.lower() for sql, _ in db.executed)
-    assert "condition_kind='code'" not in joined, (
+    updates = [payload for operation, payload, _ in client.commands
+               if operation == 'timer.update']
+    assert not any(payload.get('condition_kind') == 'code' for payload in updates), (
         'a disagreement at the threshold poll MUST NOT promote (gate is load-bearing)')
-    # And the streak must be reset to 0 (an UPDATE writing promotion_streak=0).
-    assert any('promotion_streak' in sql.lower() and 0 in params
-               for sql, params in db.executed), 'disagreement must reset the streak'
+    assert any(payload.get('promotion_streak') == 0 for payload in updates), (
+        'disagreement must reset the streak')
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -415,7 +422,8 @@ def test_NEUTER_timer_hybrid_disagreement_blocks_promotion(monkeypatch, tmp_path
 
 class TestProactiveReconcile:
     def _task(self, **over):
-        t = {'id': 'task_abc123', 'condition_kind': 'hybrid',
+        t = {'id': 'task_abc123', 'user_id': 1,
+             'condition_kind': 'hybrid',
              'condition_command': 'true', 'condition_regex': '',
              'promotion_streak': 0}
         t.update(over)
@@ -427,11 +435,12 @@ class TestProactiveReconcile:
         assert r.matched is True
 
     def test_apply_reconcile_promotes_and_persists(self, monkeypatch):
-        from lib.scheduler import proactive
+        import lib.scheduler.proactive as proactive
         thr = shared.promotion_streak_threshold()
-        db = _FakeDB()
-        import lib.database as _dbmod
-        monkeypatch.setattr(_dbmod, 'get_thread_db', lambda d: db, raising=True)
+        client = _FakeStorageClient()
+        monkeypatch.setattr(
+            proactive, '_scheduler_client',
+            lambda *, write=False: client, raising=True)
         audits = []
         monkeypatch.setattr(proactive, 'audit_log',
                             lambda ev, **kw: audits.append((ev, kw)))
@@ -441,32 +450,34 @@ class TestProactiveReconcile:
         outcome = proactive.apply_reconcile_poll(task, pred, llm_ready=True,
                                                  llm_available=True)
         assert outcome.promoted is True
-        joined = ' '.join(sql.lower() for sql, _ in db.executed)
-        assert "condition_kind='code'" in joined
+        updates = [payload for operation, payload, _ in client.commands
+                   if operation == 'scheduler.task.update']
+        assert any(payload.get('condition_kind') == 'code' for payload in updates)
         assert any(ev == 'proactive_predicate_promoted' for ev, _ in audits)
 
     def test_record_poll_persists_audit_columns(self, monkeypatch):
-        from lib.scheduler import proactive
-        db = _FakeDB()
-        import lib.database as _dbmod
-        monkeypatch.setattr(_dbmod, 'get_thread_db', lambda d: db, raising=True)
+        import lib.scheduler.proactive as proactive
+        client = _FakeStorageClient()
+        monkeypatch.setattr(
+            proactive, '_scheduler_client',
+            lambda *, write=False: client, raising=True)
         proactive.record_poll('task_abc123', 'act', 'r', 'cheap', 0, 'snap',
-                              tier='llm', predicate_matched=1, llm_agreed=1)
-        # The INSERT must carry the three audit columns + their values.
-        insert = [(sql, params) for sql, params in db.executed
-                  if 'insert into proactive_poll_log' in sql.lower()]
-        assert insert, 'record_poll must INSERT into proactive_poll_log'
-        sql, params = insert[0]
-        assert 'tier' in sql and 'predicate_matched' in sql and 'llm_agreed' in sql
-        assert 1 in params
+                              tier='llm', predicate_matched=1, llm_agreed=1,
+                              user_id=1)
+        appends = [payload for operation, payload, _ in client.commands
+                   if operation == 'scheduler.poll.append']
+        assert len(appends) == 1
+        assert appends[0]['tier'] == 'llm'
+        assert appends[0]['predicate_matched'] == 1
+        assert appends[0]['llm_agreed'] == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Backward-compat
+#  Default LLM tier
 # ═══════════════════════════════════════════════════════════════════════════
 
 def test_llm_tier_unchanged_when_no_predicate(monkeypatch):
-    """No predicate params → condition_kind='llm' → legacy path, predicate never runs."""
+    """No predicate params selects the LLM tier; predicates never run."""
     def _boom(*a, **k):
         raise AssertionError('evaluate_predicate must not run on the llm tier')
     monkeypatch.setattr(timer_mod, '_build_poll_tools', lambda cfg: None)
@@ -474,9 +485,11 @@ def test_llm_tier_unchanged_when_no_predicate(monkeypatch):
     _install_scripted_llm(monkeypatch, ready_value=False, reason='waiting')
 
     row = _timer_row(condition_kind='llm', check_instruction='done?')
-    monkeypatch.setattr(timer_mod, '_get_timer_row', lambda tid: row)
+    monkeypatch.setattr(
+        timer_mod, '_get_timer_row', lambda tid, **_kwargs: row)
 
-    ready, reason, tokens, skipped, parse_error, *_ = timer_mod.poll_timer('tmr_pred')
+    ready, reason, tokens, skipped, parse_error, *_ = timer_mod.poll_timer(
+        'tmr_pred', user_id=1)
     assert ready is False
     assert parse_error is False
 
@@ -498,23 +511,28 @@ def test_malformed_once_schedule_does_not_wedge_sweep(monkeypatch):
     from lib.scheduler.manager import ScheduledTaskManager
 
     mgr = ScheduledTaskManager.__new__(ScheduledTaskManager)
+    from lib.identity import PrincipalContext
+    mgr._process_principal = PrincipalContext.system(
+        subject_id='scheduler-predicate-test',
+        owner_user_id=1,
+        scopes={'scheduler:run'},
+    )
     rows = [
-        {'id': 'bad', 'schedule': 'once:not-a-timestamp', 'run_count': 0,
+        {'id': 'bad', 'user_id': 1,
+         'schedule': 'once:not-a-timestamp', 'run_count': 0,
          'task_type': 'command', 'last_run': None},
-        {'id': 'good', 'schedule': 'once:2000-01-01T00:00:00', 'run_count': 0,
+        {'id': 'good', 'user_id': 1,
+         'schedule': 'once:2000-01-01T00:00:00', 'run_count': 0,
          'task_type': 'command', 'last_run': None},
     ]
-    mgr._get_db = lambda: _FakeCursor(rows)  # execute(...).fetchall() → rows
-    # Give the FakeCursor an execute() that returns itself so .fetchall() works.
+    client = _FakeStorageClient(task_rows=rows)
+    import lib.scheduler.manager as manager_module
+    monkeypatch.setattr(
+        manager_module, '_scheduler_client',
+        lambda *, write=False: client, raising=True)
     ran = []
     mgr._run_and_record = lambda task: ran.append(task['id'])
-    mgr.toggle_task = lambda tid, enabled=None: None
-
-    # _get_db().execute(sql) must return something with .fetchall(); wrap.
-    class _DB:
-        def execute(self, *a, **k):
-            return _FakeCursor(rows)
-    mgr._get_db = lambda: _DB()
+    mgr.toggle_task = lambda tid, **_kwargs: None
 
     # Must not raise, and the 'good' due row must still run despite the bad one.
     mgr._check_and_run_due_tasks()
@@ -529,17 +547,66 @@ def test_NEUTER_malformed_once_would_wedge_without_guard(monkeypatch):
     from lib.scheduler.manager import ScheduledTaskManager
 
     mgr = ScheduledTaskManager.__new__(ScheduledTaskManager)
-    rows = [{'id': 'bad', 'schedule': 'once:garbage', 'run_count': 0,
+    from lib.identity import PrincipalContext
+    mgr._process_principal = PrincipalContext.system(
+        subject_id='scheduler-predicate-test',
+        owner_user_id=1,
+        scopes={'scheduler:run'},
+    )
+    rows = [{'id': 'bad', 'user_id': 1,
+             'schedule': 'once:garbage', 'run_count': 0,
              'task_type': 'command', 'last_run': None}]
-
-    class _DB:
-        def execute(self, *a, **k):
-            return _FakeCursor(rows)
-    mgr._get_db = lambda: _DB()
+    client = _FakeStorageClient(task_rows=rows)
+    import lib.scheduler.manager as manager_module
+    monkeypatch.setattr(
+        manager_module, '_scheduler_client',
+        lambda *, write=False: client, raising=True)
     mgr._run_and_record = lambda task: None
-    mgr.toggle_task = lambda tid, enabled=None: None
+    mgr.toggle_task = lambda tid, **_kwargs: None
 
     mgr._check_and_run_due_tasks()  # must NOT raise
+
+
+def test_ownerless_scheduler_runs_durable_rows_without_personal_sweeps(
+        monkeypatch):
+    from lib.identity import PrincipalContext
+    from lib.scheduler.manager import ScheduledTaskManager
+    import lib.conversations.project_dispatch as project_dispatch
+    import lib.message_queue as message_queue
+    import lib.scheduler.manager as manager_module
+
+    mgr = ScheduledTaskManager.__new__(ScheduledTaskManager)
+    mgr._process_principal = PrincipalContext.system(
+        subject_id='distributed-scheduler-test',
+        scopes={'scheduler:run'},
+    )
+    client = _FakeStorageClient(task_rows=[{
+        'id': 'owner-23-durable-task',
+        'user_id': 23,
+        'schedule': 'once:2000-01-01T00:00:00',
+        'run_count': 0,
+        'task_type': 'command',
+        'last_run': None,
+    }])
+    monkeypatch.setattr(
+        manager_module, '_scheduler_client',
+        lambda *, write=False: client, raising=True)
+    project_sweep = mock.Mock()
+    peer_drain = mock.Mock()
+    monkeypatch.setattr(
+        project_dispatch, 'sweep_all_active_projects', project_sweep)
+    monkeypatch.setattr(
+        message_queue, 'drain_idle_peer_messages', peer_drain)
+    ran = []
+    mgr._run_and_record = lambda task: ran.append(
+        (task['id'], task['user_id']))
+    mgr.toggle_task = lambda *_args, **_kwargs: None
+
+    mgr._check_and_run_due_tasks()
+
+    assert ran == [('owner-23-durable-task', 23)]
+    project_sweep.assert_not_called()
+    peer_drain.assert_not_called()
 
 
 def test_poll_decision_survives_none_content(monkeypatch):
@@ -547,7 +614,7 @@ def test_poll_decision_survives_none_content(monkeypatch):
     LLM returns content=None. parse_json_decision raises AttributeError on
     None (caught), then the handler formats ``(content or '')[:100]`` — before
     the fix this was ``content[:100]`` → TypeError escaping poll_decision."""
-    from lib.scheduler import proactive
+    import lib.scheduler.proactive as proactive
 
     def _fake_smart_chat(messages, **kwargs):
         return None, {'total_tokens': 0}

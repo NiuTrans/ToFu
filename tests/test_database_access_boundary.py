@@ -17,29 +17,37 @@ _PRODUCTION_ROOTS = ('lib', 'routes', 'server.py')
 _PROJECT_PYTHON_ROOTS = ('lib', 'routes', 'scripts', 'debug', 'server.py')
 _DATA_ACCESS_ROOTS = ('lib', 'routes', 'scripts', 'debug', 'server.py')
 
-# Every SQLite authority, including auxiliary stores, belongs under the data
-# layer. Canonical tofu.db access belongs exclusively to _core; the remaining
-# entries are reviewed repositories/bootstrap/snapshot implementations.
+# Every SQLite authority belongs to the Sidecar or an explicitly offline
+# migration tool. Application modules never own connections.
 _SQLITE_CONNECT_ALLOWLIST = {
     'lib/storage_sidecar/adapters/sqlite.py',
     'lib/storage_sidecar/cli.py',
-    'lib/database/_core.py',
-    'lib/database/backup.py',
-    'lib/database/sqlite_cutover.py',
-    'lib/database/integration_control_repository.py',
-    'lib/database/knowledge_repository.py',
-    'lib/database/sqlite_tooling.py',
-}
-_ONLINE_SQLITE_MAINTENANCE_SCRIPTS = (
-    'scripts/compact_sqlite_diagnostics.py',
-    'scripts/compact_sqlite_projections.py',
-)
-_TRANSCRIPT_ARCHIVE_ADMIN_ALLOWLIST = {
-    # Explicit one-shot authority migration/recovery tools. They do not run in
-    # the application or recurring maintenance plane.
-    'scripts/migrate_chatui_to_tofu.py',
+    'lib/storage_sidecar/cutover.py',
+    # The fastpath front's file-level machinery: WAL-shipper online backup
+    # (sqlite3 backup API needs raw handles), the candidate-dir scratch WAL
+    # probe, and the restored-front verification open.  None can ride the
+    # pooled data layer — they operate on the raw front/shadow files.
+    'lib/storage_sidecar/shipper.py',
+    'lib/storage_sidecar/fastpath.py',
+    # The bounded turn-search materialization is a disposable, replayable
+    # database with its own writer/read pool.  It must not borrow the durable
+    # authority adapter because that would couple cache latency and failure to
+    # authoritative transactions.
+    'lib/storage_sidecar/turn_search_projection.py',
+    # Launch-time capability discovery opens only a UUID-named scratch
+    # database, verifies WAL recovery, then removes every artifact before
+    # backend selection.  Keeping the probe stdlib-only is intentional.
+    'lib/storage_sidecar/storage_capabilities.py',
+    # Reviewed offline data-layer owners.  The reader hard-enforces mode=ro
+    # plus query_only.  Maintenance writes require a live ProjectLease, and
+    # candidate opens first prove they are not the canonical authority.
+    'lib/storage_sidecar/offline.py',
+    'lib/storage_sidecar/offline_maintenance.py',
+    # Offline authority migrations run only under a stopped-project lease.
     'scripts/migrate_pg_to_sqlite.py',
+    'scripts/migrate_sqlite_to_postgres.py',
 }
+_TRANSCRIPT_ARCHIVE_ADMIN_ALLOWLIST: set[str] = set()
 _EXPLICIT_MAINTENANCE_AUTHORITY_ALLOWLIST = {
     'debug/_standalone_guard.py',
     'debug/backfill_search_text_originalcontent.py',
@@ -48,20 +56,41 @@ _EXPLICIT_MAINTENANCE_AUTHORITY_ALLOWLIST = {
     'debug/test_l1_compact_cache_tradeoff.py',
     'debug/test_l1_prefix_skip_vs_aggressive.py',
     'debug/test_l1_skip_vs_aggressive_v2.py',
-    'scripts/retranslate_truncated.py',
 }
 _OFFLINE_TRANSACTION_SCRIPT_ALLOWLIST = {
-    # Explicitly addressed legacy PostgreSQL/candidate stores. These tools do
-    # not attach to the running SQLite authority and own multi-hour batching.
-    'scripts/migrate_chatui_to_tofu.py',
     'scripts/migrate_pg_to_sqlite.py',
+    'scripts/migrate_sqlite_to_postgres.py',
 }
 _DATA_LAYER_CALLBACK_SQL_ALLOWLIST = {
     # CAS operations are supplied to run_sqlite_tool_write; driver, owner,
     # BEGIN IMMEDIATE, retry, commit and rollback remain in sqlite_tooling.
-    'scripts/compact_sqlite_diagnostics.py',
-    'scripts/compact_sqlite_projections.py',
+    'scripts/storage_deep_clean.py',
 }
+
+
+_TRACKED_FILES: set[str] | None = None
+
+
+def _is_tracked(rel: str) -> bool:
+    """Ratchets measure the COMMITTED tree, never uncommitted scratch.
+
+    Untracked/gitignored maintenance scratch (debug/*.py one-shots,
+    gitignored scripts/) flickers in and out of shared dev checkouts as
+    siblings stash and recreate it, which made this suite non-deterministic
+    red without any committed change.  CI fresh checkouts see every file
+    tracked, so gating on ``git ls-files`` changes nothing there; locally it
+    keeps the suite a function of the tree state it can actually ratchet.
+    """
+    global _TRACKED_FILES
+    if _TRACKED_FILES is None:
+        result = subprocess.run(
+            ['git', 'ls-files'], cwd=_ROOT, text=True,
+            capture_output=True, check=False)
+        _TRACKED_FILES = (set(result.stdout.splitlines())
+                          if result.returncode == 0 else set())
+        if result.returncode != 0:  # fail open: no git → scan everything
+            return True
+    return rel in _TRACKED_FILES
 
 
 def _candidate_files(pattern: str, roots=_PRODUCTION_ROOTS):
@@ -72,7 +101,8 @@ def _candidate_files(pattern: str, roots=_PRODUCTION_ROOTS):
         cwd=_ROOT, text=True, capture_output=True, check=False)
     assert result.returncode in (0, 1), result.stderr
     for rel in result.stdout.splitlines():
-        yield _ROOT / rel
+        if _is_tracked(rel):
+            yield _ROOT / rel
 
 
 def _relative(path: Path) -> str:
@@ -80,9 +110,8 @@ def _relative(path: Path) -> str:
 
 
 def _is_data_owner(rel: str) -> bool:
-    """Sidecar is final authority; lib.database is a shrinking legacy set."""
-    return (rel.startswith('lib/storage_sidecar/')
-            or rel.startswith('lib/database/'))
+    """Only the Sidecar implementation owns live database capabilities."""
+    return rel.startswith('lib/storage_sidecar/')
 
 
 def _is_sqlite_connect(call: ast.Call) -> bool:
@@ -129,7 +158,7 @@ def test_sqlite_connections_have_an_explicit_storage_owner():
                 violations.append(f'{rel}:{node.lineno}')
     assert not violations, (
         'New sqlite3.connect() bypasses the project data layer. Add an '
-        'operation under lib/database instead of extending this allowlist: '
+        'operation to the Sidecar instead of extending this allowlist: '
         + ', '.join(violations))
 
 
@@ -147,7 +176,7 @@ def test_application_cannot_open_database_driver_connections():
                 violations.append(f'{rel}:{node.lineno}')
     assert not violations, (
         'Application code opens a raw SQLite/PostgreSQL connection. Use the '
-        'public lib.database pool/facade: ' + ', '.join(violations))
+        'semantic StorageClient API: ' + ', '.join(violations))
 
 
 def test_project_sqlite_connections_belong_to_the_data_layer():
@@ -163,32 +192,9 @@ def test_project_sqlite_connections_belong_to_the_data_layer():
             if isinstance(node, ast.Call) and _is_sqlite_connect(node):
                 violations.append(f'{rel}:{node.lineno}')
     assert not violations, (
-        'Project tooling opens SQLite outside lib/database and can bypass '
+        'Project tooling opens SQLite outside the Sidecar/offline allowlist and can bypass '
         'canonical write ownership/transaction rules. Add a data-layer '
         'tooling API: ' + ', '.join(violations))
-
-
-def test_online_sqlite_maintenance_uses_data_layer_transactions():
-    """Live-safe compactors may define CAS SQL, never driver/transaction policy."""
-    violations = []
-    for rel in _ONLINE_SQLITE_MAINTENANCE_SCRIPTS:
-        path = _ROOT / rel
-        tree = ast.parse(path.read_text(encoding='utf-8'), filename=rel)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and _is_sqlite_connect(node):
-                violations.append(f'{rel}:{node.lineno}:sqlite3.connect')
-            if (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in {'commit', 'rollback'}):
-                violations.append(f'{rel}:{node.lineno}:{node.func.attr}')
-            if (isinstance(node, ast.Constant)
-                    and isinstance(node.value, str)
-                    and _RAW_TRANSACTION_SQL_RE.search(node.value)):
-                violations.append(f'{rel}:{node.lineno}:raw transaction SQL')
-    assert not violations, (
-        'Online SQLite maintenance owns driver/transaction mechanics instead '
-        'of delegating them to lib/database/sqlite_tooling.py: '
-        + ', '.join(violations))
 
 
 def test_debug_and_new_scripts_cannot_self_authorize_canonical_writes():
@@ -215,24 +221,8 @@ def test_debug_and_new_scripts_cannot_self_authorize_canonical_writes():
         + ', '.join(violations))
 
 
-def test_application_cannot_import_private_pool_lifecycle():
-    """Checkout/return details are data-layer internals, not business APIs."""
-    violations = []
-    for path in _candidate_files(r'_pool_(?:get|put)', _PROJECT_PYTHON_ROOTS):
-        rel = _relative(path)
-        if _is_data_owner(rel):
-            continue
-        tree = ast.parse(path.read_text(encoding='utf-8'), filename=rel)
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.ImportFrom)
-                    and node.module == 'lib.database._core'):
-                continue
-            for alias in node.names:
-                if alias.name in {'_pool_get', '_pool_put'}:
-                    violations.append(f'{rel}:{node.lineno}:{alias.name}')
-    assert not violations, (
-        'Application code owns private pool checkout/return lifecycle. Use '
-        'pooled_db or run_pooled: ' + ', '.join(violations))
+def test_removed_database_namespace_stays_absent():
+    assert not (_ROOT / 'lib' / 'database').exists()
 
 
 def test_application_code_cannot_reach_through_connection_wrappers():
@@ -249,7 +239,7 @@ def test_application_code_cannot_reach_through_connection_wrappers():
                 violations.append(f'{rel}:{node.lineno}')
     assert not violations, (
         'Application code bypasses the database wrapper/writer discipline. '
-        'Move the operation into lib/database and expose a semantic API: '
+        'Move the operation into the Sidecar and expose a semantic API: '
         + ', '.join(violations))
 
 
@@ -374,9 +364,8 @@ def test_application_cannot_issue_raw_transaction_sql():
                     and _RAW_TRANSACTION_SQL_RE.search(sql_arg.value)):
                 violations.append(f'{rel}:{node.lineno}')
     assert not violations, (
-        'Application code issues raw transaction SQL. Use write_transaction '
-        'or pooled_write_transaction so SQLite reserves its writer before '
-        'the first read: ' + ', '.join(violations))
+        'Application code issues raw transaction SQL instead of a semantic '
+        'Sidecar command: ' + ', '.join(violations))
 
 
 def test_application_cannot_own_connection_transaction_boundaries():
@@ -396,9 +385,8 @@ def test_application_cannot_own_connection_transaction_boundaries():
                     and node.func.attr in {'commit', 'rollback', 'begin'}):
                 violations.append(f'{rel}:{node.lineno}')
     assert not violations, (
-        'Application code owns a connection transaction boundary. Use '
-        'db_execute_with_retry for one statement or write_transaction for an '
-        'atomic unit: ' + ', '.join(violations))
+        'Application code owns a connection transaction boundary instead of '
+        'a semantic Sidecar command: ' + ', '.join(violations))
 
 
 def test_direct_application_writes_require_an_owned_transaction():
@@ -459,101 +447,7 @@ def test_direct_application_writes_require_an_owned_transaction():
         'unrelated later operation: ' + ', '.join(violations))
 
 
-def test_retry_helper_cannot_commit_an_outer_write_transaction():
-    """The single-statement helper must not prematurely commit an outer unit."""
-    violations = []
-    for path in _candidate_files(r'db_execute_with_retry'):
-        rel = _relative(path)
-        if _is_data_owner(rel):
-            continue
-        tree = ast.parse(path.read_text(encoding='utf-8'), filename=rel)
-        parents = {}
-        for parent in ast.walk(tree):
-            for child in ast.iter_child_nodes(parent):
-                parents[child] = parent
-        for node in ast.walk(tree):
-            if _call_name(node) != 'db_execute_with_retry':
-                continue
-            inside_owned_write = False
-            current = node
-            while current in parents:
-                current = parents[current]
-                if isinstance(current, (ast.With, ast.AsyncWith)) and any(
-                        _call_name(item.context_expr) in {
-                            'write_transaction', 'pooled_write_transaction'}
-                        for item in current.items):
-                    inside_owned_write = True
-                    break
-            if not inside_owned_write:
-                continue
-            commit_false = any(
-                keyword.arg == 'commit'
-                and isinstance(keyword.value, ast.Constant)
-                and keyword.value.value is False
-                for keyword in node.keywords)
-            if not commit_false:
-                violations.append(f'{rel}:{node.lineno}')
-    assert not violations, (
-        'db_execute_with_retry(commit=True) appears inside an outer write '
-        'transaction and can commit it before the semantic unit finishes; '
-        'use db.execute or pass commit=False: ' + ', '.join(violations))
-
-
-def test_core_upsert_commit_mode_matches_transaction_ownership():
-    """Core upserts must either own a commit or explicitly join an outer unit."""
-    violations = []
-    for path in _candidate_files(r'\bupsert\s*\('):
-        rel = _relative(path)
-        if _is_data_owner(rel):
-            continue
-        tree = ast.parse(path.read_text(encoding='utf-8'), filename=rel)
-        parents = {}
-        for parent in ast.walk(tree):
-            for child in ast.iter_child_nodes(parent):
-                parents[child] = parent
-        guarded_functions = {
-            node for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and any(_call_name(child) == 'assert_write_transaction'
-                    for child in ast.walk(node))
-        }
-        for node in ast.walk(tree):
-            if _call_name(node) != 'upsert':
-                continue
-            commit_value = None
-            retry_value = None
-            for keyword in node.keywords:
-                if (keyword.arg == 'commit'
-                        and isinstance(keyword.value, ast.Constant)):
-                    commit_value = keyword.value.value
-                if (keyword.arg == 'retry'
-                        and isinstance(keyword.value, ast.Constant)):
-                    retry_value = keyword.value.value
-            owned = False
-            current = node
-            while current in parents:
-                current = parents[current]
-                if current in guarded_functions:
-                    owned = True
-                    break
-                if isinstance(current, (ast.With, ast.AsyncWith)) and any(
-                        _call_name(item.context_expr) in {
-                            'write_transaction', 'pooled_write_transaction'}
-                        for item in current.items):
-                    owned = True
-                    break
-            if owned and (commit_value is not False or retry_value is True):
-                violations.append(
-                    f'{rel}:{node.lineno}:outer transaction requires '
-                    'commit=False,retry=False')
-            if not owned and commit_value is False:
-                violations.append(
-                    f'{rel}:{node.lineno}:commit=False has no outer transaction')
-    assert not violations, (
-        'Core upsert transaction mode is unsafe: ' + ', '.join(violations))
-
-
-def test_runtime_schema_changes_are_owned_by_database_bootstrap():
+def test_runtime_schema_changes_are_owned_by_sidecar():
     """Business imports must not race startup with ad-hoc CREATE/ALTER DDL."""
     violations = []
     for path in _candidate_files(
@@ -575,6 +469,6 @@ def test_runtime_schema_changes_are_owned_by_database_bootstrap():
             if sql is not None and _DDL_SQL_RE.search(sql):
                 violations.append(f'{rel}:{node.lineno}')
     assert not violations, (
-        'Application code owns runtime DDL. Define/migrate the schema under '
-        'lib/database and make the application call a semantic API: '
+        'Application code owns runtime DDL. Define/migrate it in the Sidecar '
+        'and expose a semantic API: '
         + ', '.join(violations))

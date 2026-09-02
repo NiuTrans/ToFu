@@ -1,5 +1,5 @@
 """Regression: streaming pre-exec ``web_search`` delegates to the authoritative
-``handlers.search._web_search_one`` — so it is byte-identical to the serial
+``handlers.search._core._web_search_one`` — so it is byte-identical to the serial
 handler and never drifts into a stale re-implementation.
 
 Background
@@ -84,7 +84,7 @@ class TestStreamingWebSearchDelegation:
 
         breakdown = {'bing': ['https://a.com']}
         fake_ret = (_results('https://a.com'), None, breakdown, None)
-        with patch('lib.tasks_pkg.handlers.search._web_search_one',
+        with patch('lib.tasks_pkg.handlers.search._core._web_search_one',
                    return_value=fake_ret) as m, \
              patch.object(_tofu_search_mod(), 'format_search_for_tool_response',
                           return_value='FORMATTED-LLM-TEXT') as fmt:
@@ -113,7 +113,7 @@ class TestStreamingWebSearchDelegation:
         acc = StreamingToolAccumulator(_make_task(), project_path='/tmp')
         diag = {'reason': 'no_matches', 'engine_ok': ['bing']}
         fake_ret = ([], diag, None, None)
-        with patch('lib.tasks_pkg.handlers.search._web_search_one', return_value=fake_ret), \
+        with patch('lib.tasks_pkg.handlers.search._core._web_search_one', return_value=fake_ret), \
              patch.object(_tofu_search_mod(), 'format_search_for_tool_response',
                           return_value='no results text'):
             out = acc._execute_one('web_search', {'query': 'zzz'})
@@ -128,7 +128,7 @@ class TestStreamingWebSearchDelegation:
                    'items': [{'title': 'Paper', 'url': 'u'}],
                    'content': '# Paper header'}
         fake_ret = (_results('https://a.com'), None, None, vresult)
-        with patch('lib.tasks_pkg.handlers.search._web_search_one', return_value=fake_ret), \
+        with patch('lib.tasks_pkg.handlers.search._core._web_search_one', return_value=fake_ret), \
              patch.object(_tofu_search_mod(), 'format_search_for_tool_response',
                           return_value='body'):
             out = acc._execute_one('web_search', {'query': 'mamba', 'vertical': 'academic'})
@@ -153,7 +153,7 @@ class TestStreamingWebSearchDelegation:
                 return (_results('https://b.com'), None, None, vresult)
             return (_results('https://a.com'), None, None, None)
 
-        with patch('lib.tasks_pkg.handlers.search._web_search_one', side_effect=fake) as m, \
+        with patch('lib.tasks_pkg.handlers.search._core._web_search_one', side_effect=fake) as m, \
              patch.object(_tofu_search_mod(), 'format_search_for_tool_response',
                           return_value='FMT'):
             out = acc._execute_one('web_search', {'queries': ['q1', 'q2']})
@@ -177,7 +177,7 @@ class TestStreamingWebSearchDelegation:
         RuntimeError from it must propagate out of _execute_one."""
         from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
         acc = StreamingToolAccumulator(_make_task(), project_path='/tmp')
-        with patch('lib.tasks_pkg.handlers.search._web_search_one',
+        with patch('lib.tasks_pkg.handlers.search._core._web_search_one',
                    side_effect=RuntimeError('boom-from-web-search-one')) as m:
             with pytest.raises(RuntimeError, match='boom-from-web-search-one'):
                 acc._execute_one('web_search', {'query': 'x'})

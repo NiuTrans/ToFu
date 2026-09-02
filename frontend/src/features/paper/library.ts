@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import type { I18nKey } from '../../i18n';
 type JsonObject = Record<string, unknown>;
 
 interface PaperFolder extends JsonObject {
@@ -158,8 +159,8 @@ function escape(value: unknown): string {
 }
 
 function translate(
-  key: string,
-  fallback = key,
+  key: I18nKey,
+  fallback: string = key,
   params?: Record<string, unknown>,
 ): string {
   const helper = globals().t;

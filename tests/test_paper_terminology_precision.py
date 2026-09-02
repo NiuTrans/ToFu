@@ -38,7 +38,7 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 
 
 def _missing(body):
-    from lib.paper.terminology_audit import build_terminology_audit
+    from lib.paper.terminology_audit.audit import build_terminology_audit
     a = build_terminology_audit(body)
     return set() if not a else {m['term'] for m in a['missing']}
 
@@ -75,7 +75,7 @@ def test_inline_definition_suppressed():
 
 def test_inline_suppression_load_bearing():
     """Neuter the inline detector → DPO/FID re-appear as gaps."""
-    import lib.paper.terminology_audit as ta
+    import lib.paper.terminology_audit.audit as ta
     orig = ta._is_inline_defined
     ta._is_inline_defined = lambda term, body: False
     try:
@@ -128,7 +128,7 @@ def test_cited_methodnames_suppressed():
 def test_cited_suppression_load_bearing():
     """Neuter the related-work-only detector → the all-caps citations re-appear
     (they are not caught by the named-entity or well-known rules)."""
-    import lib.paper.terminology_audit as ta
+    import lib.paper.terminology_audit.audit as ta
     orig = ta._only_in_related_work
     ta._only_in_related_work = lambda term, sections: False
     try:
@@ -171,7 +171,7 @@ End.
 
 
 def test_named_entity_suppression_load_bearing():
-    import lib.paper.terminology_audit as ta
+    import lib.paper.terminology_audit.audit as ta
     orig = ta._is_named_entity
     ta._is_named_entity = lambda term: False
     body = ("# T\n\n## 🔑 Core Terminology\n| Term | Definition | Why |\n"
@@ -228,7 +228,7 @@ def test_wellknown_acronyms_suppressed():
 
 
 def test_wellknown_suppression_load_bearing():
-    import lib.paper.terminology_audit as ta
+    import lib.paper.terminology_audit.audit as ta
     orig = ta._WELL_KNOWN_ACRONYMS
     ta._WELL_KNOWN_ACRONYMS = frozenset()
     try:
@@ -272,7 +272,7 @@ def test_common_english_words_suppressed():
 
 
 def test_common_word_suppression_load_bearing():
-    import lib.paper.terminology_audit as ta
+    import lib.paper.terminology_audit.audit as ta
     orig = ta._is_common_word
     ta._is_common_word = lambda term: False
     try:
@@ -290,7 +290,7 @@ def test_common_word_suppression_load_bearing():
 def test_genuine_gaps_still_detected():
     """The suppressors must NOT swallow the original golden failure modes: a
     genuinely-undefined acronym used in the body, and a dangling glossary ref."""
-    from lib.paper.terminology_audit import build_terminology_audit
+    from lib.paper.terminology_audit.audit import build_terminology_audit
     body = """\
 # T
 

@@ -71,9 +71,11 @@ def test_transient_and_durable_starts_share_worker_wiring(monkeypatch):
     )
 
     live_id = service.start(
-        'ephemeral', _definition(), input_text='live input')
+        'ephemeral', _definition(), owner_user_id=41,
+        input_text='live input')
     durable_id = service.start(
         'durable', _definition(),
+        owner_user_id=41,
         input_text='durable input',
         orchestration_id='flow-1',
         created_by='key-1',
@@ -97,6 +99,7 @@ def test_transient_and_durable_starts_share_worker_wiring(monkeypatch):
     }
     assert spawns[1][2]['task_id'] == 'run-1'
     assert spawns[1][2]['durable_runs'] is runs
+    assert [call[2]['owner_user_id'] for call in spawns] == [41, 41]
     resolver = spawns[0][2]['subflow_resolver_provider']()
     assert resolver('child-1') == {'id': 'child-1'}
 
@@ -111,7 +114,7 @@ def test_start_rejects_unknown_delivery_kind_before_runtime_work(monkeypatch):
         _Runtime(), definition_service=_Definitions)
 
     with pytest.raises(RuntimeStartError, match='start kind'):
-        service.start('future-mode', _definition())
+        service.start('future-mode', _definition(), owner_user_id=41)
 
     assert spawns == []
 
@@ -129,7 +132,7 @@ def test_empty_durable_id_fails_before_runtime_visibility(monkeypatch):
     )
 
     with pytest.raises(RuntimeStartError, match='create durable'):
-        service.start_durable(_definition())
+        service.start('durable', _definition(), owner_user_id=41)
 
     assert spawns == []
 
@@ -149,7 +152,7 @@ def test_spawn_failure_closes_runtime_and_durable_projections(monkeypatch):
     )
 
     with pytest.raises(RuntimeStartError) as caught:
-        service.start_durable(_definition())
+        service.start('durable', _definition(), owner_user_id=41)
 
     assert caught.value.run_id == 'run-1'
     assert isinstance(caught.value.__cause__, OSError)
@@ -186,7 +189,7 @@ def test_cleanup_failure_does_not_mask_primary_spawn_failure(monkeypatch):
     )
 
     with pytest.raises(RuntimeStartError) as caught:
-        service.start_durable(_definition())
+        service.start('durable', _definition(), owner_user_id=41)
 
     assert caught.value.run_id == 'run-1'
     assert isinstance(caught.value.__cause__, RuntimeError)
@@ -205,7 +208,7 @@ def test_transient_spawn_failure_uses_the_same_service_error(monkeypatch):
         _Runtime(), definition_service=_Definitions)
 
     with pytest.raises(RuntimeStartError) as caught:
-        service.start_ephemeral(_definition())
+        service.start('ephemeral', _definition(), owner_user_id=41)
 
     assert isinstance(caught.value.__cause__, RuntimeError)
 

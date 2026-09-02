@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import type { I18nKey } from '../../i18n';
 type JsonObject = Record<string, unknown>;
 
 interface XPView extends JsonObject {
@@ -115,7 +116,7 @@ function escape(value: unknown): string {
   return span.innerHTML;
 }
 
-function translate(key: string, fallback = key): string {
+function translate(key: I18nKey, fallback: string = key): string {
   const helper = globals().t;
   return typeof helper === 'function' ? helper(key) : fallback;
 }
@@ -185,7 +186,7 @@ function connectionCard(item: ConnectionItem): string {
 function actionButton(
   kind: 'debate' | 'ideate',
   text: string,
-  key: string,
+  key: I18nKey,
   fallback: string,
 ): string {
   return `<button type="button" class="paper-xp-act xp-act-${kind}"`
@@ -476,7 +477,7 @@ export function paperXpCostBreakdown(meta: ReportMeta | null | undefined): strin
   const parts: string[] = [];
   const base = format(meta.costCny);
   if (base) parts.push(`${translate('paper.xpCostBody')} ${base}`);
-  const names: Record<string, string> = {
+  const names: Record<string, I18nKey> = {
     insight: 'paper.xpPassInsight',
     termfill: 'paper.xpPassTermfill',
     checkpoints: 'paper.xpPassCheckpoints',
@@ -484,7 +485,8 @@ export function paperXpCostBreakdown(meta: ReportMeta | null | undefined): strin
   };
   Object.entries(meta.secondPasses).forEach(([key, row]) => {
     const cost = format(row?.costCny);
-    if (cost) parts.push(`${translate(names[key] || key)} ${cost}`);
+    const labelKey = names[key];
+    if (cost) parts.push(`${labelKey ? translate(labelKey) : key} ${cost}`);
   });
   return parts.join(' + ');
 }

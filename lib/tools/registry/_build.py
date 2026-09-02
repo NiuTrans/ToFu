@@ -38,7 +38,7 @@ def _build_search(ctx: ToolContext) -> list[dict]:
     # — it now behaves like 'multi' (the one-shot SEARCH_TOOL_SINGLE schema
     # was removed). The composer exposure gate decides whether its schema is
     # visible; the builder describes runtime availability only.
-    from lib.tools import build_search_tool
+    from lib.tools.search import build_search_tool
     return [build_search_tool()]
 
 
@@ -48,7 +48,9 @@ def _build_search_settings(ctx: ToolContext) -> list[dict]:
     # appended at the END of the base phase: inserting it into the search spec
     # put it mid-list (position 2), which broke the cache-stable tool-order ratchet
     # (tests/test_tool_registry.py::TestOrdering).
-    from lib.tools import build_update_search_settings_tool
+    if not ctx.durable_state_available:
+        return []
+    from lib.tools.search import build_update_search_settings_tool
     return [build_update_search_settings_tool()]
 
 
@@ -57,6 +59,8 @@ def _build_knowledge(ctx: ToolContext) -> list[dict]:
     # disabled corpus contributes ZERO schema tokens — no phantom knowledge
     # tool in fresh installs and no invitation for the model to call a tool
     # that cannot return evidence.
+    if not ctx.durable_state_available:
+        return []
     from lib.knowledge.tool import build_tool
     return build_tool(ctx)
 
@@ -71,15 +75,21 @@ def _build_fetch(ctx: ToolContext) -> list[dict]:
     # Built per call: the schema's ``reason`` param follows the runtime
     # LLM_CONTENT_FILTER_ENABLED flag — a module-level constant would freeze
     # whatever the import-time snapshot saw (same rationale as build_search_tool).
-    from lib.tools import build_fetch_url_tool
+    from lib.tools.search import build_fetch_url_tool
     return [build_fetch_url_tool()]
+
+
+def _build_server_download(ctx: ToolContext) -> list[dict]:
+    """Append-only explicit server-location download capability."""
+    from lib.tools.search import build_download_url_to_server_tool
+    return [build_download_url_to_server_tool()]
 
 
 def _build_read_files(ctx: ToolContext) -> list[dict]:
     # read_files is ALWAYS on — handles project-relative AND absolute local
     # paths (images, PDFs, Office docs, text), so the model can read local
     # content even with no project attached.
-    from lib.tools import READ_FILES_TOOL
+    from lib.tools.project import READ_FILES_TOOL
     if ctx.project_enabled and ctx.multiroot_active:
         from lib.tools.project import with_multiroot_hint
         return with_multiroot_hint([READ_FILES_TOOL])
@@ -91,17 +101,27 @@ def _build_inspect_image(ctx: ToolContext) -> list[dict]:
     # of any local image at full resolution so the model can read detail the
     # initial downscale discarded. No project / vision toggle gates it; the
     # dispatch path drops the resulting image for text-only models anyway.
-    from lib.tools import INSPECT_IMAGE_TOOL
+    from lib.tools.image_edit import INSPECT_IMAGE_TOOL
     if ctx.project_enabled and ctx.multiroot_active:
         from lib.tools.project import with_multiroot_hint
         return with_multiroot_hint([INSPECT_IMAGE_TOOL])
     return [INSPECT_IMAGE_TOOL]
 
 
+def _build_project_result_meta(
+    tool_name: str,
+    tool_args: dict,
+    tool_content: str,
+) -> dict:
+    """Lazy project-plugin adapter for the core result-metadata seam."""
+    from lib.tools.meta import build_project_tool_meta
+    return build_project_tool_meta(tool_name, tool_args, tool_content)
+
+
 def _build_project_or_code_exec(ctx: ToolContext) -> list[dict]:
     # ``project_ready`` is evaluated from the current request, so attaching or
     # detaching Project Brain changes the next assembled tool surface directly.
-    from lib.tools import CODE_EXEC_TOOL
+    from lib.tools.code_exec import CODE_EXEC_TOOL
     from lib.tools.project import project_tools_for_runtime
     project_tools = project_tools_for_runtime()
     if ctx.project_ready:
@@ -120,10 +140,13 @@ def _build_project_or_code_exec(ctx: ToolContext) -> list[dict]:
 
 
 def _build_browser(ctx: ToolContext) -> list[dict]:
-    from lib.browser import is_extension_connected
-    if is_extension_connected():
+    from lib.browser.queue import get_connected_clients
+    if (
+        ctx.owner_user_id > 0
+        and get_connected_clients(owner_user_id=str(ctx.owner_user_id))
+    ):
         from lib.browser.advanced import ADVANCED_BROWSER_TOOLS
-        from lib.tools import BROWSER_TOOLS
+        from lib.tools.browser import BROWSER_TOOLS
         tools = list(BROWSER_TOOLS) + list(ADVANCED_BROWSER_TOOLS)
         logger.debug('[Task %s] Browser extension connected — browser tools '
                      'enabled (%d tools)', ctx.tid, len(tools))
@@ -189,7 +212,7 @@ def _build_page_preview(ctx: ToolContext) -> list[dict]:
     # must not launch Chromium).
     if not ctx.project_ready:
         return []
-    from lib.tools import BROWSER_TOOL_PREVIEW_PAGE
+    from lib.tools.browser import BROWSER_TOOL_PREVIEW_PAGE
     logger.debug('[Task %s] Page-preview tool enabled (server-side render)',
                  ctx.tid)
     return [BROWSER_TOOL_PREVIEW_PAGE]
@@ -200,7 +223,7 @@ def _build_conv_ref(ctx: ToolContext) -> list[dict]:
     # read-only (discover siblings + open one). Register them in two cases:
     #   (a) the user @-mentioned a conversation (the classic explicit path), OR
     #   (b) we're in project mode — the always-on cross-conv digest
-    #       (system_context.py ★4.4) names sibling conversations for ambient
+    #       (Context Composer) names sibling conversations for ambient
     #       awareness, so the model must be ABLE to open a surfaced sibling
     #       rather than being told about phantom tools. Gating only on
     #       has_conv_ref meant the digest header advertised tools absent from
@@ -208,42 +231,69 @@ def _build_conv_ref(ctx: ToolContext) -> list[dict]:
     #       branch). Registering them in project mode closes that gap.
     # Both branches require at least one base tool (current_count > 0): with no
     # tools at all there's no schema to extend.
-    if ctx.current_count <= 0:
+    #
+    # The Project Brain tools (charter/board/peer) used to be appended here;
+    # they now live in the dedicated ``project_brain`` (eager reads) and
+    # ``project_brain_write`` (searchable advisory writes) specs, so the
+    # cross-conversation mechanism is actually VISIBLE on a plain project
+    # turn instead of hiding behind a keyword-triggered searchable family.
+    if not ctx.durable_state_available or ctx.current_count <= 0:
         return []
     if ctx.has_conv_ref or (ctx.project_enabled and ctx.project_path):
-        from lib.tools import CONV_REF_TOOLS
+        from lib.tools.conversation import CONV_REF_TOOLS
         logger.debug('[Task %s] 💬 conv_ref tools enabled (has_conv_ref=%s '
                      'project=%s)', ctx.tid, ctx.has_conv_ref,
                      bool(ctx.project_enabled and ctx.project_path))
-        tools = list(CONV_REF_TOOLS)
-        # Project Charter tools (Pillar #2): the shared north star. Only in
-        # project mode (a charter is per-project) — read + propose. Commit is
-        # human-gated and is NEVER exposed as an agent tool. (Until 2026-07-30
-        # this comment was FALSE: CHARTER_TOOLS shipped the commit tool too,
-        # so the code read as safe while an agent could write shared intent
-        # unreviewed. CHARTER_TOOLS is now the enforcement point.)
-        if ctx.project_enabled and ctx.project_path:
-            from lib.tools import BOARD_TOOLS, CHARTER_TOOLS, PEER_TOOLS
-            tools += list(CHARTER_TOOLS)
-            # Project Board tools (Pillar #3): the coordination board — the
-            # mechanism that makes conversations auto-coordinate (claim/avoid
-            # duplicating). Project-scoped, same gate.
-            tools += list(BOARD_TOOLS)
-            # Project Peer tools (Pillar #6): cross-conversation communication
-            # — live peer status + advisory messaging + advisory/gated
-            # intervention. Same project gate; registered on every project turn
-            # so the model can coordinate without the phantom-tool trap.
-            tools += list(PEER_TOOLS)
-        return tools
+        return list(CONV_REF_TOOLS)
     return []
+
+
+def _build_project_brain(ctx: ToolContext) -> list[dict]:
+    # Project Brain READ surface (charter/board/peer-status/feed) — eager and
+    # resident in project mode. The per-turn injections already reference
+    # project_charter_read / project_board_read BY NAME, and the whole point
+    # of the brain is that the model knows the cross-conversation mechanism
+    # exists; a keyword-triggered searchable family failed both (the model
+    # cannot search for a mechanism it has never heard of). Read-only, ~2.7k
+    # chars of schema.
+    if not ctx.durable_state_available or ctx.current_count <= 0:
+        return []
+    if ctx.project_enabled and ctx.project_path:
+        from lib.tools.conversation import BRAIN_READ_TOOLS
+        return list(BRAIN_READ_TOOLS)
+    return []
+
+
+def _build_project_brain_write(ctx: ToolContext) -> list[dict]:
+    # Project Brain ADVISORY-WRITE surface (charter propose, board
+    # post/claim/complete/block, peer message/intervene) — deferred to Tool
+    # Search (the large half of the family), still exactly callable by name
+    # through the task-level executable catalog. The read-side schemas point
+    # at these names. Charter COMMIT stays human-gated and is never exposed
+    # (CHARTER_TOOLS is the enforcement point).
+    if not ctx.durable_state_available or ctx.current_count <= 0:
+        return []
+    if ctx.project_enabled and ctx.project_path:
+        from lib.tools.conversation import BRAIN_WRITE_TOOLS
+        return list(BRAIN_WRITE_TOOLS)
+    return []
+
+
+def canonical_human_guidance_schema() -> dict:
+    """Return the registry-owned canonical ``ask_human`` wire schema.
+
+    Core callers use this registry seam instead of importing the concrete
+    human-guidance plugin module directly.
+    """
+    from lib.tools.human_guidance import ASK_HUMAN_TOOL
+    return ASK_HUMAN_TOOL
 
 
 def _build_human_guidance(ctx: ToolContext) -> list[dict]:
     if ctx.current_count > 0:
-        from lib.tools.human_guidance import ASK_HUMAN_TOOL
         logger.debug('[Task %s] 🙋 Human guidance (ask_human) tool available',
                      ctx.tid)
-        return [ASK_HUMAN_TOOL]
+        return [canonical_human_guidance_schema()]
     return []
 
 
@@ -253,39 +303,50 @@ def _build_memory(ctx: ToolContext) -> list[dict]:
     # ``ctx.lean`` is a retained seam (chat_mode.is_lean_mode, currently always
     # False after the air/pro merge) for a future auto-retract-tools feature
     # that would ship only the base search/fetch/read tools on a simple turn.
-    if (ctx.lean or not ctx.has_base_tools
+    if (not ctx.durable_state_available or ctx.lean or not ctx.has_base_tools
             or not bool(ctx.cfg.get('memoryEnabled', True))):
         return []
-    from lib.memory import ALL_MEMORY_TOOLS
-    return list(ALL_MEMORY_TOOLS)
+    from copy import deepcopy
+    from lib.memory.tools import ALL_MEMORY_TOOLS
+    tools = deepcopy(ALL_MEMORY_TOOLS)
+    if not (ctx.project_enabled and ctx.project_path):
+        # Memory remains useful in a non-project conversation, but a project
+        # target is physically impossible there. The old static schema still
+        # advertised project as the default, so a perfectly valid omitted
+        # ``scope`` became a guaranteed ``project_path required`` tool error.
+        # Constrain the model contract at assembly time; the handler keeps the
+        # same context-sensitive default as a defensive boundary.
+        for tool in tools:
+            fn = tool.get('function') or {}
+            if fn.get('name') not in ('create_memory', 'merge_memories'):
+                continue
+            scope = (((fn.get('parameters') or {}).get('properties') or {})
+                     .get('scope'))
+            if isinstance(scope, dict):
+                scope['enum'] = ['global']
+                scope['description'] = (
+                    "Store in global memory. This conversation has no active "
+                    "project, so project scope is unavailable. Default: global")
+    return tools
 
 
 def _build_skills(ctx: ToolContext) -> list[dict]:
-    # Skill loading attaches whenever ANY real tool exists (independent of
-    # memoryEnabled): the
-    # <available_skills> index in the system prompt advertises installed
-    # packages, so the model must be able to load them. Skills have no
-    # model-side CRUD; the single tool is read-only (idempotent).
+    # Compact read/discovery tools stay direct: installed-skill routing should
+    # not pay an extra gateway round before load_skill can amplify the task.
     if ctx.lean or not ctx.has_base_tools:
         return []
-    try:
-        from lib.skills import list_skills
-        extras = [p for p in (ctx.cfg.get('projectPaths') or [])
-                  if p and p != ctx.project_path]
-        visible = [
-            row for row in list_skills(
-                ctx.project_path if ctx.project_enabled else None,
-                extra_paths=extras)
-            if row.get('enabled', True) and row.get('eligible', True)
-        ]
-        if not visible:
-            return []
-    except Exception as exc:
-        logger.warning('[Task %s] skill availability check failed: %s',
-                       ctx.tid, exc)
+    from lib.skills import SKILL_READ_TOOLS
+    return list(SKILL_READ_TOOLS)
+
+
+def _build_skill_install(ctx: ToolContext) -> list[dict]:
+    # The safety-sensitive mutator stays in the immutable executable catalog
+    # but is Tool-Search deferred on larger surfaces. Small surfaces retain it
+    # directly because an extra discovery round would cost more than its schema.
+    if ctx.lean or not ctx.has_base_tools:
         return []
-    from lib.skills import ALL_SKILL_TOOLS
-    return list(ALL_SKILL_TOOLS)
+    from lib.skills import SKILL_INSTALL_TOOLS
+    return list(SKILL_INSTALL_TOOLS)
 
 
 def _build_todo(ctx: ToolContext) -> list[dict]:
@@ -308,12 +369,24 @@ def _build_scheduler(ctx: ToolContext) -> list[dict]:
     # longer controls tool exposure — there is no composer toggle anymore.
     # ``ctx.lean`` is a retained seam (always False today; see _build_memory)
     # for a future auto-retract.
-    if ctx.lean or not ctx.has_base_tools:
+    if (not ctx.durable_state_available
+            or ctx.lean or not ctx.has_base_tools):
         return []
     from lib.scheduler.tool_defs import SCHEDULER_TOOLS
     logger.debug('[Task %s] ⏰ Scheduler tools enabled (%d tools)',
                  ctx.tid, len(SCHEDULER_TOOLS))
     return list(SCHEDULER_TOOLS)
+
+
+def _build_tool_result_artifacts(ctx: ToolContext) -> list[dict]:
+    if not ctx.durable_state_available:
+        return []
+    from lib.context_experiment_flags import normalize_context_experiment_flags
+    if normalize_context_experiment_flags(
+            ctx.cfg)["tools"]["resultEnvelope"] != "v2":
+        return []
+    from lib.tools.tool_result_artifacts import build_tool_result_artifact_tools
+    return build_tool_result_artifact_tools()
 
 
 def _build_swarm(ctx: ToolContext) -> list[dict]:
@@ -409,11 +482,17 @@ def _build_mcp(ctx: ToolContext) -> list[dict]:
                                 for block in content if isinstance(block, dict))
                         return ''
 
-                    query = '\n'.join(
-                        _message_text(message) for message in (
-                            getattr(ctx, 'messages', None) or [])
-                        if isinstance(message, dict)
-                        and message.get('role') in ('user', 'system'))[-12000:]
+                    # Retrieval intent belongs to the latest user turn. System
+                    # instructions and long project journals contain broad
+                    # words such as "paper", "login", and "commit" that used
+                    # to select unrelated MCP schemas before the actual task.
+                    query = ''
+                    for message in reversed(
+                            getattr(ctx, 'messages', None) or []):
+                        if (isinstance(message, dict)
+                                and message.get('role') == 'user'):
+                            query = _message_text(message)[-8_000:]
+                            break
                     from lib.mcp.tool_search import select_active_mcp_tools
                     try:
                         active = select_active_mcp_tools(
@@ -465,6 +544,8 @@ def _build_custom(ctx: ToolContext) -> list[dict]:
 
 def _register_builtins() -> None:
     """Register the built-in tool specs in canonical (cache-stable) order."""
+    from lib.tools.tool_result_artifacts import TOOL_RESULT_ARTIFACT_CONTRACTS
+
     builtins = [
         # ── base phase (counted toward has_real_tools) ──
         ToolSpec('search', _build_search, phase='base',
@@ -497,24 +578,23 @@ def _register_builtins() -> None:
                  gate='常开（无需项目）'),
         ToolSpec('project', _build_project_or_code_exec, phase='base',
                  provides=frozenset({
-                     'list_dir', 'grep_search', 'find_files',
+                     'grep_search', 'find_files',
                      'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                      'insert_content', 'insert_contents',
-                     'create_project', 'run_command',
+                     'run_command',
                  }),
                  write_tools=frozenset({
                      'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                      'insert_content', 'insert_contents',
-                     'create_project', 'run_command',
+                     'run_command',
                  }),
                  idempotent_tools=frozenset({
-                     'list_dir', 'grep_search', 'find_files',
+                     'grep_search', 'find_files',
                  }),
                  programmatic_tools=frozenset({
-                     'list_dir', 'grep_search', 'find_files',
+                     'grep_search', 'find_files',
                  }),
                  search_hints={
-                     'list_dir': 'browse folder directory list files 查看目录',
                      'grep_search': (
                          'symbol references usages occurrences who calls '
                          'code content search 查找引用 谁调用了'),
@@ -530,21 +610,22 @@ def _register_builtins() -> None:
                      'apply_diffs': 'edit modify fix several files 批量修改代码',
                      'insert_content': 'insert append text into file 插入内容',
                      'insert_contents': 'insert append several files 批量插入',
-                     'create_project': 'initialize scaffold new project 创建项目',
                      'run_command': 'shell terminal execute command 运行命令',
                  },
                  category='project', description='Project file tools / code exec',
                  gate='挂载项目（输入框 → 项目）或开启代码执行',
                  exposure_gate=lambda ctx: (
-                     ctx.project_ready or ctx.code_exec_enabled)),
+                     ctx.project_ready or ctx.code_exec_enabled),
+                 result_meta_builder=_build_project_result_meta),
         ToolSpec('browser', _build_browser, phase='base',
-                 # 13 names = BROWSER_TOOLS (11) + ADVANCED_BROWSER_TOOLS (2).
-                 # v2 (pt_869e5648403e4745): the ten retired names are NOT
+                 # 15 names = BROWSER_TOOLS (13) + ADVANCED_BROWSER_TOOLS (2).
+                 # v2 (): the ten retired names are NOT
                  # declared — their tool_registry registration shrank with
                  # BROWSER_TOOL_NAMES, so there is no handler left to declare
                  # (their display formatters remain for history rendering).
                  provides=frozenset({
                      'browser_navigate', 'browser_read_page', 'browser_list_tabs',
+                     'browser_research_page', 'browser_devtools',
                      'browser_close_tab', 'browser_click', 'browser_type',
                      'browser_press_key', 'browser_execute_js',
                      'browser_screenshot', 'browser_get_cookies',
@@ -561,6 +642,7 @@ def _register_builtins() -> None:
                  write_tools=frozenset({
                      'browser_navigate', 'browser_click', 'browser_type',
                      'browser_press_key', 'browser_execute_js',
+                     'browser_research_page', 'browser_devtools',
                      'browser_fill_form', 'browser_menu_click',
                      'browser_close_tab',
                  }),
@@ -669,27 +751,80 @@ def _register_builtins() -> None:
                  description='Server-side rendered page preview',
                  gate='挂载项目后可用'),
         ToolSpec('conv_ref', _build_conv_ref, phase='base',
-                 provides=frozenset({'list_conversations', 'get_conversation',
-                                     'project_charter_read', 'project_charter_propose',
-                                     'project_board_read', 'project_board_post',
-                                     'project_board_claim', 'project_board_complete',
-                                     'project_board_block',
-                                     'project_peer_status', 'project_feed_read',
-                                     'project_message', 'project_intervene'}),
-                 # No write_tools: every remaining tool in this family only
-                 # READS, or queues an advisory item a human/peer can drop.
-                 # project_charter_commit used to live here — it was the widest
-                 # blast radius in the family (every sibling reads a committed
-                 # decision as shared intent), and it is now human-only.
+                 provides=frozenset({'list_conversations', 'get_conversation'}),
                  write_tools=frozenset(),
-                 idempotent_tools=frozenset({'list_conversations', 'get_conversation',
-                                             'project_charter_read', 'project_board_read',
-                                             'project_peer_status', 'project_feed_read'}),
+                 idempotent_tools=frozenset({'list_conversations',
+                                             'get_conversation'}),
                  programmatic_tools=frozenset({
                      'list_conversations', 'get_conversation',
+                 }),
+                 # Eager: the per-turn sibling-conversation digest names these
+                 # two by function name when they are registered — deferring
+                 # them re-creates the phantom-tool gap the project-mode
+                 # branch was added to close.
+                 category='conversation', description='Conversation reference tools',
+                 gate='项目模式 或 @ 提及一个会话'),
+        # Project Brain READ surface — the cross-conversation mechanism the
+        # model must KNOW about on every project turn: the per-turn charter /
+        # board injections already name project_charter_read / project_board_read,
+        # and peer_status / feed_read are the live + narrative complements.
+        # Eager (resident) so a plain project turn actually sees the schemas;
+        # ~2.7k chars, all read-only. Registered right after conv_ref so the
+        # conversation family stays adjacent.
+        ToolSpec('project_brain', _build_project_brain, phase='base',
+                 provides=frozenset({
                      'project_charter_read', 'project_board_read',
                      'project_peer_status', 'project_feed_read',
+                     'integration_status',
                  }),
+                 write_tools=frozenset(),
+                 idempotent_tools=frozenset({
+                     'project_charter_read', 'project_board_read',
+                     'project_peer_status', 'project_feed_read',
+                     'integration_status',
+                 }),
+                 programmatic_tools=frozenset({
+                     'project_charter_read', 'project_board_read',
+                     'project_peer_status', 'project_feed_read',
+                     'integration_status',
+                 }),
+                 search_hints={
+                     'project_charter_read': (
+                         'read project north star committed decisions '
+                         '查看项目章程 共同决定'),
+                     'project_board_read': (
+                         'read coordination board epics claimed open '
+                         '查看项目看板 任务认领状态'),
+                     'project_peer_status': (
+                         'live sibling conversations status who is working '
+                         '查看项目伙伴实时状态'),
+                     'project_feed_read': (
+                         'cross-conversation activity feed history '
+                         '查看项目动态 跨对话历史'),
+                     'integration_status': (
+                         'isolated writer workspace queue state review '
+                         '查看集成工作区状态 隔离任务'),
+                 },
+                 category='conversation',
+                 description='Project brain read tools (charter/board/peer/feed)',
+                 gate='项目模式'),
+        # Project Brain ADVISORY-WRITE surface — propose/post/claim/complete/
+        # block/message/intervene. No write_tools: each only queues an
+        # advisory item a human/peer can drop. project_charter_commit used to
+        # be reachable here — it was the widest blast radius in the family
+        # (every sibling reads a committed decision as shared intent), and it
+        # is now human-only. Deferred to Tool Search; the read-side schemas
+        # name these tools, and the executable catalog keeps them callable.
+        ToolSpec('project_brain_write', _build_project_brain_write,
+                 phase='base',
+                 provides=frozenset({
+                     'project_charter_propose',
+                     'project_board_post', 'project_board_claim',
+                     'project_board_complete', 'project_board_block',
+                     'project_message', 'project_intervene',
+                     'integration_checkpoint', 'integration_submit',
+                 }),
+                 write_tools=frozenset(),
                  discovery_policy='searchable',
                  search_hints={
                      'project_board_claim': (
@@ -697,12 +832,31 @@ def _register_builtins() -> None:
                          '认领任务 我来做 接手'),
                      'project_board_complete': (
                          'finish close mark work item done 完成任务'),
+                     'project_board_post': (
+                         'create new epic work item on project board '
+                         '发布项目任务 新建工作项'),
+                     'project_board_block': (
+                         'mark epic waiting on human external gate '
+                         '标记任务阻塞 需要人类'),
+                     'project_charter_propose': (
+                         'propose new project decision for human review '
+                         '提议项目决定'),
                      'project_message': (
                          'send direct message to project peer teammate '
                          '给项目伙伴发消息'),
+                     'project_intervene': (
+                         'ask sibling conversation to stop change course '
+                         '干预项目伙伴 停止'),
+                     'integration_checkpoint': (
+                         'snapshot isolated worktree progress milestone '
+                         '保存隔离工作区检查点'),
+                     'integration_submit': (
+                         'submit isolated work for human review merge queue '
+                         '提交隔离任务人工审查'),
                  },
-                 category='conversation', description='Conversation reference tools',
-                 gate='项目模式 或 @ 提及一个会话'),
+                 category='conversation',
+                 description='Project brain advisory-write tools',
+                 gate='项目模式'),
         ToolSpec('human_guidance', _build_human_guidance, phase='base',
                  provides=frozenset({'ask_human'}),
                  category='human', description='Ask the human for guidance',
@@ -733,6 +887,23 @@ def _register_builtins() -> None:
                  gate='本地知识库存在且已开启',
                  handler=_handle_knowledge,
                  catalog_active_only=True),
+        # Explicit server-file semantics are append-only so every established
+        # hot tool keeps its prompt-cache position. It rides the same runtime
+        # availability gate as fetch_url but has its own stable contract/name.
+        ToolSpec('server_download', _build_server_download, phase='base',
+                 provides=frozenset({'download_url_to_server'}),
+                 idempotent_tools=frozenset({'download_url_to_server'}),
+                 search_hints={
+                     'download_url_to_server': (
+                         'download save fetch archive zip file to server project '
+                         'logged-in browser cookies intranet SSO '
+                         '下载 保存 服务器 内网 登录 文件 压缩包'
+                     ),
+                 },
+                 category='search', description='Download a URL to server staging',
+                 gate='抓取开关（默认开）',
+                 exposure_gate=lambda ctx: (
+                     ctx.fetch_enabled or ctx.search_enabled)),
         # ── capability phase ──
         ToolSpec('memory', _build_memory, phase='capability',
                  provides=frozenset({
@@ -757,11 +928,34 @@ def _register_builtins() -> None:
                  category='memory', description='Memory CRUD tools',
                  gate='Memory 开关开启且有任意基础工具'),
         ToolSpec('skills', _build_skills, phase='capability',
-                 provides=frozenset({'load_skill'}),
-                 idempotent_tools=frozenset({'load_skill'}),
+                 provides=frozenset({
+                     'search_skills', 'load_skill', 'read_skill_resource',
+                 }),
+                 idempotent_tools=frozenset({
+                     'search_skills', 'load_skill', 'read_skill_resource',
+                 }),
+                 search_hints={
+                     'search_skills': (
+                         'find install discover workflow skill 技能 查找 安装'),
+                     'load_skill': 'load workflow instructions 加载技能说明',
+                     'read_skill_resource': (
+                         'read skill reference script resource 技能资源'),
+                 },
                  category='skills',
-                 description='Skill loading (progressive disclosure)',
-                 gate='存在已启用且满足依赖的技能，并有任意基础工具'),
+                 description='Bounded skill discovery and disclosure',
+                 gate='有任意基础工具'),
+        ToolSpec('skill_install', _build_skill_install, phase='capability',
+                 provides=frozenset({'request_skill_install'}),
+                 write_tools=frozenset({'request_skill_install'}),
+                 confirmation_tools=frozenset({'request_skill_install'}),
+                 search_hints={
+                     'request_skill_install': (
+                         'install verified catalog skill 安装技能'),
+                 },
+                 discovery_policy='searchable',
+                 category='skills',
+                 description='Verified skill catalog installation',
+                 gate='有任意基础工具；始终需要真人确认'),
         ToolSpec('todo', _build_todo, phase='capability',
                  provides=frozenset({'todo_write'}),
                  category='task', description='Structured task checklist',
@@ -796,6 +990,26 @@ def _register_builtins() -> None:
                  },
                  category='scheduler', description='Scheduler / proactive agent tools',
                  gate='常开（有任意基础工具即挂载）'),
+        ToolSpec(
+            'tool_result_artifacts', _build_tool_result_artifacts,
+            phase='capability',
+            provides=frozenset({'read_tool_artifact', 'search_tool_artifact'}),
+            idempotent_tools=frozenset({
+                'read_tool_artifact', 'search_tool_artifact'}),
+            programmatic_tools=frozenset({
+                'read_tool_artifact', 'search_tool_artifact'}),
+            discovery_policy='searchable',
+            script_safe=True,
+            catalog_active_only=True,
+            search_hints={
+                'read_tool_artifact': 'continue large result range cursor 继续读取',
+                'search_tool_artifact': 'search prior tool result 搜索工具结果',
+            },
+            category='artifacts',
+            description='Bounded continuation for large tool results',
+            gate='tools.resultEnvelope=v2',
+            contracts=TOOL_RESULT_ARTIFACT_CONTRACTS,
+        ),
         ToolSpec('swarm', _build_swarm, phase='capability',
                  # provides lists every name this family has a handler for on
                  # the MAIN dispatch registry (@tool_registry.tool_set over
@@ -824,8 +1038,7 @@ def _register_builtins() -> None:
                  # here so it reads as a decision rather than an omission.
                  idempotent_tools=frozenset({'list_artifacts'}),
                  category='swarm', description='Async multi-agent swarm',
-                 gate='输入框 → 多智能体开关',
-                 exposure_gate=lambda ctx: ctx.swarm_enabled),
+                 gate='常开（默认工具，无开关）'),
         ToolSpec('mcp', _build_mcp, phase='capability',
                  provides=frozenset({
                      'search_mcp_tools', 'call_mcp_read_tool',

@@ -90,8 +90,8 @@ def _capture_system_for(lang_key):
     """Drive /report/start under `lang_key` and capture the system message the
     engine received."""
     import asyncio
-    import lib.paper.report_engine as re_mod
-    from lib.paper import _report_runtime
+    import lib.paper.report_engine.worker as re_mod
+    from lib.paper.report_runtime import _report_runtime
 
     app = _load_app()
     orig = re_mod.dispatch_stream
@@ -175,13 +175,11 @@ def test_source_level_negative_control_clause_noop_drops_date():
     """No-op ``date_anchor_clause`` → today's date vanishes from the system
     prompt and the route assertion FAILS. Proves the clause is load-bearing.
 
-    routes/paper.py imported the name from the ``lib.paper`` facade, so patch
-    BOTH the defining module and the facade/route bindings. Restore
-    byte-identical afterwards.
+    The route imports the prompt helper explicitly, so patch both the defining
+    module and that consumer binding. Restore both afterwards.
     """
     import lib.paper.prompts as prompts_mod
-    import lib.paper as paper_pkg
-    import routes.paper as routes_paper
+    import routes.paper_pkg._report as routes_paper
 
     orig_fn = prompts_mod.date_anchor_clause
 
@@ -189,7 +187,6 @@ def test_source_level_negative_control_clause_noop_drops_date():
         return ''
 
     prompts_mod.date_anchor_clause = _noop
-    paper_pkg.date_anchor_clause = _noop
     routes_paper.date_anchor_clause = _noop
     try:
         system = _capture_system_for('review:neurips:en')
@@ -197,7 +194,6 @@ def test_source_level_negative_control_clause_noop_drops_date():
             "today's date still present with clause no-op — clause not load-bearing"
     finally:
         prompts_mod.date_anchor_clause = orig_fn
-        paper_pkg.date_anchor_clause = orig_fn
         routes_paper.date_anchor_clause = orig_fn
 
     # Restored: the date returns.

@@ -1,197 +1,45 @@
-"""Managed project-local PostgreSQL backend with isolated read/write pools."""
+"""External PostgreSQL adapter with isolated Psycopg 3 read/write pools.
+
+The adapter owns connections and transactions only.  Cluster lifecycle,
+credentials, TLS, backups, and high availability belong to the deployment
+platform; application startup validates but never migrates the schema.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import glob
-import os
-from pathlib import Path
-import queue
-import shutil
-import socket
-import subprocess
-import sys
+from collections.abc import Mapping
 import time
 from typing import Any
-from datetime import datetime, timezone
 
-import orjson
-import psycopg2
-from psycopg2 import errors as pg_errors
-from psycopg2.extras import RealDictCursor
-from psycopg2 import sql as pg_sql
+import psycopg
+from psycopg import errors as pg_errors
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool, PoolTimeout
 
 from lib.storage.errors import StorageError
 from lib.log import get_logger
-from lib.storage_sidecar.adapters.base import Backend, Operation
+from lib.storage_sidecar.adapters.base import Backend, Operation, receipt_cacheable
 from lib.storage_sidecar.config import SidecarConfig
 from lib.storage_sidecar.preflight import run_filesystem_preflight
-from lib.storage_sidecar.schema import initialize_schema
+from lib.storage_sidecar.receipt_codec import (
+    decode_receipt_response,
+    encode_receipt_response,
+)
+from lib.storage_sidecar.schema import (
+    OBSOLETE_DEFERRED_INDEX_NAMES,
+    deferred_index_statements,
+    initialize_schema,
+    validate_schema_version,
+)
 
 
 logger = get_logger('tofu.storage.sidecar.postgres')
 
 
-def _find_pg_binary(name: str) -> str:
-    candidates: list[str] = []
-    found = shutil.which(name)
-    if found:
-        candidates.append(found)
-    for root in filter(None, {
-        str(Path(sys.executable).resolve().parent),
-        os.environ.get('CONDA_PREFIX', ''),
-    }):
-        candidates.extend((str(Path(root) / name), str(Path(root) / 'bin' / name)))
-    for pattern in (
-        f'/usr/lib/postgresql/*/bin/{name}',
-        f'/opt/homebrew/opt/postgresql*/bin/{name}',
-        f'/usr/local/opt/postgresql*/bin/{name}',
-    ):
-        candidates.extend(sorted(glob.glob(pattern), reverse=True))
-    for candidate in candidates:
-        if Path(candidate).is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    raise StorageError(
-        'database_unavailable', f'PostgreSQL binary {name} is unavailable')
-
-
-class _ManagedPostgres:
-    def __init__(self, config: SidecarConfig) -> None:
-        self.config = config
-        configured_port = os.environ.get('TOFU_STORAGE_PG_PORT')
-        if configured_port:
-            self.port = int(configured_port)
-        else:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                probe.bind(('127.0.0.1', 0))
-                self.port = int(probe.getsockname()[1])
-        if not 1024 <= self.port <= 65535:
-            raise RuntimeError('TOFU_STORAGE_PG_PORT is invalid')
-        self.user = 'tofu_storage'
-        self.database = 'tofu'
-        self._started_here = False
-
-    def _base_dsn(self, database: str) -> str:
-        return (
-            f'host=127.0.0.1 port={self.port} dbname={database} '
-            f'user={self.user} connect_timeout=2 application_name=tofu-storage-sidecar'
-        )
-
-    @property
-    def dsn(self) -> str:
-        return self._base_dsn(self.database)
-
-    def _initialize(self) -> None:
-        initdb = _find_pg_binary('initdb')
-        self.config.pgdata.parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            [initdb, '-D', str(self.config.pgdata), '--data-checksums',
-             '--encoding=UTF8', '--auth=trust', f'--username={self.user}'],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise StorageError(
-                'database_unavailable', 'PostgreSQL cluster initialization failed')
-
-    def _running_port(self) -> int | None:
-        pid_file = self.config.pgdata / 'postmaster.pid'
-        try:
-            lines = pid_file.read_text(encoding='utf-8').splitlines()
-            pid = int(lines[0])
-            port = int(lines[3])
-            os.kill(pid, 0)
-            return port
-        except (OSError, ValueError, IndexError) as exc:
-            logger.debug('PostgreSQL pid/port probe unavailable: %s',
-                         type(exc).__name__)
-            return None
-
-    def start(self) -> None:
-        if not (self.config.pgdata / 'PG_VERSION').is_file():
-            self._initialize()
-        running_port = self._running_port()
-        if running_port is not None:
-            self.port = running_port
-            # Do not claim or stop a PID from a stale postmaster.pid until the
-            # server proves that it actually owns this exact project pgdata.
-            adopted = True
-        else:
-            adopted = False
-            pg_ctl = _find_pg_binary('pg_ctl')
-            log_path = self.config.logs_dir / 'storage-postgresql.log'
-            options = ' '.join((
-                '-h 127.0.0.1', f'-p {self.port}',
-                '-c fsync=on', '-c synchronous_commit=on',
-                '-c full_page_writes=on', '-c max_connections=96',
-                '-c idle_in_transaction_session_timeout=5000',
-                '-c log_statement=none', '-c log_min_error_statement=error',
-            ))
-            result = subprocess.run(
-                [pg_ctl, '-D', str(self.config.pgdata), '-l', str(log_path),
-                 '-o', options, '-w', '-t', '30', 'start'],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=40,
-                check=False,
-            )
-            if result.returncode != 0:
-                raise StorageError(
-                    'database_unavailable', 'PostgreSQL failed to start')
-            self._started_here = True
-        admin = psycopg2.connect(self._base_dsn('postgres'))
-        try:
-            admin.autocommit = True
-            with admin.cursor() as cursor:
-                cursor.execute('SHOW data_directory')
-                actual_data_dir = Path(cursor.fetchone()[0]).resolve()
-                cursor.execute('SHOW port')
-                actual_port = int(cursor.fetchone()[0])
-                if (actual_data_dir != self.config.pgdata.resolve()
-                        or actual_port != self.port):
-                    raise StorageError(
-                        'database_unavailable',
-                        'PostgreSQL process identity does not match the project cluster')
-                # The project lease proves no peer sidecar owns this verified
-                # cluster. A postmaster surviving a killed Sidecar is adopted
-                # and stopped when the new owner exits.
-                if adopted:
-                    self._started_here = True
-                cursor.execute('SELECT 1 FROM pg_database WHERE datname = %s', (self.database,))
-                if cursor.fetchone() is None:
-                    cursor.execute(
-                        pg_sql.SQL('CREATE DATABASE {}').format(
-                            pg_sql.Identifier(self.database)))
-        finally:
-            admin.close()
-
-    def stop(self) -> None:
-        if not self._started_here:
-            return
-        try:
-            subprocess.run(
-                [_find_pg_binary('pg_ctl'), '-D', str(self.config.pgdata),
-                 '-w', '-t', '30', 'stop', '-m', 'fast'],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=40,
-                check=False,
-            )
-        finally:
-            self._started_here = False
-
-
 class PostgresSession:
     backend = 'postgres'
 
-    def __init__(self, connection) -> None:
+    def __init__(self, connection: psycopg.Connection[DictRow]) -> None:
         self.connection = connection
 
     def lock_key(self, namespace: str, key: str) -> None:
@@ -201,6 +49,13 @@ class PostgresSession:
             'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?)) AS locked',
             (namespace, key),
         )
+
+    def index_exists(self, index_name: str) -> bool:
+        row = self.fetch_one(
+            'SELECT to_regclass(?) AS registered_name',
+            (str(index_name),),
+        )
+        return bool(row and row.get('registered_name'))
 
     @staticmethod
     def _sql(value: str) -> str:
@@ -216,95 +71,110 @@ class PostgresSession:
             cursor.execute(self._sql(sql), params)
             return max(0, int(cursor.rowcount))
 
-    def fetch_one(self, sql: str, params: tuple[Any, ...] = ()):
-        with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+    def fetch_one(
+        self, sql: str, params: tuple[Any, ...] = (),
+    ) -> Mapping[str, Any] | None:
+        with self.connection.cursor() as cursor:
             cursor.execute(self._sql(sql), params)
             row = cursor.fetchone()
             return dict(row) if row is not None else None
 
-    def fetch_all(self, sql: str, params: tuple[Any, ...] = ()):
-        with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+    def fetch_all(
+        self, sql: str, params: tuple[Any, ...] = (),
+    ) -> list[Mapping[str, Any]]:
+        with self.connection.cursor() as cursor:
             cursor.execute(self._sql(sql), params)
             return [dict(row) for row in cursor.fetchall()]
 
-
-@dataclass(slots=True)
-class _PgSlot:
-    connection: Any
-    created_at: float
-    last_used_at: float
+    def fetch_one_for_update_skip_locked(
+        self, sql: str, params: tuple[Any, ...] = (),
+    ) -> Mapping[str, Any] | None:
+        """Lock one available queue row without blocking sibling workers."""
+        statement = f'{sql.rstrip()} FOR UPDATE SKIP LOCKED'
+        return self.fetch_one(statement, params)
 
 
 class _PgPool:
-    def __init__(self, dsn: str, size: int, config: SidecarConfig) -> None:
+    """Small deadline-aware facade over Psycopg's supported pool."""
+
+    def __init__(
+        self, dsn: str, size: int, config: SidecarConfig, *, name: str,
+    ) -> None:
         self.dsn = dsn
         self.size = size
         self.config = config
-        self.queue: queue.Queue[_PgSlot] = queue.Queue(size)
-        self.rotations = 0
-        now = time.monotonic()
+        self.pool = ConnectionPool(
+            conninfo=dsn,
+            min_size=size,
+            max_size=size,
+            name=name,
+            open=False,
+            timeout=config.acquire_timeout_s,
+            max_idle=config.idle_lifetime_s,
+            max_lifetime=config.max_lifetime_s,
+            reconnect_timeout=max(5.0, config.acquire_timeout_s),
+            kwargs={
+                'autocommit': False,
+                'row_factory': dict_row,
+                'application_name': 'tofu-storage-sidecar',
+            },
+            configure=self._configure,
+            check=ConnectionPool.check_connection,
+        )
         try:
-            for _ in range(size):
-                self.queue.put(_PgSlot(self._connect(), now, now))
-        except BaseException:
-            self.close()
-            raise
+            self.pool.open(
+                wait=True, timeout=max(5.0, config.acquire_timeout_s))
+        except PoolTimeout as exc:
+            self.pool.close()
+            raise StorageError(
+                'database_unavailable',
+                'PostgreSQL connection pool could not become ready',
+                True,
+                100,
+            ) from exc
 
-    def _connect(self):
-        connection = psycopg2.connect(self.dsn)
-        connection.autocommit = False
+    @staticmethod
+    def _configure(connection: psycopg.Connection) -> None:
         with connection.cursor() as cursor:
-            cursor.execute("SET SESSION application_name = 'tofu-storage-sidecar'")
             cursor.execute('SET SESSION idle_in_transaction_session_timeout = 5000')
         connection.commit()
-        return connection
 
-    def acquire(self, deadline_at: float) -> _PgSlot:
+    def acquire(self, deadline_at: float) -> psycopg.Connection:
         timeout = max(0.0, min(
             self.config.acquire_timeout_s, deadline_at - time.monotonic()))
         try:
-            slot = self.queue.get(timeout=timeout)
-        except queue.Empty as exc:
+            return self.pool.getconn(timeout=timeout)
+        except PoolTimeout as exc:
             raise StorageError(
                 'database_timeout', 'PostgreSQL pool acquisition timed out', True, 25,
             ) from exc
-        now = time.monotonic()
-        if (slot.connection.closed
-                or now - slot.created_at >= self.config.max_lifetime_s
-                or now - slot.last_used_at >= self.config.idle_lifetime_s):
-            try:
-                slot.connection.close()
-            finally:
-                slot = _PgSlot(self._connect(), now, now)
-                self.rotations += 1
-        return slot
 
-    def release(self, slot: _PgSlot, *, broken: bool = False) -> None:
-        if broken or slot.connection.closed:
-            try:
-                slot.connection.close()
-            finally:
-                now = time.monotonic()
-                slot = _PgSlot(self._connect(), now, now)
-        slot.last_used_at = time.monotonic()
-        self.queue.put(slot)
+    def release(
+        self, connection: psycopg.Connection, *, broken: bool = False,
+    ) -> None:
+        if broken:
+            connection.close()
+        self.pool.putconn(connection)
+
+    def metrics(self) -> dict[str, int]:
+        return dict(self.pool.get_stats())
 
     def close(self) -> None:
-        while not self.queue.empty():
-            self.queue.get_nowait().connection.close()
+        self.pool.close()
 
 
 def _map_postgres_error(exc: BaseException) -> StorageError:
     if isinstance(exc, StorageError):
         return exc
-    if not isinstance(exc, psycopg2.Error):
+    if not isinstance(exc, psycopg.Error):
         return StorageError('database_internal', 'Storage operation failed')
-    state = exc.pgcode or ''
+    state = exc.sqlstate or ''
     if state in {'40001', '40P01', '55P03'}:
         return StorageError('database_busy', 'PostgreSQL transaction is busy', True, 25)
     if state == '57014':
         return StorageError('database_timeout', 'PostgreSQL transaction timed out', True, 25)
-    if state.startswith('08') or isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError)):
+    if state.startswith('08') or isinstance(
+            exc, (psycopg.OperationalError, psycopg.InterfaceError)):
         return StorageError('database_unavailable', 'PostgreSQL is unavailable', True, 100)
     if state in {'23505', '23P01'}:
         return StorageError('database_conflict', 'PostgreSQL uniqueness conflict')
@@ -318,12 +188,13 @@ class PostgresBackend(Backend):
 
     def __init__(self, config: SidecarConfig) -> None:
         self.config = config
-        self._manager = _ManagedPostgres(config)
         self._read_pool: _PgPool | None = None
         self._write_pool: _PgPool | None = None
         self._closed = False
         self._preflight: dict[str, Any] = {}
         self._metrics = {'queries': 0, 'commands': 0, 'retries': 0, 'failures': 0}
+        self._turn_search_projection: Any = None
+        self._turn_search_projection_error = ''
 
     def _transaction(
         self,
@@ -336,7 +207,7 @@ class PostgresBackend(Backend):
     ) -> Any:
         attempt = 0
         while True:
-            slot = pool.acquire(deadline_at)
+            connection = pool.acquire(deadline_at)
             broken = False
             retrying = False
             try:
@@ -344,33 +215,42 @@ class PostgresBackend(Backend):
                     self.config.transaction_timeout_s,
                     deadline_at - time.monotonic(),
                 ) * 1000))
-                with slot.connection.cursor() as cursor:
-                    # psycopg2 opens a transaction before the first statement
+                with connection.cursor() as cursor:
+                    # Psycopg opens a transaction before the first statement
                     # when autocommit is disabled. Sending BEGIN explicitly
                     # therefore emits PostgreSQL's "already a transaction"
                     # warning on every RPC. Read transactions only need their
                     # access mode declared before catalog work begins.
                     if readonly:
                         cursor.execute('SET TRANSACTION READ ONLY')
-                    cursor.execute('SET LOCAL statement_timeout = %s', (remaining_ms,))
-                    cursor.execute('SET LOCAL lock_timeout = %s',
-                                   (min(2000, remaining_ms),))
-                result = operation(PostgresSession(slot.connection))
+                    # PostgreSQL utility SET syntax does not accept bind
+                    # parameters (PG18 rejects ``SET ... = $1``). set_config
+                    # is parameterizable and ``is_local=true`` keeps both
+                    # limits scoped to this transaction.
+                    cursor.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        (str(remaining_ms),),
+                    )
+                    cursor.execute(
+                        "SELECT set_config('lock_timeout', %s, true)",
+                        (str(min(2000, remaining_ms)),),
+                    )
+                result = operation(PostgresSession(connection))
                 if readonly:
-                    slot.connection.rollback()
+                    connection.rollback()
                 else:
-                    slot.connection.commit()
+                    connection.commit()
                 return result
             except BaseException as exc:
-                if not isinstance(exc, (StorageError, psycopg2.Error)):
+                if not isinstance(exc, (StorageError, psycopg.Error)):
                     # Never log SQL or parameters here.  The exception class is
                     # enough to diagnose catalog bugs without exposing data.
                     logger.error(
                         'unclassified PostgreSQL semantic failure type=%s',
                         type(exc).__name__)
                 try:
-                    slot.connection.rollback()
-                except psycopg2.Error as rollback_error:
+                    connection.rollback()
+                except psycopg.Error as rollback_error:
                     broken = True
                     logger.debug('PostgreSQL rollback failed: %s',
                                  type(rollback_error).__name__)
@@ -385,8 +265,8 @@ class PostgresBackend(Backend):
                     raise mapped from exc
             finally:
                 try:
-                    pool.release(slot, broken=broken)
-                except psycopg2.Error as release_error:
+                    pool.release(connection, broken=broken)
+                except (psycopg.Error, RuntimeError) as release_error:
                     logger.warning(
                         'PostgreSQL pool slot replacement failed: %s',
                         type(release_error).__name__)
@@ -396,11 +276,21 @@ class PostgresBackend(Backend):
 
     def start(self) -> dict[str, Any]:
         report = run_filesystem_preflight(self.config.data_dir)
-        self._manager.start()
-        probe = psycopg2.connect(self._manager.dsn)
+        if not self.config.postgres_dsn:
+            raise StorageError(
+                'database_unavailable', 'External PostgreSQL DSN is missing')
         try:
-            probe.autocommit = True
-            with probe.cursor(cursor_factory=RealDictCursor) as cursor:
+            probe = psycopg.connect(
+                self.config.postgres_dsn,
+                autocommit=False,
+                row_factory=dict_row,
+                application_name='tofu-storage-sidecar-startup',
+                connect_timeout=5,
+            )
+        except psycopg.Error as exc:
+            raise _map_postgres_error(exc) from exc
+        try:
+            with probe.cursor() as cursor:
                 cursor.execute(
                     'SELECT current_setting(\'fsync\') AS fsync, '
                     'current_setting(\'synchronous_commit\') AS synchronous_commit, '
@@ -412,7 +302,6 @@ class PostgresBackend(Backend):
             if (settings['fsync'] != 'on'
                     or settings['synchronous_commit'] not in {'on', 'remote_apply'}
                     or settings['full_page_writes'] != 'on'
-                    or settings['data_checksums'] != 'on'
                     or settings['in_recovery']):
                 raise StorageError(
                     'database_unavailable', 'PostgreSQL durability preflight failed')
@@ -427,40 +316,48 @@ class PostgresBackend(Backend):
             else:
                 read_size = self.config.read_pool_size
                 write_size = self.config.write_pool_size
-            # Initialize the logical schema before filling either pool.
-            probe.autocommit = False
             startup_session = PostgresSession(probe)
-            initialize_schema(startup_session)
-            startup_session.execute(
-                'INSERT INTO storage_meta(meta_key, meta_value) VALUES (?, ?) '
-                'ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value',
-                ('__startup_read_write_probe__', 'ok'),
-            )
-            startup_probe = startup_session.fetch_one(
-                'SELECT meta_value FROM storage_meta WHERE meta_key = ?',
-                ('__startup_read_write_probe__',),
-            )
-            if startup_probe is None or startup_probe['meta_value'] != 'ok':
-                raise StorageError(
-                    'database_integrity', 'PostgreSQL read/write startup probe failed')
-            startup_session.execute(
-                'DELETE FROM storage_meta WHERE meta_key = ?',
-                ('__startup_read_write_probe__',),
-            )
-            probe.commit()
-        except BaseException:
-            probe.rollback()
-            probe.close()
-            self._manager.stop()
+            if self.config.allow_schema_migration:
+                # This authority exists only for isolated repository contract
+                # tests. Production migration uses the one-shot migration job.
+                initialize_schema(startup_session)
+                for statement in deferred_index_statements('postgres'):
+                    startup_session.execute(statement)
+                for index_name in sorted(OBSOLETE_DEFERRED_INDEX_NAMES):
+                    startup_session.execute(
+                        f'DROP INDEX IF EXISTS {index_name}')
+                probe.commit()
+            else:
+                validate_schema_version(startup_session)
+                probe.rollback()
+        except BaseException as exc:
+            try:
+                probe.rollback()
+            except psycopg.Error:
+                pass
+            if isinstance(exc, StorageError):
+                raise
+            if isinstance(exc, psycopg.Error):
+                raise _map_postgres_error(exc) from exc
             raise
-        probe.close()
+        finally:
+            probe.close()
         try:
-            self._read_pool = _PgPool(self._manager.dsn, read_size, self.config)
-            self._write_pool = _PgPool(self._manager.dsn, write_size, self.config)
+            self._read_pool = _PgPool(
+                self.config.postgres_dsn,
+                read_size,
+                self.config,
+                name='tofu-storage-read',
+            )
+            self._write_pool = _PgPool(
+                self.config.postgres_dsn,
+                write_size,
+                self.config,
+                name='tofu-storage-write',
+            )
         except BaseException:
             if self._read_pool:
                 self._read_pool.close()
-            self._manager.stop()
             raise
         self._preflight = {
             **report.as_dict(),
@@ -471,10 +368,32 @@ class PostgresBackend(Backend):
             'read_pool_capacity': read_size,
             'write_pool_capacity': write_size,
             'connection_budget_80pct': budget,
+            'schema_migration_authority': (
+                'test-only' if self.config.allow_schema_migration else 'external-job'),
         }
+        try:
+            from lib.storage_sidecar.turn_search_projection import (
+                AuthorityTurnSearchTarget,
+                TurnSearchProjectionRuntime,
+            )
+
+            projection = TurnSearchProjectionRuntime(
+                self,
+                AuthorityTurnSearchTarget(self),
+                backfill_delay_s=self.config.turn_search_backfill_delay_s,
+            )
+            projection.start()
+            self._turn_search_projection = projection
+        except BaseException as exc:
+            self._turn_search_projection_error = type(exc).__name__
+            logger.exception(
+                '[turn-search] PostgreSQL projection failed to start; '
+                'conversation search is degraded')
         return self.health()
 
-    def query(self, operation: Operation, deadline_at: float) -> Any:
+    def query(
+        self, operation_name: str, operation: Operation, deadline_at: float,
+    ) -> Any:
         if self._read_pool is None:
             raise StorageError('database_unavailable', 'PostgreSQL read pool is not ready')
         result = self._transaction(
@@ -523,13 +442,12 @@ class PostgresBackend(Backend):
                             or receipt['request_digest'] != payload_digest):
                         raise StorageError(
                             'database_conflict', 'command_id was reused for a different request')
-                    return orjson.loads(bytes(receipt['response_json']))
+                    return decode_receipt_response(receipt['response_json'])
             response = operation(session)
-            if receipt_required:
-                encoded = orjson.dumps(response, option=orjson.OPT_SORT_KEYS)
-                if len(encoded) > 64 * 1024:
-                    raise StorageError(
-                        'database_protocol_error', 'Command response is too large for a receipt')
+            # Clean refusals (ok=False) mutate nothing — memoizing them as
+            # receipts would freeze a stale verdict (see base.receipt_cacheable).
+            if receipt_required and receipt_cacheable(response):
+                encoded = encode_receipt_response(response)
                 session.execute(
                     'INSERT INTO storage_command_receipts('
                     'command_id, operation, request_digest, response_json, committed_at_ms) '
@@ -542,78 +460,116 @@ class PostgresBackend(Backend):
         result = self._transaction(
             self._write_pool, transactional, deadline_at, readonly=False, retries=3)
         self._metrics['commands'] += 1
+        if self._turn_search_projection is not None:
+            self._turn_search_projection.wake()
         return result
 
     def health(self) -> dict[str, Any]:
-        return {
+        result = {
             'ready': not self._closed and self._read_pool is not None
                      and self._write_pool is not None,
             'backend': self.name,
             'protocol': 'storage.v1',
             'preflight': self._preflight,
         }
+        if self._turn_search_projection is not None:
+            result['turn_search_projection'] = (
+                self._turn_search_projection.status())
+        elif self._turn_search_projection_error:
+            result['turn_search_projection'] = {
+                'state': 'unavailable',
+                'error_type': self._turn_search_projection_error,
+            }
+        return result
 
     def metrics(self) -> dict[str, Any]:
+        read_pool = self._read_pool.metrics() if self._read_pool else {}
+        write_pool = self._write_pool.metrics() if self._write_pool else {}
         return {
             'backend': self.name,
             **self._metrics,
-            'read_pool_available': self._read_pool.queue.qsize() if self._read_pool else 0,
-            'write_pool_available': self._write_pool.queue.qsize() if self._write_pool else 0,
-            'read_pool_rotations': self._read_pool.rotations if self._read_pool else 0,
-            'write_pool_rotations': self._write_pool.rotations if self._write_pool else 0,
+            'read_pool_available': int(read_pool.get('pool_available', 0)),
+            'write_pool_available': int(write_pool.get('pool_available', 0)),
+            'read_pool_rotations': max(
+                0,
+                int(read_pool.get('connections_num', 0))
+                - int(read_pool.get('pool_size', 0)),
+            ),
+            'write_pool_rotations': max(
+                0,
+                int(write_pool.get('connections_num', 0))
+                - int(write_pool.get('pool_size', 0)),
+            ),
+            'read_pool': read_pool,
+            'write_pool': write_pool,
+            'turn_search_projection': (
+                self._turn_search_projection.status()
+                if self._turn_search_projection is not None else {
+                    'state': 'unavailable',
+                    'error_type': self._turn_search_projection_error,
+                }
+            ),
         }
 
     def integrity_check(self, deadline_at: float) -> dict[str, Any]:
-        return self.query(
-            lambda session: {
-                'ok': bool(session.fetch_one(
-                    'SELECT NOT pg_is_in_recovery() AS ok')['ok']),
-                'checksums': 'on',
-            },
-            deadline_at,
-        )
+        def check(session: PostgresSession) -> dict[str, Any]:
+            row = session.fetch_one(
+                "SELECT NOT pg_is_in_recovery() AS ok, "
+                "current_setting('data_checksums') AS checksums")
+            return {'ok': bool(row['ok']), 'checksums': row['checksums']}
+
+        return self.query('system.integrity_check', check, deadline_at)
 
     def backup(self, deadline_at: float) -> dict[str, Any]:
-        backups = self.config.data_dir / 'backups'
-        backups.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-        target = backups / f'storage-postgres-{stamp}'
-        if target.exists():
-            raise StorageError('database_conflict', 'Backup target already exists')
-        timeout = max(1, int(deadline_at - time.monotonic()))
-        result = subprocess.run(
-            [_find_pg_binary('pg_basebackup'), '-D', str(target),
-             '-d', self._manager.dsn, '-X', 'stream', '-c', 'fast',
-             '--checkpoint=fast', '--no-password'],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=timeout,
-            check=False,
+        del deadline_at
+        raise StorageError(
+            'database_protocol_error',
+            'External PostgreSQL backups are platform-managed',
         )
-        if result.returncode != 0:
-            if target.exists():
-                shutil.rmtree(target)
-            raise StorageError(
-                'database_unavailable', 'PostgreSQL base backup failed', True, 100)
-        return {
-            'ok': True,
-            'backup': str(target.relative_to(self.config.project_root)),
-            'bytes': sum(path.stat().st_size for path in target.rglob('*') if path.is_file()),
-        }
+
+    def baseline(self, deadline_at: float) -> dict[str, Any]:
+        def collect(session: PostgresSession):
+            rows = session.fetch_all(
+                "SELECT tablename AS name FROM pg_tables "
+                "WHERE schemaname = 'public' ORDER BY tablename")
+            tables = []
+            for row in rows:
+                if time.monotonic() >= deadline_at:
+                    raise StorageError(
+                        'database_timeout', 'Storage baseline deadline expired',
+                        True, 100)
+                identifier = str(row['name']).replace('"', '""')
+                count = session.fetch_one(
+                    f'SELECT COUNT(*) AS count FROM "{identifier}"')
+                tables.append({'name': row['name'], 'rows': int(count['count'])})
+            indexes = session.fetch_all(
+                "SELECT indexname AS name FROM pg_indexes "
+                "WHERE schemaname = 'public' ORDER BY indexname")
+            version = session.fetch_one(
+                'SELECT meta_value FROM storage_meta WHERE meta_key = ?',
+                ('schema_version',))
+            return {
+                'backend': self.name,
+                'schema_version': int(version['meta_value']) if version else None,
+                'tables': tables,
+                'indexes': [row['name'] for row in indexes],
+            }
+
+        return self.query('system.baseline', collect, deadline_at)
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        if self._turn_search_projection is not None:
+            self._turn_search_projection.close()
+            self._turn_search_projection = None
         if self._read_pool:
             self._read_pool.close()
             self._read_pool = None
         if self._write_pool:
             self._write_pool.close()
             self._write_pool = None
-        self._manager.stop()
 
 
 __all__ = ['PostgresBackend', 'PostgresSession']

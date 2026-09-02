@@ -489,6 +489,6 @@ class FixtureIntegrityTest(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_mcp_liveness_probe.standalone')
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_mcp_liveness_probe.standalone')
     unittest.main()

@@ -8,7 +8,7 @@ dropped. Two pieces close that gap:
 
   • C3 — reaching the bottom of what's in memory triggers a keyset page fetch
     (``Api.conversations.listPage(before, beforeId, limit)``) whose rows are
-    incrementally merged via ``mergeServerConvShells`` and re-rendered.
+    incrementally merged via ``mergeConversationCatalogRows`` and re-rendered.
   • C4 — while "loaded < server total" a "N earlier conversations not loaded ·
     Load more" affordance is rendered at the list bottom; clicking it triggers
     the same page fetch; it disappears once caught up.
@@ -35,11 +35,12 @@ import shutil
 import subprocess
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 
 
@@ -50,6 +51,7 @@ def _node_available() -> bool:
 _HARNESS = r"""
 const fs = require('fs');
 global.window = global;
+global.addEventListener = () => {};
 
 // ── Minimal DOM: a list element that records appended children. ──
 function makeEl(tag) {
@@ -86,9 +88,9 @@ global.getActiveFolderId = () => null;
 
 // In-memory sidebar window: only the 3 NEWEST convs (server has 9 total).
 global.conversations = [
-  { id: 'c9', title: 'c9', updatedAt: 9000, createdAt: 9000, messages: [], _serverMsgCount: 1 },
-  { id: 'c8', title: 'c8', updatedAt: 8000, createdAt: 8000, messages: [], _serverMsgCount: 1 },
-  { id: 'c7', title: 'c7', updatedAt: 7000, createdAt: 7000, messages: [], _serverMsgCount: 1 },
+  { id: 'c9', title: 'c9', updatedAt: 9000, createdAt: 9000, _serverTurnCount: 1 },
+  { id: 'c8', title: 'c8', updatedAt: 8000, createdAt: 8000, _serverTurnCount: 1 },
+  { id: 'c7', title: 'c7', updatedAt: 7000, createdAt: 7000, _serverTurnCount: 1 },
 ];
 
 // Server reports 9 total.
@@ -97,20 +99,20 @@ global.getServerTotalCount = () => _total;
 
 global.renderConversationList = () => {};
 
-// A minimal real mergeServerConvShells (id-keyed, append shells, never dup).
-global._serverConvCount = (sc) => (sc && (sc.messageCount != null ? sc.messageCount
+// A minimal metadata-only catalog merge (id-keyed, append shells, never dup).
+global._catalogTurnCount = (sc) => (sc && (sc.messageCount != null ? sc.messageCount
   : (sc.msgCount != null ? sc.msgCount : sc.msg_count))) || 0;
 global._applySettingsToConv = () => {};
-global.mergeServerConvShells = (rows) => {
+global.mergeConversationCatalogRows = (rows) => {
   if (!Array.isArray(rows)) return 0;
   const map = new Map(conversations.map(c => [c.id, c]));
   let added = 0;
   for (const sc of rows) {
     if (!sc || !sc.id) continue;
     if (map.has(sc.id)) continue;
-    const cnt = _serverConvCount(sc);
-    conversations.push({ id: sc.id, title: sc.title, messages: [],
-      _serverMsgCount: cnt, _needsLoad: cnt > 0,
+    const cnt = _catalogTurnCount(sc);
+    conversations.push({ id: sc.id, title: sc.title,
+      _serverTurnCount: cnt, _turnSnapshotRequired: cnt > 0,
       createdAt: sc.createdAt, updatedAt: sc.updatedAt || sc.createdAt });
     added++;
   }

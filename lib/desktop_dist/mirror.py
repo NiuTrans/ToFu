@@ -105,7 +105,7 @@ def refresh_now() -> bool:
     assets = rel.get('assets') or []
 
     wanted: dict = {}
-    # Both component tables (docs/DESKTOP_AGENT_DIST_DESIGN.md §5.2):
+    # Both component tables (docs/modules/remote_execution.md):
     # releases that carry agent assets get them mirrored with kind='agent'
     # recorded; releases without them simply produce no agent rows.
     for kind in ('full', 'agent'):

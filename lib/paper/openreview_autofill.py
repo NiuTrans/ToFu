@@ -391,7 +391,14 @@ def extract_review_values(review_body, title=''):
 
 # ── Orchestration entry (thin — delegates to the pure functions above) ──
 
-def autofill_openreview_review(bridge, review_values, client_id=None, timeout=20):
+def autofill_openreview_review(
+    bridge,
+    review_values,
+    *,
+    client_id,
+    owner_user_id,
+    timeout=20,
+):
     """Fill the review form on the active OpenReview tab, then STOP (no submit).
 
     Thin orchestration over the pure classifier/planner. Steps:
@@ -404,10 +411,11 @@ def autofill_openreview_review(bridge, review_values, client_id=None, timeout=20
 
     Args:
         bridge: module exposing ``send_browser_command(cmd_type, params, timeout,
-            client_id)`` (dependency-injected so tests use a fake; production
+            client_id, owner_user_id)`` (dependency-injected so tests use a fake; production
             passes ``lib.browser``).
         review_values: ``{'title','review','overall','confidence'}`` strings.
-        client_id: optional target extension client.
+        client_id: target extension device.
+        owner_user_id: authenticated owner of that device.
         timeout: per-command wait budget (seconds).
 
     Returns:
@@ -417,7 +425,13 @@ def autofill_openreview_review(bridge, review_values, client_id=None, timeout=20
         OpenReview page / no form / no PDF), never a silent failure.
     """
     def _send(cmd, params, to=None):
-        return bridge.send_browser_command(cmd, params, timeout=to or timeout, client_id=client_id)
+        return bridge.send_browser_command(
+            cmd,
+            params,
+            timeout=to or timeout,
+            client_id=client_id,
+            owner_user_id=owner_user_id,
+        )
 
     # 1) Active tab.
     tabs, err = _send('list_tabs', {'active': True, 'currentWindow': True})

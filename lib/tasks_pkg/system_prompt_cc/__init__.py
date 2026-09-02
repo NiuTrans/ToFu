@@ -88,6 +88,7 @@ from lib.tasks_pkg.system_prompt_cc._build import (  # noqa: E402,F401
     build_static_blocks,
     build_static_prompt,
     build_user_context_reminder,
+    resolve_static_prompt_profile,
 )
 
 
@@ -111,6 +112,7 @@ __all__ = [
     'build_static_blocks',
     'build_static_prompt',
     'build_user_context_reminder',
+    'resolve_static_prompt_profile',
     # helper
     '_with_heading',
 ]

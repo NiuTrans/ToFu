@@ -32,10 +32,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import lib.paper.tools as T  # noqa: E402
-from lib.paper.tools import (  # noqa: E402
-    display_query_for,
-    parse_and_repair_tool_args,
-)
+from lib.tasks_pkg.tool_display import tool_round_label as display_query_for  # noqa: E402
+from lib.tool_input_repair import parse_and_repair_tool_args  # noqa: E402
 
 
 # ── (1) bare-string queries → single-element array ────────────────────────
@@ -95,25 +93,34 @@ def test_display_label_fetch_url_single_string():
 
 # ── (3) executor issues ONE search for the bug payload ─────────────────────
 
-def test_executor_issues_one_search_for_bare_string(monkeypatch):
+def _search_backend(web_search_one, formatted='FORMATTED'):
+    return T.PaperSearchBackend(
+        web_search_one=web_search_one,
+        fetch_url_one=lambda *a, **k: None,
+        format_search_response=(
+            lambda results, search_diag=None, query='': formatted),
+        format_search_display=lambda results: [],
+        format_fetch_display=lambda item, short_url: {},
+        vertical_header_for_llm=lambda result: '',
+        vertical_to_sse_payload=lambda result: None,
+    )
+
+
+def test_executor_issues_one_search_for_bare_string():
     calls = []
 
     def fake_web_search_one(q, user_question, f, vertical='auto'):
         calls.append(q)
         return ([], None, None, None)
 
-    monkeypatch.setattr(T, '_web_search_one', fake_web_search_one)
-    monkeypatch.setattr(T, 'format_search_for_tool_response',
-                        lambda results, search_diag=None, query='': 'FORMATTED')
-    monkeypatch.setattr(T, '_format_search_display_for_results', lambda results: [])
-
     payload = json.dumps({'queries': 'a,b.c;d!e?f' * 10})  # 110-char string
-    content, display, diag, eng, verts = T._execute_report_tool('web_search', payload)
+    content, display, diag, eng, verts = T.execute_paper_tool(
+        'web_search', payload, search_backend=_search_backend(fake_web_search_one))
     assert len(calls) == 1  # exactly one search, NOT one-per-character
     assert content == 'FORMATTED'
 
 
-def test_executor_runs_real_batch(monkeypatch):
+def test_executor_runs_real_batch():
     """A genuine multi-query batch still fans out to N searches (≤5 cap)."""
     calls = []
 
@@ -121,13 +128,10 @@ def test_executor_runs_real_batch(monkeypatch):
         calls.append(q)
         return ([], None, None, None)
 
-    monkeypatch.setattr(T, '_web_search_one', fake_web_search_one)
-    monkeypatch.setattr(T, 'format_search_for_tool_response',
-                        lambda results, search_diag=None, query='': 'F')
-    monkeypatch.setattr(T, '_format_search_display_for_results', lambda results: [])
-
     payload = json.dumps({'queries': [{'query': 'q1'}, {'query': 'q2'}, {'query': 'q3'}]})
-    T._execute_report_tool('web_search', payload)
+    T.execute_paper_tool(
+        'web_search', payload,
+        search_backend=_search_backend(fake_web_search_one, formatted='F'))
     assert sorted(calls) == ['q1', 'q2', 'q3']
 
 

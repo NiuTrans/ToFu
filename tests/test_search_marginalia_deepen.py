@@ -233,6 +233,6 @@ class TestWiring:
         import inspect
 
         from tofu_search.search import orchestrator as o
-        src = inspect.getsource(o.perform_web_search)
+        src = inspect.getsource(o._perform_web_search_impl)
         assert 'Marginalia' in src
         assert "'deepen'" in src or 'deepen' in inspect.signature(o.perform_web_search).parameters

@@ -1,6 +1,6 @@
 """lib/site_knowledge.py — per-site extraction knowledge store.
 
-Site Knowledge Layer (docs/SITE_KNOWLEDGE_LAYER_DESIGN.md): entries are
+Site Knowledge Layer (docs/modules/browser_automation.md): entries are
 OVERRIDES on top of tofu-search's built-in engine constants. When a site's
 DOM drifts, the site-doctor (lib/site_doctor.py) verifies new selectors
 against the LIVE page and pins them here as DATA; tofu-search engines read

@@ -11,12 +11,28 @@ from lib.tools.programmatic import (
     PROGRAMMATIC_MAX_CONCURRENT_CALLS,
     PROGRAMMATIC_MAX_CONTINUATIONS,
     PROGRAMMATIC_MAX_OUTPUT_BYTES,
+    eligible_programmatic_tool_names,
     encode_programmatic_output,
 )
 
 
 _PROGRAM_ROUND_BASE = 8_800_000
 _CONTENT_UNSET = object()
+
+
+def _append_program_event(task: dict[str, Any], event: dict[str, Any]) -> None:
+    """Deliver a lifecycle event when the carrier has a task-stream identity.
+
+    Standalone handler tests and offline gateway callers may deliberately use
+    an anonymous task dict. They still receive programRuns/toolRounds state;
+    there is simply no event stream to address.
+    """
+    try:
+        append_event(task, event)
+    except KeyError:
+        if 'id' not in task:
+            return
+        raise
 
 
 def _program_call_id(item: dict[str, Any]) -> str:
@@ -113,6 +129,139 @@ def _upsert_child(run: dict[str, Any], call_id: str, name: str
     return child
 
 
+def _program_backend(source: str) -> str:
+    return ('local_toolscript'
+            if source in ('execute_program', 'local_toolscript')
+            else 'native_openai')
+
+
+def project_program_run(task: dict[str, Any], run: dict[str, Any], *,
+                        llm_round: int | None = None,
+                        terminal: bool | None = None) -> dict[str, Any]:
+    """Project one native or local program run onto the shared UI timeline.
+
+    This is the sole writer of ``_programSynthetic`` rows and program lifecycle
+    events.  Hosted Responses reconciliation and local ToolScript execution
+    both call it, which keeps reload and live-stream shapes backend-neutral.
+    Repeated calls are idempotent at the projection level: one parent row, an
+    optional start-upsert when locally learned children arrive, and at most one
+    output event per distinct terminal state/result.
+    """
+    call_id = str(run.get('callId') or '')
+    if not call_id:
+        raise ValueError('program run requires callId')
+    if llm_round is not None and run.get('llmRound') is None:
+        run['llmRound'] = llm_round
+    llm_round = (run.get('llmRound') if llm_round is None else llm_round)
+    source = str(run.get('source') or 'openai_ptc')
+    backend = _program_backend(source)
+    children = [child for child in (run.get('childCalls') or ())
+                if isinstance(child, dict)]
+    child_ids = [str(child.get('id') or '') for child in children
+                 if child.get('id')]
+    child_tools = [str(child.get('name') or '') for child in children
+                   if child.get('name')]
+
+    # This is the first provider-neutral point at which a real program
+    # trajectory exists.  Request projection alone is deliberately kept in a
+    # separate evidence field and can never satisfy adoption.
+    from lib.orchestration_adoption import record_orchestration_execution
+    record_orchestration_execution(
+        task, lane='programmatic', kind='program_run', backend=backend,
+        call_id=call_id, status=str(run.get('status') or 'running'),
+        child_call_count=len(children), round_index=llm_round)
+
+    rounds = task.setdefault('toolRounds', [])
+    parent = next((row for row in rounds
+                   if isinstance(row, dict) and row.get('_programSynthetic')
+                   and str(row.get('_programCallId') or '') == call_id), None)
+    if parent is None:
+        parent = {
+            'roundNum': _next_round_num(rounds),
+            'llmRound': llm_round,
+            'status': 'searching',
+            '_programSynthetic': True,
+            '_programCallId': call_id,
+            'programCode': str(run.get('code') or ''),
+            'programStatus': 'running',
+            'programSource': source,
+            'programBackend': backend,
+            'childCallIds': child_ids,
+            'childToolNames': child_tools,
+            'programLimits': dict(run.get('limits') or {}),
+            'tStart': run.get('tStart') or now_ms(),
+        }
+        _insert_before_children(rounds, parent, child_ids)
+        _append_program_event(task, build_event(
+            EventType.PROGRAM_START,
+            roundNum=parent['roundNum'], llmRound=llm_round,
+            programCallId=call_id, code=parent['programCode'],
+            childCallIds=child_ids, childToolNames=child_tools,
+            limits=dict(parent['programLimits']), status='running',
+            source=source, backend=backend, tStart=parent['tStart']))
+    else:
+        prior_child_ids = list(parent.get('childCallIds') or [])
+        prior_child_tools = list(parent.get('childToolNames') or [])
+        if llm_round is not None and parent.get('llmRound') is None:
+            parent['llmRound'] = llm_round
+        if run.get('code'):
+            parent['programCode'] = str(run['code'])
+        parent['programSource'] = source
+        parent['programBackend'] = backend
+        if run.get('limits'):
+            parent['programLimits'] = dict(run['limits'])
+        if child_ids:
+            parent['childCallIds'] = list(dict.fromkeys(
+                (parent.get('childCallIds') or []) + child_ids))
+        if child_tools:
+            parent['childToolNames'] = list(dict.fromkeys(
+                (parent.get('childToolNames') or []) + child_tools))
+        structure_changed = (
+            prior_child_ids != list(parent.get('childCallIds') or [])
+            or prior_child_tools != list(parent.get('childToolNames') or []))
+        if terminal and structure_changed:
+            # Local ToolScript learns its children while the program runs.
+            # Re-emitting the idempotent start/upsert shape once at terminal
+            # updates a live card before the output frame; hosted PTC already
+            # knows its child list when its first start projection is built.
+            _append_program_event(task, build_event(
+                EventType.PROGRAM_START,
+                roundNum=parent['roundNum'], llmRound=parent.get('llmRound'),
+                programCallId=call_id, code=parent.get('programCode') or '',
+                childCallIds=list(parent.get('childCallIds') or []),
+                childToolNames=list(parent.get('childToolNames') or []),
+                limits=dict(parent.get('programLimits') or {}),
+                status='running', source=source, backend=backend,
+                tStart=parent.get('tStart')))
+
+    if run.get('fingerprint'):
+        parent['programFingerprint'] = run['fingerprint']
+    status = str(run.get('status') or 'running')
+    if terminal is None:
+        terminal = status != 'running'
+    if terminal:
+        result = (run.get('result') if status == 'completed'
+                  else run.get('error', run.get('result')))
+        changed = (parent.get('programStatus') != status
+                   or parent.get('programResult') != result)
+        parent['programStatus'] = status
+        parent['programResult'] = result
+        parent['status'] = 'done' if status == 'completed' else 'error'
+        if changed:
+            run.setdefault('tEnd', now_ms())
+            parent['tEnd'] = run['tEnd']
+            _append_program_event(task, build_event(
+                EventType.PROGRAM_OUTPUT,
+                roundNum=parent['roundNum'],
+                llmRound=parent.get('llmRound'), programCallId=call_id,
+                result=result, status=status,
+                childCallIds=list(parent.get('childCallIds') or []),
+                childToolNames=list(parent.get('childToolNames') or []),
+                source=source, backend=backend,
+                tStart=parent.get('tStart'), tEnd=parent['tEnd']))
+    return parent
+
+
 def reject_programmatic_call(task: dict[str, Any], tc: dict[str, Any],
                              tool_name: str) -> tuple[str, dict] | None:
     """Admit one program child or return a model-facing rejection.
@@ -169,7 +318,6 @@ def reject_programmatic_call(task: dict[str, Any], tc: dict[str, Any],
 
     child = _upsert_child(run, call_id, tool_name)
 
-    from lib.tools.programmatic import eligible_programmatic_tool_names
     if tool_name not in eligible_programmatic_tool_names():
         child['status'] = 'rejected'
         child['rejection'] = 'direct_only'
@@ -299,12 +447,6 @@ def reconcile_programmatic_items(task: dict[str, Any], assistant_msg: Any,
             'name': str(fn.get('name') or ''),
         })
 
-    rounds = task.setdefault('toolRounds', [])
-    parents = {
-        str(row.get('_programCallId')): row
-        for row in rounds
-        if isinstance(row, dict) and row.get('_programSynthetic')
-    }
     by_id: dict[str, dict[str, Any]] = {}
     for item in programs + outputs:
         call_id = _program_call_id(item)
@@ -316,8 +458,6 @@ def reconcile_programmatic_items(task: dict[str, Any], assistant_msg: Any,
         program = pair.get('program') or {}
         output = pair.get('program_output')
         children = children_by_program.get(call_id, [])
-        child_ids = [c['id'] for c in children if c['id']]
-        child_tools = [c['name'] for c in children if c['name']]
         run = _ensure_program_run(task, call_id, llm_round=llm_round)
         if program.get('code'):
             run['code'] = str(program['code'])
@@ -325,67 +465,21 @@ def reconcile_programmatic_items(task: dict[str, Any], assistant_msg: Any,
             run['fingerprint'] = program['fingerprint']
         for child in children:
             _upsert_child(run, child['id'], child['name'])
-        parent = parents.get(call_id)
-        if parent is None:
-            parent = {
-                'roundNum': _next_round_num(rounds),
-                'llmRound': llm_round,
-                'status': 'searching',
-                '_programSynthetic': True,
-                '_programCallId': call_id,
-                'programCode': run['code'],
-                'programStatus': 'running',
-                'childCallIds': child_ids,
-                'childToolNames': child_tools,
-                'programLimits': dict(run['limits']),
-                'tStart': run['tStart'],
-            }
-            _insert_before_children(rounds, parent, child_ids)
-            parents[call_id] = parent
-            append_event(task, build_event(
-                EventType.PROGRAM_START,
-                roundNum=parent['roundNum'], llmRound=llm_round,
-                programCallId=call_id, code=parent['programCode'],
-                childCallIds=child_ids, childToolNames=child_tools,
-                limits=dict(run['limits']), status='running',
-                tStart=parent['tStart']))
-        else:
-            if program.get('code') and not parent.get('programCode'):
-                parent['programCode'] = str(program['code'])
-            if child_ids:
-                parent['childCallIds'] = list(dict.fromkeys(
-                    (parent.get('childCallIds') or []) + child_ids))
-            if child_tools:
-                parent['childToolNames'] = list(dict.fromkeys(
-                    (parent.get('childToolNames') or []) + child_tools))
-
-        if program.get('fingerprint') and not parent.get('programFingerprint'):
-            parent['programFingerprint'] = program['fingerprint']
-
         if isinstance(output, dict):
             raw_status = str(output.get('status') or 'completed')
             result = output.get('result')
-            changed = (parent.get('programStatus') != raw_status
-                       or parent.get('programResult') != result)
-            parent['programStatus'] = raw_status
-            parent['programResult'] = result
-            parent['status'] = 'done' if raw_status == 'completed' else 'error'
             run['status'] = raw_status
             run['result'] = result
-            if changed:
-                run['tEnd'] = now_ms()
-                parent['tEnd'] = run['tEnd']
-                append_event(task, build_event(
-                    EventType.PROGRAM_OUTPUT,
-                    roundNum=parent['roundNum'], llmRound=parent.get('llmRound'),
-                    programCallId=call_id, result=result, status=raw_status,
-                    tStart=parent.get('tStart'), tEnd=parent['tEnd']))
+        project_program_run(
+            task, run, llm_round=llm_round,
+            terminal=isinstance(output, dict))
         touched += 1
     return touched
 
 
 __all__ = [
     'admit_program_continuation',
+    'project_program_run',
     'reconcile_programmatic_items',
     'reject_programmatic_call',
     'settle_programmatic_call',

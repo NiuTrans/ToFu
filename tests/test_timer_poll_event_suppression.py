@@ -23,7 +23,7 @@ and (b) two consecutive polls persist ZERO rows under the timer id (so the
 collision condition can never arise). Reverting the one-line fix makes the
 second assertion fail (poll 1 persists seq 0/1, poll 2 collides).
 
-Uses the session SQLite DB from conftest (TOFU_DB_PATH) — no PG needed.
+The durable assertion runs against the real Sidecar test runtime.
 """
 
 import uuid
@@ -33,7 +33,8 @@ import pytest
 import lib.scheduler.timer as timer_mod
 from lib.tasks_pkg.event_log import read_events
 
-pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._chat_sidecar',)
+pytestmark = [pytest.mark.unit, pytest.mark.usefixtures('chat_sidecar')]
 
 
 def _fake_tool_call():
@@ -58,7 +59,7 @@ def test_poll_tool_proxy_sets_suppress_events(monkeypatch):
 
     timer_id = 'tmr_' + uuid.uuid4().hex[:8]
     result, elapsed, is_err = timer_mod._execute_poll_tool(
-        _fake_tool_call(), timer_id, project_path='')
+        _fake_tool_call(), timer_id, project_path='', owner_user_id=1)
 
     assert is_err is False
     assert result == 'tool ok'
@@ -92,7 +93,8 @@ def test_poll_tool_emits_no_persisted_events_across_polls(monkeypatch):
     timer_id = 'tmr_' + uuid.uuid4().hex[:8]
 
     for _poll in range(2):
-        timer_mod._execute_poll_tool(_fake_tool_call(), timer_id, project_path='')
+        timer_mod._execute_poll_tool(
+            _fake_tool_call(), timer_id, project_path='', owner_user_id=1)
 
     persisted = read_events(timer_id)
     assert persisted == [], (

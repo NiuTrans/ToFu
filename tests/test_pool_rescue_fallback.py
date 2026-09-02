@@ -44,7 +44,7 @@ def _base_task(cfg=None):
 
 def _patch_common(monkeypatch, stream_impl, fallback='kimi-k3',
                   patch_fallback=True):
-    import lib.tasks_pkg.llm_fallback as fb_pkg
+    import lib.tasks_pkg.llm_fallback._call as fb_pkg
     events = []
     monkeypatch.setattr(fb_pkg, 'stream_llm_response', stream_impl)
     if patch_fallback:
@@ -134,6 +134,23 @@ class TestPoolRescue:
                    for r in api_rounds)
         assert any('其它可用模型' in (e.get('detail') or '') for e in events), (
             f'no rescue phase event: {events}')
+        switches = [
+            event for event in events
+            if event.get('type') == 'model_fallback'
+        ]
+        switch = dict(switches[-1])
+        # lib.agent_core.events stamps low-frequency boundaries with
+        # emittedAt at construction; compare the semantic payload and pin
+        # the stamp's shape separately.
+        emitted_at = switch.pop('emittedAt', None)
+        assert isinstance(emitted_at, (int, float)) and emitted_at > 0
+        assert switch == {
+            'type': 'model_fallback',
+            'fallbackModel': 'glm-5.1',
+            'fallbackFrom': 'kimi-k3',
+            'fallbackKind': 'pool_rescue',
+            'fallbackReason': task['_fallback_reason'],
+        }
 
     def test_pool_empty_falls_through_to_envelope(self, monkeypatch):
         """No healthy slot beyond the failed models → original give-up."""
@@ -248,19 +265,24 @@ class TestStreamPoolWideSeam:
 
     def _task(self):
         return {'id': 't-seam-001', 'convId': 'c-seam', 'config': {},
+                '_userId': 1,
                 'content': '', 'thinking': '',
                 'content_lock': threading.Lock(),
                 'events': [], 'events_lock': threading.Lock()}
 
     def _record_dispatch(self, monkeypatch):
-        import lib.tasks_pkg.manager as mgr
+        import lib.tasks_pkg.manager._stream as stream
         rec = {}
 
         def _ds(body, **kw):
             rec.update(kw)
             return ({'role': 'assistant', 'content': 'ok'}, 'stop', {})
 
-        monkeypatch.setattr(mgr, 'dispatch_stream', _ds)
+        monkeypatch.setattr(stream, 'dispatch_stream', _ds)
+        monkeypatch.setattr(
+            stream, 'append_event',
+            lambda task, event: task['events'].append(event),
+        )
         return rec
 
     def test_pool_wide_dispatches_non_strict(self, monkeypatch):

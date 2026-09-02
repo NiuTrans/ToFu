@@ -3,7 +3,7 @@
 
 WHY
 ---
-``_populateModelDropdown`` (static/js/main/main_toolbar_ui.js) had no sort at
+``_populateModelDropdown`` (retained ``runtime/sections/main/main_toolbar_ui.js``) had no sort at
 all: it rendered ``dropdown_models`` in array order, which is provider order in
 ``data/config/server_config.json``. That array happens to be ordered by
 ``model_id`` (the Settings cold sort writes it back that way), but the ROW shows

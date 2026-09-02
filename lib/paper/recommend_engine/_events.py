@@ -1,4 +1,4 @@
-"""Public entrypoints — the streaming generator and its blocking wrapper.
+"""Stream the recommendation pipeline and expose its blocking projection.
 
 ``iter_recommend_events`` is the single source of truth for the recommend flow:
 the agentic interpretation call (research → structured JSON) and the
@@ -6,22 +6,24 @@ the agentic interpretation call (research → structured JSON) and the
 can reveal each grounded card the instant it resolves. ``recommend_papers`` is a
 thin blocking consumer of this generator.
 
-The interpretation + grounding seams (``_research_and_interpret`` /
-``_ground_candidate`` / ``_ground_correction``) are resolved THROUGH the package
-facade at call time (``import lib.paper.recommend_engine as _pkg``) so a test
-patching ``re_mod._ground_candidate`` (grounding suite) bites here exactly as it
-did in the original single-module layout.
 """
 
 from lib.llm_errors import AbortedError
 from lib.log import get_logger
 
-from ._ground import _GROUND_ATTEMPT_MULTIPLIER, _norm_id
+from ._ground import (
+    _GROUND_ATTEMPT_MULTIPLIER,
+    _ground_candidate,
+    _ground_correction,
+    _norm_id,
+)
+from ._research import _research_and_interpret
 
 logger = get_logger(__name__)
 
 
-def iter_recommend_events(description, max_results=6, *, abort=None, on_tool_event=None):
+def iter_recommend_events(description, max_results=6, *, abort=None,
+                          on_tool_event=None, user_id=None):
     """Stream the describe-to-recommend pipeline as an ordered event sequence.
 
     This is the single source of truth for the recommend flow: the agentic
@@ -58,8 +60,6 @@ def iter_recommend_events(description, max_results=6, *, abort=None, on_tool_eve
             — terminal failure of the interpretation call (distinct from
               "grounded nothing", which is a normal ``done`` with resultCount 0).
     """
-    import lib.paper.recommend_engine as _pkg
-
     description = (description or '').strip()
     if not description:
         logger.warning('[Paper:Recommend] Empty description')
@@ -70,8 +70,11 @@ def iter_recommend_events(description, max_results=6, *, abort=None, on_tool_eve
     max_results = max(1, min(int(max_results or 6), 12))
 
     try:
-        parsed = _pkg._research_and_interpret(
-            description, max_results, abort=abort, on_tool_event=on_tool_event)
+        research_kwargs = {'abort': abort, 'on_tool_event': on_tool_event}
+        if user_id is not None:
+            research_kwargs['user_id'] = user_id
+        parsed = _research_and_interpret(
+            description, max_results, **research_kwargs)
     except AbortedError:
         logger.info('[Paper:Recommend] Interpretation aborted for %.80s', description)
         yield {'type': 'done', 'query': description, 'resultCount': 0,
@@ -108,7 +111,7 @@ def iter_recommend_events(description, max_results=6, *, abort=None, on_tool_eve
             logger.info('[Paper:Recommend] Grounding aborted after %d cards for %.80s',
                         grounded_count, description)
             break
-        card = _pkg._ground_candidate(cand)
+        card = _ground_candidate(cand)
         if not card:
             continue
         base = _norm_id(card['arxiv_id'])
@@ -120,7 +123,7 @@ def iter_recommend_events(description, max_results=6, *, abort=None, on_tool_eve
         if grounded_count >= max_results:
             break
 
-    correction = _pkg._ground_correction(raw_correction, seen_ids)
+    correction = _ground_correction(raw_correction, seen_ids)
     if correction and correction.get('note'):
         yield {'type': 'correction', 'correction': correction}
 
@@ -136,7 +139,7 @@ def iter_recommend_events(description, max_results=6, *, abort=None, on_tool_eve
            'correctionPresent': bool(correction and correction.get('note'))}
 
 
-def recommend_papers(description, max_results=6):
+def recommend_papers(description, max_results=6, *, user_id=None):
     """Interpret a fuzzy description into grounded, addable arXiv paper cards.
 
     Blocking convenience wrapper over :func:`iter_recommend_events` — it drains
@@ -158,11 +161,11 @@ def recommend_papers(description, max_results=6):
         A card is guaranteed to carry a real ``arxiv_id`` (grounded), so the
         frontend can click straight into the existing ``_fetchArxivPaper``.
     """
-    import lib.paper.recommend_engine as _pkg
-
     query = (description or '').strip()
     out = {'query': query, 'correction': None, 'results': [], 'llmError': False}
-    for ev in _pkg.iter_recommend_events(description, max_results):
+    event_kwargs = {'user_id': user_id} if user_id is not None else {}
+    for ev in iter_recommend_events(
+            description, max_results, **event_kwargs):
         etype = ev.get('type')
         if etype == 'candidate':
             out['results'].append(ev['card'])

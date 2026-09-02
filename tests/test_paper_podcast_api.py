@@ -35,6 +35,8 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+TEST_OWNER_USER_ID = 1
+
 SCRIPT = {
     'title': '测试播客', 'lang': 'zh', 'mode': 'short',
     'segments': [
@@ -89,8 +91,8 @@ def phash() -> str:
 @pytest.fixture()
 def podcast_env(tmp_path, monkeypatch):
     """Redirect the paper dir to tmp; stub script LLM + TTS provider seams."""
-    import lib.paper.hashing as hashing
-    import lib.paper.podcast_engine as PE
+    import lib.paper_identity as hashing
+    import lib.paper.podcast_engine.worker as PE
     import lib.paper.podcast_engine._audio as PA
     import lib.tts as T
     from lib.storage import StorageRuntime, StorageSupervisor
@@ -107,8 +109,11 @@ def podcast_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(PE, 'generate_script',
                         lambda **kw: (dict(SCRIPT), dict(META)))
-    monkeypatch.setattr('lib.paper._load_image_manifest', lambda ph: [])
-    monkeypatch.setattr('lib.paper._lookup_paper_title', lambda ph: '测试论文')
+    monkeypatch.setattr(
+        'lib.paper.images.figures.load_image_manifest', lambda ph: [])
+    monkeypatch.setattr(
+        'lib.paper.images.titles.lookup_paper_title',
+        lambda ph, *, user_id: '测试论文')
 
     monkeypatch.setattr(T, '_tts_slots', lambda: [_FakeSlot()])
     monkeypatch.setattr(T, '_post_speech',
@@ -123,6 +128,7 @@ def podcast_env(tmp_path, monkeypatch):
 def _insert_report(phash, lang='zh'):
     from lib.storage import get_storage_client
     get_storage_client(write=True).command('paper.report.upsert', {
+        'user_id': TEST_OWNER_USER_ID,
         'paper_hash': phash, 'lang': lang,
         'report': '报告:成绩 86.3,上一代 83.1,规模 130 亿参数。',
         'model': 'm', 'meta': {}, 'created_at': int(time.time()),
@@ -147,12 +153,12 @@ def _wait_done(client, task_id, timeout=15.0):
 
 def test_worker_full_chain(podcast_env, phash):
     """Direct worker drive: events, DB row, atomic file, WAV master."""
-    import lib.paper.podcast_engine as PE
+    import lib.paper.podcast_engine.worker as PE
     from lib.paper.podcast_runtime import _new_podcast_task
 
     _insert_report(phash)
-    task = _new_podcast_task('podcast_test01', phash, 'short', 'zh', 'alloy', None)
-    PE._run_podcast_task(task)
+    task = _new_podcast_task('podcast_test01', phash, 'short', 'zh', 'alloy', None, user_id=TEST_OWNER_USER_ID)
+    PE.run_podcast_task(task)
 
     assert task['status'] == 'done', [e for e in task['events']]
     types = [e['type'] for e in task['events']]
@@ -161,7 +167,8 @@ def test_worker_full_chain(podcast_env, phash):
     seg_events = [e for e in task['events'] if e['type'] == 'segment_done']
     assert len(seg_events) == len(SCRIPT['segments'])
 
-    row = PE.load_cached_podcast(phash, 'short', 'zh', 'alloy')
+    row = PE.load_cached_podcast(
+        phash, 'short', 'zh', 'alloy', user_id=TEST_OWNER_USER_ID)
     assert row and row['status'] == 'done'
     assert row['script_json']['segments'][0]['section'] == 'cold_open'
     assert row['tts_model'] == 'unit-tts'
@@ -177,19 +184,20 @@ def test_worker_full_chain(podcast_env, phash):
 
 def test_worker_script_only_degrade(podcast_env, phash, monkeypatch):
     """No TTS slot configured → script_only row + honest reason (owner rule)."""
-    import lib.paper.podcast_engine as PE
+    import lib.paper.podcast_engine.worker as PE
     import lib.tts as T
     from lib.paper.podcast_runtime import _new_podcast_task
 
     monkeypatch.setattr(T, '_tts_slots', lambda: [])
     _insert_report(phash)
-    task = _new_podcast_task('podcast_test02', phash, 'short', 'zh', 'alloy', None)
-    PE._run_podcast_task(task)
+    task = _new_podcast_task('podcast_test02', phash, 'short', 'zh', 'alloy', None, user_id=TEST_OWNER_USER_ID)
+    PE.run_podcast_task(task)
 
     assert task['status'] == 'done'
     done = [e for e in task['events'] if e['type'] == 'done'][-1]
     assert done['scriptOnly'] is True and done['reason'] == 'no_tts_slot'
-    row = PE.load_cached_podcast(phash, 'short', 'zh', 'alloy')
+    row = PE.load_cached_podcast(
+        phash, 'short', 'zh', 'alloy', user_id=TEST_OWNER_USER_ID)
     assert row and row['status'] == 'script_only'
     assert row['meta']['degrade_reason'] == 'no_tts_slot'
     assert not row['file_path']
@@ -199,46 +207,48 @@ def test_worker_degrade_vs_error_contrast(podcast_env, phash, monkeypatch):
     """NEUTER-contrast: tts_available=True but ZERO slots → synthesize raises
     503 → the task must go ERROR(tts_unavailable), NOT script_only. Proves
     script_only comes from the degrade branch, not from any TTS failure."""
-    import lib.paper.podcast_engine as PE
+    import lib.paper.podcast_engine.worker as PE
     import lib.tts as T
     from lib.paper.podcast_runtime import _new_podcast_task
 
     monkeypatch.setattr(T, 'tts_available', lambda: True)   # gate says yes…
     monkeypatch.setattr(T, '_tts_slots', lambda: [])        # …but no slot
     _insert_report(phash)
-    task = _new_podcast_task('podcast_test03', phash, 'short', 'zh', 'alloy', None)
-    PE._run_podcast_task(task)
+    task = _new_podcast_task('podcast_test03', phash, 'short', 'zh', 'alloy', None, user_id=TEST_OWNER_USER_ID)
+    PE.run_podcast_task(task)
 
     assert task['status'] == 'error'
     err = [e for e in task['events'] if e['type'] == 'error'][-1]
     assert err['reason'] == 'tts_unavailable', err
-    assert PE.load_cached_podcast(phash, 'short', 'zh', 'alloy') is None
+    assert PE.load_cached_podcast(
+        phash, 'short', 'zh', 'alloy',
+        user_id=TEST_OWNER_USER_ID) is None
 
 
 def test_worker_abort(podcast_env, phash, monkeypatch):
-    import lib.paper.podcast_engine as PE
+    import lib.paper.podcast_engine.worker as PE
     from lib.paper.podcast_runtime import _new_podcast_task
 
     _insert_report(phash)
-    task = _new_podcast_task('podcast_test04', phash, 'short', 'zh', 'alloy', None)
+    task = _new_podcast_task('podcast_test04', phash, 'short', 'zh', 'alloy', None, user_id=TEST_OWNER_USER_ID)
 
     def _script_then_abort(**kw):
         task['abort_event'].set()
         return dict(SCRIPT), dict(META)
 
     monkeypatch.setattr(PE, 'generate_script', _script_then_abort)
-    PE._run_podcast_task(task)
+    PE.run_podcast_task(task)
     assert task['status'] == 'aborted'
     assert [e for e in task['events'] if e['type'] == 'aborted']
 
 
 def test_worker_source_gate(podcast_env, phash):
     """No report/translation/parsed text → error with report_required reason."""
-    import lib.paper.podcast_engine as PE
+    import lib.paper.podcast_engine.worker as PE
     from lib.paper.podcast_runtime import _new_podcast_task
 
-    task = _new_podcast_task('podcast_test05', phash, 'short', 'zh', 'alloy', None)
-    PE._run_podcast_task(task)
+    task = _new_podcast_task('podcast_test05', phash, 'short', 'zh', 'alloy', None, user_id=TEST_OWNER_USER_ID)
+    PE.run_podcast_task(task)
     assert task['status'] == 'error'
     err = [e for e in task['events'] if e['type'] == 'error'][-1]
     assert err['reason'] == 'report_required'
@@ -257,7 +267,9 @@ def test_start_requires_report(flask_client, podcast_env, phash):
 def test_start_gate_NEUTER(flask_client, podcast_env, phash, monkeypatch):
     """NEUTER: amputate has_report → the SAME no-report start proceeds —
     the gate is load-bearing, not incidental."""
-    monkeypatch.setattr('routes.paper.has_report', lambda ph: True)
+    monkeypatch.setattr(
+        'routes.paper_pkg._podcast.has_report',
+        lambda ph, *, user_id: user_id == TEST_OWNER_USER_ID)
     r = flask_client.post('/api/v1/paper/podcast/start',
                           json={'paper_hash': phash, 'mode': 'short', 'lang': 'zh'})
     body = r.get_json()
@@ -341,8 +353,9 @@ def test_cache_identity_includes_model(flask_client, podcast_env, phash):
 
     # the one-slot row now belongs to m-beta: m-beta hits, and the lookup
     # carries the making-model
-    import lib.paper.podcast_engine as PE
-    row = PE.load_cached_podcast(phash, 'short', 'zh', eff_voice)
+    import lib.paper.podcast_engine.worker as PE
+    row = PE.load_cached_podcast(
+        phash, 'short', 'zh', eff_voice, user_id=TEST_OWNER_USER_ID)
     assert row and (row.get('model') or '') == 'm-beta'
     r4 = flask_client.post('/api/v1/paper/podcast/start',
                            json={'paper_hash': phash, 'mode': 'short',
@@ -364,7 +377,7 @@ def test_lookup_reattach_ignores_model_and_voice(flask_client, podcast_env,
     fall back to the newest live task for (paper_hash, mode, lang); without
     it a podcast started with any concrete model is invisible to the lookup
     and the tab regresses to the idle/generate card mid-run."""
-    import lib.paper.podcast_engine as PE
+    import lib.paper.podcast_engine.worker as PE
 
     _insert_report(phash)
     gate = {}
@@ -410,13 +423,13 @@ def test_dedup_index_separates_models():
         _podcast_index_register,
     )
     tid = 'podcast_idx_' + uuid.uuid4().hex[:8]
-    task = _new_podcast_task(tid, 'ph_dedup', 'short', 'zh', 'alloy', 'm-alpha')
+    task = _new_podcast_task(tid, 'ph_dedup', 'short', 'zh', 'alloy', 'm-alpha', user_id=TEST_OWNER_USER_ID)
     _podcast_index_register('ph_dedup', 'short', 'zh', 'alloy', 'm-alpha',
-                            task['task_id'])
+                            task['task_id'], user_id=TEST_OWNER_USER_ID)
     assert _podcast_index_get('ph_dedup', 'short', 'zh', 'alloy',
-                              'm-alpha') == task['task_id']
+                              'm-alpha', user_id=TEST_OWNER_USER_ID) == task['task_id']
     assert _podcast_index_get('ph_dedup', 'short', 'zh', 'alloy',
-                              'm-beta') is None
+                              'm-beta', user_id=TEST_OWNER_USER_ID) is None
 
 
 def test_audio_range(flask_client, podcast_env, phash):
@@ -457,7 +470,7 @@ def test_script_endpoint(flask_client, podcast_env, phash):
 
 
 def test_abort_endpoint(flask_client, podcast_env, phash, monkeypatch):
-    import lib.paper.podcast_engine as PE
+    import lib.paper.podcast_engine.worker as PE
 
     _insert_report(phash)
     gate = {}

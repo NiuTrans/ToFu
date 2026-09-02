@@ -34,33 +34,13 @@ sys.modules.setdefault('flask', _quart)
 
 import pytest  # noqa: E402
 
-pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._chat_sidecar',)
+pytestmark = [pytest.mark.unit, pytest.mark.usefixtures('chat_sidecar')]
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
 def _ok(msg): print(' ', _color('✓', '32'), msg)
 def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
-
-
-def _seed_conv(db, conv_id):
-    from lib.database._core_schema import CONVERSATIONS, upsert
-    from lib.database import json_dumps_pg
-    now_ms = int(time.time() * 1000)
-    upsert(db, CONVERSATIONS, {
-        'id': conv_id, 'user_id': 1, 'title': 'release-integ-test',
-        'messages': json_dumps_pg([{'role': 'user', 'content': 'hi'}]),
-        'msg_count': 1, 'created_at': now_ms, 'updated_at': now_ms,
-        'settings': '{}',
-    }, insert_cols=['id', 'user_id', 'title', 'messages', 'msg_count',
-                    'created_at', 'updated_at', 'settings'], retry=True)
-    db.commit()
-
-
-def _delete_conv(db, conv_id):
-    from lib.database import db_execute_with_retry
-    db_execute_with_retry(db, 'DELETE FROM conversations WHERE id=? AND user_id=1', (conv_id,))
-    db_execute_with_retry(db, 'DELETE FROM task_results WHERE conv_id=?', (conv_id,))
-    db.commit()
 
 
 def _heavy_terminal_task(conv_id, tid):
@@ -78,32 +58,30 @@ def _heavy_terminal_task(conv_id, tid):
 
 
 def test_e2e_persist_releases_messages_and_keeps_db():
-    """The REAL persist_task_result releases messages AND fully persists."""
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    """The real persistence boundary releases memory after Sidecar commit."""
+    from lib.storage import get_storage_client
     from lib.tasks_pkg.manager import persist_task_result
+    from tests._seed import delete_conversation, seed_conversation
+
     conv_id = 'cv-release-e2e'
     tid = 'tk-' + uuid.uuid4().hex[:12]
-    db = get_thread_db(DOMAIN_CHAT)
-    _seed_conv(db, conv_id)
+    seed_conversation(
+        conv_id, messages=[{'role': 'user', 'content': 'hi'}],
+        title='release-integ-test')
     task = _heavy_terminal_task(conv_id, tid)
+    task['_userId'] = 1
     try:
         persist_task_result(task)
-        # (a) heavy input field released
         assert task['messages'] is None, 'persist did not release task["messages"]'
-        # (b) durable result fully persisted — nothing lost
-        row = db.execute(
-            'SELECT content, status FROM task_results WHERE task_id=?', (tid,)
-        ).fetchone()
-        assert row is not None, 'task_results row missing after persist'
-        content = row[0] if not isinstance(row, dict) else row['content']
-        status = row[1] if not isinstance(row, dict) else row['status']
-        assert content == 'the final answer', f'content not persisted: {content!r}'
-        assert status == 'done', f'status not persisted: {status!r}'
+        row = get_storage_client().query(
+            'record.get', {'namespace': 'task_results', 'key': tid})
+        assert row is not None, 'task result missing after persist'
+        value = row['value']
+        assert value['content'] == 'the final answer'
+        assert value['status'] == 'done'
     finally:
-        from lib.database import db_execute_with_retry
-        db_execute_with_retry(db, 'DELETE FROM task_results WHERE task_id=?', (tid,))
-        _delete_conv(db, conv_id)
-    _ok('e2e: real persist_task_result releases messages AND persists full result to DB')
+        delete_conversation(conv_id)
+    _ok('e2e: persistence releases messages after a complete Sidecar commit')
 
 
 def test_post_terminal_readers_tolerate_none_messages():
@@ -126,8 +104,9 @@ def test_post_terminal_readers_tolerate_none_messages():
 def test_shed_concurrent_with_task_churn():
     """shed_memory_under_pressure must not raise while other threads mutate the
     registry, and must never evict a running task."""
-    from lib.tasks_pkg.manager import shed_memory_under_pressure, _chat_runtime
-    rt = _chat_runtime
+    from lib.tasks_pkg.manager import shed_memory_under_pressure
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    rt = chat_task_runtime
     stop = threading.Event()
     errors = []
     running_tid = 'tk-run-guard-' + uuid.uuid4().hex[:8]
@@ -137,7 +116,7 @@ def test_shed_concurrent_with_task_churn():
         while not stop.is_set():
             try:
                 tid = f'tk-churn-{i}-{uuid.uuid4().hex[:6]}'
-                t = rt.create(task_id=tid)
+                t = rt.create(user_id=1, task_id=tid)
                 t['status'] = 'done'
                 t['finished_at'] = time.time()
                 i += 1
@@ -155,7 +134,7 @@ def test_shed_concurrent_with_task_churn():
                 errors.append(('shed', repr(e)))
                 break
 
-    r = rt.create(task_id=running_tid)
+    r = rt.create(user_id=1, task_id=running_tid)
     r['status'] = 'running'   # must survive every shed
     threads = [threading.Thread(target=churn), threading.Thread(target=churn),
                threading.Thread(target=shedder)]
@@ -178,9 +157,10 @@ def test_shed_concurrent_with_task_churn():
 
 
 def test_release_and_shed_are_idempotent():
-    from lib.tasks_pkg.manager import _release_heavy_task_state, shed_memory_under_pressure
+    from lib.tasks_pkg.manager import shed_memory_under_pressure
+    from lib.tasks_pkg.manager._persist import _release_heavy_task_state
     task = _heavy_terminal_task('c-idem', 'tk-idem')
-    task['_endpoint_turns'] = [{'content': 'turn'}]   # both heavy fields present
+    task['_flow_turns'] = [{'content': 'turn'}]   # both heavy fields present
     n1 = _release_heavy_task_state(task)
     n2 = _release_heavy_task_state(task)   # already released
     assert n1 == 2 and n2 == 0, f'release not idempotent: {n1}, {n2}'
@@ -216,8 +196,8 @@ def main():
     print(_color('═══ release/shed integration + concurrency + idempotency ═══', '36'))
     print()
     try:
-        from tests._standalone_guard import guard_standalone_db
-        guard_standalone_db('test_release_heavy_state_integration.__main__')
+        from tests._standalone_guard import guard_standalone_storage
+        guard_standalone_storage('test_release_heavy_state_integration.__main__')
     except Exception:
         pass
     if not all(_run(fn) for fn in _POSITIVE):

@@ -15,11 +15,10 @@ A reasoning model routinely emits THINKING then calls a tool directly with NO
 interstitial narration (``_assistant_content == ''``) — the common multi-round
 shape. In that case the whole block was skipped, so ``round['thinking']`` was
 never stamped. The live bubble briefly showed it (the frontend ``delta_reset``
-handler stamps content/thinking INDEPENDENTLY), but at finalize the
-authoritative ``committedMessage`` — built from ``task['segments']`` via
-``assemble_segments``, which reads ``round['thinking']`` — overwrote the live
-copy with the empty backend value. Net: the intermediate round's reasoning
-vanished on finalize / reload.
+handler stamps content/thinking independently), but the terminal turn
+projection is built from ``task['segments']`` via ``assemble_segments``, which
+reads ``round['thinking']``. Without the stamp, the intermediate round's
+reasoning vanished on settlement and reload.
 
 Fix: capture content / thinking / signature INDEPENDENTLY in both the
 early-announce and the normal branch (mirror the frontend's independent
@@ -39,7 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from lib.tasks_pkg.tool_dispatch import parse_tool_calls
+from lib.tasks_pkg.tool_dispatch.api import parse_tool_calls
 from lib.tasks_pkg.segments import assemble_segments, SEG_THINKING, SEG_TEXT
 
 pytestmark = pytest.mark.unit

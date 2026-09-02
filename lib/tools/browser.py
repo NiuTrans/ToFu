@@ -1,25 +1,10 @@
-"""lib/tools/browser.py — Browser extension tool definitions (v2 surface).
+"""Single source of truth for model-facing browser-extension schemas.
 
-v2 (epic pt_869e5648403e4745) — intent-first consolidation, 19 → 11:
-
-  * ONE perception entry: browser_read_page absorbs read_tab /
-    summarize_page / get_interactive_elements / get_app_state. Its auto
-    mode does the canvas/SPA diagnosis in code instead of asking the model
-    which rendering technology the page uses.
-  * Actions say WHAT, not HOW: browser_click / browser_type accept text=
-    (fuzzy-matched server-side), auto-wait for the element, and return a
-    page-state receipt so verification costs no extra LLM round.
-    browser_keyboard split into browser_type (clear-first text entry) and
-    browser_press_key (special keys).
-  * browser_navigate absorbs browser_create_tab (new_tab=true) and waits
-    for load by default.
-  * browser_wait is gone from the model surface — waiting is handled
-    inside the actions.
-  * tab_id is OPTIONAL everywhere: the server remembers the working tab.
-
-The removed names keep their dispatch handlers (direct execute_browser_tool
-callers) and their display formatters (history rendering) — they are only
-gone from the MODEL's schema list. See LEGACY_BROWSER_TOOL_NAMES.
+The catalogue is intent-first: one page reader chooses the useful
+representation, actions resolve human-readable targets and wait internally,
+navigation owns both same-tab and new-tab behavior, and every tab argument is
+optional because the owner/device-scoped runtime remembers its working tab.
+Dispatch accepts only these names and snake_case argument shapes.
 """
 
 from lib.log import get_logger
@@ -28,7 +13,7 @@ logger = get_logger(__name__)
 
 _TAB_ID_OPT = {
     "type": "integer",
-    "description": "Tab ID. Omit to use the current working tab (the one you last acted on, else the active tab)."
+    "description": "Tab ID; omit for the current working tab."
 }
 
 BROWSER_TOOL_LIST_TABS = {
@@ -36,10 +21,8 @@ BROWSER_TOOL_LIST_TABS = {
     "function": {
         "name": "browser_list_tabs",
         "description": (
-            "List all open browser tabs with their titles, URLs, and tab IDs. "
-            "You usually do NOT need this before acting — every browser tool "
-            "defaults to the current working tab. Use it to pick a DIFFERENT "
-            "tab than the one you were working with."
+            "List open browser tabs with titles, URLs and IDs. Use this only "
+            "to choose a different tab; other tools use the working tab."
         ),
         "parameters": {
             "type": "object",
@@ -53,17 +36,9 @@ BROWSER_TOOL_READ_PAGE = {
     "function": {
         "name": "browser_read_page",
         "description": (
-            "Read a web page from the user's real browser (works on login-walled "
-            "pages: internal tools, logged-in dashboards).\n"
-            "mode='auto' (default) picks the best representation FOR you: page text "
-            "when it is substantive; when the text is sparse (Canvas/SVG/SPA page) "
-            "it automatically attaches a structural summary (framework, forms, "
-            "canvas count) with concrete next steps — no diagnosis needed on your part.\n"
-            "mode='text' forces DOM text (optionally scoped by selector). "
-            "mode='elements' lists interactive elements (buttons/links/inputs and "
-            "cursor-pointer card regions, with selectors) — rarely needed since "
-            "browser_click/browser_type accept text=. "
-            "mode='app_state' extracts Vue/React state and chart data (G6/ECharts)."
+            "Read the user's real, logged-in browser page. auto chooses useful "
+            "text/structure; text reads DOM text; data returns captured SPA APIs; "
+            "elements lists controls; app_state extracts framework/chart state."
         ),
         "parameters": {
             "type": "object",
@@ -71,18 +46,65 @@ BROWSER_TOOL_READ_PAGE = {
                 "tab_id": _TAB_ID_OPT,
                 "mode": {
                     "type": "string",
-                    "enum": ["auto", "text", "elements", "app_state"],
+                    "enum": ["auto", "text", "data", "elements", "app_state"],
                     "description": "What representation to return (default: auto)"
                 },
                 "selector": {
                     "type": "string",
-                    "description": "CSS selector to scope text extraction (optional)"
+                    "description": "Optional CSS scope for text mode."
                 },
                 "max_chars": {
                     "type": "integer",
-                    "description": "Maximum characters to return (default 30000 in auto, 50000 in text)"
+                    "description": "Output limit."
                 }
             },
+        }
+    }
+}
+
+BROWSER_TOOL_RESEARCH_PAGE = {
+    "type": "function",
+    "function": {
+        "name": "browser_research_page",
+        "description": (
+            "Deep-read an exact URL in the user's logged-in browser. Traverses "
+            "bounded same-origin pages and returns DOM plus ranked/redacted "
+            "API/state data and shapes."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string"
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["both", "content", "analysis"],
+                    "description": "both (default), content, or analysis."
+                },
+                "max_scrolls": {
+                    "type": "integer",
+                    "description": (
+                        "Lazy-list scrolls per page (default 4, max 8)."
+                    )
+                },
+                "max_pages": {
+                    "type": "integer",
+                    "description": (
+                        "Same-origin page limit (default 3, max 5)."
+                    )
+                },
+                "pagination": {
+                    "type": "string",
+                    "enum": ["auto", "links", "none"],
+                    "description": "auto (default), next links only, or none."
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Output chars (default 60000, max 80000)."
+                }
+            },
+            "required": ["url"]
         }
     }
 }
@@ -92,16 +114,12 @@ BROWSER_TOOL_EXECUTE_JS = {
     "function": {
         "name": "browser_execute_js",
         "description": (
-            "Execute JavaScript code in a browser tab and return the result. "
-            "Use this for: reading specific data from JS variables, accessing framework state "
-            "(Vue/React data), calling page APIs, or advanced DOM manipulation.\n"
-            "The code runs in MAIN world with full page context (window, document, app state).\n"
-            "IMPORTANT: The code must be a single expression or IIFE. "
-            "Use (() => { ... return result; })() for multi-statement code. "
-            "Return value must be JSON-serializable.\n"
-            "This is the escape hatch: prefer browser_click / browser_type for "
-            "interactions and browser_read_page for reading — they handle waiting, "
-            "targeting and verification for you."
+            "Run one JavaScript expression/IIFE in the page MAIN world and return "
+            "a JSON value. Prefer normal read/click/type tools; use browser_devtools "
+            "for console history, promises, complex objects and debugger control. "
+            "Arbitrary JS is always write-authorized. Pass tab_id for site-specific "
+            "code or relative fetch URLs; browser_research_page uses a temporary tab "
+            "and does not change the remembered working tab."
         ),
         "parameters": {
             "type": "object",
@@ -113,10 +131,78 @@ BROWSER_TOOL_EXECUTE_JS = {
                 },
                 "description": {
                     "type": "string",
-                    "description": "ALWAYS provide a short one-line summary (in the user's language) of what this JS does and why. It is rendered as a caption above the code in the UI so the user can grasp the intent at a glance without parsing the script. E.g. 'Extract the flight prices from the results grid', 'Read the logged-in user id from window state'."
+                    "description": "Short user-facing explanation of the script."
                 }
             },
             "required": ["code"]
+        }
+    }
+}
+
+BROWSER_TOOL_DEVTOOLS = {
+    "type": "function",
+    "function": {
+        "name": "browser_devtools",
+        "description": (
+            "Use a bounded DevTools Bridge in the user's Chrome: read console "
+            "and exceptions, await/evaluate expressions, safely expand complex "
+            "objects without invoking getters, inspect execution contexts, and "
+            "debug JavaScript with scripts, breakpoints, pause and stepping. "
+            "Call debug_start before debugger actions and debug_stop when done. "
+            "Line/column numbers are zero-based. Prefer ordinary browser tools "
+            "for routine page interaction."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tab_id": _TAB_ID_OPT,
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "console_read", "console_clear", "context_list",
+                        "evaluate", "inspect", "debug_start", "debug_state",
+                        "debug_stop", "breakpoint_set", "breakpoint_remove",
+                        "pause", "resume", "step_over", "step_into", "step_out",
+                        "frame_evaluate", "script_source"
+                    ]
+                },
+                "expression": {
+                    "type": "string",
+                    "description": "Expression for evaluate/inspect/frame_evaluate."
+                },
+                "await_promise": {
+                    "type": "boolean",
+                    "description": "Await a returned promise (default true)."
+                },
+                "observe_ms": {
+                    "type": "integer",
+                    "description": "Console observation window, 50–5000 ms."
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "description": "Object expansion depth, 0–6."
+                },
+                "session_ttl_ms": {
+                    "type": "integer",
+                    "description": "Debug session lifetime, 10000–120000 ms."
+                },
+                "context_id": {"type": "integer"},
+                "session_id": {
+                    "type": "string",
+                    "description": "Related-target session from context/script state."
+                },
+                "source_url": {
+                    "type": "string",
+                    "description": "Exact script URL for a URL breakpoint."
+                },
+                "line_number": {"type": "integer"},
+                "column_number": {"type": "integer"},
+                "condition": {"type": "string"},
+                "breakpoint_id": {"type": "string"},
+                "call_frame_id": {"type": "string"},
+                "script_id": {"type": "string"}
+            },
+            "required": ["action"]
         }
     }
 }
@@ -126,22 +212,15 @@ BROWSER_TOOL_SCREENSHOT = {
     "function": {
         "name": "browser_screenshot",
         "description": (
-            "Capture a screenshot of a browser tab. By default returns a FULL-PAGE screenshot "
-            "of the entire scrollable content (not just the visible viewport) — captured in one shot "
-            "via the Chrome DevTools Protocol, which also triggers lazy-loaded content.\n"
-            "Returns the screenshot as an IMAGE you can actually SEE and analyze visually (not base64 text!).\n"
-            "Use this to: 1) Understand page layout; 2) See Canvas-rendered content (charts, graphs, DAG diagrams); "
-            "3) Verify click/navigation results; 4) Read text from images when DOM extraction fails.\n"
-            "Prefer the default full-page capture so you don't miss content below the fold. "
-            "Only set full_page=false when you specifically need just the current viewport. "
-            "Large images are auto-compressed to JPEG."
+            "Capture a visible image of a tab, including Canvas/SVG. Defaults to "
+            "the full scrollable page; set full_page=false for the viewport."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "tab_id": {
                     "type": "integer",
-                    "description": "Tab ID to screenshot. If omitted, captures the currently active tab."
+                    "description": "Tab ID; omit for the active tab."
                 },
                 "format": {
                     "type": "string",
@@ -150,7 +229,7 @@ BROWSER_TOOL_SCREENSHOT = {
                 },
                 "full_page": {
                     "type": "boolean",
-                    "description": "If true (default), capture the entire scrollable page. If false, capture only the visible viewport."
+                    "description": "Full page by default; false means viewport."
                 }
             },
         }
@@ -162,8 +241,13 @@ BROWSER_TOOL_GET_COOKIES = {
     "function": {
         "name": "browser_get_cookies",
         "description": (
-            "Get cookies from the user's browser. Can filter by URL, domain, or name. "
-            "Useful for reading authentication tokens, session cookies, etc."
+            "Inspect cookie METADATA in the user's browser, filtered by URL, domain, "
+            "or name. Values are intentionally redacted and must remain inside Chrome. "
+            "Use this only to diagnose whether a site has cookies; never use it to copy "
+            "authentication into curl/wget or server HTTP. To fetch a logged-in page, "
+            "use fetch_url. To place a remote file on the Tofu server, call "
+            "download_url_to_server with the exact file URL; it automatically uses the "
+            "selected browser session when required."
         ),
         "parameters": {
             "type": "object",
@@ -235,12 +319,9 @@ BROWSER_TOOL_NAVIGATE = {
     "function": {
         "name": "browser_navigate",
         "description": (
-            "Navigate a browser tab to a URL — or open a NEW tab with new_tab=true "
-            "(background by default, does not interrupt the user). "
-            "Waits for the page to load by default and reports the final URL/title.\n"
-            "If you are NOT certain of the exact URL, FIRST call web_search to obtain the real "
-            "link — never guess or reconstruct a domain from memory (guessed URLs 404 or land on "
-            "the wrong site)."
+            "Navigate the working tab, or open a background tab with new_tab=true. "
+            "Waits for load and reports final URL/title. If unsure, use web_search; "
+            "never guess a URL from memory."
         ),
         "parameters": {
             "type": "object",
@@ -252,7 +333,7 @@ BROWSER_TOOL_NAVIGATE = {
                 },
                 "new_tab": {
                     "type": "boolean",
-                    "description": "Open the URL in a new tab instead of reusing the working tab (default: false). The new tab becomes the working tab."
+                    "description": "Open a new working tab (default false)."
                 },
                 "active": {
                     "type": "boolean",
@@ -273,16 +354,9 @@ BROWSER_TOOL_CLICK = {
     "function": {
         "name": "browser_click",
         "description": (
-            "Click an element in the user's browser. Say WHAT to click, not how: "
-            "text='登录' fuzzy-matches a button/link by visible text or aria-label "
-            "(preferred); selector='#id' is the explicit fallback. "
-            "The element is automatically awaited and scrolled into view, and the result "
-            "reports whether the page changed (URL/title) — and when the click opens a "
-            "NEW TAB, that tab is reported and becomes the working tab automatically "
-            "(tab #, title, URL), so you usually do NOT need a separate verification read.\n"
-            "For hover/right-click menus use browser_menu_click. For typing into fields "
-            "use browser_type; for 2+ fields use ONE browser_fill_form call. "
-            "On ambiguity the closest candidates are returned — retry with more specific text."
+            "Click by visible text/aria-label (preferred) or CSS selector. It waits, "
+            "scrolls and reports navigation/NEW TAB results. Use menu_click for menus "
+            "and browser_fill_form for multiple fields."
         ),
         "parameters": {
             "type": "object",
@@ -290,7 +364,7 @@ BROWSER_TOOL_CLICK = {
                 "tab_id": _TAB_ID_OPT,
                 "text": {
                     "type": "string",
-                    "description": "Visible text / aria-label of the element to click (fuzzy-matched, preferred)"
+                    "description": "Visible text/aria-label, fuzzy matched."
                 },
                 "selector": {
                     "type": "string",
@@ -298,7 +372,7 @@ BROWSER_TOOL_CLICK = {
                 },
                 "right_click": {
                     "type": "boolean",
-                    "description": "Right-click instead of left-click (default: false). To then pick a context-menu item, use browser_menu_click instead."
+                    "description": "Right-click (default false)."
                 },
                 "scroll_to": {
                     "type": "boolean",
@@ -314,12 +388,8 @@ BROWSER_TOOL_TYPE = {
     "function": {
         "name": "browser_type",
         "description": (
-            "Type text into a field, REPLACING its current content (clear-first). "
-            "Say WHICH field, not how: text='搜索' fuzzy-matches the input by "
-            "placeholder/label/aria-label (preferred); selector='#q' is the explicit fallback.\n"
-            "To fill or change 2+ fields (e.g. origin AND destination AND date), use ONE "
-            "browser_fill_form call instead — it is faster and less error-prone. "
-            "For Enter/Tab/Escape and keyboard shortcuts use browser_press_key."
+            "Replace a field's text, targeting its label/placeholder (preferred) or "
+            "CSS selector. Use fill_form for 2+ fields and press_key for shortcuts."
         ),
         "parameters": {
             "type": "object",
@@ -352,12 +422,9 @@ BROWSER_TOOL_PRESS_KEY = {
     "function": {
         "name": "browser_press_key",
         "description": (
-            "Press a key or key combination: 'Enter', 'Escape', 'Tab', 'Backspace', "
-            "'ArrowUp/Down/Left/Right', 'Home', 'End', 'PageUp/Down', 'F1-F12', "
-            "or combos like 'Ctrl+S', 'Ctrl+Shift+P' (modifiers: Ctrl, Alt, Shift, Meta).\n"
-            "Goes to the currently focused element unless selector is given.\n"
-            "NOTE: keystrokes APPEND — to enter text into a field use browser_type "
-            "(clear-first) or browser_fill_form (2+ fields), not repeated press_key calls."
+            "Press a key or combination such as Enter, Escape or Ctrl+Shift+P. "
+            "Targets the focused element unless selector is supplied; use type for "
+            "text and browser_fill_form for multiple fields."
         ),
         "parameters": {
             "type": "object",
@@ -430,6 +497,8 @@ PAGE_PREVIEW_TOOL_NAMES = frozenset({'browser_preview_page'})
 BROWSER_TOOLS = [
     BROWSER_TOOL_LIST_TABS,
     BROWSER_TOOL_READ_PAGE,
+    BROWSER_TOOL_RESEARCH_PAGE,
+    BROWSER_TOOL_DEVTOOLS,
     BROWSER_TOOL_EXECUTE_JS,
     BROWSER_TOOL_SCREENSHOT,
     BROWSER_TOOL_CLICK,
@@ -441,30 +510,20 @@ BROWSER_TOOLS = [
     BROWSER_TOOL_GET_HISTORY,
 ]
 BROWSER_TOOL_NAMES = {
-    'browser_list_tabs', 'browser_read_page', 'browser_execute_js',
+    'browser_list_tabs', 'browser_read_page', 'browser_research_page',
+    'browser_devtools', 'browser_execute_js',
     'browser_screenshot', 'browser_click', 'browser_type', 'browser_press_key',
     'browser_navigate', 'browser_close_tab',
     'browser_get_cookies', 'browser_get_history',
 }
 
-#: Names REMOVED from the model surface by the v2 consolidation
-#: (pt_869e5648403e4745). Their dispatch handlers and display formatters
-#: stay — old conversations must keep rendering their tool cards, and direct
-#: execute_browser_tool callers keep working. Consumers: the frontend icon
-#: map and lib/tasks_pkg/tool_display/_dispatch.py (history display).
-LEGACY_BROWSER_TOOL_NAMES = frozenset({
-    'browser_read_tab', 'browser_get_interactive_elements',
-    'browser_summarize_page', 'browser_get_app_state',
-    'browser_wait', 'browser_hover', 'browser_keyboard',
-    'browser_create_tab', 'browser_hover_and_click',
-    'browser_right_click_menu',
-})
-
 __all__ = [
-    'BROWSER_TOOL_LIST_TABS', 'BROWSER_TOOL_READ_PAGE', 'BROWSER_TOOL_EXECUTE_JS',
+    'BROWSER_TOOL_LIST_TABS', 'BROWSER_TOOL_READ_PAGE',
+    'BROWSER_TOOL_RESEARCH_PAGE', 'BROWSER_TOOL_DEVTOOLS',
+    'BROWSER_TOOL_EXECUTE_JS',
     'BROWSER_TOOL_SCREENSHOT', 'BROWSER_TOOL_CLICK', 'BROWSER_TOOL_TYPE',
     'BROWSER_TOOL_PRESS_KEY', 'BROWSER_TOOL_NAVIGATE', 'BROWSER_TOOL_CLOSE_TAB',
     'BROWSER_TOOL_GET_COOKIES', 'BROWSER_TOOL_GET_HISTORY',
     'BROWSER_TOOL_PREVIEW_PAGE', 'PAGE_PREVIEW_TOOL_NAMES',
-    'BROWSER_TOOLS', 'BROWSER_TOOL_NAMES', 'LEGACY_BROWSER_TOOL_NAMES',
+    'BROWSER_TOOLS', 'BROWSER_TOOL_NAMES',
 ]

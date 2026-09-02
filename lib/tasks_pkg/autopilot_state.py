@@ -1,20 +1,20 @@
 """Autopilot state helpers — objective / run-id / budget / resolvers.
 
-**Extraction context** (board epic ``pt_00459503f23b4c0e``, slice 1):
+**Extraction context** (board epic ```, slice 1):
 carved out of ``lib/tasks_pkg/autopilot.py`` per
-``docs/AUTOPILOT_DECOMPOSITION_AUDIT.md``. Chose a SIBLING module
+``docs/modules/task_engine.md``. Chose a SIBLING module
 (``autopilot_state.py``) rather than a full module→package conversion
 (``autopilot/_state.py``) for slice 1: converting a heavily-imported module
 into a package on a shared-HEAD cross-sibling worktree carries much bigger
 merge risk than adding one new sibling file, and the wire-parity contract
 (re-export identity through ``autopilot.py``) is byte-equivalent either way.
 
-**Sequencing constraint (pt_8dc03017 gate)**: the sibling epic
-``pt_8dc030176bad450b`` (owner-parked, human-gated) plans to mutate
+**Sequencing constraint ( gate)**: the sibling epic
+``` (owner-parked, human-gated) plans to mutate
 ``_VUEventForwarder``, the ``_autopilot_deciding`` latch, and the VU
 ``convId=''`` opt-out. This module DELIBERATELY carries NONE of those
 symbols — the extracted cluster is the "Objective + budget + resolvers"
-group the audit identified as ZERO-overlap with the pt_8dc03017 cutover.
+group the audit identified as ZERO-overlap with the  cutover.
 A future dispatch (post-cutover) can consolidate ``autopilot_state.py`` +
 the remaining unmoved clusters (baton, VU, markers) into an
 ``autopilot/`` package.
@@ -31,7 +31,7 @@ side effects are limited to ``conversations.settings`` writes via
   * :func:`_record_vu_turn_and_check_budget` — budget-guard RMW.
   * :func:`_clear_run_id` — run-end cleanup.
   * :func:`_resolve_recent_run_id` — DB reader.
-  * :func:`_resolve_run_anchor_msgid` — DB reader.
+  * :func:`_resolve_run_anchor_turn_id` — stable turn-identity reader.
   * Module constants ``_VU_HISTORY_CAP`` / ``_PROGRESS_LEDGER_CAP``.
 
 All private ("_"-prefixed) — internal to the autopilot package; the
@@ -99,7 +99,7 @@ def _extract_objective(messages: list) -> str:
     return ''
 
 
-def _extract_objective_from_db(conv_id: str) -> str:
+def _extract_objective_from_db(conv_id: str, *, user_id: int) -> str:
     """Return the objective derived from the PERSISTED conversation messages.
 
     The DB row is the source of truth for what the human actually typed — it
@@ -115,8 +115,8 @@ def _extract_objective_from_db(conv_id: str) -> str:
     if not conv_id:
         return ''
     try:
-        from lib.tasks_pkg.conv_message_builder import _load_messages_from_db
-        raw = _load_messages_from_db(conv_id)
+        from lib.tasks_pkg.conv_message_builder._load import _load_messages_from_db
+        raw = _load_messages_from_db(conv_id, user_id=user_id)
     except Exception as e:
         logger.debug('[Autopilot] objective DB read failed conv=%s: %s',
                      conv_id[:8], e)
@@ -126,7 +126,12 @@ def _extract_objective_from_db(conv_id: str) -> str:
     return _extract_objective(raw)
 
 
-def _get_or_persist_objective(conv_id: str, messages: list) -> str:
+def _get_or_persist_objective(
+    conv_id: str,
+    messages: list,
+    *,
+    user_id: int,
+) -> str:
     """Resolve the immutable autopilot objective for a conversation.
 
     The objective is the north star the virtual user measures the assistant
@@ -159,7 +164,8 @@ def _get_or_persist_objective(conv_id: str, messages: list) -> str:
             # first user turn has those <system-reminder> blocks spliced in.
             # Deriving from ``messages`` would pin ~2KB of boilerplate as the
             # objective. Fall back to the live list only if the DB read fails.
-            objective = _extract_objective_from_db(conv_id) or _extract_objective(messages)
+            objective = (_extract_objective_from_db(conv_id, user_id=user_id)
+                         or _extract_objective(messages))
             out['objective'] = objective
             if not objective:
                 return False  # nothing worth pinning
@@ -170,7 +176,8 @@ def _get_or_persist_objective(conv_id: str, messages: list) -> str:
 
         # notify=False: autopilotObjective is internal run-bookkeeping, never
         # rendered — invalidate the (now-stale) cache blob but don't push.
-        res = update_conversation_settings(conv_id, _mut, notify=False)
+        res = update_conversation_settings(
+            conv_id, _mut, user_id=user_id, notify=False)
         if res is None:
             # Conv row absent — derive without persisting (original behaviour).
             return _extract_objective(messages)
@@ -181,7 +188,7 @@ def _get_or_persist_objective(conv_id: str, messages: list) -> str:
         return _extract_objective(messages)
 
 
-def _get_or_persist_run_id(conv_id: str) -> str:
+def _get_or_persist_run_id(conv_id: str, *, user_id: int) -> str:
     """Resolve the immutable autopilot run id for a conversation.
 
     The run id is the EXPLICIT boundary that lets the frontend group a whole
@@ -216,7 +223,8 @@ def _get_or_persist_run_id(conv_id: str) -> str:
             return None
 
         # notify=False: autopilotRunId is internal run-bookkeeping, not rendered.
-        res = update_conversation_settings(conv_id, _mut, notify=False)
+        res = update_conversation_settings(
+            conv_id, _mut, user_id=user_id, notify=False)
         if res is None:
             return new_id  # conv row absent → ephemeral id (original behaviour)
         return out['id']
@@ -229,8 +237,13 @@ def _get_or_persist_run_id(conv_id: str) -> str:
 # ── Budget guard ────────────────────────────────────────────────────
 
 
-def _record_vu_turn_and_check_budget(conv_id: str, vu_text: str,
-                                     targets: list | None = None) -> dict:
+def _record_vu_turn_and_check_budget(
+    conv_id: str,
+    vu_text: str,
+    *,
+    user_id: int,
+    targets: list | None = None,
+) -> dict:
     """Increment the run's VU turn count + append its request text, then verdict.
 
     Serialized read-merge-write through ``update_conversation_settings`` (never
@@ -324,7 +337,8 @@ def _record_vu_turn_and_check_budget(conv_id: str, vu_text: str,
 
         # notify=False: turn-count / VU-history / progress ledger are internal
         # budget bookkeeping, not rendered — invalidate cache but don't push.
-        res = update_conversation_settings(conv_id, _mut, notify=False)
+        res = update_conversation_settings(
+            conv_id, _mut, user_id=user_id, notify=False)
         if res is None:
             return {'stop': False, 'reason': '', 'turn': 0}
         if out['stop']:
@@ -340,7 +354,7 @@ def _record_vu_turn_and_check_budget(conv_id: str, vu_text: str,
         return {'stop': False, 'reason': '', 'turn': 0}
 
 
-def _clear_run_id(conv_id: str) -> None:
+def _clear_run_id(conv_id: str, *, user_id: int) -> None:
     """Clear the pinned run id + budget counters when a run concludes.
 
     Called on TASK_DONE (after the summary is generated) so the NEXT autopilot
@@ -350,7 +364,7 @@ def _clear_run_id(conv_id: str) -> None:
     run always starts clean — and, conversely, that a run still in progress
     keeps its accumulated count.
 
-    ★ Hole A — ``autopilotObjective`` is DELIBERATELY NOT cleared here.  The
+    Hole A — ``autopilotObjective`` is DELIBERATELY NOT cleared here.  The
     objective is the first real user message (the conversation's north star);
     clearing it forced the next run to RE-DERIVE by re-scanning the live
     messages, and after compaction that re-scan could return a later,
@@ -383,7 +397,8 @@ def _clear_run_id(conv_id: str) -> None:
             return None
 
         # notify=False: clearing internal run pins/counters is not rendered.
-        update_conversation_settings(conv_id, _mut, notify=False)
+        update_conversation_settings(
+            conv_id, _mut, user_id=user_id, notify=False)
     except Exception as e:
         logger.debug('[Autopilot] _clear_run_id failed conv=%s: %s', conv_id[:8], e)
 
@@ -391,7 +406,7 @@ def _clear_run_id(conv_id: str) -> None:
 # ── Run resolvers (DB reads) ────────────────────────────────────────
 
 
-def _resolve_recent_run_id(conv_id: str) -> str:
+def _resolve_recent_run_id(conv_id: str, *, user_id: int) -> str:
     """Return the most recent VU turn's ``_autopilotRunId`` for a conversation.
 
     Prefers the still-pinned ``settings.autopilotRunId`` (the live run); falls
@@ -402,23 +417,21 @@ def _resolve_recent_run_id(conv_id: str) -> str:
     if not conv_id:
         return ''
     try:
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        from lib.database.conversation_repository import load_conversation
-        db = get_thread_db(DOMAIN_CHAT)
-        snapshot = load_conversation(
-            db, conv_id, metadata_columns=('settings',))
+        from lib.conversations.repository import get_conversation
+        snapshot = get_conversation(conv_id, user_id=user_id)
         if snapshot is None:
             return ''
+        msgs = snapshot.messages
+        raw_settings = snapshot.get('settings')
         try:
-            raw_settings = snapshot.get('settings')
-            settings = json.loads(raw_settings or '{}') if raw_settings else {}
+            settings = (dict(raw_settings) if isinstance(raw_settings, dict)
+                        else json.loads(raw_settings or '{}')) if raw_settings else {}
         except (json.JSONDecodeError, TypeError) as e:
             logger.debug('[Autopilot] settings JSON parse failed, using fallback: %s', e)
             settings = {}
         pinned = (settings.get('autopilotRunId') or '').strip()
         if pinned:
             return pinned
-        msgs = snapshot.messages
         for m in reversed(msgs):
             if isinstance(m, dict) and (m.get('_autopilotRunId') or '').strip():
                 return m['_autopilotRunId'].strip()
@@ -428,32 +441,34 @@ def _resolve_recent_run_id(conv_id: str) -> str:
     return ''
 
 
-def _resolve_run_anchor_msgid(conv_id: str, run_id: str) -> str:
-    """Resolve the stable ``_msgId`` of a run's BOUNDARY turn, server-side.
+def _resolve_run_anchor_turn_id(
+    conv_id: str,
+    run_id: str,
+    *,
+    user_id: int,
+) -> str:
+    """Resolve the stable ``_turnId`` of a run's boundary turn.
 
     This is the backend authority for report PLACEMENT. The boundary is the
     last turn belonging to the run: the run's VU turn, EXTENDED forward over the
     trailing unstamped agent follow-up(s) it prompted, stopping at the next
     run's VU turn / a real (non-VU) human turn / end-of-list. Returns that
-    turn's ``_msgId`` so the frontend can dock the run's close-out report there
-    by a stable id — never a mutable array index (the
-    stream-target-resolution-by-msgid convention).
+    turn's ``_turnId`` so report placement never depends on an array index or
+    on a second message-identity namespace.
 
     Returns '' when the run has no turn on disk, or its boundary turn carries no
-    ``_msgId`` (cannot anchor without a stable id — the caller then omits the
+    ``_turnId`` (cannot anchor without a stable id — the caller then omits the
     anchor and the frontend uses its ts-tail last resort). Best-effort — any
     failure returns ''.
     """
     if not conv_id or not run_id:
         return ''
     try:
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        from lib.database.conversation_repository import load_conversation
-        db = get_thread_db(DOMAIN_CHAT)
-        snapshot = load_conversation(db, conv_id)
-        if snapshot is None:
+        from lib.conversations.repository import get_conversation
+        snapshot = get_conversation(conv_id, user_id=user_id)
+        msgs = snapshot.messages if snapshot is not None else []
+        if not msgs:
             return ''
-        msgs = snapshot.messages
         # Last turn STAMPED with this run id (only the VU turn carries it).
         stamped_idx = -1
         for i, m in enumerate(msgs):
@@ -475,9 +490,9 @@ def _resolve_run_anchor_msgid(conv_id: str, run_id: str) -> str:
                 break
             boundary = j
         anchor = msgs[boundary]
-        return (anchor.get('_msgId') or '').strip() if isinstance(anchor, dict) else ''
+        return (anchor.get('_turnId') or '').strip() if isinstance(anchor, dict) else ''
     except Exception as e:
-        logger.debug('[Autopilot] _resolve_run_anchor_msgid failed conv=%s run=%s: %s',
+        logger.debug('[Autopilot] _resolve_run_anchor_turn_id failed conv=%s run=%s: %s',
                      conv_id[:8], run_id, e)
         return ''
 
@@ -492,5 +507,5 @@ __all__ = [
     '_record_vu_turn_and_check_budget',
     '_clear_run_id',
     '_resolve_recent_run_id',
-    '_resolve_run_anchor_msgid',
+    '_resolve_run_anchor_turn_id',
 ]

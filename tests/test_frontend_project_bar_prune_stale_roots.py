@@ -31,11 +31,12 @@ import os
 import re
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 # Epic-E sub-7 (2026-08-01): _restoreConvProject / loadProjectStatus moved
 # to project_state.js (core state subset); project.js is now the deferred
 # panel. Read state-first with a panel fallback — loud when in neither.

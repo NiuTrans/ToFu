@@ -15,14 +15,11 @@ Coverage ceiling (honest — see the project journal entry):
                     ``_mark_yesterday_todos_done`` on an in-memory ``_prev`` dict.
     * llm.py      — ``_extract_json_result`` + ``_repair_truncated_json``
                     (fences / legacy-list / embedded / truncated), ``_pick_persona``.
-  DB-coupled (``_scan_costs_in_range`` / ``_get_monthly_costs`` / the
-  ``_extract_convs_for_date`` family) are covered ONLY for their
-  graceful-degrade-on-DB-error contract — full DB seeding is out of scope.
+  Authority-coupled scans are covered with immutable conversation snapshots;
+  storage transport and pricing lookups remain stubbed.
 
-No network, no live LLM (``_run_llm_analysis`` stubbed), no real DB
-(``get_thread_db`` patched to raise → exercises the except path). The ``lib``
-pricing globals + ``lib.pricing`` lookups are stubbed so cost math is
-deterministic regardless of the live pricing table.
+No network, no live LLM (``_run_llm_analysis`` stubbed), and no storage
+process. Pricing globals and lookups are stubbed so cost math is deterministic.
 """
 from __future__ import annotations
 
@@ -34,6 +31,7 @@ import pytest
 from lib.daily_report import cost, conversations, todos, llm
 
 pytestmark = pytest.mark.unit
+OWNER_USER_ID = 41
 
 
 # ═══════════════════════════════════════════════════════════
@@ -90,47 +88,67 @@ class TestCostMath:
             assert cost._qwen_cny(100, "input", "no-such-model") in (
                 pytest.approx(100 * 1.0 / 1e6),)  # falls back to _default tier 1
 
-    def test_scan_costs_degrades_on_db_error(self):
-        with mock.patch("lib.database.get_thread_db", side_effect=RuntimeError("no db")):
-            assert cost._scan_costs_in_range(0, 10**13) == {}
+    def test_scan_costs_degrades_on_authority_error(self):
+        with mock.patch(
+                "lib.conversations.repository.scan_conversations_bounded",
+                side_effect=RuntimeError("authority unavailable")):
+            assert cost._scan_costs_in_range(
+                0, 10**13, owner_user_id=OWNER_USER_ID) == {}
 
-    def test_cost_scan_projects_usage_from_normalized_rows(self):
-        pg_sql = cost._normalized_usage_projection_sql("pg", 1)
-        sqlite_sql = cost._normalized_usage_projection_sql("sqlite", 1)
-        assert 'FROM conversation_messages' in pg_sql
-        assert 'FROM conversation_messages' in sqlite_sql
-        assert "billing_meta->'usage' AS usage" in pg_sql
-        assert "json_extract(billing_meta,'$.usage') AS usage" in sqlite_sql
+    def test_cost_scan_projects_usage_from_authority_snapshot(self):
+        from lib.conversations.repository import ConversationSnapshot
+
+        snapshot = ConversationSnapshot(
+            metadata={
+                "id": "c-projected", "title": "Projected",
+                "created_at": 10, "updated_at": 20,
+                "settings": {"model": "fallback-model"},
+            },
+            messages=[
+                {"role": "user", "content": "question"},
+                {
+                    "role": "assistant",
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 25},
+                    "timestamp": 15, "model": "model-x",
+                    "providerId": "provider-y",
+                },
+            ],
+        )
+
+        assert cost._usage_rows_from_snapshots([snapshot]) == [{
+            "id": "c-projected", "title": "Projected",
+            "created_at": 10, "updated_at": 20,
+            "conv_model": "fallback-model", "first_content": "question",
+            "msg_index": 1, "total_msgs": 2,
+            "usage": {"prompt_tokens": 100, "completion_tokens": 25},
+            "msg_timestamp": 15, "msg_model": "model-x",
+            "msg_provider": "provider-y",
+        }]
 
     def test_projected_usage_row_preserves_cost_rollup(self):
         import datetime as _dt
         ts = int(_dt.datetime(2026, 8, 7, 12).timestamp() * 1000)
-        projected = [{
-            "id": "c-projected", "title": "Projected", "created_at": ts,
-            "updated_at": ts, "conv_model": "fallback-model",
-            "first_content": "", "msg_index": 1, "total_msgs": 2,
-            "usage": {"prompt_tokens": 100, "completion_tokens": 25},
-            "msg_timestamp": ts, "msg_model": "model-x",
-            "msg_provider": "provider-y",
-        }]
+        from lib.conversations.repository import ConversationSnapshot
+        snapshot = ConversationSnapshot(
+            metadata={
+                "id": "c-projected", "title": "Projected",
+                "created_at": ts, "updated_at": ts,
+                "settings": {"model": "fallback-model"},
+            },
+            messages=[{
+                "role": "assistant", "timestamp": ts,
+                "usage": {"prompt_tokens": 100, "completion_tokens": 25},
+                "model": "model-x", "providerId": "provider-y",
+            }],
+        )
 
-        class _Cursor:
-            def fetchall(self):
-                return projected
-
-        class _DB:
-            def execute(self, sql, params):
-                return _Cursor()
-
-        with mock.patch("lib.database.get_thread_db", return_value=_DB()), \
-                mock.patch("lib.database._BACKEND", "pg"), \
-                mock.patch(
-                    "lib.database.messages_rows.rows_read_enabled",
-                    return_value=True), \
-                mock.patch.object(
-                    cost, "_normalized_usage_rows", return_value=projected), \
+        with mock.patch(
+                "lib.conversations.repository.scan_conversations_bounded",
+                return_value=(1, iter([snapshot]))), \
                 mock.patch.object(cost, "_calc_msg_cost_cny", return_value=1.25):
-            got = cost._scan_costs_in_range(ts - 1, ts + 1, 2026, 8)
+            got = cost._scan_costs_in_range(
+                ts - 1, ts + 1, 2026, 8,
+                owner_user_id=OWNER_USER_ID)
 
         assert got[7]["cost"] == 1.25
         assert got[7]["conversations"]["c-projected"] == {
@@ -178,9 +196,10 @@ class TestScopedCostInvalidation:
         calls = []
         # Patch the day-level invalidator so we can see exactly which days it targets.
         with mock.patch.object(cost, "invalidate_day_cost_cache",
-                               side_effect=lambda d=None: calls.append(d)):
+                               side_effect=lambda d=None, **_kw: calls.append(d)):
             touched = cost.invalidate_cost_cache_for_messages(
-                [self._msg(2026, 6, 10), self._msg(2026, 6, 10, hour=20)])
+                [self._msg(2026, 6, 10), self._msg(2026, 6, 10, hour=20)],
+                owner_user_id=OWNER_USER_ID)
         # Two messages, same day → one dedup'd day invalidated.
         assert touched == {"2026-06-10"}
         assert calls == ["2026-06-10"]
@@ -190,9 +209,10 @@ class TestScopedCostInvalidation:
     def test_invalidate_scoped_no_usage_is_noop(self):
         calls = []
         with mock.patch.object(cost, "invalidate_day_cost_cache",
-                               side_effect=lambda d=None: calls.append(d)):
+                               side_effect=lambda d=None, **_kw: calls.append(d)):
             touched = cost.invalidate_cost_cache_for_messages(
-                [{"role": "user", "content": "hi", "timestamp": 1}])
+                [{"role": "user", "content": "hi", "timestamp": 1}],
+                owner_user_id=OWNER_USER_ID)
         # No usage anywhere → nothing invalidated (and never the whole-table wipe).
         assert touched == set()
         assert calls == []
@@ -203,8 +223,9 @@ class TestScopedCostInvalidation:
         """The public invalidator must issue the named Sidecar command."""
         client = mock.Mock()
         with mock.patch("lib.storage.get_storage_client", return_value=client):
-            cost.invalidate_day_cost_cache(date_str)
-        payload = {'user_id': cost.DEFAULT_USER_ID}
+            cost.invalidate_day_cost_cache(
+                date_str, owner_user_id=OWNER_USER_ID)
+        payload = {'user_id': OWNER_USER_ID}
         if date_str is not None:
             payload['date'] = date_str
         args = client.command.call_args.args
@@ -259,8 +280,9 @@ class TestSettledDayPinning:
         with mock.patch.object(cost, "_persisted_cost_dates",
                                return_value={y_str}), \
                 mock.patch.object(cost, "invalidate_day_cost_cache",
-                                  side_effect=lambda d=None: calls.append(d)):
-            touched = cost.invalidate_cost_cache_for_messages(msgs)
+                                  side_effect=lambda d=None, **_kw: calls.append(d)):
+            touched = cost.invalidate_cost_cache_for_messages(
+                msgs, owner_user_id=OWNER_USER_ID)
 
         # Yesterday pinned → NOT invalidated; only today dropped.
         assert y_str not in touched, "settled yesterday must be pinned"
@@ -282,8 +304,9 @@ class TestSettledDayPinning:
                                return_value={y_str}), \
                 mock.patch.object(cost, "_should_pin_day", return_value=False), \
                 mock.patch.object(cost, "invalidate_day_cost_cache",
-                                  side_effect=lambda d=None: calls.append(d)):
-            touched = cost.invalidate_cost_cache_for_messages(msgs)
+                                  side_effect=lambda d=None, **_kw: calls.append(d)):
+            touched = cost.invalidate_cost_cache_for_messages(
+                msgs, owner_user_id=OWNER_USER_ID)
 
         # With pinning neutered, yesterday IS invalidated again (the old bug).
         assert y_str in touched and t_str in touched
@@ -325,7 +348,8 @@ class TestPastMonthNoRescan:
                 mock.patch.object(cost, "_scan_costs_in_range",
                                   side_effect=_fake_scan), \
                 mock.patch.object(cost, "_persist_day_cost"):
-            result = cost._get_monthly_costs(year, month)
+            result = cost._get_monthly_costs(
+                year, month, owner_user_id=OWNER_USER_ID)
 
         # Zero rescans — the whole month came from cache.
         assert scan_calls == [], (
@@ -403,7 +427,8 @@ class TestAnalyseConversations:
         # _get_yesterday_carryover which reads a report file — stub it empty.
         with mock.patch.object(conversations, "_get_yesterday_carryover",
                                return_value=[]):
-            res = conversations._analyse_conversations([], "2026-06-28")
+            res = conversations._analyse_conversations(
+                [], "2026-06-28", owner_user_id=OWNER_USER_ID)
         assert res["ok"] is True
         assert res["streams"] == []
         assert "persona" in res and "quote" in res
@@ -426,7 +451,8 @@ class TestAnalyseConversations:
                                   return_value=(None, 0)), \
                 mock.patch.object(conversations, "_close_yesterday_remaining_todos",
                                   return_value=([], None, 0)):
-            res = conversations._analyse_conversations(convs, "2026-06-28")
+            res = conversations._analyse_conversations(
+                convs, "2026-06-28", owner_user_id=OWNER_USER_ID)
         streams = res["streams"]
         named = [s for s in streams if s["title"] == "Stream A"][0]
         # The bogus id (not in all_conv_ids) is dropped from the LLM stream.
@@ -448,7 +474,8 @@ class TestAnalyseConversations:
                 mock.patch.object(conversations, "_mark_yesterday_todos_done", return_value=(None, 0)), \
                 mock.patch.object(conversations, "_close_yesterday_remaining_todos",
                                   return_value=([], None, 0)):
-            res = conversations._analyse_conversations(convs, "2026-06-28")
+            res = conversations._analyse_conversations(
+                convs, "2026-06-28", owner_user_id=OWNER_USER_ID)
         assert res["streams"][0]["status"] == "in_progress"  # bogus → default
 
 
@@ -479,7 +506,8 @@ class TestTodoFuzzyMatch:
             {"id": "t2", "text": "already done", "done": True},
         ]}
         unfinished, ret_prev, changed = todos._close_yesterday_remaining_todos(
-            "2026-06-28", _prev=prev, _defer_save=True)
+            "2026-06-28", owner_user_id=OWNER_USER_ID,
+            _prev=prev, _defer_save=True)
         assert changed == 1  # only the undone one is auto-closed
         assert [u["text"] for u in unfinished] == ["undone item"]
         # the auto-closed item is now done+_auto_closed in the mutated dict
@@ -492,6 +520,7 @@ class TestTodoFuzzyMatch:
             "2026-06-28",
             yesterday_done=["修复图片回显问题"],   # fuzzy variant
             todo_status=[("修复图片回显", False)],
+            owner_user_id=OWNER_USER_ID,
             _prev=prev, _defer_save=True)
         assert changed == 1
         assert ret_prev["tomorrow"][0]["done"] is True
@@ -500,6 +529,7 @@ class TestTodoFuzzyMatch:
         prev = {"tomorrow": [{"id": "t1", "text": "x", "done": False}]}
         ret_prev, changed = todos._mark_yesterday_todos_done(
             "2026-06-28", yesterday_done=[], todo_status=[("x", False)],
+            owner_user_id=OWNER_USER_ID,
             _prev=prev, _defer_save=True)
         assert changed == 0
 
@@ -619,7 +649,8 @@ class TestMergeManualState:
                 mock.patch.object(conversations, "_close_yesterday_remaining_todos",
                                   return_value=([], None, 0)), \
                 mock.patch.object(conversations, "_load_report", return_value=prior):
-            res = conversations._analyse_conversations(convs, "2026-06-28")
+            res = conversations._analyse_conversations(
+                convs, "2026-06-28", owner_user_id=OWNER_USER_ID)
         ship = [s for s in res["streams"] if s["title"] == "Ship feature X"][0]
         # Without the merge this would be 'in_progress' (LLM value) — the bug.
         assert ship["status"] == "done" and ship.get("_manual") is True

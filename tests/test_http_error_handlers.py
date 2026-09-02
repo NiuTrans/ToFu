@@ -7,7 +7,6 @@ import asyncio
 import pytest
 
 from lib.app_factory import create_base_app
-from lib.database import PoolExhaustedError
 from lib.http_error_handlers import register_http_error_handlers
 from lib.storage import StorageError
 
@@ -15,7 +14,7 @@ from lib.storage import StorageError
 pytestmark = pytest.mark.unit
 
 
-def test_api_html_and_pool_overload_shapes_remain_distinct():
+def test_api_html_and_storage_error_shapes_remain_distinct():
     app = create_base_app('error-handler-test', {
         'TESTING': True,
         'PROPAGATE_EXCEPTIONS': False,
@@ -27,11 +26,6 @@ def test_api_html_and_pool_overload_shapes_remain_distinct():
     @app.get('/api/fail')
     async def api_fail():
         raise ValueError('sensitive failure')
-
-    @app.get('/api/busy')
-    async def api_busy():
-        raise PoolExhaustedError(
-            'full', active=4, max_conns=4, pooled=2, tracked=4)
 
     @app.get('/api/storage/<code>')
     async def storage_fail(code):
@@ -45,21 +39,19 @@ def test_api_html_and_pool_overload_shapes_remain_distinct():
             missing_api = await client.get('/api/missing')
             missing_html = await client.get('/missing')
             failure = await client.get('/api/fail')
-            busy = await client.get('/api/busy')
             storage_busy = await client.get('/api/storage/database_busy')
             storage_conflict = await client.get('/api/storage/database_conflict')
             storage_integrity = await client.get('/api/storage/database_integrity')
             return (
                 missing_api, await missing_api.get_json(),
                 missing_html, failure, await failure.get_json(),
-                busy, await busy.get_json(),
                 storage_busy, await storage_busy.get_json(),
                 storage_conflict, await storage_conflict.get_json(),
                 storage_integrity, await storage_integrity.get_json(),
             )
 
     (missing_api, missing_payload, missing_html, failure, failure_payload,
-     busy, busy_payload, storage_busy, storage_busy_payload,
+     storage_busy, storage_busy_payload,
      storage_conflict, storage_conflict_payload,
      storage_integrity, storage_integrity_payload) = asyncio.run(exercise())
     assert missing_api.status_code == 404
@@ -68,9 +60,10 @@ def test_api_html_and_pool_overload_shapes_remain_distinct():
     assert 'text/html' in missing_html.content_type
     assert failure.status_code == 500
     assert failure_payload['ok'] is False
-    assert busy.status_code == 503
-    assert busy.headers['Retry-After'] == '2'
-    assert 'database pool saturated' in busy_payload['error']
+    assert failure_payload['error']['kind'] == 'internal'
+    assert failure_payload['error']['detail'] == ''
+    assert failure_payload['error']['raw'] == ''
+    assert 'sensitive failure' not in str(failure_payload)
     assert storage_busy.status_code == 503
     assert storage_busy_payload['error'] == 'database_busy'
     assert storage_busy_payload['operationId'] == 'op-123'

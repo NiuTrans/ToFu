@@ -40,8 +40,6 @@ class AuthoringServicePort(Protocol):
 
     def contract(self) -> dict: ...
 
-    def role_contract(self, role: str = '') -> dict: ...
-
     def layout(self, definition: dict) -> dict: ...
 
     def plan(self, definition: dict) -> AuthoringPlanResultPort: ...
@@ -70,14 +68,14 @@ class DefinitionServicePort(Protocol):
         orchestration_id: str,
         definition: dict,
         *,
-        expected_updated_at: int | None = None,
+        expected_updated_at: int,
     ) -> DefinitionWriteResultPort: ...
 
     def delete_if_current(
         self,
         orchestration_id: str,
         *,
-        expected_updated_at: int | None = None,
+        expected_updated_at: int,
     ) -> DefinitionDeleteResultPort: ...
 
 
@@ -125,6 +123,7 @@ class RuntimeStartServicePort(Protocol):
         kind: str,
         definition: dict,
         *,
+        owner_user_id: int,
         input_text: str = '',
         orchestration_id: str = '',
         created_by: str = '',

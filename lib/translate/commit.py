@@ -1,308 +1,250 @@
-"""Race-safe commit of translated content into ``conversations.messages``.
+"""Commit translation overlays to the authoritative turn projection.
 
-Endpoint mode spawns multiple auto-translate threads in parallel for one
-conversation (one per planner + each worker iteration). A naive
-read-modify-write on the full ``messages`` JSON lets the later writer
-clobber earlier translations. Two layers of protection:
+Responsibility: merge a completed translation into one owner-scoped turn and
+publish the resulting conversation revision.  Callers address a turn by its
+stable ``turn_id``; message-array positions, content matching, transcript
+blobs, and process-local serialization are deliberately outside this module.
 
-1. Per-conversation in-process ``threading.Lock`` (only one commit
-   touches a given conv row at a time within this worker).
-2. Inside the lock, a CAS loop on ``rev`` (the server-issued monotonic
-   message-version bumped by conversations_rev_bump_trg) so we also survive
-   concurrent writes from OTHER paths (frontend sync, save_conv, the terminal
-   task sync, _sync_endpoint_turns_to_conversation). rev is strictly better
-   than updated_at here: two writers that read the same row in the same
-   millisecond no longer both pass the guard (RENDER_CONTRACT Phase 4 W6).
+The turn projection revision is the concurrency boundary.  A stale writer
+re-reads the latest projection and reapplies only its translation-owned fields,
+so unrelated terminal metadata and sibling enrichment cannot be clobbered.
 """
 
-import threading
+from __future__ import annotations
+
+from copy import deepcopy
 import time
+from typing import Any, Mapping
 
-from lib.database import DOMAIN_CHAT
 from lib.log import get_logger
+from lib.turn_lifecycle import (
+    LifecycleConflict,
+    get_turn,
+    update_turn_projection,
+)
 
-from .constants import DEFAULT_USER_ID
 
 logger = get_logger(__name__)
+_MAX_PROJECTION_ATTEMPTS = 6
+_WRITABLE_FIELDS = frozenset({"content", "translatedContent"})
 
 
-# ── Per-conversation commit serialization ──
-_commit_locks_lock = threading.Lock()
-_commit_locks: dict[str, threading.Lock] = {}
+def _stamp_segment_translations(
+    projection: dict[str, Any],
+    translations_by_round: Mapping[Any, Any] | None,
+) -> int:
+    """Stamp translated narration / reasoning on matching segments.
 
-
-def _get_commit_lock(conv_id: str) -> threading.Lock:
-    """Return a shared lock for serializing translate commits on one conv."""
-    with _commit_locks_lock:
-        lk = _commit_locks.get(conv_id)
-        if lk is None:
-            lk = threading.Lock()
-            _commit_locks[conv_id] = lk
-        return lk
-
-
-def _stamp_segment_translations(msg, segment_translations):
-    """Stamp per-round translated Chinese onto ``msg['segments']`` by llmRound.
-
-    ``segment_translations`` is ``{round_num: 中文}``. Each non-deliverable
-    ``text`` segment whose ``llmRound`` matches a key gets ``translatedText``.
-    A no-op when the message carries no segments (pre-v36 row) or none match.
+    Keying mirrors ``_translate_segments_to_map``: non-deliverable ``text``
+    segments resolve by ``llmRound`` (the live incremental worker's map shape);
+    ``thinking`` segments resolve by ``blockId`` because reasoning shares its
+    round with the narration prose.
     """
-    segs = msg.get('segments')
-    if not isinstance(segs, list) or not segs:
-        return
+    if not translations_by_round:
+        return 0
+    segments = projection.get("segments")
+    if not isinstance(segments, list):
+        return 0
+
     stamped = 0
-    for seg in segs:
-        if not isinstance(seg, dict):
+    for segment in segments:
+        if not isinstance(segment, dict):
             continue
-        if seg.get('type') != 'text' or seg.get('deliverable'):
-            continue
-        lr = seg.get('llmRound')
-        if lr is None:
-            continue
-        txt = segment_translations.get(lr)
-        if txt and txt.strip():
-            seg['translatedText'] = txt
-            stamped += 1
-    if stamped:
-        logger.debug('[Translate] stamped translatedText on %d/%d segments',
-                     stamped, len(segs))
-
-
-def _commit_translation_to_db(conv_id, msg_idx, field, translated_text,
-                              original_text=None, model=None, msg_id=None,
-                              segment_translations=None, fallback_segments=None):
-    """Write translated content directly into the conversation's messages in DB.
-
-    ``segment_translations`` (optional): a ``{round_num: 中文}`` map from the
-    incremental per-round translator. When present, each non-deliverable text
-    segment of ``msg['segments']`` whose ``llmRound`` matches a key is stamped
-    with ``translatedText`` so the settled segment-timeline render shows the
-    translated narration in place (interleaved with its tools), exactly like
-    the streaming preview. A pure projection co-located on the authoritative
-    segment — parallel to ``translatedContent`` beside ``content``; the
-    ``translatedContent`` blob semantics are unchanged.
-
-    See module docstring for the race-safety rationale.
-    """
-    if not conv_id:
-        logger.debug('[Translate] commit: missing conv_id — skipping')
-        return
-    if field is None and not segment_translations:
-        logger.debug('[Translate] commit: stamp-only with empty map — skipping')
-        return
-
-    lock = _get_commit_lock(conv_id)
-    with lock:
-        _commit_translation_inner(conv_id, msg_idx, field, translated_text,
-                                  original_text=original_text, model=model,
-                                  msg_id=msg_id,
-                                  segment_translations=segment_translations,
-                                  fallback_segments=fallback_segments)
-
-
-def _commit_translation_inner(conv_id, msg_idx, field, translated_text,
-                              original_text=None, model=None, msg_id=None,
-                              segment_translations=None, fallback_segments=None):
-    """CAS-retry body of _commit_translation_to_db (caller holds conv lock).
-
-    Resolution order for the target message:
-      1. msg_id (stable UUID) — preferred, robust against concurrent inserts
-      2. msg_idx (position) — legacy path, only used when id missing or stale
-      3. content match against original_text — final fallback for in-flight
-         tasks that pre-date the id-aware translate flow
-    """
-    from lib.database import get_thread_db
-
-    MAX_CAS_ATTEMPTS = 5
-    last_err = None
-    for attempt in range(MAX_CAS_ATTEMPTS):
-        try:
-            db = get_thread_db(DOMAIN_CHAT)
-            from lib.database.conversation_repository import load_conversation
-            snapshot = load_conversation(db, conv_id, user_id=DEFAULT_USER_ID)
-            if snapshot is None:
-                logger.warning('[Translate] commit: conv=%s not found — skipping',
-                               conv_id[:8])
-                return
-
-            messages = snapshot.messages
-            # CAS token: rev (RENDER_CONTRACT Phase 4 W6). The trigger bumps rev
-            # on every messages change, so the terminal sync / a sibling
-            # translate thread advancing rev between our SELECT and UPDATE makes
-            # us MISS (re-read + retry) rather than clobber. updated_at is still
-            # stamped in SET for freshness but is no longer the CAS token.
-            prev_rev = snapshot['rev']
-
-            # Resolution: id → idx → content. ID lookup is index-free and
-            # the canonical path; idx is a legacy position fallback.
-            msg = None
-            resolved_idx = None
-            resolved_via = None
-            if msg_id:
-                for i, candidate in enumerate(messages):
-                    if isinstance(candidate, dict) and candidate.get('_msgId') == msg_id:
-                        msg = candidate
-                        resolved_idx = i
-                        resolved_via = 'msgId'
-                        break
-            if msg is None and msg_idx is not None:
-                try:
-                    idx = int(msg_idx)
-                except (ValueError, TypeError) as _e_audit:
-                    logger.debug('[translate] _commit_translation_inner caught %s: %s', type(_e_audit).__name__, _e_audit)
-                    idx = -1
-                if 0 <= idx < len(messages):
-                    msg = messages[idx]
-                    resolved_idx = idx
-                    resolved_via = 'msgIdx'
-            if msg is None and original_text:
-                _orig_stripped = original_text.strip()[:200]
-                for i, candidate in enumerate(reversed(messages)):
-                    if not isinstance(candidate, dict):
-                        continue
-                    _cand_content = (candidate.get('content') or '').strip()[:200]
-                    if _cand_content and _cand_content == _orig_stripped:
-                        msg = candidate
-                        resolved_idx = len(messages) - 1 - i
-                        resolved_via = 'content'
-                        logger.info('[Translate] commit: resolved by content match for conv=%s msgId=%s '
-                                    '(msg_idx=%s out of range, len=%d)',
-                                    conv_id[:8], (msg_id or '')[:8] or '-',
-                                    msg_idx, len(messages))
-                        break
-            if msg is None:
-                logger.warning('[Translate] commit: target message not found for conv=%s '
-                               'msg_idx=%s msgId=%s len=%d — dropping translation',
-                               conv_id[:8], msg_idx, (msg_id or '')[:8] or '-',
-                               len(messages))
-                return
-            idx = resolved_idx if resolved_idx is not None else (
-                int(msg_idx) if msg_idx is not None else -1
-            )
-            needs_base_rewrite = False
-            # Backfill the message's stable id if the caller passed one and
-            # the message lacks it (e.g. translation started before the id
-            # backfill landed).  This makes future PATCHes id-addressable.
-            if msg_id and not msg.get('_msgId'):
-                msg['_msgId'] = msg_id
-                needs_base_rewrite = True
-
-            if field == 'translatedContent':
-                msg['translatedContent'] = translated_text
-                msg['_showingTranslation'] = True
-                msg['_translateDone'] = True
-                if model:
-                    msg['_translateModel'] = model
-            elif field == 'content':
-                needs_base_rewrite = True
-                if not msg.get('originalContent'):
-                    msg['originalContent'] = msg.get('content', '')
-                msg['content'] = translated_text
-            elif field is None:
-                # Stamp-only commit (path-independent narration backfill): the
-                # deliverable is already settled (translatedContent set) OR is
-                # itself already in the target language (no translatedContent
-                # needed) — either way translatedContent/content stay untouched
-                # and ONLY the interleaved narration segments are stamped below.
-                pass
-            else:
-                needs_base_rewrite = True
-                msg[field] = translated_text
-
-            # ★ Per-round narration stamp — PATH-INDEPENDENT. Runs for a
-            #   translatedContent commit AND for a field=None stamp-only commit,
-            #   so EVERY terminal path (incremental-owned finalize, whole-message
-            #   already-translated / already-target early-return, autopilot) can
-            #   enrich the narration segments regardless of how the deliverable
-            #   was settled. Keyed by llmRound ≡ round_num (exact — never
-            #   text-equality). Deliverable/terminal segments are excluded from
-            #   the timeline (rendered via translatedContent), so need nothing.
-            if segment_translations:
-                # ★ SELF-HEAL (SSOT ordering guarantee): the stamp is a no-op
-                #   when the resolved DB message carries no `segments` — which
-                #   happens when this commit raced ahead of (or the frontend
-                #   row-write CAS beat) _sync_result_to_conversation, the
-                #   reported 0/N bug. If the caller handed the authoritative
-                #   thin segments (task['segments'] captured at finalize),
-                #   splice them onto the message in THIS SAME CAS write so the
-                #   stamp has something to land on. Gated on a non-empty map so
-                #   a plain translatedContent commit never fabricates segments;
-                #   segments are backend-authoritative so this is not a second
-                #   source of truth.
-                _existing_segs = msg.get('segments')
-                if (not (isinstance(_existing_segs, list) and _existing_segs)
-                        and isinstance(fallback_segments, list)
-                        and fallback_segments):
-                    msg['segments'] = fallback_segments
-                    needs_base_rewrite = True
-                    logger.info('[Translate] commit: DB msg had no segments '
-                                '— spliced %d authoritative segments before '
-                                'stamp (conv=%s)', len(fallback_segments),
-                                conv_id[:8])
-                _stamp_segment_translations(msg, segment_translations)
-
-            new_updated = int(time.time() * 1000)
-            # CAS — only update if rev hasn't advanced since we read it.
-            # If another writer (frontend sync / terminal sync / other translate
-            # thread) changed messages in the meantime, the trigger bumped rev,
-            # so the row count will be 0 and we'll re-read and retry.
-            # ``rev`` is the WHERE token only — NEVER written in SET (the
-            # conversations_rev_bump_trg trigger is the sole bumper).
-            # The repository returns the CAS outcome while committing the blob
-            # and canonical rows together. The outer loop owns retry policy.
-            from lib.database.conversation_repository import (
-                conversation_rows_authoritative,
-                replace_messages,
-                update_message_translation_overlay,
-            )
-            if (conversation_rows_authoritative()
-                    and not needs_base_rewrite
-                    and field in ('translatedContent', None)):
-                result = update_message_translation_overlay(
-                    db, conv_id, idx, msg, messages,
-                    user_id=DEFAULT_USER_ID,
-                    expected_rev=prev_rev,
-                    updated_at=new_updated,
-                )
-            else:
-                result = replace_messages(
-                    db, conv_id, messages, user_id=DEFAULT_USER_ID,
-                    expected_rev=prev_rev,
-                    metadata={'updated_at': new_updated},
-                    changed_seqs=[idx])
-            if not result.applied:
-                # CAS miss — someone else wrote first.  Retry with fresh read.
-                logger.info('[Translate] commit CAS miss on conv=%s msg=%d '
-                            '(attempt %d/%d) — retrying',
-                            conv_id[:8], idx, attempt + 1, MAX_CAS_ATTEMPTS)
-                # Small sleep to avoid hot-spinning on a contended row.
-                time.sleep(0.05 * (attempt + 1))
+        segment_type = segment.get("type")
+        translated: Any = None
+        if segment_type == "thinking":
+            block_id = segment.get("blockId")
+            if block_id:
+                translated = translations_by_round.get(block_id)
+        elif segment_type == "text" and not segment.get("deliverable"):
+            round_number = segment.get("llmRound")
+            if round_number is None:
                 continue
-            logger.info('[Translate] Committed %s to conv=%s msg=%d via=%s '
-                        '(%d chars, attempt=%d)',
-                        field, conv_id[:8], idx, resolved_via or 'idx',
-                        len(translated_text), attempt + 1)
-            # Event-driven cross-device sync: the translated body changed, so
-            # push the post-write rev → a sibling tab with this conv open shows
-            # the translation without a manual refresh.
-            try:
-                from lib.conversations import notify_conv_changed
-                _tr_rev_row = db.execute(
-                    'SELECT rev FROM conversations WHERE id=? AND user_id=?',
-                    (conv_id, DEFAULT_USER_ID)).fetchone()
-                notify_conv_changed(conv_id, rev=(_tr_rev_row[0] if _tr_rev_row else None))
-            except Exception as _ne:
-                logger.debug('[Translate] conv-changed notify skipped conv=%s: %s',
-                             conv_id[:8], _ne)
-            return
-        except Exception as e:
-            last_err = e
-            logger.warning('[Translate] commit attempt %d/%d failed for '
-                           'conv=%s msg=%s: %s',
-                           attempt + 1, MAX_CAS_ATTEMPTS, conv_id[:8],
-                           msg_idx, e)
-            time.sleep(0.1 * (attempt + 1))
-    logger.error('[Translate] commit gave up after %d attempts for conv=%s msg=%s: %s',
-                 MAX_CAS_ATTEMPTS, conv_id[:8], msg_idx, last_err,
-                 exc_info=bool(last_err))
+            translated = translations_by_round.get(round_number)
+            if translated is None:
+                translated = translations_by_round.get(str(round_number))
+        else:
+            continue
+        if not isinstance(translated, str) or not translated.strip():
+            continue
+        if segment.get("translatedText") == translated:
+            continue
+        segment["translatedText"] = translated
+        stamped += 1
+    return stamped
+
+
+def _merge_translation(
+    projection: Mapping[str, Any],
+    *,
+    field: str | None,
+    translated_text: str,
+    model: str | None,
+    segment_translations: Mapping[Any, Any] | None,
+) -> tuple[dict[str, Any], bool]:
+    """Return a copied projection with only translation-owned fields changed."""
+    if field not in _WRITABLE_FIELDS and field is not None:
+        raise ValueError(f"Unsupported translation field: {field}")
+
+    updated = deepcopy(dict(projection))
+    before = deepcopy(updated)
+
+    if field == "translatedContent":
+        updated["translatedContent"] = translated_text
+        updated["_showingTranslation"] = True
+        updated["_translateDone"] = True
+        if model:
+            updated["_translateModel"] = model
+    elif field == "content":
+        updated.setdefault("originalContent", updated.get("content", ""))
+        updated["content"] = translated_text
+        updated["_translateDone"] = True
+        if model:
+            updated["_translateModel"] = model
+
+    stamped = _stamp_segment_translations(updated, segment_translations)
+    if stamped:
+        logger.debug("[Translate] stamped %d narration segment(s)", stamped)
+    return updated, updated != before
+
+
+def commit_translation_to_turn(
+    conversation_id: str,
+    turn_id: str,
+    field: str | None,
+    translated_text: str,
+    *,
+    user_id: Any,
+    model: str | None = None,
+    segment_translations: Mapping[Any, Any] | None = None,
+) -> dict[str, Any] | None:
+    """CAS-merge a translation into one settled authoritative turn.
+
+    ``field=None`` is a narration-only enrichment.  Missing identity is a
+    programming error: silently falling back to an array index would recreate
+    the dual-authority race this boundary exists to remove.
+    """
+    if not conversation_id:
+        raise ValueError("conversation_id is required")
+    if not turn_id:
+        raise ValueError("turn_id is required")
+    if user_id in (None, ""):
+        raise ValueError("user_id is required")
+    if field is None and not segment_translations:
+        return None
+
+    latest_conflict: LifecycleConflict | None = None
+    for attempt in range(_MAX_PROJECTION_ATTEMPTS):
+        turn = get_turn(conversation_id, turn_id, user_id=user_id)
+        projection, changed = _merge_translation(
+            turn.get("projection") or {},
+            field=field,
+            translated_text=translated_text,
+            model=model,
+            segment_translations=segment_translations,
+        )
+        if not changed:
+            return {"turn": turn, "conversationRevision": None}
+        try:
+            result = update_turn_projection(
+                conversation_id,
+                turn_id,
+                projection=projection,
+                expected_projection_revision=turn["projectionRevision"],
+                user_id=user_id,
+            )
+        except LifecycleConflict as exc:
+            if exc.code != "stale_projection":
+                raise
+            latest_conflict = exc
+            if attempt + 1 < _MAX_PROJECTION_ATTEMPTS:
+                time.sleep(0.02 * (attempt + 1))
+            continue
+
+        revision = result.get("conversationRevision")
+        try:
+            from lib.conversations import notify_conv_changed
+
+            notify_conv_changed(
+                conversation_id,
+                rev=revision,
+                user_id=user_id,
+            )
+        except Exception as exc:  # persistence succeeded; notification is repairable
+            logger.debug(
+                "[Translate] invalidation publish failed conv=%s turn=%s: %s",
+                conversation_id[:8],
+                turn_id[:8],
+                exc,
+            )
+        logger.info(
+            "[Translate] committed field=%s conv=%s turn=%s revision=%s",
+            field or "segments",
+            conversation_id[:8],
+            turn_id[:8],
+            revision,
+        )
+        return result
+
+    assert latest_conflict is not None
+    raise latest_conflict
+
+
+def mark_turn_translation_complete(
+    conversation_id: str,
+    turn_id: str,
+    *,
+    user_id: Any,
+) -> dict[str, Any] | None:
+    """Persist the terminal no-output verdict for already-target content."""
+    latest_conflict: LifecycleConflict | None = None
+    for attempt in range(_MAX_PROJECTION_ATTEMPTS):
+        turn = get_turn(conversation_id, turn_id, user_id=user_id)
+        projection = deepcopy(dict(turn.get("projection") or {}))
+        if (projection.get("_translateDone") is True
+                and projection.get("_translateSkippedReason")
+                == "already_target_language"):
+            return {"turn": turn, "conversationRevision": None}
+        projection["_translateDone"] = True
+        projection["_translateSkippedReason"] = "already_target_language"
+        projection.pop("translatedContent", None)
+        projection.pop("_showingTranslation", None)
+        try:
+            result = update_turn_projection(
+                conversation_id,
+                turn_id,
+                projection=projection,
+                expected_projection_revision=turn["projectionRevision"],
+                user_id=user_id,
+            )
+        except LifecycleConflict as exc:
+            if exc.code != "stale_projection":
+                raise
+            latest_conflict = exc
+            if attempt + 1 < _MAX_PROJECTION_ATTEMPTS:
+                time.sleep(0.02 * (attempt + 1))
+            continue
+        try:
+            from lib.conversations import notify_conv_changed
+
+            notify_conv_changed(
+                conversation_id,
+                rev=result.get("conversationRevision"),
+                user_id=user_id,
+            )
+        except Exception as exc:
+            logger.debug(
+                "[Translate] no-op invalidation failed conv=%s turn=%s: %s",
+                conversation_id[:8], turn_id[:8], exc,
+            )
+        return result
+    assert latest_conflict is not None
+    raise latest_conflict
+
+
+__all__ = [
+    "commit_translation_to_turn",
+    "mark_turn_translation_complete",
+    "_merge_translation",
+    "_stamp_segment_translations",
+]

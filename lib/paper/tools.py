@@ -12,27 +12,25 @@ Two execution families, both owned by chat and reused here:
 * everything else (read_files / code_exec / memory / todo / scheduler / …) —
   routed through the SHARED single-tool dispatch
   (``lib.tasks_pkg.executor._execute_tool_one``), so the exact handlers chat
-  runs serve the paper engines too. ``_execute_report_tool`` only translates
+  runs serve the paper engines too. ``execute_paper_tool`` only translates
   paper's 5-tuple result contract + event/display schema; per-tool branches
   must NEVER grow here (charter: fix the chassis, don't patch the caller).
 
 Also here: ``make_paper_exec_shim`` (the task-dict shim the shared dispatch
-expects, with the explicit unattended auto-approval policy), ``cap_tool_result``
-(the honest bounding contract — chat's spill-to-disk where read_files can page
-the result back, an explicit TRUNCATED marker where it cannot), and
-``paper_effective_tool_name`` (the no-project run_command → code_exec flip).
+expects, with the explicit unattended auto-approval policy),
+``PaperToolResultBudgetV2`` (the shared 8k/result + 24k/round owner-scoped
+artifact contract), and ``paper_effective_tool_name`` (the no-project
+run_command → code_exec flip).
 """
 
+import copy
+import hashlib
 import json
+from dataclasses import dataclass
+from typing import Any
 
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
 from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
-# NOTE: handlers.search is imported LAZILY inside _execute_report_tool, not
-# here. It re-exports tofu_search symbols at module level, and importing it
-# from THIS module bypasses the degradable guard in handlers/__init__.py —
-# lib/paper is on the boot chain (routes/paper.py → lib/paper/__init__), so a
-# module-level import would resurrect the whole-process kill that guard exists
-# to prevent (2026-07-31 GLIBCXX linkage ImportError, 8 occurrences).
 # Reuse chat's canonical seams — DON'T reimplement them here:
 #   • parse_and_repair_tool_args → JSON-decode + schema repair (the
 #     bare-string-`queries` → single-element-array fix lives in ONE place,
@@ -40,60 +38,462 @@ from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
 #   • tool_round_label → the exact string/dict-safe label chat renders,
 #     incl. the multi-line batch form and empty-list guards.
 from lib.tasks_pkg.tool_display import _short_url
-from lib.tasks_pkg.tool_display import tool_round_label as display_query_for  # noqa: F401 — re-exported for the report/QA engines
-from lib.tool_input_repair import parse_and_repair_tool_args  # noqa: F401 — re-exported for the report/QA engines
-# NOTE: tofu_search is imported LAZILY at its single use site below, not here.
-# This module is on the boot chain (routes/paper.py → lib/paper/__init__), and
-# tofu_search pulls trafilatura → lxml → libicuuc — which on 2026-07-31 raised a
-# GLIBCXX linkage ImportError eight times. A module-level import would make that
-# failure kill the whole server for a fault confined to web search.
-
+from lib.tasks_pkg.tool_display import tool_round_label as display_query_for
+from lib.tool_input_repair import parse_and_repair_tool_args
+from lib.tools.contracts import (
+    ToolContractError,
+    compile_execution_contract_documents,
+    validate_tool_arguments_from_documents,
+)
+from lib.tools.result_projection import TOOL_RESULT_PROJECTION_ITEMS_KEY
 logger = get_logger(__name__)
 
-# ── Lazy (PEP 562) re-export of chat's search seams ──────────────────────────
-# These six helpers live in lib.tasks_pkg.handlers.search, which re-exports
-# tofu_search symbols at MODULE level. lib/paper is on the boot chain
-# (routes/paper.py → lib/paper/__init__), so importing them eagerly here put
-# tofu_search → trafilatura → lxml → libicuuc on the boot path — and on
-# 2026-07-31 that chain's GLIBCXX linkage ImportError killed the WHOLE server
-# eight times for a fault confined to web search.
-#
-# A local import inside _execute_report_tool would fix the boot path but BREAK
-# the test seam: the paper suites monkeypatch ``lib.paper.tools._web_search_one``
-# (measured — 6 tests fail with AttributeError), and a function-local name is
-# invisible to that patch. Module ``__getattr__`` satisfies both: the import is
-# deferred to first ATTRIBUTE ACCESS, while the names still resolve through this
-# module's namespace, so monkeypatch.setattr keeps steering them. Same PEP 562
-# pattern lib/agent_core/__init__.py uses.
-_SEARCH_SEAM_MEMBERS = frozenset({
-    '_fetch_url_one',
-    '_format_fetch_display',
-    '_format_search_display_for_results',
-    '_vertical_header_for_llm',
-    '_vertical_to_sse_payload',
-    '_web_search_one',
+@dataclass(frozen=True)
+class PaperSearchBackend:
+    """Lazy adapter to chat's canonical search and fetch presentation seams."""
+
+    web_search_one: Any
+    fetch_url_one: Any
+    format_search_response: Any
+    format_search_display: Any
+    format_fetch_display: Any
+    vertical_header_for_llm: Any
+    vertical_to_sse_payload: Any
+
+
+def load_paper_search_backend() -> PaperSearchBackend:
+    """Load optional search dependencies only for an actual tool call."""
+    import importlib
+
+    from lib.tasks_pkg.handlers.search import _core as search_core
+    from lib.tasks_pkg.handlers.search import _display as search_display
+
+    tofu_search_module = importlib.import_module('tofu_search.search')
+    return PaperSearchBackend(
+        web_search_one=search_core._web_search_one,
+        fetch_url_one=search_core._fetch_url_one,
+        format_search_response=tofu_search_module.format_search_for_tool_response,
+        format_search_display=search_display._format_search_display_for_results,
+        format_fetch_display=search_display._format_fetch_display,
+        vertical_header_for_llm=search_display._vertical_header_for_llm,
+        vertical_to_sse_payload=search_display._vertical_to_sse_payload,
+    )
+
+
+__all__ = ['execute_paper_tool', 'make_research_tool_executor',
+           'make_paper_exec_shim', 'cap_tool_result',
+           'paper_effective_tool_name', 'freeze_paper_tool_epoch',
+           'build_research_tool_schemas', 'build_paper_full_tool_context',
+           'build_paper_full_tool_epoch', 'apply_paper_tool_epoch_guidance',
+           'PaperToolEpochV2', 'PaperSearchBackend', 'load_paper_search_backend',
+           'PaperToolResultBudgetV2']
+
+
+_PAPER_FULL_DIRECT_NAMES = frozenset({
+    'web_search',
+    'fetch_url',
+    'read_files',
+    'inspect_image',
+    # These two tiny schemas avoid an extra discovery round immediately after
+    # an 8k result is truncated. Execution still fails closed without an owner.
+    'read_tool_artifact',
+    'search_tool_artifact',
 })
-_TOFU_SEARCH_MEMBERS = frozenset({'format_search_for_tool_response'})
+_PAPER_UNATTENDED_EXCLUDED_NAMES = frozenset({'ask_human'})
 
 
-def __getattr__(name):
-    """Resolve chat's search seams on first access (PEP 562 lazy re-export)."""
-    if name in _SEARCH_SEAM_MEMBERS:
-        from lib.tasks_pkg.handlers import search as _search
-        return getattr(_search, name)
-    if name in _TOFU_SEARCH_MEMBERS:
-        # NOTE: ``from tofu_search import search`` yields the search FUNCTION —
-        # the package binds that name over its own submodule. Reach the module
-        # explicitly or the attribute lookup lands on a function object.
-        import importlib
-        return getattr(importlib.import_module('tofu_search.search'), name)
-    raise AttributeError('module %r has no attribute %r' % (__name__, name))
+def build_research_tool_schemas() -> list[dict]:
+    """Build the current search/fetch schemas for research-only paper agents."""
+    from lib.tools.search import build_fetch_url_tool, build_search_tool
 
-# Re-exported canonical helpers (chat's seams) the paper engines import from
-# this module. Listed here so the re-export is intentional, not dead code.
-__all__ = ['_execute_report_tool', 'parse_and_repair_tool_args', 'display_query_for',
-           'make_research_tool_executor', 'make_paper_exec_shim', 'cap_tool_result',
-           'paper_effective_tool_name']
+    return [build_search_tool(), build_fetch_url_tool()]
+
+
+def build_paper_full_tool_context(*, cfg=None, owner_user_id=0):
+    """Assemble one project-less chat-tier registry snapshot for paper agents."""
+    from lib.tools.registry import (
+        ToolContext,
+        assemble_tool_list,
+        resolve_enabled_plugins,
+    )
+
+    cfg = dict(cfg or {})
+    context = ToolContext(
+        cfg=cfg,
+        task_id='',
+        project_path='',
+        project_enabled=False,
+        search_mode='multi',
+        search_enabled=True,
+        fetch_enabled=True,
+        code_exec_enabled=True,
+        browser_enabled=False,
+        desktop_enabled=False,
+        enabled_plugins=resolve_enabled_plugins(cfg),
+        owner_user_id=int(owner_user_id or 0),
+    )
+    tools, _has_base = assemble_tool_list(context)
+    return tools, context
+
+
+def _paper_schema_name(schema):
+    if not isinstance(schema, dict):
+        return ''
+    function = schema.get('function')
+    if isinstance(function, dict):
+        return str(function.get('name') or '')
+    return str(schema.get('name') or '')
+
+
+@dataclass(frozen=True)
+class PaperToolEpochV2:
+    """One immutable-by-convention paper tool visibility/authority snapshot.
+
+    ``wire_schemas`` is the bounded provider projection.  The larger
+    ``executable_schemas`` catalog stays server-side and is the only authority
+    searched and executed by the local gateways.  All maps are derived from the
+    same registry/ToolContract snapshot, preventing a search hit from resolving
+    against a different schema or permission epoch.
+    """
+
+    wire_schemas: tuple[dict[str, Any], ...]
+    executable_schemas: tuple[dict[str, Any], ...]
+    contract_documents_by_name: dict[str, dict[str, Any]]
+    discovery_policy_by_name: dict[str, str]
+    namespace_by_name: dict[str, str]
+    search_text_by_name: dict[str, str]
+    script_safe_by_name: dict[str, bool]
+    schema_tokens: int
+    gateway_schema_tokens: int
+    schema_budget_tokens: int
+    result_envelope: str
+    epoch_hash: str
+    degraded_reason: str = ''
+
+    def telemetry(self):
+        """Return the bounded benchmark/runtime projection for this epoch."""
+        telemetry = {
+            'contractVersion': 'tofu.paper-tool-epoch/v2',
+            'epochHash': self.epoch_hash,
+            'wireSchemaTokens': self.schema_tokens,
+            'gatewaySchemaTokens': self.gateway_schema_tokens,
+            'configuredSchemaBudgetTokens': self.schema_budget_tokens,
+            'resultEnvelope': self.result_envelope,
+            'wireToolCount': len(self.wire_schemas),
+            'executableToolCount': len(self.executable_schemas),
+            'searchableToolCount': sum(
+                value == 'searchable'
+                for value in self.discovery_policy_by_name.values()),
+        }
+        if self.degraded_reason:
+            telemetry['degradedReason'] = self.degraded_reason
+        return telemetry
+
+
+def _resolve_paper_schema_budget(model, cfg, explicit_budget):
+    if explicit_budget is not None:
+        return max(0, int(explicit_budget))
+    config = cfg if isinstance(cfg, dict) else {}
+    tools_cfg = config.get('tools')
+    if isinstance(tools_cfg, dict) and 'schemaBudgetTokens' in tools_cfg:
+        return max(0, int(tools_cfg.get('schemaBudgetTokens') or 0))
+    if 'tools.schemaBudgetTokens' in config:
+        return max(0, int(config.get('tools.schemaBudgetTokens') or 0))
+    return 0
+
+
+def _paper_schema_budget_is_explicit(cfg, explicit_budget):
+    if explicit_budget is not None:
+        return True
+    config = cfg if isinstance(cfg, dict) else {}
+    tools_cfg = config.get('tools')
+    return (
+        isinstance(tools_cfg, dict) and 'schemaBudgetTokens' in tools_cfg
+    ) or 'tools.schemaBudgetTokens' in config
+
+
+def _resolve_paper_result_envelope(cfg):
+    """Use safe V2 by default, while honoring an explicit experiment arm."""
+    config = cfg if isinstance(cfg, dict) else {}
+    tools_cfg = config.get('tools')
+    value = (tools_cfg.get('resultEnvelope')
+             if isinstance(tools_cfg, dict) and 'resultEnvelope' in tools_cfg
+             else config.get('tools.resultEnvelope'))
+    if value is None:
+        return 'v2'
+    normalized = str(value or '').strip().lower()
+    if normalized not in {'legacy', 'v2'}:
+        logger.warning(
+            '[Paper:ToolResult] invalid resultEnvelope=%r; using safe v2',
+            value)
+        return 'v2'
+    return normalized
+
+
+def _build_paper_full_tool_epoch(*, owner_user_id=None, model='', cfg=None,
+                                 schema_budget_tokens=None):
+    """Build the bounded full-paper Tool Search epoch from one registry pass.
+
+    Full-paper agents keep the chat-tier executable catalog (including media,
+    scheduler, memory, and agent capabilities). The default provider surface is
+    the full uncapped catalog for every model. An explicit, model-neutral budget
+    may defer optional tools behind ``search_tools``/``execute_tools``; that
+    gateway pair independently targets 500 tokens. Budget drift degrades schema
+    detail but never makes a report request unavailable.
+    """
+    from lib.tools.gateway import (
+        EXECUTE_TOOLS_NAME,
+        LOCAL_GATEWAY_MAX_TOKENS,
+        SEARCH_TOOLS_NAME,
+        local_wire_tools,
+        tool_schema_tokens,
+    )
+
+    owner_id = int(owner_user_id or 0)
+    if owner_id < 0:
+        raise ValueError('paper tool epoch owner must be non-negative')
+    budget = _resolve_paper_schema_budget(
+        model, cfg or {}, schema_budget_tokens)
+    budget_explicit = _paper_schema_budget_is_explicit(
+        cfg or {}, schema_budget_tokens)
+    result_envelope = _resolve_paper_result_envelope(cfg or {})
+    registry_cfg = copy.deepcopy(dict(cfg or {}))
+    tools_cfg = dict(registry_cfg.get('tools') or {})
+    tools_cfg['resultEnvelope'] = result_envelope
+    registry_cfg['tools'] = tools_cfg
+    if owner_id > 0:
+        registry_cfg['userId'] = owner_id
+    registry_wire, ctx = build_paper_full_tool_context(
+        cfg=registry_cfg, owner_user_id=owner_id)
+
+    executable = []
+    # The uncapped product default retains the complete task-authorized catalog.
+    # Explicit zero remains the registered long-agent control arm's historical
+    # eager-only surface; it is an experiment choice, not a model-name default.
+    source_catalog = (
+        ctx.executable_tool_catalog
+        if budget or not budget_explicit
+        else registry_wire
+    )
+    for schema in source_catalog:
+        name = _paper_schema_name(schema)
+        if not name or name in _PAPER_UNATTENDED_EXCLUDED_NAMES:
+            continue
+        if owner_id <= 0 and name in {
+                'read_tool_artifact', 'search_tool_artifact'}:
+            continue
+        executable.append(copy.deepcopy(schema))
+    # The legacy full-paper surface predated Tool Search but already had the two
+    # owner continuation tools. Preserve that exact rollback shape when an arm
+    # explicitly selects schemaBudgetTokens=0.
+    if not budget and owner_id > 0:
+        known = {_paper_schema_name(schema) for schema in executable}
+        for schema in ctx.executable_tool_catalog:
+            name = _paper_schema_name(schema)
+            if name in {'read_tool_artifact', 'search_tool_artifact'} \
+                    and name not in known:
+                executable.append(copy.deepcopy(schema))
+                known.add(name)
+
+    executable_names = [_paper_schema_name(schema) for schema in executable]
+    if len(executable_names) != len(set(executable_names)):
+        raise ValueError('duplicate executable tool contract in paper full epoch')
+    executable_name_set = set(executable_names)
+    policy = ({name: ('eager' if name in _PAPER_FULL_DIRECT_NAMES
+                      else 'searchable')
+               for name in executable_names}
+              if budget else {name: 'eager' for name in executable_names})
+    searchable_count = sum(value == 'searchable' for value in policy.values())
+    wire = (local_wire_tools(
+        executable,
+        discovery_policy_by_name=policy,
+        discovery_catalog_size=len(executable),
+        searchable_count=searchable_count,
+        include_search=True,
+        schema_budget_tokens=budget,
+        model=model,
+        priority_names=_PAPER_FULL_DIRECT_NAMES,
+        required_names=_PAPER_FULL_DIRECT_NAMES,
+    ) if budget else copy.deepcopy(executable))
+    wire_names = {_paper_schema_name(schema) for schema in wire}
+    hidden_names = executable_name_set - wire_names
+    gateway_names = {SEARCH_TOOLS_NAME, EXECUTE_TOOLS_NAME}
+    if hidden_names and not gateway_names.issubset(wire_names):
+        raise ValueError(
+            'paper schema budget hid executable tools without Tool Search')
+
+    required_direct = {'web_search', 'fetch_url', 'read_files'}
+    missing_direct = required_direct - wire_names
+    if missing_direct:
+        raise ValueError(
+            'paper schema budget cannot retain required direct tools: '
+            + ', '.join(sorted(missing_direct)))
+
+    # Gateway schemas are visibility capabilities rather than members of the
+    # executable catalog, but their outer calls still need exact validation.
+    gateway_schemas = [
+        schema for schema in wire
+        if _paper_schema_name(schema) in gateway_names
+    ]
+    contract_schemas = [*executable, *gateway_schemas]
+    documents = compile_execution_contract_documents(
+        contract_schemas,
+        authoritative_documents_by_name=ctx.tool_contract_documents_by_name,
+        namespace='paper',
+    )
+    wire_tokens = tool_schema_tokens(wire, model=model)
+    gateway_tokens = (tool_schema_tokens(gateway_schemas, model=model)
+                      if gateway_schemas else 0)
+    if budget and wire_tokens > budget:
+        logger.warning(
+            '[Paper:ToolEpoch] functional wire schema exceeds cost target: '
+            'tokens=%d target=%d; request continues', wire_tokens, budget)
+    if gateway_tokens > LOCAL_GATEWAY_MAX_TOKENS:
+        logger.warning(
+            '[Paper:ToolEpoch] compact gateway exceeds cost target: '
+            'tokens=%d target=%d; request continues',
+            gateway_tokens, LOCAL_GATEWAY_MAX_TOKENS)
+    epoch_payload = json.dumps({
+        'wire': wire,
+        'executable': executable,
+        'policy': policy,
+        'resultEnvelope': result_envelope,
+        'namespaces': {
+            name: str(ctx.tool_namespace_by_name.get(name) or 'paper')
+            for name in executable_names
+        },
+    }, ensure_ascii=False, sort_keys=True, separators=(',', ':'), default=str)
+    epoch_hash = hashlib.sha256(epoch_payload.encode('utf-8')).hexdigest()
+
+    return PaperToolEpochV2(
+        wire_schemas=tuple(copy.deepcopy(wire)),
+        executable_schemas=tuple(copy.deepcopy(executable)),
+        contract_documents_by_name=dict(documents),
+        discovery_policy_by_name=policy,
+        namespace_by_name={
+            name: str(ctx.tool_namespace_by_name.get(name) or 'paper')
+            for name in executable_names
+        },
+        search_text_by_name={
+            name: str(ctx.search_text_by_name.get(name) or '')
+            for name in executable_names
+        },
+        script_safe_by_name={
+            name: bool(ctx.script_safe_by_name.get(name))
+            for name in executable_names
+        },
+        schema_tokens=wire_tokens,
+        gateway_schema_tokens=gateway_tokens,
+        schema_budget_tokens=budget,
+        result_envelope=result_envelope,
+        epoch_hash=epoch_hash,
+    )
+
+
+def _text_only_paper_tool_epoch(*, model='', cfg=None,
+                                schema_budget_tokens=None, error):
+    """Return a fail-closed epoch while preserving the paper text request."""
+    try:
+        budget = _resolve_paper_schema_budget(
+            model, cfg or {}, schema_budget_tokens)
+    except Exception as error:
+        logger.debug(
+            'Paper text-only fallback could not resolve schema budget: %s',
+            type(error).__name__,
+        )
+        budget = 0
+    try:
+        result_envelope = _resolve_paper_result_envelope(cfg or {})
+    except Exception as error:
+        logger.debug(
+            'Paper text-only fallback could not resolve result envelope: %s',
+            type(error).__name__,
+        )
+        result_envelope = 'v2'
+    epoch_payload = json.dumps({
+        'wire': [],
+        'executable': [],
+        'policy': {},
+        'resultEnvelope': result_envelope,
+        'namespaces': {},
+    }, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    # Keep user-visible/task telemetry useful without copying arbitrary plugin
+    # exception text, which may contain provider configuration or credentials.
+    reason = f'tool_epoch_assembly_failed:{type(error).__name__}'
+    return PaperToolEpochV2(
+        wire_schemas=(),
+        executable_schemas=(),
+        contract_documents_by_name={},
+        discovery_policy_by_name={},
+        namespace_by_name={},
+        search_text_by_name={},
+        script_safe_by_name={},
+        schema_tokens=0,
+        gateway_schema_tokens=0,
+        schema_budget_tokens=budget,
+        result_envelope=result_envelope,
+        epoch_hash=hashlib.sha256(epoch_payload.encode('utf-8')).hexdigest(),
+        degraded_reason=reason,
+    )
+
+
+def build_paper_full_tool_epoch(*, owner_user_id=None, model='', cfg=None,
+                                schema_budget_tokens=None):
+    """Build a paper tool epoch, degrading derived defects to text-only.
+
+    Owner identity remains a hard boundary. Once that input is valid, registry,
+    projection, and contract compilation are derived capabilities: on a defect
+    no tool may be advertised or executed, while the report/Q&A model request
+    can still run without tools.
+    """
+    owner_id = int(owner_user_id or 0)
+    if owner_id < 0:
+        raise ValueError('paper tool epoch owner must be non-negative')
+    try:
+        return _build_paper_full_tool_epoch(
+            owner_user_id=owner_id,
+            model=model,
+            cfg=cfg,
+            schema_budget_tokens=schema_budget_tokens,
+        )
+    except Exception as error:
+        logger.error(
+            '[Paper:ToolEpoch] derived tool assembly failed; disabling tools '
+            'and continuing text-only: %s', error, exc_info=True)
+        return _text_only_paper_tool_epoch(
+            model=model,
+            cfg=cfg,
+            schema_budget_tokens=schema_budget_tokens,
+            error=error,
+        )
+
+
+def apply_paper_tool_epoch_guidance(messages, epoch, *, lang='en'):
+    """Teach the gateway convention only when this arm exposes the gateway."""
+    wire_names = {_paper_schema_name(schema) for schema in epoch.wire_schemas}
+    if 'search_tools' not in wire_names or 'execute_tools' not in wire_names:
+        return False
+    if str(lang or '').lower().startswith('zh'):
+        guidance = (
+            '为控制上下文，部分已授权工具未直接显示。需要这些能力时先调用 '
+            'search_tools，再严格使用返回的精确工具名和 arguments_schema 调用 '
+            'execute_tools；不要猜隐藏工具名。')
+    else:
+        guidance = (
+            'To bound context, some authorized tools are not shown directly. '
+            'For such a capability, call search_tools first, then execute_tools '
+            'with the exact returned name and arguments_schema; never guess a '
+            'hidden tool name.')
+    for message in messages or ():
+        if not isinstance(message, dict) or message.get('role') != 'system':
+            continue
+        content = message.get('content')
+        if not isinstance(content, str):
+            continue
+        if guidance not in content:
+            message['content'] = content.rstrip() + '\n\n' + guidance
+        return True
+    return False
 
 
 def paper_effective_tool_name(fn_name):
@@ -107,13 +507,48 @@ def paper_effective_tool_name(fn_name):
     ``'run_command'``. Without this flip a paper ``run_command`` call would
     fall through to the PROJECT handler and die with "No project path".
     """
-    from lib.tools import CODE_EXEC_TOOL_NAMES
+    from lib.tools.code_exec import CODE_EXEC_TOOL_NAMES
     if fn_name in CODE_EXEC_TOOL_NAMES:
         return 'code_exec'
     return fn_name
 
 
-def make_paper_exec_shim(*, task_id, conv_id='', abort=None, cfg=None):
+def freeze_paper_tool_epoch(schemas, *, owner_user_id=None):
+    """Freeze the exact schemas sent in one paper-agent tool epoch.
+
+    Lazy registry-backed lists are materialized once, then the same snapshot
+    compiles the execution authority. Provider visibility and dispatch can
+    therefore never observe different registry states within a round.  A
+    positive owner adds the two bounded artifact-continuation tools.  They are
+    directly relevant only after ToolResultEnvelopeV2 is active, and are never
+    added to an empty/forced-final epoch.
+    """
+    frozen_schemas = list(schemas or ())
+    owner_id = int(owner_user_id or 0)
+    if owner_id < 0:
+        raise ValueError('paper tool epoch owner must be non-negative')
+    if frozen_schemas and owner_id > 0:
+        from lib.tools.tool_result_artifacts import (
+            build_tool_result_artifact_tools,
+        )
+        known_names = {
+            str(((schema.get('function') or {}).get('name') or ''))
+            for schema in frozen_schemas if isinstance(schema, dict)
+        }
+        frozen_schemas.extend(
+            schema for schema in build_tool_result_artifact_tools()
+            if str(((schema.get('function') or {}).get('name') or ''))
+            not in known_names
+        )
+    documents = compile_execution_contract_documents(
+        frozen_schemas, namespace='paper')
+    return frozen_schemas, documents
+
+
+def make_paper_exec_shim(*, task_id, conv_id='', abort=None, cfg=None,
+                         owner_user_id=None,
+                         tool_contract_documents_by_name=None,
+                         tool_epoch=None, model=''):
     """Build the shim task dict the SHARED dispatch (``_execute_tool_one``)
     expects, for a headless paper engine run.
 
@@ -135,7 +570,18 @@ def make_paper_exec_shim(*, task_id, conv_id='', abort=None, cfg=None):
     paper engines emit their OWN ``tool_start`` / ``tool_done`` events from
     the finalized ``round_entry``.
     """
-    return {
+    if tool_epoch is not None and not isinstance(tool_epoch, PaperToolEpochV2):
+        raise TypeError('tool_epoch must be PaperToolEpochV2')
+    cfg_payload = dict(cfg or {})
+    tools_cfg = dict(cfg_payload.get('tools') or {})
+    # Keep the shared handler aligned with the exact result contract entering
+    # model history. Safe shipped Paper behavior is V2; an explicit registered
+    # control arm may request the bounded legacy baseline.
+    tools_cfg['resultEnvelope'] = (
+        tool_epoch.result_envelope if tool_epoch is not None
+        else _resolve_paper_result_envelope(cfg_payload))
+    cfg_payload['tools'] = tools_cfg
+    shim = {
         'id': task_id,
         'convId': conv_id,
         '_suppressEvents': True,
@@ -143,59 +589,268 @@ def make_paper_exec_shim(*, task_id, conv_id='', abort=None, cfg=None):
         # _execute_shared_tool (the shared dispatch reads task['aborted']).
         'aborted': bool(abort and abort()),
         '_abort': abort,
-        '_cfg': dict(cfg or {}),
+        '_cfg': cfg_payload,
+        'model': str(model or ''),
+        # Nested execute_tools children use the ordinary shared pipeline, whose
+        # receipts and display projection are task-owned. They stay private to
+        # this headless shim because _suppressEvents is true.
+        'toolRounds': [],
+        'programRuns': [],
     }
+    if owner_user_id is not None:
+        owner_id = int(owner_user_id)
+        shim['_userId'] = owner_id
+        cfg_payload.setdefault('userId', owner_id)
+    if tool_epoch is not None:
+        executable = copy.deepcopy(list(tool_epoch.executable_schemas))
+        shim['_tool_schema'] = copy.deepcopy(list(tool_epoch.wire_schemas))
+        shim['_executable_tool_catalog'] = executable
+        shim['_toolContractDocumentsByName'] = dict(
+            tool_epoch.contract_documents_by_name)
+        shim['_toolDiscoveryPolicyByName'] = dict(
+            tool_epoch.discovery_policy_by_name)
+        shim['_executableToolNamespaceByName'] = dict(
+            tool_epoch.namespace_by_name)
+        shim['_executableToolSearchTextByName'] = dict(
+            tool_epoch.search_text_by_name)
+        shim['_toolScriptSafeByName'] = dict(tool_epoch.script_safe_by_name)
+        shim['_toolSearchCatalogSize'] = len(executable)
+        shim['_toolSearchableCount'] = sum(
+            value == 'searchable'
+            for value in tool_epoch.discovery_policy_by_name.values())
+        shim['_toolExecutionScope'] = 'available'
+        shim['_toolEpochHash'] = tool_epoch.epoch_hash
+        from lib.tools.gateway import EXECUTE_TOOLS_NAME, SEARCH_TOOLS_NAME
+        wire_names = {
+            _paper_schema_name(schema) for schema in tool_epoch.wire_schemas}
+        shim['_tool_gateway_names'] = [
+            name for name in (EXECUTE_TOOLS_NAME, SEARCH_TOOLS_NAME)
+            if name in wire_names]
+        shim['_toolSearchMode'] = (
+            'local' if SEARCH_TOOLS_NAME in wire_names else 'off')
+        if EXECUTE_TOOLS_NAME in wire_names:
+            # ToolScript is a bounded read-only reduction. Ordinary ``calls``
+            # still enter the normal permission/approval pipeline, including
+            # writes.
+            shim['_ptc_local'] = {
+                'tier': 'program',
+                'eligible': sorted(
+                    name for name, safe
+                    in tool_epoch.script_safe_by_name.items() if safe),
+            }
+    elif tool_contract_documents_by_name is not None:
+        shim['_toolContractDocumentsByName'] = dict(
+            tool_contract_documents_by_name)
+    return shim
 
 
-def cap_tool_result(content, tool_name, tool_use_id='', *, conv_id='',
-                    can_read=False):
-    """Bound a tool result before it enters the message history — honestly.
+def _validate_paper_tool_arguments(name, args, documents_by_name, *, task_id=''):
+    """Return validated/defaulted args or a stable no-execution rejection."""
+    try:
+        return (
+            validate_tool_arguments_from_documents(
+                documents_by_name, name, args),
+            None,
+            None,
+        )
+    except ToolContractError as exc:
+        metadata = exc.to_dict()
+        message = (
+            f'ERROR: Tool call `{name}` was NOT executed. '
+            f'[{exc.code}] {exc} Path: {exc.path}. {exc.next_action}'
+        )
+        logger.warning(
+            '[Paper:ToolContract] rejected tool=%s code=%s path=%s task=%s',
+            name, exc.code, exc.path, task_id)
+        audit_log(
+            'paper_tool_contract_rejected', tool=name, code=exc.code,
+            path=exc.path, retryable=exc.retryable, task_id=task_id)
+        return {}, metadata, message
 
-    Paper engines ride ``run_agent_loop``, which has NO compaction layer, and
-    historically HARD-TRUNCATED every tool result at 30k chars — silently
-    dropping the tail (the model then hallucinated the missing content). Chat's
-    Layer-0 (``compaction/_budget``) instead spills oversized results to disk
-    with a preview + path the model pages back via read_files. This helper
-    gives each engine family the honest version of that contract:
 
-    * ``can_read=True`` (report / Q&A — full tool set incl. read_files): spill
-      via the SAME ``_persist_to_disk`` chat uses; the returned summary carries
-      real file paths the model CAN open (read_files is in its tool set).
-    * ``can_read=False`` (insight / recommend / ideate — research-only set, no
-      read_files): truncate with an EXPLICIT marker naming the dropped size,
-      so the model knows the content is incomplete instead of guessing.
+def cap_tool_result(content, tool_name, tool_use_id='', *, owner_user_id=0,
+                    model='', observed_at_ms=0, world_version='',
+                    tool_arguments=None, projection_items=None):
+    """Project one raw paper tool result into ToolResultEnvelopeV2.
+
+    Every tool, including ``read_files``, is bounded to 8k model-visible
+    tokens.  Oversized content is persisted only through the owner-scoped
+    semantic artifact repository; no filesystem path or SQLite detail enters
+    application/model data.  Owner-less compatibility calls remain bounded but
+    honestly receive no recovery handle when persistence is unavailable.
+
+    ``tool_use_id`` is retained for source compatibility and diagnostics; the
+    content-addressed repository intentionally does not use call IDs as keys.
     """
-    from lib.tasks_pkg.compaction._constants import (
-        _DEFAULT_TOOL_RESULT_MAX,
-        TOOL_RESULT_MAX_CHARS,
+    del tool_use_id
+    from lib.tasks_pkg.compaction.api import budget_tool_result_v2
+    return budget_tool_result_v2(
+        tool_name, content, user_id=int(owner_user_id or 0), model=model,
+        observed_at_ms=int(observed_at_ms or 0),
+        world_version=str(world_version or ''),
+        tool_arguments=tool_arguments,
+        projection_items=projection_items,
     )
-    if not isinstance(content, str):
-        return content
-    cap = TOOL_RESULT_MAX_CHARS.get(tool_name, _DEFAULT_TOOL_RESULT_MAX)
-    # A 0 table value means BUDGET-EXEMPT (e.g. read_files — chat's L0 never
-    # caps it, see _BUDGET_EXEMPT_TOOLS): pass through whole, never spill.
-    if not cap or len(content) <= cap:
-        return content
-    if can_read:
-        from lib.tasks_pkg.compaction._persist import _persist_to_disk
-        return _persist_to_disk(content, tool_name, tool_use_id, conv_id)
-    logger.info('[Paper:Tool] %s result %d chars over %d budget — explicit '
-                'truncation (engine has no read_files)', tool_name,
-                len(content), cap)
-    return (
-        f'{content[:cap]}\n\n'
-        f'[TRUNCATED — the tool result was {len(content):,} chars, over the '
-        f'{cap:,}-char budget for "{tool_name}". The tail was dropped and is '
-        f'NOT recoverable in this engine (no read_files tool). Do NOT '
-        f'fabricate the missing content — narrow the query and retry if you '
-        f'need it.]'
-    )
+
+
+class PaperToolResultBudgetV2:
+    """Own one paper loop's selected single/aggregate result contract.
+
+    ``append`` is the only ingress for model-visible paper tool messages.
+    ``finish_round`` is wired to :func:`run_agent_loop`'s ``on_round_end`` so
+    duplicate or empty provider call IDs cannot evade the 24k aggregate cap.
+    A positive owner enables semantic artifact recovery; zero is a bounded,
+    no-persistence compatibility mode and is never promoted to a real owner.
+
+    Safe shipped Paper requests use ``v2``. ``legacy`` exists only as the
+    explicit pre-registered experiment baseline; it still passes through the
+    historical hard ceiling and aggregate budget rather than becoming
+    unbounded. Keeping both paths behind this one ingress prevents an arm from
+    silently changing unrelated loop semantics.
+    """
+
+    def __init__(self, *, owner_user_id=None, model='',
+                 result_envelope='v2', conv_id=''):
+        owner_id = int(owner_user_id or 0)
+        if owner_id < 0:
+            raise ValueError('paper tool result owner must be non-negative')
+        normalized_contract = str(result_envelope or '').strip().lower()
+        if normalized_contract not in {'legacy', 'v2'}:
+            raise ValueError('paper result envelope must be legacy or v2')
+        self.owner_user_id = owner_id
+        self.model = str(model or '')
+        self.result_envelope = normalized_contract
+        self.conv_id = str(conv_id or '')
+        self._sequence = 0
+        self._records_by_round = {}
+
+    def telemetry(self):
+        return {
+            'contractVersion': 'tofu.paper-tool-result-policy/v1',
+            'resultEnvelope': self.result_envelope,
+            'singleResultTokenBudget': (
+                8_000 if self.result_envelope == 'v2' else None),
+            'roundResultTokenBudget': (
+                24_000 if self.result_envelope == 'v2' else None),
+        }
+
+    @staticmethod
+    def _envelope_metadata(content):
+        try:
+            value = json.loads(content)
+        except (TypeError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _annotate_round_entry(self, record, visible, *, aggregate=False):
+        round_entry = record.get('round_entry')
+        if not isinstance(round_entry, dict):
+            return
+        from lib.tasks_pkg.compaction._budget import _result_tokens
+        raw = record['raw_content']
+        value = (self._envelope_metadata(visible)
+                 if self.result_envelope == 'v2' else {})
+        round_entry.update({
+            'resultContract': (
+                'tofu.tool-result/v2'
+                if self.result_envelope == 'v2' else 'legacy'),
+            'rawToolBytes': len(raw.encode('utf-8', errors='replace')),
+            'visibleToolBytes': len(visible.encode('utf-8', errors='replace')),
+            'rawToolTokens': _result_tokens(raw, self.model),
+            'visibleToolTokens': _result_tokens(visible, self.model),
+            'toolResultArtifactRef': str(value.get('artifactRef') or ''),
+            'toolResultTruncated': (
+                bool(value.get('truncated'))
+                if self.result_envelope == 'v2'
+                else visible != raw),
+            'toolContent': visible[:4000],
+        })
+        if aggregate:
+            round_entry['aggregateResultBudgetApplied'] = True
+
+    def append(self, messages, *, round_index, tool_name, tool_call_id,
+               content, round_entry=None, world_version='',
+               tool_arguments=None):
+        """Budget, append, and track one tool message for its logical round."""
+        import time
+        raw = (content if isinstance(content, str)
+               else json.dumps(content, ensure_ascii=False, default=str))
+        projection_items = (
+            round_entry.pop(TOOL_RESULT_PROJECTION_ITEMS_KEY, None)
+            if isinstance(round_entry, dict) else None)
+        if self.result_envelope == 'v2':
+            visible = cap_tool_result(
+                raw, tool_name, tool_call_id,
+                owner_user_id=self.owner_user_id, model=self.model,
+                observed_at_ms=int(time.time() * 1000),
+                world_version=world_version,
+                tool_arguments=tool_arguments,
+                projection_items=projection_items,
+            )
+        else:
+            from lib.tasks_pkg.compaction.api import (
+                budget_tool_result,
+                clamp_tool_result_text,
+            )
+            visible = budget_tool_result(
+                tool_name, raw, tool_use_id=tool_call_id,
+                conv_id=self.conv_id)
+            visible = clamp_tool_result_text(
+                tool_name, visible, tc_id=tool_call_id,
+                conv_id=self.conv_id)
+        message = {
+            'role': 'tool', 'tool_call_id': tool_call_id,
+            'content': visible,
+        }
+        messages.append(message)
+        self._sequence += 1
+        record = {
+            'key': f'{int(round_index)}:{self._sequence}',
+            'message': message,
+            'tool_name': str(tool_name or ''),
+            'tool_call_id': str(tool_call_id or ''),
+            'raw_content': raw,
+            'round_entry': round_entry,
+        }
+        self._records_by_round.setdefault(int(round_index), []).append(record)
+        self._annotate_round_entry(record, visible)
+        return visible
+
+    def finish_round(self, round_index):
+        """Enforce the selected aggregate policy on appended tool messages."""
+        records = self._records_by_round.pop(int(round_index), [])
+        if not records:
+            return
+        from lib.tasks_pkg.compaction.api import (
+            enforce_round_aggregate_budget,
+            enforce_round_aggregate_budget_v2,
+        )
+        values = {
+            record['key']: (
+                record['message']['content'], record['tool_name'],
+                record['tool_call_id'],
+            )
+            for record in records
+        }
+        if self.result_envelope == 'v2':
+            updated = enforce_round_aggregate_budget_v2(
+                values, user_id=self.owner_user_id, model=self.model,
+                observed_at_ms=0,
+            )
+        else:
+            updated = enforce_round_aggregate_budget(
+                values, conv_id=self.conv_id)
+        for record in records:
+            visible = updated[record['key']][0]
+            aggregate = visible != record['message']['content']
+            record['message']['content'] = visible
+            self._annotate_round_entry(record, visible, aggregate=aggregate)
 
 
 def _execute_shared_tool(name, args, shim, round_entry, abort):
     """Route one non-search tool call through chat's SHARED single-tool dispatch.
 
-    Returns the same 5-tuple ``_execute_report_tool`` produces for search
+    Returns the same 5-tuple ``execute_paper_tool`` produces for search
     tools; the display payload is whatever the chat handler finalized onto
     ``round_entry['results']`` (a ``_build_simple_meta`` / project-meta list —
     the exact shape ``renderToolRoundsHTML`` already renders for chat).
@@ -203,19 +858,42 @@ def _execute_shared_tool(name, args, shim, round_entry, abort):
     from lib.log import audit_log
     from lib.tasks_pkg.executor import _execute_tool_one
     from lib.tasks_pkg.tool_dispatch._flags import _WRITE_TOOLS
+    from lib.tools.gateway import EXECUTE_TOOLS_NAME, normalize_execute_request
 
     # Refresh the abort mirror — the shared dispatch reads task['aborted'].
     shim['aborted'] = bool(abort and abort())
 
     tc_id = (round_entry or {}).get('toolCallId', '')
     # Unattended auto-approval — explicit + audited (see make_paper_exec_shim).
-    # MCP tools get chat's conservative default-write classification.
-    if name in _WRITE_TOOLS or name.startswith('mcp__'):
-        audit_log('paper_tool_auto_approve', tool=name,
+    # A hidden write enters through execute_tools, so normalize its child names
+    # against the exact epoch before auditing; checking only the outer gateway
+    # would silently erase the paper-specific approval trail.
+    approval_names = [name]
+    if name == EXECUTE_TOOLS_NAME:
+        normalized = normalize_execute_request(
+            args,
+            catalog=shim.get('_executable_tool_catalog') or [],
+            namespace_by_name=(
+                shim.get('_executableToolNamespaceByName') or {}),
+            gateway_call_id=str((round_entry or {}).get('toolCallId') or ''),
+            source='paper_execute_calls',
+            contract_documents_by_name=(
+                shim.get('_toolContractDocumentsByName')
+                if '_toolContractDocumentsByName' in shim else None),
+        )
+        approval_names.extend(
+            str((call.get('function') or {}).get('name') or '')
+            for call in normalized.get('calls') or ())
+    for approval_name in dict.fromkeys(approval_names):
+        # MCP tools get chat's conservative default-write classification.
+        if (approval_name not in _WRITE_TOOLS
+                and not approval_name.startswith('mcp__')):
+            continue
+        audit_log('paper_tool_auto_approve', tool=approval_name,
                   task_id=shim.get('id', ''),
                   reason='unattended_headless_engine')
         logger.info('[Paper:Tool] auto-approved write-partition tool %s '
-                    '(unattended engine, task=%s)', name,
+                    '(unattended engine, task=%s)', approval_name,
                     str(shim.get('id', ''))[:8])
 
     tc = {'id': tc_id,
@@ -252,8 +930,9 @@ def _execute_shared_tool(name, args, shim, round_entry, abort):
     return content, display, None, None, None
 
 
-def _execute_report_tool(name, args_str, user_question='', abort=None,
-                         force_vertical=None, exec_shim=None, round_entry=None):
+def execute_paper_tool(name, args_str, user_question='', abort=None,
+                         force_vertical=None, exec_shim=None, round_entry=None,
+                         contract_documents_by_name=None, search_backend=None):
     """Execute a tool call from the report agent.
 
     Args:
@@ -302,7 +981,27 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
     # is never iterated character-by-character.
     args, _repair_log = parse_and_repair_tool_args(name, args_str)
 
+    documents = contract_documents_by_name
+    if (documents is None and exec_shim is not None
+            and '_toolContractDocumentsByName' in exec_shim):
+        documents = exec_shim['_toolContractDocumentsByName']
+    args, contract_error, rejection = _validate_paper_tool_arguments(
+        name, args, documents,
+        task_id=str((exec_shim or {}).get('id') or ''))
+    if contract_error is not None:
+        if round_entry is not None:
+            round_entry['status'] = 'rejected'
+            round_entry['results'] = []
+            round_entry['contractError'] = contract_error
+            round_entry['toolContent'] = rejection[:4000]
+        return rejection, [], None, None, None
+
     if name == 'web_search':
+        try:
+            backend = search_backend or load_paper_search_backend()
+        except Exception as exc:
+            logger.error('[Paper:Report:Tool] search backend unavailable: %s', exc)
+            return f'Error: search backend unavailable: {exc}', [], None, None, None
         freshness = args.get('freshness', '')
         batch_vertical = args.get('vertical', 'auto')
         queries = args.get('queries', [])
@@ -343,25 +1042,17 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
         single = len(query_specs) == 1
 
         def _search_one(spec):
-            # Resolved through THIS module (not a bare global) so the PEP 562
-            # lazy re-export applies AND a test's monkeypatch.setattr on
-            # lib.paper.tools._web_search_one still steers the call.
-            import sys as _sys
-            _self = _sys.modules[__name__]
-            _web_search_one = _self._web_search_one
-            _vertical_header_for_llm = _self._vertical_header_for_llm
-            _format_search_display_for_results = _self._format_search_display_for_results
-            format_search_for_tool_response = _self.format_search_for_tool_response
             q, f, v = spec
             logger.info('[Paper:Report:Tool] web_search query=%r', q[:100])
             # Reuse chat's helper so vertical search runs CONCURRENTLY (zero
             # added latency) and we get the engine breakdown for free.
-            results, search_diag, engine_breakdown, vertical_result = _web_search_one(
+            results, search_diag, engine_breakdown, vertical_result = backend.web_search_one(
                 q, user_question, f, vertical=v)
-            formatted = format_search_for_tool_response(results, search_diag=search_diag, query=q)
+            formatted = backend.format_search_response(
+                results, search_diag=search_diag, query=q)
             if vertical_result:
-                formatted = _vertical_header_for_llm(vertical_result) + formatted
-            display = _format_search_display_for_results(results)
+                formatted = backend.vertical_header_for_llm(vertical_result) + formatted
+            display = backend.format_search_display(results)
             return (formatted, display, search_diag, engine_breakdown, vertical_result)
 
         ordered = run_batch_concurrent(query_specs, _search_one, max_workers=2, tag='PaperSearch', abort=abort)
@@ -371,8 +1062,6 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
         all_verticals = []
         last_diag = None
         engine_breakdown_out = None
-        import sys as _sys
-        _vertical_to_sse_payload = _sys.modules[__name__]._vertical_to_sse_payload
         for idx, item in enumerate(ordered):
             q = query_list[idx]
             if item is None:
@@ -391,7 +1080,7 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
             # has no place to attach.
             if single and engine_breakdown:
                 engine_breakdown_out = engine_breakdown
-            v_payload = _vertical_to_sse_payload(vertical_result)
+            v_payload = backend.vertical_to_sse_payload(vertical_result)
             if v_payload:
                 v_payload = dict(v_payload)
                 v_payload['query'] = q
@@ -408,6 +1097,11 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
                 engine_breakdown_out, all_verticals or None)
 
     elif name == 'fetch_url':
+        try:
+            backend = search_backend or load_paper_search_backend()
+        except Exception as exc:
+            logger.error('[Paper:Report:Tool] fetch backend unavailable: %s', exc)
+            return f'Error: fetch backend unavailable: {exc}', [], None, None, None
         urls = args.get('urls', [])
         # Defensive: a non-list ``urls`` (string that repair could not
         # normalize) becomes a single entry — never iterated per-character.
@@ -434,20 +1128,16 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
             return 'Error: no valid url provided', [], None, None, None
 
         def _fetch_one(u):
-            import sys as _sys
-            _fetch_url_one = _sys.modules[__name__]._fetch_url_one
             logger.info('[Paper:Report:Tool] fetch_url url=%.100s', u)
             # Reuse chat's helper so binary-asset staging, content filtering,
             # rejected-scheme handling and filtered-vs-raw char counts all
             # match chat exactly.
-            return _fetch_url_one(u, user_question, fetch_reason='')
+            return backend.fetch_url_one(u, user_question, fetch_reason='')
 
         ordered = run_batch_concurrent(url_list, _fetch_one, max_workers=3, tag='PaperFetch', abort=abort)
 
         all_parts = []
         all_display = []
-        import sys as _sys
-        _format_fetch_display = _sys.modules[__name__]._format_fetch_display
         for idx, item in enumerate(ordered):
             u = url_list[idx]
             if item is None:
@@ -458,7 +1148,7 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
                     'raw_chars': 0, 'filtered_chars': 0,
                     'error_msg': 'internal fetch error (see logs)',
                 }
-            all_display.append(_format_fetch_display(item, _short_url))
+            all_display.append(backend.format_fetch_display(item, _short_url))
             page_content = item['page_content']
             filtered_chars = item['filtered_chars']
             error_msg = item.get('error_msg')
@@ -482,32 +1172,34 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
 
 
 def make_research_tool_executor(messages, *, user_question, abort_signal,
-                                execute_report_tool=None,
+                                result_budget,
+                                paper_tool_executor=None,
                                 on_tool_event=None, log_prefix='[Paper]',
-                                force_vertical=None):
+                                force_vertical=None,
+                                contract_documents_for_round=None,
+                                exec_shim=None):
     """Build the ``run_agent_loop`` ``execute_tool(rnd, tc)`` closure shared by
     the paper insight + recommend research agents.
 
     The two engines' per-tool-call handling was line-identical except for three
     axes — the log prefix, whether web_search is forced onto a vertical, and
-    which ``_execute_report_tool`` binding is used — so all three are
+    which ``execute_paper_tool`` binding is used — so all three are
     parameters here. The closure:
       1. parse+schema-repairs the tool args (``parse_and_repair_tool_args``),
       2. fires an ``on_tool_event`` ``tool_start`` (round-numbered),
-      3. runs ``execute_report_tool`` (passing ``force_vertical`` through),
+      3. runs ``paper_tool_executor`` (passing ``force_vertical`` through),
       4. fires ``tool_done`` with results + optional engineBreakdown/verticals,
-      5. appends the ``role:'tool'`` message (30k-char capped) to ``messages``.
+      5. appends the bounded V2 ``role:'tool'`` message to ``messages``.
 
-    ``execute_report_tool`` MUST be the caller's OWN facade-resolved binding
-    (e.g. ``lib.paper.insight_engine._execute_report_tool``) so a test patching
-    that engine's attribute still steers the executor exactly as the former
-    inline closure did; it defaults to this module's ``_execute_report_tool``.
+    ``paper_tool_executor`` is an explicit dependency injection point for an
+    engine-specific executor; it defaults to this module's
+    ``execute_paper_tool``.
     ``messages`` is mutated in place (the loop appends the tool turn), matching
     the former inline closures exactly. A private per-executor round counter
     numbers the tool-events independently of the loop's round index (parity
     with the original ``_round_counter`` closure state).
     """
-    _exec_report = execute_report_tool or _execute_report_tool
+    _exec_report = paper_tool_executor or execute_paper_tool
     _round_counter = {'n': 0}
 
     def _execute_tool(rnd, tc):
@@ -517,9 +1209,23 @@ def make_research_tool_executor(messages, *, user_question, abort_signal,
         # Parse + schema-repair once so the display label and the executor see
         # the same normalized shape (a bare-string queries/urls → array).
         fn_args, _ = parse_and_repair_tool_args(fn_name, fn_args_raw)
+        documents = None
+        if contract_documents_for_round is not None:
+            documents = contract_documents_for_round(rnd)
+            # A requested v2 epoch that is unexpectedly absent is an empty
+            # authority map, never a silent downgrade to legacy ``None``.
+            if documents is None:
+                documents = {}
+        fn_args, contract_error, rejection = _validate_paper_tool_arguments(
+            fn_name, fn_args, documents)
         _round_counter['n'] += 1
         rn = _round_counter['n']
         display_query = display_query_for(fn_name, fn_args)
+        round_entry = {
+            'roundNum': rn, 'llmRound': rnd,
+            'toolName': fn_name, 'query': display_query,
+            'toolCallId': tc_id, 'status': 'searching', 'results': None,
+        }
 
         if on_tool_event:
             on_tool_event({
@@ -529,13 +1235,38 @@ def make_research_tool_executor(messages, *, user_question, abort_signal,
 
         import time as _time
         tool_t0 = _time.time()
-        # Only pass force_vertical when set, so the insight path's call is
-        # byte-identical to its former inline closure (which passed no such
-        # kwarg); the recommend path passes its 'academic' vertical.
-        _extra = {'force_vertical': force_vertical} if force_vertical else {}
-        result, display_results, search_diag, engine_breakdown, verticals = _exec_report(
-            fn_name, fn_args_raw, user_question=user_question,
-            abort=abort_signal.is_set, **_extra)
+        if contract_error is not None:
+            # The model sees the stable retry hint, but no network/tool backend
+            # is touched and the event remains ``rejected`` rather than done.
+            result = rejection
+            display_results, search_diag = [], None
+            engine_breakdown, verticals = None, None
+            round_entry['status'] = 'rejected'
+            round_entry['contractError'] = contract_error
+        else:
+            # Execute the validated/defaulted value, not the pre-contract raw
+            # JSON. Keep the facade call signature compatible with engine
+            # monkeypatch seams by enforcing the contract in this closure.
+            normalized_args = json.dumps(fn_args, ensure_ascii=False)
+            _extra = ({'force_vertical': force_vertical}
+                      if force_vertical else {})
+            # Research epochs expose only search/fetch plus owner-scoped result
+            # continuation.  Continuation must use the same shared dispatcher
+            # as chat so ownership and typed errors remain authoritative.
+            if exec_shim is not None and fn_name not in {
+                    'web_search', 'fetch_url'}:
+                _extra.update({
+                    'exec_shim': exec_shim,
+                    'round_entry': round_entry,
+                    'contract_documents_by_name': documents,
+                })
+            (result, display_results, search_diag,
+             engine_breakdown, verticals) = _exec_report(
+                fn_name, normalized_args, user_question=user_question,
+                abort=abort_signal.is_set, **_extra)
+            if round_entry.get('status') != 'rejected':
+                round_entry['status'] = 'done'
+            round_entry['results'] = display_results
         tool_elapsed = _time.time() - tool_t0
         logger.info('%s:Tool %s → %d chars in %.1fs',
                     log_prefix, fn_name, len(result), tool_elapsed)
@@ -545,18 +1276,21 @@ def make_research_tool_executor(messages, *, user_question, abort_signal,
                 'type': 'tool_done', 'roundNum': rn, 'toolName': fn_name,
                 'toolCallId': tc_id, 'elapsed': round(tool_elapsed, 1),
                 'results': display_results,
+                'status': ('rejected' if round_entry.get('status') == 'rejected'
+                           else 'done'),
             }
+            if contract_error is not None:
+                done_ev['contractError'] = contract_error
+                done_ev['toolContent'] = result[:4000]
             if engine_breakdown:
                 done_ev['engineBreakdown'] = engine_breakdown
             if verticals:
                 done_ev['verticals'] = verticals
             on_tool_event(done_ev)
 
-        messages.append({
-            'role': 'tool', 'tool_call_id': tc_id,
-            # Research-only engines have no read_files — bound HONESTLY (an
-            # explicit TRUNCATED marker) instead of the old silent 30k slice.
-            'content': cap_tool_result(result, fn_name, tc_id, can_read=False),
-        })
+        result_budget.append(
+            messages, round_index=rnd, tool_name=fn_name,
+            tool_call_id=tc_id, content=result, round_entry=round_entry,
+            tool_arguments=fn_args)
 
     return _execute_tool

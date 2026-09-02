@@ -1,11 +1,12 @@
 {
-  "key": "local",
   "brand": "local",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "local",
   "category": "local",
   "name": "Local OpenAI-Compatible (vLLM / SGLang / Ollama)",
   "base_url": "",
   "balance_url": "",
   "thinking_format": "",
-  "models": [],
+  "offering_recipes": [],
   "_hint": "Use 'Bulk Add Local Endpoints' to register many self-hosted vLLM/SGLang/Ollama servers at once. The probe auto-discovers models from /v1/models on each endpoint."
 }

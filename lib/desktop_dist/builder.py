@@ -205,17 +205,25 @@ def _pipeline(workdir: str, version: str, sha: str, log_fh) -> str:
     #    three; an earlier draft of this builder checked only the first two
     #    and let a numpy-crashing child through to tar, measured 2026-08-01).
     #
-    #    HERMETIC on purpose: TOFU_SMOKE=1's import is read-only, but the
-    #    launcher ALSO spawns a re-exec'd server child that runs the FULL
-    #    startup — including _init_database. With this host's env that child
-    #    connects to the PRODUCTION PostgreSQL and runs DDL against it (it
-    #    deadlock-crashed against the live server, measured). Strip PG_* so
-    #    it falls back to a scratch SQLite, and kill any leftover child
-    #    before tar reads the tree (a lingering child writing logs/data next
-    #    to the exe is what made tar report "file changed as we read it").
-    env = {k: v for k, v in os.environ.items() if not k.startswith('PG')}
-    env['TOFU_SMOKE'] = '1'
-    env['TOFU_DB_PATH'] = os.path.join(workdir, 'smoke.db')
+    #    HERMETIC on purpose: the launcher spawns a full server child. Give
+    #    that child an explicit disposable personal Sidecar root so host
+    #    deployment secrets and production storage are unreachable.
+    blocked = {
+        'TOFU_DEPLOYMENT_MODE', 'TOFU_DISTRIBUTED_PREVIEW_MODE',
+        'TOFU_POSTGRES_DSN_FILE', 'TOFU_PROCESS_ROLE',
+        'TOFU_REDIS_URL_FILE', 'TOFU_REPLICA_ID',
+    }
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith('PG') and key not in blocked
+    }
+    env.update({
+        'TOFU_SMOKE': '1',
+        'TOFU_DEPLOYMENT_MODE': 'personal',
+        'TOFU_PROCESS_ROLE': 'all',
+        'TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE': '1',
+        'TOFU_STORAGE_PROJECT_ROOT': os.path.join(workdir, 'smoke-authority'),
+    })
     out = _sh(f'{dist}/Tofu/Tofu', log_fh, env=env, check=False)
     _kill_stragglers(dist)
     err = (out.stderr or b'').decode('utf-8', 'replace')

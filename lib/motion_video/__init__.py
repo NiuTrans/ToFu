@@ -2,7 +2,7 @@
 
 Tofu's native absorb-and-surpass of the vibe-motion/auto-motion workflow
 (SRT transcript → semantic storyboard → per-scene HyperFrames composition →
-render → concat → final.mp4). See docs/MOTION_VIDEO_DESIGN.md.
+render → concat → final.mp4). See docs/modules/ingest_media.md.
 
 Layers:
 

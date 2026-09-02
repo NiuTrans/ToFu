@@ -24,7 +24,10 @@ NEUTER: the shipped-source needle asserts update_check routes through the
 enricher — delete the call and the route-level test goes red.
 """
 
+
 from __future__ import annotations
+
+pytest_plugins = ('tests._credential_sidecar',)
 
 import asyncio
 import json
@@ -161,11 +164,6 @@ class UpdateCheckRouteTest(unittest.TestCase):
         _install_shim()
         cls._tmp = tempfile.TemporaryDirectory()
         from lib import api_keys
-        cls._orig_keys = api_keys._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(cls._tmp.name, 'api_keys.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        os.environ['TUNNEL_TOKEN'] = 'tt'
 
         import routes.api_v1.update as upd
         cls.upd = upd
@@ -184,14 +182,11 @@ class UpdateCheckRouteTest(unittest.TestCase):
         cls.app.register_blueprint(upd.api_v1_update_bp)
 
         from lib.api_keys import create_key
-        _r, cls.token = create_key(name='upd-check-test', scopes=['admin'])
+        _r, cls.token = create_key(owner_user_id=1, name='upd-check-test', scopes=['admin'])
 
     @classmethod
     def tearDownClass(cls):
         from lib import api_keys
-        api_keys._STORE_PATH = cls._orig_keys
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
         cls.upd._apply_state_path = cls._orig_state
         cls._tmp.cleanup()
 

@@ -60,7 +60,8 @@ from lib.request_parser import (
 )
 
 from .auth import (
-    SESSION_COOKIE, SESSION_COOKIE_MAX_AGE, current_auth, require_scope,
+    SESSION_COOKIE, SESSION_COOKIE_MAX_AGE, current_auth, request_principal,
+    require_scope,
 )
 
 logger = get_logger(__name__)
@@ -84,6 +85,7 @@ def _relay_settings() -> dict:
 def _user_payload(u) -> dict:
     return {
         'id': u.id,
+        'owner_id': u.owner_user_id,
         'email': u.email,
         'display_name': u.display_name,
         'role': u.role,
@@ -133,11 +135,13 @@ def _mint_session_key(user) -> tuple[dict, str]:
     if user.role == 'admin':
         return create_key(
             name=f'session:{user.email}', scopes=[], admin=True,
-            user_id=user.id,
+            owner_user_id=user.owner_user_id,
+            account_user_id=user.id,
             metadata={'origin': 'login', 'email': user.email})
     return create_key(
         name=f'session:{user.email}', scopes=scopes,
-        user_id=user.id,
+        owner_user_id=user.owner_user_id,
+        account_user_id=user.id,
         metadata={'origin': 'login', 'email': user.email})
 
 
@@ -244,10 +248,11 @@ def login_route():
           tags=['users'], public=True)
 def logout_route():
     ctx = current_auth()
-    if ctx is not None and ctx.key_id and not ctx.via_open_mode \
-            and not ctx.via_tunnel_token:
-        revoke_key(ctx.key_id)
-        audit_log('user_logout', user_id=ctx.user_id,
+    if ctx is not None and ctx.key_id and not ctx.via_open_mode:
+        revoke_key(
+            ctx.key_id, owner_user_id=ctx.owner_user_id,
+            tenant_id=ctx.tenant_id)
+        audit_log('user_logout', account_user_id=ctx.account_user_id,
                   key_id=ctx.key_id)
     resp = api_ok(ok=True)
     _response_obj(resp).set_cookie(SESSION_COOKIE, '', expires=0, max_age=0,
@@ -258,28 +263,23 @@ def logout_route():
 
 @api_v1_users_bp.route('/api/v1/users/me', methods=['GET'])
 @api_meta(summary='Current tenant user',
-          description='Returns the user the current session is bound '
-                       'to. ``{user: null}`` when unauthenticated or '
-                       'when the session\'s key has no ``user_id`` '
-                       '(legacy / personal install).',
+          description='Returns the explicit storage owner for the current '
+                       'principal. Authenticated responses always carry a '
+                       'positive ``ownerId``; unauthenticated responses carry '
+                       '``ownerId: null``.',
           tags=['users'], public=True)
 def me_route():
     ctx = current_auth()
     if ctx is None or not ctx.is_authenticated:
-        return api_ok(authenticated=False, user=None)
-    if not getattr(ctx, 'user_id', ''):
-        # Bearer token without a tenant binding (personal install,
-        # bootstrap admin key, open mode). Still authenticated, but
-        # not a "user" in the multi-tenant sense.
-        return api_ok(authenticated=True, user=None,
-                      principal={'name': ctx.name, 'key_id': ctx.key_id,
-                                  'scopes': sorted(ctx.scopes)})
-    user = get_user(ctx.user_id)
-    if user is None:
-        # The user row vanished between the key's creation and now.
-        return api_ok(authenticated=True, user=None,
-                      principal={'name': ctx.name, 'key_id': ctx.key_id})
-    return api_ok(authenticated=True, user=_user_payload(user),
+        return api_ok(authenticated=False, ownerId=None, user=None)
+    owner_id = request_principal().require_owner(context='users.me')
+    # Personal/open principals have no tenant-account row. A bound relay key
+    # keeps its account identifier on AuthContext independently of the numeric
+    # storage owner used by repositories and push routing.
+    account_id = str(ctx.account_user_id or '').strip()
+    user = get_user(account_id) if account_id else None
+    return api_ok(authenticated=True, ownerId=owner_id,
+                  user=_user_payload(user) if user is not None else None,
                   principal={'name': ctx.name, 'key_id': ctx.key_id,
                               'scopes': sorted(ctx.scopes)})
 
@@ -387,7 +387,8 @@ def mint_user_key_route(user_id):
     row, token = create_key(
         name=name, scopes=scopes,
         rate_limit_rpm=rpm, rate_limit_tpd=tpd,
-        user_id=user_id,
+        owner_user_id=user.owner_user_id,
+        account_user_id=user.id,
         metadata={'origin': 'admin_mint', 'email': user.email})
     return api_created(key=row, token=token)
 

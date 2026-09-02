@@ -7,7 +7,7 @@ a slow / flaky tunnel, then watch it snap to their conversation.
 Guarded here as SOURCE INVARIANTS (no jsdom — matches the repo's node-free
 source-assertion convention for boot wiring the e2e harness can't exercise):
 
-  1. main.js — right after `hydrateSidebarFromCache()` resolves (cache-first
+  1. main.js — right after `hydrateConversationCatalogFromCache()` resolves
      sidebar paint, BEFORE the server round-trip), boot opens a conversation
      via `loadConversation(...)`:
        • the SPECIFIC last-active conv when its id is known AND in the cache
@@ -23,13 +23,18 @@ source-assertion convention for boot wiring the e2e harness can't exercise):
      last conversation, matching ChatGPT.
 
   3. main_init_tasks.js — `_ensureNewest()` must NOT repaint over an in-flight
-     first-open skeleton (`_initialSwitchLoad` + `_needsLoad` + empty messages),
+     first-open skeleton (`_initialSwitchLoad` + `_turnSnapshotRequired` + empty messages),
      which would flash the generic "Loading conversation…" welcome over it.
 """
 import re
 from pathlib import Path
 
+import pytest
+
 from tests._runtime_sections import runtime_section_path
+
+
+pytestmark = pytest.mark.unit
 
 REPO = Path(__file__).resolve().parent.parent
 MAIN_JS = Path(runtime_section_path('main.js'))
@@ -55,8 +60,8 @@ def _strip_js_comments(src: str) -> str:
 
 
 def _hydrate_then_block(src: str, *, strip_comments: bool = False) -> str:
-    m = re.search(r"hydrateSidebarFromCache\(\)\s*\.then\(\s*\(\)\s*=>\s*\{([\s\S]*?)\}\)\s*\.catch", src)
-    assert m, "hydrateSidebarFromCache().then(...).catch() block not found"
+    m = re.search(r"hydrateConversationCatalogFromCache\(\)\s*\.then\(\s*\(\)\s*=>\s*\{([\s\S]*?)\}\)\s*\.catch", src)
+    assert m, "hydrateConversationCatalogFromCache().then(...).catch() block not found"
     block = m.group(1)
     return _strip_js_comments(block) if strip_comments else block
 
@@ -118,21 +123,19 @@ def test_last_active_conv_mirrored_to_localstorage_on_leave():
     assert "'pagehide'" in src, "must persist on pagehide (desktop tab close)"
 
 
-def test_ensure_newest_preserves_inflight_skeleton():
-    """_ensureNewest must skip its full repaint when the active conv is still
-    mid first-open load (skeleton painted): _initialSwitchLoad + _needsLoad +
-    empty messages. Otherwise it repaints the generic loading welcome over the
-    skeleton (downgrade flash). The repaint call itself moved
-    renderChat → ConvView.replaceAll (the ConvView fold) — the GUARD is what's
-    pinned, not the retired callee name."""
+def test_ensure_newest_delegates_to_authoritative_surface():
+    """Startup convergence may request a paint but cannot select a renderer.
+
+    The authoritative bridge itself refuses an unhydrated empty TurnStore, so
+    the old message-array skeleton guard no longer belongs in this function.
+    """
     src = INIT_JS.read_text()
     m = re.search(r"function _ensureNewest\s*\(\)\s*\{([\s\S]*?)\n\}", src)
     assert m, "_ensureNewest not found"
     body = m.group(1)
-    assert re.search(
-        r"_initialSwitchLoad[\s\S]{0,80}_needsLoad[\s\S]{0,80}messages\.length\s*===\s*0[\s\S]{0,80}ConvView\.replaceAll\(c\.id\)",
-        body,
-    ), "_ensureNewest must guard the full repaint (ConvView.replaceAll) against an in-flight first-open skeleton"
+    assert 'runtimeScope.requestAuthoritativeConversationRender(c.id)' in body
+    assert 'ConvView' not in body
+    assert 'renderChat' not in body
 
 
 if __name__ == "__main__":
@@ -140,5 +143,5 @@ if __name__ == "__main__":
     test_cold_open_falls_back_to_most_recent_cached_conv(); print("PASS cold-open")
     test_restore_id_has_durable_localstorage_fallback(); print("PASS durable-id")
     test_last_active_conv_mirrored_to_localstorage_on_leave(); print("PASS mirror")
-    test_ensure_newest_preserves_inflight_skeleton(); print("PASS skeleton-guard")
+    test_ensure_newest_delegates_to_authoritative_surface(); print("PASS surface-owner")
     print("ALL GREEN")

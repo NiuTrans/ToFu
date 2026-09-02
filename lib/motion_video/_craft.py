@@ -1,6 +1,6 @@
 """lib/motion_video/_craft.py — the deep craft corpus, reachable from the author.
 
-**The dead instruction** (epic pt_db5602172ac44b11 item ③, measured 2026-07-29).
+**The dead instruction** ( item ③, measured 2026-07-29).
 ``guide/WORKFLOW.md`` told the author *"Activate `hyperframes-motion` when a
 scene needs real choreography"* — but ``load_skill`` is a CHAT-agent tool,
 and the headless per-scene author's toolset is a fixed five

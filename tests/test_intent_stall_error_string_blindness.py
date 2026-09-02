@@ -13,7 +13,7 @@ WHY THE FIX MUST NOT SNIFF THE PROSE (the trap this file pins). "content
 contains 'Error:'" is NOT a usable criterion: ``read_files`` on a log file and
 ``grep_search`` matching lines that contain the word both return content full of
 ``Error:`` while having SUCCEEDED. A nudge fired on those would re-drive a model
-that did nothing wrong, and the measurement (docs/INTENT_STALL_MEASUREMENT.md)
+that did nothing wrong, and the measurement (docs/modules/task_engine.md)
 is explicit that a false positive costs more than a miss. ``run_command`` is the
 sharpest case: a command may legitimately print ``Error: ...`` on stdout and
 exit 0. So the failure must be STAMPED at the point the execution layer

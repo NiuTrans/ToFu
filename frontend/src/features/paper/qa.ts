@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import type { I18nKey } from '../../i18n';
 import {
   paperAttachPush,
   paperDetachPush,
@@ -106,7 +107,7 @@ function escape(value: unknown): string {
   return node.innerHTML;
 }
 
-function translate(key: string, fallback = key): string {
+function translate(key: I18nKey, fallback: string = key): string {
   const helper = globals().t;
   return typeof helper === 'function' ? helper(key) : fallback;
 }

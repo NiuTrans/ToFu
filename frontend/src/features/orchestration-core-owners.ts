@@ -92,6 +92,7 @@ import './orchestration/mutation-command';
 import './orchestration/run-plan-command';
 import './orchestration/durable-run-command';
 import './orchestration/workspace-save-command';
+import './orchestration/workspace-use-command';
 import './orchestration/workspace-load-command';
 import './orchestration/workspace-delete-command';
 import './orchestration/workspace-persistence';

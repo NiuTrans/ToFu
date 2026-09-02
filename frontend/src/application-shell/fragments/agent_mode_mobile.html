@@ -1,0 +1,37 @@
+<div class="mobile-agent-mode-group" role="radiogroup" data-i18n-aria-label="toolbar.agentMode">
+  <button type="button" class="mobile-sheet-item mobile-agent-mode-item active" id="mobileAgentModeStandard" data-mode="standard" role="radio" aria-checked="true" data-tofu-action="setAgentMode('standard');updateMobileSheet()">
+    <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
+    <span class="mobile-sheet-item-text">
+      <span class="mobile-sheet-item-name" data-i18n="toolbar.standardMode">常规</span>
+      <span class="mobile-sheet-item-desc" data-i18n="toolbar.standardModeDesc">普通的单轮对话方式</span>
+    </span>
+    <span class="mobile-sheet-item-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
+  </button>
+  <button type="button" class="mobile-sheet-item mobile-agent-mode-item" id="mobilePlanMode" data-mode="plan" role="radio" aria-checked="false" data-tofu-action="setAgentMode('plan');updateMobileSheet()">
+    <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="m9 13 2 2 4-4"/></svg></span>
+    <span class="mobile-sheet-item-text">
+      <span class="mobile-sheet-item-name" data-i18n="toolbar.planMode">计划模式</span>
+      <span class="mobile-sheet-item-desc" data-i18n="toolbar.planModeDesc">只读探索，可多轮讨论后再执行</span>
+    </span>
+    <span class="mobile-sheet-item-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
+  </button>
+  <button type="button" class="mobile-sheet-item mobile-agent-mode-item" id="mobileAutopilot" data-mode="autopilot" role="radio" aria-checked="false" data-tofu-action="setAgentMode('autopilot');updateMobileSheet()">
+    <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 10v6m11-11h-6m-10 0H1m17.66-6.34l-4.24 4.24m-5.66 5.66l-4.24 4.24m12.14 0l-4.24-4.24m-5.66-5.66L4.34 4.34"/></svg></span>
+    <span class="mobile-sheet-item-text">
+      <span class="mobile-sheet-item-name" data-i18n="toolbar.autopilot">目标模式</span>
+      <span class="mobile-sheet-item-desc" data-i18n="toolbar.autopilotDesc">虚拟用户自动回复，直到任务完成</span>
+    </span>
+    <span class="mobile-sheet-item-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
+  </button>
+</div>
+<div class="mobile-workflow-section" id="mobileWorkflowSection" style="display:none">
+  <div class="mobile-sheet-section-subtitle" data-i18n="toolbar.savedWorkflows">已保存工作流</div>
+  <button type="button" class="mobile-sheet-item" id="mobileFlow" data-tofu-action="openMobileFlowPicker()" aria-haspopup="dialog">
+    <span class="mobile-sheet-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h4a2 2 0 0 1 2 2V14"/></svg></span>
+    <span class="mobile-sheet-item-text">
+      <span class="mobile-sheet-item-name" data-i18n="toolbar.workflow">工作流</span>
+      <span class="mobile-sheet-item-desc" id="mobileFlowLabel" data-i18n="mobile.workflowDesc">选择已保存的工作流</span>
+    </span>
+    <span class="mobile-sheet-item-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
+  </button>
+</div>

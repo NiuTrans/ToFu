@@ -1,17 +1,11 @@
 """lib/browser/queue/_state.py — Process-wide shared state for the command queue.
 
-This module is the SINGLE HOME for every mutable module-level object the
-browser command queue relies on: the command dict, its lock, the SYNC notify
-Event, the async-waiter registry, the per-client registry, the legacy global
-poll time, and the thread-local active client. Every other submodule reads and
+This module is the single home for every mutable object the browser command
+queue relies on: the command dict, locks/events, async-waiter registry, and
+per-client registry. Every other module reads and
 mutates THESE objects (by reference / via this module) so the process has
 exactly one queue — a divergent copy would drop in-flight browser commands or
 lose client registration.
-
-``_last_poll_time`` is REBOUND (not mutated in place) by ``mark_poll`` and
-``wait_for_commands``. To preserve a single home for it those functions rebind
-it as ``_state._last_poll_time = now`` (module attribute) rather than via a
-per-file ``global`` — so there is exactly one binding in the process.
 """
 
 import os as _os
@@ -36,27 +30,23 @@ _notify = threading.Event()   # Signaled when a new command is added (SYNC waite
 # the SYNC enqueue path (send_browser_command, on a tool thread) wakes them
 # via loop.call_soon_threadsafe — the only thread-safe way to touch an
 # asyncio.Event from outside its loop. Each waiter is
-#   {'loop':, 'event':, 'client_id':}
+#   {'loop':, 'event':, 'client_id':, 'owner_user_id':}
 # and is responsible for removing ITSELF in a finally block (covers the
 # timeout, success, AND CancelledError/disconnect paths) so nothing leaks.
 _async_waiters = []           # list[dict]
 _async_waiters_lock = threading.Lock()
 
 
-def _wake_async_waiters(client_id=None):
+def _wake_async_waiters(client_id, owner_user_id):
     """Wake async poll waiters after a command was enqueued (called sync).
 
-    Wakes a waiter when the new command could be FOR it: unrouted commands
-    (client_id is None) wake everyone; a client-targeted command wakes only
-    the matching waiter and the anonymous (client_id-less) waiters. The
-    waiter re-checks get_pending_commands after waking, so an over-broad
-    wake is merely a harmless spurious loop, never a mis-delivery.
+    Only the exact owner/device poller is eligible for the command.
     """
     with _async_waiters_lock:
         waiters = list(_async_waiters)
     for w in waiters:
-        wcid = w.get('client_id')
-        if client_id and wcid and wcid != client_id:
+        if (w.get('client_id') != client_id
+                or w.get('owner_user_id') != owner_user_id):
             continue
         loop, event = w.get('loop'), w.get('event')
         if loop is None or event is None:
@@ -99,21 +89,14 @@ _clients_lock = threading.Lock()
 # Entries carry last_seen + ext_version + fail_count; reads filter by TTL
 # (the parked 5-min probe keeps a live stranded client fresh), writes are
 # capacity-capped.
-_locked_out = {}        # client_id → {first_seen, last_seen, ext_version, fail_count}
+_locked_out = {}        # (owner_user_id, client_id) → recovery metadata
 _locked_out_lock = threading.Lock()
 
-# Legacy global poll time (kept for backward compat with is_extension_connected).
-# REBOUND by mark_poll / wait_for_commands via ``_state._last_poll_time = ...``.
-_last_poll_time = 0
-
-
-# ── Thread-local active client for per-device routing ──
-_active_client = threading.local()
-
-def _set_active_client(client_id):
-    """Set the active browser client ID for the current thread."""
-    _active_client.client_id = client_id
-
-def _get_active_client():
-    """Get the active browser client ID for the current thread, or None."""
-    return getattr(_active_client, 'client_id', None)
+# ── Incompatible fleet registry ───────────────────────────────────────
+# An authenticated poll can still fail the protocol/capability handshake.
+# Such a device must never enter the command registry, but it is materially
+# different from "not installed": the owner needs an upgrade action. Keep a
+# separate bounded recovery note so status/UI can report that truth without
+# weakening protocol negotiation or retaining unbounded request history.
+_incompatible_clients = {}  # (owner_user_id, client_id) → recovery metadata
+_incompatible_clients_lock = threading.Lock()

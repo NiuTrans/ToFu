@@ -53,13 +53,9 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ORCH_PKG = os.path.join(_ROOT, 'lib/tasks_pkg/orchestrator')
 _BREAKER_PY = os.path.join(_ORCH_PKG, '_tool_timeout_breaker.py')
 _EVENTS_PY = os.path.join(_ROOT, 'lib/agent_core/events.py')
-from tests._runtime_sections import runtime_section_path
-
-_REDUCER_JS = runtime_section_path('ui/stream_reducer.js')
-
 # Closed enumeration of sanctioned ROUND_END reasons (registry-synced).
 _SANCTIONED_REASONS = {'tools', 'final', 'aborted', 'budget', 'error',
-                       'tool_timeout'}
+                       'tool_timeout', 'tool_loop'}
 
 
 def _read(path):
@@ -119,29 +115,11 @@ def test_events_registry_documents_tool_timeout_reason():
         'enumeration — /api/v1/capabilities consumers read this')
 
 
-@_unit
-def test_reducer_round_end_is_reason_agnostic():
-    """Pin 4 (tolerance contract): the frontend reducer's round_end case
-    must NOT branch on ev.reason — the wire may add new reasons freely as
-    long as closing stays unconditional."""
-    src = _read(_REDUCER_JS)
-    m = re.search(r"case 'round_end':\s*\{(.*?)\n    \}", src, re.S)
-    assert m, 'stream_reducer.js round_end case not found — file drifted?'
-    body = m.group(1)
-    assert 'reason' not in body, (
-        'reducer round_end case now READS ev.reason — new wire reasons are '
-        'no longer automatically tolerated; re-audit _SANCTIONED_REASONS '
-        'and the frontend close logic in lockstep')
-    assert '_currentRound' in body, (
-        'round_end case must keep clearing _currentRound (the close)')
-
-
 if __name__ == '__main__':
     for fn in [
         test_breaker_branch_emits_round_end_before_break,
         test_all_round_end_sites_use_sanctioned_reasons,
         test_events_registry_documents_tool_timeout_reason,
-        test_reducer_round_end_is_reason_agnostic,
     ]:
         fn()
         print('ok', fn.__name__)

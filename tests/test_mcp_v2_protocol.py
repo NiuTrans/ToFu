@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import os
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -22,10 +24,14 @@ pytestmark = pytest.mark.unit
 _RAW_SERVER = textwrap.dedent(
     r'''
     import json
+    import os
     import sys
 
     era = sys.argv[1]
     trace_path = sys.argv[2]
+    if len(sys.argv) > 3:
+        with open(sys.argv[3], 'w', encoding='utf-8') as pid_file:
+            pid_file.write(str(os.getpid()))
 
     def send(request_id, *, result=None, error=None):
         message = {'jsonrpc': '2.0', 'id': request_id}
@@ -176,3 +182,48 @@ def test_legacy_peer_falls_back_after_discover_rejection(tmp_path):
         # cannot probe the new protocol, but must keep legacy peers usable.
         assert methods[0] == 'initialize'
     assert 'notifications/initialized' in methods
+
+
+def test_idle_stdio_server_exits_and_transparently_restarts(tmp_path,
+                                                            monkeypatch):
+    """Parking must reclaim the OS process, not only clear Python fields."""
+    _require_sdk_v2()
+    import lib.mcp.client._bridge as bridge_module
+
+    server = tmp_path / 'raw_parkable_mcp.py'
+    server.write_text(_RAW_SERVER, encoding='utf-8')
+    trace = tmp_path / 'parkable.trace'
+    pid_file = tmp_path / 'parkable.pid'
+    config = {
+        'transport': 'stdio',
+        'command': sys.executable,
+        'args': [str(server), 'modern', str(trace), str(pid_file)],
+        'enabled': True,
+    }
+    bridge = bridge_module.MCPBridge()
+    monkeypatch.setattr(bridge_module, 'MCP_STDIO_IDLE_SECONDS', 1)
+    try:
+        tools = bridge.connect_server('parkable', config)
+        assert [tool.name for tool in tools] == ['echo_era']
+        old_pid = int(pid_file.read_text(encoding='utf-8'))
+        assert os.path.exists(f'/proc/{old_pid}')
+
+        bridge._last_activity['parkable'] = time.monotonic() - 2
+        assert bridge._park_idle_stdio_server('parkable') is True
+        for _ in range(40):
+            if not os.path.exists(f'/proc/{old_pid}'):
+                break
+            time.sleep(0.05)
+        assert not os.path.exists(f'/proc/{old_pid}'), \
+            'stdio child survived a completed owner shutdown'
+        assert bridge.list_servers()[0]['parked'] is True
+        assert bridge.tool_count == 1
+
+        result = bridge.call_tool('mcp__parkable__echo_era', {})
+        new_pid = int(pid_file.read_text(encoding='utf-8'))
+        assert result == 'modern-ok'
+        assert new_pid != old_pid
+        assert os.path.exists(f'/proc/{new_pid}')
+        assert bridge.list_servers()[0]['parked'] is False
+    finally:
+        bridge.disconnect_all()

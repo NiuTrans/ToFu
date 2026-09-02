@@ -135,12 +135,15 @@ def test_registered_context_is_the_model_info_source_of_truth():
 
 
 def test_glm53_uses_the_complete_registration_shape():
+    from lib.provider_template_recipes import offering_recipes
+
     for filename in ('glm.json', 'meituan.json'):
         template = json.loads((
             ROOT / 'static' / 'provider_templates' / filename
         ).read_text(encoding='utf-8'))
-        row = next(model for model in template['models']
-                   if model.get('model_id') == 'glm-5.3')
+        recipes = offering_recipes(template, allow_legacy=False)
+        row = next(
+            model for model in recipes if model.get('model_id') == 'glm-5.3')
         assert 'cost' not in row, filename
         assert row['context_window'] == 1_000_000, filename
         assert row['pricing']['input'] == pytest.approx(3.45), filename

@@ -1,3 +1,7 @@
+# Compatibility projection for personal/bootstrap installs that still consume
+# a requirements file. It is the union of core dependencies and the ``app`` +
+# ``worker`` extras; API-only containers install the smaller core set from
+# ``uv.lock``.
 quart>=0.20
 hypercorn>=0.17
 # cryptography — auto-generates TLS certificates for zero-config HTTP/2.
@@ -91,7 +95,17 @@ psutil>=5.9
 # >=0.9.0: read-only SiteSearchProvider, request-bound provider propagation,
 # and the browser-only SSRF bypass used by native site adapters. HARD floor:
 # chatui registers the site provider and passes deepen_enabled at startup.
-tofu-search>=0.9.0
+# >=0.10.3: the 2026-08-21 proxy chain trio. 0.10.1 routes per-call config
+# overrides to the engine layer (bind_call_config ContextVar — without it a
+# per-call proxy_url never reached the engines); 0.10.2 makes SearXNG raise on
+# total blockage instead of returning a fake "no matches" [] (the dead engine
+# masquerading as the survivor); 0.10.3 routes the FETCH layer through the
+# configured proxy — before it, do_request never passed proxies=, so on a host
+# without direct egress every page body failed with DNS errors and search
+# silently degraded to snippet-only. SOFT floor for startup (the bridge
+# introspects SearchConfig fields before passing 0.10.x kwargs), but the fetch
+# proxy fix is operationally critical on no-egress hosts — do not lower.
+tofu-search>=0.10.3
 trafilatura>=1.6
 # playwright is optional — powers the JS-rendered fallback in tofu_search.fetch.
 # On Linux, Chromium needs X11/GTK shared libs (libatk, libgbm, libXcomposite, …).
@@ -100,8 +114,6 @@ trafilatura>=1.6
 #                 (atk-1.0, xorg-libxcomposite, mesa-libgbm-cos7-x86_64, …) and
 #                 tofu_search/fetch/playwright_pool.py auto-augments LD_LIBRARY_PATH.
 playwright>=1.40
-Pillow>=10.0
-python-pptx>=0.6.21
 Pillow>=10.0
 python-pptx>=0.6.21
 # fontTools — CFF→glyf conversion for PPTX font embedding (lib/slides/
@@ -182,10 +194,14 @@ httpx>=0.28
 # the same payload in ~5 ms, dropping the loop stall below the danger threshold.
 # A stdlib iterencode fallback covers the rare inputs orjson rejects (non-str keys).
 orjson>=3.9
-# Loaded only by the PostgreSQL Storage Sidecar adapter. Keeping it in the
-# cross-platform artifact makes explicit TOFU_DB_BACKEND=postgres fail on
-# backend preflight, not on a missing client driver.
-psycopg2-binary>=2.9
+# Pydantic validates generated OpenAPI 3.1 boundary types. It is imported by
+# the default HTTP application, so the compatibility projection must declare
+# it directly rather than relying on a transitive dependency.
+pydantic>=2.7,<3
+# Loaded only by the external-PostgreSQL Storage Sidecar adapter.  The binary
+# extra supplies libpq consistently; the pool extra is the supported Psycopg 3
+# synchronous ConnectionPool used by sidecar worker threads.
+psycopg[binary,pool]>=3.2
 # tiktoken — exact BPE tokenizer (cl100k/o200k) used by lib/token_counter as
 # the local "exact" tier for OpenAI/Claude-family models. Without it the
 # resolver chain falls through to the CJK/entropy heuristic, which under-counts
@@ -228,13 +244,6 @@ PyYAML>=6.0
 # it here guarantees uvx is on PATH inside the conda env without requiring a
 # separate curl|sh bootstrap.
 uv>=0.4
-# SQLAlchemy Core (NOT the ORM) — used by lib/database/_core_schema.py as a
-# single-source table-definition + dual-dialect DDL/DML *compiler* for NEW
-# tables (PG primary, SQLite fallback), retiring the hand-maintained twin-DDL
-# + regex _sql_translate path for those tables. Compile-only: no Engine is
-# opened; execution stays on the existing get_db() connection. Importing the
-# _core_schema module is optional — the legacy DB path does not depend on it.
-sqlalchemy>=2.0
 # zhconv — pure-Python (MediaWiki tables, MIT) Traditional↔Simplified Chinese
 # converter. Used by lib/transcription/_zh.py as a FAIL-SAFE last gate on voice
 # transcripts: Whisper-family / omni-chat ASR models emit Mandarin as Traditional

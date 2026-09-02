@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "responsibility": "Ordered authoring sections for the generated settings stylesheet.",
+  "output": "static/settings.css",
+  "sections": [
+    {
+      "path": "01-core-panels.css"
+    },
+    {
+      "path": "02-mcp-apps.css"
+    },
+    {
+      "path": "03-model-visibility.css"
+    },
+    {
+      "path": "04-search-network-advanced.css"
+    },
+    {
+      "path": "05-devices.css"
+    }
+  ]
+}

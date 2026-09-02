@@ -10,6 +10,16 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 
+def _display_url_host(bind_host: str) -> str:
+    """Turn a listener address into a browser-copyable URL host."""
+    host = str(bind_host or '').strip()
+    if host in ('', '0.0.0.0', '::', '[::]'):
+        return 'localhost'
+    if ':' in host and not host.startswith('['):
+        return f'[{host}]'
+    return host
+
+
 def announce_server_ready(
     *,
     host: str,
@@ -22,7 +32,6 @@ def announce_server_ready(
     vscode_proxy: str,
     feishu_ok: bool,
     mcp_config: Mapping[str, Any],
-    tunnel_token: str,
     auth_mode: str,
     bootstrap_token: str,
     boot_started_at: float,
@@ -48,11 +57,12 @@ def announce_server_ready(
     else:
         h2_status = 'HTTP/1.1 (proxy-safe default; TLS is opt-in)'
 
+    display_url = f'{protocol}://{_display_url_host(host)}:{port}'
     lines = ['=' * 56, f'  🫧 Tofu Server  v{__version__}  [ASYNC]']
     if behind_proxy and vscode_proxy:
         lines.append(f"  {vscode_proxy.replace('{{port}}', str(port))}")
     lines.extend([
-        f'  {protocol}://{host}:{port}',
+        f'  {display_url}',
         f'  Protocol: {h2_status}',
         '  Server: Hypercorn (ASGI)',
     ])
@@ -64,16 +74,14 @@ def announce_server_ready(
         lines.append('  💬  Feishu Bot: ON')
     if mcp_config:
         lines.append(f'  🔌  MCP Apps: {len(mcp_config)} server(s)')
-    if tunnel_token:
-        lines.append('  🔒  Tunnel Auth: ON (deprecated — prefer API keys)')
-
     if auth_mode == 'open':
         lines.append('  🔓  Auth: OPEN — no token required')
         if host not in ('127.0.0.1', 'localhost', '::1'):
             lines.extend([
-                f'  ⚠️   Bound to {host}: API is reachable on the LAN WITHOUT auth.',
-                '      Switch to private mode in Settings → API Keys, or set '
-                'TOFU_AUTH_MODE=private.',
+                f'  ⚠️   Bound to {host}: API is reachable on the LAN WITHOUT '
+                'auth unless an outer container/proxy publishes loopback only.',
+                '      Keep that outer boundary local, or switch to private '
+                'mode / set TOFU_AUTH_MODE=private.',
             ])
     elif auth_mode == 'private':
         lines.append('  🔒  Auth: PRIVATE — Bearer token required')
@@ -84,7 +92,7 @@ def announce_server_ready(
         lines.extend([
             '  🔑  Personal admin key minted (first boot)',
             f'      Token: {bootstrap_token}',
-            f'      Open: {protocol}://{host}:{port}/?token={bootstrap_token}',
+            f'      Open: {display_url}/?token={bootstrap_token}',
             '      Saved to data/config/.first_run_token (chmod 0600)',
             '      (auto-cleared when this bootstrap key is revoked)',
         ])
@@ -142,9 +150,13 @@ def announce_server_ready(
 
     boot('Ready — handing off to Hypercorn.')
     try:
-        sys.stderr.write(f'\n{banner}\n\n')
+        # stderr is commonly redirected into a durable process-console file.
+        # The bootstrap token remains recoverable from its chmod-0600 file;
+        # never duplicate the plaintext credential into a general log.
+        from lib.log_redaction import redact_text
+        sys.stderr.write(f'\n{redact_text(banner)}\n\n')
         sys.stderr.flush()
-    except OSError as exc:
+    except Exception as exc:
         boot_logger.debug('[Server] ready banner console echo failed: %s', exc)
     return banner
 

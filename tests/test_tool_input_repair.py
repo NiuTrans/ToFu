@@ -446,7 +446,7 @@ def test_salvage_valid_input_never_reaches_rung():
 _KNOWN = {
     'read_files', 'grep_search', 'list_dir', 'find_files', 'write_file',
     'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents',
-    'run_command', 'web_search', 'fetch_url', 'create_project',
+    'run_command', 'web_search', 'fetch_url',
     'mcp__github__create_issue',
 }
 
@@ -475,6 +475,15 @@ def test_resolve_static_aliases():
         name, kind = resolve_tool_name(wrong, known=_KNOWN)
         assert name == canonical, f'{wrong!r} -> {name!r}, expected {canonical!r}'
         assert kind == 'alias'
+
+
+def test_tool_result_reader_alias_never_shadows_real_artifact_tool():
+    assert resolve_tool_name(
+        'read_artifact', known={'read_tool_artifact'},
+    ) == ('read_tool_artifact', 'alias')
+    assert resolve_tool_name(
+        'read_artifact', known={'read_artifact', 'read_tool_artifact'},
+    ) == ('read_artifact', None)
 
 
 def test_resolve_casefold_match():

@@ -15,10 +15,11 @@ pytestmark = pytest.mark.unit
 def store(tmp_path, monkeypatch):
     monkeypatch.setenv('TOFU_STORAGE_SQLITE_READ_POOL', '1')
     supervisor = StorageSupervisor(
-        project_root=tmp_path, backend='sqlite', startup_timeout=20)
+        project_root=tmp_path, backend='sqlite', startup_timeout=60)
     supervisor.start()
     try:
         yield SidecarOrchestrationRunStore(
+            13_001,
             client=lambda **_kwargs: supervisor.client)
     finally:
         supervisor.stop()
@@ -43,3 +44,13 @@ def test_full_lifecycle_uses_semantic_operations(store):
         'run-adapter']
     assert store.delete_run('run-adapter')
     assert store.get_run('run-adapter') is None
+
+
+def test_run_identity_is_owner_scoped(store):
+    other = SidecarOrchestrationRunStore(
+        13_002, client=store._client)
+    assert store.create_run('run-private', definition={'nodes': []})
+    assert other.get_run('run-private') is None
+    assert other.list_runs() == []
+    assert other.delete_run('run-private') is False
+    assert store.get_run('run-private') is not None

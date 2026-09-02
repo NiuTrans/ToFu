@@ -20,12 +20,15 @@ import json
 from typing import AsyncGenerator
 
 from lib.compat._common import (
+    CompatTerminalFailure,
     apply_common_cfg,
     apply_thinking_cfg,
     apply_tools_and_personal_defaults,
+    require_deliverable_terminal,
     short_id,
 )
 from lib.log import get_logger
+from lib.turn_verdict import terminal_finish_reason
 
 logger = get_logger(__name__)
 
@@ -96,7 +99,7 @@ def _content_blocks_from_task(task: dict) -> list[dict]:
     if task.get('thinking'):
         blocks.append({'type': 'thinking', 'thinking': task['thinking']})
     # Deliverable = narration-free answer from the segment model (epic
-    # pt_cb8f98b0cb9b47fb, step 3) — one source of truth with the streaming path.
+    # , step 3) — one source of truth with the streaming path.
     text = deliverable_text(task)
     if text:
         blocks.append({'type': 'text', 'text': text})
@@ -124,7 +127,8 @@ def build_anthropic_response(task: dict, model: str) -> dict:
     """Tofu finished task → Anthropic Messages response."""
     finish_map = {'stop': 'end_turn', 'length': 'max_tokens',
                    'tool_use': 'tool_use', 'tool_calls': 'tool_use'}
-    finish = task.get('finishReason') or 'stop'
+    require_deliverable_terminal(task)
+    finish = terminal_finish_reason(task)
     if task.get('status') == 'aborted':
         stop_reason = 'end_turn'
     elif task.get('status') == 'error':
@@ -194,7 +198,7 @@ async def stream_anthropic_chunks(task, model: str
                 })
                 started = True
             if etype == 'delta':
-                # ★ Narrator-leak root fix (epic pt_cb8f98b0cb9b47fb, step 3):
+                # Narrator-leak root fix (, step 3):
                 #   content deltas are unclassifiable mid-stream and a wire
                 #   client can't retract, so we do NOT stream raw content as the
                 #   answer text block. The narration-free deliverable is emitted
@@ -216,6 +220,17 @@ async def stream_anthropic_chunks(task, model: str
                                   'thinking': ev['thinking']},
                     })
             elif etype == 'done':
+                try:
+                    require_deliverable_terminal(task, ev)
+                except CompatTerminalFailure as exc:
+                    yield _evt('error', {
+                        'type': 'error',
+                        'error': {
+                            'type': 'api_error',
+                            'message': str(exc),
+                        },
+                    })
+                    return
                 # Close the live thinking block (if any) before the answer block.
                 if thinking_block_open:
                     yield _evt('content_block_stop', {
@@ -223,7 +238,7 @@ async def stream_anthropic_chunks(task, model: str
                     })
                     thinking_block_open = False
                     block_index += 1
-                # ★ Emit the narration-free deliverable as one text block NOW.
+                # Emit the narration-free deliverable as one text block NOW.
                 from lib.tasks_pkg.segments import deliverable_text
                 answer = deliverable_text(task)
                 if answer:
@@ -246,7 +261,7 @@ async def stream_anthropic_chunks(task, model: str
                         'index': block_index,
                     })
                     text_block_open = False
-                # ★ Tool-use parity with the sync path
+                # Tool-use parity with the sync path
                 #   (_content_blocks_from_task): the model may have finished on
                 #   a tool call. The sync response includes tool_use blocks, but
                 #   the stream `done` branch previously emitted none — so a
@@ -309,6 +324,17 @@ async def stream_anthropic_chunks(task, model: str
             # Terminal but no `done` event in the stream (late connect after
             # completion) — still emit the deliverable so the client gets the
             # answer, with a well-formed message envelope.
+            try:
+                require_deliverable_terminal(task)
+            except CompatTerminalFailure as exc:
+                yield _evt('error', {
+                    'type': 'error',
+                    'error': {
+                        'type': 'api_error',
+                        'message': str(exc),
+                    },
+                })
+                return
             if not started:
                 yield _evt('message_start', {
                     'type': 'message_start',

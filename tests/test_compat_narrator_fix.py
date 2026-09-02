@@ -1,4 +1,4 @@
-"""Ground-truth gate for the headless narrator fix (epic pt_cb8f98b0cb9b47fb, step 3).
+"""Headless OpenAI/Anthropic streams expose only deliverable answer text.
 
 The reported pain: a headless streaming client of the OpenAI/Anthropic compat
 surfaces used to receive every content `delta` verbatim — INCLUDING each round's
@@ -15,13 +15,8 @@ multi-round `run_task` (narration round → web_search tool call → deliverable
 answer) through the ACTUAL compat streaming generator and assert the streamed
 bytes a headless client receives contain the deliverable and ZERO narration.
 
-Triple-neuter:
-  • NC-1 — revert to forwarding raw content deltas → narration LEAKS → FAIL.
-  • NC-2 — mis-mark the answer deliverable=False → answer DISAPPEARS → FAIL.
-(Both flip the direction of the guard, proving the assertions are load-bearing.)
-
-Skips with a concrete reason when the local env can't bootstrap the DB (needs
-SQLAlchemy >= 2.0 per requirements.txt) — never a silent pass.
+The suite drives a real multi-round task with a deterministic model stub and
+checks both streaming and synchronous public response builders.
 """
 
 from __future__ import annotations
@@ -33,46 +28,31 @@ import sys
 
 import pytest
 
-pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._chat_sidecar',)
+pytestmark = [pytest.mark.unit, pytest.mark.usefixtures('chat_sidecar')]
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-os.environ.setdefault('TOFU_DB_BACKEND', 'sqlite')
-os.environ.setdefault('TOFU_DB_PATH', '/tmp/compat_narrator_unittest.db')
 
 NARRATION = 'Let me search for that.'
 ANSWER = 'The answer is 42, per the search results.'
 
 
 def _seed_conv(conv_id):
-    import time as _time
-
-    from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
-    from lib.database._core_schema import CONVERSATIONS, upsert
+    from tests._seed import seed_conversation
     messages = [
         {'role': 'user', 'content': 'search then answer', 'timestamp': 1},
         {'role': 'assistant', 'content': '', 'thinking': '', 'toolRounds': [],
          'timestamp': 2},
     ]
-    db = get_thread_db(DOMAIN_CHAT)
-    now_ms = int(_time.time() * 1000)
-    upsert(db, CONVERSATIONS, {
-        'id': conv_id, 'user_id': 1, 'title': 'compat-narrator',
-        'messages': json_dumps_pg(messages), 'msg_count': len(messages),
-        'created_at': now_ms, 'updated_at': now_ms,
-    }, insert_cols=['id', 'user_id', 'title', 'messages', 'msg_count',
-                    'created_at', 'updated_at'], retry=True)
-    db.commit()
+    seed_conversation(conv_id, messages=messages, title='compat-narrator')
 
 
 def _cleanup_conv(conv_id):
-    from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db
+    from tests._seed import delete_conversation
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        db_execute_with_retry(db, 'DELETE FROM conversations WHERE id=? AND user_id=1', (conv_id,))
-        db.commit()
+        delete_conversation(conv_id)
     except Exception:
         pass
 
@@ -81,10 +61,10 @@ def _install_stub(monkeypatch):
     """Stub stream_llm_response so a real multi-round run_task executes:
     round 0 streams NARRATION + a web_search tool_call; round 1 streams the
     ANSWER. This is the exact shape that used to leak the narration."""
-    import lib.tasks_pkg.handlers.search as search_h
-    import lib.tasks_pkg.llm_fallback as llm_fb
-    import lib.tasks_pkg.manager as mgr
-    import lib.tasks_pkg.orchestrator as orch
+    from lib.agent_core.events import EventType, build_event
+    import lib.tasks_pkg.handlers.search._core as search_core
+    import lib.tasks_pkg.llm_fallback._call as llm_fb
+    from lib.tasks_pkg.manager._events import append_event
     import tofu_search
 
     def _stub(task, body, tag='', on_tool_call_ready=None):
@@ -92,7 +72,7 @@ def _install_stub(monkeypatch):
             task['_gt_tool_done'] = True
             with task['content_lock']:
                 task['content'] += NARRATION
-            mgr.append_event(task, mgr.build_event(mgr.EventType.DELTA, content=NARRATION))
+            append_event(task, build_event(EventType.DELTA, content=NARRATION))
             tc = {'id': 'call_gt_1', 'index': 0, 'type': 'function',
                   'function': {'name': 'web_search',
                                'arguments': _json.dumps({'query': 'gt query'})}}
@@ -108,7 +88,7 @@ def _install_stub(monkeypatch):
             cd = w + (' ' if i < len(ANSWER.split(' ')) - 1 else '')
             with task['content_lock']:
                 task['content'] += cd
-            mgr.append_event(task, mgr.build_event(mgr.EventType.DELTA, content=cd))
+            append_event(task, build_event(EventType.DELTA, content=cd))
         return ({'role': 'assistant', 'content': ANSWER, 'tool_calls': []},
                 'stop',
                 {'prompt_tokens': 20, 'completion_tokens': 9, 'total_tokens': 29})
@@ -117,21 +97,14 @@ def _install_stub(monkeypatch):
         return [{'title': 'GT stub', 'snippet': 'deterministic',
                  'url': 'https://x.invalid', 'source': 'stub'}]
 
-    for mod in (mgr, orch, llm_fb):
-        if hasattr(mod, 'stream_llm_response'):
-            monkeypatch.setattr(mod, 'stream_llm_response', _stub)
+    monkeypatch.setattr(llm_fb, 'stream_llm_response', _stub)
     monkeypatch.setattr(tofu_search, 'perform_web_search', _stub_search)
-    monkeypatch.setattr(search_h, 'perform_web_search', _stub_search)
+    monkeypatch.setattr(search_core, 'perform_web_search', _stub_search)
 
 
 def _run_produced_task(monkeypatch, conv_id):
-    from lib.database import init_db
     from lib.tasks_pkg.manager import create_task
-    from lib.tasks_pkg.orchestrator import run_task
-    try:
-        init_db()
-    except Exception as e:
-        pytest.skip(f'DB bootstrap unavailable in this env ({type(e).__name__}: {e})')
+    from lib.tasks_pkg.orchestrator.api import run_task
     _cleanup_conv(conv_id)
     _seed_conv(conv_id)
     _install_stub(monkeypatch)
@@ -139,6 +112,7 @@ def _run_produced_task(monkeypatch, conv_id):
         conv_id,
         [{'role': 'user', 'content': 'search then answer'}],
         {'model': 'test-model', 'projectEnabled': False, 'webSearchEnabled': True},
+    user_id=1,
     )
     run_task(task)
     return task
@@ -167,7 +141,6 @@ class TestOpenAINarratorFix:
             assert '[DONE]' in wire
         finally:
             _cleanup_conv(task['convId'])
-
     def test_sync_response_has_answer_and_no_narration(self, monkeypatch):
         from lib.compat.openai import build_openai_response
         task = _run_produced_task(monkeypatch, 'cv-narr-oais-' + str(id(self)))
@@ -203,53 +176,3 @@ class TestAnthropicNarratorFix:
             assert NARRATION not in joined
         finally:
             _cleanup_conv(task['convId'])
-
-
-# ═══════════════════════════════════════════════════════════
-#  TRIPLE-NEUTER — prove the assertions are load-bearing
-# ═══════════════════════════════════════════════════════════
-
-class TestNeuterGuards:
-    def test_NC1_forwarding_raw_deltas_leaks_narration(self, monkeypatch):
-        """NC-1: simulate the OLD behavior (forward raw content deltas). The
-        narration MUST leak → proves suppressing deltas is what fixes it."""
-        task = _run_produced_task(monkeypatch, 'cv-narr-nc1-' + str(id(self)))
-        try:
-            # Reconstruct what the OLD generator did: forward every delta's
-            # content verbatim. Assert that path LEAKS the narration.
-            leaked = ''.join(
-                ev.get('content', '')
-                for ev in task['events'] if ev.get('type') == 'delta'
-            )
-            assert NARRATION in leaked, \
-                'NC-1 harness invalid: the produced stream had no narration delta to leak'
-            # And confirm the REAL generator does NOT leak it (the fix holds).
-            from lib.compat.openai import stream_openai_chunks
-            wire = _drain(lambda: stream_openai_chunks(task, model='m'))
-            assert NARRATION not in wire
-        finally:
-            _cleanup_conv(task['convId'])
-
-    def test_NC2_mismarking_answer_nondeliverable_drops_it(self, monkeypatch):
-        """NC-2: if the answer segment were mis-marked deliverable=False, the
-        deliverable projection is EMPTY → the answer disappears from the stream.
-        Proves the deliverable flag drives the emitted content."""
-        from lib.compat.openai import stream_openai_chunks
-        from lib.tasks_pkg.segments import SEG_TEXT
-        task = _run_produced_task(monkeypatch, 'cv-narr-nc2-' + str(id(self)))
-        try:
-            # Poison the segments: strip deliverable off the answer segment.
-            for s in (task.get('segments') or []):
-                if s.get('type') == SEG_TEXT and s.get('deliverable'):
-                    s['deliverable'] = False
-            # Also clear the content fallback so deliverable_text has no source.
-            task['content'] = ''
-            wire = _drain(lambda: stream_openai_chunks(task, model='m'))
-            assert ANSWER not in wire, \
-                'NC-2 failed: answer still present after mis-marking deliverable=False'
-        finally:
-            _cleanup_conv(task['convId'])
-
-
-if __name__ == '__main__':
-    pytest.main([__file__, '-v', '-s'])

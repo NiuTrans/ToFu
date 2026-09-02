@@ -50,13 +50,15 @@ _EXACT_RULES: tuple[tuple[str, int, str], ...] = (
     # reviewed): vendor-documented windows promoted from the runtime-data
     # backfill into static knowledge so fresh installs and template setups
     # resolve them too. Substring order matters in two places:
-    # 'gemini-3.5-flash-lite' before 'gemini-3.5-flash'. The gemini-3.5/3.6
-    # unknown guard below sits AFTER these rules, so verified variants win
-    # while unknown future variants (e.g. a hypothetical gemini-3.5-pro)
-    # still refuse to inherit the generic 'gemini' family estimate.
+    # 'gemini-3.5-flash-lite' before 'gemini-3.5-flash'. The
+    # gemini-3.5/3.6/3.7 unknown guard below sits AFTER these rules, so
+    # verified variants win while unknown future variants (e.g. a
+    # hypothetical gemini-3.5-pro) still refuse to inherit the generic
+    # 'gemini' family estimate.
     ('gemini-3.5-flash-lite', 1_000_000, 'vendor_official'),
     ('gemini-3.5-flash', 1_000_000, 'vendor_official'),
     ('gemini-3.6-flash', 1_000_000, 'vendor_official'),
+    ('gemini-3.7-flash', 1_000_000, 'vendor_official'),
     ('glm-5.1', 200_000, 'vendor_official'),
     ('glm-5.2', 1_000_000, 'vendor_official'),
     ('glm-5.3', 1_000_000, 'vendor_official'),
@@ -124,7 +126,7 @@ def context_profile(model: str, provider_id: str = '') -> dict:
     for needle, window, source in _EXACT_RULES:
         if needle in name:
             return ContextProfile(window, source, True).as_dict()
-    if 'gemini-3.5' in name or 'gemini-3.6' in name:
+    if 'gemini-3.5' in name or 'gemini-3.6' in name or 'gemini-3.7' in name:
         return _UNKNOWN.as_dict()
     for needle, window, source in _ESTIMATE_RULES:
         if needle in name:

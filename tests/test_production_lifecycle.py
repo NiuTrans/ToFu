@@ -14,6 +14,7 @@ from lib.app_factory import create_base_app
 from lib.production_lifecycle import (
     ProductionStartupSteps,
     register_production_lifecycle,
+    start_optional_production_services,
 )
 
 
@@ -24,6 +25,7 @@ def test_production_lifecycle_runs_required_optional_and_cleanup_in_order():
     app = create_base_app('production-lifecycle-order', {'TESTING': True})
     stop = threading.Event()
     calls = []
+    boot_lines = []
 
     def phase(name):
         def run(*args):
@@ -46,6 +48,7 @@ def test_production_lifecycle_runs_required_optional_and_cleanup_in_order():
         app,
         steps=ProductionStartupSteps(
             build_assets=phase('assets'),
+            validate_storage_boundary=phase('boundary'),
             init_database=phase('database'),
             start_storage=phase('storage'),
             validate_imports=phase('imports'),
@@ -53,6 +56,8 @@ def test_production_lifecycle_runs_required_optional_and_cleanup_in_order():
         ),
         shutdown_requested=stop,
         logger=logging.getLogger('test.production-lifecycle'),
+        boot=lambda message, *args: boot_lines.append(
+            message % args if args else message),
         announce_ready=announce,
         optional_services=optional_services,
         shutdown_runtime=shutdown_runtime,
@@ -62,6 +67,7 @@ def test_production_lifecycle_runs_required_optional_and_cleanup_in_order():
         app,
         steps=ProductionStartupSteps(
             build_assets=lambda: None,
+            validate_storage_boundary=lambda: None,
             init_database=lambda: None,
             start_storage=lambda: None,
             validate_imports=lambda: None,
@@ -81,11 +87,17 @@ def test_production_lifecycle_runs_required_optional_and_cleanup_in_order():
 
     asyncio.run(exercise())
     assert [name for name, _ in calls] == [
-        'assets', 'database', 'storage', 'imports', 'workers', 'optional',
+        'assets', 'boundary', 'storage', 'database', 'imports', 'workers', 'optional',
         'announce', 'shutdown',
     ]
-    assert calls[4][1] == (app,)
+    assert calls[5][1] == (app,)
     assert calls[-1][1][:2] == (stop, app)
+    assert any(
+        line.startswith('[startup phase 1/8] start | Frontend assets')
+        for line in boot_lines)
+    assert any(
+        line.startswith('[startup phase 8/8] done | Readiness announcement | ')
+        for line in boot_lines)
 
 
 def test_shutdown_checkpoint_skips_post_database_startup():
@@ -104,6 +116,7 @@ def test_shutdown_checkpoint_skips_post_database_startup():
         app,
         steps=ProductionStartupSteps(
             build_assets=lambda: calls.append('assets'),
+            validate_storage_boundary=lambda: calls.append('boundary'),
             init_database=init_database,
             start_storage=lambda: calls.append('storage'),
             validate_imports=lambda: calls.append('imports'),
@@ -120,7 +133,21 @@ def test_shutdown_checkpoint_skips_post_database_startup():
                 'status'] == 'interrupted'
 
     asyncio.run(exercise())
-    assert calls == ['assets', 'database', 'shutdown']
+    assert calls == ['assets', 'boundary', 'storage', 'database', 'shutdown']
+
+
+
+def test_distributed_preview_starts_no_optional_service(monkeypatch):
+    monkeypatch.setenv('TOFU_DEPLOYMENT_MODE', 'distributed')
+    monkeypatch.setenv('TOFU_DISTRIBUTED_PREVIEW_MODE', 'read-only')
+
+    result = start_optional_production_services(
+        shutdown_requested=threading.Event(),
+        logger=logging.getLogger('test.distributed-preview'),
+        process_role='worker',
+    )
+
+    assert result == ({}, False)
 
 
 def test_startup_failure_uses_native_rollback_cleanup():
@@ -140,6 +167,7 @@ def test_startup_failure_uses_native_rollback_cleanup():
         app,
         steps=ProductionStartupSteps(
             build_assets=lambda: calls.append('assets'),
+            validate_storage_boundary=lambda: calls.append('boundary'),
             init_database=fail_database,
             start_storage=lambda: calls.append('storage'),
             validate_imports=lambda: calls.append('imports'),
@@ -156,7 +184,50 @@ def test_startup_failure_uses_native_rollback_cleanup():
 
     asyncio.run(exercise())
     assert stop.is_set()
-    assert calls == ['assets', 'database', 'shutdown']
+    assert calls == ['assets', 'boundary', 'storage', 'database', 'shutdown']
+    assert app.extensions['tofu_lifecycle']['status'] == 'startup_failed'
+
+
+def test_frontend_artifact_failure_blocks_readiness_and_runs_rollback():
+    app = create_base_app('production-frontend-gate', {'TESTING': True})
+    stop = threading.Event()
+    readiness_gate = threading.Event()
+    app.extensions['tofu_production_startup_gate'] = readiness_gate
+    calls = []
+
+    def fail_assets():
+        calls.append('assets')
+        raise RuntimeError('required frontend artifact missing')
+
+    async def shutdown_runtime(event, **_kwargs):
+        calls.append('shutdown')
+        assert event.is_set()
+
+    register_production_lifecycle(
+        app,
+        steps=ProductionStartupSteps(
+            build_assets=fail_assets,
+            validate_storage_boundary=lambda: calls.append('boundary'),
+            init_database=lambda: calls.append('database'),
+            start_storage=lambda: calls.append('storage'),
+            validate_imports=lambda: calls.append('imports'),
+            start_workers=lambda _app: calls.append('workers'),
+        ),
+        shutdown_requested=stop,
+        shutdown_runtime=shutdown_runtime,
+        process_role='api',
+    )
+
+    async def exercise():
+        with pytest.raises(
+                LifespanError, match='required frontend artifact missing'):
+            async with app.test_app():
+                pass
+
+    asyncio.run(exercise())
+    assert stop.is_set()
+    assert not readiness_gate.is_set()
+    assert calls == ['assets', 'shutdown']
     assert app.extensions['tofu_lifecycle']['status'] == 'startup_failed'
 
 
@@ -177,6 +248,7 @@ def test_storage_handshake_failure_blocks_workers_and_runs_cleanup():
         app,
         steps=ProductionStartupSteps(
             build_assets=lambda: calls.append('assets'),
+            validate_storage_boundary=lambda: calls.append('boundary'),
             init_database=lambda: calls.append('database'),
             start_storage=fail_storage,
             validate_imports=lambda: calls.append('imports'),
@@ -192,14 +264,36 @@ def test_storage_handshake_failure_blocks_workers_and_runs_cleanup():
                 pass
 
     asyncio.run(exercise())
-    assert calls == ['assets', 'database', 'storage', 'shutdown']
+    assert calls == ['assets', 'boundary', 'storage', 'shutdown']
     assert app.extensions['tofu_production_lifecycle'][
         'status'] == 'stopped'
 
 
-def test_server_composition_wires_required_storage_phase():
-    from pathlib import Path
+def test_server_composition_wires_required_storage_phase(monkeypatch):
+    import server as server_module
+    from lib import production_lifecycle
 
-    source = (Path(__file__).parents[1] / 'server.py').read_text(
-        encoding='utf-8')
-    assert 'start_storage=_start_storage_sidecar' in source
+    captured = {}
+
+    def capture_registration(target_app, **kwargs):
+        captured['target_app'] = target_app
+        captured.update(kwargs)
+        return 'registered'
+
+    monkeypatch.setattr(
+        production_lifecycle,
+        'register_production_lifecycle',
+        capture_registration,
+    )
+    app_sentinel = object()
+
+    assert server_module.register_server_production_lifecycle(
+        app_sentinel
+    ) == 'registered'
+    assert captured['target_app'] is app_sentinel
+    steps = captured['steps']
+    assert steps.start_storage is server_module._start_storage_sidecar
+    assert (
+        steps.validate_storage_boundary
+        is server_module._validate_storage_cutover_boundary
+    )

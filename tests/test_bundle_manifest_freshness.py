@@ -8,7 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from lib.vite_assets import VITE_ENTRIES, VITE_MANIFEST, validate_vite_artifact
+from lib.vite_assets import (
+    I18N_CATALOG_DIGEST_FIELD,
+    VITE_ENTRIES,
+    VITE_ENTRY,
+    VITE_MANIFEST,
+    _source_i18n_catalog_digest,
+    validate_published_vite_artifact,
+    validate_vite_artifact,
+)
 
 
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
@@ -36,6 +44,28 @@ def test_manifest_is_valid_complete_and_content_hashed():
         assert HASHED_ASSET.fullmatch(row['file']), row
     for row in manifest.values():
         assert HASHED_ASSET.fullmatch(row['file']), row
+    assert manifest[VITE_ENTRY][I18N_CATALOG_DIGEST_FIELD] == (
+        _source_i18n_catalog_digest())
+
+
+def test_runtime_graph_survives_locale_source_edits_until_atomic_publish(
+        tmp_path, monkeypatch):
+    from lib import vite_assets
+
+    locale_paths = tuple(
+        tmp_path / f'{language}.json' for language in ('zh', 'en'))
+    for path in locale_paths:
+        path.write_text('{"editedAfterPublish": true}\n', encoding='utf-8')
+    monkeypatch.setattr(
+        vite_assets, 'I18N_LOCALE_PATHS',
+        tuple(str(path) for path in locale_paths),
+    )
+
+    with pytest.raises(vite_assets.ViteAssetError, match='i18n chunks are stale'):
+        validate_vite_artifact()
+
+    manifest = validate_published_vite_artifact()
+    assert manifest[VITE_ENTRY]['isEntry'] is True
 
 
 def test_manifest_is_at_least_as_fresh_as_every_frontend_input():

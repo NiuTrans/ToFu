@@ -27,18 +27,32 @@ logger = get_logger(__name__)
 
 def _empty_summary() -> dict:
     return {
-        'epicsOpen': 0, 'epicsClaimed': 0, 'epicsDone': 0,
-        'pendingDecisions': 0, 'activePeers': 0, 'peerEpics': {},
-        'charterExists': False, 'conflicts': 0, 'conflictMessages': [],
-        'statusLine': '',
+        "epicsOpen": 0,
+        "epicsClaimed": 0,
+        "epicsDone": 0,
+        "pendingDecisions": 0,
+        "activePeers": 0,
+        "peerEpics": {},
+        "charterExists": False,
+        "conflicts": 0,
+        "conflictMessages": [],
+        "statusLine": "",
         # Attention roll-up (lib.conversations.project_attention) — the counts
         # the collaboration bar leads with. `blocking` is the only one that
         # drives emphasis; see the note in build_brain_summary.
-        'needsYou': 0, 'blocking': 0, 'advisory': 0, 'waiting': 0,
+        "needsYou": 0,
+        "blocking": 0,
+        "advisory": 0,
+        "waiting": 0,
     }
 
 
-def build_brain_summary(project_path: str, conv_id: str = '') -> dict:
+def build_brain_summary(
+    project_path: str,
+    conv_id: str = "",
+    *,
+    user_id: int,
+) -> dict:
     """Aggregate the collaboration-bar summary for ``project_path``.
 
     Returns ``{epicsOpen, epicsClaimed, epicsDone, pendingDecisions,
@@ -59,25 +73,26 @@ def build_brain_summary(project_path: str, conv_id: str = '') -> dict:
     """
     if not project_path:
         return _empty_summary()
-    conv_id = (conv_id or '').strip()
+    conv_id = (conv_id or "").strip()
     out = _empty_summary()
 
     # ── Board counts + the claim→epic join source ──
     board_tasks = []
     try:
         from lib.conversations.project_board import read_board
-        board = read_board(project_path)
-        out['epicsOpen'] = int(board.get('open', 0))
-        out['epicsClaimed'] = int(board.get('claimed', 0))
-        out['epicsDone'] = int(board.get('done', 0))
-        board_tasks = board.get('tasks', []) or []
+
+        board = read_board(project_path, user_id=user_id)
+        out["epicsOpen"] = int(board.get("open", 0))
+        out["epicsClaimed"] = int(board.get("claimed", 0))
+        out["epicsDone"] = int(board.get("done", 0))
+        board_tasks = board.get("tasks", []) or []
     except Exception as e:
-        logger.debug('[BrainSummary] board read failed proj=%.40r: %s',
-                     project_path, e)
+        logger.debug("[BrainSummary] board read failed proj=%.40r: %s", project_path, e)
 
     # owner_conv_id → epic title, for epics whose EFFECTIVE status is claimed.
     # Single source of the claim→conv join (shared with build_peer_status).
     from lib.conversations.project_board import claims_by_conv
+
     claim_by_conv = claims_by_conv(board_tasks)
 
     # ── Pending decisions = proposals NOT yet resolved by a commit/dismiss ──
@@ -88,42 +103,51 @@ def build_brain_summary(project_path: str, conv_id: str = '') -> dict:
     #    decremented after commit.)
     try:
         from lib.conversations.project_charter import pending_proposals
-        out['pendingDecisions'] = len(pending_proposals(project_path))
+
+        out["pendingDecisions"] = len(
+            pending_proposals(project_path, user_id=user_id))
     except Exception as e:
-        logger.debug('[BrainSummary] pending read failed proj=%.40r: %s',
-                     project_path, e)
+        logger.debug(
+            "[BrainSummary] pending read failed proj=%.40r: %s", project_path, e
+        )
 
     # ── Charter existence ──
     try:
         from lib.conversations.project_charter import read_charter
-        rec = read_charter(project_path)
-        out['charterExists'] = bool(rec.get('exists'))
+
+        rec = read_charter(project_path, user_id=user_id)
+        out["charterExists"] = bool(rec.get("exists"))
     except Exception as e:
-        logger.debug('[BrainSummary] charter read failed proj=%.40r: %s',
-                     project_path, e)
+        logger.debug(
+            "[BrainSummary] charter read failed proj=%.40r: %s", project_path, e
+        )
 
     # ── Active peers + the peer→epic JOIN (the deep-collaboration signal) ──
     peers = []
     try:
         from lib.presence.registry import snapshot
-        peers = snapshot(project_path).get('peers', []) or []
+
+        peers = snapshot(project_path, user_id=user_id).get("peers", []) or []
         # Conversation-level peers only (a sub-agent carries agentId); a claim
         # is owned by a conversation, so we join on the conversation peer. The
         # displayed conv itself is excluded (see docstring) so the count is
         # "other conversations online".
-        conv_ids = {p.get('convId') for p in peers
-                    if p.get('convId') and not p.get('agentId')
-                    and p.get('convId') != conv_id}
-        out['activePeers'] = len(conv_ids)
+        conv_ids = {
+            p.get("convId")
+            for p in peers
+            if p.get("convId") and not p.get("agentId") and p.get("convId") != conv_id
+        }
+        out["activePeers"] = len(conv_ids)
         peer_epics = {}
         for cid in conv_ids:
             title = claim_by_conv.get(cid)
             if title:
                 peer_epics[cid] = title
-        out['peerEpics'] = peer_epics
+        out["peerEpics"] = peer_epics
     except Exception as e:
-        logger.debug('[BrainSummary] presence read failed proj=%.40r: %s',
-                     project_path, e)
+        logger.debug(
+            "[BrainSummary] presence read failed proj=%.40r: %s", project_path, e
+        )
 
     # ── Conflict advisories: file-set overlaps between 2+ ACTIVE peers ──
     #    Recomputed from the SAME peer snapshot via the SAME backend judgment
@@ -133,13 +157,16 @@ def build_brain_summary(project_path: str, conv_id: str = '') -> dict:
     try:
         if peers:
             from lib.presence.conflict import detect_overlaps
+
             advisories = detect_overlaps(peers)
-            out['conflicts'] = len(advisories)
-            out['conflictMessages'] = [a.get('message', '') for a in advisories
-                                       if a.get('message')]
+            out["conflicts"] = len(advisories)
+            out["conflictMessages"] = [
+                a.get("message", "") for a in advisories if a.get("message")
+            ]
     except Exception as e:
-        logger.debug('[BrainSummary] conflict detect failed proj=%.40r: %s',
-                     project_path, e)
+        logger.debug(
+            "[BrainSummary] conflict detect failed proj=%.40r: %s", project_path, e
+        )
 
     # ── Attention roll-up: everything genuinely waiting on the human ──
     #    ONE call into the attention SSOT, so the always-visible bar and the
@@ -155,26 +182,30 @@ def build_brain_summary(project_path: str, conv_id: str = '') -> dict:
     #    drives the bar's emphasis; `needsYou` is what it counts.
     try:
         from lib.conversations.project_attention import build_attention_items
-        attn = build_attention_items(project_path, conv_id)
-        out['needsYou'] = attn['needsYou']
-        out['blocking'] = attn['blocking']
-        out['advisory'] = attn['advisory']
-        out['waiting'] = attn['waiting']
+
+        attn = build_attention_items(project_path, conv_id, user_id=int(user_id))
+        out["needsYou"] = attn["needsYou"]
+        out["blocking"] = attn["blocking"]
+        out["advisory"] = attn["advisory"]
+        out["waiting"] = attn["waiting"]
     except Exception as e:
-        logger.debug('[BrainSummary] attention read failed proj=%.40r: %s',
-                     project_path, e)
+        logger.debug(
+            "[BrainSummary] attention read failed proj=%.40r: %s", project_path, e
+        )
 
     # ── Pillar #7: the ambient one-line project-status headline. Read-only
     #    (no synthesis on this hot always-visible-bar path) — the LATEST stored
     #    snapshot's first sentence, or '' when none exists yet. ──
     try:
         from lib.conversations.project_status import status_line
-        out['statusLine'] = status_line(project_path)
+
+        out["statusLine"] = status_line(project_path, user_id=user_id)
     except Exception as e:
-        logger.debug('[BrainSummary] status line read failed proj=%.40r: %s',
-                     project_path, e)
+        logger.debug(
+            "[BrainSummary] status line read failed proj=%.40r: %s", project_path, e
+        )
 
     return out
 
 
-__all__ = ['build_brain_summary']
+__all__ = ["build_brain_summary"]

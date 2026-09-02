@@ -24,8 +24,7 @@ def _mutation_response(
     reasons: list[str],
 ) -> dict:
     config = mutation_endpoint_contract(operation)
-    schema = mutation_response_schema(
-        config['action'], reasons, config['compatibility'])
+    schema = mutation_response_schema(config['action'], reasons)
     if status == '500':
         schema = {
             'oneOf': [

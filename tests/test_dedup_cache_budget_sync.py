@@ -29,13 +29,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 pytestmark = pytest.mark.unit
 
-import lib.tasks_pkg.tool_dispatch as td
+import lib.tasks_pkg.tool_dispatch._flags as td
 from lib.tasks_pkg.executor import tool_registry
-from lib.tasks_pkg.tool_dispatch import (
-    _make_cache_key,
+from lib.tasks_pkg.tool_dispatch.api import (
     execute_tool_pipeline,
     parse_tool_calls,
 )
+from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key
 
 # A budget well below the payload so the offloader definitely fires. web_search
 # budget is 30_000; we return ~120 KB.
@@ -58,6 +58,7 @@ def _make_task():
     return {
         'id': 'task_dedupsync_x',
         'convId': 'convdedupsync',
+        '_userId': 1,
         'model': 'test-model',
         'events': [],
         'events_lock': threading.Lock(),

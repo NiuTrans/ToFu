@@ -1,10 +1,10 @@
 import { featureRegistry } from '../../feature-registry';
+import type { I18nKey } from '../../i18n';
 import {
   adoptMediaModel,
   adoptServerClocks,
   seedMediaModel,
 } from './media-model-ui';
-import { getRuntimeService } from '../../runtime/app-runtime.js';
 
 type LooseObject = Record<string, any>;
 type MediaWindow = Window & Record<string, any>;
@@ -14,7 +14,7 @@ function globals(): MediaWindow {
 }
 
 function video(): LooseObject {
-  const state = globals()._pvideo ?? getRuntimeService('_pvideo');
+  const state = globals()._pvideo;
   if (!state) throw new Error('Video view state is unavailable');
   return state as LooseObject;
 }
@@ -28,7 +28,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error ?? '');
 }
 
-function translate(key: string, fallback: string): string {
+function translate(key: I18nKey, fallback: string): string {
   const fn = globals()._pvT;
   return typeof fn === 'function' ? String(fn(key, fallback)) : fallback;
 }

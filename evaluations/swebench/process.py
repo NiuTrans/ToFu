@@ -53,12 +53,15 @@ def run_streaming(
     cwd: Path,
     log_path: Path,
     env: Mapping[str, str] | None = None,
+    unset_env: Sequence[str] = (),
 ) -> int:
     """Run a child in its own process group while teeing merged output."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     child_env = os.environ.copy()
     if env:
         child_env.update(env)
+    for name in unset_env:
+        child_env.pop(str(name), None)
     with log_path.open("a", encoding="utf-8", errors="replace") as log:
         process = subprocess.Popen(
             list(command),

@@ -1,8 +1,8 @@
 """Typed error envelope for backend → frontend error reporting.
 
 Every error surfaced to the user (in `task['error']`, in the `error`
-field of SSE `done` / `state` events, in `/api/chat/poll` responses, and
-in persisted `task_results.error` / `assistantMsg.error`) is a dict with
+field of SSE `done` / `state` events, and in persisted
+`task_results.error` / `assistantMsg.error`) is a dict with
 this shape::
 
     {
@@ -46,13 +46,17 @@ The `kind` enum is closed — callers must pick one of these values:
   - ``model_limit``         max_tokens exceeds learned model cap
   - ``tool_rounds_exhausted`` legacy persisted turns from the retired cap
   - ``tool_timeout``        repeated tool-execution timeouts
+  - ``tool_loop``           byte-identical tool call+result repeated (degenerate loop)
   - ``premature_close``     SSE stream cut off (retries exhausted)
   - ``abnormal_stop``       missing finish marker, partial reply
   - ``aborted``             user clicked Stop (rare in error path)
   - ``server_offline``      frontend lost contact with the server
   - ``server_busy``         backend admission capacity is temporarily full
+  - ``task_start_failed``   durable turn exists but its executor did not start
   - ``internal``            backend bug / unhandled exception
   - ``generic``             unrecognized — last-resort fallback
+  - ``tool_not_available``  requested tool is absent from this turn
+  - ``tool_call_rejected``  tool was blocked before execution
 
 Backwards-compat note (2026-05-22): there is none.  The string form of
 ``task['error']`` was retired in favour of this dict.  Persistence

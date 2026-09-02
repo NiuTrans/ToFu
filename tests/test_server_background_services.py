@@ -5,31 +5,32 @@ from types import SimpleNamespace
 
 import pytest
 
-from lib.server_background_services import start_background_services
+from lib.server_background_services import (
+    start_background_services,
+    start_lan_discovery_responder,
+    stop_lan_discovery_responder,
+)
 
 
 pytestmark = pytest.mark.unit
 
 
 def test_persisted_configuration_precedes_network_owned_services(monkeypatch):
-    import lib.billing.janitor as janitor
     import lib.desktop.pairing as pairing
     import lib.integration_control as integration_control
     import lib.motion_video.engine as motion_engine
     import lib.netpath as netpath
-    import lib.paper.podcast_engine as podcast_engine
-    import lib.research as research
-    import lib.slides.engine as slides_engine
+    import lib.paper.podcast_engine.worker as podcast_engine
+    import lib.research.api as research_api
+    import lib.slides.api as slides_api
     import routes
 
     calls: list[str] = []
     monkeypatch.setattr(
         routes,
         'start_registered_background_services',
-        lambda _app: calls.append('routes'),
+        lambda _app, **_kwargs: calls.append('routes'),
     )
-    monkeypatch.setattr(
-        janitor, 'start_janitor', lambda: calls.append('janitor'))
     monkeypatch.setattr(
         netpath, 'start_prober', lambda: calls.append('netpath'))
     monkeypatch.setattr(
@@ -37,9 +38,9 @@ def test_persisted_configuration_precedes_network_owned_services(monkeypatch):
     monkeypatch.setattr(
         motion_engine, 'resume_interrupted_jobs', lambda: 0)
     monkeypatch.setattr(
-        research, 'resume_interrupted_research', lambda: 0)
+        research_api, 'resume_interrupted_research', lambda: 0)
     monkeypatch.setattr(
-        slides_engine, 'resume_interrupted_decks', lambda: 0)
+        slides_api, 'resume_interrupted_decks', lambda: 0)
     monkeypatch.setattr(
         podcast_engine, 'mark_interrupted_podcasts', lambda: None)
     monkeypatch.setattr(
@@ -59,4 +60,65 @@ def test_persisted_configuration_precedes_network_owned_services(monkeypatch):
         },
     )
 
-    assert calls[:5] == ['routes', 'proxy', 'key', 'janitor', 'netpath']
+    assert calls[:4] == ['routes', 'proxy', 'key', 'netpath']
+
+
+
+def test_distributed_preview_starts_no_background_owner(monkeypatch):
+    import routes
+
+    calls = []
+    monkeypatch.setattr(
+        routes,
+        'start_registered_background_services',
+        lambda *_args, **_kwargs: calls.append('routes'),
+    )
+    start_background_services(
+        SimpleNamespace(extensions={}),
+        process_role='worker',
+        load_saved_proxy_config=lambda: calls.append('proxy'),
+        bootstrap_personal_key=lambda: calls.append('key'),
+        logger=logging.getLogger('test.distributed-preview'),
+        environ={
+            'TOFU_DEPLOYMENT_MODE': 'distributed',
+            'TOFU_DISTRIBUTED_PREVIEW_MODE': 'read-only',
+        },
+    )
+    assert calls == []
+
+
+def test_lan_discovery_has_one_exact_lifecycle_owner(monkeypatch):
+    import lib.desktop.pairing as pairing
+    import lib.server_background_services as background_services
+
+    class Responder:
+        def __init__(self):
+            self.running = True
+            self.stops = []
+
+        def is_running(self):
+            return self.running
+
+        def stop(self, timeout):
+            self.stops.append(timeout)
+            self.running = False
+            return True
+
+    responder = Responder()
+    starts = []
+    monkeypatch.setattr(
+        background_services, '_LAN_DISCOVERY_RESPONDER', None)
+    monkeypatch.setattr(
+        pairing, 'maybe_start_responder',
+        lambda *args, **kwargs: starts.append((args, kwargs)) or responder)
+    env = {'TOFU_DESKTOP_LAN_DISCOVERY': '1'}
+
+    assert start_lan_discovery_responder(
+        15000, bind_host='0.0.0.0', environ=env) is responder
+    assert start_lan_discovery_responder(
+        15000, bind_host='0.0.0.0', environ=env) is responder
+    assert len(starts) == 1
+    assert starts[0][1]['environ'] is env
+    assert stop_lan_discovery_responder(timeout=0.125) is True
+    assert responder.stops == [0.125]
+    assert background_services._LAN_DISCOVERY_RESPONDER is None

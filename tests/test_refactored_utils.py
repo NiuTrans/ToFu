@@ -180,7 +180,7 @@ class TestBackwardCompatImports:
     """Verify refactored code is still importable from old paths."""
 
     def test_repair_json_from_orchestrator(self):
-        from lib.tasks_pkg.orchestrator import _repair_json
+        from lib.utils import repair_json as _repair_json
         from lib.utils import repair_json
         assert _repair_json is repair_json
 
@@ -338,7 +338,7 @@ class TestCompressImage:
         assert result_img.mode == 'RGB'
 
     def test_only_one_definition_exists(self):
-        """Ensure _compress_image is only defined in lib/file_reader.py."""
+        """Ensure _compress_image has one owner in lib/file_reader/."""
         # Walk lib/ and routes/ in pure Python rather than shelling out to
         # `grep -rn`: on slow FUSE mounts a recursive grep that descends into
         # scratch/cache subdirs can take >90s and time the test out.
@@ -397,9 +397,9 @@ class TestToolRegistryPostRefactor:
         from lib.tasks_pkg.executor import _execute_tool_one
         assert callable(_execute_tool_one)
 
-    def test_lazy_import_from_tasks_pkg(self):
-        """tool_registry importable via lib.tasks_pkg (lazy import)."""
-        from lib.tasks_pkg import _execute_tool_one, tool_registry
+    def test_executor_public_api(self):
+        """Executor services are imported from their owning package."""
+        from lib.tasks_pkg.executor import _execute_tool_one, tool_registry
         assert tool_registry is not None
         assert callable(_execute_tool_one)
 

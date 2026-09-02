@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
 from lib.api_response import (
     api_bad_request,
@@ -21,9 +19,6 @@ from lib.orchestration.compose_request_contract import (
     compose_request_contract,
     compose_request_schema,
 )
-from lib.orchestration.http_endpoint_contract import (
-    orchestration_http_endpoint,
-)
 from lib.orchestration.inspection_wire_contract import (
     inspection_response_fields,
 )
@@ -34,27 +29,10 @@ from lib.request_parser import (
     optional_dict,
     optional_list,
     optional_str,
-    query_str,
 )
 from .orchestration_request_http import OrchestrationHttpPreparation
 _SOURCE_UNSET = object()
 _COMPOSE = compose_request_contract()
-(_ROLE_QUERY,) = orchestration_http_endpoint('role-schema').query_fields
-
-
-def role_contract_parameters() -> list[dict]:
-    return [{
-        'name': _ROLE_QUERY,
-        'in': 'query',
-        'schema': {'type': 'string'},
-        'description': 'Optional role name; omit for the full contract.',
-    }]
-
-
-def role_contract_query(args: Mapping[str, Any]) -> str:
-    return query_str(args, _ROLE_QUERY)
-
-
 @dataclass(frozen=True)
 class PreparedComposeRequest:
     """Typed Composer inputs after HTTP body normalization."""
@@ -145,8 +123,6 @@ __all__ = [
     'MAX_COMPOSE_HISTORY_ITEMS',
     'MAX_COMPOSE_HISTORY_CONTENT_LENGTH',
     'PreparedComposeRequest',
-    'role_contract_parameters',
-    'role_contract_query',
     'compose_request_schema',
     'prepare_compose_request',
     'authoring_builtin_response',

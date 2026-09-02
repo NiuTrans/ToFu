@@ -17,7 +17,20 @@ import time
 
 import pytest
 
-from lib.browser import queue as q
+import lib.browser.queue as q
+
+
+OWNER = '101'
+CLIENT = 'client-ttl-test'
+
+
+def _register(client_id=CLIENT):
+    q.mark_poll(
+        client_id,
+        owner_user_id=OWNER,
+        protocol_version=2,
+        capabilities=[],
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +44,7 @@ def _clean_queue():
 
 
 def _make_cmd(cmd_id, *, created_at, timeout, picked_up=False, cancelled=False,
-              target_client=None):
+              target_client=CLIENT):
     """Insert a synthetic command into the queue and return it."""
     cmd = {
         'id': cmd_id,
@@ -43,6 +56,9 @@ def _make_cmd(cmd_id, *, created_at, timeout, picked_up=False, cancelled=False,
         'created_at': created_at,
         'picked_up': picked_up,
         'target_client': target_client,
+        'claimed_client_id': '',
+        'claimed_owner_user_id': '',
+        'owner_user_id': OWNER,
         'timeout': timeout,
         'cancelled': cancelled,
     }
@@ -55,39 +71,45 @@ def _make_cmd(cmd_id, *, created_at, timeout, picked_up=False, cancelled=False,
 class TestDeliveryCutoff:
     def test_fresh_command_is_delivered(self):
         _make_cmd('c1', created_at=time.time(), timeout=30)
-        pending = q.get_pending_commands()
+        pending = q.get_pending_commands(
+            client_id=CLIENT, owner_user_id=OWNER)
         assert [c['id'] for c in pending] == ['c1']
 
     def test_command_past_caller_timeout_not_delivered(self):
         # Created 31s ago with a 30s budget → caller has given up → never deliver.
         _make_cmd('old', created_at=time.time() - 31, timeout=30)
-        pending = q.get_pending_commands()
+        pending = q.get_pending_commands(
+            client_id=CLIENT, owner_user_id=OWNER)
         assert pending == []
 
     def test_short_timeout_cuts_off_before_old_60s_default(self):
         # A 5s-budget command at 6s old must NOT be delivered, even though the
         # old hardcoded cutoff (60s) would still have shipped it.
         _make_cmd('short', created_at=time.time() - 6, timeout=5)
-        assert q.get_pending_commands() == []
+        assert q.get_pending_commands(
+            client_id=CLIENT, owner_user_id=OWNER) == []
 
     def test_long_timeout_still_delivered_past_60s(self):
         # A genuinely long-budget command (e.g. full-page screenshot, 60s) at
         # 45s old is still live and must be delivered — the old 60s magic
         # number happened to work here, but the cutoff now tracks the budget.
         _make_cmd('long', created_at=time.time() - 45, timeout=60)
-        assert [c['id'] for c in q.get_pending_commands()] == ['long']
+        assert [c['id'] for c in q.get_pending_commands(
+            client_id=CLIENT, owner_user_id=OWNER)] == ['long']
 
     def test_cancelled_command_not_delivered(self):
         _make_cmd('cx', created_at=time.time(), timeout=30, cancelled=True)
-        assert q.get_pending_commands() == []
+        assert q.get_pending_commands(
+            client_id=CLIENT, owner_user_id=OWNER) == []
 
     def test_delivered_command_is_marked_picked_up(self):
         _make_cmd('p1', created_at=time.time(), timeout=30)
-        q.get_pending_commands()
+        q.get_pending_commands(client_id=CLIENT, owner_user_id=OWNER)
         with q._commands_lock:
             assert q._commands['p1']['picked_up'] is True
         # Second call must not re-deliver it.
-        assert q.get_pending_commands() == []
+        assert q.get_pending_commands(
+            client_id=CLIENT, owner_user_id=OWNER) == []
 
 
 @pytest.mark.unit
@@ -95,10 +117,11 @@ class TestCallerTimeoutCancellation:
     def test_timeout_marks_command_cancelled_then_evicts(self):
         # send_browser_command must register a connected client first, so fake
         # one and use a tiny timeout to keep the test fast.
-        client = 'client-ttl-test'
-        q.mark_poll(client)
+        client = CLIENT
+        _register(client)
         result, error = q.send_browser_command('list_tabs', timeout=0.2,
-                                                client_id=client)
+                                                client_id=client,
+                                                owner_user_id=OWNER)
         assert result is None
         assert error and 'timed out' in error
         # The command must have been removed from the queue on giveup.
@@ -108,13 +131,15 @@ class TestCallerTimeoutCancellation:
     def test_late_poll_after_timeout_skips_cancelled_command(self):
         """A poll that races in just as the caller times out must not run it."""
         client = 'client-race'
-        q.mark_poll(client)
+        _register(client)
 
         delivered = {}
 
         def _waiter():
             # 0.3s budget → gives up, marks cancelled, pops the command.
-            r, e = q.send_browser_command('list_tabs', timeout=0.3, client_id=client)
+            r, e = q.send_browser_command(
+                'list_tabs', timeout=0.3, client_id=client,
+                owner_user_id=OWNER)
             delivered['result'] = (r, e)
 
         t = threading.Thread(target=_waiter)
@@ -123,7 +148,8 @@ class TestCallerTimeoutCancellation:
         time.sleep(0.5)
         t.join(timeout=2)
         # After giveup the command is gone, so a poll sees nothing to deliver.
-        assert q.get_pending_commands(client_id=client) == []
+        assert q.get_pending_commands(
+            client_id=client, owner_user_id=OWNER) == []
         assert delivered['result'][0] is None
 
 

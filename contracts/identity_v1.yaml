@@ -1,0 +1,107 @@
+contract: tofu.identity/v1
+responsibility: >-
+  Bind public tenant accounts and bearer credentials to explicit numeric
+  repository owners without allowing either identifier to impersonate the
+  other.
+
+identifiers:
+  accountUserId:
+    type: opaque-string
+    purpose: authentication subject, account administration, and billing
+    maximumLength: 256
+    repositoryKey: false
+  ownerUserId:
+    type: positive-integer
+    purpose: durable resource ownership and isolation
+    personalReservedValue: 1
+    allocation: transactional-global-sequence
+  tenantId:
+    type: optional-opaque-string
+    purpose: enterprise partition evolution seam
+    maximumLength: 256
+
+requestBoundary:
+  authenticationContext:
+    fields: [key_id, owner_user_id, account_user_id, tenant_id, scopes]
+  principalContext:
+    subject: credential key_id
+    owner: owner_user_id
+    rule: account_user_id is never parsed or coerced into owner_user_id
+  missingOwner: deny
+
+authorities:
+  accounts:
+    table: tenant_users
+    operations:
+      - tenant.user.create
+      - tenant.user.get
+      - tenant.user.list
+      - tenant.user.set_status
+      - tenant.user.set_role
+      - tenant.user.authentication
+      - tenant.user.record_login
+  credentials:
+    table: auth_credentials
+    operations:
+      - credential.create
+      - credential.create_if_owner_empty
+      - credential.list
+      - credential.get
+      - credential.authenticate
+      - credential.validate
+      - credential.touch
+      - credential.identify
+      - credential.update
+      - credential.revoke
+      - credential.exists
+
+credentialLifecycle:
+  secret:
+    plaintextReturnCount: 1
+    persistedRepresentation: sha256
+    exposedByQueries: false
+  ownership:
+    listGetUpdateRevoke: exact-owner-and-tenant
+    optionalAccountBinding: true
+    accountBindingRule: account must exist, be active, and own the same ownerUserId
+  authentication:
+    authorityValidation: read-every-request
+    lastUsedAuditTouch: conditional-maintenance-command
+    defaultAuditTouchIntervalSeconds: 60
+    auditTouchFailureDeniesValidatedRequest: false
+    rejects: [missing, unknown, disabled, expired, revoked, suspended-account]
+  revocation:
+    storage: disabled-tombstone
+    ownerQueriesExposeTombstones: false
+    internalIdentification: exact-secret-hash-without-authority
+  scopes:
+    vocabulary: lib.api_keys.ALL_SCOPES
+    adminTierImmutable: true
+
+deviceBridge:
+  remoteCredential: literal agents:bridge scope
+  globalSharedSecret: forbidden
+  credentialFreeMode: forbidden
+  addressBasedTrust: forbidden
+  processCapability:
+    persisted: false
+    ownerUserId: 1
+    acceptedBy: /api/desktop/poll
+    rejectedBy: /api/browser/*
+  packageMintFailure: 503
+
+http:
+  accountSelf: GET /api/v1/users/me
+  credentialCollection: /api/v1/keys
+  accountResponseField: user.id
+  ownerResponseField: ownerId
+  plaintextCredentialField: token
+
+forbidden:
+  - deriving repository ownership by converting an account identifier
+  - a module-global current user below the request boundary
+  - filesystem or process-local credential authority
+  - returning secret hashes or recovering plaintext credentials
+  - listing, reading, updating, or revoking a credential without owner scope
+  - accepting a deployment-wide device bridge secret
+  - distributing an agent or extension package without a usable credential

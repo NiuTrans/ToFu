@@ -23,7 +23,7 @@ from quart import Blueprint
 
 from lib.api_response import api_bad_request, api_ok
 from lib.cost import compute_cost
-from lib.log import get_logger
+from lib.log import LOG_DIR, get_logger
 from lib.log_clean import detect_log_noise
 from lib.openapi import api_meta
 from lib.request_parser import BadRequest, optional_dict, optional_str, parse_body, require_list, require_str
@@ -33,7 +33,7 @@ from lib.text_lang import (
 )
 from lib.tool_changes import extract_file_changes_dicts
 
-from .auth import require_scope
+from .auth import current_auth, require_scope
 
 logger = get_logger(__name__)
 
@@ -388,9 +388,18 @@ def client_logs_relay():
         return api_ok(relayed=0, disabled=True)
     body = parse_body()
     try:
-        entries = require_list(body, 'entries', max_len=200)
+        entries = require_list(body, 'entries')
     except BadRequest as e:
         return api_bad_request(str(e), field=e.field or 'entries')
+    # A log SINK must never reject a burst: the browser ring buffer keeps
+    # growing while it awaits a 2xx, so a 400 here made the same oversized
+    # batch loop forever and every line was lost — exactly the incident
+    # diagnostics this relay exists to capture (2026-08-19: recurring 400s
+    # while the backend was degraded and the console was noisiest).  Honor
+    # the documented 200-entry cap by keeping the NEWEST entries.
+    dropped = max(0, len(entries) - 200)
+    if dropped:
+        entries = entries[-200:]
     session = (optional_str(body, 'session', default='', max_len=64) or '')[:16]
     fe = logging.getLogger('frontend')
     relayed = 0
@@ -414,7 +423,68 @@ def client_logs_relay():
         else:
             fe.info('%s', line)
         relayed += 1
-    return api_ok(relayed=relayed)
+    if dropped:
+        fe.warning('[client:%s] relay batch truncated: dropped %d older '
+                   'entr%s over the 200-entry cap',
+                   session or '?', dropped, 'y' if dropped == 1 else 'ies')
+    return api_ok(relayed=relayed, dropped=dropped)
+
+
+@api_v1_logs_bp.route('/api/v1/logs/diagnostics', methods=['GET'])
+@require_scope('admin')
+@api_meta(
+    summary='Storage-independent, model-sized incident diagnosis',
+    description=(
+        'Reads the bounded incident JSONL index (or a bounded legacy '
+        'error.log tail) without contacting SQLite, PostgreSQL, or the '
+        'storage sidecar. Returns ranked fingerprints, true coalesced '
+        'occurrence counts, correlation ids, retention health and short '
+        'redacted samples under a strict output-byte budget. Admin-only '
+        'because diagnostics can span users and contain operational '
+        'metadata. Query filters: request_id, conversation_id, task_id, '
+        'trace_id; window_hours (0.05..720), max_items (1..100), '
+        'max_bytes (4096..131072).'),
+    tags=['logs'],
+    scope='admin',
+)
+def log_diagnostics_view():
+    from quart import request
+
+    from lib.log_diagnostics import diagnose_logs
+    from lib.runtime_paths import data_root
+
+    try:
+        window_hours = float(request.args.get('window_hours') or 24)
+        max_items = int(request.args.get('max_items') or 20)
+        max_bytes = int(request.args.get('max_bytes') or 32 * 1024)
+    except (TypeError, ValueError):
+        return api_bad_request('invalid numeric parameter')
+    if not (0.05 <= window_hours <= 720):
+        return api_bad_request('invalid window_hours (0.05..720)',
+                               field='window_hours')
+    if not (1 <= max_items <= 100):
+        return api_bad_request('invalid max_items (1..100)', field='max_items')
+    if not (4 * 1024 <= max_bytes <= 128 * 1024):
+        return api_bad_request('invalid max_bytes (4096..131072)',
+                               field='max_bytes')
+    selectors = {
+        key: (request.args.get(key) or '').strip()[:128]
+        for key in ('request_id', 'conversation_id', 'task_id', 'trace_id')
+    }
+    ctx = current_auth()
+    result = diagnose_logs(
+        LOG_DIR,
+        data_dir=data_root(),
+        window_hours=window_hours,
+        max_items=max_items,
+        max_output_bytes=max_bytes,
+        requesting_user_id=str(getattr(ctx, 'owner_user_id', '') or ''),
+        # This endpoint is admin-only. Keep the ownership decision explicit so
+        # a future per-user diagnostic route cannot inherit a global shortcut.
+        include_all_users=True,
+        **selectors,
+    )
+    return api_ok(result)
 
 
 @api_v1_logs_bp.route('/api/v1/logs/aggregates', methods=['GET'])
@@ -423,7 +493,7 @@ def client_logs_relay():
     summary='error.log fingerprint rollup, sorted by frequency',
     description=(
         'Read-only view over the ``log_aggregates`` table (layer ③ of the '
-        'error.log dedup design, epic pt_71eaaa8d5b8243e9). Each row is one '
+        'error.log dedup design, ). Each row is one '
         '``(level, logger, message-template, exc-signature)`` fingerprint '
         'with ``count`` / ``first_seen`` / ``last_seen`` (epoch-ms + ISO) '
         'and one recent ``sample`` — the text logs stay the source of '
@@ -464,5 +534,80 @@ def log_aggregates_view():
                       unavailable=True)
     return api_ok(result)
 
+
+@api_v1_logs_bp.route('/api/v1/logs/digest', methods=['GET'])
+@require_scope('chat')
+@api_meta(
+    summary='LLM-facing differential log digest (NEW/ESCALATING/RECURRING/RESOLVED)',
+    description=(
+        'The bounded, LLM-consumable answer to "what needs fixing right '
+        'now" (layer ③ of the log-signal design, lib/log_signals.py). '
+        'Built on the log_aggregates fingerprint table plus an hourly '
+        'count baseline (data/config/log_digest_baseline.json): each '
+        'fingerprint is labelled NEW (first seen inside ``window_hours``), '
+        'ESCALATING (recent rate > escalate_factor × lifetime rate), '
+        'RECURRING (still firing) or RESOLVED (silent for 24h). Every '
+        'entry carries ``rid``/``grep_hint`` pointers back into the raw '
+        'text logs, which remain the source of truth. Without a baseline '
+        'snapshot yet, ESCALATING is honestly never reported (cold start).\n\n'
+        'Query params: ``window_hours`` (1..168, default 24), '
+        '``max_items`` (1..100 per section, default 20), '
+        '``escalate_factor`` (default 3.0).'),
+    tags=['logs'],
+    scope='chat',
+)
+def log_digest_view():
+    from quart import request
+
+    from lib.log_signals import compute_digest
+
+    try:
+        window_hours = float(request.args.get('window_hours') or 24)
+        max_items = int(request.args.get('max_items') or 20)
+        escalate_factor = float(request.args.get('escalate_factor') or 3.0)
+    except (TypeError, ValueError):
+        return api_bad_request('invalid numeric parameter')
+    if not (1 <= window_hours <= 168):
+        return api_bad_request('invalid window_hours (1..168)',
+                               field='window_hours')
+    if not (1 <= max_items <= 100):
+        return api_bad_request('invalid max_items (1..100)',
+                               field='max_items')
+    if not (1.5 <= escalate_factor <= 100):
+        return api_bad_request('invalid escalate_factor (1.5..100)',
+                               field='escalate_factor')
+    try:
+        result = compute_digest(
+            window_hours=window_hours, max_items=max_items,
+            escalate_factor=escalate_factor)
+    except Exception as e:
+        # Storage failure is precisely when operators need diagnostics most.
+        # Fall back to the file-only incident index instead of returning an
+        # empty dashboard whose root cause is impossible to inspect.
+        logger.warning('[Logs.digest] aggregate store unavailable; using '
+                       'incident journal fallback: %s', e)
+        try:
+            from lib.log_diagnostics import diagnose_logs
+            from lib.runtime_paths import data_root
+
+            ctx = current_auth()
+            fallback = diagnose_logs(
+                LOG_DIR, data_dir=data_root(), window_hours=window_hours,
+                max_items=max_items, max_output_bytes=32 * 1024,
+                requesting_user_id=str(getattr(ctx, 'owner_user_id', '') or ''),
+                include_all_users=bool(
+                    ctx is not None and ctx.has_scope('admin')))
+            return api_ok(
+                new=[], escalating=[],
+                recurring_top=fallback.get('incidents') or [], resolved=[],
+                summary=fallback.get('summary') or {}, unavailable=True,
+                fallback='incident_journal', diagnostics=fallback)
+        except Exception as fallback_error:
+            logger.warning('[Logs.digest] incident fallback failed: %s',
+                           fallback_error)
+            return api_ok(new=[], escalating=[], recurring_top=[], resolved=[],
+                          summary={}, unavailable=True,
+                          fallback='unavailable')
+    return api_ok(result)
 
 __all__ = ['api_v1_logs_bp']

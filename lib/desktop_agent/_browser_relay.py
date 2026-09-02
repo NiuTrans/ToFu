@@ -19,6 +19,15 @@ matches the configured Tofu server origin.  It also answers Chromium Private
 Network Access preflights.  No endpoint is bound off loopback, no gateway
 cookie ever enters this process, and the bridge token is exposed only to the
 already-trusted Tofu origin that minted it.
+
+One deliberate exception, the BOOTSTRAP mode: while the agent has no
+configured attachment there is no origin to gate on, so ``/v1/status`` and
+``/v1/attach`` answer any browser origin.  This is the macOS/Linux
+zero-config attach channel — the signed-in Local Control page pushes the
+agent its routes + a fresh credential (lib/desktop_agent/_push_attach.py
+owns the policy: a page may only attach the agent to the page's own
+server).  The moment an attachment exists the strict origin gate closes
+over every verb again.
 """
 
 from __future__ import annotations
@@ -93,18 +102,30 @@ class BrowserRelay:
     """A single-agent, loopback-only browser transport broker."""
 
     def __init__(self, allowed_urls, log=lambda _msg: None,
-                 port_start: int = PORT_START, port_end: int = PORT_END):
+                 port_start: int = PORT_START, port_end: int = PORT_END,
+                 attach_handler=None, attach_state=None):
         """Create a broker.
 
         ``allowed_urls`` is a zero-argument callable returning the currently
         configured server URL plus attach candidates.  It is evaluated for
         every browser request so reconnecting the agent updates the origin
         gate without restarting this local service.
+
+        ``attach_handler`` (optional) is ``fn(payload, origin) -> (ok,
+        reason, url, transport)`` — the policy entry point for a
+        browser-pushed attach (see _push_attach.py); ``attach_state`` is a
+        zero-argument callable returning whether an attachment is currently
+        configured.  Both must be provided for the bootstrap channel to
+        open; without them the broker behaves exactly as before.
         """
         self._allowed_urls = allowed_urls
         self._log = log
         self._port_start = int(port_start)
         self._port_end = int(port_end)
+        self._attach_handler = attach_handler
+        self._attach_state = attach_state
+        self._attach_lock = threading.Lock()
+        self._last_attach_at = 0.0
         self._jobs = {}
         self._jobs_lock = threading.Lock()
         self._pending = queue.Queue(maxsize=2)
@@ -112,6 +133,41 @@ class BrowserRelay:
         self._httpd = None
         self._thread = None
         self.port = 0
+
+    def bootstrap_active(self) -> bool:
+        """Whether the unattached bootstrap channel is open RIGHT NOW.
+
+        Fails CLOSED: an unreadable attach state reads as attached, so a
+        config hiccup never widens the origin gate.
+        """
+        if self._attach_handler is None or self._attach_state is None:
+            return False
+        try:
+            return not bool(self._attach_state())
+        except Exception as e:
+            logger.debug('[AgentRelay] attach-state probe failed: %s', e)
+            return False
+
+    def handle_attach(self, payload, origin):
+        """Run one pushed-attach attempt — serialized and throttled.
+
+        The handler probes candidate routes (up to 2.5 s each), so a page
+        hammering the endpoint would otherwise pile up network waits; one
+        attempt per 3 s bounds that while staying invisible to a human
+        retrying a stalled install.
+        """
+        if self._attach_handler is None:
+            return False, 'unsupported', '', ''
+        with self._attach_lock:
+            now = time.monotonic()
+            if now - self._last_attach_at < 3.0:
+                return False, 'throttled', '', ''
+            self._last_attach_at = now
+            try:
+                return self._attach_handler(payload, origin)
+            except Exception as e:
+                logger.warning('[AgentRelay] attach handler failed: %s', e)
+                return False, 'handler_error', '', ''
 
     def allowed_origins(self) -> set[str]:
         try:
@@ -146,27 +202,42 @@ class BrowserRelay:
                 return  # never leak bridge-token-bearing request details
 
             def _cors(self, origin: str) -> None:
-                self.send_header('Access-Control-Allow-Origin', origin)
-                self.send_header('Vary', 'Origin')
-                self.send_header('Access-Control-Allow-Methods',
-                                 'GET, POST, OPTIONS')
-                self.send_header('Access-Control-Allow-Headers',
-                                 'Content-Type')
-                # Chromium's Private Network Access preflight for an HTTPS
-                # cloud-IDE page reaching http://127.0.0.1.
-                self.send_header('Access-Control-Allow-Private-Network',
-                                 'true')
+                if origin:
+                    self.send_header('Access-Control-Allow-Origin', origin)
+                    self.send_header('Vary', 'Origin')
+                    self.send_header('Access-Control-Allow-Methods',
+                                     'GET, POST, OPTIONS')
+                    self.send_header('Access-Control-Allow-Headers',
+                                     'Content-Type')
+                    # Chromium's Private Network Access preflight for an
+                    # HTTPS cloud-IDE page reaching http://127.0.0.1.
+                    self.send_header('Access-Control-Allow-Private-Network',
+                                     'true')
                 self.send_header('Cache-Control', 'no-store')
 
-            def _authorize(self) -> str:
+            def _gate(self, bootstrap_ok: bool):
+                """The origin check. Returns the origin to CORS-answer with
+                ('' for a headerless non-browser caller), or None after
+                sending a 403.
+
+                ``bootstrap_ok`` paths (status + attach) open to ANY origin
+                while the agent is unattached — there is no configured
+                origin to gate on yet, and the page that just served the
+                download must be able to find and provision this agent.
+                The attach verb's own policy (origin-owns-a-route) is what
+                constrains it; every other verb stays on the strict gate.
+                """
                 origin = (self.headers.get('Origin') or '').strip().lower()
-                if not relay.origin_allowed(origin):
-                    self.send_response(403)
-                    self.send_header('Content-Length', '0')
-                    self.end_headers()
-                    return ''
-                relay.note_browser()
-                return origin
+                if origin and relay.origin_allowed(origin):
+                    relay.note_browser()
+                    return origin
+                if bootstrap_ok and relay.bootstrap_active():
+                    relay.note_browser()
+                    return origin
+                self.send_response(403)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return None
 
             def _json(self, status: int, data: dict, origin: str) -> None:
                 raw = json.dumps(data, ensure_ascii=False,
@@ -200,21 +271,29 @@ class BrowserRelay:
                     return None
 
             def do_OPTIONS(self):  # noqa: N802 - BaseHTTPRequestHandler API
-                origin = self._authorize()
-                if origin:
+                origin = self._gate(
+                    self.path in ('/v1/status', '/v1/attach'))
+                if origin is not None:
                     self._empty(204, origin)
 
             def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
-                origin = self._authorize()
-                if not origin:
+                origin = self._gate(self.path == '/v1/status')
+                if origin is None:
                     return
                 if self.path == '/v1/status':
-                    self._json(200, {
+                    body = {
                         'kind': 'tofu-agent-browser-relay',
                         'version': 1,
                         'port': relay.port,
                         'pending': relay.pending_count(),
-                    }, origin)
+                    }
+                    # The page's attach/discovery probe keys on this: an
+                    # unattached agent gets its bundle pushed; an attached
+                    # one enters the relay flow. Absent when no attach
+                    # channel is wired (legacy callers read it as attached).
+                    if relay._attach_state is not None:
+                        body['attached'] = not relay.bootstrap_active()
+                    self._json(200, body, origin)
                     return
                 if self.path != '/v1/take':
                     self._empty(404, origin)
@@ -226,8 +305,30 @@ class BrowserRelay:
                     self._json(200, job, origin)
 
             def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
-                origin = self._authorize()
-                if not origin:
+                origin = self._gate(self.path == '/v1/attach')
+                if origin is None:
+                    return
+                if self.path == '/v1/attach':
+                    if relay._attach_handler is None:
+                        # No push channel wired (source-run agent): the page
+                        # reads 404 as 'relay-only build' and stops pushing.
+                        self._empty(404, origin)
+                        return
+                    data = self._read_json()
+                    if not isinstance(data, dict):
+                        self._empty(400, origin)
+                        return
+                    ok, reason, url, transport = relay.handle_attach(
+                        data, self.headers.get('Origin') or '')
+                    status = (200 if ok else
+                              409 if reason == 'already_attached' else
+                              429 if reason == 'throttled' else 403)
+                    self._json(status, {
+                        'accepted': bool(ok),
+                        'reason': reason,
+                        'url': url,
+                        'transport': transport,
+                    }, origin)
                     return
                 if self.path != '/v1/result':
                     self._empty(404, origin)

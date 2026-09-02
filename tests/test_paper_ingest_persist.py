@@ -4,7 +4,7 @@
 The vanishing-paper bug had two coupled root causes, both proven here:
 
   1. ``/api/paper/upload`` did ``open(filepath, 'wb')`` with no makedirs at
-     WRITE time — ``PAPER_DIR`` is created once at import (lib/paper/hashing.py).
+     WRITE time — ``PAPER_DIR`` is created once by ``lib.paper_identity``.
      On a FUSE/cross-DC mount that dir can be gone at write time → the write
      ENOENTs, the upload 500s, and the PDF bytes are lost. Fix: re-ensure the
      dir on every write.
@@ -28,6 +28,8 @@ Under pytest: uses the live ``server.app`` (auth_mode=open) test client.
 import os
 import sys
 import time
+import uuid
+from dataclasses import replace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -43,6 +45,7 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 
 try:
     import pytest
+    pytest_plugins = ('tests._artifact_sidecar',)
     pytestmark = [pytest.mark.unit, pytest.mark.auth_mode('open')]
 except ImportError:
     pytest = None
@@ -52,34 +55,15 @@ _APP = None
 
 
 def _load_app():
-    """Boot the real ``server.app`` against a temp SQLite DB with a fully
-    bootstrapped schema (so the paper_library / users tables exist under
-    pytest, which does NOT bootstrap the ambient DB). Cached across tests."""
+    """Start isolated storage and return the shared native application."""
     global _APP
     if _APP is not None:
         return _APP
-    import tempfile
-    # MUST be set before server.py / lib.database import (paths read once).
-    os.environ['TOFU_DB_BACKEND'] = 'sqlite'
-    if not os.environ.get('TOFU_DB_PATH'):
-        _dbf = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
-        _dbf.close()
-        os.environ['TOFU_DB_PATH'] = _dbf.name
     os.environ.setdefault('TOFU_AUTH_MODE', 'open')
-
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        'server', os.path.join(os.path.dirname(os.path.dirname(__file__)), 'server.py'))
-    mod = importlib.util.module_from_spec(spec)
-    mod.__name__ = 'server'
-    spec.loader.exec_module(mod)
-    # Force schema bootstrap (idempotent) — seeds users(id=1) too.
-    try:
-        from lib.database import init_db
-        init_db()
-    except Exception as e:
-        print(f'[paper_ingest_test] init_db: {e}')
-    _APP = mod.app
+    from lib.storage import start_storage
+    import server
+    start_storage()
+    _APP = server.app
     return _APP
 
 
@@ -116,9 +100,9 @@ _FAKE_PDF = _make_min_pdf()
 def _patch_parse(routes_paper):
     """Monkeypatch the parse + figure-extraction so the test is hermetic (no
     real PDF engine). Returns a restore() callable."""
-    import lib.pdf_parser as _pp
-    orig_parse = _pp.parse_pdf
-    orig_fig = routes_paper._extract_paper_figures
+    import lib.pdf_parser.core as pdf_core
+    orig_parse = pdf_core.parse_pdf
+    orig_fig = routes_paper.extract_paper_figures
 
     def _fake_parse(pdf_bytes, **kw):
         return {'text': 'X' * 500, 'totalPages': 3, 'textLength': 500}
@@ -126,14 +110,14 @@ def _patch_parse(routes_paper):
     def _fake_fig(filepath, phash, **kw):
         return []
 
-    _pp.parse_pdf = _fake_parse
-    routes_paper._extract_paper_figures = _fake_fig
-    # routes.paper imported the name at module load → patch that binding too.
-    routes_paper.__dict__['_extract_paper_figures'] = _fake_fig
+    pdf_core.parse_pdf = _fake_parse
+    routes_paper.extract_paper_figures = _fake_fig
+    # routes.paper_pkg._library imported the name at module load → patch that binding too.
+    routes_paper.__dict__['extract_paper_figures'] = _fake_fig
 
     def restore():
-        _pp.parse_pdf = orig_parse
-        routes_paper._extract_paper_figures = orig_fig
+        pdf_core.parse_pdf = orig_parse
+        routes_paper.extract_paper_figures = orig_fig
     return restore
 
 
@@ -154,38 +138,31 @@ def _multipart(pdf_bytes, paper_id):
 
 
 def _count_rows(paper_id):
-    from lib.database._core import _pool_get, _pool_put
-    db = _pool_get()
-    try:
-        row = db.execute(
-            'SELECT COUNT(*) AS n FROM paper_library WHERE id=? AND user_id=1',
-            (paper_id,)).fetchone()
-        return int(row['n'])
-    finally:
-        _pool_put(db)
+    from lib.paper.library_repository import PaperLibraryRepository
+
+    return int(PaperLibraryRepository(1).get(paper_id) is not None)
 
 
 def _seed_raw_row(paper_id, *, pdf_filename, paper_hash='', arxiv_id='',
                   parsed_text='x' * 200):
-    """Insert a paper_library row DIRECTLY (bypassing the ingest path), so a
-    test can plant a ghost (empty pdf_filename), a healthy row, or a saved
-    recommendation (empty pdf_filename + arxiv_id, no parsed_text)."""
-    import time as _t
-    from lib.database._core import _pool_get, _pool_put
-    from lib.database._core_schema import PAPER_LIBRARY, upsert
-    now = int(_t.time() * 1000)
-    db = _pool_get()
-    try:
-        upsert(db, PAPER_LIBRARY, {
-            'id': paper_id, 'user_id': 1, 'title': 'seeded',
-            'pdf_url': ('/api/paper/pdf/' + pdf_filename) if pdf_filename else '',
-            'pdf_filename': pdf_filename, 'arxiv_id': arxiv_id,
-            'paper_hash': paper_hash, 'parsed_text': parsed_text,
-            'parser_version': '', 'qa_history': '[]', 'images': '[]', 'babel_cache': '{}',
-            'page_count': 1, 'folder_id': '', 'created_at': now, 'updated_at': now,
-        }, retry=True)
-    finally:
-        _pool_put(db)
+    """Seed an owner-scoped entry through the canonical repository boundary."""
+    from lib.paper.library_repository import PaperLibraryEntry, PaperLibraryRepository
+
+    now = int(time.time() * 1000)
+    entry = PaperLibraryEntry(
+        paper_id=paper_id,
+        title='seeded',
+        pdf_url=('/api/paper/pdf/' + pdf_filename) if pdf_filename else '',
+        pdf_filename=pdf_filename,
+        arxiv_id=arxiv_id,
+        paper_hash=paper_hash,
+        parsed_text=parsed_text,
+        page_count=1,
+        created_at=now,
+        updated_at=now,
+    )
+    assert PaperLibraryRepository(1).put(
+        entry, command_id=f'paper-ingest-seed:{paper_id}:{uuid.uuid4().hex}')
 
 
 async def _list_ids(client):
@@ -202,7 +179,7 @@ def test_upload_persists_row_with_zero_client_puts():
     PUT is issued in this test at all. This is the durable fix."""
     import asyncio
     app = _load_app()
-    import routes.paper as rp
+    import routes.paper_pkg._library as rp
     restore = _patch_parse(rp)
     pid = f'paper_ingest_{int(time.time()*1000)}'
 
@@ -233,7 +210,7 @@ def test_upload_no_paper_id_persists_nothing_NC():
     some other incidental write."""
     import asyncio
     app = _load_app()
-    import routes.paper as rp
+    import routes.paper_pkg._library as rp
     restore = _patch_parse(rp)
 
     async def _t():
@@ -266,8 +243,8 @@ def test_upload_into_missing_paper_dir_still_succeeds():
     import shutil
     import tempfile
     app = _load_app()
-    import routes.paper as rp
-    import lib.paper.hashing as hashing
+    import routes.paper_pkg._library as rp
+    import lib.paper_identity as hashing
     restore = _patch_parse(rp)
 
     tmp_root = tempfile.mkdtemp(prefix='tofu-paperdir-')
@@ -308,13 +285,13 @@ def test_ghost_row_reaped_from_listing_with_NC():
     fire-and-forget persistence) MUST NOT appear in the library listing —
     returning one reproduces the exact vanishing-paper ghost the user saw.
 
-    BITING NC (in-test source toggle): patch routes.paper._is_ghost_library_row
+    BITING NC (in-test source toggle): patch routes.paper_pkg._library._is_ghost_library_row
     to always return False (reap disabled) → the ghost REAPPEARS in the
     listing; restore → it's gone again.
     """
     import asyncio
     app = _load_app()
-    import routes.paper as rp
+    import routes.paper_pkg._library as rp
 
     ghost = f'paper_ghost_{int(time.time()*1000)}'
     healthy = f'paper_ok_{int(time.time()*1000)}'
@@ -370,7 +347,7 @@ def test_saved_recommendation_row_survives_reaper_with_NC():
     """
     import asyncio
     app = _load_app()
-    import routes.paper as rp
+    import routes.paper_pkg._library as rp
 
     rec = f'paper_rec_{int(time.time()*1000)}'
     dead = f'paper_dead_{int(time.time()*1000)}'
@@ -430,38 +407,32 @@ def test_reingest_preserves_existing_folder_assignment():
     assignment (the PUT path's own preserve contract), while still updating
     the columns it does write (title/pdf/page_count)."""
     app = _load_app()
-    import routes.paper as rp
-    from lib.database._core import _pool_get, _pool_put
+    import routes.paper_pkg._library as rp
+    from lib.paper.library_repository import PaperLibraryRepository
     pid = f'paper_folderkeep_{int(time.time()*1000)}'
 
     assert rp._persist_ingested_library_row(
-        pid, title='v1', pdf_url='/api/paper/pdf/x.pdf', pdf_filename='x.pdf',
+        pid, user_id=1, title='v1', pdf_url='/api/paper/pdf/x.pdf', pdf_filename='x.pdf',
         arxiv_id='', paper_hash='h1', parsed_text='abc', images=[], page_count=1)
     # The user files the paper into a folder (metadata-only PUT path).
-    db = _pool_get()
-    try:
-        db.execute(
-            'UPDATE paper_library SET folder_id=? WHERE id=? AND user_id=1',
-            ('folder-x', pid))
-        db.commit()
-    finally:
-        _pool_put(db)
+    repository = PaperLibraryRepository(1)
+    existing = repository.get(pid)
+    assert existing is not None
+    assert repository.put(
+        replace(existing, folder_id='folder-x'),
+        command_id=f'paper-ingest-folder:{pid}:{uuid.uuid4().hex}',
+    )
 
     # Re-ingest the same paper id (re-upload / re-fetch).
     assert rp._persist_ingested_library_row(
-        pid, title='v2', pdf_url='/api/paper/pdf/y.pdf', pdf_filename='y.pdf',
+        pid, user_id=1, title='v2', pdf_url='/api/paper/pdf/y.pdf', pdf_filename='y.pdf',
         arxiv_id='', paper_hash='h2', parsed_text='def', images=[], page_count=2)
 
-    db = _pool_get()
-    try:
-        row = db.execute(
-            'SELECT folder_id, title, page_count FROM paper_library'
-            ' WHERE id=? AND user_id=1', (pid,)).fetchone()
-    finally:
-        _pool_put(db)
-    assert row['folder_id'] == 'folder-x', \
-        f"re-ingest clobbered the folder assignment: {row['folder_id']!r}"
-    assert row['title'] == 'v2' and int(row['page_count']) == 2, \
+    row = repository.get(pid)
+    assert row is not None
+    assert row.folder_id == 'folder-x', \
+        f"re-ingest clobbered the folder assignment: {row.folder_id!r}"
+    assert row.title == 'v2' and row.page_count == 2, \
         're-ingest did not refresh the written columns'
     _ok('re-ingest preserves folder_id (partial upsert) yet refreshes written columns')
 
@@ -477,12 +448,12 @@ def test_arxiv_stream_persists_row_end_to_end_zero_client_puts():
     """
     import asyncio
     app = _load_app()
-    import routes.paper as rp
+    import routes.paper_pkg._arxiv as rp
     import lib.http_client as _hc
 
     restore_parse = _patch_parse(rp)
 
-    # Mock the arXiv PDF download (http_get is imported into routes.paper as
+    # Mock the arXiv PDF download (http_get is imported into routes.paper_pkg._arxiv as
     # http_get, and the streaming handler calls it directly).
     class _FakeResp:
         status_code = 200
@@ -559,4 +530,6 @@ def main():
 
 
 if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_paper_ingest_persist.__main__')
     main()

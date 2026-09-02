@@ -86,13 +86,14 @@ _PERSIST_CFG_KEYS = (
 
 
 def _persist_config(cfg: dict, model: str, thinking_enabled: bool,
-                    project_path: str, parent_cfg: dict) -> dict:
+                    project_path: str, parent_cfg: dict, *, user_id) -> dict:
     """Snapshot the config needed to rebuild a swarm's sub-agents on restart."""
     out = {
         'model':            model,
         'thinking_enabled': thinking_enabled,
         'project_path':     project_path,
         'parent_cfg':       dict(parent_cfg or {}),
+        'user_id':          user_id,
     }
     for k in _PERSIST_CFG_KEYS:
         if k in (cfg or {}):

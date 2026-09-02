@@ -1,4 +1,4 @@
-"""RENDER-BUDGET INVARIANTS for the project-bar scene (static/js/tofu-scene.js).
+"""Render budgets for frontend/src/runtime/scene/tofu-scene.js.
 
 The scene is an always-on animation living behind an ordinary UI control, so its
 per-frame cost is a FEATURE REQUIREMENT, not a nice-to-have: if it regresses, it
@@ -49,7 +49,13 @@ import pytest
 from tests._jsdom import frontend_module_guard
 
 REPO = Path(__file__).resolve().parent.parent
-SCENE_JS = REPO / "static" / "js" / "tofu-scene.js"
+import sys as _sys
+_sys.path.insert(0, str(REPO))
+from tests._runtime_sections import runtime_section_path
+import sys as _sys
+if str(REPO) not in _sys.path:
+    _sys.path.insert(0, str(REPO))
+SCENE_JS = Path(runtime_section_path('tofu-scene.js'))
 
 # P0-1: node absent → clean skip normally, collection-red under
 # TOFU_REQUIRE_FRONTEND=1 (docs/TESTING_STRATEGY.md §4).
@@ -597,10 +603,10 @@ def test_painting_is_full_bleed_no_torn_edge():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  5. THE PET's per-frame cost (static/js/tofu-pet.js)
+#  5. THE PET's per-frame cost (frontend/src/runtime/scene/tofu-pet.js)
 # ══════════════════════════════════════════════════════════════════════════
 
-PET_JS = REPO / "static" / "js" / "tofu-pet.js"
+PET_JS = Path(runtime_section_path('tofu-pet.js'))
 
 
 def test_pet_does_not_write_a_dead_parallax_property_every_frame():

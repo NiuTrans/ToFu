@@ -3,51 +3,50 @@
 from __future__ import annotations
 
 import io
+from types import SimpleNamespace
 import zipfile
 
 import pytest
 
 pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._knowledge_sidecar',)
+
+TEST_OWNER_USER_ID = 1
 
 
-@pytest.fixture(autouse=True)
-def isolated_knowledge(tmp_path, monkeypatch):
-    from lib.knowledge import store
-    monkeypatch.setattr(store, '_DB_PATH_OVERRIDE', str(tmp_path / 'knowledge.sqlite3'))
-    monkeypatch.setattr(store, '_SOURCE_ROOT_OVERRIDE', str(tmp_path / 'sources'))
-    yield store
+def _search(query: str, **kwargs):
+    from lib.knowledge.search import search
+
+    return search(query, user_id=TEST_OWNER_USER_ID, **kwargs)
 
 
 def test_empty_or_disabled_corpus_contributes_no_model_tool(isolated_knowledge):
     from lib.knowledge.tool import build_tool
-    assert build_tool(None) == []
+    context = SimpleNamespace(owner_user_id=TEST_OWNER_USER_ID)
+    assert build_tool(context) == []
 
     isolated_knowledge.add_document(
-        '报销制度：差旅发票应在三十天内提交。'.encode(), 'policy.txt')
-    assert [t['function']['name'] for t in build_tool(None)] == ['search_knowledge']
+        '报销制度：差旅发票应在三十天内提交。'.encode(), 'policy.txt',
+        user_id=TEST_OWNER_USER_ID)
+    assert [t['function']['name'] for t in build_tool(context)] == ['search_knowledge']
 
-    isolated_knowledge.set_enabled(False)
-    assert build_tool(None) == []
+    isolated_knowledge.set_enabled(False, user_id=TEST_OWNER_USER_ID)
+    assert build_tool(context) == []
 
 
-def test_status_read_does_not_initialize_an_incomplete_store(
-        isolated_knowledge, tmp_path):
-    db_path = tmp_path / 'knowledge.sqlite3'
-    db_path.touch()
-
-    status = isolated_knowledge.get_status()
+def test_status_read_does_not_create_owner_files(isolated_knowledge, tmp_path):
+    status = isolated_knowledge.get_status(user_id=TEST_OWNER_USER_ID)
 
     assert status['available'] is False
     assert status['totals']['documents'] == 0
-    assert db_path.stat().st_size == 0
-    assert list(tmp_path.glob('knowledge.sqlite3-*')) == []
+    assert not (tmp_path / 'knowledge-files').exists()
 
 
 def test_catalog_only_lists_knowledge_tool_while_available(isolated_knowledge):
     from lib.tools.registry._introspect import build_tool_inventory
 
     def knowledge_families():
-        inventory = build_tool_inventory()
+        inventory = build_tool_inventory(owner_user_id=TEST_OWNER_USER_ID)
         return [
             family
             for group in inventory['groups']
@@ -56,13 +55,14 @@ def test_catalog_only_lists_knowledge_tool_while_available(isolated_knowledge):
         ]
 
     assert knowledge_families() == []
-    isolated_knowledge.add_document(b'local evidence', 'evidence.txt')
+    isolated_knowledge.add_document(
+        b'local evidence', 'evidence.txt', user_id=TEST_OWNER_USER_ID)
     families = knowledge_families()
     assert len(families) == 1
     assert [row['name'] for row in families[0]['tools']] == [
         'search_knowledge']
 
-    isolated_knowledge.set_enabled(False)
+    isolated_knowledge.set_enabled(False, user_id=TEST_OWNER_USER_ID)
     assert knowledge_families() == []
 
 
@@ -77,14 +77,16 @@ def test_knowledge_tool_has_human_readable_activity_labels():
 
 def test_plaintext_is_deduplicated_and_cjk_search_is_grounded(isolated_knowledge):
     raw = '研发部张三擅长边缘计算。\n年假为十天。'.encode('utf-16')
-    first = isolated_knowledge.add_document(raw, '无扩展知识')
-    second = isolated_knowledge.add_document(raw, 'renamed.txt')
+    first = isolated_knowledge.add_document(
+        raw, '无扩展知识', user_id=TEST_OWNER_USER_ID)
+    second = isolated_knowledge.add_document(
+        raw, 'renamed.txt', user_id=TEST_OWNER_USER_ID)
     assert first['kind'] == '.txt'
     assert second['duplicate'] is True
-    assert isolated_knowledge.get_status()['totals']['documents'] == 1
+    assert isolated_knowledge.get_status(
+        user_id=TEST_OWNER_USER_ID)['totals']['documents'] == 1
 
-    from lib.knowledge.search import search
-    hits = search('谁擅长边缘计算')
+    hits = _search('谁擅长边缘计算')
     assert hits
     assert hits[0]['source'] == '无扩展知识'
     assert '张三' in hits[0]['excerpt']
@@ -111,10 +113,12 @@ Zoom 客户端需要完成安装和 SSO 登录。
 请在电脑上添加打印机并完成驱动配置。
 '''
     document = isolated_knowledge.add_document(
-        handbook.encode(), '新员工入职IT指南.md')
+        handbook.encode(), '新员工入职IT指南.md',
+        user_id=TEST_OWNER_USER_ID)
     assert document['chunk_count'] == 5
 
-    parsed = isolated_knowledge.get_document_content(document['id'])
+    parsed = isolated_knowledge.get_document_content(
+        document['id'], user_id=TEST_OWNER_USER_ID)
     assert parsed is not None
     assert [chunk['section'] for chunk in parsed['chunks']][1:] == [
         '一、大象 — 与公司同事进行业务沟通',
@@ -123,8 +127,7 @@ Zoom 客户端需要完成安装和 SSO 登录。
         '四、打印机 — 公司打印机安装及配置',
     ]
 
-    from lib.knowledge.search import search
-    hits = search('员工需要安装什么软件', limit=6)
+    hits = _search('员工需要安装什么软件', limit=6)
     excerpts = '\n'.join(hit['excerpt'] for hit in hits)
     for expected in ('大象', '邮件系统', 'Zoom', '打印机'):
         assert expected in excerpts
@@ -133,10 +136,10 @@ Zoom 客户端需要完成安装和 SSO 登录。
 def test_install_intent_expansion_participates_in_candidate_recall(
         isolated_knowledge):
     isolated_knowledge.add_document(
-        '星云桌面客户端由信息技术部门统一下发。'.encode(), '入职说明.txt')
+        '星云桌面客户端由信息技术部门统一下发。'.encode(), '入职说明.txt',
+        user_id=TEST_OWNER_USER_ID)
 
-    from lib.knowledge.search import search
-    hits = search('员工要安装什么软件')
+    hits = _search('员工要安装什么软件')
 
     assert hits
     assert '星云桌面客户端' in hits[0]['excerpt']
@@ -160,10 +163,10 @@ def test_excel_magic_wins_over_suffix_and_sparse_table_blocks_survive(
     buf = io.BytesIO()
     wb.save(buf)
 
-    doc = isolated_knowledge.add_document(buf.getvalue(), 'not-really.txt')
+    doc = isolated_knowledge.add_document(
+        buf.getvalue(), 'not-really.txt', user_id=TEST_OWNER_USER_ID)
     assert doc['kind'] == '.xlsx'
-    from lib.knowledge.search import search
-    hits = search('Policy Table 2026 年假天数')
+    hits = _search('Policy Table 2026 年假天数')
     assert any('年假' in hit['excerpt'] for hit in hits)
     assert any('Policy_Table_2026' in hit['excerpt'] for hit in hits)
     assert any(hit['section'] == 'Table block 2' for hit in hits)
@@ -176,24 +179,28 @@ def test_unformatted_docx_and_misleading_suffix(isolated_knowledge):
     document.add_paragraph('紧急联系人是李雷，分机 8848。')
     buf = io.BytesIO()
     document.save(buf)
-    indexed = isolated_knowledge.add_document(buf.getvalue(), 'notes.bin')
+    indexed = isolated_knowledge.add_document(
+        buf.getvalue(), 'notes.bin', user_id=TEST_OWNER_USER_ID)
     assert indexed['kind'] == '.docx'
-    from lib.knowledge.search import search
-    assert '李雷' in search('紧急联系人分机')[0]['excerpt']
+    assert '李雷' in _search('紧急联系人分机')[0]['excerpt']
 
 
 def test_delete_last_document_makes_tool_unavailable(isolated_knowledge):
-    doc = isolated_knowledge.add_document(b'alpha beta gamma', 'a.md')
-    assert isolated_knowledge.tool_available()
-    assert isolated_knowledge.delete_document(doc['id'])
-    assert not isolated_knowledge.tool_available()
-    assert isolated_knowledge.delete_document(doc['id']) is False
+    doc = isolated_knowledge.add_document(
+        b'alpha beta gamma', 'a.md', user_id=TEST_OWNER_USER_ID)
+    assert isolated_knowledge.tool_available(user_id=TEST_OWNER_USER_ID)
+    assert isolated_knowledge.delete_document(
+        doc['id'], user_id=TEST_OWNER_USER_ID)
+    assert not isolated_knowledge.tool_available(user_id=TEST_OWNER_USER_ID)
+    assert isolated_knowledge.delete_document(
+        doc['id'], user_id=TEST_OWNER_USER_ID) is False
 
 
 def test_reindex_atomically_replaces_searchable_content(
         isolated_knowledge, monkeypatch):
     doc = isolated_knowledge.add_document(
-        b'obsolete-needle-54321', 'handbook.txt')
+        b'obsolete-needle-54321', 'handbook.txt',
+        user_id=TEST_OWNER_USER_ID)
     monkeypatch.setattr(isolated_knowledge, 'extract', lambda _raw, _name: {
         'text': '# Revised\n\nnew canonical value 7788',
         'kind': '.txt',
@@ -202,19 +209,20 @@ def test_reindex_atomically_replaces_searchable_content(
         'pages': 1,
     })
 
-    updated = isolated_knowledge.reindex_document(doc['id'])
+    updated = isolated_knowledge.reindex_document(
+        doc['id'], user_id=TEST_OWNER_USER_ID)
 
     assert updated['method'] == 'test-upgraded-parser'
     assert updated['warnings'] == ['parser upgraded']
-    from lib.knowledge.search import search
-    assert '7788' in search('canonical value 7788')[0]['excerpt']
-    assert search('obsolete-needle-54321') == []
+    assert '7788' in _search('canonical value 7788')[0]['excerpt']
+    assert _search('obsolete-needle-54321') == []
 
 
 def test_upload_respects_an_explicit_disabled_choice(isolated_knowledge):
-    isolated_knowledge.set_enabled(False)
-    isolated_knowledge.add_document(b'private draft evidence', 'draft.txt')
-    status = isolated_knowledge.get_status()
+    isolated_knowledge.set_enabled(False, user_id=TEST_OWNER_USER_ID)
+    isolated_knowledge.add_document(
+        b'private draft evidence', 'draft.txt', user_id=TEST_OWNER_USER_ID)
+    status = isolated_knowledge.get_status(user_id=TEST_OWNER_USER_ID)
     assert status['totals']['documents'] == 1
     assert status['enabled'] is False
     assert status['available'] is False
@@ -224,15 +232,16 @@ def test_html_extraction_discards_executable_noise(isolated_knowledge):
     raw = b'''<!doctype html><html><head><style>.secret{}</style></head>
     <body><h1>Incident guide</h1><p>Escalation code is BLUE-42.</p>
     <script>var misleading = "WRONG-99";</script></body></html>'''
-    isolated_knowledge.add_document(raw, 'guide.html')
-    from lib.knowledge.search import search
-    assert 'BLUE-42' in search('escalation code')[0]['excerpt']
-    assert search('WRONG-99') == []
+    isolated_knowledge.add_document(
+        raw, 'guide.html', user_id=TEST_OWNER_USER_ID)
+    assert 'BLUE-42' in _search('escalation code')[0]['excerpt']
+    assert _search('WRONG-99') == []
 
 
 def test_rtf_unicode_and_email_attachment_are_searchable(isolated_knowledge):
     rtf = rb'{\rtf1\ansi Policy: submit in \u19971? days.\par Owner: Alice}'
-    isolated_knowledge.add_document(rtf, 'policy.rtf')
+    isolated_knowledge.add_document(
+        rtf, 'policy.rtf', user_id=TEST_OWNER_USER_ID)
 
     eml = (b'Subject: Operations handbook\r\nFrom: ops@example.com\r\n'
            b'To: team@example.com\r\nMIME-Version: 1.0\r\n'
@@ -241,10 +250,10 @@ def test_rtf_unicode_and_email_attachment_are_searchable(isolated_knowledge):
            b'--x\r\nContent-Type: text/plain\r\n'
            b'Content-Disposition: attachment; filename="contacts.txt"\r\n\r\n'
            b'Night contact: Charlie 7788\r\n--x--\r\n')
-    isolated_knowledge.add_document(eml, 'message.eml')
-    from lib.knowledge.search import search
-    assert any('七' in hit['excerpt'] for hit in search('submit 七 days'))
-    assert any('Charlie 7788' in hit['excerpt'] for hit in search('Night contact'))
+    isolated_knowledge.add_document(
+        eml, 'message.eml', user_id=TEST_OWNER_USER_ID)
+    assert any('七' in hit['excerpt'] for hit in _search('submit 七 days'))
+    assert any('Charlie 7788' in hit['excerpt'] for hit in _search('Night contact'))
 
 
 def test_opendocument_magic_wins_over_name(isolated_knowledge):
@@ -260,10 +269,10 @@ def test_opendocument_magic_wins_over_name(isolated_knowledge):
             <office:body><office:text><text:h>Runbook</text:h>
             <text:p>Failover region is Hangzhou.</text:p></office:text></office:body>
           </office:document-content>''')
-    indexed = isolated_knowledge.add_document(buf.getvalue(), 'mystery.bin')
+    indexed = isolated_knowledge.add_document(
+        buf.getvalue(), 'mystery.bin', user_id=TEST_OWNER_USER_ID)
     assert indexed['kind'] == '.odt'
-    from lib.knowledge.search import search
-    assert 'Hangzhou' in search('failover region')[0]['excerpt']
+    assert 'Hangzhou' in _search('failover region')[0]['excerpt']
 
 
 def test_semicolon_csv_infers_a_header_below_report_context(
@@ -275,15 +284,16 @@ Alice;Zoom;IT Service Desk
 Bob;Printer driver;Workplace Support
 '''.encode()
 
-    document = isolated_knowledge.add_document(raw, 'onboarding.csv')
+    document = isolated_knowledge.add_document(
+        raw, 'onboarding.csv', user_id=TEST_OWNER_USER_ID)
 
     assert document['method'] == 'delimited-table-local'
-    parsed = isolated_knowledge.get_document_content(document['id'])
+    parsed = isolated_knowledge.get_document_content(
+        document['id'], user_id=TEST_OWNER_USER_ID)
     content = '\n'.join(chunk['content'] for chunk in parsed['chunks'])
     assert 'Table context: Q3 onboarding inventory' in content
     assert '| Employee | Required software | Owner |' in content
-    from lib.knowledge.search import search
-    hits = search('Alice required software owner')
+    hits = _search('Alice required software owner')
     assert hits
     assert 'Zoom' in hits[0]['excerpt']
 
@@ -324,15 +334,15 @@ def test_pptx_table_cells_are_searchable_with_a_nonfirst_header(
     presentation.save(buffer)
 
     document = isolated_knowledge.add_document(
-        buffer.getvalue(), 'onboarding.pptx')
+        buffer.getvalue(), 'onboarding.pptx', user_id=TEST_OWNER_USER_ID)
 
-    parsed = isolated_knowledge.get_document_content(document['id'])
+    parsed = isolated_knowledge.get_document_content(
+        document['id'], user_id=TEST_OWNER_USER_ID)
     content = '\n'.join(chunk['content'] for chunk in parsed['chunks'])
     assert 'Table context: New hire application matrix' in content
     assert '| Employee | Required software | Owner |' in content
-    from lib.knowledge.search import search
     assert any('Zoom' in hit['excerpt']
-               for hit in search('Alice required software'))
+               for hit in _search('Alice required software'))
 
 
 def test_ods_table_uses_the_same_header_inference(isolated_knowledge):
@@ -371,17 +381,17 @@ def test_ods_table_uses_the_same_header_inference(isolated_knowledge):
           </office:document-content>''')
 
     document = isolated_knowledge.add_document(
-        buffer.getvalue(), 'misleading-name.bin')
+        buffer.getvalue(), 'misleading-name.bin', user_id=TEST_OWNER_USER_ID)
 
     assert document['kind'] == '.ods'
-    parsed = isolated_knowledge.get_document_content(document['id'])
+    parsed = isolated_knowledge.get_document_content(
+        document['id'], user_id=TEST_OWNER_USER_ID)
     content = '\n'.join(chunk['content'] for chunk in parsed['chunks'])
     assert 'Table context: New hire application matrix' in content
     assert '| Employee | Required software | Owner |' in content
     assert '|  |  | Escalation |' in content
-    from lib.knowledge.search import search
     assert any('Zoom' in hit['excerpt']
-               for hit in search('Alice required software'))
+               for hit in _search('Alice required software'))
 
 
 def test_repeated_pdf_margins_are_removed_without_losing_page_content():
@@ -418,13 +428,13 @@ def test_search_suppresses_near_duplicate_evidence_across_documents(
         'NEBULA-7741 access procedure requires the employee to install the '
         'company VPN client, sign in with SSO, and confirm the security '
         'certificate before opening finance systems.')
-    isolated_knowledge.add_document(canonical.encode(), 'handbook-a.txt')
+    isolated_knowledge.add_document(
+        canonical.encode(), 'handbook-a.txt', user_id=TEST_OWNER_USER_ID)
     isolated_knowledge.add_document(
         (canonical + '\nReference copy maintained by Workplace IT.').encode(),
-        'handbook-b.txt')
+        'handbook-b.txt', user_id=TEST_OWNER_USER_ID)
 
-    from lib.knowledge.search import search
-    hits = search('NEBULA-7741 VPN finance systems', limit=6)
+    hits = _search('NEBULA-7741 VPN finance systems', limit=6)
 
     assert len(hits) == 1
     assert 'company VPN client' in hits[0]['excerpt']
@@ -446,13 +456,14 @@ def test_image_is_durable_searchable_multimodal_evidence(
     image.save(buffer, format='PNG')
     raw = buffer.getvalue()
 
-    document = isolated_knowledge.add_document(raw, 'org-chart-blue.png')
+    document = isolated_knowledge.add_document(
+        raw, 'org-chart-blue.png', user_id=TEST_OWNER_USER_ID)
     assert document['kind'] == '.png'
     assert document['asset_count'] == 1
-    assert isolated_knowledge.get_status()['totals']['assets'] == 1
+    assert isolated_knowledge.get_status(
+        user_id=TEST_OWNER_USER_ID)['totals']['assets'] == 1
 
-    from lib.knowledge.search import search
-    results = search('org chart blue')
+    results = _search('org chart blue')
     assert results and len(results[0]['assets']) == 1
     asset = results[0]['assets'][0]
     assert asset['kind'] == 'image'
@@ -469,13 +480,15 @@ def test_image_is_durable_searchable_multimodal_evidence(
         'image/jpeg', 'image/png')
 
     from lib.knowledge.tool import _multimodal_results
-    payload = _multimodal_results(results)
+    payload = _multimodal_results(results, user_id=TEST_OWNER_USER_ID)
     assert payload['__screenshot__'] is True
     assert payload['images'][0]['assetId'] == asset['id']
     assert 'org-chart-blue.png' in payload['_no_vision_fallback']
 
-    assert isolated_knowledge.delete_document(document['id']) is True
-    assert list((tmp_path / 'assets').glob('*')) == []
+    assert isolated_knowledge.delete_document(
+        document['id'], user_id=TEST_OWNER_USER_ID) is True
+    assert list((tmp_path / 'knowledge-files' / str(TEST_OWNER_USER_ID)
+                 / 'assets').glob('*')) == []
     assert flask_client.get(asset['url']).status_code == 404
 
 
@@ -486,18 +499,20 @@ def test_visual_enrichment_requires_consent_and_atomically_refreshes_search(
     buffer = io.BytesIO()
     image.save(buffer, format='PNG')
     document = isolated_knowledge.add_document(
-        buffer.getvalue(), 'unlabeled-diagram.png')
+        buffer.getvalue(), 'unlabeled-diagram.png',
+        user_id=TEST_OWNER_USER_ID)
 
-    from lib.database import knowledge_repository as repository
-    assets = repository.list_assets(
-        isolated_knowledge._db_path(), document_id=document['id'])
+    from lib.knowledge.repository import KnowledgeRepository
+    repository = KnowledgeRepository(TEST_OWNER_USER_ID)
+    assets = repository.document(document['id'])['assets']
     assert assets[0]['enrichment_status'] == 'not_requested'
 
     from lib.knowledge import enrichment
-    monkeypatch.setattr(enrichment, 'start_visual_enrichment', lambda: False)
-    isolated_knowledge.set_visual_enrichment(True)
-    queued = repository.list_assets(
-        isolated_knowledge._db_path(), document_id=document['id'])
+    monkeypatch.setattr(
+        enrichment, 'start_visual_enrichment', lambda *, user_id: False)
+    isolated_knowledge.set_visual_enrichment(
+        True, user_id=TEST_OWNER_USER_ID)
+    queued = repository.document(document['id'])['assets']
     assert queued[0]['enrichment_status'] == 'pending'
 
     monkeypatch.setattr(enrichment, '_vision_models', lambda: ['vision-test'])
@@ -505,20 +520,19 @@ def test_visual_enrichment_requires_consent_and_atomically_refreshes_search(
         enrichment, '_describe',
         lambda _raw, _mime, _row: (
             'A yellow dependency graph labeled ATLAS-NEBULA.', 'vision-test'))
-    enrichment._run()
+    import threading
+    enrichment._run(TEST_OWNER_USER_ID, threading.Event())
 
-    ready = repository.find_asset_by_id(
-        isolated_knowledge._db_path(), assets[0]['id'])
+    ready = repository.asset(assets[0]['id'])
     assert ready['enrichment_status'] == 'ready'
     assert ready['enrichment_model'] == 'vision-test'
-    from lib.knowledge.search import search
-    hit = search('ATLAS NEBULA')[0]
+    hit = _search('ATLAS NEBULA')[0]
     assert 'yellow dependency graph' in hit['excerpt']
     assert hit['assets'][0]['description'].startswith('A yellow')
 
 
 def test_knowledge_images_keep_grounded_text_for_a_text_only_model(monkeypatch):
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     monkeypatch.setattr(
         _pipeline, 'model_supports_vision', lambda _model: False)
     content, no_vision = _pipeline._screenshot_display_content(
@@ -666,7 +680,8 @@ def test_management_api_upload_toggle_and_delete(flask_client, isolated_knowledg
 def test_management_api_exposes_visual_consent_separately(
         flask_client, isolated_knowledge, monkeypatch):
     from lib.knowledge import enrichment
-    monkeypatch.setattr(enrichment, 'start_visual_enrichment', lambda: False)
+    monkeypatch.setattr(
+        enrichment, 'start_visual_enrichment', lambda *, user_id: False)
 
     initial = flask_client.get('/api/v1/knowledge').get_json()
     assert initial['visual_enrichment'] is False

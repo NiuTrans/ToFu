@@ -40,7 +40,7 @@ def _mutation_required_fields() -> tuple[str, ...]:
     for config in mutation_endpoint_contracts().values():
         for reasons in config['outcomes']:
             schemas.append(mutation_response_schema(
-                config['action'], reasons, config['compatibility']))
+                config['action'], reasons))
     first = tuple(schemas[0]['required'])
     required_sets = [set(schema['required']) for schema in schemas[1:]]
     return tuple(field for field in first if all(

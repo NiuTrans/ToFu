@@ -710,7 +710,9 @@ def test_responses_chip_style_and_i18n_keys():
     """The pill must visually distinguish a responses wire (it previously
     rendered as a default openai chip), and the new i18n keys must exist
     in both languages."""
-    with open(os.path.join(_ROOT, 'static', 'styles.css'), encoding='utf-8') as f:
+    with open(os.path.join(
+            _ROOT, 'frontend', 'src', 'features', 'settings',
+            'provider-surfaces.css'), encoding='utf-8') as f:
         css = f.read()
     assert '.stg-face-chip.responses' in css, (
         'missing CSS for .stg-face-chip.responses — a responses face is '
@@ -740,7 +742,9 @@ console.log(JSON.stringify(_faceChipHTML(0, { model_id: 'live' })));
 
 def test_chip_and_warning_styles_exist():
     """A chip with no CSS class definition renders as unstyled text."""
-    with open(os.path.join(_ROOT, 'static', 'styles.css'), encoding='utf-8') as f:
+    with open(os.path.join(
+            _ROOT, 'frontend', 'src', 'features', 'settings',
+            'provider-surfaces.css'), encoding='utf-8') as f:
         css = f.read()
     for sel in ('.stg-face-chip', '.stg-face-chip.anthropic',
                 '.stg-face-chip.refused', '.stg-face-warn', '.stg-face-row'):

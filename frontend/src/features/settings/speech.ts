@@ -1,4 +1,5 @@
 import { featureRegistry } from '../../feature-registry';
+import type { I18nKey } from '../../i18n';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
 
 type SttKind = 'openai' | 'groq' | 'omni' | 'custom';
@@ -82,7 +83,7 @@ function globals(): SpeechWindow {
   return featureRegistry as unknown as SpeechWindow;
 }
 
-function translate(key: string, fallback: string): string {
+function translate(key: I18nKey, fallback: string): string {
   try {
     const translated = globals().t?.(key);
     if (translated && translated !== key) return translated;

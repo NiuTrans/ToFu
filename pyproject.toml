@@ -1,33 +1,101 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools==80.10.2", "wheel==0.48.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tofu"
-version = "0.16.0"
-description = "Tofu (豆腐) — Self-hosted AI assistant with Quart backend and vanilla JS frontend"
+name = "tofu-agent"
+version = "0.17.0"
+description = "Embeddable and headless Tofu agent runtime with network and tool capabilities"
 readme = "README.md"
-requires-python = ">=3.10"
-license = {text = "MIT"}
-dynamic = ["dependencies"]
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{name = "Tofu contributors"}]
+dependencies = [
+    "quart>=0.20",
+    "hypercorn>=0.17",
+    "cryptography>=42.0",
+    "requests>=2.31",
+    "urllib3>=1.26.19",
+    "Jinja2>=3.1.6",
+    "psutil>=5.9",
+    "tofu-search>=0.10.3",
+    "trafilatura>=1.6",
+    "Pillow>=10.0",
+    "python-pptx>=0.6.21",
+    "fontTools>=4.40",
+    "lxml>=5.3",
+    "lxml_html_clean>=0.4",
+    "beautifulsoup4>=4.12",
+    "python-dateutil>=2.8",
+    "python-docx>=1.0",
+    "openpyxl>=3.1",
+    "xlrd>=2.0",
+    "olefile>=0.46",
+    "mcp>=2,<3",
+    "httpx>=0.28",
+    "orjson>=3.9",
+    "pydantic>=2.7,<3",
+    "tiktoken>=0.7",
+    # pymupdf4llm exact-pins the other two packages; move this trio together.
+    "pymupdf==1.27.2.3",
+    "pymupdf_layout==1.27.2.3",
+    "pymupdf4llm==1.27.2.3",
+    "markdown>=3.5",
+    "markdown-it-py>=3.0",
+    "PyYAML>=6.0",
+    "zhconv>=1.4",
+    "qrcode>=7.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/rangehow/ToFu"
+Documentation = "https://github.com/rangehow/ToFu#readme"
+Repository = "https://github.com/rangehow/ToFu"
+Issues = "https://github.com/rangehow/ToFu/issues"
+
+[project.scripts]
+tofu-agent = "tofu_agent.cli:main"
 
 [project.optional-dependencies]
+# The published default is the complete agent/tool/network runtime. Durable
+# application storage and the updater are deliberately separate so embedding
+# Tofu never implies PostgreSQL or a checked-out web application.
+storage = [
+    "psycopg[binary,pool]>=3.2",
+]
+# Tag releases build without PEP 517 isolation, so the exact backend, wheel
+# builder and metadata validator come from uv.lock instead of being resolved
+# from the network independently in each publishing job.
+release = [
+    "build>=1.2,<2",
+    "twine>=6,<7",
+    "setuptools>=77,<81",
+    "wheel>=0.45,<1",
+]
+app = [
+    "psycopg[binary,pool]>=3.2",
+    "uv>=0.4",
+]
 # `test` is the extra CI installs (`pip install -e ".[test]"`). It carries the
-# test runner + its plugins ONLY — no linters — so a test job pulls exactly
-# what it needs. pytest itself lives HERE (it is NOT in requirements.txt), so
-# this extra must exist for CI to have a runner at all.
+# full-app storage dependencies plus the test runner/plugins, but no linters.
+# pytest itself lives HERE (it is NOT in requirements.txt), so this extra must
+# exist for CI to have a runner at all.
 test = [
+    # The repository suite exercises the full application as well as the
+    # storage-free public runtime.
+    "psycopg[binary,pool]>=3.2",
+    "uv>=0.4",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     # The external mock LLM process in tests/mock_llm_server.py intentionally
     # remains a tiny Flask fixture; Flask is not part of the application
     # runtime anymore.
     "flask>=3.0",
-    # Parallel test execution across worker processes. The suite is ~5400
-    # tests; running it serially is the dominant CI wall-time cost. Each xdist
+    # Parallel test execution across worker processes. The suite is large;
+    # running it serially is the dominant CI wall-time cost. Each xdist
     # worker is its own process → its own session fixtures → its own throwaway
     # SQLite DB (conftest mkdtemps per session), so parallelism is isolation-safe.
-    "pytest-xdist>=3.0",
+    "pytest-xdist>=3.8",
     # Per-test hang guard so one wedged test can't stall the whole job to the
     # CI ceiling. Use the `signal` method (default on POSIX) — the `thread`
     # method mis-fires on the endpoint-loop tests.
@@ -42,36 +110,62 @@ test = [
     "tinycss2>=1.2",
 ]
 dev = [
-    # Superset of `test` plus the linter — the local contributor extra.
-    "tofu[test]",
+    # Superset of `test` plus the linter — kept explicit because a project
+    # cannot depend on its own optional extra in a portable uv lock.
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "flask>=3.0",
+    "pytest-xdist>=3.8",
+    "pytest-timeout>=2.1",
+    "fakeredis>=2.20",
+    "tinycss2>=1.2",
+    "psycopg[binary,pool]>=3.2",
+    "uv>=0.4",
     "ruff",
+    "pyright>=1.1.403",
+]
+# Browser automation is a worker capability. The API image intentionally
+# omits both this Python package and the Chromium payload; the personal image
+# targets the worker stage and therefore retains the existing feature set.
+worker = [
+    "playwright>=1.40",
 ]
 # Optional horizontal-scale extra: the cross-replica runtime-state backend
 # (TOFU_RUNTIME_STATE_BACKEND=redis) + push fan-out. Redis is NOT a core
 # dependency — a single-box install runs the inproc default with zero extra
-# packages. `pip install tofu[scale]` pulls the client for a multi-replica
+# packages. `pip install tofu-agent[scale]` pulls the client for a multi-replica
 # deployment.
 scale = [
     "redis>=4.3",
 ]
-# Optional trading subsystem — extracted into its own package. `pip install
-# tofu[trading]` pulls it in; it self-mounts via the tofu.blueprints /
-# tofu.schema / tofu.flags / tofu.startup entry-point groups.
-trading = [
-    "tofu-trading>=0.1,<0.2",
-]
-
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
-
 [tool.setuptools.packages.find]
 # Ship the importable Python packages. The in-process façade (`tofu`) and the
-# kernel it calls (`lib.tasks_pkg.entry`) require `lib*` and `routes*` to be
-# importable; `tofu*` is the supported public surface.
-include = ["tofu*", "lib*", "routes*", "rootless_vm*"]
+# kernel it calls (`lib.tasks_pkg.entry`) require `lib*` to be importable;
+# `tofu*` is the supported public surface. Database/storage authorities and
+# HTTP application routes are source-workspace concerns, not wheel contents.
+namespaces = false
+include = ["tofu*", "lib*", "rootless_vm*"]
 exclude = ["tests*", "benchmarks*", "debug*", "clients*", "desktop*",
            "browser_extension*", "docs*", "promo*", "propaganda*",
-           "swebench_rerun_workdir*", "outputs*", "paper*", "tools*"]
+           "swebench_rerun_workdir*", "outputs*", "paper*", "tools*",
+           "routes*", "lib.database*", "lib.storage", "lib.storage.*",
+           "lib.storage_sidecar*", "lib.tests*"]
+
+[tool.setuptools]
+# These two top-level modules are runtime dependencies of the public package;
+# declaring them prevents editable installs from hiding a broken wheel.
+py-modules = ["runtime_guards", "tofu_dotenv"]
+# The repository has VCS manifest plugins installed in some build environments.
+# Never let their broad source list turn excluded application packages into
+# accidental package data; every non-Python runtime asset is declared below.
+include-package-data = false
+
+[tool.setuptools.package-data]
+"tofu_agent" = ["setup_ui/*.html", "setup_ui/*.css", "setup_ui/*.js"]
+"lib.model_info" = ["data/*.json"]
+"lib.motion_video" = ["guide/*.md", "guide/*.html"]
+"lib.slides" = ["guide/*.md"]
+"lib.design_sys" = ["bibles/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -84,15 +178,16 @@ python_functions = "test_*"
 # this in project addopts as well as the Makefile so a direct
 # ``python -m pytest`` is equally hermetic.
 #
-# `-p no:timeout` MUST precede/accompany the explicit load: with entry-point
-# autoload ON (a bare `pytest`, exactly what public CI runs) pytest-timeout's
-# entrypoint registers the module as 'timeout', and the explicit
-# `-p pytest_timeout` then re-registers the same module under a second name →
-# ValueError: Plugin already registered under a different name (bitten
-# 2026-08-05 on the first push carrying this addopts — every CI test leg died
-# at startup). Blocking the 'timeout' name keeps exactly one registration in
-# both worlds (autoload on OR PYTEST_DISABLE_PLUGIN_AUTOLOAD=1).
-addopts = "-v --tb=short --strict-markers -p no:napari -p no:timeout -p pytest_timeout"
+# Policy-critical plugins are loaded explicitly so direct pytest, Make, CI and
+# the autoload-disabled affected-test runner all execute the same contract.
+# Their entry-point names must be blocked first: pytest otherwise registers the
+# same module twice under different names when plugin autoload is enabled.
+#
+# Distribution mode lives here, not in individual commands. ``worksteal`` is
+# the independence contract: tests may be assigned in any order to any worker.
+# Bare pytest remains serial because this config intentionally supplies no
+# ``-n``; Make/CI/affected-test entry points opt into bounded worker counts.
+addopts = "-v --tb=short --strict-markers -p no:napari -p no:timeout -p pytest_timeout -p no:xdist -p xdist.plugin -p no:anyio -p anyio.pytest_plugin --dist worksteal"
 # Per-test hang guard. pytest-timeout has been an installed, DECLARED dep for
 # a while, but with no default configured it never fired — measured
 # 2026-07-27: a sleep(600) test ran until an EXTERNAL kill stopped the shell,
@@ -111,10 +206,10 @@ addopts = "-v --tb=short --strict-markers -p no:napari -p no:timeout -p pytest_t
 timeout = 300
 markers = [
     "unit: Pure unit tests (no server, no DB)",
-    "api: API integration tests (requires PostgreSQL)",
+    "api: API integration tests using an isolated application/storage authority",
     "visual: Visual E2E tests (requires live server + Chromium)",
     "slow: Long-running tests (opt-in)",
     "timeout(seconds): Override the default pytest-timeout deadline for a test.",
-    "ci_serial: Timing/concurrency-sensitive suites that assert locking or race behavior — CI and parallel Makefile targets run them in a dedicated SERIAL step (no xdist) because an oversubscribed runner starves their writer/heartbeat windows into false 'database is locked' / timeout reds (measured f0a930e→e65e14f). JOBS=0 keeps the whole target serial.",
+    "serial: Unit tests with a host-global, saturation, or timing constraint that must not overlap the parallel unit lane. test-unit runs them in a dedicated no-xdist phase. Each new use requires an inline resource reason and should be removed once that resource is isolated.",
     "live_llm: Hits the real LLM API (costs money, needs creds). Manual-only; gated by TOFU_PARITY_LIVE=1.",
 ]

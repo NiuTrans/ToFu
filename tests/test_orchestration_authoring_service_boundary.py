@@ -1,4 +1,4 @@
-"""Application-owned built-in inspection and role-contract selection."""
+"""Application-owned orchestration authoring operations."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import pytest
 import lib.orchestration.authoring_service as authoring_service_module
 import lib.orchestration.authoring_operations as authoring_operations_module
 import lib.orchestration.authoring_results as authoring_results_module
-import lib.orchestration.service as service_facade
 
 from lib.orchestration.authoring_service import (
     AuthoringServiceError,
@@ -21,7 +20,7 @@ pytestmark = pytest.mark.unit
 def test_builtin_definition_and_inspection_are_one_application_result():
     service = OrchestrationAuthoringService()
 
-    result = service.builtin_inspection('endpoint')
+    result = service.builtin_inspection('autopilot')
     assert result.definition is not None
     assert result.definition['schema'] == 'tofu.orchestration/v1'
     assert result.inspection is not None
@@ -31,18 +30,11 @@ def test_builtin_definition_and_inspection_are_one_application_result():
     assert missing.definition is None
     assert missing.inspection is None
 
-    parameterized = service.build_builtin('endpoint', max_iterations=3)
+    parameterized = service.build_builtin('autopilot', max_iterations=3)
     assert parameterized is not None
     loop = next(node for node in parameterized['nodes']
                 if node.get('kind') == 'loop')
     assert loop['params']['max_iterations'] == 3
-
-
-def test_role_contract_selection_is_owned_by_the_application_port():
-    service = OrchestrationAuthoringService()
-
-    assert service.role_contract('') == service.contract()
-    assert service.role_contract('worker')['role'] == 'worker'
 
 
 def test_composer_dependency_uses_shared_typed_service_boundary():
@@ -73,20 +65,12 @@ def test_authoring_routes_only_project_application_results():
         builtin_start,
     )
     builtin_route = route_source[builtin_start:builtin_end]
-    role_start = route_source.index('def role_schema_orchestration')
-    role_end = route_source.index(
-        "@orchestration_route(blueprint, 'layout')",
-        role_start,
-    )
-    role_route = route_source[role_start:role_end]
-
     assert 'authoring_service().builtin_inspection(name)' in builtin_route
     assert 'authoring_builtin_response(result, name=name)' in builtin_route
     assert 'result.definition' not in builtin_route
     assert '.inspect(' not in builtin_route
     assert 'service = authoring_service()' not in builtin_route
-    assert 'authoring_service().role_contract(role)' in role_route
-    assert 'if role else' not in role_route
+    assert 'role_schema_orchestration' not in route_source
 
     ports = open(
         'lib/orchestration/application_service_ports.py', encoding='utf-8',
@@ -98,11 +82,7 @@ def test_authoring_routes_only_project_application_results():
     assert 'def builtin(' not in canonical_port
 
 
-def test_rolling_service_facade_reexports_the_new_application_result():
-    assert service_facade.AuthoringBuiltinResult is \
-        authoring_service_module.AuthoringBuiltinResult
-    assert service_facade.inspect_builtin_definition is \
-        authoring_service_module.inspect_builtin_definition
+def test_authoring_service_exposes_its_application_result_and_operations():
     assert authoring_service_module.AuthoringBuiltinResult is \
         authoring_results_module.AuthoringBuiltinResult
     assert authoring_service_module.inspect_builtin_definition is \

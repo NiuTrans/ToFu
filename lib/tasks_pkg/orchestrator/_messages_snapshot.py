@@ -2,7 +2,7 @@
 # Request-Inspector messages snapshot for the debug panel.
 """Emit the pre-flight ``MESSAGES_SNAPSHOT`` (kind='request') event.
 
-Extracted 2026-07-31 (pt_03f4cdf1 slice 15) from
+Extracted 2026-07-31 ( slice 15) from
 ``lib/tasks_pkg/orchestrator/_run.py``'s stream loop.
 
 **What it does**
@@ -17,15 +17,15 @@ Extracted 2026-07-31 (pt_03f4cdf1 slice 15) from
       ``_strip_base64_for_snapshot`` — keeps the debug event small
       enough to travel over SSE.
     * Builds a ``MESSAGES_SNAPSHOT`` event with **kind='request'** — the
-      Request Inspector contract (docs/DEBUG_PANEL_REDESIGN.md §3) says
+      Request Inspector contract (docs/FRONTEND_ARCHITECTURE.md §3) says
       this is the ONLY kind='request' emission; the three other
       snapshot sites (post-tool / final / fallback) are kind='state'
       (NOT LLM requests) and stay in _turn.py / _finalize.py.
-    * Endpoint-mode tasks (Planner / Worker / Critic) each re-run
+    * Flow nodes (Planner / Worker / Critic) each re-run
       run_task with their own round numbering, so
-      ``task['_endpoint_phase']`` is tagged onto the event as ``turn``
+      ``task['_flow_phase']`` is tagged onto the event as ``turn``
       so the Request Inspector can distinguish same-numbered rounds
-      across drivers (epic pt_e3dc7198e7e34bb1).
+      across drivers ().
 
 **Best-effort**
     The whole helper is try/except-wrapped: a Request Inspector
@@ -42,9 +42,9 @@ from typing import Any
 from lib.agent_core.events import EventType, build_event
 from lib.log import get_logger
 from lib.tasks_pkg.manager import (
-    _strip_base64_for_snapshot,
     append_event,
 )
+from lib.tasks_pkg.manager._events import _strip_base64_for_snapshot
 from lib.tasks_pkg.wire_messages import apply_wire_sanitize
 
 
@@ -71,7 +71,7 @@ def emit_messages_snapshot_event(
 
     Args:
         task: The live task dict; ``task['convId']`` /
-            ``task['provider_id']`` / ``task['_endpoint_phase']`` are
+            ``task['provider_id']`` / ``task['_flow_phase']`` are
             read; the emitted event is appended onto ``task['events']``
             via ``append_event``.
         messages: The live outbound message list — READ ONLY; the
@@ -89,19 +89,19 @@ def emit_messages_snapshot_event(
         snapshot = _strip_base64_for_snapshot(_wire)
         snap_evt = build_event(
             EventType.MESSAGES_SNAPSHOT,
-            # Request Inspector contract (docs/DEBUG_PANEL_REDESIGN.md
+            # Request Inspector contract (docs/FRONTEND_ARCHITECTURE.md
             # §3): this is the ONLY kind='request' emission — the
             # payload the model is about to receive. The other three
             # snapshot sites (post-tool / final / fallback) are
             # kind='state' (NOT LLM requests).
             kind='request',
             model=model,
-            # Endpoint turns (Planner/Worker/Critic) each re-run
+            # Flow node turns (Planner/Worker/Critic) each re-run
             # run_task with their OWN round numbering — tag the
             # driver's phase so the Request Inspector can tell
-            # same-numbered rounds apart (epic pt_e3dc7198e7e34bb1).
-            # '' for normal (non-endpoint) tasks.
-            turn=task.get('_endpoint_phase') or '',
+            # same-numbered rounds apart ().
+            # '' for ordinary tasks outside a Flow.
+            turn=task.get('_flow_phase') or '',
             params={
                 'maxTokens': max_tokens,
                 'temperature': temperature,

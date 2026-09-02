@@ -1,5 +1,6 @@
 import { featureRegistry } from '../../feature-registry';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
+import type { I18nKey } from '../../i18n';
 
 interface KeyStatRow {
   total?: number;
@@ -125,7 +126,7 @@ type KeyStatsWindow = Window & {
 };
 
 const MODEL_HEALTH_POLL_MS = 10_000;
-const HEALTH_REASON_KEYS: Record<string, string> = {
+const HEALTH_REASON_KEYS: Record<string, I18nKey> = {
   rate_limit: 'settings.mhReasonRateLimit',
   upstream: 'settings.mhReasonUpstream',
   error: 'settings.mhReasonError',
@@ -153,7 +154,7 @@ function dispatchApi(): DispatchApi {
   return api;
 }
 
-function translate(key: string, values?: Record<string, unknown>): string {
+function translate(key: I18nKey, values?: Record<string, unknown>): string {
   return globals().t?.(key, values) || key;
 }
 
@@ -379,8 +380,8 @@ export function renderKeyCardStatsHtml(
       translate('settings.keyStatNoCallsTip'))}">—</span>`;
   const metric = (
     className: string,
-    titleKey: string,
-    valueKey: string,
+    titleKey: I18nKey,
+    valueKey: I18nKey,
     value: number,
   ): string => value > 0
     ? `<span class="${className}" title="${escape(translate(titleKey))}">${escape(

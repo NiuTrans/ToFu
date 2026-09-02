@@ -69,10 +69,21 @@ class TestAsyncDispatchStreamIsNative:
         # `await asyncio.to_thread(dispatch_stream, ...)`. Ensure we no longer
         # delegate the whole thing to a thread (which would re-block via
         # the sync `requests` transport).
-        import inspect
+        import ast
 
         from lib.llm_dispatch import api
-        src = inspect.getsource(api.async_dispatch_stream)
+        # Slice the current file by AST instead of reusing the imported
+        # function's potentially stale line number. Concurrent source writers
+        # can shift that line number while an xdist worker remains alive.
+        with open(api.__file__, encoding='utf-8') as source_file:
+            module_source = source_file.read()
+        tree = ast.parse(module_source)
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == 'async_dispatch_stream'
+        )
+        src = ast.get_source_segment(module_source, function) or ''
         # Match an actual delegating CALL, not the docstring's prose mention
         # of the old stopgap. The call form was `asyncio.to_thread(...)`.
         assert 'asyncio.to_thread(dispatch_stream' not in src
@@ -114,6 +125,9 @@ class TestAsyncDispatchStreamSuccess:
         assert usage['_dispatch']['model'] == 'qwen-plus'
         assert usage['_dispatch']['key'] == 'k0'
         assert usage['_dispatch']['429_retries'] == 0
+        assert usage['_dispatch']['queue_wait_ms'] >= 0
+        assert usage['_dispatch']['queue_wait_measurement'] == \
+            'dispatcher_backpressure_only'
 
 
 @pytest.mark.unit
@@ -149,6 +163,7 @@ class TestAsyncDispatchStreamRetry:
         assert msg == 'ok'
         assert calls['n'] == 2
         assert usage['_dispatch']['429_retries'] >= 1
+        assert usage['_dispatch']['queue_wait_ms'] >= 0
         # First slot saw a rate-limit error recorded; second slot succeeded.
         assert slot1.total_errors >= 1
         assert slot2.last_success_time > 0

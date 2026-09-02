@@ -63,27 +63,20 @@ def fake_row(monkeypatch):
     from lib.conv_ref import _detail
     row = _Row({
         'id': 'c1', 'user_id': 1, 'title': 'Cache bug',
-        'messages': json.dumps(MESSAGES), 'created_at': 1, 'updated_at': 2,
-        'settings': json.dumps({'preset': 'sonnet'}),
+        'messages': MESSAGES, 'created_at': 1, 'updated_at': 2,
+        'settings': {'preset': 'sonnet'},
         'msg_count': len(MESSAGES), 'rev': 3,
     })
-
-    class _Cur:
-        def fetchone(self):
-            return row
-
-    class _DB:
-        def execute(self, sql, params=()):
-            return _Cur()
-
-    monkeypatch.setattr(_detail, '_get_db', lambda: _DB())
+    monkeypatch.setattr(
+        _detail, '_read_conversation_snapshot',
+        lambda conversation_id, *, user_id: row)
     return row
 
 
 def _run_tool(fn_args):
     """Drive the REAL tool executor (not the library function directly)."""
     from lib.conv_ref import execute_conv_ref_tool
-    return execute_conv_ref_tool('get_conversation', fn_args)
+    return execute_conv_ref_tool('get_conversation', fn_args, user_id=1)
 
 
 def _is_raw(out):
@@ -147,13 +140,14 @@ class TestLibraryDefaultUnchanged:
 
     def test_library_function_still_defaults_to_prose(self, fake_row):
         from lib.conv_ref import get_conversation
-        out = get_conversation('c1')
+        out = get_conversation('c1', user_id=1)
         assert not _is_raw(out)
         assert 'Referenced Conversation' in out
 
     def test_mention_injection_path_gets_prose(self, fake_row):
         from lib.chat.messages import resolve_conv_refs
-        got = resolve_conv_refs([{'id': 'c1', 'title': 'Cache bug'}])
+        got = resolve_conv_refs(
+            [{'id': 'c1', 'title': 'Cache bug'}], user_id=1)
         assert len(got) == 1
         assert not _is_raw(got[0]['text']), (
             'an @-mentioned conversation is now injected as a raw JSON dump — '
@@ -182,7 +176,8 @@ class TestCardAndPayloadAgree:
         brain.simple_call = _fake_simple_call
         try:
             brain._handle_conv_ref_tool(
-                {'convId': None}, {}, 'get_conversation', 't', fn_args,
+                {'convId': None, '_userId': 1}, {},
+                'get_conversation', 't', fn_args,
                 1, {}, {}, '/tmp/x', False,
             )
             meta = {}
@@ -222,7 +217,7 @@ class TestSchemaDescribesTheDefault:
     """
 
     def _schema(self):
-        from lib.tools import CONV_REF_GET_TOOL
+        from lib.tools.conversation import CONV_REF_GET_TOOL
         return CONV_REF_GET_TOOL['function']
 
     def test_raw_param_does_not_advertise_a_false_default(self):

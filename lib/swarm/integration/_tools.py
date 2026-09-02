@@ -41,6 +41,7 @@ from lib.swarm.integration._state import (
 )
 from lib.swarm.master import MasterOrchestrator
 from lib.swarm.protocol import SubTaskSpec
+from lib.tasks_pkg.manager import task_user_id
 
 logger = get_logger(__name__)
 
@@ -125,9 +126,44 @@ def _handle_spawn_agents(fn_args: dict, *,
                          project_path: str,
                          abort_check: Callable | None,
                          on_event: Callable | None) -> str:
+    # Work on request-local copies: clamping the read-only wave must not mutate
+    # the parent task's sticky config or authority catalog for later rounds.
+    cfg = dict(cfg or {})
+    all_tools = list(all_tools or [])
     agents_data = fn_args.get('agents') or []
     if not agents_data:
         return json.dumps({'error': 'no agents specified', 'status': 'error'})
+
+    orchestration = task.get('_toolOrchestration')
+    orchestration = orchestration if isinstance(orchestration, dict) else {}
+    read_only_orchestration = (
+        str(orchestration.get('multiAgent') or '').lower() == 'read_only')
+    try:
+        max_orchestrated_agents = max(1, min(
+            int(orchestration.get('maxConcurrentAgents') or 3), 8))
+    except (TypeError, ValueError):
+        max_orchestrated_agents = 3
+    if (read_only_orchestration
+            and len(agents_data) > max_orchestrated_agents):
+        return json.dumps({
+            'status': 'error',
+            'error': 'multi_agent_wave_limit',
+            'limit': max_orchestrated_agents,
+            'requested': len(agents_data),
+            'message': (
+                f'This read-only orchestration round allows at most '
+                f'{max_orchestrated_agents} agents in one wave. Combine or '
+                'prioritize the independent workstreams and retry once.'),
+        })
+    if read_only_orchestration:
+        from lib.swarm.routing import read_only_swarm_tools
+        all_tools = read_only_swarm_tools(task, all_tools)
+        try:
+            configured_parallel = int(cfg.get('max_parallel') or 8)
+        except (TypeError, ValueError):
+            configured_parallel = 8
+        cfg['max_parallel'] = max(
+            1, min(configured_parallel, max_orchestrated_agents))
 
     specs: list[SubTaskSpec] = []
     for agent_def in agents_data:
@@ -155,6 +191,7 @@ def _handle_spawn_agents(fn_args: dict, *,
     # turn is reachable from later turns in the SAME conversation. Falls
     # back to task_id when there's no conv (tests, standalone).
     swarm_key = swarm_key_for(task)
+    owner_id = task_user_id(task)
 
     # If a session already exists for this conversation, ADD to it instead
     # of creating a fresh one. This is how the main agent re-uses the same
@@ -164,10 +201,58 @@ def _handle_spawn_agents(fn_args: dict, *,
     # — otherwise the user can never spawn again after the first wave
     # completes.
     session = _get_session(swarm_key)
+    if session is not None and session.user_id != owner_id:
+        logger.warning('[Swarm:%s] owner mismatch for existing session',
+                       swarm_key)
+        return json.dumps({
+            'status': 'error',
+            'error': 'swarm_not_found',
+            'message': 'No swarm session exists for this conversation.',
+        })
     if session is not None and session.is_terminated:
         logger.info('[Swarm:%s] previous session terminated — recycling key', swarm_key)
         _remove_session(swarm_key)
         session = None
+    if session is not None:
+        existing_contract = ((session._parent_task_proxy.get('config') or {})
+                             .get('_toolOrchestration'))
+        existing_contract = (existing_contract
+                             if isinstance(existing_contract, dict) else {})
+        existing_read_only = (
+            str(existing_contract.get('multiAgent') or '').lower()
+            == 'read_only')
+        if read_only_orchestration and not existing_read_only:
+            # Never add an allegedly read-only wave to a session whose worker
+            # catalog was created with standard/mutating authority.
+            return json.dumps({
+                'status': 'error',
+                'error': 'orchestration_session_mode_conflict',
+                'message': (
+                    'An existing standard-authority swarm is still active for '
+                    'this conversation. Wait for it to settle before starting '
+                    'a read-only orchestration wave.'),
+            })
+        if existing_read_only:
+            # Follow-up waves inherit the session's original authority even
+            # when the current root round no longer carries the first-round
+            # auto-routing decision.
+            read_only_orchestration = True
+            orchestration = existing_contract
+            try:
+                max_orchestrated_agents = max(1, min(
+                    int(orchestration.get('maxConcurrentAgents') or 3), 8))
+            except (TypeError, ValueError):
+                max_orchestrated_agents = 3
+            if len(agents_data) > max_orchestrated_agents:
+                return json.dumps({
+                    'status': 'error',
+                    'error': 'multi_agent_wave_limit',
+                    'limit': max_orchestrated_agents,
+                    'requested': len(agents_data),
+                    'message': (
+                        f'This read-only swarm allows at most '
+                        f'{max_orchestrated_agents} agents in one wave.'),
+                })
 
     # A fresh wave must be able to enqueue <swarm-update>s even if a prior
     # wave on this key was explicitly aborted (which tombstoned the inbox).
@@ -202,16 +287,22 @@ def _handle_spawn_agents(fn_args: dict, *,
         if push_conv_id:
             try:
                 from lib.agent_core.push import push_event
-                push_event('swarm', push_conv_id, ev)
+                push_event('swarm', push_conv_id, ev, user_id=owner_id)
             except Exception as e:
-                logger.debug('[Swarm:%s] push mirror failed: %s', task_id, e)
+                # The push mirror is the ONLY channel that survives the
+                # spawning turn's end. Its failure silently strands every
+                # later event (incl. the terminal swarm_phase:complete) for a
+                # detached panel — that is an error path, not chatter.
+                logger.warning('[Swarm:%s] push mirror failed — detached panel '
+                               'may miss event %s: %s',
+                               task_id, ev.get('type'), e)
 
     # Resolve the settle hook through the facade package so a test that
     # patches ``_maybe_autocontinue`` / ``_start_autocontinue_turn`` on the
     # ``lib.swarm.integration`` module still drives the settle path.
-    def _on_settled(k=swarm_key):
+    def _on_settled(k=swarm_key, owner=owner_id, source=task_id):
         import lib.swarm.integration as _pkg
-        return _pkg._maybe_autocontinue(k)
+        return _pkg._maybe_autocontinue(k, owner, source_id=source)
 
     deduped_dropped: list[SubTaskSpec] = []
     if session is None:
@@ -233,10 +324,16 @@ def _handle_spawn_agents(fn_args: dict, *,
         _pin = task.get('_pinned_provider_id')
         if _pin:
             parent_cfg['_pinned_provider_id'] = _pin
+        if read_only_orchestration:
+            # Serializable worker contract.  Master copies this into its
+            # isolated parent proxy and persistence snapshot; workers then
+            # enforce read-only authority and locally compose the PTC lane.
+            parent_cfg['_toolOrchestration'] = dict(orchestration)
 
         session = MasterOrchestrator(
             task_id=task_id,
             conv_id=conv_id,
+            user_id=owner_id,
             specs=specs,
             project_path=project_path,
             model=model,
@@ -264,7 +361,8 @@ def _handle_spawn_agents(fn_args: dict, *,
                 conv_id=conv_id, task_id=task_id,
                 specs=[s.to_dict() for s in specs],
                 config=_persist_config(cfg, model, thinking_enabled,
-                                       project_path, parent_cfg),
+                                       project_path, parent_cfg,
+                                       user_id=owner_id),
                 status='running')
         except Exception as e:
             logger.debug('[Swarm:%s] session persist failed (non-fatal): %s',
@@ -314,7 +412,8 @@ def _handle_spawn_agents(fn_args: dict, *,
                     conv_id=session.conv_id, task_id=task_id,
                     specs=[s.to_dict() for s in session.specs],
                     config=_persist_config(cfg, model, thinking_enabled,
-                                           project_path, {}),
+                                           project_path, {},
+                                           user_id=session.user_id),
                     status='running')
             except Exception as e:
                 logger.debug('[Swarm:%s] followup session persist failed: %s',
@@ -327,6 +426,7 @@ def _handle_spawn_agents(fn_args: dict, *,
             _emit({
                 'type': 'swarm_phase', 'phase': 'spawn_more',
                 'content': f'🚀 Spawning {len(accepted_specs)} more agent(s) (live)…',
+                'swarmKey': swarm_key,
                 'agents': [
                     {'agentId': s.id, 'role': s.role,
                      'objective': s.objective,
@@ -341,7 +441,22 @@ def _handle_spawn_agents(fn_args: dict, *,
     handle = {
         'status':    'async_launched',
         'swarm_id':  task_id,
+        # The conversation-scoped session key — the frontend stamps it onto
+        # the swarm panel so its reconciler probes /api/v1/swarm/status with
+        # the key that ALWAYS resolves (alias misses were a false-settle
+        # vector). Persisted inside toolContent, so it survives reload.
+        'swarm_key': swarm_key,
         'is_followup': swarm_id_existing,
+        'orchestration': ({
+            'backend': 'local_swarm',
+            'mode': 'read_only',
+            'compositionMode': orchestration.get('compositionMode') or '',
+            'programmaticWorkers': bool(
+                orchestration.get('programmaticCalling') in ('auto', 'on')),
+            'maxConcurrentAgents': max_orchestrated_agents,
+        } if read_only_orchestration else {
+            'backend': 'local_swarm', 'mode': 'standard',
+        }),
         'agents': [
             {
                 'id':          s.id,
@@ -374,6 +489,15 @@ def _handle_spawn_agents(fn_args: dict, *,
             f' Note: {len(deduped_dropped)} spec(s) were skipped '
             'because their objective duplicates an already-running '
             'or completed agent — see ``deduplicated`` field.')
+    if read_only_orchestration and specs:
+        # A successfully launched wave is actual adoption.  Merely exposing
+        # spawn_agents/native multi-agent on the wire is projection evidence
+        # and is intentionally insufficient for benchmark promotion.
+        from lib.orchestration_adoption import record_orchestration_execution
+        record_orchestration_execution(
+            task, lane='multi_agent', kind='agent_wave',
+            backend='local_swarm', status='launched',
+            agent_count=len(specs))
     return json.dumps(handle, ensure_ascii=False)
 
 

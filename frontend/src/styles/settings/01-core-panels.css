@@ -1,0 +1,732 @@
+/* ══════════════════════════════════════════════════════
+   settings.css — styles specific to the Settings modal panels.
+
+   Extracted from static/styles.css (2026-07-18) so a settings PAGE's
+   structure (static/settings_panels/<tab>.html), logic
+   (static/js/settings/*.js) and styles (here) live together and are easy to
+   locate. Served hashed + minified by lib/css_bundler.py alongside styles.css;
+   the <link> is injected by routes/common.py right after the styles.css link.
+
+   Migration is incremental — rules move here per settings page. Shared
+   settings chrome (.settings-tab, .settings-field, .stg-*) stays in styles.css
+   until a later batch.
+   ══════════════════════════════════════════════════════ */
+
+/* ── Translation tab: Machine Translation provider selector ── */
+.mt-provider-select {
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--s-ink);
+  background: var(--s-white);
+  border: var(--s-border);
+  border-radius: 6px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color .15s;
+}
+.mt-provider-select:focus { border-color: var(--accent-color, #d4a853); }
+
+/* ── Translation tab: Machine Translation provider card ── */
+.mt-provider-card {
+  background: var(--s-white);
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  overflow: hidden;
+  margin-bottom: 14px;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.mt-provider-card:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: var(--s-shadow-sm);
+}
+.mt-provider-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(26,24,20,0.08);
+  background: rgba(26,24,20,0.02);
+}
+.mt-provider-logo {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(212,168,83,0.10), rgba(212,168,83,0.04));
+  border: 1px solid rgba(212,168,83,0.2);
+}
+.mt-provider-info { flex: 1; min-width: 0; }
+.mt-provider-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--s-ink);
+  line-height: 1.3;
+}
+.mt-provider-desc {
+  font-size: 11.5px;
+  color: var(--s-ink-soft);
+  margin-top: 2px;
+}
+.mt-apply-link {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--s-white);
+  background: var(--accent-color, #d4a853);
+  border: 2px solid var(--s-ink);
+  border-radius: 8px;
+  box-shadow: 2px 2px 0 var(--s-ink);
+  text-decoration: none;
+  transition: transform 0.1s, box-shadow 0.1s;
+  white-space: nowrap;
+}
+.mt-apply-link:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+}
+.mt-apply-link:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+.mt-provider-card-body {
+  padding: 14px 16px;
+}
+.mt-provider-card-body .settings-row { margin-bottom: 8px; }
+.mt-provider-card-body .settings-field label {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+
+/* ══ oauth / preferences / feishu settings pages (moved from styles.css 2026-07-18) ══ */
+.feishu-status-dot { font-size: 16px; flex-shrink: 0; cursor: default; }
+/* ══════════════════════════════════════════════════════
+   OAuth Subscription Login Tab
+   ══════════════════════════════════════════════════════ */
+/* The only ownership decision a normal user needs: approve the account;
+   Tofu handles infrastructure and recovery behind the page. */
+.oauth-responsibility {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+.oauth-responsibility-item {
+  display: grid;
+  gap: 4px;
+  padding: 11px 12px;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+}
+.oauth-responsibility-item.is-user { border-left: 4px solid var(--s-ink); }
+.oauth-responsibility-item.is-system {
+  border-left: 4px solid var(--s-gold);
+  background: rgba(201, 153, 63, .08);
+}
+.oauth-responsibility-label {
+  color: var(--s-muted);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+.oauth-responsibility-item strong {
+  color: var(--s-ink);
+  font-size: 12px;
+  line-height: 1.55;
+}
+@media (max-width: 620px) {
+  .oauth-responsibility { grid-template-columns: 1fr; }
+}
+
+/* ── OAuth tab: 3-step flow strip (the whole flow in one glance) ── */
+.oauth-steps {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+.oauth-step {
+  flex: 1;
+  min-width: 150px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--s-white);
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+}
+.oauth-step-num {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--s-ink);
+  color: var(--s-white);
+  font-weight: 800;
+  font-size: 12px;
+  border-radius: 50%;
+}
+.oauth-step-title { font-size: 12.5px; font-weight: 800; color: var(--s-ink); }
+.oauth-step-sub { font-size: 11.5px; color: var(--s-muted); margin-top: 1px; line-height: 1.4; }
+.oauth-step-arrow { align-self: center; color: var(--s-muted); font-weight: 800; }
+
+/* China-access banner — same amber language as .stg-oauth-note */
+.oauth-china-note {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #8a5a00;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1.5px solid rgba(245, 158, 11, 0.4);
+  border-radius: var(--s-radius);
+}
+
+.oauth-provider-card {
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  padding: 16px;
+  margin-bottom: 12px;
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-sm);
+}
+.oauth-provider-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.oauth-provider-name {
+  font-weight: 800;
+  font-size: 14px;
+  color: var(--s-ink);
+  flex: 1;
+}
+.oauth-status-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--s-cream);
+  color: var(--s-muted);
+  border: 1px solid var(--s-border-color, #ccc);
+}
+.oauth-status-badge.authenticated {
+  background: #d4edda;
+  color: #155724;
+  border-color: #28a745;
+}
+.oauth-status-badge.pending {
+  background: #fff3cd;
+  color: #856404;
+  border-color: #ffc107;
+}
+.oauth-status-badge.error {
+  background: #f8d7da;
+  color: #721c24;
+  border-color: #dc3545;
+}
+.oauth-provider-desc {
+  font-size: 12px;
+  color: var(--s-muted);
+  margin: 4px 0 10px;
+  line-height: 1.5;
+}
+.oauth-provider-desc {
+  font-size: 12px;
+  color: var(--s-muted);
+  margin: 4px 0 10px;
+  line-height: 1.5;
+}
+.oauth-provider-info {
+  font-size: 12px;
+  color: var(--s-ink);
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  background: var(--s-cream);
+  border-radius: var(--s-radius);
+}
+.oauth-email {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+.oauth-egress-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--s-border-color, #ccc);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  color: var(--s-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.oauth-egress-line::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: #8b8b8b;
+}
+.oauth-egress-line.is-ok::before { background: #28a745; }
+.oauth-egress-line.is-checking::before { background: #d39e00; }
+.oauth-egress-line.is-warning::before { background: #e07a1f; }
+.oauth-egress-line.is-error::before { background: #dc3545; }
+
+/* Subscription-quota meter card (Codex). The renderer
+   (_renderOAuthQuota in app-runtime.js) emits these classes; without them
+   the block renders as bare text and the level track is invisible. Styled
+   like the tofu-bar convention: white track + 1.5px ink border, gold fill
+   (same as [data-theme="tofu"] .upd-restart-bar in styles.css). */
+.oauth-quota {
+  margin-bottom: 10px;
+  padding: 8px 12px 10px;
+  background: var(--s-cream);
+  border: var(--s-border-sm);
+  box-shadow: var(--s-shadow-xs);
+  font-size: 12px;
+  color: var(--s-ink);
+}
+.oauth-quota-title {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--s-ink-soft);
+  margin-bottom: 6px;
+}
+.oauth-quota-pending {
+  color: var(--s-muted);
+  line-height: 1.5;
+}
+.oauth-quota-row {
+  margin-top: 6px;
+}
+.oauth-quota-row-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+.oauth-quota-row-head span:last-child {
+  font-weight: 700;
+}
+.oauth-quota-track {
+  height: 8px;
+  background: var(--s-white);
+  border: var(--s-border-sm);
+  overflow: hidden;
+}
+.oauth-quota-track > span {
+  display: block;
+  height: 100%;
+  background: var(--s-gold);
+  transition: width 0.3s ease;
+}
+.oauth-quota-source {
+  margin-top: 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--s-muted);
+}
+.oauth-reset-offer {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1.5px solid var(--s-gold-dim);
+  background: rgba(201, 153, 63, .1);
+  box-shadow: var(--s-shadow-xs);
+  color: var(--s-ink);
+}
+.oauth-reset-offer.is-stale {
+  border-color: var(--s-border-color, #aaa);
+  background: var(--s-cream);
+}
+.oauth-reset-offer.is-checking {
+  border-style: dashed;
+  color: var(--s-muted);
+}
+.oauth-reset-offer-title {
+  font-size: 12px;
+  font-weight: 850;
+  margin-bottom: 4px;
+}
+.oauth-reset-offer-copy,
+.oauth-reset-offer-hint {
+  font-size: 11px;
+  line-height: 1.5;
+}
+.oauth-reset-offer-meta {
+  margin-top: 4px;
+  color: var(--s-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+}
+.oauth-reset-offer-hint {
+  margin-top: 5px;
+  color: var(--s-ink-soft);
+}
+.oauth-provider-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.oauth-provider-actions .btn-small,
+.oauth-manual-fallback .btn-small {
+  padding: 6px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.oauth-provider-actions .btn-small:hover,
+.oauth-manual-fallback .btn-small:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+}
+.oauth-provider-actions .btn-primary,
+.oauth-manual-fallback .btn-primary {
+  background: var(--s-ink);
+  color: var(--s-white);
+}
+.oauth-provider-actions .btn-danger,
+.oauth-manual-fallback .btn-danger {
+  background: #dc3545;
+  color: #fff;
+  border-color: #dc3545;
+}
+.oauth-manual-fallback .btn-small:not(.btn-primary):not(.btn-danger) {
+  background: var(--s-white);
+  color: var(--s-ink);
+}
+.oauth-manual-fallback {
+  margin-top: 10px;
+  padding: 10px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 8px;
+  border: 1px dashed var(--s-border);
+}
+.oauth-manual-hint {
+  font-size: 12px;
+  color: var(--s-muted);
+  margin: 0 0 8px;
+}
+.oauth-manual-input {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--s-border);
+  background: var(--bg-input);
+  color: var(--fg);
+  font-size: 12px;
+  font-family: monospace;
+}
+/* "Noted: you prefer X" — the learn/confirm moment (layer 3). A calm card
+   with one row per learned/staged preference; pending rows carry the
+   Confirm/Dismiss propose-then-confirm buttons. */
+.pref-learned-box{
+  display:flex;flex-direction:column;gap:6px;margin:0 0 8px 0;
+}
+.pref-learned-box .pl-row{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:7px 10px;border-radius:6px;
+  background:rgba(148,163,184,0.04);
+  border:1px solid rgba(148,163,184,0.16);
+  font-size:12px;line-height:1.45;color:var(--text-secondary);
+}
+/* Pending rows (with Confirm/Dismiss) keep a faint indigo accent so the
+   actionable card stands out from the informational ones. */
+.pref-learned-box .pl-row.pl-pending{
+  background:rgba(99,102,241,0.05);
+  border-color:rgba(99,102,241,0.22);
+}
+.pref-learned-box .pl-lead{flex-shrink:0;display:flex;align-items:center;color:rgba(45,212,191,0.85)}
+.pref-learned-box .pl-pending .pl-lead{color:rgba(129,140,248,0.95)}
+.pref-learned-box .pl-text{flex:1;min-width:0;color:var(--text-primary,#e4e4e7)}
+.pref-learned-box .pl-text b{font-weight:600}
+.pref-learned-box .pl-hint{
+  display:block;font-size:10.5px;opacity:0.65;margin-top:2px;
+}
+.pref-learned-box .pl-actions{display:flex;gap:6px;flex-shrink:0}
+.pref-learned-box .pl-btn{
+  font:inherit;font-size:11px;font-weight:600;cursor:pointer;
+  padding:4px 12px;border-radius:6px;border:1px solid transparent;
+  transition:background .15s ease,border-color .15s ease;
+}
+.pref-learned-box .pl-confirm{
+  background:rgba(99,102,241,0.85);border-color:rgba(99,102,241,0.95);
+  color:#ffffff;
+}
+.pref-learned-box .pl-confirm:hover{background:rgba(99,102,241,1)}
+.pref-learned-box .pl-dismiss{
+  background:transparent;border-color:rgba(148,163,184,0.3);
+  color:var(--text-secondary);
+}
+.pref-learned-box .pl-dismiss:hover{background:rgba(148,163,184,0.12)}
+.pref-learned-box .pl-resolved{opacity:0.75}
+/* ── Preferences settings tab — pending-proposal rows ── */
+.prefs-pending-list{display:flex;flex-direction:column;gap:8px;margin:6px 0 4px 0}
+.prefs-pending-row{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:8px 12px;border-radius:8px;
+  background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.18);
+}
+.prefs-pending-text{flex:1;min-width:0;color:var(--text-primary,#e4e4e7);font-size:12.5px}
+.prefs-pending-text b{font-weight:600}
+.prefs-pending-evidence{font-size:10.5px;opacity:0.65;margin-top:2px}
+.prefs-pending-actions{display:flex;gap:6px;flex-shrink:0}
+/* ══════════════════════════════════════════════════════
+   My Context settings tab — "paper dossier" (2026-08 redesign)
+   Index-card archive metaphor on the tofu block system: mono eyebrow
+   stamps, highlighter titles, punched-ticket WHEN→DO rules, ledger
+   capacity meter, hard-shadow card physics. No indigo glass.
+   ══════════════════════════════════════════════════════ */
+
+/* ── Hero: the dossier cover ── */
+.ctx-hero{
+  position:relative;display:flex;align-items:flex-start;justify-content:space-between;gap:24px;
+  margin:0 0 20px;padding:26px 26px 22px;
+  border:var(--s-border);background:var(--s-white);
+  box-shadow:var(--s-shadow-sm);overflow:hidden;
+}
+/* gold file-tab stitched along the top edge */
+.ctx-hero::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:5px;
+  background:repeating-linear-gradient(90deg,var(--s-gold) 0 22px,rgba(201,153,63,.3) 22px 26px);
+}
+/* faint archive watermark */
+.ctx-hero::after{
+  content:'DOSSIER';position:absolute;right:14px;bottom:8px;pointer-events:none;
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;letter-spacing:.42em;
+  color:rgba(26,24,20,.15);transform:rotate(-3deg);
+}
+.ctx-hero-copy{max-width:640px;min-width:0}
+.ctx-eyebrow{
+  display:flex;align-items:center;gap:8px;margin-bottom:9px;
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;
+  letter-spacing:.2em;color:var(--s-gold-dim);
+}
+.ctx-eyebrow::before{content:'';width:8px;height:8px;flex:none;background:var(--s-gold);box-shadow:1px 1px 0 var(--s-ink)}
+.ctx-title{
+  align-self:flex-start;display:inline-flex;margin:0 0 8px!important;padding:0 2px;
+  font-size:22px!important;font-weight:900;letter-spacing:.01em;line-height:1.3;
+  color:var(--s-ink);text-transform:none;
+  background:linear-gradient(transparent 58%,var(--s-gold-glow) 58% 94%,transparent 94%);
+}
+.ctx-intro{margin:0;color:var(--s-ink-soft);font-size:13px;line-height:1.8;font-weight:500}
+/* always-on: rubber stamp */
+.ctx-always-on{
+  flex:none;display:flex;align-items:center;gap:7px;margin-top:4px;padding:6px 10px;white-space:nowrap;
+  border:1.5px solid var(--s-gold-dim);outline:1px solid rgba(168,125,46,.45);outline-offset:2px;
+  background:rgba(201,153,63,.07);color:var(--s-gold-dim);
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;letter-spacing:.08em;
+  transform:rotate(-2deg);
+}
+.ctx-live-dot{width:7px;height:7px;flex:none;background:var(--s-gold);border:1px solid var(--s-gold-dim);animation:ctxStampPulse 2.4s ease-in-out infinite}
+@keyframes ctxStampPulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ── Toolbar: ledger capacity meter + tofu buttons ── */
+.ctx-toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:10px;padding:0 2px}
+.ctx-toolbar-actions,.ctx-capacity{display:flex;align-items:center;gap:9px}
+.ctx-capacity{font-size:11px;font-weight:600;color:var(--s-ink-soft)}
+.ctx-capacity-count{font-family:'JetBrains Mono',monospace;font-weight:700;font-variant-numeric:tabular-nums;color:var(--s-ink)}
+.ctx-capacity-count.is-over{color:#b3261e}
+.ctx-capacity-track{width:92px;height:9px;border:1.5px solid var(--s-ink);background:var(--s-white);overflow:hidden}
+.ctx-capacity-track span{display:block;width:0;height:100%;background:var(--s-gold);transition:width .2s ease}
+.ctx-capacity-track span.is-over{background:#b3261e}
+.ctx-dirty-state{min-height:16px;font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:700;color:var(--s-gold-dim)}
+.ctx-status{min-height:20px;margin:4px 2px 12px;font-size:11.5px;font-weight:600;color:var(--s-ink-soft)}
+.ctx-status.is-error{color:#b3261e}
+.ctx-status.is-success{color:#147a3e}
+
+/* ── Section cards: filing-cabinet drawers ── */
+/* Masonry (CSS columns), not grid: sections have wildly unequal heights
+   (e.g. 8 identity facts vs 1 preference). A 2-col grid + full-span rule
+   section left a gaping void under the short column; columns flow each
+   drawer into the next free space with zero holes. DOM order is preserved
+   down-then-across.
+
+   Width contract: the dossier cards are designed for ≥ ~380px columns.
+   The default 860px panel only offers ~305px (860 − 178 sidebar − content
+   padding), where English facts shattered into 3-word lines and long
+   tokens broke mid-word ("ModuleNotFoundErr/or"). Two layered fixes:
+   1. While My Context is active, the panel itself widens — pure-CSS
+      counterpart of the matrix tab's stg-matrix-wide (the width
+      transition already lives on .settings-panel), no JS hook needed. */
+@media (min-width:769px){
+  .settings-panel:has(#settingsTab_preferences.active){width:min(1180px,96vw)}
+}
+/* 2. When even that width is unavailable (96vw binds on narrower windows,
+   or :has() is unsupported), the tab's own container drops the masonry to
+   one comfortable column (the @container rule lives AFTER the base rule
+   below — equal specificity falls back to source order). This is keyed off
+   the CONTENT width, not the viewport — the panel is fixed-width, so a
+   viewport breakpoint can never see the real constraint. Scoped to the
+   preferences tab so no other tab pays the containment cost. */
+#settingsTab_preferences{container-type:inline-size}
+.ctx-groups{columns:2;column-gap:14px}
+@container (max-width:779px){
+  .ctx-groups{columns:1}
+}
+.ctx-groups[aria-busy="true"]{opacity:.55}
+.ctx-group{
+  min-width:0;margin:0 0 14px;padding:16px;break-inside:avoid;
+  border:var(--s-border);background:var(--s-white);box-shadow:var(--s-shadow-xs);
+  transition:transform .12s ease,box-shadow .12s ease;
+}
+.ctx-group:hover{transform:translate(-1px,-1px);box-shadow:var(--s-shadow-sm)}
+.ctx-group-head{display:flex;align-items:flex-start;gap:11px;margin-bottom:13px}
+.ctx-group-icon{
+  display:flex;align-items:center;justify-content:center;width:34px;height:34px;flex:0 0 34px;
+  border:var(--s-border-sm);background:var(--s-cream);color:var(--s-ink);
+  box-shadow:2px 2px 0 var(--s-ink);
+}
+.ctx-group-icon svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.ctx-group-work_rule .ctx-group-icon{background:rgba(201,153,63,.16)}
+.ctx-group-copy{min-width:0;flex:1}
+.ctx-group-title-row{display:flex;align-items:center;gap:8px}
+.ctx-group-title-row h3{margin:0;font-size:13.5px;font-weight:800;letter-spacing:.01em;color:var(--s-ink)}
+.ctx-group-title-row span{
+  min-width:20px;padding:1px 7px;text-align:center;
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;
+  background:var(--s-gold);color:var(--s-ink);border:1.5px solid var(--s-ink);
+}
+.ctx-group-copy p{margin:5px 0 0;font-size:11.5px;line-height:1.6;color:var(--s-ink-soft);opacity:.85}
+.ctx-add-btn{
+  display:flex;align-items:center;gap:5px;flex:none;padding:5px 10px;
+  border:1.5px dashed rgba(26,24,20,.4);border-radius:0;background:transparent;color:var(--s-ink-soft);
+  font:inherit;font-size:11px;font-weight:700;cursor:pointer;transition:all .12s ease;
+}
+.ctx-add-btn:hover{border-style:solid;border-color:var(--s-ink);color:var(--s-ink);background:var(--s-cream);box-shadow:2px 2px 0 var(--s-ink);transform:translate(-1px,-1px)}
+.ctx-add-btn svg{width:12px;height:12px}
+
+/* ── Fact/rule cards: numbered index cards ── */
+.ctx-items{display:flex;flex-direction:column;gap:8px;counter-reset:ctxcard}
+.ctx-empty{
+  width:100%;padding:16px 12px;border:1.5px dashed rgba(26,24,20,.3);border-radius:0;background:transparent;
+  color:rgba(61,54,44,.55);font:inherit;font-size:11.5px;font-weight:600;cursor:pointer;transition:all .12s ease;
+}
+.ctx-empty:hover{border-color:var(--s-gold-dim);color:var(--s-gold-dim);background:rgba(201,153,63,.05)}
+.ctx-item{
+  counter-increment:ctxcard;position:relative;overflow:hidden;
+  border:1.5px solid var(--s-ink);background:var(--s-white);
+  box-shadow:2px 2px 0 rgba(26,24,20,.12);
+  transition:transform .12s ease,box-shadow .12s ease;
+}
+.ctx-item:hover{transform:translate(-1px,-1px);box-shadow:3px 3px 0 var(--s-ink)}
+.ctx-item.is-editing{transform:translate(-1px,-1px);box-shadow:3px 3px 0 var(--s-gold)}
+.ctx-item-view{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;cursor:pointer}
+/* archive counter: 01 / 02 / 03 … */
+.ctx-item-view::before{
+  content:counter(ctxcard,decimal-leading-zero);flex:none;margin-top:2px;
+  font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:800;letter-spacing:.05em;
+  color:rgba(26,24,20,.38);
+}
+.ctx-item:hover .ctx-item-view::before,.ctx-item.is-editing .ctx-item-view::before{color:var(--s-gold-dim)}
+.ctx-item-content{min-width:0;flex:1}
+.ctx-item-text{margin:0;color:var(--s-ink);font-size:12.5px;line-height:1.65;overflow-wrap:break-word}
+.ctx-item-meta{margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.04em;color:rgba(61,54,44,.5)}
+.ctx-item-actions{display:flex;gap:2px;opacity:0;transition:opacity .15s ease}
+.ctx-item:hover .ctx-item-actions,.ctx-item:focus-within .ctx-item-actions{opacity:1}
+.ctx-item-actions button{
+  display:flex;align-items:center;justify-content:center;width:24px;height:24px;
+  border:1.5px solid transparent;border-radius:0;background:transparent;color:rgba(61,54,44,.6);
+  cursor:pointer;transition:all .1s ease;
+}
+.ctx-item-actions button:hover{border-color:var(--s-ink);background:var(--s-cream);color:var(--s-ink)}
+.ctx-item-actions button.is-danger:hover{border-color:#b3261e;background:rgba(179,38,30,.08);color:#b3261e}
+.ctx-item-actions button svg{width:12px;height:12px}
+
+/* ── WHEN→DO: punched-ticket rule rows, stitched by a dashed link ── */
+.ctx-rule-line{display:grid;grid-template-columns:26px minmax(0,1fr);align-items:start;gap:8px}
+.ctx-rule-line+.ctx-rule-line{margin-top:7px}
+.ctx-rule-line>span{
+  position:relative;display:flex;align-items:center;justify-content:center;height:19px;
+  background:var(--s-ink);color:var(--s-white);
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;
+}
+.ctx-rule-line.is-action>span{background:var(--s-gold);color:var(--s-ink)}
+.ctx-rule-line:not(.is-action)>span::after{
+  content:'';position:absolute;left:50%;top:100%;height:8px;
+  border-left:1.5px dashed rgba(26,24,20,.35);
+}
+.ctx-rule-line p{margin:1px 0 0;color:var(--s-ink);font-size:12.5px;line-height:1.6;overflow-wrap:break-word}
+
+/* ── Inline editor ── */
+.ctx-item-editor{padding:2px 12px 12px;border-top:1.5px dashed rgba(26,24,20,.18)}
+.ctx-item-editor label{display:block;margin-top:10px}
+.ctx-item-editor label span{
+  display:block;margin-bottom:5px;
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;letter-spacing:.06em;color:var(--s-ink-soft);
+}
+.ctx-item-editor textarea{
+  box-sizing:border-box;width:100%;resize:vertical;min-height:56px;padding:8px 10px;
+  border:1.5px solid var(--s-ink);border-radius:0;background:var(--s-white);
+  color:var(--s-ink);font:inherit;font-size:12.5px;line-height:1.6;outline:none;
+  transition:border-color .12s ease,box-shadow .12s ease;
+}
+.ctx-item-editor textarea:focus{border-color:var(--s-gold-dim);box-shadow:2px 2px 0 var(--s-gold-glow)}
+.ctx-editor-done{
+  display:block;margin:9px 0 0 auto;padding:5px 14px;
+  border:var(--s-border-sm);border-radius:0;background:var(--s-ink);color:var(--s-white);
+  font:inherit;font-size:11px;font-weight:800;letter-spacing:.04em;cursor:pointer;
+  box-shadow:2px 2px 0 rgba(26,24,20,.25);
+  transition:transform .1s ease,box-shadow .1s ease,background .1s ease,color .1s ease;
+}
+.ctx-editor-done:hover{background:var(--s-gold);color:var(--s-ink);transform:translate(1px,1px);box-shadow:1px 1px 0 rgba(26,24,20,.25)}
+
+/* ── Experience-memory zone: perforated tear-off ledger ── */
+.ctx-memory-zone{position:relative;margin-top:30px;padding-top:26px}
+.ctx-memory-zone::before{content:'';position:absolute;top:0;left:0;right:0;border-top:2px dashed rgba(26,24,20,.25)}
+.ctx-memory-zone::after{
+  content:'✂';position:absolute;top:0;left:22px;transform:translateY(-56%);
+  padding-right:8px;background:var(--s-white);font-size:13px;color:rgba(26,24,20,.4);
+}
+.ctx-memory-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:12px}
+.ctx-memory-title{
+  align-self:flex-start;display:inline-flex;margin:0 0 6px!important;padding:0 2px;
+  font-size:16px!important;font-weight:900;letter-spacing:.02em;color:var(--s-ink);text-transform:none;
+  background:linear-gradient(transparent 58%,rgba(201,153,63,.12) 58% 94%,transparent 94%);
+}
+.ctx-memory-intro{max-width:680px;margin:0;color:var(--s-ink-soft);font-size:12px;line-height:1.7;font-weight:500}
+.ctx-memory-actions{display:flex;gap:7px;flex:none}
+/* embedded memory list reads as an inset paper tray */
+#prefsMemoryList{border:1.5px solid var(--s-ink)}
+
+@media(max-width:760px){
+  .ctx-hero,.ctx-toolbar,.ctx-memory-head{flex-direction:column}
+  .ctx-hero{padding:22px 18px 18px}
+  .ctx-always-on{align-self:flex-start;transform:rotate(-1deg)}
+  .ctx-toolbar{align-items:stretch}
+  .ctx-toolbar-actions{justify-content:flex-end}
+  .ctx-groups{columns:1}
+  .ctx-memory-actions{width:100%;flex-wrap:wrap}
+  .ctx-item-actions{opacity:1}
+}
+
+
+/* ══ mcp / skills settings pages (moved from styles.css 2026-07-18) ══ */

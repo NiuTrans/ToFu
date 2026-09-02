@@ -20,7 +20,7 @@ DefinitionResolver = Callable[[dict], ResolvedDefinitionPort]
 DefinitionServiceProvider = Callable[[], DefinitionServicePort]
 RunServiceProvider = Callable[[], RunServicePort]
 RuntimeStartServiceProvider = Callable[[], RuntimeStartServicePort]
-RuntimeMutationServiceProvider = Callable[[], RuntimeMutationServicePort]
+RuntimeMutationServiceProvider = Callable[[int], RuntimeMutationServicePort]
 HumanGateServiceProvider = Callable[[], HumanGateServicePort]
 
 

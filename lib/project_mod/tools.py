@@ -26,6 +26,28 @@ from lib.project_mod.scanner import (
 
 logger = get_logger(__name__)
 
+# Multi-root cross-check result cache for _resolve_base.  Keyed on the
+# conversation + root-set signature, so a project/root switch (which changes
+# the signature) naturally invalidates.  Bounded; cleared wholesale when it
+# grows past the cap (the common case is a small set of hot rel_paths).
+_RESOLVE_BASE_CACHE = {}
+_RESOLVE_BASE_CACHE_MAX = 4096
+
+# Folder-picker metadata is cosmetic (code badge + approximate child count),
+# but the repository can live on FUSE.  Never turn one shallow browse into
+# ``number_of_children × 100`` network metadata reads.  The current directory,
+# nested details, and response size each have an explicit hard ceiling.
+_PROJECT_BROWSE_MAX_ENTRIES = 1024
+_PROJECT_BROWSE_MAX_DIRS = 512
+_PROJECT_BROWSE_RESPONSE_BYTES = 96 * 1024
+# Initial navigation performs exactly one ``scandir``. Child counts/code badges
+# are cosmetic and a single nested FUSE lookup can otherwise hold the whole
+# modal open. The implementation remains available behind these internal
+# budgets for targeted tests/future progressive enrichment, but zero is the
+# latency-safe product default.
+_PROJECT_BROWSE_DETAIL_DIRS = 0
+_PROJECT_BROWSE_DETAIL_ENTRIES = 0
+
 # ── Re-export from run_command (backward compat) ──
 from lib.project_mod.run_command import (  # noqa: E402,F401
     _clean_command_output,
@@ -47,6 +69,8 @@ from lib.project_mod.run_command import (  # noqa: E402,F401
     _line_fingerprint,
     _maybe_harden_grep_command,
     _maybe_wrap_rm_with_trash,
+    parse_safe_directory_listing_command,
+    parse_safe_file_find_command,
     _record_run_command_changes,
     _run_command_interactive,
     _run_command_simple,
@@ -81,7 +105,6 @@ from lib.project_mod.write_tools import (  # noqa: E402,F401
     tool_apply_diff,
     tool_apply_diffs,
     tool_edit_file,
-    tool_create_project,
     tool_insert_content,
     tool_insert_contents,
     tool_write_file,
@@ -89,11 +112,11 @@ from lib.project_mod.write_tools import (  # noqa: E402,F401
 
 
 # ═══════════════════════════════════════════════════════
-#  ★ Directory Browser — NEW
+#  Directory Browser — NEW
 # ═══════════════════════════════════════════════════════
 
 def browse_directory(path_str=None, show_hidden=False):
-    """List subdirectories at a given path for folder browser UI."""
+    """List one directory with bounded, best-effort child metadata."""
     if not path_str or path_str == '~':
         path_str = os.path.expanduser('~')
     abs_path = os.path.abspath(os.path.expanduser(path_str))
@@ -104,40 +127,85 @@ def browse_directory(path_str=None, show_hidden=False):
     parent = os.path.dirname(abs_path)
     dirs = []
     files_count = 0
+    truncated = False
+    scanned_entries = 0
+    response_bytes = len(abs_path.encode('utf-8')) + 256
     try:
-        for entry in sorted(os.scandir(abs_path), key=lambda e: e.name.lower()):
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    if not show_hidden and entry.name.startswith('.'):
-                        continue
-                    # Check if it looks like a project (has code files)
-                    has_code = False
-                    item_count = 0
-                    try:
-                        for sub in os.scandir(entry.path):
-                            item_count += 1
-                            if item_count > 100:
-                                break
-                            ext = os.path.splitext(sub.name)[1].lower()
-                            if ext in CODE_EXTENSIONS:
-                                has_code = True
-                    except (PermissionError, OSError) as e:
-                        logger.debug('[Tools] dir scan failed for %s: %s', entry.name, e, exc_info=True)
-                    dirs.append({
-                        'name': entry.name,
-                        'path': entry.path,
-                        'itemCount': item_count,
-                        'hasCode': has_code,
-                        'hidden': entry.name.startswith('.'),
-                    })
-                elif entry.is_file(follow_symlinks=False):
-                    files_count += 1
-            except (PermissionError, OSError) as e:
-                logger.debug('[Tools] entry processing failed for entry: %s', e, exc_info=True)
-                continue
-    except PermissionError:
+        with os.scandir(abs_path) as entries:
+            for entry in entries:
+                if scanned_entries >= _PROJECT_BROWSE_MAX_ENTRIES:
+                    truncated = True
+                    break
+                scanned_entries += 1
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        if not show_hidden and entry.name.startswith('.'):
+                            continue
+                        if len(dirs) >= _PROJECT_BROWSE_MAX_DIRS:
+                            truncated = True
+                            break
+                        entry_bytes = (
+                            len(entry.name.encode('utf-8'))
+                            + len(entry.path.encode('utf-8'))
+                            + 128
+                        )
+                        if response_bytes + entry_bytes \
+                                > _PROJECT_BROWSE_RESPONSE_BYTES:
+                            truncated = True
+                            break
+                        dirs.append({
+                            'name': entry.name,
+                            'path': entry.path,
+                            'itemCount': 0,
+                            'hasCode': False,
+                            'hidden': entry.name.startswith('.'),
+                            'detailsDeferred': True,
+                        })
+                        response_bytes += entry_bytes
+                    elif entry.is_file(follow_symlinks=False):
+                        files_count += 1
+                except (PermissionError, OSError) as e:
+                    logger.debug(
+                        '[Tools] entry processing failed for entry: %s',
+                        e,
+                        exc_info=True,
+                    )
+                    continue
+    except (PermissionError, OSError):
         logger.debug('[Tools] permission denied scanning %s', abs_path, exc_info=True)
-        return {'error': f'Permission denied: {abs_path}', 'path': abs_path}
+        return {'error': f'Unable to browse: {abs_path}', 'path': abs_path}
+
+    dirs.sort(key=lambda item: item['name'].lower())
+    detail_entries_left = _PROJECT_BROWSE_DETAIL_ENTRIES
+    for index, item in enumerate(dirs):
+        if index >= _PROJECT_BROWSE_DETAIL_DIRS or detail_entries_left <= 0:
+            break
+        item_count = 0
+        has_code = False
+        details_deferred = False
+        per_directory_limit = min(101, detail_entries_left)
+        try:
+            with os.scandir(item['path']) as children:
+                for child in children:
+                    if item_count >= per_directory_limit:
+                        details_deferred = True
+                        break
+                    item_count += 1
+                    ext = os.path.splitext(child.name)[1].lower()
+                    if ext in CODE_EXTENSIONS:
+                        has_code = True
+        except (PermissionError, OSError) as e:
+            logger.debug(
+                '[Tools] bounded dir detail scan failed for %s: %s',
+                item['name'],
+                e,
+                exc_info=True,
+            )
+            details_deferred = True
+        detail_entries_left -= item_count
+        item['itemCount'] = item_count
+        item['hasCode'] = has_code
+        item['detailsDeferred'] = details_deferred
 
     return {
         'path': abs_path,
@@ -145,6 +213,9 @@ def browse_directory(path_str=None, show_hidden=False):
         'dirs': dirs,
         'filesCount': files_count,
         'showHidden': show_hidden,
+        'truncated': truncated,
+        'scannedEntries': scanned_entries,
+        'countsExact': not truncated,
     }
 
 
@@ -276,13 +347,13 @@ def _resolve_base(base_path, rel_path, conv_id=None):
     If rel_path contains ':', treat the part before ':' as a root name.
     Otherwise fall back to the provided base_path.
 
-    ★ Cross-root safety: when multiple roots are configured, checks if
+    Cross-root safety: when multiple roots are configured, checks if
     the requested relative path exists under the primary root.  If it
     does NOT exist there but DOES exist under exactly one other root,
     auto-routes to that root and logs a warning.  This prevents the
     common model mistake of writing files intended for root B into root A.
 
-    ★ conv_id scoping (2026-05-05): when the caller knows which
+    conv_id scoping (2026-05-05): when the caller knows which
     conversation's root registry should authoritatively answer this
     resolution, pass the full conv_id.  resolve_namespaced_path will
     check that conv's registry first so concurrent tasks cannot
@@ -328,7 +399,7 @@ def _resolve_base(base_path, rel_path, conv_id=None):
                                     'conv_id=%s',
                                     rel_path, conv_id[:12] if conv_id else '?')
                         return base_path, (_rest or '.')
-                # ★ DO NOT silently strip the 'name:' prefix. Stripping
+                # DO NOT silently strip the 'name:' prefix. Stripping
                 #   it converts a model typo ('CDP:foo' when meant 'cdp:foo',
                 #   or a stale root that was cleared by set_project) into a
                 #   DATA-LOSS bug: the write tools fall back to the primary
@@ -351,11 +422,11 @@ def _resolve_base(base_path, rel_path, conv_id=None):
                 from lib.project_mod.config import UnknownWorkspaceRootError
                 raise UnknownWorkspaceRootError(
                     f'Unknown workspace root "{_name}" in path "{rel_path}". '
-                    f'Either (1) call create_project(path=...) first to register '
-                    f'"{_name}" as a root, (2) use a known root name (see the '
-                    f'multi-root table shown at session start), or (3) use a '
-                    f'plain relative path without any colon prefix (will resolve '
-                    f'under the primary root).'
+                    f'Use a known root name (see the multi-root table shown at '
+                    f'session start), a plain relative path without any colon '
+                    f'prefix (resolves under the primary root), or an absolute '
+                    f'path under a writable location (its containing directory '
+                    f'auto-registers on first write).'
                 ) from _ve
 
     # ── Multi-root cross-check for path-misrouting ──
@@ -368,13 +439,25 @@ def _resolve_base(base_path, rel_path, conv_id=None):
         from lib.project_mod.config import _lock as _cfg_lock
         from lib.project_mod.config import get_conv_roots
         with _cfg_lock:
-            # ★ Source roots from the SAME conv-scoped registry the namespaced
+            # Source roots from the SAME conv-scoped registry the namespaced
             #   resolver uses (get_conv_roots falls back to global _roots when
             #   the conv has none).  Reading the global _roots here would let a
             #   concurrent conversation's root leak in and misroute a write —
             #   the same clobber-risk class as the prompt root-table leak.
             roots_view = get_conv_roots(conv_id)
             if len(roots_view) > 1:
+                # Memoize the filesystem probe: on FUSE each os.path.exists is a
+                # stat, and this loop re-probes every extra root on every call.
+                # Keyed by conv + root-set signature so a project/root switch
+                # invalidates; filesystem-level staleness is bounded by the same
+                # root-set lifetime the resolver itself uses.
+                sig = tuple(sorted((rn, rs['path']) for rn, rs in roots_view.items()))
+                cache_key = (conv_id, sig, base_path, rel_path)
+                cached = _RESOLVE_BASE_CACHE.get(cache_key)
+                if cached is not None:
+                    return cached
+
+                result = (base_path, rel_path)  # default: primary fallback
                 primary_target = os.path.join(base_path, rel_path)
                 if not os.path.exists(primary_target):
                     # File doesn't exist under primary — check other roots
@@ -390,18 +473,23 @@ def _resolve_base(base_path, rel_path, conv_id=None):
                         # Successful single-candidate resolution is NOT an error
                         # — log at INFO so it stays out of error.log.
                         logger.info(
-                            '[Tools] ★ Cross-root auto-route: %s not found under primary %s '
+                            '[Tools] Cross-root auto-route: %s not found under primary %s '
                             'but exists under [%s] %s — routing there. '
                             'Model should use \'%s:%s\' prefix to be explicit.',
                             rel_path, base_path, rn, rp, rn, rel_path)
-                        return rp, rel_path
+                        result = (rp, rel_path)
                     elif len(candidate_roots) > 1:
                         names = ', '.join(f'{rn}' for rn, _ in candidate_roots)
                         logger.warning(
-                            '[Tools] ★ Ambiguous multi-root path: %s not found under primary '
+                            '[Tools] Ambiguous multi-root path: %s not found under primary '
                             'but exists in multiple roots (%s). Using primary as fallback. '
                             'Model should use explicit root prefix.',
                             rel_path, names)
+
+                _RESOLVE_BASE_CACHE[cache_key] = result
+                if len(_RESOLVE_BASE_CACHE) > _RESOLVE_BASE_CACHE_MAX:
+                    _RESOLVE_BASE_CACHE.clear()
+                return result
 
     return base_path, rel_path
 
@@ -449,10 +537,12 @@ def _exec_list_dir(fn_args, base_path, conv_id, task_id, kwargs):
 
 
 def _exec_read_files(fn_args, base_path, conv_id, task_id, kwargs):
+    result_projection_items = kwargs.get('result_projection_items')
+
     def _rb(bp_arg, rp_arg):
         return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
 
-    # ★ Compatibility shim: some models (e.g. DeepSeek) flatten the
+    # Compatibility shim: some models (e.g. DeepSeek) flatten the
     #   "reads" array into top-level {"path": "..."} instead of
     #   {"reads": [{"path": "..."}]}.  Detect and auto-wrap.
     reads = fn_args.get('reads')
@@ -469,7 +559,7 @@ def _exec_read_files(fn_args, base_path, conv_id, task_id, kwargs):
                         str(spec['path'])[:120])
         else:
             reads = []
-    # ★ Recovery: some models serialize the WHOLE reads array as a JSON
+    # Recovery: some models serialize the WHOLE reads array as a JSON
     #   string into a scalar 'path' (e.g. path='[{"path": "a.py", ...}]').
     #   The stringified blob then looks like a 'rootname:path' spec and
     #   produced misleading "Unknown workspace root" errors.  Detect a
@@ -509,15 +599,25 @@ def _exec_read_files(fn_args, base_path, conv_id, task_id, kwargs):
         if isinstance(spec, dict) and 'path' in spec:
             bp2, rp2 = _rb(base_path, spec['path'])
             resolved.append({'path': rp2, 'start_line': spec.get('start_line'),
-                             'end_line': spec.get('end_line'), '_base': bp2})
+                             'end_line': spec.get('end_line'), '_base': bp2,
+                             '_display_path': str(spec['path'])})
         elif isinstance(spec, str) and spec.strip():
             bp2, rp2 = _rb(base_path, spec.strip())
-            resolved.append({'path': rp2, '_base': bp2})
+            resolved.append({'path': rp2, '_base': bp2,
+                             '_display_path': spec.strip()})
             logger.debug('[Tools] read_files: normalised bare string spec %r → dict', spec[:80])
         else:
             invalid_specs.append((i, type(spec).__name__, str(spec)[:120]))
             logger.warning('[Tools] read_files: invalid spec at index %d type=%s val=%r',
                            i, type(spec).__name__, str(spec)[:120])
+    if isinstance(result_projection_items, list):
+        from lib.tools.result_projection import file_read_result_projection_item
+        for index, value_type, preview in invalid_specs:
+            result_projection_items.append(file_read_result_projection_item(
+                index=index + 1,
+                path=f'<invalid read item {index + 1}>',
+                result=(f'Invalid read_files item: {value_type} {preview!r}.'),
+                status='error'))
     # If ALL specs were invalid, return a clear error so the model can retry
     if not resolved and invalid_specs:
         details = '; '.join(f'index {i}: {t} {v!r}' for i, t, v in invalid_specs[:5])
@@ -529,7 +629,8 @@ def _exec_read_files(fn_args, base_path, conv_id, task_id, kwargs):
             f'Invalid entries: {details}. Retry with correct schema.'
         )
     # If SOME specs were invalid, prepend a warning but still read the valid ones
-    result = tool_read_files(base_path, resolved)
+    result = tool_read_files(
+        base_path, resolved, result_items=result_projection_items)
     if invalid_specs:
         details = '; '.join(f'index {i}: {t} {v!r}' for i, t, v in invalid_specs[:5])
         warn = (
@@ -588,7 +689,7 @@ def _exec_grep_search(fn_args, base_path, conv_id, task_id, kwargs):
     def _rb(bp_arg, rp_arg):
         return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
 
-    # ★ Batch mode: if 'searches' array is present, run all searches
+    # Batch mode: if 'searches' array is present, run all searches
     searches = fn_args.get('searches')
     if searches and isinstance(searches, list):
         # Resolve paths in each search spec for multi-root
@@ -628,7 +729,7 @@ def _exec_find_files(fn_args, base_path, conv_id, task_id, kwargs):
     def _rb(bp_arg, rp_arg):
         return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
 
-    # ★ Batch mode: if 'searches' array is present, run all finds
+    # Batch mode: if 'searches' array is present, run all finds
     searches = fn_args.get('searches')
     if searches and isinstance(searches, list):
         resolved = []
@@ -658,20 +759,7 @@ def _exec_find_files(fn_args, base_path, conv_id, task_id, kwargs):
     return tool_find_files(bp, fn_args.get('pattern', ''),
                            search_path,
                            max_results=fn_args.get('max_results'))
-# ★ create_project — bootstrap a new workspace root
-
-
-def _exec_create_project(fn_args, base_path, conv_id, task_id, kwargs):
-    result = tool_create_project(
-        fn_args.get('path', ''),
-        name=fn_args.get('name'),
-        overwrite=bool(fn_args.get('overwrite', False)),
-        conv_id=conv_id, task_id=task_id,
-    )
-    if result.get('ok'):
-        return (f"{result['message']}")
-    return f"create_project failed: {result.get('error', 'unknown error')}"
-# ★ Write tools — pass conv_id + task_id for per-round undo
+# Write tools — pass conv_id + task_id for per-round undo
 
 
 def _exec_write_file(fn_args, base_path, conv_id, task_id, kwargs):
@@ -690,8 +778,11 @@ def _exec_write_file(fn_args, base_path, conv_id, task_id, kwargs):
                              fn_args.get('description', ''),
                              conv_id=conv_id, task_id=task_id)
     if result['ok']:
-        return (f"File {'created' if result.get('created') else 'updated'}: {result['path']} "
-                f"({result['lines']} lines, {_fmt_size(result['bytesWritten'])})")
+        msg = (f"File {'created' if result.get('created') else 'updated'}: {result['path']} "
+               f"({result['lines']} lines, {_fmt_size(result['bytesWritten'])})")
+        if result.get('syntaxWarning'):
+            msg += ' ' + result['syntaxWarning']
+        return msg
     else:
         return f"Write failed: {result['error']}"
 
@@ -717,6 +808,8 @@ def _exec_apply_diff(fn_args, base_path, conv_id, task_id, kwargs):
                f"({result['oldLines']}L → {result['newLines']}L)")
         if result.get('replacedCount'):
             msg += f" [{result['replacedCount']} occurrences replaced]"
+        if result.get('syntaxWarning'):
+            msg += ' ' + result['syntaxWarning']
         return msg
     else:
         return f"Diff failed: {result['error']}"
@@ -754,10 +847,15 @@ def _exec_insert_content(fn_args, base_path, conv_id, task_id, kwargs):
                                  fn_args.get('description', ''),
                                  conv_id=conv_id, task_id=task_id)
     if result['ok']:
-        return (f"Inserted {result['linesInserted']} lines "
-                f"{result['position']} anchor at L{result['anchorLine']} "
-                f"in {result['path']} "
-                f"({result['oldLines']}L → {result['newLines']}L)")
+        msg = (f"Inserted {result['linesInserted']} lines "
+               f"{result['position']} anchor at L{result['anchorLine']} "
+               f"in {result['path']} "
+               f"({result['oldLines']}L → {result['newLines']}L)")
+        for _note in result.get('echoRepairs') or []:
+            msg += f' [{_note}]'
+        if result.get('syntaxWarning'):
+            msg += ' ' + result['syntaxWarning']
+        return msg
     else:
         return f"Insert failed: {result['error']}"
 
@@ -775,33 +873,53 @@ def _sticky_cwd_enabled():
         '0', 'false', 'no', 'off')
 
 
+def _bounded_directory_fast_path_available(base, rel_path):
+    """Return whether a reader can safely replace a directory shell command.
+
+    ``ls file`` and ``find file`` have valid semantics that the bounded
+    directory readers do not emulate. Symlink escapes likewise stay with the
+    ordinary runner and its existing sandbox/authority policy.
+    """
+    if not base:
+        return False
+    try:
+        base_real = os.path.realpath(base)
+        target_real = os.path.realpath(os.path.join(base_real, rel_path))
+        return (
+            os.path.commonpath([base_real, target_real]) == base_real
+            and os.path.isdir(target_real)
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
     from lib.project_mod.config import get_conv_cwd, set_conv_cwd
 
     def _rb(bp_arg, rp_arg):
         return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
 
-    # ★ Multi-root: resolve working_dir if model specifies one
+    # Multi-root: resolve working_dir if model specifies one
     cwd = base_path
     working_dir = fn_args.get('working_dir', '')
     sticky_on = bool(conv_id) and _sticky_cwd_enabled()
     if working_dir:
         cwd_bp, _ = _rb(base_path, working_dir)
         cwd = os.path.join(cwd_bp, _) if _ and _ != '.' else cwd_bp
-        # ★ Sticky cwd: remember where the model explicitly navigated so its
+        # Sticky cwd: remember where the model explicitly navigated so its
         #   next run_command with no working_dir resumes here (kills repeated
         #   `cd <project>`). Validated/gated inside set_conv_cwd (containment).
         if sticky_on:
             set_conv_cwd(conv_id, cwd)
     elif sticky_on:
-        # ★ No working_dir → resume from this conversation's last cwd, if any.
+        # No working_dir → resume from this conversation's last cwd, if any.
         #   Stateless derived affinity: no persistent shell, env still re-derived
         #   per call by _get_cmd_env. Safe-degrades to base_path when absent.
         sticky = get_conv_cwd(conv_id)
         if sticky:
             cwd = sticky
 
-    # ★ cd-capture sink: after the command runs, remember the shell's final cwd
+    # cd-capture sink: after the command runs, remember the shell's final cwd
     #   (so a trailing `cd subdir` inside the command also sticks). Captured via
     #   a dedicated temp FILE, never stdout — so it cannot be spoofed by command
     #   output. set_conv_cwd re-validates containment; a hop outside the conv's
@@ -809,9 +927,43 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
     cwd_sink = (lambda captured: set_conv_cwd(conv_id, captured)) if sticky_on else None
 
     command_str = fn_args.get('command', '')
+    directory_listing = (
+        parse_safe_directory_listing_command(command_str)
+        if os.environ.get('TOFU_RUN_LS_FASTPATH', '1') != '0' else None)
+    if directory_listing is not None \
+            and _bounded_directory_fast_path_available(
+                cwd, directory_listing['path']):
+        logger.info(
+            '[run_command] routed plain ls through bounded directory reader: %s',
+            directory_listing['path'],
+        )
+        return tool_list_dir(
+            cwd,
+            directory_listing['path'],
+            show_hidden=directory_listing['show_hidden'],
+            shell_compatible=True,
+        )
+    file_find = (
+        parse_safe_file_find_command(command_str)
+        if os.environ.get('TOFU_RUN_FIND_FASTPATH', '1') != '0' else None)
+    if file_find is not None \
+            and _bounded_directory_fast_path_available(cwd, file_find['path']):
+        logger.info(
+            '[run_command] routed simple find through bounded file finder: %s %s',
+            file_find['path'], file_find['pattern'],
+        )
+        return tool_find_files(
+            cwd,
+            file_find['pattern'],
+            rel_path=file_find['path'],
+            max_results=file_find['max_results'],
+            case_sensitive=file_find['case_sensitive'],
+            shell_output=True,
+            respect_project_ignores=False,
+        )
     destructive = _is_destructive_command(command_str)
 
-    # ★ Read-only root guard: refuse a destructive command whose working
+    # Read-only root guard: refuse a destructive command whose working
     #   directory lives inside a root marked read-only. Read-only commands
     #   (grep/ls/cat/…) still run — only writes are blocked. This mirrors
     #   the write-tool guard so every mutation path honours RO uniformly.
@@ -824,7 +976,7 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
                 f"modify files are not allowed there. Run it in a writable "
                 f"root, or use read-only commands only.")
 
-    # ★ Pre-compute write targets to decide if snapshotting is useful.
+    # Pre-compute write targets to decide if snapshotting is useful.
     # If we can't determine specific targets (opaque commands like
     # python3, make, npm …), DON'T snapshot — the diff would include
     # every file that changed autonomously (log files, DB WAL, etc.)
@@ -837,21 +989,20 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
     snap_before = None
     _saved_contents = {}
     if can_track:
-        # ★ Take filesystem snapshot before command to detect changes
+        # Take filesystem snapshot before command to detect changes
         snap_before = _snapshot_project_files(cwd)
         # Save content of existing files so we can undo deletions/modifications
         # Cap per-file at 100KB, total at 20MB to avoid memory explosion
         _total_saved = 0
         _MAX_FILE_SAVE = 100 * 1024
         _MAX_TOTAL_SAVE = 20 * 1024 * 1024
-        for rel, mtime in snap_before.items():
+        for rel, (mtime, fsize) in snap_before.items():
             if _total_saved >= _MAX_TOTAL_SAVE:
                 break
+            if fsize > _MAX_FILE_SAVE:
+                continue
             abs_p = os.path.join(cwd, rel)
             try:
-                fsize = os.path.getsize(abs_p)
-                if fsize > _MAX_FILE_SAVE:
-                    continue
                 with open(abs_p, 'rb') as f:
                     raw = f.read(_MAX_FILE_SAVE)
                 _saved_contents[rel] = raw
@@ -877,12 +1028,38 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
                               cwd_sink=cwd_sink,
                               credentials=fn_args.get('credentials'))
 
-    # ★ Diff snapshot after command (only if we took one)
+    if destructive:
+        # Opaque shell commands can mutate files without going through the
+        # write-tool freshness hook. Drop every known project index containing
+        # this cwd so a later indexed find/grep cannot serve a stale snapshot.
+        from lib.project_mod import tree_index
+        from lib.project_mod.config import get_conv_roots
+        candidate_roots = {os.path.abspath(base_path)} if base_path else set()
+        candidate_roots.update(
+            os.path.abspath(state['path'])
+            for state in get_conv_roots(conv_id).values()
+            if isinstance(state, dict) and state.get('path')
+        )
+        cwd_abs = os.path.abspath(cwd)
+        for root in candidate_roots:
+            try:
+                within_root = os.path.commonpath([root, cwd_abs]) == root
+            except ValueError:
+                within_root = False
+            if within_root:
+                try:
+                    tree_index.invalidate(root)
+                except Exception as exc:
+                    logger.debug(
+                        '[run_command] index invalidation failed for %s: %s',
+                        root, exc)
+
+    # Diff snapshot after command (only if we took one)
     if snap_before is not None:
         snap_after = _snapshot_project_files(cwd)
         changes = _diff_snapshots(cwd, snap_before, snap_after)
         if changes:
-            # ★ Filter changes to only include files the command
+            # Filter changes to only include files the command
             # could plausibly write to.  write_targets was already
             # computed above and is guaranteed to be a non-empty set
             # (not None) since we only snapshot when can_track=True.
@@ -917,7 +1094,6 @@ _EXEC_HANDLERS = {
     'inspect_image': _exec_inspect_image,
     'grep_search': _exec_grep_search,
     'find_files': _exec_find_files,
-    'create_project': _exec_create_project,
     'write_file': _exec_write_file,
     'edit_file': _exec_edit_file,
     'apply_diff': _exec_apply_diff,
@@ -947,7 +1123,7 @@ def execute_standalone_command(fn_name, fn_args, working_dir=None, stdin_callbac
     """Execute run_command without requiring a project path.
 
     ``task`` is the SAME cooperative-control seam the project path already
-    had (pt_0bde0fd8): when provided, the runner registers
+    had (): when provided, the runner registers
     ``_subprocess_pid`` on it (so the stuck-task reaper can INTERRUPT the
     command instead of force-failing the whole turn, and the interrupt
     endpoint can target it) and polls ``task['aborted']`` (so Stop kills
@@ -955,21 +1131,60 @@ def execute_standalone_command(fn_name, fn_args, working_dir=None, stdin_callbac
     simply omit it — behaviour is then identical to before.
     """
     if fn_name == 'run_command':
-        return tool_run_command(working_dir,
-                                fn_args.get('command', ''),
-                                fn_args.get('timeout', None),
-                                stdin_callback=stdin_callback,
-                                on_chunk=on_chunk,
-                                on_spawn=on_spawn,
-                                on_grep_intercept=on_grep_intercept,
-                                task=task,
-                                credentials=fn_args.get('credentials'))
+        command = fn_args.get('command', '')
+        directory_listing = (
+            parse_safe_directory_listing_command(command)
+            if os.environ.get('TOFU_RUN_LS_FASTPATH', '1') != '0' else None)
+        if directory_listing is not None \
+                and _bounded_directory_fast_path_available(
+                    working_dir, directory_listing['path']):
+            return tool_list_dir(
+                working_dir,
+                directory_listing['path'],
+                show_hidden=directory_listing['show_hidden'],
+                shell_compatible=True,
+            )
+        file_find = (
+            parse_safe_file_find_command(command)
+            if os.environ.get('TOFU_RUN_FIND_FASTPATH', '1') != '0' else None)
+        if file_find is not None \
+                and _bounded_directory_fast_path_available(
+                    working_dir, file_find['path']):
+            return tool_find_files(
+                working_dir,
+                file_find['pattern'],
+                rel_path=file_find['path'],
+                max_results=file_find['max_results'],
+                case_sensitive=file_find['case_sensitive'],
+                shell_output=True,
+                respect_project_ignores=False,
+            )
+        result = tool_run_command(working_dir,
+                                  command,
+                                  fn_args.get('timeout', None),
+                                  stdin_callback=stdin_callback,
+                                  on_chunk=on_chunk,
+                                  on_spawn=on_spawn,
+                                  on_grep_intercept=on_grep_intercept,
+                                  task=task,
+                                  credentials=fn_args.get('credentials'))
+        if working_dir and _is_destructive_command(command):
+            from lib.project_mod import tree_index
+            try:
+                tree_index.invalidate(working_dir)
+            except Exception as exc:
+                logger.debug(
+                    '[run_command] standalone index invalidation failed: %s',
+                    exc)
+        return result
     return f'Unknown tool: {fn_name}'
 
 
 #: Tool names ``project_tool_display`` has a dedicated branch for. Kept adjacent
 #: to that if/elif chain so a new branch added there is added here in the same
 #: edit — ``format_tool_args_brief`` relies on this membership set.
+#: ``create_project`` is display-only legacy: the tool was retired, but old
+#: tool rounds still need a readable label instead of a generic fallback.
 _PROJECT_DISPLAY_TOOLS = frozenset({
     'list_dir', 'read_files', 'grep_search', 'find_files', 'create_project',
     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
@@ -1056,7 +1271,7 @@ def project_tool_display(fn_name, fn_args):
         suffix = f' +{n_files - 4} more' if n_files > 4 else ''
         return f'Read {n_files} file{"s" if n_files != 1 else ""}: {"; ".join(parts)}{suffix}'
     elif fn_name == 'grep_search':
-        # ★ Batch mode
+        # Batch mode
         searches = fn_args.get('searches')
         if searches and isinstance(searches, list):
             n = len(searches)
@@ -1080,7 +1295,7 @@ def project_tool_display(fn_name, fn_args):
     elif fn_name == 'list_dir':
         return f'List {fn_args.get("path", ".")}'
     elif fn_name == 'find_files':
-        # ★ Batch mode
+        # Batch mode
         searches = fn_args.get('searches')
         if searches and isinstance(searches, list):
             n = len(searches)

@@ -39,14 +39,94 @@ benefit that every emission references the declared vocabulary.
 ### Scope: what this rule covers
 
 This rule governs the **chat / agent task event stream** — the ~41 registered
-types flowing over `/api/chat/stream`, `/api/v1/tasks/{id}/stream`, and the
-`chat` push channel (the ones a frontend renders). It does **not** govern
+types flowing over `/api/v1/tasks/{id}/stream` and the `chat` push channel.
+It does **not** govern
 unrelated `TaskRuntime` channels that define their own small private vocabulary
 for a non-chat feature (e.g. the paper/translate runtimes emitting
 `{'type': 'chunk'}` on their own channel — see CLAUDE.md §14). Those are
-self-contained producer↔consumer pairs, not part of the shared frontend
-contract, so they are not registered here. If in doubt: if the built-in chat
-frontend (`sse_pipeline.js`) needs to understand it, it belongs in the registry.
+self-contained producer↔consumer pairs, not part of the shared task-event
+contract, so they are not registered here. The conversation UI consumes the
+v3 turn projection/event protocol described below; do not add a second task-SSE
+consumer to make a new chat field visible.
+
+Turn-native conversation synchronization is a separate declared protocol. Its
+`turn.upsert`, `turn.patch`, `turn.deleted`, `attempt.event`,
+`conversation.activity`, heartbeat, and reset envelopes are owned by
+`contracts/conversation_sync_v3.yaml` and
+[`CONVERSATION_SYNC_V3.md`](CONVERSATION_SYNC_V3.md), not by `EventType`.
+Those events are appended transactionally by the Storage Sidecar and consumed
+by the one conversation coordinator; do not emit them with `build_event` or
+add a second frontend stream.
+
+`turn.compact` is deliberately represented by one small transactional
+`conversation.activity` change whose payload is
+`{requiresSnapshot: true, conversationRevision}`. Compaction can delete a turn
+graph closure, insert a summary, rewrite ancestry, and patch retained
+projections atomically; no bounded delta can faithfully describe that mutation.
+The coordinator therefore performs one authoritative snapshot re-anchor, and
+the replay log never copies the folded transcript or large retained turns.
+
+Provider microchunks are not individually observable contract events. The
+stream manager emits the first text delta immediately, then losslessly merges
+later content/reasoning for at most 100 ms or 256 characters. It flushes before
+every structural boundary and assigns a sequence only to the merged event, so
+live delivery and durable replay remain byte-identical without paying one
+Sidecar transaction per 4-character provider chunk.
+
+### Activity timeline projection
+
+Execution diagnostics use the registered task-event vocabulary as facts and
+one cumulative Turn sidecar as presentation. Tool lifecycle,
+`tool_schema_rejected`, retry `phase` cycles (and any phase carrying an HTTP
+error status), the `compaction` → `compaction_done` archive/receipt pair,
+`model_fallback`, failed/aborted
+`model_request_complete`, and terminal errors are folded by
+`lib/turn_activity_timeline.py` into `projection.activityTimeline`. The fold is
+durable-before-visible through `record_task_event`, so live delivery, reconnect,
+and cold snapshot render the same order without a second task-SSE consumer.
+
+The compaction pair becomes one inspectable Turn row keyed by `archiveId`; its
+settled form carries the estimated token/message counts before and after plus
+the reduction percentage. The transient `phase=compacting` beat remains
+progress text and is replaced by that receipt row rather than rendered twice.
+
+Each entry carries a 0-based `llmRound` display anchor — its own 1-based
+`R{n}` request-tag round minus one when present, else the last model-request
+round tracked as events flow through the fold — so the browser splices every
+warning/error row inline under its tool block or model round instead of
+rendering one consolidated timeline block.
+
+The sidecar deliberately excludes the two channels that already have a home:
+routine `phase` status text (working/thinking/waiting/startup beats — the
+live-status surface owns them, persisting them would render the same fact
+twice) and per-round `model_request_start` / successful request completion
+bookkeeping (the turn trace owns timing). A model request earns a row only
+when it fails or is aborted.
+Model completion diagnostics additionally carry credential-free `routeId`,
+`routeMode`, `routeDecision`, and `failureStage` fields. Repeated recovery
+incidents with an explicit `backoff_s` coalesce as counted occurrences whose
+`durationMs` is the sum of actual backoffs; their first-to-last wall envelope
+must never be presented as one continuous wait.
+ The wire boundary re-isolates the same malformed
+schema on every model dispatch of an attempt; repeated `tool_schema_rejected`
+facts with identical tool, reason, and detail coalesce into one counted row
+per attempt rather than one row per request.
+
+`tool_wire_projection` is a separate bounded Request Inspector diagnostic. It
+records the ordered final provider tool names, schema-token estimate, resolved
+discovery backend, explicit budget, budget compaction/omission names, and an
+opaque fingerprint of the exact cache-relevant tools bytes after provider
+projection. It is deliberately not rendered into the Turn activity
+timeline, does not duplicate full schemas, never enters model context, and
+grants no execution authority.
+
+The sidecar is not a second event authority and its rows are not synthetic tool
+calls. It is capped at 128 entries and 96 KiB of serialized JSON; repeated
+wait/retry/schema rows coalesce by span, tool progress updates the matching
+tool row, and old low-priority status rows are reclaimed before failures and
+model switches. It never enters the LLM transcript or grants tool authority.
+The legacy `error` event remains a terminal compatibility frame; current fatal
+paths normally settle with `done.error`.
 
 ### Delivery vs construction
 
@@ -92,6 +172,21 @@ append_event(task, {'type': 'phase', 'phase': 'retrying', 'detail': '…'})
 * Frontend-local phase states the client derives itself (e.g.
   `thinking_active`) are NOT pushes — they are deliberately unregistered.
 
+For model streaming, the three progress phases have non-overlapping meaning:
+
+- `waiting_model` is the current attempt waiting for its first semantic
+  provider progress; headers, keep-alives and bytes do not turn it into a
+  retry.
+- `stream_stalled` is the current attempt after reasoning, assistant text or
+  valid tool progress has paused.
+- `retrying` is emitted only after an actual failed or rate-limited provider
+  attempt is being retried. Its `attempt` field is a real retry count, never a
+  heartbeat sequence.
+
+Every phase snapshot carries the assigned event `seq`; repeated wait/stall
+heartbeats repaint through that sequence. Wait/stall phases remain transient
+and do not create activity-timeline retry rows.
+
 ### Events built up conditionally
 
 When fields are added based on runtime conditions, construct the typed base and
@@ -106,6 +201,13 @@ if usage:
 append_event(task, done)
 ```
 
+Model-backed `done` events also carry `streamState`. This is the authoritative
+closed provider-stream verdict (`provider_finished`, `premature_close`,
+`malformed_stream`, and so on; `semantic_progress_timeout` is retained only for
+historical attempt compatibility). Consumers must not
+infer success from non-empty content or from a compatibility `finishReason=stop` value. Only
+`streamState=provider_finished` is positive stream-completion evidence.
+
 ---
 
 ## 2. Adding a NEW event type
@@ -118,9 +220,10 @@ Editing one file — `lib/agent_core/events.py` — covers it:
    `purpose`, `terminal` / `requires_response` flags if applicable, and a
    `fields` map documenting the payload (these become the
    `/api/v1/capabilities` `events` block automatically).
-3. **Handle it in the frontend** — add the `ev.type === "..."` branch in
-   `static/js/ui/sse_pipeline.js` (and `branch.js` if relevant), OR add it to
-   `TRANSPORT_TYPES` if it is a stream-internal signal a frontend should ignore.
+3. **Project it deliberately** — if it changes conversation UI, update the
+   cumulative turn projection and its typed renderer. If it belongs only to
+   generic task clients, update that declared client contract. Never recreate
+   the retired chat task-SSE reducer.
 4. **Emit it** via `build_event(EventType.NEW_THING, ...)`.
 
 That's it — no second registration list, no capabilities-endpoint edit. The
@@ -132,6 +235,17 @@ drift guard (below) confirms you didn't miss a step.
 event's shape** (a field removed / renamed / retyped). A new event type or a
 new *optional* field is additive — do **not** bump. Clients are told to ignore
 unknown event types and unknown fields, so additive changes are always safe.
+
+### Program lifecycle projection
+
+Native OpenAI PTC and local ToolScript share `program_start` and
+`program_output`. Both events carry `programCallId`, model/display round,
+source/backend, status, and child call identity; start also carries authored
+code and enforced limits, while output carries the aggregate result. Emitters
+must update the cumulative `programRuns`/parent `toolRounds` projection before
+delivery. Real child calls keep their ordinary tool lifecycle, so clients show
+one program parent plus inspectable children and never invent native adoption
+from an `execute_tools` gateway call.
 
 ---
 
@@ -159,8 +273,7 @@ changed, but because the substring it greps for is gone.
 string:**
 
 ```bash
-grep -rn "'type': 'compaction'" tests/      # the substring the audit matches
-grep -rn '"type": "compaction"' tests/
+rg -n "'type': 'compaction'|\"type\": \"compaction\"" tests/
 ```
 
 If a test matches, update its assertion to also accept the typed form

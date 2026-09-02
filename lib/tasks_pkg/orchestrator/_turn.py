@@ -5,7 +5,7 @@
 
 ``drain_peer_messages_into`` — driver-loop peer-inbox drain hook.
 ``_run_single_turn`` — one full LLM+tool cycle on an existing task dict
-(endpoint.py drives the outer work->review->revise loop with it).
+(the Flow engine drives any outer work→review→revise loop).
 
 Both delegate to ``run_task`` in ``_run.py``.
 """
@@ -15,20 +15,15 @@ from __future__ import annotations
 from typing import Any
 
 from lib.log import get_logger
+from lib.turn_verdict import terminal_finish_reason
 
 logger = get_logger(__name__)
-
-
-from lib.tasks_pkg.commit_round import (  # noqa: E402
-    _run_commit_round_async,  # noqa: F401  (re-export for back-comp)
-    )
-
 
 
 from lib.tasks_pkg.orchestrator._run import run_task
 
 
-#  _run_single_turn — reusable building block for endpoint mode
+#  _run_single_turn — reusable building block for Flow nodes
 # ══════════════════════════════════════════════════════════
 
 def drain_peer_messages_into(task: dict[str, Any],
@@ -37,8 +32,8 @@ def drain_peer_messages_into(task: dict[str, Any],
     """Driver-loop peer-message drain hook (Pillar #6 fast path for big tasks).
 
     The main ``run_task`` round loop drains the peer inbox at each round
-    boundary, but the endpoint (Planner→Worker→Critic) and VU loops are DRIVER
-    loops that own their own iteration boundary — they must call THIS at the top
+    boundary, but Flow and VU outer loops are DRIVER loops that own their own
+    iteration boundary — they must call THIS at the top
     of each iteration so a peer message reaches the model on the NEXT iteration
     (as a tool turn), not only when the whole task ends.
 
@@ -101,8 +96,8 @@ def _run_single_turn(
     4. Returns dict with keys: content, thinking, usage, finishReason, messages, error
 
     **Note:** This mutates ``task`` in place (content, thinking, status, etc.).
-    It does NOT emit 'done' events — the caller (endpoint.py) decides when the
-    overall session is done.
+    It does NOT emit 'done' events — the Flow caller decides when the overall
+    run is done.
 
     Parameters
     ----------
@@ -118,7 +113,7 @@ def _run_single_turn(
     if 'id' not in task:
         raise ValueError("_run_single_turn called with a task dict missing 'id' — did you forget to use create_task()?")
     tid = task['id'][:8]
-    logger.debug('[Endpoint] _run_single_turn %s ENTRY — messages_override=%s',
+    logger.debug('[FlowTurn] _run_single_turn %s ENTRY — messages_override=%s',
                  tid, 'yes' if messages_override is not None else 'no')
 
     # Override messages if supplied
@@ -137,22 +132,24 @@ def _run_single_turn(
     task['programRuns'] = []   # canonical hosted-program runs per turn
 
     # Flag to tell run_task NOT to emit final 'done' event
-    task['_endpoint_managed'] = True
+    task['_flow_managed'] = True
 
     try:
         run_task(task)
     finally:
-        task.pop('_endpoint_managed', None)
+        task.pop('_flow_managed', None)
 
     result = {
         'content':      task.get('content', ''),
         'thinking':     task.get('thinking', ''),
         'usage':        task.get('usage', {}),
-        'finishReason': task.get('finishReason', 'stop'),
+        'finishReason': terminal_finish_reason(task),
         'messages':     list(task.get('messages', [])),
         'error':        task.get('error'),
     }
-    # ★ Propagate fallback info so endpoint mode can surface it to the frontend
+    if task.get('streamState'):
+        result['streamState'] = task['streamState']
+    # Propagate fallback info so the Flow projection can surface it.
     if task.get('_fallback_model'):
         result['fallbackModel'] = task['_fallback_model']
         result['fallbackFrom']  = task.get('_fallback_from', '')
@@ -161,6 +158,6 @@ def _run_single_turn(
         if task.get('_fallback_kind'):
             result['fallbackKind'] = task['_fallback_kind']
 
-    logger.debug('[Endpoint] _run_single_turn %s → %d chars, finish=%s',
+    logger.debug('[FlowTurn] _run_single_turn %s → %d chars, finish=%s',
                  tid, len(result['content']), result['finishReason'])
     return result

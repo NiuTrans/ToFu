@@ -219,7 +219,7 @@ class _Capture(logging.Handler):
 
 @pytest.fixture()
 def roi_log():
-    from lib.tasks_pkg.cache_tracking import _roi
+    import lib.tasks_pkg.cache_tracking._roi as _roi
     cap = _Capture()
     _roi.logger.addHandler(cap)
     prev = _roi.logger.level

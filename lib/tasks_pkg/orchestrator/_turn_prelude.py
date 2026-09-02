@@ -1,6 +1,6 @@
-"""Turn prelude — the pre-Section-1 human/swarm/profile/browser preamble.
+"""Turn prelude for human/swarm state, profiles, and cost experiments.
 
-Extracted 2026-08-01 (pt_03f4cdf1 slice 33) from ``run_task``'s preamble.
+Extracted 2026-08-01 ( slice 33) from ``run_task``'s preamble.
 Runs ONCE per invocation, after the VU-startup attribution and before
 provider binding / config resolution. Returns the (possibly profile-
 merged) cfg — the caller rebinds its local exactly as the inline
@@ -28,10 +28,9 @@ Steps (original order, each with its own branch):
    bounded MCP-exposure / working-set policy. Disabled is an exact no-op;
    explicit request overrides are excluded rather than overwritten.
 
-4. **Per-client browser routing.** ``cfg['browserClientId']`` sets the
-   thread-local client ID so all browser commands (tools, fetch
-   fallback, search fallback) from this task thread route to the
-   correct device's extension.
+Browser routing is intentionally absent here. The selected client remains in
+the request config until the browser tool handler constructs an explicit
+owner/device runtime; no prelude may install ambient routing authority.
 """
 
 from __future__ import annotations
@@ -42,7 +41,7 @@ logger = get_logger(__name__)
 
 
 def run_turn_prelude(task, cfg, tid):
-    """Run the three preamble steps; return the (possibly merged) cfg.
+    """Run the preamble steps; return the (possibly merged) config.
 
     Args:
         task: Live task dict (``task['config']`` is updated by the
@@ -79,15 +78,5 @@ def run_turn_prelude(task, cfg, tid):
     except Exception as _e:
         logger.error('[Task %s] cost experiment assignment failed; using '
                      'original request config: %s', tid, _e, exc_info=True)
-
-    # ── 4. Per-client browser routing: thread-local client ID so all
-    #    browser commands from this task thread route to the correct
-    #    device's extension ──
-    _browser_client_id = cfg.get('browserClientId')
-    if _browser_client_id:
-        from lib.browser import _set_active_client
-        _set_active_client(_browser_client_id)
-        logger.debug('[Task %s] Browser client routed to %s',
-                     tid, _browser_client_id[:12])
 
     return cfg

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from lib.identity import PrincipalContext
 from lib.log import audit_log, get_logger, log_context
 
 from . import analyzer, applier, proposer
@@ -20,12 +21,14 @@ from . import analyzer, applier, proposer
 logger = get_logger(__name__)
 
 
-def run_once(*, dry_run: bool = False,
+def run_once(*, principal: PrincipalContext, dry_run: bool = False,
              llm_override=None,
              window_hours: int = 24) -> dict:
     """Run the optimiser pipeline once.
 
     Args:
+        principal: Explicit owner-scoped user or system identity. The caller
+            must carry ``optimizer:maintain`` (or ``admin``) authority.
         dry_run: If True, never actually apply anything; every proposal
             is stored with ``status='pending_review'`` and
             ``status_reason='dry_run'``.
@@ -38,12 +41,18 @@ def run_once(*, dry_run: bool = False,
         ``reverts``, ``evidence_summary``, ``proposals``, ``applied``,
         ``pending_review``, ``rejected``.
     """
+    if not isinstance(principal, PrincipalContext):
+        raise TypeError('optimizer run requires PrincipalContext')
+    principal.require_scope('optimizer:maintain')
+    owner_user_id = principal.require_owner(context='optimizer run')
+
     started = datetime.now().isoformat()
     logger.info('[Optimizer] run_once starting dry_run=%s', dry_run)
 
     # Step 1: expire / revert
     try:
-        reverts = applier.revert_expired_actions()
+        reverts = applier.revert_expired_actions(
+            owner_user_id=owner_user_id)
     except Exception as e:
         logger.error('[Optimizer] revert_expired_actions crashed: %s', e, exc_info=True)
         reverts = []
@@ -51,7 +60,8 @@ def run_once(*, dry_run: bool = False,
     # Step 2: evidence
     with log_context('Optimizer.gather_evidence', logger=logger):
         try:
-            evidence = analyzer.gather_evidence(window_hours=window_hours)
+            evidence = analyzer.gather_evidence(
+                principal=principal, window_hours=window_hours)
         except Exception as e:
             logger.error('[Optimizer] gather_evidence crashed: %s', e, exc_info=True)
             # Degrade gracefully with empty evidence so the audit record still writes
@@ -73,7 +83,8 @@ def run_once(*, dry_run: bool = False,
     rejected: list[dict] = []
     for prop in proposals:
         try:
-            outcome = applier.apply_proposal(prop, dry_run=dry_run)
+            outcome = applier.apply_proposal(
+                prop, owner_user_id=owner_user_id, dry_run=dry_run)
         except Exception as e:
             logger.error('[Optimizer] apply_proposal crashed: %s', e, exc_info=True)
             rejected.append({'title': prop.get('title', ''),
@@ -111,6 +122,7 @@ def run_once(*, dry_run: bool = False,
 
     audit_log(
         'optimizer_run_complete',
+        user_id=owner_user_id,
         dry_run=dry_run,
         duration_s=(
             datetime.fromisoformat(finished) - datetime.fromisoformat(started)

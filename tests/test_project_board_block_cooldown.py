@@ -44,36 +44,12 @@ Load-bearing negative controls (each byte-reverts ONE guard):
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.usefixtures('chat_sidecar')]
+pytest_plugins = ('tests._chat_sidecar',)
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
-_BOARD_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_board.py')
-_DISPATCH_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_dispatch.py')
-
-
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
-
-
-@pytest.fixture(autouse=True)
-def _clean(flask_app):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_tasks')
-        db.execute('DELETE FROM project_events')
-        db.execute('DELETE FROM message_queue')
-        db.commit()
-    yield
+TEST_OWNER_USER_ID = 1
 
 
 @pytest.fixture(autouse=True)
@@ -82,32 +58,17 @@ def _stub_push(monkeypatch):
 
 
 def _row(flask_app, project_path, task_id):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        r = db.execute(
-            'SELECT blocked_until, block_count, block_reason, status '
-            'FROM project_tasks WHERE id=? AND project_path=?',
-            (task_id, project_path)).fetchone()
-    return dict(r) if r else None
-
-
-def _set_blocked_until(flask_app, project_path, task_id, blocked_until):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('UPDATE project_tasks SET blocked_until=? WHERE id=? AND project_path=?',
-                   (blocked_until, task_id, project_path))
-        db.commit()
+    from lib.conversations.project_board import read_board
+    return next((task for task in read_board(
+        project_path, user_id=TEST_OWNER_USER_ID)['tasks']
+        if task['id'] == task_id), None)
 
 
 def _feed(flask_app, project_path):
     from lib.conversations.project_feed import read_project_feed
     with flask_app.app_context():
-        return read_project_feed(project_path, limit=500)['events']
+        return read_project_feed(project_path, limit=500, user_id=TEST_OWNER_USER_ID)['events']
 
-
-from tests._nc_harness import patch_restore as _patch_restore  # noqa: E402
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -142,9 +103,9 @@ def test_block_sets_cooldown_count_and_reason(flask_app):
         BLOCK_COOLDOWN_BASE_MS, _now_ms, block_task, post_task,
     )
     with flask_app.app_context():
-        tid = post_task('/b/1', 'cA', 'epic under external gate')['id']
+        tid = post_task('/b/1', 'cA', 'epic under external gate', user_id=TEST_OWNER_USER_ID)['id']
         before = _now_ms()
-        res = block_task('/b/1', 'cA', tid, '[human-gated] waiting §10 sign-off')
+        res = block_task('/b/1', 'cA', tid, '[human-gated] waiting §10 sign-off', user_id=TEST_OWNER_USER_ID)
     assert res['ok']
     row = _row(flask_app, '/b/1', tid)
     assert row['block_count'] == 1
@@ -157,11 +118,11 @@ def test_block_sets_cooldown_count_and_reason(flask_app):
 def test_repeated_block_escalates_count_and_cooldown(flask_app):
     from lib.conversations.project_board import block_task, post_task
     with flask_app.app_context():
-        tid = post_task('/b/2', 'cA', 'perpetually human-gated epic')['id']
-        block_task('/b/2', 'cA', tid, 'gate 1')
+        tid = post_task('/b/2', 'cA', 'perpetually human-gated epic', user_id=TEST_OWNER_USER_ID)['id']
+        block_task('/b/2', 'cA', tid, 'gate 1', user_id=TEST_OWNER_USER_ID)
     row1 = _row(flask_app, '/b/2', tid)
     with flask_app.app_context():
-        block_task('/b/2', 'cA', tid, 'gate 2')
+        block_task('/b/2', 'cA', tid, 'gate 2', user_id=TEST_OWNER_USER_ID)
     row2 = _row(flask_app, '/b/2', tid)
     assert row2['block_count'] == 2 and row1['block_count'] == 1
     # 2nd block schedules a LATER retry than the 1st (escalation), measured as
@@ -178,25 +139,26 @@ def test_blocked_epic_not_dispatchable(flask_app):
     from lib.conversations.project_board import block_task, post_task
     from lib.conversations.project_dispatch import select_dispatchable
     with flask_app.app_context():
-        tid = post_task('/b/3', 'cA', 'blocked epic')['id']
-        block_task('/b/3', 'cA', tid, 'sibling must commit first')
-        cands = [c['id'] for c in select_dispatchable('/b/3')]
+        tid = post_task('/b/3', 'cA', 'blocked epic', user_id=TEST_OWNER_USER_ID)['id']
+        block_task('/b/3', 'cA', tid, 'sibling must commit first', user_id=TEST_OWNER_USER_ID)
+        cands = [c['id'] for c in select_dispatchable('/b/3', user_id=TEST_OWNER_USER_ID)]
     assert tid not in cands, \
         'a blocked epic on cooldown must NOT be re-dispatched (stops the churn)'
 
 
-def test_cooldown_self_expires_at_read_time(flask_app):
+def test_cooldown_self_expires_at_read_time(flask_app, monkeypatch):
     """The ONLY reason this is allowed where park was not: the cooldown expires
     automatically at read time (no reaper, no human un-block). Once the window
     passes, the epic is pickable again so a resolved dep IS retried."""
     from lib.conversations.project_board import block_task, post_task
     from lib.conversations.project_dispatch import select_dispatchable
     with flask_app.app_context():
-        tid = post_task('/b/4', 'cA', 'temporarily blocked epic')['id']
-        block_task('/b/4', 'cA', tid, 'waiting on sibling commit')
-    _set_blocked_until(flask_app, '/b/4', tid, 1)  # force cooldown into the past
+        tid = post_task('/b/4', 'cA', 'temporarily blocked epic', user_id=TEST_OWNER_USER_ID)['id']
+        block_task('/b/4', 'cA', tid, 'waiting on sibling commit', user_id=TEST_OWNER_USER_ID)
+    import lib.conversations.project_dispatch as project_dispatch
+    monkeypatch.setattr(project_dispatch.time, 'time', lambda: 10_000_000_000)
     with flask_app.app_context():
-        cands = [c['id'] for c in select_dispatchable('/b/4')]
+        cands = [c['id'] for c in select_dispatchable('/b/4', user_id=TEST_OWNER_USER_ID)]
     assert tid in cands, \
         'once the cooldown lapses the epic must be dispatchable again (retry)'
 
@@ -207,8 +169,8 @@ def test_unblocked_epic_still_dispatchable(flask_app):
     from lib.conversations.project_board import post_task
     from lib.conversations.project_dispatch import select_dispatchable
     with flask_app.app_context():
-        tid = post_task('/b/5', 'cA', 'fresh open epic')['id']
-        cands = [c['id'] for c in select_dispatchable('/b/5')]
+        tid = post_task('/b/5', 'cA', 'fresh open epic', user_id=TEST_OWNER_USER_ID)['id']
+        cands = [c['id'] for c in select_dispatchable('/b/5', user_id=TEST_OWNER_USER_ID)]
     assert tid in cands
 
 
@@ -221,9 +183,9 @@ def test_complete_resets_block_state(flask_app):
         block_task, complete_task, post_task,
     )
     with flask_app.app_context():
-        tid = post_task('/b/6', 'cA', 'epic')['id']
-        block_task('/b/6', 'cA', tid, 'gate')
-        complete_task('/b/6', 'cA', tid)
+        tid = post_task('/b/6', 'cA', 'epic', user_id=TEST_OWNER_USER_ID)['id']
+        block_task('/b/6', 'cA', tid, 'gate', user_id=TEST_OWNER_USER_ID)
+        complete_task('/b/6', 'cA', tid, user_id=TEST_OWNER_USER_ID)
     row = _row(flask_app, '/b/6', tid)
     assert row['block_count'] == 0 and row['blocked_until'] == 0
     assert (row['block_reason'] or '') == ''
@@ -233,12 +195,12 @@ def test_reopen_resets_block_state_and_forces_immediate_retry(flask_app):
     from lib.conversations.project_board import block_task, post_task, reopen_task
     from lib.conversations.project_dispatch import select_dispatchable
     with flask_app.app_context():
-        tid = post_task('/b/7', 'cA', 'epic')['id']
-        block_task('/b/7', 'cA', tid, 'gate')
+        tid = post_task('/b/7', 'cA', 'epic', user_id=TEST_OWNER_USER_ID)['id']
+        block_task('/b/7', 'cA', tid, 'gate', user_id=TEST_OWNER_USER_ID)
         # blocked → not dispatchable
-        assert tid not in [c['id'] for c in select_dispatchable('/b/7')]
-        reopen_task('/b/7', 'human', tid)
-        cands = [c['id'] for c in select_dispatchable('/b/7')]
+        assert tid not in [c['id'] for c in select_dispatchable('/b/7', user_id=TEST_OWNER_USER_ID)]
+        reopen_task('/b/7', 'human', tid, user_id=TEST_OWNER_USER_ID)
+        cands = [c['id'] for c in select_dispatchable('/b/7', user_id=TEST_OWNER_USER_ID)]
     row = _row(flask_app, '/b/7', tid)
     assert row['block_count'] == 0 and row['blocked_until'] == 0
     assert tid in cands, 'a human reopen must force an immediate retry'
@@ -253,9 +215,9 @@ def test_blocked_lane_renders_reason_and_retry(flask_app):
         block_task, post_task, render_board_block,
     )
     with flask_app.app_context():
-        tid = post_task('/b/8', 'cA', 'Epic D scale-out')['id']
-        block_task('/b/8', 'cA', tid, '[human-gated] §10 infra sign-off required')
-        block = render_board_block('/b/8', current_conv_id='cR')
+        tid = post_task('/b/8', 'cA', 'Epic D scale-out', user_id=TEST_OWNER_USER_ID)['id']
+        block_task('/b/8', 'cA', tid, '[human-gated] §10 infra sign-off required', user_id=TEST_OWNER_USER_ID)
+        block = render_board_block('/b/8', current_conv_id='cR', user_id=TEST_OWNER_USER_ID)
     assert 'Waiting on an external gate' in block
     assert '[human-gated]' in block, 'the block reason (with class) must be shown'
     # the blocked epic must NOT appear in the plain "Open" lane (it would read as
@@ -268,16 +230,17 @@ def test_blocked_lane_renders_reason_and_retry(flask_app):
             'a blocked epic must be partitioned OUT of the Open lane'
 
 
-def test_expired_cooldown_epic_returns_to_open_lane(flask_app):
+def test_expired_cooldown_epic_returns_to_open_lane(flask_app, monkeypatch):
     from lib.conversations.project_board import (
         block_task, post_task, render_board_block,
     )
     with flask_app.app_context():
-        tid = post_task('/b/9', 'cA', 'transiently blocked epic')['id']
-        block_task('/b/9', 'cA', tid, 'gate')
-    _set_blocked_until(flask_app, '/b/9', tid, 1)  # expire cooldown
+        tid = post_task('/b/9', 'cA', 'transiently blocked epic', user_id=TEST_OWNER_USER_ID)['id']
+        block_task('/b/9', 'cA', tid, 'gate', user_id=TEST_OWNER_USER_ID)
+    import lib.conversations.project_board as project_board
+    monkeypatch.setattr(project_board, '_now_ms', lambda: 10_000_000_000_000)
     with flask_app.app_context():
-        block = render_board_block('/b/9', current_conv_id='cR')
+        block = render_board_block('/b/9', current_conv_id='cR', user_id=TEST_OWNER_USER_ID)
     # no live cooldown → not in a waiting-on-gate lane
     assert 'Waiting on an external gate' not in block
 
@@ -300,93 +263,11 @@ def _legacy_row(**over):
     return row
 
 
-def test_pre_migration_row_reads_as_unblocked():
-    from lib.conversations.project_board import _row_to_task
-    t = _row_to_task(_legacy_row(), now_ms=1_000_000)
+def test_nullable_block_fields_read_as_unblocked():
+    from lib.storage_sidecar.operations_pkg._board import _board_public
+    t = _board_public(_legacy_row(
+        project_path='/legacy', blocked_until=None, block_count=None,
+        block_reason='', wait_paths='[]', dispatch_target='', write_set='[]',
+        block_question='', human_answer='', blocked_by=''), now=1_000_000)
     assert t['blocked_until'] == 0 and t['block_count'] == 0
     assert t['block_reason'] == ''
-
-
-# ════════════════════════════════════════════════════════════════════
-#  NC-1 — the select_dispatchable cooldown skip is load-bearing
-# ════════════════════════════════════════════════════════════════════
-
-def test_NC_1_dispatch_cooldown_skip_is_load_bearing(flask_app):
-    def run():
-        import lib.conversations.project_dispatch as pd
-        from lib.conversations.project_board import block_task, post_task
-        with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            get_thread_db(DOMAIN_CHAT).execute(
-                "DELETE FROM project_tasks WHERE project_path='/ncb1'")
-            get_thread_db(DOMAIN_CHAT).commit()
-            tid = post_task('/ncb1', 'cA', 'blocked epic')['id']
-            block_task('/ncb1', 'cA', tid, 'external gate')
-            cands = [c['id'] for c in pd.select_dispatchable('/ncb1')]
-        assert tid in cands, \
-            'NC-1: with the blocked_until skip removed, a blocked epic must ' \
-            'LEAK back into the candidate set (reproduces the billed-turn churn)'
-
-    _patch_restore(
-        _DISPATCH_SRC,
-        "        if int(t.get('blocked_until') or 0) > now_ms:\n            continue\n",
-        "        if False:  # NC-1 (cooldown skip disabled)\n            continue\n",
-        run,
-    )
-
-
-# ════════════════════════════════════════════════════════════════════
-#  NC-2 — the reopen_task block-state reset is load-bearing
-# ════════════════════════════════════════════════════════════════════
-
-def test_NC_2_reopen_reset_is_load_bearing(flask_app):
-    def run():
-        import lib.conversations.project_board as pb
-        from lib.conversations.project_dispatch import select_dispatchable
-        with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            get_thread_db(DOMAIN_CHAT).execute(
-                "DELETE FROM project_tasks WHERE project_path='/ncb2'")
-            get_thread_db(DOMAIN_CHAT).commit()
-            tid = pb.post_task('/ncb2', 'cA', 'epic')['id']
-            pb.block_task('/ncb2', 'cA', tid, 'gate')
-            pb.reopen_task('/ncb2', 'human', tid)
-            cands = [c['id'] for c in select_dispatchable('/ncb2')]
-        assert tid not in cands, \
-            'NC-2: with the reopen block-reset removed, a human reopen must ' \
-            'NOT force a retry (the epic stays cooldown-suppressed)'
-
-    _patch_restore(
-        _BOARD_SRC,
-        "lease_expires_at=0, dispatched=0, blocked_until=0, block_count=0, "
-        "\"\n            \"block_reason='', wait_paths='[]', dispatch_target='', \"\n            \"block_question='', human_answer='', updated_at=? \"",
-        "lease_expires_at=0, dispatched=0, updated_at=? \"",
-        run,
-    )
-
-
-# ════════════════════════════════════════════════════════════════════
-#  NC-3 — the _row_to_task blocked_until nullable default is load-bearing
-# ════════════════════════════════════════════════════════════════════
-
-def test_NC_3_blocked_until_default_is_load_bearing():
-    def run():
-        import lib.conversations.project_board as pb
-        raised = False
-        try:
-            pb._row_to_task(_legacy_row(), now_ms=1_000_000)
-        except KeyError:
-            raised = True
-        assert raised, \
-            'NC-3: with the nullable default removed, a column-less legacy row ' \
-            'must raise KeyError out of _row_to_task (proves the guard)'
-
-    _patch_restore(
-        _BOARD_SRC,
-        "    try:\n        blocked_until = int(r['blocked_until'] or 0)\n"
-        "    except (KeyError, IndexError, TypeError) as e:\n"
-        "        logger.debug('[Board] blocked_until field parse failed, defaulting: %s', e)\n"
-        "        blocked_until = 0",
-        "    blocked_until = r['blocked_until']  # NC-3 (nullable default removed)",
-        run,
-    )

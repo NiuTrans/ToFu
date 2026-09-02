@@ -22,11 +22,14 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from tests._runtime_sections import runtime_section
 
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOLBAR_JS = ROOT / "static" / "js" / "main" / "main_toolbar_ui.js"
+TOOLBAR_SOURCE = runtime_section(
+    "main/main_toolbar_ui.js", scope_prelude=False,
+)
 
 
 def _node() -> str:
@@ -52,8 +55,7 @@ def _slice_fn(src: str, signature: str) -> str:
 
 
 def _set_chat_mode_fn() -> str:
-    return _slice_fn(TOOLBAR_JS.read_text(encoding="utf-8"),
-                     "function setChatMode(mode) {")
+    return _slice_fn(TOOLBAR_SOURCE, "function setChatMode(mode) {")
 
 
 HARNESS = textwrap.dedent("""
@@ -71,7 +73,7 @@ HARNESS = textwrap.dedent("""
       if (throwInApply) throw new Error('simulated dial bookkeeping failure');
       applied = m;
     }};
-    global._saveConvToolState = () => {{ saved++; order.push('save'); }};
+    global.captureActiveConversationSettings = () => {{ saved++; order.push('save'); }};
     global.clearProject = () => {{}};
     global.debugLog = () => {{}};
     global.chatMode = 'chat';
@@ -120,13 +122,13 @@ def test_studio_reopens_panel_when_project_already_attached():
     # The panel must open FIRST — before the dial/state bookkeeping — so that
     # bookkeeping can never block the affordance.
     assert out["order"][0] == "open", (
-        "openProjectModal must run BEFORE _applyChatModeUI/_saveConvToolState"
+        "openProjectModal must run BEFORE _applyChatModeUI/captureActiveConversationSettings"
     )
 
 
 def test_studio_opens_panel_even_when_dial_bookkeeping_throws():
     """The real second bug: when a project is already attached, the pre-fix
-    code ran _applyChatModeUI + _saveConvToolState BEFORE opening the panel. If
+    code ran _applyChatModeUI + captureActiveConversationSettings BEFORE opening the panel. If
     either threw synchronously the panel never opened — so an already-attached
     conv could never change its path, while attaching a fresh one (which skips
     that bookkeeping) worked. The panel must open regardless."""
@@ -147,7 +149,7 @@ def test_NC_open_after_bookkeeping_breaks_when_bookkeeping_throws():
         "    if (hasProject) {\n"
         "      try {\n"
         "        _applyChatModeUI('studio');\n"
-        "        _saveConvToolState();\n"
+        "        captureActiveConversationSettings();\n"
         "        debugLog('Mode: Studio (project attached)', 'success');\n"
         "      } catch (err) {\n"
         "        console.warn('[setChatMode] studio dial bookkeeping failed:', err);\n"
@@ -156,7 +158,7 @@ def test_NC_open_after_bookkeeping_breaks_when_bookkeeping_throws():
         "    return;",
         "    if (hasProject) {\n"
         "      _applyChatModeUI('studio');\n"
-        "      _saveConvToolState();\n"
+        "      captureActiveConversationSettings();\n"
         "      debugLog('Mode: Studio (project attached)', 'success');\n"
         "    }\n"
         "    if (typeof openProjectModal === 'function') openProjectModal();\n"

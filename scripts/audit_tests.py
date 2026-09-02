@@ -42,10 +42,11 @@ WHAT IT DETECTS (each finding names file:line so it is actionable)
                             reasons unrelated to what it claims to guard
   F   dead path anchor    — the test references a repo-relative path that no
                             longer exists on disk
-  G   implementation-face — the test reads shipped SOURCE TEXT or reaches into
-                            private symbols. Per the charter this is only
-                            legitimate for RATCHET guards; for behaviour
-                            guards it is the rot vector. Reported, not banned
+  G   implementation-face — the test reads shipped SOURCE text. This is
+                            legitimate only for narrow architecture or
+                            generated-artifact ratchets; it is not a behavior
+                            contract. G is identity-ratcheted so existing debt
+                            can shrink but no new test/source pair can appear
   H   near-duplicate      — same test-function name defined in N files
   I   coverage gap        — a shipped module that NO test file imports or names
 
@@ -87,6 +88,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import os
 import re
@@ -127,7 +129,13 @@ _PATH_RE = re.compile(
     r'[\w./\-]+\.(py|js|css|md|json|html|txt|toml|sh|d\.ts)$')
 
 # Shipped source dirs whose TEXT being read by a test = implementation-face.
-_SHIPPED_DIRS = ('lib/', 'routes/', 'static/', 'server.py', 'export.py')
+_SHIPPED_DIRS = (
+    'lib/', 'routes/', 'frontend/src/', 'static/', 'scripts/',
+    'bootstrap_pkg/', 'desktop/', 'deploy/', 'browser_extension/',
+    'server.py', 'bootstrap.py', 'export.py', 'restart_15000.sh', 'install.sh',
+    'vite.config.mjs', 'index.html', 'package.json', 'docker-compose.yml',
+    'Dockerfile',
+)
 
 
 def _tracked(pattern: str) -> list[str]:
@@ -332,6 +340,7 @@ def _unconditional_skip(dec) -> str:
 
 
 _SHARED_HELPERS_CACHE: dict = {}
+_IMPORTED_TEST_MODULE_CACHE: dict = {}
 
 
 def _shared_helper_defs() -> dict:
@@ -355,7 +364,52 @@ def _shared_helper_defs() -> dict:
     return _SHARED_HELPERS_CACHE
 
 
-def _shipped_source_reads(tree, mentioned_paths: set) -> dict:
+def _imported_test_helper_defs(tree: ast.AST) -> dict:
+    """Resolve explicitly imported helpers owned by another test module.
+
+    A few integration suites deliberately share a behavioral driver from a
+    neighboring ``tests/test_*.py`` module.  Those calls are just as capable of
+    failing as helpers in ``tests/_*.py``; restricting closure analysis to the
+    latter misclassifies the consumer as assertion-free.  Only explicit
+    ``from tests... import name`` edges are followed, so this does not turn the
+    audit into an import executor or a repository-wide name guesser.
+    """
+    imported: dict = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        module_name = node.module or ''
+        if not module_name.startswith('tests.'):
+            continue
+        relative_path = module_name.replace('.', '/') + '.py'
+        absolute_path = os.path.join(REPO, relative_path)
+        cache_key = (REPO, relative_path)
+        if cache_key not in _IMPORTED_TEST_MODULE_CACHE:
+            definitions: dict = {}
+            try:
+                with open(absolute_path, encoding='utf-8') as source_file:
+                    imported_tree = ast.parse(
+                        source_file.read(), filename=relative_path)
+            except (OSError, SyntaxError):
+                imported_tree = None
+            if imported_tree is not None:
+                definitions = {
+                    item.name: item for item in imported_tree.body
+                    if isinstance(
+                        item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                }
+            _IMPORTED_TEST_MODULE_CACHE[cache_key] = definitions
+        definitions = _IMPORTED_TEST_MODULE_CACHE[cache_key]
+        for alias in node.names:
+            if alias.name == '*':
+                continue
+            definition = definitions.get(alias.name)
+            if definition is not None:
+                imported[alias.asname or alias.name] = definition
+    return imported
+
+
+def _shipped_source_reads(tree) -> dict:
     """Map ``(scope_node, varname) -> shipped file text`` for variables provably
     assigned from reading a shipped source file.
 
@@ -378,21 +432,141 @@ def _shipped_source_reads(tree, mentioned_paths: set) -> dict:
     """
     out: dict = {}
 
-    def _shipped_arg(call) -> str:
-        for a in list(getattr(call, 'args', [])):
-            if isinstance(a, ast.Constant) and isinstance(a.value, str):
-                v = a.value.strip()
-                if v in mentioned_paths and v.startswith(_SHIPPED_DIRS):
-                    return v
+    def _existing_shipped_path(raw: str) -> str:
+        candidate = os.path.normpath(str(raw or '').strip()).replace('\\', '/')
+        if (candidate.startswith('./')):
+            candidate = candidate[2:]
+        if (candidate.startswith(_SHIPPED_DIRS)
+                and os.path.isfile(os.path.join(REPO, candidate))):
+            return candidate
         return ''
+
+    known_path_names: dict[str, str] = {}
+
+    def _literal_path_parts(node) -> list[str]:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            value = node.value.strip('/\\')
+            return [value] if value else []
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            return (_literal_path_parts(node.left)
+                    + _literal_path_parts(node.right))
+        if isinstance(node, ast.Call):
+            parts: list[str] = []
+            for argument in node.args:
+                parts.extend(_literal_path_parts(argument))
+            return parts
+        if isinstance(node, (ast.Attribute, ast.Subscript)):
+            return _literal_path_parts(node.value)
+        parts = []
+        for child in ast.iter_child_nodes(node):
+            parts.extend(_literal_path_parts(child))
+        return parts
+
+    def _path_from_expression(node) -> str:
+        if isinstance(node, ast.Name):
+            return known_path_names.get(node.id, '')
+        dynamic_names = {
+            item.id for item in ast.walk(node) if isinstance(item, ast.Name)
+            and item.id not in known_path_names
+            and item.id not in {'Path', 'PurePath', 'os', 'pathlib', '__file__'}
+            and item.id.upper() not in {
+                'ROOT', 'REPO', 'PROJECT_ROOT', 'BASE_DIR', 'HERE'}
+            and not item.id.upper().endswith('_ROOT')
+        }
+        # ``tmp_path / ... / 'index.html'`` names a generated fixture, not the
+        # repository's top-level index.html. Only statically repo-rooted path
+        # expressions qualify; helper calls with a literal argument are still
+        # resolved when their caller is inspected below.
+        if dynamic_names:
+            return ''
+        literal_parts = _literal_path_parts(node)
+        for literal in literal_parts:
+            resolved = _existing_shipped_path(literal)
+            if resolved:
+                return resolved
+        # Resolve the common ``ROOT / 'lib' / 'owner.py'`` spelling. Only an
+        # existing shipped file is accepted, so unrelated string fragments or
+        # a fixture that merely contains a path cannot create provenance.
+        for start in range(len(literal_parts)):
+            for end in range(start + 2, len(literal_parts) + 1):
+                resolved = _existing_shipped_path(
+                    '/'.join(literal_parts[start:end]))
+                if resolved:
+                    return resolved
+        return ''
+
+    # Module constants such as ``OWNER = ROOT / 'lib' / 'owner.py'`` are a
+    # normal spelling. Resolve them before walking function-local reads. Do
+    # not absorb same-named locals from nested test functions into this map.
+    for _round in range(2):
+        for assignment in (node for node in tree.body
+                           if isinstance(node, ast.Assign)):
+            if len(assignment.targets) != 1 \
+                    or not isinstance(assignment.targets[0], ast.Name):
+                continue
+            resolved = _path_from_expression(assignment.value)
+            if resolved:
+                known_path_names[assignment.targets[0].id] = resolved
+
+    source_reader_helpers: dict[str, str] = {}
+    for function in (node for node in tree.body
+                     if isinstance(node, (ast.FunctionDef,
+                                          ast.AsyncFunctionDef))):
+        read_calls = [
+            call for call in ast.walk(function)
+            if isinstance(call, ast.Call)
+            and _call_name(call) in {'open', 'read', 'read_text'}
+        ]
+        if not read_calls:
+            continue
+        helper_paths = set()
+        for call in read_calls:
+            name = _call_name(call)
+            if name == 'open' and call.args:
+                resolved = _path_from_expression(call.args[0])
+            elif isinstance(call.func, ast.Attribute):
+                resolved = _path_from_expression(call.func.value)
+            else:
+                resolved = ''
+            if resolved:
+                helper_paths.add(resolved)
+        source_reader_helpers[function.name] = (
+            next(iter(helper_paths)) if len(helper_paths) == 1 else '')
+
+    def _walk_scope(scope):
+        stack = list(reversed(getattr(scope, 'body', ())))
+        while stack:
+            node = stack.pop()
+            yield node
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef, ast.Lambda)):
+                continue
+            stack.extend(reversed(list(ast.iter_child_nodes(node))))
 
     scopes = [tree] + [n for n in ast.walk(tree)
                        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
     for scope in scopes:
-        # Direct children only, so a nested def's assignments stay in ITS scope.
-        for n in ast.walk(scope):
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n is not scope:
+        handle_bindings: list[tuple[str, int, int, str]] = []
+        for context in _walk_scope(scope):
+            if not isinstance(context, ast.With):
                 continue
+            for item in context.items:
+                call = item.context_expr
+                if (not isinstance(call, ast.Call)
+                        or _call_name(call) != 'open'
+                        or not call.args
+                        or not isinstance(item.optional_vars, ast.Name)):
+                    continue
+                resolved = _path_from_expression(call.args[0])
+                handle_bindings.append((
+                    item.optional_vars.id,
+                    context.lineno,
+                    getattr(context, 'end_lineno', context.lineno),
+                    resolved,
+                ))
+
+        # Direct children only, so a nested def's assignments stay in ITS scope.
+        for n in _walk_scope(scope):
             if not isinstance(n, ast.Assign) or len(n.targets) != 1:
                 continue
             tgt = n.targets[0]
@@ -402,8 +576,27 @@ def _shipped_source_reads(tree, mentioned_paths: set) -> dict:
             for c in ast.walk(n.value):
                 if isinstance(c, ast.Call):
                     nm = _call_name(c)
-                    if nm in ('read', 'read_text', 'open') or nm.startswith('_'):
-                        rel = rel or _shipped_arg(c)
+                    if nm == 'open' and c.args:
+                        rel = rel or _path_from_expression(c.args[0])
+                    elif nm in ('read', 'read_text'):
+                        receiver = (c.func.value
+                                    if isinstance(c.func, ast.Attribute)
+                                    else None)
+                        if isinstance(receiver, ast.Name):
+                            matches = [
+                                binding for binding in handle_bindings
+                                if binding[0] == receiver.id
+                                and binding[1] <= n.lineno <= binding[2]
+                            ]
+                            if matches:
+                                rel = rel or max(
+                                    matches, key=lambda binding: binding[1])[3]
+                        elif receiver is not None:
+                            rel = rel or _path_from_expression(receiver)
+                    elif nm in source_reader_helpers:
+                        for argument in c.args:
+                            rel = rel or _path_from_expression(argument)
+                        rel = rel or source_reader_helpers[nm]
             if not rel:
                 continue
             try:
@@ -583,18 +776,23 @@ def analyze_file(rel: str) -> FileReport:
         if not os.path.exists(os.path.join(REPO, p)):
             rep.add('F', 0, f'references missing path {p}')
 
-    # G: implementation-face (reads shipped source text)
-    live_shipped = [p for p in mentioned_paths
-                    if p.startswith(_SHIPPED_DIRS) and os.path.exists(os.path.join(REPO, p))]
-    if live_shipped and needles:
-        rep.add('G', 0, f'source-text anchors on {len(live_shipped)} shipped file(s): '
-                        + ', '.join(sorted(live_shipped)[:4]))
+    # Resolve provenance before classifying implementation-facing reads. A path
+    # literal elsewhere in the test is not enough: a value must actually be
+    # assigned from reading that shipped file.
+    src_vars = _shipped_source_reads(tree)
+
+    # G: implementation-face (reads shipped source text). Emit one
+    # finding per test/source pair: a file-level count lets one removed anchor
+    # hide one newly added anchor in the same test, which is not a real ratchet.
+    implementation_paths = {entry[1] for entry in src_vars.values()}
+    for shipped_path in sorted(implementation_paths):
+        rep.add('G', 0, f'source-text read of {shipped_path}')
 
     # E: drifted anchor — needle absent from the shipped source text it is
     # ACTUALLY tested against, resolved in the needle's OWN scope.
-    src_vars = _shipped_source_reads(tree, mentioned_paths)
     for needle, line, hay_name, scope_id in needles:
-        entry = src_vars.get((scope_id, hay_name))
+        entry = (src_vars.get((scope_id, hay_name))
+                 or src_vars.get((id(tree), hay_name)))
         if entry is None:
             continue   # haystack not proven shipped-source text in this scope
         text, from_rel = entry
@@ -608,7 +806,10 @@ def analyze_file(rel: str) -> FileReport:
     # same-file helpers plus the shared tests/_*.py drivers.
     local_funcs = {n.name: n for n in ast.walk(tree)
                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    helper_funcs = _shared_helper_defs()
+    helper_funcs = {
+        **_shared_helper_defs(),
+        **_imported_test_helper_defs(tree),
+    }
 
     for n in ast.walk(tree):
         if isinstance(n, ast.Assert):
@@ -656,7 +857,8 @@ def analyze_file(rel: str) -> FileReport:
 # user context), money (billing), or correctness that only shows up in
 # production. Used to rank gaps by RISK rather than alphabetically.
 _HIGH_RISK_PREFIXES = (
-    'lib/database/', 'lib/tasks_pkg/', 'lib/agent_core/', 'lib/agent_loop',
+    'lib/storage/', 'lib/storage_sidecar/', 'lib/tasks_pkg/',
+    'lib/agent_core/', 'lib/agent_loop',
     'lib/agent_verdict/', 'lib/llm/', 'lib/llm_dispatch/', 'lib/billing/',
     'lib/production/', 'lib/conversations/', 'routes/api_v1/',
 )
@@ -696,23 +898,9 @@ def _loc(path: str) -> int:
 def coverage_gaps(reports: list[FileReport]) -> list[dict]:
     """Shipped modules that NO test file imports or even names.
 
-    ★ CALIBRATION (2026-07-27): the first version of this reported ZERO gaps
-    and that was a FALSE GREEN with two causes, both now fixed:
-
-      1. It only enumerated ``lib/*.py`` + ``routes/*.py`` — the TOP LEVEL. But
-         nearly all behaviour in this repo lives in sub-packages
-         (``lib/tasks_pkg/**``, ``lib/database/**``, ``lib/llm/**``, …), so the
-         scan looked past the entire codebase. Measured after switching to a
-         recursive walk: **195 modules / 23,190 LOC with no test reference at
-         all** (12.7% of shipped LOC), where the tool had claimed 0.
-      2. ``mod.startswith(k + '.')`` credited a module as covered when a test
-         merely named its PARENT package. ``import lib.database`` would mark
-         every one of the ~90 modules under it as tested. Only an exact match or
-         a reference to the module ITSELF (or something inside it) counts now.
-
-    The lesson is the charter's, applied to my own tool: a detector that reports
-    nothing is indistinguishable from a detector that is not looking. Cross-check
-    a "clean" result against an independent method before believing it.
+    Discovery is recursive because most behavior lives below package roots.
+    A parent-package import does not count every child as covered: only an
+    exact module reference or a reference below that module qualifies.
 
     Returns dicts sorted by risk then LOC, so the output is a work queue rather
     than an alphabetical dump.
@@ -787,9 +975,10 @@ _CAT_LABEL = {
     'F': 'reference to a missing repo path',
     'G': 'implementation-face (reads shipped source text)',
 }
-# Categories that block CI when they GROW (ratchet). G is informational: the
-# charter permits implementation-face for ratchet guards.
-BLOCKING = ('A0', 'A1', 'A2', 'A', 'B', 'C', 'D', 'E', 'F')
+# Categories that block CI when they grow. G remains possible for narrow
+# architecture/generated-output ratchets, but existing identities are
+# grandfathered explicitly and may only disappear.
+BLOCKING = ('A0', 'A1', 'A2', 'A', 'B', 'C', 'D', 'E', 'F', 'G')
 _REPORT_ORDER = ('A0', 'A1', 'A2', 'A', 'B', 'C', 'D', 'E', 'F', 'G')
 
 
@@ -859,26 +1048,44 @@ def main() -> int:
             json.dump(census, f, indent=1, ensure_ascii=False)
         print(f'\nwrote {args.json}')
 
+    finding_keys = {
+        'G': sorted(f'{rel}:{detail}' for rel, _line, detail in per_cat['G']),
+    }
+    finding_digests = {
+        category: hashlib.sha256(
+            '\n'.join(keys).encode('utf-8')).hexdigest()
+        for category, keys in finding_keys.items()
+    }
+
     if args.write_baseline:
         with open(BASELINE_PATH, 'w', encoding='utf-8') as f:
-            json.dump({'counts': {c: counts.get(c, 0) for c in BLOCKING}},
-                      f, indent=1)
+            json.dump({
+                'counts': {c: counts.get(c, 0) for c in BLOCKING},
+                'finding_digests': finding_digests,
+            }, f, indent=1)
         print(f'wrote baseline {BASELINE_PATH}')
         return 0
 
     if args.check:
         try:
             with open(BASELINE_PATH, encoding='utf-8') as f:
-                base = json.load(f)['counts']
+                baseline = json.load(f)
+            base = baseline['counts']
         except OSError:
             print('\nno baseline — run --write-baseline first')
             return 1
         grew = [(c, base.get(c, 0), counts.get(c, 0)) for c in BLOCKING
                 if counts.get(c, 0) > base.get(c, 0)]
-        if grew:
+        g_identity_changed = (
+            baseline.get('finding_digests', {}).get('G')
+            != finding_digests['G'])
+        if grew or g_identity_changed:
             print('\nRATCHET BROKEN — these categories grew:')
             for c, b, n in grew:
                 print(f'  [{c}] {_CAT_LABEL[c]}: {b} → {n}')
+            if g_identity_changed:
+                print('  [G] source-text read identity set changed; '
+                      'inspect --category G and regenerate only after debt shrank')
             return 1
         print('\nratchet OK')
     return 0

@@ -279,7 +279,7 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
     except Exception as e:
         logger.debug('[Ephemeral] no_proxy registration probe failed: %s', e)
 
-    # ★ Pre-flight reachability probe. Only for self-hosted / raw-IP
+    # Pre-flight reachability probe. Only for self-hosted / raw-IP
     #   endpoints — those are the boxes that go down without an SLA and
     #   whose first request would otherwise stall on the connect timeout.
     #   Cloud BYO endpoints (addressed by domain) are assumed reachable;
@@ -314,7 +314,7 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
         model=model_id,
         capabilities=caps,
         base_url=base_url,
-        # ★ Unique per handle (NOT per owner): the provider_id is what the
+        # Unique per handle (NOT per owner): the provider_id is what the
         #   thread-scoped hard pin (lib/llm_dispatch/provider_pin.py) matches
         #   on, so two concurrent inline-provider requests from the SAME API
         #   key must still pin to their own distinct slots. ``owner`` stays in
@@ -340,8 +340,10 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
     with _lock:
         _handles[handle_id] = handle
 
-    # Audit + log WITHOUT the api_key (the prefix is enough for diagnostics).
-    api_key_hint = (api_key[:6] + '…') if len(api_key) > 8 else ('<empty>' if not api_key else '<short>')
+    # Record credential presence, never credential characters. Even a short
+    # prefix can disclose most of a private gateway token and handle/provider
+    # identifiers already provide the correlation needed for diagnostics.
+    api_key_hint = '<configured>' if api_key else '<empty>'
     audit_log('ephemeral_slot_mint', handle=handle_id, owner=str(owner or ''),
               model=model_id, base_url=base_url, api_key_hint=api_key_hint)
     logger.info('[Ephemeral] mint handle=%s owner=%s model=%s url=%s key=%s caps=%s',

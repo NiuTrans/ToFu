@@ -1,23 +1,31 @@
-"""lib/optimizer/ — Daily Optimizer.
+"""Lazy public facade for the bounded Daily Optimizer pipeline."""
 
-Runs once a day, mines logs / audit events / daily reports, and produces
-structured optimisation proposals.  A narrow whitelist of low-risk actions
-(v1: ``block_search_domain``) is auto-applied; everything else is stored
-as ``pending_review`` for a human to approve via the REST API.
+from __future__ import annotations
 
-Each auto-applied action carries a ``ttl_days`` — the next run
-automatically reverts expired actions.  A simple outcome-metric feedback
-loop (see ``analyzer._compute_post_apply_metrics``) teaches the LLM
-whether its previous proposals actually helped.
-
-Public entry point:
-    run_once(dry_run: bool = False) -> dict
-"""
-
-from lib.log import get_logger
-
-from .orchestrator import run_once
-
-logger = get_logger(__name__)
+from importlib import import_module
 
 __all__ = ['run_once']
+
+_EXPORT_MODULES = {
+    'run_once': 'lib.optimizer.orchestrator',
+}
+
+_CHILD_MODULES = {
+    'actions', 'analyzer', 'applier', 'orchestrator', 'proposer', 'storage',
+}
+
+
+def __getattr__(name: str):
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None and name in _CHILD_MODULES:
+        module_name = f'lib.optimizer.{name}'
+    if module_name is None:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    module = import_module(module_name)
+    value = module if name in _CHILD_MODULES else getattr(module, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__) | _CHILD_MODULES)

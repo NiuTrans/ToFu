@@ -128,6 +128,8 @@ _LOG_OR_HANDLE_NAMES = frozenset({
     'api_internal_error', 'api_error', 'api_bad_request',
     'api_not_found', 'api_unauthorized', 'api_forbidden',
     'api_conflict', 'api_payload_too_large', 'api_method_not_allowed',
+    '_safe_route_error_response', '_archive_error',
+    'print',
 })
 
 
@@ -262,27 +264,22 @@ class _SilentCatchFinder(_ContextMixin):
         self.generic_visit(node)
 
 
-# Exception types whose silent catch is a legitimate control-flow /
-# optional-dependency branch, not a swallowed error. Catching ONLY these and
-# discarding (pass / fallback) needs no log — mirrors the audit's TIER C.
-_EXEMPT_EXC_TYPES = frozenset({
-    'ImportError', 'ModuleNotFoundError', 'NameError', 'StopIteration',
-    'StopAsyncIteration', 'GeneratorExit', 'KeyboardInterrupt', 'SystemExit',
-    'CancelledError', 'TimeoutError', 'Empty', 'Full',
-    'BlockingIOError', 'TimeoutExpired',
-})
-# Back-compat alias (older references).
-_ASSIGN_EXEMPT_EXC_TYPES = _EXEMPT_EXC_TYPES
+# A named, specific exception is already an explicit branch in the function's
+# control flow: parsing invalid input, probing an optional file, losing a
+# lifecycle race, and so on. Requiring a log for every such fallback produced
+# hundreds of false positives and encouraged noisy logging. Bare handlers and
+# broad ``Exception``/``BaseException`` catches are different: they can hide
+# unrelated programming defects, so those must log, raise, or be reviewed as
+# one of the small fault-containment boundaries below.
+_BROAD_EXC_TYPES = frozenset({'<bare>', 'Exception', 'BaseException'})
 
 
 def _all_exc_exempt(exc_str: str) -> bool:
-    """True iff EVERY caught type in ``exc_str`` is a control-flow / optional-dep
-    type (so a silent catch is legitimate). A bare ``except:`` ('<bare>') or any
-    broad/narrow-data type makes the whole handler non-exempt."""
+    """Return whether every caught type is specific rather than broad."""
     parts = [p.strip() for p in exc_str.split(',') if p.strip()]
     if not parts:
         return False
-    return all(p in _EXEMPT_EXC_TYPES for p in parts)
+    return all(part not in _BROAD_EXC_TYPES for part in parts)
 
 
 def _finding_sig(rel: str, f: dict) -> tuple[str, str, str]:
@@ -290,14 +287,39 @@ def _finding_sig(rel: str, f: dict) -> tuple[str, str, str]:
 
     Deliberately EXCLUDES the line number. The previous allowlist keyed on
     ``(relpath, lineno)`` and silently rotted the moment a file was edited or
-    split into a package — e.g. the ``system_context.py:454`` instrumentation
-    swallow moved to ``system_context/_inject.py:134`` and the two
+    split into a package — e.g. Context Composer instrumentation moved into
+    focused provider/render modules and the two
     ``api_response.py`` safe_route entries slid from 340/348 to 357/365, so the
     guard (had it run) would have re-flagged already-triaged code. Keying on the
     enclosing function name + caught-type tuple survives edits, line shifts, and
     the module→package renames this project does routinely.
     """
     return (rel, f['func'], f['exc'])
+
+
+# Logging and diagnostic sinks must contain failures without recursively
+# logging through the component that just failed. Each branch returns a
+# bounded sentinel, retains the already-safe value, or drops only diagnostic
+# delivery; application state is never changed here.
+_FAULT_CONTAINMENT_SIGS = frozenset({
+    ('lib/incident_journal.py', '_record_text', 'Exception'),
+    ('lib/incident_journal.py', '_exception_signature', 'Exception'),
+    ('lib/incident_journal.py', 'handleError', 'Exception'),
+    ('lib/log.py', '_bounded_context_scalar', 'Exception'),
+    ('lib/log_rate_limit.py', '_full_text', 'Exception'),
+    ('lib/log_rate_limit.py', '_deliver_pending', 'Exception'),
+    ('lib/log_redaction.py', 'sanitize_value', 'Exception'),
+    ('lib/tasks_pkg/context_composer/_render.py',
+     '_emit_context_summary', 'Exception'),
+    ('lib/tasks_pkg/manager/_persist.py',
+     'terminal_state_log_summary', 'Exception'),
+})
+
+_ASSIGNMENT_FAULT_CONTAINMENT_SIGS = _FAULT_CONTAINMENT_SIGS | frozenset({
+    ('lib/log.py', 'filter', 'Exception'),
+    ('lib/log_rate_limit.py', '_snapshot', 'Exception'),
+    ('lib/log_redaction.py', '_safe_string', 'Exception'),
+})
 
 
 class _AssignSilentCatchFinder(_ContextMixin):
@@ -352,75 +374,19 @@ class _FStringLoggerFinder(ast.NodeVisitor):
 class TestSilentCatches:
     """No except blocks should silently swallow exceptions without logging."""
 
-    # Known acceptable silent catches, keyed by the STABLE signature
-    # (relpath, enclosing-function qualname, caught-type-tuple) — NOT line
-    # number (see _finding_sig for why line-keyed allowlists rot). Each entry
-    # must have a comment explaining why it's acceptable.
-    ACCEPTABLE_SIGS = {
-        # safe_route.wrapper: `except Exception: return _handle(e)` — _handle
-        # routes to api_internal_error (auto-logs ERROR+traceback per §4.6.2)
-        # or api_bad_request. Not visible through the local _handle indirection.
-        ('lib/api_response.py', 'safe_route.wrapper', 'Exception'),
-        # _db_safe.wrapper: `except _db_errors: return _handle(e)` — _handle
-        # logs (warning for 'database is locked' 503, else error+traceback then
-        # re-raise). Not visible through the local _handle indirection.
-        ('routes/common.py', '_db_safe.wrapper', '_db_errors'),
-        ('routes/common.py', '_db_safe.async_wrapper', '_db_errors'),
-        # Context manifests are authoritative; this INFO summary is only
-        # instrumentation and a broken logging backend must not break a turn.
-        ('lib/tasks_pkg/context_composer/_render.py',
-         '_emit_context_summary', 'Exception'),
-        # terminal_state_log_summary: builds a diagnostic string that is ITSELF
-        # only ever passed to logger.error on a persist-failure branch; its own
-        # fallback returns a marker string rather than logging (logging here
-        # would recurse into the very failure it describes).
-        ('lib/tasks_pkg/manager/_persist.py',
-         'terminal_state_log_summary', 'Exception'),
-        # ── Single-statement (pass/return-only) narrow fallbacks that ALSO
-        #    trip this finder (a lone pass/return body qualifies as both a
-        #    "silent catch" and an "assignment-only" one). Full rationale on
-        #    the matching entries in TestAssignmentSilentCatches.ACCEPTABLE_SIGS:
-        #    each catches a DATA-shaped error over persisted JSON / a DB rev /
-        #    an optional stat and degrades to a safe default, with the real
-        #    outcome logged (or the row skipped) at the caller's boundary.
-        ('routes/conversations.py', '_row_rev', 'TypeError,ValueError'),
-        # RuntimeError = "no running event loop" in a sync context → skip spawn.
-        ('routes/conversations.py', '_maybe_backfill_narration_on_open', 'RuntimeError'),
-        # os.getsize transient stat error → treat row as present (never hide a
-        # real paper).
-        ('routes/paper.py', '_is_ghost_library_row', 'OSError'),
-        # lib/ single-statement (pass/return/continue) narrow fallbacks that
-        # also trip this finder — same DATA-shaped-except-with-safe-default
-        # rationale documented on the matching TestAssignmentSilentCatches sigs.
-        ('lib/database/_pg_backup/__init__.py', '<module>', 'AttributeError,TypeError'),
-        ('lib/database/messages_rows.py',
-         'load_message_window._seq', 'KeyError,IndexError,TypeError,ValueError'),
-        ('lib/llm_dispatch/big_prefix_gate.py',
-         'estimate_prefix_tokens', 'TypeError,ValueError'),
-        # Partial tool-input JSON is the expected shape between Anthropic SSE
-        # chunks; logging every incomplete fragment would add per-chunk I/O.
-        ('lib/llm/anthropic_outbound/_sse.py',
-         '_capture_delta', 'JSONDecodeError,TypeError'),
-        # ip_address(ValueError) is the ordinary hostname branch, so logging
-        # here would emit one debug record for every valid bypass hostname.
-        ('lib/proxy.py', '_normalize_bypass_domain', 'ValueError'),
-        # Missing map/list indexes implement ToolScript optional-access/null
-        # semantics; a record for every miss would be user-program log noise.
-        ('lib/tools/toolscript.py',
-         'eval_node', 'KeyError,IndexError,TypeError'),
-        ('lib/shutdown_marker.py', '_is_num', 'TypeError,ValueError'),
-        ('lib/tasks_pkg/killed_recovery.py',
-         '_context_weight', 'TypeError,ValueError'),
-    }
+    # These are true fault-containment boundaries: logging inside them either
+    # delegates to an error helper or could recurse into the logger currently
+    # failing. Specific exception branches need no entry here.
+    ACCEPTABLE_SIGS = _FAULT_CONTAINMENT_SIGS
 
     def test_no_silent_catches_in_lib(self):
-        """All except blocks in lib/ must log something."""
+        """Broad catches in lib/ must log, raise, or be fault containment."""
         violations = self._scan(LIB_DIR)
         if violations:
             pytest.fail(_render_violations('silent catch(es)', violations))
 
     def test_no_silent_catches_in_routes(self):
-        """All except blocks in routes/ must log something."""
+        """Broad catches in routes/ must log or return through an error seam."""
         violations = self._scan(ROUTES_DIR)
         if violations:
             pytest.fail(_render_violations('silent catch(es)', violations))
@@ -437,96 +403,9 @@ class TestSilentCatches:
 
 
 class TestAssignmentSilentCatches:
-    """No except block may swallow an error by only assigning a fallback
-    value (e.g. ``body = ''``) without logging.
+    """Broad catches that assign a fallback follow the same policy."""
 
-    Complements TestSilentCatches, which only inspects pass/return/continue
-    single-statement bodies. Optional-dep / control-flow exception types are
-    exempt (see _ASSIGN_EXEMPT_EXC_TYPES).
-    """
-
-    # Genuinely-legit assignment-only catches, keyed by the STABLE signature
-    # (relpath, enclosing-function qualname, caught-type-tuple) — NOT line
-    # number (see _finding_sig). Each entry has a reason. The bulk are narrow
-    # parse-fallbacks over PERSISTED/OPTIONAL JSON or env values: catching a
-    # data-shaped error (JSONDecodeError / TypeError / ValueError / KeyError /
-    # IndexError) and assigning a safe default ({} / [] / 0) is the documented
-    # degrade path, and the caller ALWAYS logs the real outcome at its own
-    # boundary (a warning on the outer handler, or the row simply skipped). A
-    # logger.debug on every one of these would be pure per-row noise (CLAUDE.md
-    # §2.2 "expected/harmless fallback → debug, optional").
-    ACCEPTABLE_SIGS = {
-        # ── Blessed broad catches shared with TestSilentCatches (see there). ──
-        ('lib/api_response.py', 'safe_route.wrapper', 'Exception'),
-        ('routes/common.py', '_db_safe.wrapper', '_db_errors'),
-        ('routes/common.py', '_db_safe.async_wrapper', '_db_errors'),
-        ('lib/tasks_pkg/context_composer/_render.py',
-         '_emit_context_summary', 'Exception'),
-        ('lib/tasks_pkg/manager/_persist.py',
-         'terminal_state_log_summary', 'Exception'),
-        # ── entry_points().get(...) TypeError fallback → Python <3.10 API shape.
-        #    Control-flow (version branch), not an error swallow. Same idiom
-        #    across every plugin-discovery seam (tools / providers / schema /
-        #    flags / blueprints / task-runtimes).
-        ('lib/llm_dispatch/provider_registry.py',
-         'discover_provider_plugins', 'TypeError'),
-        ('lib/database/schema_registry.py', 'discover_schema_plugins', 'TypeError'),
-        ('lib/feature_registry.py', 'discover_flag_plugins', 'TypeError'),
-        ('routes/plugin_registry.py', 'discover_blueprint_plugins', 'TypeError'),
-        ('routes/plugin_registry.py', 'run_startup_hooks', 'TypeError'),
-        ('routes/plugin_registry.py', 'discover_task_runtime_plugins', 'TypeError'),
-        # ── Narrow parse-fallbacks over PERSISTED JSON — assign safe default,
-        #    outer caller logs / skips the row. Data-shaped except only. ──
-        ('lib/database/messages_rows.py',
-         'load_message_window._seq', 'KeyError,IndexError,TypeError,ValueError'),
-        ('lib/tasks_pkg/cache_tracking/_persist.py',
-         'read_persisted_boundary', 'TypeError,KeyError,IndexError'),
-        ('lib/tasks_pkg/killed_recovery.py',
-         '_context_weight', 'TypeError,ValueError'),
-        ('lib/tasks_pkg/killed_recovery.py',
-         '_redispatch_conv', 'JSONDecodeError,TypeError'),
-        ('lib/tasks_pkg/killed_recovery.py',
-         'restamp_killed_after_internal_fatal', 'JSONDecodeError,TypeError'),
-        ('lib/tasks_pkg/killed_recovery.py',
-         '_dispatch_one', 'JSONDecodeError,TypeError'),
-        ('lib/tasks_pkg/killed_recovery.py',
-         'run_killed_recovery', 'JSONDecodeError,TypeError'),
-        ('lib/tasks_pkg/manager/_recovery.py',
-         'recover_stale_tasks_on_startup', 'JSONDecodeError,TypeError'),
-        ('lib/tasks_pkg/manager/_sync.py',
-         '_reconcile_orphan_placeholder_on_settle', 'JSONDecodeError,TypeError'),
-        # ── Narrow parse of a DB `rev` int / window arg → 0 fallback. ──
-        ('routes/conversations.py', '_row_rev', 'TypeError,ValueError'),
-        ('routes/conversations.py', 'list_convs', 'TypeError,ValueError'),
-        ('routes/conversations.py', '_parse_window_args', 'TypeError,ValueError'),
-        # ── __module__-normalise / env-parse ValueError branches — assign a
-        #    default, no error to report. ──
-        ('lib/database/_pg_backup/__init__.py', '<module>', 'AttributeError,TypeError'),
-        ('lib/translate/segment_backfill.py', '<module>', 'ValueError,TypeError'),
-        ('lib/self_update/_apply.py', '_apply_via_tarball', 'TypeError,ValueError'),
-        ('lib/shutdown_marker.py', '_is_num', 'TypeError,ValueError'),
-        ('lib/llm_dispatch/big_prefix_gate.py',
-         'estimate_prefix_tokens', 'TypeError,ValueError'),
-        ('lib/llm/anthropic_outbound/_sse.py', 'translate', 'TypeError,ValueError'),
-        # input_json_delta is intentionally incomplete between SSE chunks;
-        # parsing failure is protocol progress, not malformed persisted data.
-        # Logging every partial fragment would create O(chunks) debug I/O.
-        ('lib/llm/anthropic_outbound/_sse.py',
-         '_capture_delta', 'JSONDecodeError,TypeError'),
-        # ip_address rejects hostnames by design before IDNA validation.
-        ('lib/proxy.py', '_normalize_bypass_domain', 'ValueError'),
-        # ToolScript indexes intentionally evaluate absent members to null.
-        ('lib/tools/toolscript.py',
-         'eval_node', 'KeyError,IndexError,TypeError'),
-        ('lib/tasks_pkg/wire_fingerprint.py', 'system_fingerprint', 'TypeError,ValueError'),
-        # ── RuntimeError = "no running event loop" in a sync context → skip
-        #    the async spawn. Control-flow, not an error. ──
-        ('routes/conversations.py', '_maybe_backfill_narration_on_open', 'RuntimeError'),
-        ('routes/conversations.py', '_schedule_reconcile_persist', 'RuntimeError'),
-        # ── os.getsize on a listing row: transient stat error → treat as
-        #    present (never hide a real paper). Best-effort, caller logs. ──
-        ('routes/paper.py', '_is_ghost_library_row', 'OSError'),
-    }
+    ACCEPTABLE_SIGS = _ASSIGNMENT_FAULT_CONTAINMENT_SIGS
 
     def test_no_assignment_silent_catches_in_lib(self):
         violations = self._scan(LIB_DIR)

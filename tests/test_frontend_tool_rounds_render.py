@@ -17,7 +17,7 @@ shape the SSE dispatcher produces) through the PUBLIC entry
 ``renderToolRoundsHTML(rounds, isStreaming)`` and asserts the resulting DOM
 structure for every tool family + status. It locks the render contract so the
 eventual decomposition of ``tool_rounds.js`` (next monolith target) has a
-no-regression safety net — same discipline as the streaming_ui.js split.
+no-regression safety net for the shared typed Turn presentation path.
 
 Runs the REAL shipped JS under jsdom via the shared harness; the swarm panel
 builder lives in ui/streaming_swarm_panel.js, so that file is loaded first
@@ -42,9 +42,10 @@ const { document, check, report } = setup({
   root: process.argv[3],
   html: '<!DOCTYPE html><body><div id="chatInner"></div></body>',
   // argv[4] = ui/streaming_swarm_panel.js (defines _buildSwarmPanelHTML),
-  // argv[2] = ui/tool_rounds.js (the file under test). Same window scope,
-  // swarm panel first — mirrors the bundle order.
-  targets: [process.argv[4], process.argv[2]],
+  // argv[2] = ui/tool_rounds.js (the core file under test),
+  // argv[5] = ui/tool_rounds_rich.js (structured checklist/rich cards).
+  // Same window scope, in retained-runtime order.
+  targets: [process.argv[4], process.argv[2], process.argv[5]],
   globals: {
     // tool_rounds.js calls a few helpers from sibling files at RUNTIME.
     _convRenderFingerprint: () => 0,
@@ -474,6 +475,87 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
     d.querySelectorAll('.ptool-op').length === 4);
 }
 
+// ── 16. generic result viewer — settled rounds with toolContent expand ──
+// read_files / grep_search / find_files / list_dir / browser reads / MCP
+// tools used to fall through to a bare .ptool-line with the ENTIRE result
+// invisible. The catch-all viewer renders any done round with a non-empty
+// toolContent as a native <details>: standard row as summary, verbatim
+// monospace result pane (stats + copy header) as body.
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'read_files', status: 'done',
+      query: 'Read server.py',
+      toolContent: 'File: server.py (lines 1-3 of 3)\nimport os\n<div>html</div>\nprint("hi")',
+      results: [{ toolName: 'read_files', badge: '3L' }] },
+  ], false);
+  const d = frag(html);
+  check('result_block_present', !!d.querySelector('details.ptool-result-block'));
+  check('result_summary_row', !!d.querySelector('.ptool-result-block > summary.ptool-line'));
+  check('result_content_visible', html.includes('import os'));
+  check('result_html_escaped', html.includes('&lt;div&gt;html&lt;/div&gt;')
+    && !html.includes('<div>html</div>'));
+  check('result_pre_code', !!d.querySelector('.ptool-result-pre code'));
+  check('result_copy_btn', !!d.querySelector('.ptool-result-block .copy-btn'));
+  check('result_header_stats', !!d.querySelector('.ptool-result-block .code-header'));
+  check('result_badge_kept', html.includes('3L'));
+}
+
+// ── 16b. grep_search done round → expandable result, badge preserved ──
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'grep_search', status: 'done',
+      query: '/foo/ in *.py',
+      toolContent: 'a.py:12: foo()\nb.py:30: foo(x)',
+      results: [{ toolName: 'grep_search', badge: '2 matches' }] },
+  ], false);
+  const d = frag(html);
+  check('grep_result_block', !!d.querySelector('.ptool-result-block'));
+  check('grep_matches_visible', html.includes('a.py:12: foo()')
+    && html.includes('b.py:30: foo(x)'));
+  check('grep_badge_kept', html.includes('2 matches'));
+}
+
+// ── 16c. done round with EMPTY toolContent → bare line, no viewer ──
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'list_dir', status: 'done',
+      query: 'List .', toolContent: '   ' },
+  ], false);
+  const d = frag(html);
+  check('empty_content_no_block', !d.querySelector('.ptool-result-block'));
+  check('empty_content_bare_line', !!d.querySelector('.ptool-line'));
+}
+
+// ── 16d. JSON toolContent is pretty-printed for readability ──
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'mcp__overleaf__compile', status: 'done',
+      query: 'Compile project', toolContent: '{"ok":true,"pages":2}' },
+  ], false);
+  check('json_pretty_printed', html.includes('{\n  "ok": true,\n  "pages": 2\n}'));
+}
+
+// ── 16e. over-long results are soft-capped with a stated truncation note ──
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'read_files', status: 'done',
+      query: 'Read huge.log', toolContent: 'x'.repeat(130000) },
+  ], false);
+  const d = frag(html);
+  check('trunc_note_shown', !!d.querySelector('.ptool-result-trunc'));
+  check('trunc_cap_enforced', d.querySelector('.ptool-result-pre code')
+    .textContent.length === 120000);
+}
+
+// ── 16f. in-flight (searching) rounds never get the result viewer ──
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'read_files', status: 'searching',
+      query: 'Reading…', toolContent: 'partial buffer' },
+  ], true);
+  check('searching_no_result_block', !frag(html).querySelector('.ptool-result-block'));
+}
+
 report();
 """
 
@@ -482,7 +564,10 @@ def test_tool_rounds_render_characterization():
     run_harness(
         target_js=os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),
         body_js=_BODY,
-        extra_targets=[os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js')],
-        min_pass=62,
+        extra_targets=[
+            os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js'),
+            os.path.join(JS_DIR, 'ui', 'tool_rounds_rich.js'),
+        ],
+        min_pass=78,
         label='tool_rounds render',
     )

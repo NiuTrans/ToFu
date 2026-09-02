@@ -17,7 +17,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-from lib.oauth import outbound
+import lib.oauth.outbound as outbound
 
 
 class TestClaudeResolve(unittest.TestCase):

@@ -1,26 +1,30 @@
 """Regression tests for the GATEWAY-OUTAGE cap in the streaming dispatch loop.
 
-Root cause this guards against: during a TOTAL upstream gateway outage every
-slot on every key returns 502/503/504 (``openresty`` "502 Bad Gateway"). Per the
-project's ``gateway-5xx-treated-as-429`` convention those map to
-``RateLimitError`` and the streaming dispatch loop rotates slots FOREVER
-(``_MAX_429_CYCLES = 0``). With the whole upstream down, that pins the worker
-thread in a 0.3s poll loop and floods the log — the process stays alive while
-the frontend can no longer be served ("backend alive, frontend dead").
+History: during a TOTAL upstream gateway outage every slot on every key
+returns 502/503/504 (``openresty`` "502 Bad Gateway"). Per the project's
+``gateway-5xx-treated-as-429`` convention those map to ``RateLimitError``
+and the streaming dispatch loop rotates slots. The original cap (default
+120s) gave up mid-turn to free the worker thread — but owner directive
+2026-08-20 overruled it: a gateway outage is WAITABLE, stopping is the
+USER's call (abort_check runs every cycle), never the system's. The cap
+is therefore DISABLED by default (``TOFU_GATEWAY_OUTAGE_BUDGET_S=0``) and
+the budget became an opt-in ops guard, read per call independently from the
+bounded model-local 429 saturation policy (``_saturation_budget_secs``).
 
-The fix bounds a *gateway-5xx streak* with a wall-clock budget while leaving
-genuine per-key 429 contention uncapped (a sibling key will free up). This
-suite pins:
+This suite pins:
 
   1. ``RateLimitError.is_gateway`` is set for 502/503/504 (classifier) and NOT
      for a real 429 / quota 429.
   2. ``_StreamRetryState`` streak bookkeeping: a gateway 5xx opens the streak,
      a real 429 (or success) clears it, and the budget predicate honours the
      disable sentinel (<= 0).
-  3. ``dispatch_stream`` RAISES once the gateway-5xx streak exceeds the budget
-     (so the worker thread is freed) — the exact fix.
-  4. ``dispatch_stream`` does NOT cap a real-429 storm even across a long
-     wall-clock span (genuine contention must still rotate forever).
+  3. With a positive budget configured, ``dispatch_stream`` RAISES once the
+     gateway-5xx streak exceeds it (opt-in thread-pool-starvation guard).
+  4. The gateway cap does NOT classify a real-429 storm as a gateway outage;
+     the explicit 429 infinite-rotation opt-out still works independently.
+  5. The budget DEFAULTS to disabled (0), and with it disabled a gateway
+     5xx storm is NOT capped — the loop keeps rotating until the gateway
+     recovers (owner directive 2026-08-20).
 
 Run:  pytest tests/test_dispatch_gateway_outage_cap.py -m unit
 """
@@ -172,7 +176,9 @@ class TestGatewayOutageRaises:
         monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
         # Advancing clock so a handful of iterations spans > the budget.
         monkeypatch.setattr(api.time, 'monotonic', _FakeClock(step=1000.0))
-        monkeypatch.setattr(api, '_GATEWAY_OUTAGE_BUDGET_S', 120.0)
+        # Opt back IN to the bounded give-up (disabled by default since
+        # the 2026-08-20 owner directive) — read per call from env.
+        monkeypatch.setenv('TOFU_GATEWAY_OUTAGE_BUDGET_S', '120')
         monkeypatch.setattr('lib.key_stats.is_key_enabled', lambda *a, **k: True)
 
         def _all_gateway_502(body, **kwargs):
@@ -190,14 +196,16 @@ class TestGatewayOutageRaises:
 
 
 # ══════════════════════════════════════════════════════════
-#  4. dispatch_stream: real 429 storm is NOT capped
+#  4. gateway cap does not own a real 429 storm
 # ══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
 class TestRealRateLimitNotCapped:
     def test_long_real_429_storm_then_success(self, monkeypatch):
-        """A genuine per-key 429 contention run must keep rotating even across
-        a long wall-clock window (the gateway cap must NOT fire for real 429s).
+        """The gateway cap must not fire for genuine per-key 429 contention.
+
+        This test explicitly opts out of the separate bounded 429 policy so a
+        long fake clock can isolate gateway classification.
         """
         from lib.llm_dispatch import api
         from lib.llm_errors import RateLimitError
@@ -208,7 +216,8 @@ class TestRealRateLimitNotCapped:
         # clock, far beyond the 120s gateway budget. If the cap wrongly
         # counted real 429s this would raise; it must succeed instead.
         monkeypatch.setattr(api.time, 'monotonic', _FakeClock(step=1000.0))
-        monkeypatch.setattr(api, '_GATEWAY_OUTAGE_BUDGET_S', 120.0)
+        monkeypatch.setenv('TOFU_GATEWAY_OUTAGE_BUDGET_S', '120')
+        monkeypatch.setenv('TOFU_429_SATURATION_SECS', '0')
         monkeypatch.setattr('lib.key_stats.is_key_enabled', lambda *a, **k: True)
 
         calls = {'n': 0}
@@ -221,6 +230,62 @@ class TestRealRateLimitNotCapped:
 
         import lib.llm as llm_mod
         monkeypatch.setattr(llm_mod, 'stream_chat', _real_429_then_ok)
+
+        msg, finish, usage = api.dispatch_stream(
+            [{'role': 'user', 'content': 'hi'}], log_prefix='[t]', max_retries=1)
+        assert msg == 'ok'
+        assert calls['n'] == 31
+
+
+# ══════════════════════════════════════════════════════════
+#  5. Budget knob defaults DISABLED — a gateway storm is waited out
+#     (owner directive 2026-08-20: stopping is the user's call)
+# ══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestBudgetDefaultsDisabled:
+    def test_default_is_zero(self, monkeypatch):
+        from lib.llm_dispatch import api
+        monkeypatch.delenv('TOFU_GATEWAY_OUTAGE_BUDGET_S', raising=False)
+        assert api._gateway_outage_budget_secs() == 0.0
+
+    def test_positive_enables_negative_clamps_to_disabled(self, monkeypatch):
+        from lib.llm_dispatch import api
+        monkeypatch.setenv('TOFU_GATEWAY_OUTAGE_BUDGET_S', '60')
+        assert api._gateway_outage_budget_secs() == 60.0
+        monkeypatch.setenv('TOFU_GATEWAY_OUTAGE_BUDGET_S', '-5')
+        assert api._gateway_outage_budget_secs() == 0.0
+        monkeypatch.setenv('TOFU_GATEWAY_OUTAGE_BUDGET_S', 'not-a-number')
+        assert api._gateway_outage_budget_secs() == 0.0
+
+    def test_gateway_storm_not_capped_by_default(self, monkeypatch):
+        """A total gateway 5xx storm must NOT interrupt the turn when the
+        budget is at its default (disabled): the loop keeps rotating until
+        the gateway recovers — only the user's abort_check may stop it.
+        """
+        from lib.llm_dispatch import api
+        from lib.llm_errors import RateLimitError
+
+        disp = _EndlessDispatcher()
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+        # Each iteration advances 1000s — 30 gateway-502 cycles = 30000s
+        # wall clock, far beyond the legacy 120s cap. With the cap disabled
+        # this must keep rotating and succeed when the gateway recovers.
+        monkeypatch.setattr(api.time, 'monotonic', _FakeClock(step=1000.0))
+        monkeypatch.delenv('TOFU_GATEWAY_OUTAGE_BUDGET_S', raising=False)
+        monkeypatch.setattr('lib.key_stats.is_key_enabled', lambda *a, **k: True)
+
+        calls = {'n': 0}
+
+        def _gateway_502_then_ok(body, **kwargs):
+            calls['n'] += 1
+            if calls['n'] <= 30:
+                raise RateLimitError('502 Bad Gateway', is_gateway=True,
+                                     reason='HTTP 502')
+            return 'ok', 'stop', {}
+
+        import lib.llm as llm_mod
+        monkeypatch.setattr(llm_mod, 'stream_chat', _gateway_502_then_ok)
 
         msg, finish, usage = api.dispatch_stream(
             [{'role': 'user', 'content': 'hi'}], log_prefix='[t]', max_retries=1)

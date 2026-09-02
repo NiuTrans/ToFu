@@ -117,18 +117,50 @@ class OpenAITranslateTest(unittest.TestCase):
         resp = build_openai_response(task, model='m')
         self.assertEqual(resp['choices'][0]['finish_reason'], 'length')
 
-    def test_build_response_error_is_valid_enum_not_error(self):
-        """finish_reason='error' is NOT a valid OpenAI enum value; an
-        error-status task must map to a legal value ('stop'), not the bogus
-        'error' an SDK would reject."""
+    def test_build_response_error_uses_error_channel_not_fake_stop(self):
+        """A failed task is not an OpenAI completion of any finish enum."""
+        from lib.compat._common import CompatTerminalFailure
         from lib.compat.openai import build_openai_response
         task = {'id': 'a', 'status': 'error', 'content': 'partial',
                 'finishReason': 'stop'}
-        resp = build_openai_response(task, model='m')
-        fr = resp['choices'][0]['finish_reason']
-        self.assertIn(fr, ('stop', 'length', 'tool_calls', 'content_filter',
-                           'function_call'))
-        self.assertNotEqual(fr, 'error')
+        with self.assertRaises(CompatTerminalFailure):
+            build_openai_response(task, model='m')
+
+    def test_stream_failure_emits_error_instead_of_completion(self):
+        import asyncio
+        import json as _json
+
+        from lib.compat.openai import stream_openai_chunks
+
+        task = {
+            'id': 'cut',
+            'status': 'done',
+            'content': 'safe prefix',
+            'finishReason': 'premature_close',
+            'streamState': 'malformed_stream',
+            'events': [{
+                'type': 'done',
+                'finishReason': 'premature_close',
+                'streamState': 'malformed_stream',
+                'seq': 0,
+            }],
+            'events_lock': threading.Lock(),
+        }
+
+        async def _drain():
+            return [frame async for frame in
+                    stream_openai_chunks(task, model='m')]
+
+        frames = asyncio.new_event_loop().run_until_complete(_drain())
+        payloads = [
+            _json.loads(frame[len('data: '):].strip())
+            for frame in frames
+            if frame.startswith('data: ') and '[DONE]' not in frame
+        ]
+        self.assertEqual(payloads[0]['error']['code'],
+                         'provider_stream_error')
+        self.assertFalse(any('choices' in payload for payload in payloads))
+        self.assertIn('data: [DONE]\n\n', frames)
 
     def test_build_response_tool_use_normalized_to_tool_calls(self):
         from lib.compat.openai import build_openai_response

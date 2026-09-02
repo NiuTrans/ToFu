@@ -11,7 +11,8 @@ import sys
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
 OUTPUT = os.path.join(
-    ROOT, 'frontend', 'src', 'runtime', 'app-runtime.js')
+    ROOT, 'frontend', 'src', 'runtime', 'sections',
+    'orchestration-authoring-metadata.generated.js')
 SECTION_NAME = 'orchestration-authoring-metadata.generated.js'
 SECTION_MARKER = f'/* ===== migrated source: {SECTION_NAME} ===== */'
 sys.path.insert(0, ROOT)
@@ -24,7 +25,7 @@ from lib.orchestration.authoring_contract_registry import (  # noqa: E402
     RUNTIME_CONTRACT_SECTION_NAMES,
     rolling_optional_section_fields,
 )
-from lib.orchestration._field_specs import field_spec_schema  # noqa: E402
+from lib.orchestration.field_spec_contract import field_spec_schema  # noqa: E402
 from lib.orchestration.request_limit_contract import (  # noqa: E402
     request_limits_contract,
 )
@@ -84,19 +85,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
-    expected = render() + '\n'
+    expected = SECTION_MARKER + '\n' + render() + '\n'
     with open(OUTPUT, encoding='utf-8') as handle:
-        runtime = handle.read()
-    marker_start = runtime.find(SECTION_MARKER)
-    if marker_start < 0:
-        raise RuntimeError(f'missing retained runtime section: {SECTION_NAME}')
-    body_start = marker_start + len(SECTION_MARKER)
-    if runtime.startswith('\n', body_start):
-        body_start += 1
-    body_end = runtime.find('/* ===== migrated source:', body_start)
-    if body_end < 0:
-        raise RuntimeError(f'unterminated retained runtime section: {SECTION_NAME}')
-    actual = runtime[body_start:body_end]
+        actual = handle.read()
     if args.check:
         if actual != expected:
             print(
@@ -111,9 +102,8 @@ def main() -> int:
             f'{len(wire_sections())} wire sections, '
             f'{len(limit_fields())} request fields)')
         return 0
-    updated = runtime[:body_start] + expected + runtime[body_end:]
     with open(OUTPUT, 'w', encoding='utf-8') as handle:
-        handle.write(updated)
+        handle.write(expected)
     print(f'{os.path.relpath(OUTPUT, ROOT)} [{SECTION_NAME}]')
     return 0
 

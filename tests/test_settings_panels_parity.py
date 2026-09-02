@@ -1,5 +1,3 @@
-# Incident anchor: born in commit c9b75f98 — settings decouple pilot: extract translate panel to HTML fragment + s...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Closed-system guard for the settings-panel HTML-fragment injection.
 
 Panels were decoupled out of ``index.html`` into ``static/settings_panels/<tab>.html``
@@ -31,11 +29,24 @@ PANELS_DIR = os.path.join(PROJECT_ROOT, 'static', 'settings_panels')
 # contain a `settingsTab_<tab>` panel div for — whether inline or spliced from a
 # fragment. Derived from the nav buttons, asserted below against the HTML so a
 # new tab can't be added without appearing here.
+#
+# 'experiments' is MAINTAINER-ONLY (lib/settings_panels.MAINTAINER_ONLY_TABS):
+# present in the source tree, stripped from the served page in opensource
+# builds, and its fragment excluded from the opensource export — so the
+# assembled-HTML and marker→fragment expectations below subtract it when
+# running in an opensource build (same build-awareness contract as
+# tests/test_mcp_catalog_internal_only.py).
 _EXPECTED_TABS = frozenset({
-    'general', 'api', 'preset', 'search', 'translate', 'speech', 'network',
-    'devices', 'feishu', 'oauth', 'mcp', 'skills', 'tools', 'preferences',
-    'advanced',
+    'general', 'models', 'api', 'preset', 'search', 'translate', 'speech',
+    'network', 'devices', 'feishu', 'oauth', 'mcp', 'skills', 'tools',
+    'preferences', 'advanced', 'experiments',
 })
+
+
+def _hidden_tabs():
+    """Tabs legitimately ABSENT from the served page in this build."""
+    from lib.settings_panels import MAINTAINER_ONLY_TABS, is_opensource_build
+    return MAINTAINER_ONLY_TABS if is_opensource_build() else frozenset()
 
 
 def _read(path):
@@ -72,10 +83,12 @@ def test_nav_tabs_match_expected_set():
 def test_all_panels_present_in_assembled_html():
     """After splicing fragments, the served HTML must contain a
     ``id="settingsTab_<tab>"`` panel for EVERY expected tab. A migrated panel
-    whose fragment went missing (or whose marker was dropped) fails here."""
+    whose fragment went missing (or whose marker was dropped) fails here.
+    Maintainer-only tabs are expected to be absent in opensource builds (the
+    render-time strip removes them on purpose)."""
     html = _assembled_html()
     missing = [
-        tab for tab in _EXPECTED_TABS
+        tab for tab in (_EXPECTED_TABS - _hidden_tabs())
         if f'id="settingsTab_{tab}"' not in html
     ]
     assert not missing, (
@@ -100,8 +113,11 @@ def test_no_unresolved_markers_in_assembled_html():
 
 def test_every_marker_has_a_fragment_file():
     from lib.settings_panels import find_markers, fragment_path
+    # Maintainer-only markers legitimately have NO fragment in an opensource
+    # tree (export.py excludes the file; the render-time strip removes the
+    # marker before injection, so it can never dangle in the served page).
     orphan_markers = [
-        tab for tab in set(find_markers(_index_html()))
+        tab for tab in set(find_markers(_index_html())) - _hidden_tabs()
         if not os.path.exists(fragment_path(tab))
     ]
     assert not orphan_markers, (

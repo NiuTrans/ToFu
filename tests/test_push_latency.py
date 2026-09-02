@@ -27,7 +27,7 @@ from routes.push import _handle_client_frame
 @pytest.mark.unit
 class TestPushLatencyPingPong:
     def test_ping_enqueues_pong_with_echoed_timestamp(self):
-        client = PushClient()
+        client = PushClient(user_id=1)
         _handle_client_frame(client, {'action': 'ping', 't': 1234567})
 
         # The pong lands on the SAME queue _sender drains — proving it travels
@@ -36,13 +36,13 @@ class TestPushLatencyPingPong:
         assert frame == {'channel': 'system', 'type': 'pong', 't': 1234567}
 
     def test_ping_without_timestamp_echoes_none(self):
-        client = PushClient()
+        client = PushClient(user_id=1)
         _handle_client_frame(client, {'action': 'ping'})
         frame = asyncio.run(client.drain())
         assert frame == {'channel': 'system', 'type': 'pong', 't': None}
 
     def test_non_ping_frames_do_not_produce_a_pong(self):
-        client = PushClient()
+        client = PushClient(user_id=1)
         # subscribe/unsubscribe/abort/garbage must not enqueue a pong.
         _handle_client_frame(client, {'action': 'unsubscribe', 'channel': 'chat',
                                       'taskId': 'task-1'})
@@ -57,7 +57,7 @@ class TestPushLatencyPingPong:
         # Under loop congestion a FIFO pong would arrive past the client's 8s
         # watchdog, which then force-closes a HEALTHY socket. Nothing is lost:
         # the data frame is delivered right after.
-        client = PushClient()
+        client = PushClient(user_id=1)
         client.enqueue({'channel': 'chat', 'taskId': 't', 'type': 'content_delta',
                         'delta': 'hello'})
         client.enqueue({'channel': 'chat', 'taskId': 't', 'type': 'content_delta',
@@ -76,7 +76,7 @@ class TestPushLatencyPingPong:
         # A control frame must wake it PROMPTLY (not after the 30s keepalive
         # timeout), or every idle ping would outlive the client watchdog.
         async def scenario():
-            client = PushClient()
+            client = PushClient(user_id=1)
             task = asyncio.ensure_future(client.drain())
             await asyncio.sleep(0)  # let drain() arm its waiters
             await asyncio.sleep(0)
@@ -89,7 +89,7 @@ class TestPushLatencyPingPong:
     def test_data_lane_stays_fifo_without_control_frames(self):
         # The priority lane must not reorder ordinary traffic: two data frames
         # with no interleaved pong drain in their original order.
-        client = PushClient()
+        client = PushClient(user_id=1)
         client.enqueue({'channel': 'chat', 'taskId': 't', 'type': 'content_delta',
                         'delta': 'a'})
         client.enqueue({'channel': 'chat', 'taskId': 't', 'type': 'content_delta',

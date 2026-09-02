@@ -58,9 +58,11 @@ def _mk_task(**over):
     t = {
         'id': 'verdict-task-1',
         'convId': 'cv-verdict-1',
+        '_userId': 1,
         'status': 'running',
         'aborted': False,
         'model': 'test-model',
+        'config': {'tools': {'resultEnvelope': 'legacy'}},
         'events': [],
         'events_lock': threading.Lock(),
         '_dispatch_heartbeat': 0.0,
@@ -101,9 +103,9 @@ class _Recorder:
 @pytest.fixture()
 def rec(monkeypatch):
     r = _Recorder()
-    from lib.tasks_pkg import tool_dispatch as facade
+    import lib.tasks_pkg.tool_dispatch._heartbeat as facade
     from lib.tasks_pkg.executor import _finalize as exec_finalize
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     monkeypatch.setattr(_pipeline, 'append_event', r, raising=False)
     monkeypatch.setattr(facade, 'append_event', r, raising=False)
     monkeypatch.setattr(exec_finalize, 'append_event', r, raising=False)
@@ -134,14 +136,15 @@ def scripted_tools(monkeypatch):
               'source': 'Test', 'fetched': True, 'fetchedChars': len(text)}])
         return tc_id, text, False
 
-    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     monkeypatch.setattr(_heartbeat, '_execute_tool_one', _fake, raising=False)
     monkeypatch.setattr(_pipeline, '_execute_tool_one', _fake, raising=False)
     return script
 
 
 def _run(task, tcs, cfg=None, messages=None):
-    from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline
+    from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
     messages = messages if messages is not None else []
     timed_out = execute_tool_pipeline(
         task, tcs, cfg=cfg or {'autoApply': True}, project_path=None,
@@ -168,7 +171,7 @@ def test_timeout_lane_stamps_and_ships_error(rec, scripted_tools, monkeypatch):
 
     assert timed_out is True, 'the pipeline must report the timeout upward'
 
-    # The verdict is STAMPED on the round (cold/poll lane ships rounds whole)
+    # The verdict is stamped on the round (cold projection ships rounds whole)
     # and SHIPPED on the tool_complete wire event (live lane).
     assert slow[5]['status'] == 'error', (
         'a pool-timeout round must be stamped status=error; got %r — without '
@@ -289,7 +292,7 @@ def test_timeout_except_catches_the_futures_class_too():
     on the 3.10 CI leg (2026-08-06, rounds 3-5). Pin the dual-catch so the
     lane is version-proof; the behavioral face above proves it on 3.10."""
     from lib.tasks_pkg import streaming_tool_executor as ste
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
     for mod in (_pipeline, ste):
         src = inspect.getsource(mod)
         assert '_FuturesTimeoutError' in src, (
@@ -304,7 +307,7 @@ def test_every_failure_sentinel_has_a_verdict():
     that records a failure string without a verdict fails this test — the
     exact defect class of the incident, caught at review time instead of in
     the owner's screenshot."""
-    from lib.tasks_pkg.tool_dispatch import _pipeline
+    import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
 
     src = inspect.getsource(_pipeline.execute_tool_pipeline)
     lines = src.splitlines()
@@ -327,3 +330,119 @@ def test_every_failure_sentinel_has_a_verdict():
         + '\n  '.join('L%d %s' % (n, s) for n, s in missing)
         + '\nEvery failure lane must record a terminal verdict — that is the '
           'whole fix. See suite docstring.')
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Face 5 — the safety-net crash lane: handler raises INSIDE the real
+#  _execute_tool_one (the pool's except lane NEVER fires in production —
+#  the executor's universal catch returns normally, so no tool_verdicts
+#  entry is recorded; the finalize seam itself must stamp + ship 'error')
+# ═══════════════════════════════════════════════════════════════════
+
+def test_safety_net_crash_lane_stamps_and_ships_error(rec):
+    """★ THE PRODUCTION CRASH LANE. Face 2 fakes ``_execute_tool_one`` so its
+    raise escapes to the pool; real handlers raise INSIDE the executor's
+    universal safety net, which converts the exception into an error
+    tool-result and RETURNS NORMALLY — the pool records no verdict, and
+    before this fix the round was finalized as 'done': the model read
+    'Error: tool execution failed…' while the human saw a ✓ success card,
+    and the persisted round said 'done' forever.
+    """
+    from lib.tasks_pkg.executor import tool_registry
+
+    _CRASH_TOOL = 'zz_verdict_crash_tool'
+
+    def _crashing(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
+                  cfg, project_path, project_enabled, all_tools=None):
+        raise RuntimeError('handler exploded')
+
+    tool_registry.register(_CRASH_TOOL, _crashing)
+    try:
+        task = _mk_task()
+        bad = _mk_tc('tc-crash', _CRASH_TOOL, 1)
+        ok = _mk_tc('tc-ok', 'grep_search', 2)
+        # NOTE: no scripted_tools patch — the REAL _execute_tool_one runs.
+        messages, timed_out = _run(task, [bad, ok])
+    finally:
+        tool_registry._exact.pop(_CRASH_TOOL, None)
+        tool_registry._metadata.pop(_CRASH_TOOL, None)
+
+    assert timed_out is False
+    assert bad[5]['status'] == 'error', (
+        "a handler that crashed inside the executor safety net must be "
+        "stamped status='error' — the finalize seam is the ONLY failure "
+        "signal on this lane; got %r" % (bad[5]['status'],))
+
+    # The tool_result frame is SELF-DESCRIBING: the verdict rides the event,
+    # so no client ever settles this round by inference.
+    res_ev = rec.find('tc-crash', 'tool_result')
+    assert res_ev is not None and res_ev.get('status') == 'error', (
+        "tool_result for a crashed tool must carry status='error'; got %r"
+        % (res_ev,))
+
+    cmp_ev = rec.find('tc-crash', 'tool_complete')
+    assert cmp_ev is not None and cmp_ev.get('status') == 'error', (
+        "tool_complete must not re-settle the crashed round as done; got %r"
+        % (cmp_ev,))
+
+    # The model still receives the recoverable error string (unchanged).
+    crash_msgs = [m for m in messages if m.get('role') == 'tool'
+                  and m.get('tool_call_id') == 'tc-crash']
+    assert crash_msgs and 'execution failed' in crash_msgs[0]['content'], (
+        crash_msgs)
+
+
+def test_tool_result_frames_are_self_describing(rec, scripted_tools):
+    """Every tool_result frame carries an explicit terminal status — success
+    included. A client must never have to GUESS the verdict from the frame's
+    arrival: guessing is how a crashed tool rendered as a ✓ success card."""
+    scripted_tools['grep_search'] = ('ok', 0.0, 'FAST BODY')
+    task = _mk_task()
+    ok = _mk_tc('tc-ok', 'grep_search', 1)
+    _run(task, [ok])
+
+    res_ev = rec.find('tc-ok', 'tool_result')
+    assert res_ev is not None, 'the success lane must emit tool_result'
+    assert res_ev.get('status') == 'done', (
+        "a successful tool_result must carry an explicit status='done' — "
+        'the frame is the single source of truth, so the truth must be ON '
+        'the frame; got %r' % (res_ev,))
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Face 6 — the finalize seam itself: status param, whitelist, and
+#  verdict protection (no pipeline needed)
+# ═══════════════════════════════════════════════════════════════════
+
+def test_finalize_seam_verdict_rules(rec):
+    from lib.tasks_pkg.executor._finalize import _finalize_tool_round
+
+    task = _mk_task()
+
+    # 1. Default success: stamped + shipped as 'done'.
+    r1 = {'query': 'q1', 'toolCallId': 'tc-f1', 'status': 'searching'}
+    _finalize_tool_round(task, 1, r1, [{'toolName': 't'}])
+    assert r1['status'] == 'done'
+    assert rec.find('tc-f1', 'tool_result').get('status') == 'done'
+
+    # 2. Explicit failure verdict: stamped + shipped.
+    r2 = {'query': 'q2', 'toolCallId': 'tc-f2', 'status': 'searching'}
+    _finalize_tool_round(task, 2, r2, [{'toolName': 't'}], status='error')
+    assert r2['status'] == 'error'
+    assert rec.find('tc-f2', 'tool_result').get('status') == 'error'
+
+    # 3. Verdict protection: a late 'done' finalize never demotes a failure
+    #    verdict the round already holds (pool-timeout lane whose cancelled
+    #    thread finishes late).
+    r3 = {'query': 'q3', 'toolCallId': 'tc-f3', 'status': 'error'}
+    _finalize_tool_round(task, 3, r3, [{'toolName': 't'}])
+    assert r3['status'] == 'error', (
+        "a 'done' finalize must not demote a held failure verdict; got %r"
+        % (r3['status'],))
+    assert rec.find('tc-f3', 'tool_result').get('status') == 'error'
+
+    # 4. Unknown statuses normalize to 'done' (a finalize SETTLES).
+    r4 = {'query': 'q4', 'toolCallId': 'tc-f4', 'status': 'searching'}
+    _finalize_tool_round(task, 4, r4, [{'toolName': 't'}],
+                         status='whatever-future')
+    assert r4['status'] == 'done'

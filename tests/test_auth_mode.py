@@ -11,7 +11,10 @@ Validates four invariants:
      ``require_scope`` decorators still pass.
 """
 
+
 from __future__ import annotations
+
+pytest_plugins = ('tests._credential_sidecar',)
 
 import os
 import tempfile
@@ -92,12 +95,8 @@ class OpenModeGateTest(unittest.TestCase):
         cls._tmp = tempfile.TemporaryDirectory()
         # Isolate api_keys + auth_mode stores from production.
         from lib import api_keys, auth_mode
-        cls._orig_keys_path = api_keys._STORE_PATH
         cls._orig_mode_path = auth_mode._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(cls._tmp.name, 'api_keys.json')
         auth_mode._STORE_PATH = os.path.join(cls._tmp.name, 'auth.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
         # Force open mode regardless of conftest's env default.
         cls._env_was = os.environ.pop('TOFU_AUTH_MODE', None)
         auth_mode.reset_for_tests()
@@ -111,10 +110,7 @@ class OpenModeGateTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         from lib import api_keys, auth_mode
-        api_keys._STORE_PATH = cls._orig_keys_path
         auth_mode._STORE_PATH = cls._orig_mode_path
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
         # Restore the env var to exactly what it was before this class ran
         # (the shared conftest sets a session-wide TOFU_AUTH_MODE default;
         # do NOT hardcode a mode here — an earlier version pinned 'private'

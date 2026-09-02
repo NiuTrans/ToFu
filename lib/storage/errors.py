@@ -7,11 +7,30 @@ from typing import Any, Mapping
 
 
 ERROR_CODES = frozenset({
+    'database_not_found',
     'database_busy',
     'database_unavailable',
     'database_timeout',
     'database_conflict',
+    # The caller supplied an identity that conflicts with the operation's
+    # explicit owner boundary. Keep this distinct from malformed payloads and
+    # optimistic state conflicts so HTTP adapters can preserve default-deny.
+    'database_forbidden',
+    # Domain conflicts that callers must handle differently. Keeping them
+    # typed avoids brittle parsing of localized storage messages.
+    'turn_projection_stale',
+    'turn_in_progress',
+    'turn_parent_invalid',
+    'turn_lane_advanced',
+    # A normalized conversation already owns its transcript through Turn rows;
+    # accepting a legacy message-array replacement would create a second
+    # authority.  Keep this distinct from optimistic-CAS conflicts so clients
+    # do not GET/rebase/re-PUT an operation that can never become valid.
+    'conversation_authority_conflict',
     'database_integrity',
+    # Durable transport/event payloads have explicit storage budgets. This is
+    # a caller-correctable boundary failure, not an internal database fault.
+    'storage_payload_too_large',
     'database_protocol_error',
     'database_internal',
     'plugin_storage_incompatible',
@@ -57,7 +76,17 @@ class StorageError(RuntimeError):
 
 def http_status_for_storage_error(error: StorageError) -> int:
     """Map the stable storage taxonomy to the public HTTP contract."""
-    if error.code == 'database_conflict':
+    if error.code == 'database_not_found':
+        return 404
+    if error.code == 'storage_payload_too_large':
+        return 413
+    if error.code == 'database_forbidden':
+        return 403
+    if error.code in {
+        'database_conflict', 'conversation_authority_conflict',
+        'turn_projection_stale', 'turn_in_progress', 'turn_parent_invalid',
+        'turn_lane_advanced',
+    }:
         return 409
     if error.code in {
         'database_busy', 'database_unavailable', 'database_timeout',
@@ -66,41 +95,6 @@ def http_status_for_storage_error(error: StorageError) -> int:
     return 500
 
 
-def coerce_legacy_storage_error(error: BaseException) -> StorageError | None:
-    """Classify migration-era driver exceptions without importing a driver.
-
-    This bridge uses numeric SQLite result codes / PostgreSQL SQLSTATE, never
-    localized exception text.  It can disappear with the last in-process
-    repository; keeping it here prevents HTTP and scheduler code from learning
-    driver types or parsing messages during that migration.
-    """
-    module = type(error).__module__.split('.')[0]
-    if module == 'sqlite3':
-        raw = int(getattr(error, 'sqlite_errorcode', 0) or 0) & 0xFF
-        if raw in {5, 6} or (not raw and type(error).__name__ == 'OperationalError'):
-            return StorageError('database_busy', 'Database temporarily busy', True, 50)
-        if raw == 9:
-            return StorageError('database_timeout', 'Database request timed out', True, 50)
-        if raw in {10, 13, 14}:
-            return StorageError('database_unavailable', 'Database unavailable', True, 100)
-        if raw in {11, 19, 26}:
-            return StorageError('database_integrity', 'Database integrity failure')
-        return None
-    state = str(getattr(error, 'pgcode', '') or '')
-    if state in {'40001', '40P01', '55P03'}:
-        return StorageError('database_busy', 'Database temporarily busy', True, 50)
-    if state == '57014':
-        return StorageError('database_timeout', 'Database request timed out', True, 50)
-    if state.startswith('08'):
-        return StorageError('database_unavailable', 'Database unavailable', True, 100)
-    if state in {'23505', '23P01'}:
-        return StorageError('database_conflict', 'Database conflict')
-    if state.startswith('23'):
-        return StorageError('database_integrity', 'Database integrity failure')
-    return None
-
-
 __all__ = [
-    'ERROR_CODES', 'StorageError', 'coerce_legacy_storage_error',
-    'http_status_for_storage_error',
+    'ERROR_CODES', 'StorageError', 'http_status_for_storage_error',
 ]

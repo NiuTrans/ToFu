@@ -27,7 +27,6 @@ import random
 import threading
 import time
 
-from lib.env_compat import getenv_compat
 from lib.json_store import write_json_atomic
 from lib.log import get_logger
 
@@ -36,9 +35,8 @@ logger = get_logger(__name__)
 from lib.runtime_paths import data_root
 _CACHE_DIR = os.path.join(data_root(), 'translate_cache')
 
-_ENABLED = getenv_compat('TOFU_TRANSLATE_CACHE', default='1') != '0'
-_TTL_SECONDS = int(getenv_compat('TOFU_TRANSLATE_CACHE_TTL_DAYS',
-                                 default='30')) * 86400
+_ENABLED = os.environ.get('TOFU_TRANSLATE_CACHE', '1') != '0'
+_TTL_SECONDS = int(os.environ.get('TOFU_TRANSLATE_CACHE_TTL_DAYS', '30')) * 86400
 _SWEEP_PROBABILITY = 1.0 / 256  # one sweep per ~256 lookups, on the shard touched
 
 _init_lock = threading.Lock()

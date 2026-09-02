@@ -1,0 +1,69 @@
+{
+  "brand": "openai",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "openai",
+  "category": "official",
+  "name": "OpenAI",
+  "base_url": "https://api.openai.com/v1",
+  "balance_url": "https://platform.openai.com/settings/organization/billing/overview",
+  "protocol": "responses",
+  "responses_profile": "openai",
+  "contract": {
+    "source": "https://developers.openai.com/api/docs/guides/latest-model",
+    "alias": {"gpt-5.6": "gpt-5.6-sol"},
+    "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+    "default_reasoning_effort": "medium",
+    "context_window": 1050000,
+    "max_output_tokens": 128000,
+    "long_context_threshold": 272000,
+    "cache_write_mul": 1.25,
+    "cache_read_mul": 0.10,
+    "models": {
+      "gpt-5.6": {
+        "name": "GPT-5.6 (Sol alias)",
+        "role": "flagship",
+        "input": 5.00,
+        "cached_input": 0.50,
+        "output": 30.00
+      },
+      "gpt-5.6-sol": {
+        "name": "GPT-5.6 Sol",
+        "role": "flagship",
+        "input": 5.00,
+        "cached_input": 0.50,
+        "output": 30.00
+      },
+      "gpt-5.6-terra": {
+        "name": "GPT-5.6 Terra",
+        "role": "balanced",
+        "input": 2.00,
+        "cached_input": 0.20,
+        "output": 12.00
+      },
+      "gpt-5.6-luna": {
+        "name": "GPT-5.6 Luna",
+        "role": "high_volume",
+        "input": 0.20,
+        "cached_input": 0.02,
+        "output": 1.20
+      }
+    }
+  },
+  "offering_recipes": [
+    {"model_id": "gpt-5.6", "capabilities": ["text", "vision", "thinking"], "rpm": 30, "cost": 0.030},
+    {"model_id": "gpt-5.6-sol", "capabilities": ["text", "vision", "thinking"], "rpm": 30, "cost": 0.030},
+    {"model_id": "gpt-5.6-terra", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 60, "cost": 0.012},
+    {"model_id": "gpt-5.6-luna", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 200, "cost": 0.0012},
+    {"model_id": "gpt-5.4", "capabilities": ["text", "vision", "thinking"], "rpm": 30, "cost": 0.015},
+    {"model_id": "gpt-5.4-mini", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 60, "cost": 0.005},
+    {"model_id": "o3", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 30, "cost": 0.010},
+    {"model_id": "o4-mini", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 30, "cost": 0.005},
+    {"model_id": "gpt-4.1", "capabilities": ["text", "vision", "cheap"], "rpm": 30, "cost": 0.010},
+    {"model_id": "gpt-4.1-mini", "capabilities": ["text", "vision", "cheap"], "rpm": 60, "cost": 0.002},
+    {"model_id": "gpt-4o-transcribe", "capabilities": ["transcription"], "rpm": 60, "cost": 0.006},
+    {"model_id": "gpt-4o-mini-transcribe", "capabilities": ["transcription"], "rpm": 60, "cost": 0.003},
+    {"model_id": "gpt-image-2", "capabilities": ["image_gen"], "rpm": 10, "cost": 0.065},
+    {"model_id": "gpt-image-1.5", "capabilities": ["image_gen"], "rpm": 10, "cost": 0.043},
+    {"model_id": "gpt-image-1", "capabilities": ["image_gen"], "rpm": 10, "cost": 0.040}
+  ]
+}

@@ -75,8 +75,8 @@ const { document, check, report } = setup({
 const now = Date.now();
 global.activeConvId = window.activeConvId = null;
 global.conversations = window.conversations = [
-  { id: 'c1', title: 'Conv 1', messages: [{ role: 'user' }], updatedAt: now - 1000 },
-  { id: 'c2', title: 'Conv 2', messages: [{ role: 'user' }], updatedAt: now - 2000 },
+  { id: 'c1', title: 'Conv 1', _serverTurnCount: 1, updatedAt: now - 1000 },
+  { id: 'c2', title: 'Conv 2', _serverTurnCount: 1, updatedAt: now - 2000 },
 ];
 
 function copyIdCount() {
@@ -85,18 +85,15 @@ function copyIdCount() {
 
 // ── Boot scenario: the conv list renders BEFORE the async /api/v1/features
 //    response arrives (rows baked with debug=false). ──
-// NOTE: the harness evals targets in Node GLOBAL scope and mirrors each
-// injected global onto both `global` and `win` — so a REASSIGNMENT must hit
-// both (mutating the shared object works with window-only assignment, but a
-// fresh object literal does not). Mirrors index.html's `_featureFlags = flags`.
-global._featureFlags = window._featureFlags = {};   // flags not yet arrived
+// The target captures the injected flag object. Mutate that shared object to
+// model both boot arrival and Settings changes without replacing its binding.
 renderConversationList();
 check('boot_flags_pending_no_buttons', copyIdCount() === 0);
 
 // Flags arrive. loadFeatureFlags assigns _featureFlags and then calls
 // renderConversationList() (index.html) — simulated here with NO hash-cache
 // reset, exactly like the real call. The DBG token flip must force a rebuild.
-global._featureFlags = window._featureFlags = { debug_mode: true };
+_featureFlags.debug_mode = true;
 renderConversationList();
 check('boot_flags_arrival_rebuilds_sidebar', copyIdCount() === 2);
 
@@ -135,8 +132,8 @@ def test_boot_load_feature_flags_rerenders_conv_list_wiring():
     """Static wire guard: index.html's loadFeatureFlags must re-render BOTH
     debug-mode consumers after _featureFlags arrives (boot-race half of the
     fix): the sidebar (renderConversationList) AND the message area
-    (ConvView.replaceAll — trace_id / cost-popover debug rows are baked into
-    message HTML under _featureFlags.debug_mode by finish_info.js). The jsdom
+    (the authoritative ConversationSurface — debug actions are selected from
+    _featureFlags.debug_mode). The jsdom
     harness cannot execute index.html's inline script, so pin the wiring here.
     """
     source = RUNTIME.read_text(encoding='utf-8')
@@ -151,15 +148,16 @@ def test_boot_load_feature_flags_rerenders_conv_list_wiring():
         'renderConversationList() — boot-time debug users lose the '
         'copy-ID button again (race: list rendered before flags arrived)'
     )
-    repaint = body.find('ConvView.replaceAll', assign)
+    repaint = body.find('requestAuthoritativeConversationRender', assign)
     assert repaint != -1, (
         'loadFeatureFlags re-renders the sidebar but never repaints the '
-        'message area (ConvView.replaceAll) — boot-time debug users lose '
-        'trace_id / cost-debug rows baked by finish_info.js (same race)'
+        'authoritative ConversationSurface — boot-time debug users lose '
+        'typed per-turn inspector actions (same race)'
     )
     # Boot repaint must not yank the user to the bottom of the conversation.
     scroll_opt = body.find('forceScroll', repaint - 400)
     assert scroll_opt != -1 and 'forceScroll: false' in body[repaint - 400:repaint + 200], (
-        'ConvView.replaceAll in loadFeatureFlags must pass forceScroll: false '
+        'requestAuthoritativeConversationRender in loadFeatureFlags must pass '
+        'forceScroll: false '
         '(boot-time repaint must preserve scroll position)'
     )

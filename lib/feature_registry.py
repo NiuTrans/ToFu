@@ -1,7 +1,7 @@
 """lib/feature_registry.py — Pluggable boolean feature flags.
 
 Mirror of the other plugin seams (``tofu.tools`` / ``tofu.providers`` /
-``tofu.blueprints`` / ``tofu.schema``).  Lets a third-party package declare a
+``tofu.blueprints`` / the schema entry-point seam).  Lets a third-party package declare a
 boolean feature flag without core hardcoding it.
 
 Why this exists

@@ -181,8 +181,8 @@ def build_qa_messages(question, paper_text, report_md, *, history=None,
 
     Injects BOTH the generated report (in full, capped at ``_REPORT_CAP``) and
     the question-relevant paper sections. The model is told it has the full
-    standard tool set (web_search / fetch_url / read_files / code_exec / …)
-    and should use them for anything outside the paper.
+    standard tool set and should use it for anything outside the paper. The
+    runtime adds a gateway convention only for the bounded Tool Search arm.
 
     Returns ``(messages, diag)`` where ``diag`` is a small dict for tests /
     logging (n_sections_total, n_sections_selected, report_present, …).
@@ -222,10 +222,11 @@ def build_qa_messages(question, paper_text, report_md, *, history=None,
             '与系统已生成的分析报告。请基于这些材料回答用户的问题，做到具体、可引用到'
             '具体章节/表格。当问题涉及报告里的措辞（如"Limitations 一节是什么意思"），'
             '直接依据报告内容解释。\n\n'
-            '你拥有完整的标准工具集。当问题需要论文之外的信息（最新进展、'
+            '你拥有标准工具集。当问题需要论文之外的信息（最新进展、'
             '他人复现、引用数、相关工作的细节、某链接里到底有什么）时，主动用 '
-            'web_search / fetch_url 检索，不要凭空作答；用 read_files 打开抓取落盘'
-            '（或超长结果溢出落盘）的本地文件，用 code_exec 做数值核验；论文/报告里'
+            'web_search / fetch_url 检索，不要凭空作答；用 read_files 打开抓取暂存的'
+            '本地文件，用 read_tool_artifact / search_tool_artifact 按 artifactRef 继续读取'
+            '超长结果，需要时使用可用的代码执行能力做数值核验；论文/报告里'
             '已有的内容则无需联网。回答用中文。')
         paper_label = '\n\n===== 论文相关章节 =====\n'
     else:
@@ -236,12 +237,13 @@ def build_qa_messages(question, paper_text, report_md, *, history=None,
             'specific and cite the section / table. When the question is about the '
             'report\'s wording (e.g. "what did you mean in the Limitations section?"), '
             'answer directly from the report below — it is what the user sees.\n\n'
-            'You have the full standard tool set. When a question needs information '
+            'You have the standard tool set. When a question needs information '
             'beyond the paper (recent follow-ups, reproductions, citation counts, '
             'details of related work, what a given link actually contains), use '
-            'web_search / fetch_url rather than guessing; use read_files to open any '
-            'local file a fetch stages or an oversized tool result spills to disk, '
-            'and code_exec when a numeric check beats prose. For content already in '
+            'web_search / fetch_url rather than guessing; use read_files to open a '
+            'local file staged by a fetch, read_tool_artifact / search_tool_artifact '
+            'to continue an oversized result by artifactRef, and use the available '
+            'code-execution capability when a numeric check beats prose. For content already in '
             'the paper/report, no web access is needed.')
         paper_label = '\n\n===== RELEVANT PAPER SECTIONS =====\n'
 

@@ -1,7 +1,7 @@
 """lib/slides/pptd.py — the PPTD subset: model, parser, theme resolution, validator.
 
 PPTD is the YAML slide DSL this capability authors in
-(docs/SLIDES_CAPABILITY_DESIGN.md §4.2): a simplified abstraction over OOXML
+(docs/modules/ingest_media.md §4.2): a simplified abstraction over OOXML
 where every page is self-contained. The format is Moonshot's (spec: the
 open-kimi-ppt-skill reference, MIT); this module implements the v1 SUBSET —
 text / shape / line / image / icon / table elements, theme tokens

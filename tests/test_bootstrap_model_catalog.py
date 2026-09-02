@@ -8,6 +8,7 @@ import socket
 import pytest
 
 import bootstrap
+import bootstrap_pkg.providers as _bootstrap_providers
 
 pytestmark = pytest.mark.unit
 
@@ -53,7 +54,11 @@ def test_bootstrap_template_fallback_is_managed_and_keeps_wire_pool():
 
 def test_bootstrap_persists_live_provider_and_selected_default(
         tmp_path, monkeypatch):
-    monkeypatch.setattr(bootstrap, '_bootstrap_data_root', lambda: str(tmp_path))
+    # Patch at the DEFINING module (facade-retained split 2026-08-21):
+    # _bootstrap_persist_provider looks the name up inside
+    # bootstrap_pkg.providers, so patching the facade attr is inert.
+    monkeypatch.setattr(_bootstrap_providers, '_bootstrap_data_root',
+                        lambda: str(tmp_path))
     models = [
         _model('live'),
         _model('private', catalog_pinned=True, catalog_source='manual'),

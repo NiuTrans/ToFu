@@ -12,7 +12,7 @@ fires end-to-end through the genuine swarm execution path:
   • Stub the tool executor so the "edit" doesn't touch disk but reports success
     (presence ``record_files`` fires on a successful file-edit tool).
   • Run both agents and assert a WITHIN-conversation conflict advisory was
-    broadcast off the REAL ``lib.push.hub`` with peer keys
+    broadcast off the REAL ``lib.agent_core.push.hub`` with peer keys
     ``{conv#agent-1, conv#agent-2}``.
 
 Negative control (in-test): a second pass that NEUTERS the announce seam in
@@ -123,7 +123,7 @@ def _build_agent(agent_id_suffix, conv_id, task_id, project_path, llm):
                        id=agent_id_suffix)
     return SubAgent(
         spec,
-        parent_task={'id': task_id, 'convId': conv_id,
+        parent_task={'id': task_id, 'convId': conv_id, '_userId': 17,
                      'config': {'convTitle': 'Swarm session'}},
         # write_file MUST be a KNOWN tool: SubAgent.run() now routes every tool
         # call through ingest_tool_call(known_tools=...) which REJECTS a name
@@ -163,7 +163,7 @@ def _run_two_agents_capture(monkeypatch, tmp_path, *, break_announce=False):
         monkeypatch.setattr(SubAgent, '_presence_announce',
                             lambda self, phase='working': None)
 
-    from lib.push import hub
+    from lib.agent_core.push import hub
     captured = []
     listener = lambda ch, tid, payload: captured.append({'ch': ch, **payload})  # noqa: E731
     hub.add_listener(listener)

@@ -73,8 +73,7 @@ def test_authoring_ingress_consumes_canonical_argument_identity():
     assert "body, 'requirement'" not in source
     assert "body, 'current'" not in source
     assert "body, 'history'" not in source
-    assert "query_str(args, 'role')" not in source
-    assert "orchestration_http_endpoint('role-schema').query_fields" in source
+    assert 'role-schema' not in source
     assert len(contract_source.splitlines()) < 85
 
 
@@ -98,9 +97,6 @@ def test_authoring_catalogue_projects_closed_backend_registries():
     controls = set(contract['controls'])
     assert controls == set(contract['controlSchemas'])
     assert controls == set(contract['nodeDefaults']['controls'])
-    assert contract['ioTypes'] == contract['ioContract']['types']
-    assert contract['defaultOutput'] == \
-        contract['ioContract']['defaultOutput']['name']
 
 
 def test_typed_io_client_failure_codes_are_canonical_and_detached():
@@ -259,11 +255,6 @@ def test_authoring_response_schema_comes_from_live_section_registries():
         authoring_contract()['controls'])
     assert properties['builtins']['items']['enum'] == \
         authoring_contract()['builtins']
-    assert properties['ioTypes']['items']['enum'] == \
-        authoring_contract()['ioTypes']
-    assert properties['defaultOutput']['enum'] == [
-        authoring_contract()['defaultOutput'],
-    ]
     section_schemas['eventContract']['required'].clear()
     assert authoring_object_section_schemas()['eventContract']['required']
 
@@ -278,44 +269,11 @@ def test_authoring_response_schema_comes_from_live_section_registries():
     assert 'def authoring_contract_response_schema' not in source
 
 
-def test_role_contract_openapi_describes_both_compatibility_shapes():
-    import lib.orchestration.authoring_contract as contract_module
-
-    schema = authoring_openapi.role_contract_response_schema()
-    full, role = schema['oneOf']
-
-    assert full == authoring_openapi.authoring_contract_response_schema()
-    assert role['required'] == ['ok', 'role', 'fields', 'persona']
-    field = role['properties']['fields']['items']
-    assert field['required'] == ['key', 'kind', 'label']
-    assert {'text', 'textarea', 'select', 'list', 'int', 'bool'} == set(
-        field['properties']['kind']['enum'])
-    assert {'visibleWhen', 'allowUnknown', 'severity'} <= set(
-        field['properties'])
-    assert field == schema['oneOf'][0]['properties']['generic']['items']
-    assert set(authoring_openapi.role_contract_responses()) == {
-        '200', '401', '403', '500',
-    }
+def test_authoring_openapi_has_one_contract_discovery_route():
     assert set(authoring_openapi.authoring_route_response_registry()) == {
         'validation', 'compose', 'builtin', 'layout', 'plan',
-        'authoring-contract', 'role-schema',
+        'authoring-contract',
     }
-    assert authoring_openapi.role_contract_response_schema is \
-        contract_module.role_contract_response_schema
-    assert 'def role_contract_response_schema' not in open(
-        authoring_openapi.__file__, encoding='utf-8').read()
-
-
-def test_role_contract_query_and_openapi_parameter_share_one_boundary():
-    assert authoring_http.role_contract_query({'role': '  worker  '}) \
-        == 'worker'
-    assert authoring_http.role_contract_query({'role': 7}) == ''
-    assert authoring_http.role_contract_parameters() == [{
-        'name': 'role',
-        'in': 'query',
-        'schema': {'type': 'string'},
-        'description': 'Optional role name; omit for the full contract.',
-    }]
 
 
 def test_compose_request_preparation_owns_authoring_body_shape(monkeypatch):

@@ -208,8 +208,8 @@ class TestVerticalBlockRelocate:
 class TestEndToEndWireMessage:
 
     def test_offload_then_reconstruct_surfaces_vertical(self):
-        from lib.tasks_pkg.compaction import budget_tool_result
-        from lib.tasks_pkg.conv_message_builder import _reconstruct_tool_call_messages
+        from lib.tasks_pkg.compaction.api import budget_tool_result
+        from lib.tasks_pkg.conv_message_builder._toolcalls import _reconstruct_tool_call_messages
 
         content = _make_batch_search_content()
         # Must genuinely exceed the web_search budget so the offload path fires.

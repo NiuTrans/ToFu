@@ -128,8 +128,7 @@ def format_sub_results_for_master(
         status_icon = '[OK]' if result.status == SubAgentStatus.COMPLETED.value else '[FAILED]'
         retried = f' (retried {result.retry_count}x)' if result.retry_count > 0 else ''
 
-        # Use final_answer preferentially, fall back to answer
-        answer_text = result.final_answer or getattr(result, 'answer', '') or ''
+        answer_text = result.final_answer or ''
 
         header = (
             f'## Agent {i + 1}: [{spec.role}] {spec.objective[:80]}\n'

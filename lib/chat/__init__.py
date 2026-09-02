@@ -8,17 +8,8 @@ now flow ``routes → lib`` only. ``routes/chat.py`` re-exports these names
 for backward compatibility.
 """
 
-from lib.chat.messages import (
-    append_user_msg_idempotent,
-    resolve_conv_refs,
-)
-from lib.chat.persistence import (
-    append_pending_user_msg,
-    extract_db_meta,
-    extract_task_meta,
-    load_or_create_conv,
-    persist_conv_messages,
-)
+from lib.chat.messages import resolve_conv_refs
+from lib.chat.persistence import extract_db_meta
 from lib.chat.turn_builder import (
     auto_translate_user,
     translate_user_text_to_english,
@@ -31,13 +22,8 @@ from lib.chat.turn_builder import (
 )
 
 __all__ = [
-    'append_user_msg_idempotent',
     'resolve_conv_refs',
-    'append_pending_user_msg',
     'extract_db_meta',
-    'extract_task_meta',
-    'load_or_create_conv',
-    'persist_conv_messages',
     'auto_translate_user',
     'translate_user_text_to_english',
     'build_tool_history_round',

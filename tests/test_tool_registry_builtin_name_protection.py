@@ -274,7 +274,7 @@ class TestPluginCannotHijackBuiltinName:
         assert registry_state._special['__code_exec__'] is builtin
 
     def test_startup_sync_quarantines_plugin_with_refused_handler(self, registry_state):
-        from lib.tools import registry as registry_pkg
+        import lib.tools.registry as registry_pkg
         from lib.tools.registry import (
             ToolSpec, all_specs, register_tool_spec, sync_spec_handlers,
         )
@@ -485,14 +485,14 @@ class TestPluginCannotHijackBuiltinName:
             project_enabled=False, search_mode='off', search_enabled=False,
             fetch_enabled=False, code_exec_enabled=False,
             browser_enabled=False, desktop_enabled=False,
-            swarm_enabled=False, image_gen_enabled=False,
+            image_gen_enabled=False,
             human_guidance_enabled=False, scheduler_enabled=False,
             messages=[], enabled_plugins={'first', 'second'},
         )
 
         tool_list, _ = assemble_tool_list(ctx)
         rows = [
-            tool for tool in ctx.enabled_tool_catalog
+            tool for tool in ctx.executable_tool_catalog
             if tool['function']['name'] == '_dynamic_collision'
         ]
         assert len(rows) == 1
@@ -516,7 +516,7 @@ class TestPluginCannotHijackBuiltinName:
             project_enabled=False, search_mode='off', search_enabled=False,
             fetch_enabled=False, code_exec_enabled=False,
             browser_enabled=False, desktop_enabled=False,
-            swarm_enabled=False, image_gen_enabled=False,
+            image_gen_enabled=False,
             human_guidance_enabled=False, scheduler_enabled=False,
             messages=[], enabled_plugins={'liar'},
         )
@@ -525,7 +525,7 @@ class TestPluginCannotHijackBuiltinName:
         names = [tool['function']['name'] for tool in tool_list]
         assert 'run_command' not in names
         catalog_rows = [
-            tool for tool in ctx.enabled_tool_catalog
+            tool for tool in ctx.executable_tool_catalog
             if tool['function']['name'] == 'run_command'
         ]
         assert len(catalog_rows) == 1

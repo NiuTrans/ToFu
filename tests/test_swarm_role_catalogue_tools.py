@@ -5,7 +5,7 @@ WHY
 ---
 2026-07-27 incident: the master spawned a ``researcher`` sub-agent to digest
 four past project conversations via ``get_conversation``. The researcher
-role's ``tools_hint`` is ``[web_search, fetch_url, browser_read_tab,
+role's ``tools_hint`` is ``[web_search, fetch_url, browser_read_page,
 browser_list_tabs]`` — no conversation tools — so the sub-agent correctly
 reported "tool unavailable" and the turn died. Root cause: the role catalogue
 inside the spawn_agents description rendered only ``role: when_to_use``

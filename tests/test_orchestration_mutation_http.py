@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 import lib.orchestration.human_gate_request_contract as gate_contract_module
-from lib.orchestration_mutation import (
+from lib.orchestration.mutation_result import (
     MUTATION_ACTION_APPROVE_GATE,
     OrchestrationMutationResult,
 )
@@ -21,7 +21,7 @@ def test_mutation_http_does_not_publish_a_parallel_service_call_wrapper():
     assert not hasattr(mutation_http, 'mutation_service_call')
 
 
-def test_mutation_service_http_unifies_compatibility_and_success_hook(
+def test_mutation_service_http_unifies_canonical_projection_and_success_hook(
     monkeypatch,
 ):
     projected = []
@@ -31,8 +31,8 @@ def test_mutation_service_http_unifies_compatibility_and_success_hook(
         projected.append(context)
         return projector(operation())
 
-    def http_response(result, *, compatibility=None):
-        projected.append((result, compatibility))
+    def http_response(result):
+        projected.append(result)
         return 'response'
 
     monkeypatch.setattr(
@@ -55,15 +55,13 @@ def test_mutation_service_http_unifies_compatibility_and_success_hook(
         'api.test.approve',
         lambda: accepted,
         endpoint='human-approve',
-        target_id='gate-1',
-        approved=True,
         on_success=lambda: successes.append('logged'),
     )
 
     assert response == 'response'
     assert projected == [
         'api.test.approve',
-        (accepted, {'requestId': 'gate-1', 'approved': True}),
+        accepted,
     ]
     assert successes == ['logged']
 
@@ -188,8 +186,8 @@ def test_mutation_http_response_is_the_only_wire_status_projection(monkeypatch):
     captured = {}
     sentinel = object()
 
-    def fake_mutation_response(value, *, compatibility=None):
-        captured.update(result=value, compatibility=compatibility)
+    def fake_mutation_response(value):
+        captured.update(result=value)
         return payload, 409
 
     def fake_api_payload(value, status=200, **fields):
@@ -200,13 +198,11 @@ def test_mutation_http_response_is_the_only_wire_status_projection(monkeypatch):
         mutation_http, 'mutation_response', fake_mutation_response)
     monkeypatch.setattr(mutation_http, 'api_payload', fake_api_payload)
 
-    response = mutation_http.mutation_http_response(
-        result, compatibility={'run_id': 'run-1'})
+    response = mutation_http.mutation_http_response(result)
 
     assert response is sentinel
     assert captured == {
         'result': result,
-        'compatibility': {'run_id': 'run-1'},
         'payload': payload,
         'status': 409,
         'fields': {},

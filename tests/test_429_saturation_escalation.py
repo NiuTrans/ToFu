@@ -9,10 +9,9 @@ so llm_fallback never got a signal. The escalation raises
 ``RateLimitError(is_saturation=True)`` once every candidate slot has been
 continuously saturated past ``TOFU_429_SATURATION_SECS``.
 
-Owner directive 2026-08-03: a 429 wall must never interrupt the turn —
-retrying is free — so the DEFAULT budget is 0 (infinite rotation, the
-pre-escalation legacy behaviour). The bounded escalation is opt-in via
-``TOFU_429_SATURATION_SECS`` > 0; every test below pins the env explicitly.
+The default budget remains disabled because a 429 is a waitable capacity
+signal, not evidence that the model is dead. Deployments may explicitly set a
+positive ``TOFU_429_SATURATION_SECS`` to opt into bounded escalation.
 """
 
 import threading
@@ -177,6 +176,9 @@ class TestChatSaturationEscalation:
             prefer_model='m1', strict_model=True, log_prefix='[T]')
         assert content == 'ok-text'
         assert clock.now < 120
+        assert usage['_dispatch']['429_retries'] == 3
+        assert usage['_dispatch']['upstream_429_retries'] == 3
+        assert usage['_dispatch']['slot_wait_cycles'] == 0
 
     def test_env_zero_restores_legacy_infinite_rotation(
             self, monkeypatch, fake_env):
@@ -201,12 +203,18 @@ class TestChatSaturationEscalation:
         assert clock.now > 120, 'test did not actually pass the budget mark'
 
 
-# ── default (owner directive 2026-08-03) ─────────────────────────────
+# ── waitable default ────────────────────────────────────────────────
 
 @pytest.mark.unit
-def test_default_budget_disables_escalation(monkeypatch):
-    """No env → budget 0 → 429 walls rotate forever, never interrupt."""
+def test_default_budget_waits_indefinitely(monkeypatch):
+    """No env keeps capacity throttling on the selected model."""
     monkeypatch.delenv('TOFU_429_SATURATION_SECS', raising=False)
+    assert api._saturation_budget_secs() == 0
+
+
+@pytest.mark.unit
+def test_invalid_budget_falls_back_to_waitable_default(monkeypatch):
+    monkeypatch.setenv('TOFU_429_SATURATION_SECS', 'not-a-number')
     assert api._saturation_budget_secs() == 0
 
 
@@ -216,7 +224,7 @@ def test_default_budget_disables_escalation(monkeypatch):
 class TestFallbackSwallowsSaturation:
 
     def test_saturation_triggers_model_swap(self, monkeypatch):
-        import lib.tasks_pkg.llm_fallback as fb_pkg
+        import lib.tasks_pkg.llm_fallback._call as fb_pkg
         from lib.tasks_pkg.llm_fallback._call import _llm_call_with_fallback
 
         events = []

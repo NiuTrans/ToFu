@@ -1,18 +1,12 @@
 """routes/translate.py — Translation endpoints (sync + async + PPTX).
 
-This module is the **thin route layer**. Every piece of business logic
+This module is the thin PPTX route layer. Every piece of business logic
 (prompt building, notranslate handling, chunking, dedup, the LLM/MT
 retry engine, the async TaskRuntime, DB commit, PPTX worker) lives in
 ``lib.translate.*``.
 
-The legacy private symbols (``_translate_runtime``, ``_translate_tasks``,
-``_translate_tasks_lock``, ``_do_translate``, ``_format_status_message``,
-``_strip_notranslate_tags``, ``_build_translate_prompt``,
-``_translate_one_chunk``, ``_commit_translation_inner``, …) are re-
-exported here for back-compat — 22 callers in routes.chat,
-lib.message_queue, lib.tasks_pkg.manager, debug/, and the test suite
-import them from ``routes.translate``. New code should import from the
-``lib.translate`` package facade instead.
+Text translation lives at ``routes/api_v1/translate.py``; this module owns
+only formatting-preserving PPTX upload and download.
 """
 
 import os
@@ -26,41 +20,24 @@ from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
 )
 from lib.log import get_logger
-from lib.translate import (  # noqa: F401  — back-compat re-exports
-    DEFAULT_USER_ID,
-    _MAX_PPTX_BYTES,
-    _NOTRANSLATE_ALIAS_RE,
-    _NOTRANSLATE_RE,
-    _NT_PLACEHOLDER_FMT,
-    _NT_PLACEHOLDER_LOOSE_RE,
-    _NT_PLACEHOLDER_RE,
-    _PPTX_UPLOAD_DIR,
-    _SYNC_TRANSLATE_MAX_CHARS,
-    _TRANSLATE_TASK_TTL,
-    _build_translate_prompt,
-    _cleanup_translate_tasks,
-    _commit_translation_inner,
-    _commit_translation_to_db,
-    _dedup_inline_loop,
-    _dedup_repetition_loop,
-    _do_translate,
-    _do_translate_pptx,
-    _ensure_pptx_upload_dir,
-    _extract_notranslate_blocks,
-    _format_status_message,
-    _get_commit_lock,
-    _reattach_notranslate_blocks,
-    _strip_notranslate_tags,
-    _translate_one_chunk,
-    _translate_runtime,
-    _translate_tasks,
-    _translate_tasks_lock,
-    _wrap_for_translation,
+from lib.translate.pptx import (
+    _MAX_PPTX_BYTES, _PPTX_UPLOAD_DIR, _ensure_pptx_upload_dir,
 )
+from lib.translate.runtime._state import (
+    _cleanup_translate_tasks, _translate_runtime,
+)
+from routes.api_v1.auth import request_user_id, require_scope
 
 logger = get_logger(__name__)
 
 translate_bp = Blueprint('translate', __name__)
+
+
+def _do_translate_pptx(*args, **kwargs):
+    """Load the formatting-preserving PPTX worker inside its task thread."""
+    from lib.translate.pptx import _do_translate_pptx as implementation
+
+    return implementation(*args, **kwargs)
 
 
 # ── Non-PPTX routes (sync, start, poll, poll_batch) moved to
@@ -74,6 +51,7 @@ translate_bp = Blueprint('translate', __name__)
 
 
 @translate_bp.route('/api/translate/pptx', methods=['POST'])
+@require_scope('agents:translate')
 def translate_pptx_upload():
     """Upload and translate a PPTX file (async).
 
@@ -128,18 +106,15 @@ def translate_pptx_upload():
         logger.error('[PPTX-Translate] Failed to save upload: %s', e, exc_info=True)
         return api_internal_error(f'Failed to save file: {e}')
 
-    task = _translate_runtime.create(
+    owner_user_id = int(request_user_id())
+    _translate_runtime.create(
+        user_id=owner_user_id,
         task_id=task_id,
         meta={'type': 'pptx', 'filename': filename, 'targetLang': target,
               'fileSize': len(file_bytes)},
     )
-    task.update({
-        'status': 'running', 'type': 'pptx',
-        'result': None, 'error': None, 'model': None, 'progress': None,
-        'filename': filename, 'targetLang': target,
-        'fileSize': len(file_bytes),
-        'completed_at': None,
-    })
+    _translate_runtime.mark_running(
+        task_id, fields={'model': None, 'progress': None})
 
     _translate_runtime.spawn(
         task_id, _do_translate_pptx,

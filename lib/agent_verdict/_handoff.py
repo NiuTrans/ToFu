@@ -11,15 +11,15 @@ Carries the small pieces that classify_verdict and the autopilot loop consume:
     (``_PROGRESS_RE`` / ``parse_progress``) — used both by classify_verdict's
     backend-authoritative gate and by the diminishing-returns ledger.
 
-Each regex lives WITH the function that uses it.  Pure logic — imports only
-``lib.log`` and ``lib.env_compat``.
+Each regex lives WITH the function that uses it. Pure logic — imports only
+the standard library and ``lib.log``.
 """
 
 from __future__ import annotations
 
+import os
 import re
 
-from lib.env_compat import getenv_compat
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 # (list_dir, read_files, grep_search, find_files, web_search, fetch_url, …)
 # is exploration.
 #
-# ``code_exec`` is deliberately NOT a member here: endpoint's round counter
+# ``code_exec`` is deliberately NOT a member here: the Flow round counter
 # special-cases it (a code_exec round carries a different toolName), so the
 # membership test must NOT match it.  Callers that count from a flat list of
 # tool names — and therefore have no special-casing — should use
@@ -46,7 +46,6 @@ STATE_CHANGING_TOOLS = frozenset({
     'insert_content',
     'insert_contents',
     'run_command',
-    'create_project',
     'generate_image',
 })
 
@@ -187,13 +186,13 @@ VU_ROLE_PROMPT = (
 # ══════════════════════════════════════════════════════════
 
 def replan_enabled() -> bool:
-    """Replan kill-switch: ``TOFU_ENDPOINT_REPLAN=0`` disables CONTINUE_PLANNER.
+    """Replan kill-switch: ``TOFU_FLOW_REPLAN=0`` disables CONTINUE_PLANNER.
 
     When disabled, a ``planner`` phase is downgraded to ``worker`` so the
     redesign can be hot-disabled without a code rollback.  Defaults to
-    enabled (``'1'``).  Documented in CLAUDE.md §9.
+    enabled (``'1'``).
     """
-    return getenv_compat('TOFU_ENDPOINT_REPLAN', default='1').strip() != '0'
+    return os.environ.get('TOFU_FLOW_REPLAN', '1').strip() != '0'
 
 
 # ══════════════════════════════════════════════════════════
@@ -261,7 +260,7 @@ _PROGRESS_RE = re.compile(
 # Why a registry instead of per-call-site stripping: the VU protocol had
 # exactly one hardcoded strip (``[VU: TASK_DONE]`` in autopilot) and missed
 # the second token (``[PROGRESS: ...]``) — 90 leaked lines across 52 convs,
-# after which the model started authoring the signal itself (pt_0ae59e94).
+# after which the model started authoring the signal itself ().
 # A third control token added to the protocol but NOT to this list is that
 # bug's next instance; tests/test_vu_machine_token_strip.py pins the
 # registry contents so the omission fails loudly instead.

@@ -70,7 +70,7 @@ def test_direct_and_program_calls_share_exact_output_envelope():
 
 def test_program_output_budget_is_cumulative_and_utf8_safe(monkeypatch):
     from lib.llm.responses_outbound import openai_body_to_responses
-    from lib.tools import programmatic as contract
+    import lib.tools.programmatic as contract
 
     monkeypatch.setattr(contract, 'PROGRAMMATIC_MAX_OUTPUT_BYTES', 5)
     caller = _caller()
@@ -99,7 +99,7 @@ def test_program_output_budget_is_cumulative_and_utf8_safe(monkeypatch):
 
 
 def test_ptc_eligibility_is_explicit_not_the_idempotent_partition():
-    from lib.tools import all_specs
+    from lib.tools.registry import all_specs
     from lib.tools.programmatic import eligible_programmatic_tool_names
 
     names = eligible_programmatic_tool_names()
@@ -111,8 +111,7 @@ def test_ptc_eligibility_is_explicit_not_the_idempotent_partition():
 
 
 def test_program_parent_is_persisted_before_children_and_settled(monkeypatch):
-    from lib.tasks_pkg.orchestrator import _programmatic
-
+    import lib.tasks_pkg.orchestrator._programmatic as _programmatic
     emitted = []
     monkeypatch.setattr(_programmatic, 'append_event',
                         lambda _task, event: emitted.append(event))
@@ -164,7 +163,7 @@ def test_program_parent_is_persisted_before_children_and_settled(monkeypatch):
 
 
 def test_cold_tool_round_reconstruction_preserves_program_caller():
-    from lib.tasks_pkg.conv_message_builder import (
+    from lib.tasks_pkg.conv_message_builder._toolcalls import (
         _reconstruct_tool_call_messages,
     )
 
@@ -179,7 +178,7 @@ def test_cold_tool_round_reconstruction_preserves_program_caller():
 
 
 def test_program_parent_is_never_reconstructed_as_a_tool_call():
-    from lib.tasks_pkg.conv_message_builder import (
+    from lib.tasks_pkg.conv_message_builder._toolcalls import (
         _reconstruct_tool_call_messages,
     )
 
@@ -270,8 +269,7 @@ def test_program_caller_identity_and_parallelism_fail_closed(monkeypatch):
 
 
 def test_program_output_telemetry_matches_cumulative_utf8_budget(monkeypatch):
-    from lib.tasks_pkg.orchestrator import _programmatic
-
+    import lib.tasks_pkg.orchestrator._programmatic as _programmatic
     monkeypatch.setattr(_programmatic, 'PROGRAMMATIC_MAX_OUTPUT_BYTES', 5)
     task = {}
     first = {

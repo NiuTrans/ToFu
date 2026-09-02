@@ -92,7 +92,8 @@ check('done_long_cmd_key', html1.includes('data-cmd-key="call-long-1"'));
 check('done_long_not_open', !html1.includes('ptool-cmd-block ptool-cmd-ok cmd-open'));
 check('done_long_cmd_still_in_dom', html1.includes('baseline tightened')); // output AND/OR cmd
 check('done_long_cmd_pre_kept', html1.includes('$ grep -c'));
-check('done_long_output_toggle_kept', html1.includes('▸ Show output'));
+check('done_long_output_toggle_kept', html1.includes('ptool-cmd-toggle')
+  && html1.includes('Show output') && html1.includes('<svg'));
 
 // ── 2. Done: short one-liner ⇒ stays visible ──
 const doneShort = {
@@ -158,10 +159,30 @@ check('output_toggle_no_inline_var', !html1.includes('var w=this.parentElement')
 _cmdOutputToggle(outToggle, { stopPropagation() {} });
 const outWrap = host.querySelector('.ptool-cmd-output-wrap');
 check('output_toggle_expands', outWrap.classList.contains('expanded'));
-check('output_toggle_label_collapse', outToggle.textContent === '▾ Collapse');
+check('output_toggle_label_collapse', outToggle.textContent === 'Collapse'
+  && !!outToggle.querySelector('svg'));
 _cmdOutputToggle(outToggle, { stopPropagation() {} });
 check('output_toggle_collapses', !outWrap.classList.contains('expanded'));
-check('output_toggle_label_show', outToggle.textContent === '▸ Show output');
+check('output_toggle_label_show', outToggle.textContent === 'Show output'
+  && !!outToggle.querySelector('svg'));
+
+// Search/timer disclosure rows contain nested source/copy controls, so they
+// use an ARIA button rather than invalid nested <button> markup. The shared
+// document listener must supply the native Enter/Space activation contract.
+const disclosure = document.createElement('div');
+disclosure.className = 'ptool-results-header';
+disclosure.setAttribute('role', 'button');
+disclosure.tabIndex = 0;
+let disclosureClicks = 0;
+disclosure.addEventListener('click', () => { disclosureClicks += 1; });
+document.body.appendChild(disclosure);
+disclosure.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
+  key: 'Enter', bubbles: true,
+}));
+disclosure.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
+  key: ' ', bubbles: true,
+}));
+check('aria_disclosure_keyboard_activation', disclosureClicks === 2);
 
 // ── 6. code_exec: identical treatment ──
 const ceLong = {

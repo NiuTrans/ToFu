@@ -3,7 +3,7 @@
 No DB. Inputs are token counts; output is an integer micro-credit amount
 including the configured relay margin.
 
-★ Single source of truth (2026-06-24): the per-token RATE math lives in
+Single source of truth (2026-06-24): the per-token RATE math lives in
 ONE place — :func:`lib.cost.compute_cost` over the rich ``lib/pricing.py``
 table (100+ models, Anthropic-vs-OpenAI cache-token convention detection,
 per-provider cache multipliers, Qwen CNY tiers, provider-scoped overrides,
@@ -108,7 +108,7 @@ def compute_request_cost(
     if margin < 0:
         margin = get_default_margin()
 
-    # ★ Spell the scalars so the cost engine reads them under the RIGHT
+    # Spell the scalars so the cost engine reads them under the RIGHT
     #   convention. Hardcoding the Anthropic key names here used to force an
     #   OpenAI TOTAL to be read as an uncached RESIDUAL, so the cache was
     #   added on top of a figure that already contained it and the wallet

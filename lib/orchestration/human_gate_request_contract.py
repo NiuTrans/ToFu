@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from lib.orchestration.request_limit_contract import MAX_HUMAN_INPUT_LENGTH
-from lib.orchestration.mutation_result import MUTATION_LEGACY_GATE_ID_FIELD
 
 
 def human_gate_request_contract() -> dict:
     """Publish detached field identity, defaults and enforced input bounds."""
     return {
-        'requestIdField': MUTATION_LEGACY_GATE_ID_FIELD,
+        'requestIdField': 'requestId',
         'approvalField': 'approved',
         'approvalDefault': False,
         'inputField': 'response',

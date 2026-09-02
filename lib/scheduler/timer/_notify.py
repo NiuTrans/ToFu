@@ -14,18 +14,14 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 
-def notify_timer_changed(change: str) -> None:
+def notify_timer_changed(change: str, *, user_id: int) -> None:
     """Tell subscribed browsers that the durable timer projection changed."""
     try:
         from lib.agent_core.push import push_event
 
-        # A global invalidation contains no timer/conversation identifier.  It
-        # is sufficient for the current personal-server model and avoids
-        # turning a future multi-user deployment into an identifier side
-        # channel.  The list endpoint remains the authorization boundary.
         push_event('timer', '*', {
             'type': 'timer_changed',
             'change': str(change or 'updated')[:40],
-        })
+        }, user_id=user_id)
     except Exception as exc:
         logger.debug('[Timer] push invalidation failed (%s): %s', change, exc)

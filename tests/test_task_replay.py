@@ -106,7 +106,7 @@ def test_task_memory_page_uses_absolute_cursor_after_runtime_rollover():
     from lib.agent_core.task_runtime import TaskRuntime
 
     runtime = TaskRuntime('cursor-rollover', max_events=3, push_channel='')
-    task = runtime.create(task_id='cursor-rollover-task')
+    task = runtime.create(user_id=1, task_id='cursor-rollover-task')
     for index in range(5):
         runtime.append_event(task['id'], {'type': 'progress', 'index': index})
 
@@ -123,7 +123,7 @@ def test_task_memory_page_delivers_exactly_once_through_many_rollovers():
     from lib.agent_core.task_runtime import TaskRuntime
 
     runtime = TaskRuntime('cursor-soak', max_events=8, push_channel='')
-    task = runtime.create(task_id='cursor-soak-task')
+    task = runtime.create(user_id=1, task_id='cursor-soak-task')
     cursor = 0
     seen: list[tuple[int, int]] = []
 
@@ -148,7 +148,7 @@ def test_runtime_reconciles_stale_private_sequence_hint_from_wire_tail(
     from lib.agent_core.task_runtime import TaskRuntime
 
     runtime = TaskRuntime('cursor-recover', max_events=8, push_channel='')
-    task = runtime.create(task_id=f'cursor-recover-{stale_hint}')
+    task = runtime.create(user_id=1, task_id=f'cursor-recover-{stale_hint}')
     with task['events_lock']:
         task['events'] = [
             {'type': 'progress', 'seq': 40},
@@ -172,7 +172,7 @@ def test_all_in_process_task_stream_consumers_use_absolute_replay_pages():
         'lib/compat/openai.py',
         'lib/compat/anthropic.py',
         'lib/tasks_pkg/entry.py',
-        'lib/tasks_pkg/endpoint/_sync.py',
+        'lib/tasks_pkg/sync_run.py',
     ]
     for relative in consumers:
         source = (root / relative).read_text(encoding='utf-8')

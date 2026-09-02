@@ -1,0 +1,1569 @@
+/* ═══════════════════════════════════════════
+   ★ Swarm Panel styles
+   ═══════════════════════════════════════════ */
+/* ── New Swarm Dashboard ── */
+/* ── Swarm panel: rendered as a row INSIDE the unified ptool-panel, so it
+   stays visually subordinate to the surrounding tool list (amber theme,
+   flat radius) instead of reading as a heavy standalone card. ── */
+.sw-panel{margin:8px 0;border:1px solid var(--border);border-left:3px solid #eab308;border-radius:var(--radius-sm,8px);background:var(--bg-secondary);box-shadow:0 1px 3px rgba(0,0,0,0.08);overflow:hidden;transition:border-color .25s,box-shadow .25s}
+.sw-panel.sw-active{border-color:rgba(245,158,11,0.4);box-shadow:0 0 0 1px rgba(245,158,11,0.1);animation:swarmBorderPulse 2.5s ease-in-out infinite}
+.sw-panel.sw-complete{border-color:var(--border);border-left-color:#22c55e;background:var(--bg-secondary)}
+.sw-panel.sw-collapsed .sw-agent-grid,.sw-panel.sw-collapsed .sw-footer,.sw-panel.sw-collapsed .sw-progress{display:none}
+.sw-panel.sw-collapsed .sw-chevron{transform:rotate(-90deg)}
+/* ── Header ── */
+.sw-header{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 14px;cursor:pointer;user-select:none;transition:background .15s}
+.sw-header:hover{background:rgba(234,179,8,0.05)}
+@keyframes swarmBorderPulse{0%,100%{border-color:rgba(245,158,11,0.3)}50%{border-color:rgba(245,158,11,0.6)}}
+@keyframes toolPulse{0%,100%{opacity:.3;transform:scale(0.8)}50%{opacity:1;transform:scale(1.2)}}
+/* ── Swarm header ── */
+.sw-header-left{display:flex;align-items:center;gap:10px;min-width:0}
+.sw-header-icon{display:inline-flex;align-items:center;justify-content:center;color:#f59e0b;flex-shrink:0}
+.sw-active .sw-header-icon{animation:swarmIconBounce 1.2s ease-in-out infinite}
+.sw-header-info{display:flex;flex-direction:column;gap:1px;min-width:0}
+.sw-header-title{font-size:13px;font-weight:600;color:#eab308;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sw-complete .sw-header-title{color:#4ade80}
+.sw-header-icon svg{display:block}
+.sw-complete .sw-header-icon{color:#4ade80}
+.sw-status-pill svg{display:block}
+.sw-header-subtitle{font-size:11px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;display:flex;gap:10px;flex-wrap:wrap}
+.sw-header-subtitle .sw-cnt-running{color:#60a5fa}
+.sw-header-subtitle .sw-cnt-done{color:#4ade80}
+.sw-header-subtitle .sw-cnt-failed{color:#f87171}
+.sw-header-right{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.sw-header-timer{font-size:12px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace}
+.sw-chevron{font-size:12px;color:var(--text-tertiary);transition:transform .2s}
+/* ── Status pill ── */
+.sw-status-pill{display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600;font-family:'JetBrains Mono',monospace;letter-spacing:0.02em}
+.sw-status-pill.sw-pill-planning{color:#fbbf24;background:rgba(251,191,36,0.1)}
+.sw-status-pill.sw-pill-running{color:#60a5fa;background:rgba(96,165,250,0.1)}
+.sw-status-pill.sw-pill-done{color:#4ade80;background:rgba(74,222,128,0.1)}
+.sw-status-pill.sw-pill-error{color:#f87171;background:rgba(248,113,113,0.1)}
+/* ── Progress bar ── */
+.sw-progress{padding:0 18px 10px}
+.sw-progress-track{height:6px;background:rgba(255,255,255,0.06);border-radius:3px;overflow:hidden;position:relative}
+.sw-progress-fill{height:100%;border-radius:3px;transition:width .5s ease;background:linear-gradient(90deg,#fbbf24,#f59e0b)}
+.sw-complete .sw-progress-fill{background:linear-gradient(90deg,#4ade80,#22c55e)}
+.sw-progress-fill.has-errors{background:linear-gradient(90deg,#4ade80 0%,#4ade80 var(--ok-pct),#f87171 var(--ok-pct),#f87171 100%)}
+.sw-active .sw-progress-fill{animation:progressShimmer 2s ease-in-out infinite}
+@keyframes progressShimmer{0%{filter:brightness(1)}50%{filter:brightness(1.3)}100%{filter:brightness(1)}}
+.sw-progress-label{display:flex;justify-content:space-between;align-items:center;margin-top:4px;font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}
+/* ── Agent grid ── */
+.sw-agent-grid{display:flex;flex-direction:column;gap:4px;padding:4px 14px 12px}
+/* ── Agent card ── */
+.sw-agent{border-radius:8px;border:1px solid var(--border);background:var(--bg-tertiary);transition:border-color .3s,background .3s;overflow:hidden}
+.sw-agent.sw-a-running{border-color:rgba(96,165,250,0.45);background:linear-gradient(135deg,rgba(96,165,250,0.10),rgba(96,165,250,0.04)),var(--bg-tertiary)}
+.sw-agent.sw-a-done,.sw-agent.sw-a-completed{border-color:rgba(74,222,128,0.40);background:var(--bg-tertiary)}
+.sw-agent.sw-a-failed,.sw-agent.sw-a-error{border-color:rgba(248,113,113,0.45);background:linear-gradient(135deg,rgba(248,113,113,0.08),rgba(248,113,113,0.03)),var(--bg-tertiary)}
+/* Stalled: judged silent by the liveness beacon — amber (distinct from
+   failed-red: the agent may still come back, and did in the smoke test). */
+.sw-agent.sw-a-stalled{border-color:rgba(251,191,36,0.45);background:linear-gradient(135deg,rgba(251,191,36,0.08),rgba(251,191,36,0.03)),var(--bg-tertiary)}
+.sw-a-stalled .sw-a-status-icon{color:#fbbf24}
+.sw-a-stalled .sw-a-role-tag{background:rgba(251,191,36,0.10);border-color:rgba(251,191,36,0.25);color:#fcd34d}
+.sw-agent.sw-a-pending{opacity:0.5}
+/* Agent card header (always visible) */
+.sw-a-header{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;user-select:none}
+.sw-a-status-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:16px;height:16px}
+.sw-a-running .sw-a-status-icon{animation:agentPulse 1.5s ease-in-out infinite}
+.sw-a-pending .sw-a-status-icon{color:var(--text-tertiary)}
+.sw-a-running .sw-a-status-icon{color:#60a5fa}
+.sw-a-done .sw-a-status-icon,.sw-a-completed .sw-a-status-icon{color:#4ade80}
+.sw-a-failed .sw-a-status-icon,.sw-a-error .sw-a-status-icon{color:#f87171}
+.sw-a-role{font-size:12px;font-weight:600;color:var(--text-primary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sw-a-num{font-size:11px;font-weight:600;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;flex-shrink:0;min-width:22px;text-align:right}
+.sw-a-role-tag{font-size:10px;padding:1px 7px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-weight:600;color:var(--text-primary);background:rgba(251,191,36,0.10);border:1px solid rgba(251,191,36,0.20);text-transform:lowercase;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0}
+.sw-a-header .sw-a-phase-pill{margin-left:auto}
+/* ── File-modification flag: pill on agents that wrote/edited files ── */
+.sw-a-edited{display:inline-flex;align-items:center;gap:3px;flex-shrink:0;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace;padding:1px 6px;border-radius:8px;color:#fbbf24;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.3)}
+.sw-a-edited svg{display:block}
+/* subtle amber left-accent on the card itself so edited agents stand out */
+.sw-agent.sw-a-has-edits{box-shadow:inset 2px 0 0 rgba(251,191,36,0.45)}
+.sw-a-running .sw-a-role-tag{background:rgba(96,165,250,0.10);border-color:rgba(96,165,250,0.25);color:#93c5fd}
+.sw-a-done .sw-a-role-tag,.sw-a-completed .sw-a-role-tag{background:rgba(74,222,128,0.08);border-color:rgba(74,222,128,0.20);color:#86efac}
+.sw-a-failed .sw-a-role-tag,.sw-a-error .sw-a-role-tag{background:rgba(248,113,113,0.08);border-color:rgba(248,113,113,0.20);color:#fca5a5}
+.sw-a-id{font-size:10px;padding:1px 6px;border-radius:6px;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary);background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);cursor:copy;flex-shrink:0;letter-spacing:0.02em;transition:all .15s}
+.sw-a-id:hover{color:var(--text-secondary);background:rgba(255,255,255,0.07);border-color:rgba(255,255,255,0.12)}
+.sw-a-id-copied{color:#4ade80 !important;background:rgba(74,222,128,0.10) !important;border-color:rgba(74,222,128,0.25) !important}
+.sw-a-id-copied::after{content:" copied";font-size:9px;margin-left:2px}
+.sw-a-model{font-size:10px;padding:1px 7px;border-radius:6px;font-family:'JetBrains Mono',monospace;font-weight:500;color:var(--text-secondary);background:rgba(167,139,250,0.10);border:1px solid rgba(167,139,250,0.22);flex-shrink:0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+[data-theme="tofu"] .sw-a-model{color:#5b4a8a;background:rgba(124,92,184,0.12);border-color:rgba(124,92,184,0.32)}
+.sw-a-phase-pill{font-size:10px;padding:1px 7px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-weight:500;flex-shrink:0}
+.sw-a-pending .sw-a-phase-pill{color:var(--text-tertiary);background:rgba(255,255,255,0.04)}
+.sw-a-running .sw-a-phase-pill{color:#60a5fa;background:rgba(96,165,250,0.1)}
+.sw-a-done .sw-a-phase-pill,.sw-a-completed .sw-a-phase-pill{color:#4ade80;background:rgba(74,222,128,0.08)}
+.sw-a-failed .sw-a-phase-pill,.sw-a-error .sw-a-phase-pill{color:#f87171;background:rgba(248,113,113,0.08)}
+.sw-a-timer{font-size:10px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;flex-shrink:0}
+.sw-a-chevron{font-size:10px;color:var(--text-tertiary);transition:transform .15s;flex-shrink:0}
+/* Agent card body (collapsible) */
+.sw-a-body{padding:0 12px 10px;display:none;animation:fadeIn .2s ease}
+.sw-agent.sw-a-open .sw-a-body{display:block}
+.sw-agent.sw-a-open .sw-a-chevron{transform:rotate(180deg)}
+.sw-a-objective{font-size:11px;color:var(--text-secondary);line-height:1.5;margin-bottom:6px;padding:6px 8px;background:rgba(255,255,255,0.02);border-radius:6px;border-left:2px solid rgba(251,191,36,0.3);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+.sw-a-done .sw-a-objective,.sw-a-completed .sw-a-objective{border-left-color:rgba(74,222,128,0.3)}
+.sw-a-failed .sw-a-objective,.sw-a-error .sw-a-objective{border-left-color:rgba(248,113,113,0.3)}
+/* Agent tool chain */
+.sw-a-tools{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-bottom:6px}
+.sw-a-tool-tag svg,.sw-dep-tag svg{display:block}
+.sw-a-tool-tag{display:inline-flex;align-items:center;gap:3px;padding:2px 6px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-tertiary)}
+/* ── Per-agent execution timeline ── */
+.sw-a-timeline{display:flex;flex-direction:column;gap:2px;margin:6px 0;padding:6px 8px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:6px}
+.sw-tl-row{font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--text-secondary)}
+.sw-tl-line{display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:4px;transition:background .12s}
+.sw-tl-expandable .sw-tl-line{cursor:pointer}
+.sw-tl-expandable:hover .sw-tl-line{background:rgba(255,255,255,0.04)}
+.sw-tl-dot{display:inline-flex;align-items:center;justify-content:center;width:10px;height:10px;border-radius:50%;font-size:8px;flex-shrink:0;color:#fff;font-weight:700}
+.sw-tl-running{background:rgba(251,191,36,0.55);box-shadow:0 0 0 2px rgba(251,191,36,0.15);animation:swTlPulse 1.2s ease-in-out infinite}
+.sw-tl-done{background:rgba(74,222,128,0.6)}
+.sw-tl-dot svg{width:7px;height:7px}
+.sw-tl-failed{background:rgba(248,113,113,0.6)}
+@keyframes swTlPulse{0%,100%{opacity:1}50%{opacity:0.45}}
+.sw-tl-icon{font-size:10px;opacity:0.85;flex-shrink:0}
+.sw-tl-name{color:var(--text-primary);font-weight:500;flex-shrink:0}
+.sw-tl-args{color:var(--text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
+.sw-tl-elapsed{color:var(--text-tertiary);font-size:9px;flex-shrink:0;margin-left:auto}
+.sw-tl-chev{color:var(--text-tertiary);font-size:9px;transition:transform .15s;flex-shrink:0}
+.sw-tl-row.sw-tl-open .sw-tl-chev{transform:rotate(180deg)}
+.sw-tl-detail{display:none;margin:4px 6px 2px 22px;padding:6px 8px;background:rgba(0,0,0,0.18);border-left:2px solid rgba(255,255,255,0.1);border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-secondary);white-space:pre-wrap;word-break:break-word;max-height:200px;overflow-y:auto}
+.sw-tl-row.sw-tl-open .sw-tl-detail{display:block}
+.sw-tl-detail-error{border-left-color:#f87171;color:#fca5a5}
+/* Agent output preview */
+.sw-a-preview{font-size:11px;color:var(--text-secondary);line-height:1.5;margin-bottom:6px;padding:8px;background:rgba(255,255,255,0.02);border-radius:6px;border:1px solid rgba(255,255,255,0.04);max-height:220px;overflow-y:auto;overscroll-behavior:contain;white-space:pre-wrap;word-break:break-word}
+.sw-a-err{font-size:10px;color:#f87171;font-family:'JetBrains Mono',monospace;padding:4px 8px;background:rgba(248,113,113,0.05);border-radius:4px;margin-bottom:6px}
+.sw-a-meta{display:flex;align-items:center;gap:10px;font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}
+/* ── Footer stats ── */
+.sw-footer{display:flex;align-items:center;gap:12px;padding:10px 18px;border-top:1px solid rgba(251,191,36,0.08);font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}
+.sw-complete .sw-footer{border-top-color:rgba(74,222,128,0.08)}
+.sw-footer-sep{color:var(--text-tertiary);opacity:0.3}
+/* ── Swarm init (pre-agent-list) ── */
+.sw-spinner{width:16px;height:16px;border:2px solid rgba(251,191,36,0.2);border-top-color:#fbbf24;border-radius:50%;animation:spin .8s linear infinite;margin-left:auto}
+/* ── Async swarm: "running in background" pill on the panel header ─────────── */
+/*    Shown when the panel is no longer the active tool round but agents are   */
+/*    still working — gives the user a quiet "still cooking" indicator.        */
+.sw-status-pill.sw-pill-async{color:#fbbf24;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.18)}
+.sw-status-pill.sw-pill-async .sw-async-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#fbbf24;margin-right:4px;animation:swAsyncDot 1.4s ease-in-out infinite}
+@keyframes swAsyncDot{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
+/* ── Stale pill: a swarm panel that never received its completion signal ── */
+/*    (server restart / dropped SSE). Muted slate — reads as 'unconfirmed',   */
+/*    distinct from running (blue), async (amber), done (green), error (red).  */
+.sw-status-pill.sw-pill-stale{color:#94a3b8;background:rgba(148,163,184,0.10);border:1px solid rgba(148,163,184,0.20)}
+[data-theme="light"] .sw-status-pill.sw-pill-stale{color:#64748b;background:rgba(100,116,139,0.10)}
+[data-theme="tofu"] .sw-status-pill.sw-pill-stale{color:#8a7d63;background:rgba(138,125,99,0.10)}
+/* ── Inbox-inject chip: "📨 N swarm-update arrived" between messages ──────── */
+/*    Compact, monospace, amber-green to mark "the model just received async   */
+/*    notifications before this turn". Same vocabulary as .sw-status-pill.     */
+.sw-inbox-chip{display:inline-flex;align-items:center;gap:6px;margin:8px 0 6px;padding:4px 10px;border-radius:10px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:500;color:#fbbf24;background:linear-gradient(135deg,rgba(251,191,36,0.06),rgba(74,222,128,0.04));border:1px solid rgba(251,191,36,0.18);letter-spacing:0.02em;animation:swInboxChipFlash 1.6s ease-out 1}
+.sw-inbox-chip-icon{display:inline-flex;align-items:center;color:#fbbf24;flex-shrink:0;animation:swInboxChipBounce .9s ease-out 1}
+.sw-inbox-chip-text{color:var(--text-secondary)}
+.sw-inbox-chip-count{color:#4ade80;font-weight:700}
+.sw-inbox-chip-ids{color:var(--text-tertiary);font-size:10px;margin-left:2px;opacity:0.85}
+@keyframes swInboxChipFlash{0%{box-shadow:0 0 0 0 rgba(251,191,36,0.3)}40%{box-shadow:0 0 14px 0 rgba(251,191,36,0.18)}100%{box-shadow:0 0 0 0 rgba(251,191,36,0)}}
+@keyframes swInboxChipBounce{0%{transform:translateY(-3px) scale(.7);opacity:0}60%{transform:translateY(1px) scale(1.05);opacity:1}100%{transform:translateY(0) scale(1);opacity:1}}
+/* ── Async-swarm inbox-injection row (inside the ptool-panel timeline) ───── */
+/*    A synthetic tool row marking where the model received N <swarm-update>  */
+/*    sub-agent results as a user message before its next turn. Collapsible:  */
+/*    expands to show the raw payloads the model actually saw.                */
+.sw-inbox-row{margin:0;border:none}
+.sw-inbox-row>.sw-inbox-row-header{cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px}
+.sw-inbox-row>.sw-inbox-row-header::-webkit-details-marker{display:none}
+.sw-inbox-row .sw-inbox-row-ids{color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;font-size:10px;opacity:0.85}
+/* Collapse affordance: a caret appended after the row label (same convention as
+   the convmeta / memory / todo blocks). The explicit .sw-inbox-row-chev span was
+   removed so the far-right slot belongs unambiguously to the "模型原文" button. */
+.sw-inbox-row>.sw-inbox-row-header .ptool-text::after{content:" ▸";font-size:10px;opacity:0.5}
+.sw-inbox-row[open]>.sw-inbox-row-header .ptool-text::after{content:" ▾"}
+/* "Who sent this" bubble — a conversation TITLE (via convTitleById), not a raw
+   id. Reads like the peer-msg provenance banner so the sender is legible. It is
+   a <button>: clicking jumps to the source conversation (delegated handler in
+   tool_rounds.js). */
+.sw-peer-from-group{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}
+.sw-peer-from-bubble{display:inline-flex;align-items:center;gap:5px;flex-shrink:1;min-width:0;max-width:420px;padding:1px 9px;border:1px solid rgba(130,170,255,.35);background:rgba(130,170,255,.09);border-radius:9px;font-size:11px;line-height:1.4;color:#82aaff;font-weight:600;font-family:inherit;cursor:pointer;transition:background .15s,border-color .15s}
+.sw-peer-from-bubble:hover{background:rgba(130,170,255,.2);border-color:rgba(130,170,255,.65)}
+.sw-peer-from-bubble svg{display:block;flex-shrink:0}
+.sw-peer-from-bubble>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sw-peer-from-bubble .sw-peer-jump{opacity:.45;margin-left:1px}
+.sw-peer-from-bubble:hover .sw-peer-jump{opacity:1}
+/* Inside an expanded body card the bubble gets the full card width — the title
+   must be readable end-to-end there, not ellipsized like the cramped header. */
+.sw-peer-card-item .sw-peer-from-bubble{max-width:100%}
+.sw-peer-from-more{flex-shrink:0;padding:1px 7px;border-radius:9px;font-size:10px;font-weight:700;color:var(--text-tertiary);background:rgba(130,170,255,.12)}
+/* Inbox/peer/steer rows: the right-hand control group owns the right
+   end of the header — exactly ONE owner, same as every other row. */
+.sw-inbox-row>.sw-inbox-row-header .ptool-row-ctl{margin-left:auto}
+.sw-inbox-row .sw-inbox-row-body{padding:6px 10px 8px 16px;display:flex;flex-direction:column;gap:8px}
+.sw-inbox-row-empty{color:var(--text-tertiary);font-size:12px;font-style:italic}
+/* ── Beautified sub-agent / peer update cards (human view) ──
+   Replaces the old raw-<pre> XML dump. Clean field header + Markdown body. */
+.sw-card{border:1px solid var(--border);border-left:2px solid rgba(251,191,36,0.5);border-radius:7px;padding:8px 11px;background:var(--bg-secondary);display:flex;flex-direction:column;gap:6px}
+.sw-card-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.sw-card-agent{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:#fbbf24}
+.sw-card-role{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;color:var(--text-tertiary);background:var(--bg-tertiary);padding:1px 7px;border-radius:7px}
+.sw-card-status{margin-left:0}
+.sw-card-meta{margin-left:auto;font-size:10.5px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace}
+.sw-card-error{font-size:12px;line-height:1.5;color:var(--pb-red,#ef4444);background:color-mix(in srgb,var(--pb-red,#ef4444) 8%,transparent);border-radius:5px;padding:6px 9px;overflow-wrap:anywhere}
+.sw-card-preview{font-size:12.5px;line-height:1.55;color:var(--text-primary);overflow-wrap:anywhere}
+.sw-card-preview > :first-child{margin-top:0}
+.sw-card-preview > :last-child{margin-bottom:0}
+.sw-card-file{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;overflow-wrap:anywhere}
+.sw-card-file svg{display:block;flex-shrink:0}
+.sw-card-raw-pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.5;color:var(--text-secondary);background:rgba(255,255,255,0.02);border-radius:6px;padding:8px 10px;max-height:280px;overflow:auto}
+.sw-card-rawonly .sw-card-raw-pre,.sw-peer-card-item{}
+.sw-peer-card-item{border-left-color:var(--accent)}
+[data-theme="light"] .sw-card-raw-pre{background:rgba(0,0,0,0.03)}
+[data-theme="light"] .sw-peer-from-bubble{color:#3b5bdb;border-color:rgba(59,91,219,.35);background:rgba(59,91,219,.08)}
+[data-theme="light"] .sw-peer-from-bubble:hover{background:rgba(59,91,219,.16);border-color:rgba(59,91,219,.55)}
+[data-theme="light"] .sw-peer-from-more{background:rgba(59,91,219,.12)}
+[data-theme="tofu"] .sw-card{background:#faf8f3;border-color:#e0d9c8;border-left-color:#d98c3f}
+[data-theme="tofu"] .sw-card-agent{color:#b06d28}
+[data-theme="tofu"] .sw-card-raw-pre{background:rgba(0,0,0,0.04);color:#3a342c}
+[data-theme="tofu"] .sw-peer-from-bubble{color:#5b54c7;border-color:rgba(91,84,199,.35);background:rgba(91,84,199,.08)}
+[data-theme="tofu"] .sw-peer-from-bubble:hover{background:rgba(91,84,199,.16);border-color:rgba(91,84,199,.55)}
+[data-theme="tofu"] .sw-peer-from-more{background:rgba(91,84,199,.12)}
+/* ── Async-only tool rounds: await_agents / get_agent_result mini-cards ───── */
+/*    These are NOT swarm panels — they're regular tool rounds, but rendered   */
+/*    with the swarm vocabulary (amber, monospace) so the user instantly       */
+/*    recognizes "this is part of the swarm flow".                             */
+@keyframes swarmIconBounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}
+@keyframes agentPulse{0%,100%{opacity:0.6;transform:scale(0.9)}50%{opacity:1;transform:scale(1.1)}}
+/* ── Live preview stream ── */
+.sw-a-preview-live{border-color:rgba(251,191,36,0.15);background:rgba(251,191,36,0.03);position:relative}
+.sw-typing-cursor{color:#fbbf24;font-weight:700;animation:blink 1s step-end infinite}
+@keyframes blink{50%{opacity:0}}
+/* ── Dependency tags ── */
+.sw-a-deps{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-bottom:6px;font-size:10px}
+.sw-a-deps-label{color:var(--text-tertiary);font-weight:600;margin-right:2px}
+.sw-dep-tag{display:inline-flex;align-items:center;gap:2px;padding:1px 6px;border-radius:4px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.15);color:#fbbf24;font-family:'JetBrains Mono',monospace}
+.sw-dep-tag.sw-dep-done{background:rgba(74,222,128,0.08);border-color:rgba(74,222,128,0.15);color:#4ade80}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+
+/* ── App dialogs: themed confirm/alert/prompt (static/js/core/dialog.js) ── */
+.app-dialog-overlay{position:fixed;inset:0;height:var(--vh100,100vh);background:rgba(0,0,0,0.55);backdrop-filter:blur(2px);z-index:10050;display:flex;align-items:center;justify-content:center;padding:20px;opacity:0;transition:opacity 0.16s ease}
+.app-dialog-overlay.open{opacity:1}
+.app-dialog-overlay.closing{opacity:0}
+.app-dialog{background:var(--bg-secondary);border:1px solid var(--border-light);border-radius:var(--radius);padding:22px 24px 18px;width:400px;max-width:calc(100vw - 40px);box-shadow:0 16px 48px rgba(0,0,0,0.55);transform:translateY(8px) scale(0.98);opacity:0;transition:transform 0.18s cubic-bezier(0.2,1,0.3,1),opacity 0.18s ease}
+.app-dialog-overlay.open .app-dialog{transform:translateY(0) scale(1);opacity:1}
+.app-dialog-title{font-size:15px;font-weight:700;color:var(--text-primary);margin-bottom:10px;letter-spacing:0.01em}
+.app-dialog-message{font-size:13.5px;line-height:1.6;color:var(--text-secondary);word-break:break-word}
+.app-dialog-input{width:100%;margin-top:14px;padding:9px 12px;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text-primary);font-size:14px;font-family:inherit;outline:none;transition:border-color var(--transition)}
+.app-dialog-input:focus{border-color:var(--accent)}
+.app-dialog-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
+.app-dialog-btn{padding:8px 18px;border-radius:var(--radius-xs);font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;border:1px solid transparent;transition:background var(--transition),border-color var(--transition),transform 0.1s}
+.app-dialog-btn:active{transform:translateY(1px)}
+.app-dialog-cancel{background:var(--bg-tertiary);color:var(--text-secondary);border-color:var(--border)}
+.app-dialog-cancel:hover{background:var(--bg-hover);color:var(--text-primary)}
+.app-dialog-cancel:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.app-dialog-ok{background:var(--accent);color:#fff}
+.app-dialog-ok:hover{background:var(--accent-hover)}
+.app-dialog-ok:focus-visible{outline:2px solid var(--accent-hover);outline-offset:2px}
+.app-dialog-ok.is-danger{background:var(--error-text)}
+.app-dialog-ok.is-danger:hover{background:#e05656}
+/* Tofu theme: square neo-brutalist block to match the rest of the tofu UI */
+[data-theme="tofu"] .app-dialog{background:#faf8f3;border:3px solid #1a1814;border-radius:var(--radius);box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .app-dialog-title{color:#1a1814;text-transform:uppercase;letter-spacing:0.04em}
+[data-theme="tofu"] .app-dialog-message{color:#3a342c}
+[data-theme="tofu"] .app-dialog-input{background:#fff;border:2px solid #1a1814;border-radius:var(--radius);color:#1a1814}
+[data-theme="tofu"] .app-dialog-btn{border-radius:var(--radius);border:2px solid #1a1814;box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .app-dialog-btn:active{box-shadow:var(--clay-pressed);transform:translate(2px,2px)}
+
+/* ═══ Multi-option chooser (showChoice) — used by the post-send inject-mode
+   prompt. Each option is a full-width stacked button with an icon, a bold
+   label and a muted subtitle. The accent option (steer) gets a teal edge. ═══ */
+.app-dialog-choice{width:440px}
+.app-dialog-choices{display:flex;flex-direction:column;gap:10px;margin-top:16px}
+.app-choice-btn{display:flex;align-items:center;gap:13px;width:100%;text-align:left;padding:13px 15px;background:var(--bg-tertiary);border:1.5px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-family:inherit;color:var(--text-primary);transition:border-color .16s,background .16s,transform .1s}
+.app-choice-btn:hover{background:var(--bg-hover);border-color:var(--border-light)}
+.app-choice-btn:active{transform:translateY(1px)}
+.app-choice-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.app-choice-icon{flex-shrink:0;width:34px;height:34px;border-radius:var(--radius-xs);background:var(--bg-primary);color:var(--text-tertiary);border:1px solid var(--border)}
+.app-choice-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.app-choice-label{font-size:13.5px;font-weight:700;letter-spacing:.01em}
+.app-choice-sub{font-size:11.5px;line-height:1.45;color:var(--text-tertiary)}
+/* Accent option (steer) — teal edge + icon glow so the mid-turn injection is
+   visually distinct from the neutral queue default. */
+.app-choice-btn.is-accent{border-color:rgba(45,212,191,0.45)}
+.app-choice-btn.is-accent:hover{border-color:#2dd4bf;background:rgba(45,212,191,0.08)}
+.app-choice-btn.is-accent .app-choice-icon{color:#2dd4bf;border-color:rgba(45,212,191,0.4);background:rgba(45,212,191,0.1)}
+[data-theme="tofu"] .app-choice-btn{border:2px solid #1a1814;border-radius:var(--radius);box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .app-choice-btn:active{box-shadow:var(--clay-pressed);transform:translate(2px,2px)}
+[data-theme="tofu"] .app-choice-icon{border:2px solid #1a1814;background:#fff}
+[data-theme="tofu"] .app-choice-btn.is-accent{border-color:#0f766e}
+[data-theme="tofu"] .app-choice-btn.is-accent .app-choice-icon{color:#0f766e;border-color:#0f766e}
+
+/* ★ Perf: removed backdrop-filter:blur from preview modal and close button */
+#previewModal{z-index:150;background:rgba(0,0,0,0.92)}.preview-body{display:flex;align-items:center;justify-content:center;max-width:90vw;max-height:90vh;max-height:calc(var(--vh100,100vh)*0.9);position:relative}.preview-close-btn{position:absolute;top:8px;right:8px;z-index:10;background:rgba(255,255,255,0.12);border:none;color:#fff;font-size:20px;width:36px;height:36px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .2s;line-height:1}.preview-close-btn:hover{background:rgba(255,255,255,0.25)}.preview-image{max-width:90vw;max-height:85vh;max-height:calc(var(--vh100,100vh)*0.85);object-fit:contain;border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,0.5);animation:fadeIn .2s ease}.preview-text-panel{background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);width:min(800px,85vw);max-height:85vh;max-height:calc(var(--vh100,100vh)*0.85);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.5);animation:fadeIn .2s ease}.preview-text-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-shrink:0}.preview-text-title{font-size:15px;font-weight:600;color:var(--text-primary)}.preview-text-meta{font-size:11px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace}.preview-text-body{padding:16px 20px;overflow-y:auto;flex:1;font-size:12.5px;line-height:1.6;color:var(--text-secondary);white-space:pre-wrap;word-break:break-word;font-family:'JetBrains Mono',monospace;margin:0;background:transparent;max-height:calc(85vh - 60px);max-height:calc(var(--vh100,100vh)*0.85 - 60px)}
+/* ═══════════════════════════════════════════
+   ★ Project Co-Pilot styles
+   ═══════════════════════════════════════════ */
+.project-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;margin-bottom:8px;background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.2);border-radius:var(--radius-sm);font-size:12px;color:#f59e0b;animation:fadeIn .3s ease}.project-bar-icon{font-size:16px;flex-shrink:0}.project-bar-stats{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-tertiary);flex:1}.project-bar-btn{background:none;border:1px solid rgba(245,158,11,0.25);color:#f59e0b;cursor:pointer;padding:2px 8px;border-radius:4px;font-size:11px;font-family:inherit;transition:background-color .2s,color .2s}.project-bar-btn:hover{background:rgba(245,158,11,0.1)}.project-bar-btn:disabled{opacity:0.5;cursor:not-allowed}
+/* Per-message undo button — REMOVED, now integrated into .file-changes-bar via .fc-undo-btn */
+.project-bar-close{background:none;border:none;color:var(--text-tertiary);cursor:pointer;padding:2px;font-size:14px;transition:color .2s}.project-bar-close:hover{color:var(--error-text)}
+/* ★ Scene switcher — visible affordance to cycle the project-bar diorama scene
+   (meadow/pool/sky/off), reusing TofuPet.cycleDecor(). Icon + current-scene
+   label; .icon-box centres the SVG (no baseline drop). Scenes are a tofu-theme
+   diorama feature only, so the switcher is hidden on other themes. */
+.scene-switch-btn{gap:5px;flex-shrink:0}.scene-switch-btn .scene-switch-label{font-size:10px;line-height:1}
+.scene-switch-btn[data-scene="off"]{opacity:0.65}
+html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
+/* Auto-apply toggle */
+.project-autoapply-toggle{display:flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;border:1px solid rgba(245,158,11,0.25);background:rgba(245,158,11,0.06);color:#f59e0b;cursor:pointer;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace;transition:background-color .2s,border-color .2s,color .2s;white-space:nowrap;flex-shrink:0}.project-autoapply-toggle:hover{background:rgba(245,158,11,0.12)}.project-autoapply-toggle .autoapply-dot{width:6px;height:6px;border-radius:50%;background:#f59e0b;transition:background .2s}.project-autoapply-toggle.auto-mode{border-color:rgba(52,211,153,0.3);background:rgba(52,211,153,0.08);color:#34d399}.project-autoapply-toggle.auto-mode .autoapply-dot{background:#34d399}.project-autoapply-toggle.auto-mode:hover{background:rgba(52,211,153,0.15)}
+/* ★ Folder badges in project bar — simple inline tags */
+.project-bar-folders{display:flex;gap:4px;flex-wrap:wrap;align-items:center;cursor:pointer;min-width:0}
+.folder-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:10px;font-size:11px;font-family:'JetBrains Mono',monospace;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;cursor:pointer;transition:background .15s,border-color .15s;border:1px solid rgba(245,158,11,0.25);background:rgba(245,158,11,0.10);color:#f59e0b}
+.folder-badge:hover{background:rgba(245,158,11,0.18);border-color:rgba(245,158,11,0.4)}
+/* ★ Read-only root badge in the project bar — muted slate, lock glyph */
+.folder-badge.folder-badge-ro{background:rgba(100,116,139,0.12);border-color:rgba(100,116,139,0.32);color:var(--text-secondary)}
+.folder-badge.folder-badge-ro:hover{background:rgba(100,116,139,0.2);border-color:rgba(100,116,139,0.45)}
+.folder-badge-lock{flex-shrink:0;opacity:0.8}
+/* ★ Multi-path folder UI lives in the project-modal block further down */
+/* Indexing animation */
+.project-bar.indexing{border-color:rgba(110,86,207,0.4);background:linear-gradient(90deg,rgba(110,86,207,0.06) 0%,rgba(110,86,207,0.12) 50%,rgba(110,86,207,0.06) 100%);background-size:200% 100%;animation:projectIndexSweep 2s ease-in-out infinite}@keyframes projectIndexSweep{0%{background-position:100% 0}100%{background-position:-100% 0}}.project-bar.indexing .project-bar-stats{color:var(--accent);font-weight:600}
+.project-badge{font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;padding:3px 9px;border-radius:20px;white-space:nowrap;display:none;align-items:center;gap:5px;border:1px solid;animation:fadeIn .3s ease;background:rgba(245,158,11,0.12);color:#f59e0b;border-color:rgba(245,158,11,0.25)}.project-badge.visible{display:flex}/* Proactive agent count indicator on scheduler badge */
+/* Scheduler dropdown panel */
+.scheduler-panel{position:absolute;top:100%;right:0;margin-top:6px;width:340px;max-height:400px;overflow-y:auto;background:var(--panel-bg,#1e1e2e);border:1px solid var(--border);border-radius:var(--radius-md,8px);box-shadow:0 8px 32px rgba(0,0,0,0.4);z-index:1000;padding:10px;display:none;font-size:12px;font-family:'JetBrains Mono',monospace}
+.scheduler-panel.visible{display:block}
+.scheduler-panel-item{padding:8px;border-radius:6px;margin-bottom:6px;background:rgba(168,85,247,0.06);border:1px solid rgba(168,85,247,0.15)}
+.scheduler-panel-item .spi-name{font-weight:700;color:#a855f7;font-size:11px}
+.scheduler-panel-item .spi-meta{color:var(--text-secondary);font-size:10px;margin-top:3px}
+.scheduler-panel-item .spi-decision{display:inline-block;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;margin-left:4px}
+.scheduler-panel-item .spi-decision.act{background:rgba(34,197,94,0.15);color:#22c55e}
+.scheduler-panel-item .spi-decision.skip{background:rgba(250,204,21,0.15);color:#facc15}
+.scheduler-panel-item .spi-decision.act_failed{background:rgba(239,68,68,0.15);color:#ef4444}
+.scheduler-panel-empty{color:var(--text-secondary);text-align:center;padding:20px 10px;font-size:11px}
+/* ── Daily Optimizer badge + panel ── */
+.optimizer-badge{font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;padding:3px 9px;border-radius:20px;white-space:nowrap;display:inline-flex;align-items:center;gap:5px;border:1px solid;animation:fadeIn .3s ease;background:rgba(52,211,153,0.12);color:#34d399;border-color:rgba(52,211,153,0.35);cursor:pointer;position:relative}
+.optimizer-badge:hover{background:rgba(52,211,153,0.20)}
+.optimizer-badge .opt-dot{width:6px;height:6px;border-radius:50%;background:#34d399;box-shadow:0 0 6px #34d399}
+.optimizer-badge .optimizer-count{font-size:8px;background:#34d399;color:#0f172a;border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;margin-left:2px;font-weight:800}
+.optimizer-panel{position:absolute;top:100%;right:0;margin-top:6px;width:380px;max-height:500px;overflow-y:auto;background:var(--panel-bg,#1e1e2e);border:1px solid var(--border);border-radius:var(--radius-md,8px);box-shadow:0 8px 32px rgba(0,0,0,0.4);z-index:1000;padding:10px;display:none;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;text-align:left;white-space:normal;font-weight:400;letter-spacing:normal;text-transform:none;cursor:auto}
+.optimizer-panel.visible{display:block}
+.optimizer-panel-title{font-size:11px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+.optimizer-panel-empty{color:var(--text-secondary);text-align:center;padding:20px 10px;font-size:11px;line-height:1.5}
+.opt-toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:11px;color:#cbd5e1}
+.opt-toolbar-info{font-family:'JetBrains Mono',monospace;color:#e2e8f0}
+.opt-run-btn{font-size:10px;padding:3px 10px;border-radius:4px;border:1px solid rgba(52,211,153,0.35);background:rgba(52,211,153,0.1);color:#34d399;cursor:pointer;font-weight:700}
+.opt-run-btn:hover{background:rgba(52,211,153,0.2)}
+.opt-run-btn:disabled{opacity:0.55;cursor:default}
+.opt-section-title{font-size:11px;font-weight:700;color:#e2e8f0;text-transform:uppercase;letter-spacing:0.3px;margin:8px 0 4px;display:flex;align-items:center;gap:6px}
+.opt-count{font-size:10px;background:rgba(148,163,184,0.25);color:#f1f5f9;padding:1px 7px;border-radius:10px;font-weight:700}
+.opt-history-header{cursor:pointer;user-select:none;padding:4px 0;border-top:1px solid var(--border);margin-top:8px}
+.opt-history-header:hover{color:#34d399}
+.opt-row{padding:10px;border-radius:6px;margin-bottom:8px;background:rgba(30,41,59,0.55);border:1px solid rgba(52,211,153,0.25);border-left:3px solid #34d399}
+.opt-row.opt-status-pending_review{background:rgba(30,41,59,0.55);border-color:rgba(250,204,21,0.3);border-left-color:#facc15}
+.opt-row.opt-status-rejected{background:rgba(30,41,59,0.5);border-color:rgba(239,68,68,0.25);border-left-color:#ef4444;opacity:0.85}
+.opt-row.opt-status-expired,.opt-row.opt-status-reverted{background:rgba(30,41,59,0.45);border-color:rgba(148,163,184,0.3);border-left-color:#94a3b8;opacity:0.85}
+.opt-row-head{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:#f1f5f9}
+.opt-row-head b{color:#fff}
+.opt-row-head .opt-action-summary span{color:#cbd5e1!important}
+.opt-status-icon{flex-shrink:0}
+.opt-action-summary{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#f1f5f9}
+.opt-row-conf{font-size:10px;font-family:'JetBrains Mono',monospace;flex-shrink:0;font-weight:700}
+.opt-row-title{color:#e2e8f0}
+.opt-row-rationale{font-size:11px;color:#e2e8f0;margin-top:4px;line-height:1.5;background:rgba(15,23,42,0.55);padding:6px 8px;border-radius:4px;border-left:2px solid rgba(52,211,153,0.5);white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.opt-row-reason{font-size:11px;color:#fde68a;margin-top:4px;font-style:italic;background:rgba(15,23,42,0.55);padding:4px 8px;border-radius:4px;border-left:2px solid rgba(250,204,21,0.55);white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.opt-row-meta{font-size:11px;color:#cbd5e1;margin-top:4px;white-space:normal;overflow-wrap:anywhere;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.opt-row-actions{margin-top:6px;display:flex;gap:4px}
+.opt-btn{font-size:11px;padding:4px 12px;border-radius:4px;border:1px solid;cursor:pointer;font-weight:700}
+.opt-btn-approve{border-color:rgba(34,197,94,0.4);background:rgba(34,197,94,0.1);color:#22c55e}
+.opt-btn-approve:hover{background:rgba(34,197,94,0.2)}
+.opt-btn-reject{border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.08);color:#ef4444}
+.opt-btn-reject:hover{background:rgba(239,68,68,0.18)}
+.opt-btn-revert{border-color:rgba(250,204,21,0.4);background:rgba(250,204,21,0.08);color:#facc15}
+.opt-btn-revert:hover{background:rgba(250,204,21,0.18)}
+/* Proactive agent message banner inside chat */
+.proactive-banner{background:linear-gradient(135deg,rgba(168,85,247,0.08),rgba(139,92,246,0.04));border:1px solid rgba(168,85,247,0.2);border-radius:8px;padding:8px 12px;margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px}
+.proactive-banner .pb-text{color:var(--text-secondary);font-size:11px}
+.proactive-banner .pb-name{color:#a855f7;font-weight:700}
+/* Model-fallback banner inside the streaming bubble — painted the moment the
+   backend switches models (llm_fallback model_fallback SSE event). Amber warn
+   variant of .proactive-banner; NOT a toast. */
+.fallback-banner{background:linear-gradient(135deg,rgba(245,158,11,0.10),rgba(245,158,11,0.04));border:1px solid rgba(245,158,11,0.35);border-radius:8px;padding:8px 12px;margin-bottom:8px;font-size:12px;display:flex;align-items:flex-start;gap:8px}
+.fallback-banner .fb-icon{color:#f59e0b;display:inline-flex;align-items:center;flex:none;margin-top:1px}
+.fallback-banner .fb-text{color:var(--text-secondary);font-size:11px;min-width:0}
+.fallback-banner .fb-models{color:#f59e0b;font-weight:700}
+/* Visible cause row — the reason used to live ONLY in the title attribute,
+   which is unreachable on touch and easy to miss on desktop. Wraps instead of
+   truncating with ellipsis so a long upstream message stays selectable. */
+.fallback-banner .fb-reason{display:block;margin-top:3px;line-height:1.45;overflow-wrap:anywhere}
+.fallback-banner .fb-reason-label{color:var(--text-tertiary)}
+.fallback-banner .fb-reason-label::after{content:':';margin-right:4px}
+.fallback-banner .fb-kind{color:#f59e0b;font-weight:600;margin-right:5px}
+.fallback-banner .fb-detail{color:var(--text-secondary);font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:10.5px}
+/* ── Network-latency signal indicator ──
+   Lives INSIDE .topbar-tools, so it mirrors the .topbar-tool-btn shell
+   (height/radius/border/typography) for a consistent control group; only the
+   signal-bars + ms readout carry the semantic state colour. */
+.net-latency-badge{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border:1px solid transparent;border-radius:8px;background:none;color:var(--text-secondary);font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;font-size:12.5px;font-weight:600;line-height:1;white-space:nowrap;flex-shrink:0;user-select:none;cursor:default;transition:color .15s ease,background-color .15s ease,border-color .15s ease}
+.net-latency-badge:hover{color:var(--text-primary);background:var(--bg-hover);border-color:var(--border-light)}
+.net-latency-badge .net-bars{display:inline-flex;align-items:flex-end;gap:2px;height:14px}
+.net-latency-badge .net-bar{width:3px;border-radius:1px;background:currentColor;opacity:0.25;transition:background .2s ease,opacity .2s ease}
+.net-latency-badge .net-bar:nth-child(1){height:5px}
+.net-latency-badge .net-bar:nth-child(2){height:8px}
+.net-latency-badge .net-bar:nth-child(3){height:11px}
+.net-latency-badge .net-bar:nth-child(4){height:14px}
+.net-latency-badge .net-bar.lit{opacity:1}
+.net-latency-badge .net-ms{min-width:36px;text-align:right;font-variant-numeric:tabular-nums;font-size:11px;letter-spacing:-0.2px;color:var(--text-tertiary)}
+/* State-driven colour of the lit bars + label (the semantic signal). */
+.net-latency-badge[data-state="good"] .net-bar.lit{background:#34d399}
+.net-latency-badge[data-state="good"] .net-ms{color:#34d399}
+.net-latency-badge[data-state="ok"] .net-bar.lit{background:#eab308}
+.net-latency-badge[data-state="ok"] .net-ms{color:#eab308}
+.net-latency-badge[data-state="poor"] .net-bar.lit{background:#f97316}
+.net-latency-badge[data-state="poor"] .net-ms{color:#f97316}
+.net-latency-badge[data-state="timeout"] .net-bar.lit{background:#ef4444}
+.net-latency-badge[data-state="timeout"] .net-ms{color:#ef4444}
+.net-latency-badge[data-state="offline"]{opacity:0.65}
+.net-latency-badge[data-state="offline"] .net-ms{color:var(--text-tertiary)}
+/* Narrow viewports: match the tool buttons' tighter padding. */
+@media (max-width:1080px){.net-latency-badge{padding:0 7px}}
+/* ── Timer Watcher badge & panel ── */
+.timer-trigger{position:relative;user-select:none;-webkit-user-select:none}
+.timer-panel{user-select:text;-webkit-user-select:text}
+.timer-trigger .tm-dot{width:6px;height:6px;border-radius:50%;background:#D9A12E;animation:pulse 2s ease infinite;flex-shrink:0}
+.timer-trigger .timer-count{font-size:9px;background:var(--accent);color:#fff;border-radius:9px;min-width:16px;height:16px;padding:0 4px;display:inline-flex;align-items:center;justify-content:center;font-weight:800;line-height:1}
+.timer-panel{position:absolute;top:100%;right:0;margin-top:8px;width:380px;max-width:calc(100vw - 32px);max-height:460px;overflow-y:auto;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-md,10px);box-shadow:var(--clay-lg,0 8px 32px rgba(0,0,0,0.4));z-index:1000;padding:12px;display:none;white-space:normal;text-align:left;cursor:default;font-size:12px;font-family:'Plus Jakarta Sans',-apple-system,sans-serif}
+.timer-panel.visible{display:block}
+/* The panel is a DOM child of the badge, so hovering it propagates :hover to
+   the badge. The hover-lift transform (tofu theme) spawns a new stacking
+   context and re-orders the panel under the cursor → hover toggles off →
+   flicker loop that also steals clicks from the panel's buttons. While the
+   panel is open, pin a stable high stacking context and drop the lift. */
+.timer-trigger:has(.timer-panel.visible){z-index:1001}
+.timer-trigger:has(.timer-panel.visible):hover{transform:none}
+.timer-panel-title{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.timer-panel-empty{color:var(--text-secondary);text-align:center;padding:24px 12px;font-size:12px;line-height:1.5}
+.timer-panel-item{padding:10px;border-radius:8px;margin-bottom:8px;background:var(--bg-primary);border:1px solid var(--border);border-left:3px solid var(--text-tertiary)}
+.timer-panel-item:last-child{margin-bottom:0}
+.timer-panel-item.timer-status-active{border-left-color:var(--accent)}
+.timer-panel-item.timer-status-triggered{border-left-color:#D9A12E}
+.timer-panel-item.timer-status-cancelled{border-left-color:#C2705F}
+.timer-panel-item.timer-status-exhausted{border-left-color:var(--text-tertiary)}
+.timer-panel-item .tpi-header{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+.timer-panel-item .tpi-header-jump{cursor:pointer;border-radius:6px;margin:-3px -4px 4px;padding:3px 4px;transition:background .15s}
+.timer-panel-item .tpi-header-jump:hover{background:var(--bg-hover)}
+/* ── Timer poll-log modal ── */
+.timer-log-overlay{position:fixed;inset:0;height:var(--vh100,100vh);z-index:4000;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;padding:24px;backdrop-filter:blur(2px)}
+.timer-log-card{background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-md,10px);box-shadow:var(--clay-lg,0 8px 32px rgba(0,0,0,0.4));width:min(560px,calc(100vw - 48px));max-height:min(70vh,640px);max-height:min(calc(var(--vh100,100vh)*0.7),640px);display:flex;flex-direction:column;overflow:hidden;font-size:12px}
+.timer-log-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 14px;border-bottom:1px solid var(--border)}
+.timer-log-title{font-weight:700;color:var(--text-primary);font-size:13px;display:flex;align-items:center;gap:6px}
+.timer-log-title code{font-family:'JetBrains Mono',monospace;font-size:11px;background:var(--bg-hover);padding:1px 6px;border-radius:4px;color:var(--text-secondary)}
+.timer-log-close{background:transparent;border:none;color:var(--text-secondary);cursor:pointer;padding:4px;border-radius:6px;display:inline-flex;line-height:1;transition:background .15s,color .15s}
+.timer-log-close:hover{background:var(--bg-hover);color:var(--text-primary)}
+.timer-log-body{overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:8px}
+.timer-log-empty{color:var(--text-secondary);text-align:center;padding:28px 12px}
+.timer-log-row{border:1px solid var(--border);border-left:3px solid var(--text-tertiary);border-radius:8px;padding:8px 10px;background:var(--bg-primary)}
+.timer-log-row .tl-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.timer-log-row .tl-icon{display:inline-flex;line-height:1}
+.timer-log-row .tl-decision{font-weight:700;font-size:10px;letter-spacing:0.4px}
+.timer-log-row .tl-time{color:var(--text-secondary);font-size:10px}
+.timer-log-row .tl-tokens{margin-left:auto;color:var(--text-tertiary);font-size:10px;font-family:'JetBrains Mono',monospace}
+.timer-log-row .tl-reason{color:var(--text-primary);margin-top:5px;line-height:1.55;word-break:break-word;overflow-wrap:anywhere}
+.timer-log-row .tl-cmd{margin-top:6px;padding:6px 8px;background:var(--bg-hover);border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-secondary);white-space:pre-wrap;word-break:break-all;max-height:140px;overflow-y:auto}
+.timer-panel-item .tpi-status{font-size:13px;line-height:1}
+.timer-panel-item .tpi-id{font-weight:700;color:var(--text-primary);font-size:12px;font-family:'JetBrains Mono',monospace}
+.timer-panel-item .tpi-status-label{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;color:#fff;margin-left:auto;padding:2px 7px;border-radius:5px;background:var(--text-tertiary)}
+.timer-status-active .tpi-status-label{background:var(--accent)}
+.timer-status-triggered .tpi-status-label{background:#D9A12E}
+.timer-status-cancelled .tpi-status-label{background:#C2705F}
+.timer-panel-item .tpi-meta{color:var(--text-secondary);font-size:11px;line-height:1.75;word-break:break-word;overflow-wrap:anywhere}
+.timer-panel-item .tpi-meta code{font-size:10px;background:var(--bg-hover);color:var(--text-primary);padding:1px 5px;border-radius:4px;font-family:'JetBrains Mono',monospace;word-break:break-all;white-space:normal}
+.timer-panel-item .tpi-decision{display:inline-block;padding:1px 7px;border-radius:5px;font-size:9px;font-weight:700;letter-spacing:0.3px;margin-left:4px;color:#fff}
+.timer-panel-item .tpi-decision.ready{background:#3BA55D}
+.timer-panel-item .tpi-decision.wait{background:#D9A12E}
+.timer-panel-item .tpi-decision.error{background:#C2705F}
+.timer-panel-item .tpi-triggered{font-size:10px;color:#B5821E;font-weight:600;margin-top:7px}
+.timer-panel-item .tpi-actions{margin-top:9px;display:flex;gap:6px;flex-wrap:wrap}
+.tpi-btn{font-size:10px;padding:3px 10px;border-radius:6px;border:1px solid var(--border);cursor:pointer;font-family:inherit;font-weight:600;background:var(--bg-secondary);color:var(--text-secondary);transition:background .15s,color .15s,border-color .15s}
+.tpi-btn-log:hover{background:var(--bg-hover);color:var(--text-primary)}
+.tpi-btn-trigger{border-color:#3BA55D;color:#3BA55D}
+.tpi-btn-trigger:hover{background:#3BA55D;color:#fff}
+.tpi-btn-cancel{border-color:#C2705F;color:#C2705F}
+.tpi-btn-cancel:hover{background:#C2705F;color:#fff}
+.tool-badge{font-size:11px;padding:2px 7px;border-radius:12px;white-space:nowrap;display:none;align-items:center;animation:fadeIn .3s ease;background:rgba(245,158,11,0.12);color:#f59e0b;border:1px solid rgba(245,158,11,0.25)}.tool-badge.visible{display:inline-flex}
+/* ═══════════════════════════════════════════
+   ★ Code Execution Block (inline in chat)
+   ═══════════════════════════════════════════ */
+.code-exec-block {
+  /* Flat content inside the .ptool-turn card — see .ptool-cmd-block. */
+  margin: 0;
+  border-radius: 0;
+  border: none;
+  background: none;
+  overflow: visible;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 13px;
+}
+.code-exec-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Same horizontal inset as .ptool-line — see .ptool-cmd-header. */
+  padding: 2px 12px 4px 16px;
+  border-bottom: none;
+  background: none;
+}
+.code-exec-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+.code-exec-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.7);
+}
+.code-exec-status {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.code-exec-ok .code-exec-status {
+  color: #4ade80;
+  background: rgba(74,222,128,0.1);
+}
+.code-exec-err .code-exec-status {
+  color: #f87171;
+  background: rgba(248,113,113,0.1);
+}
+.code-exec-timeout .code-exec-status {
+  color: #fbbf24;
+  background: rgba(251,191,36,0.1);
+}
+.code-exec-running .code-exec-header {
+  color: #60a5fa;
+}
+.code-exec-running .code-exec-label {
+  color: #60a5fa;
+}
+.code-exec-cmd {
+  margin: 0;
+  padding: 10px 14px;
+  background: rgba(0,0,0,0.2);
+  border: none;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.code-exec-cmd code {
+  color: #e2e8f0;
+  font-family: inherit;
+  font-size: 12.5px;
+}
+.code-exec-output {
+  margin: 0;
+  padding: 10px 14px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+  background: rgba(0,0,0,0.15);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.code-exec-output code {
+  color: #a5b4c8;
+  font-family: inherit;
+  font-size: 12px;
+}
+/* spinner reused from project tools */
+.code-exec-running .ptool-spinner {
+  margin-left: auto;
+}
+/* ═══════════════════════════════════════════
+   ★ Unified Tool Activity Panel
+   ═══════════════════════════════════════════ */
+.ptool-panel {
+  margin-bottom: 10px;
+  border: none;
+  background: none;
+  overflow: visible;
+  animation: slideUp .3s ease;
+}
+/* No enclosing box in any state — the running affordance lives on the
+   individual round cards + the active tool row, not a panel-wide fill. */
+.ptool-panel-active { border: none; background: none; }
+/* Quiet, un-boxed count affordance (NOT a titled container header): a small
+   muted label with no border/background sitting above the cards. */
+.ptool-panel-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 2px 2px 4px;
+  font-size: 11px; font-weight: 600; color: var(--text-tertiary);
+  border-bottom: none;
+  user-select: none;
+}
+
+.ptool-panel-label { flex: 1; }
+.ptool-panel-body { padding: 0; contain: layout style; }
+/* ★ Perf: content-visibility:auto on individual tool round slots — off-screen slots skip layout/paint
+ * for long tool-use sessions (50+ rounds). contain-intrinsic-size prevents scrollbar jumps.
+ * NB: slots are now nested one level deeper inside `.ptool-turn` parallel-batch
+ * containers, so these are DESCENDANT (not direct-child) selectors. */
+.ptool-panel-body [data-prn] { content-visibility:auto; contain-intrinsic-size:auto 32px }
+/* ★ During a conversation switch (cv-off is applied by _forceScrollToBottom while the
+ *   scroll position settles), force every tool-round slot to render. Without this, slots
+ *   flash empty — collapsing to their 32px contain-intrinsic-size placeholder — as the
+ *   browser re-evaluates which slots are off-screen against a still-moving scrollTop. */
+.cv-off .ptool-panel-body [data-prn] { content-visibility:visible!important; }
+/* ★ Interactive cards (HG, stdin, approval) MUST NOT be collapsed by content-visibility
+ *   — they contain live inputs, buttons, textareas.  content-visibility:auto with
+ *   contain-intrinsic-size 32px can hide these tall cards (200-300px) when the browser
+ *   incorrectly considers them "off-screen" during a dynamic content swap from a
+ *   one-line spinner to a tall interactive card.  Override to visible for these slots. */
+.ptool-panel-body [data-prn]:has(.hg-card),
+.ptool-panel-body [data-prn]:has(.ptool-cmd-stdin),
+.ptool-panel-body [data-prn]:has(.ptool-pending),
+.ptool-panel-body [data-prn][data-prn-kind="swarm"],
+.ptool-panel-body [data-prn]:has(.sw-panel) { content-visibility:visible; contain-intrinsic-size:auto; }
+/* Swarm panels live as inline rows of the unified ptool-panel — drop
+ * the standalone vertical margin and bring the side margins in line
+ * with the surrounding tool rows so the timeline reads as one column. */
+.ptool-panel-body [data-prn] > .sw-panel { margin: 4px 10px; }
+
+/* ═══════════════════════════════════════════
+   ★ Tool-round TIMELINE  (.ptool-turn)  — redesigned 2026-07-07
+   One LLM turn = one node on a continuous vertical spine. The old design
+   stacked a FILLED pill ("第N轮" on a colored background) on its own line
+   above every tool row — a choppy, boxy, alternating rhythm. The new
+   model is a quiet timeline: a single hairline spine runs down a left
+   gutter, and each round's ordinal is an unadorned monospace digit
+   sitting in that gutter, aligned to its tool row. NO fill boxes.
+
+   • SOLO turn (one call) → a 2-column grid: [ordinal gutter | tool row].
+     Consecutive solos share the gutter width so their digits align into
+     one column and the spine is unbroken.
+   • MULTI-call turn (≥2 parallel) → a quiet bracket: a thin left rail
+     (no fill) + a collapsible header, visually distinct from the solo
+     spine so a parallel batch reads as one grouped unit.
+   ═══════════════════════════════════════════ */
+.ptool-turn {
+  display: block;
+  position: relative;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  background: rgba(255,255,255,0.022);
+  overflow: hidden;
+}
+.ptool-turn:first-child { margin-top: 4px; }
+/* The tool row / interactive card / swarm panel fills the card body. */
+.ptool-turn > [data-prn] { min-width: 0; }
+
+/* Responses Programmatic Tool Calling: one explicit parent card, followed by
+ * the ordinary child-tool rows whose args/results remain inspectable. */
+.ptool-program-turn { border-color: color-mix(in srgb, var(--accent, #7c6ee6) 34%, var(--border)); }
+.ptool-program-turn > [data-prn-kind="program"] { content-visibility: visible; }
+.ptool-program-turn > [data-prn]:not([data-prn-kind="program"]) {
+  margin-left: 18px;
+  border-left: 2px solid color-mix(in srgb, var(--accent, #7c6ee6) 24%, transparent);
+}
+.ptc-card { padding: 11px 12px 10px; background: color-mix(in srgb, var(--accent, #7c6ee6) 7%, transparent); }
+.ptc-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.ptc-icon { display: inline-flex; color: var(--accent, #7c6ee6); }
+.ptc-title { font-weight: 650; color: var(--text-primary); }
+.ptc-status { margin-left: auto; font-size: 11px; color: var(--text-tertiary); }
+.ptc-running .ptc-status { color: var(--accent, #7c6ee6); }
+.ptc-meta { margin: 5px 0 7px 23px; color: var(--text-secondary); font-size: 12px; }
+.ptc-tools { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 8px 23px; }
+.ptc-tool-chip { padding: 2px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-secondary); font: 11px/1.5 var(--font-mono, monospace); background: color-mix(in srgb, var(--bg-primary) 72%, transparent); }
+.ptc-detail { margin: 6px 0 0 23px; color: var(--text-secondary); font-size: 12px; }
+.ptc-detail summary { cursor: pointer; user-select: none; }
+.ptc-detail pre { max-height: 240px; overflow: auto; margin: 6px 0 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: 7px; background: color-mix(in srgb, var(--bg-primary) 82%, #000 18%); color: var(--text-primary); font: 11px/1.55 var(--font-mono, monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ptc-result pre { max-height: 180px; }
+/* Quiet monospace ordinal — shared by the solo gutter digit and the
+   multi-call header digit. No background, no border — just the number. */
+.ptool-turn-rno {
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  font-size: 10px; font-weight: 700; letter-spacing: 0;
+  color: var(--text-tertiary);
+  background: none; border-radius: 0; padding: 0; line-height: 1;
+  text-transform: none; flex-shrink: 0;
+}
+/* Solo round → a plain quiet header strip carrying just the round number
+   (no gutter, no spine). The element also carries `.ptool-turn-rno` above,
+   which supplies the mono font + neutral color. */
+.ptool-turn-rno-solo {
+  display: flex; align-items: center;
+  padding: 4px 12px 2px; margin: 0;
+}
+/* Multi-call turn → same card chrome as a solo round; its header gets a
+   divider (theme rules below) so the grouped rows read as under a header. */
+.ptool-turn:not([data-batch-size="1"]) > .ptool-turn-head {
+  border-bottom: 1px solid var(--border);
+}
+/* Parallel-call header — clickable collapse toggle. */
+.ptool-turn-head {
+  display: flex; align-items: center; gap: 7px;
+  padding: 5px 12px;
+  font-size: 10px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  cursor: pointer; user-select: none;
+}
+.ptool-turn-head:hover { color: var(--text-secondary); }
+.ptool-turn-head:hover .ptool-turn-rno { color: var(--text-secondary); }
+.ptool-turn-head svg { flex-shrink: 0; opacity: 0.7; }
+.ptool-turn-label { flex: 1; }
+.ptool-turn-chev { font-size: 10px; color: var(--text-tertiary); transition: transform .18s ease; }
+/* Collapsed — hide the member rows, keep the header. */
+.ptool-turn.collapsed > [data-prn] { display: none; }
+
+/* ── Light theme — neutral card border + muted ordinals ── */
+[data-theme="light"] .ptool-turn { border-color: var(--border); background: rgba(0,0,0,0.014); }
+[data-theme="light"] .ptool-turn:not([data-batch-size="1"]) > .ptool-turn-head { border-bottom-color: var(--border); }
+[data-theme="light"] .ptool-turn-rno,
+[data-theme="light"] .ptool-turn-head { color: var(--text-tertiary); }
+[data-theme="light"] .ptool-turn-head:hover,
+[data-theme="light"] .ptool-turn-head:hover .ptool-turn-rno { color: var(--text-secondary); }
+[data-theme="light"] .ptool-turn-chev { color: var(--text-tertiary); }
+
+/* ── Tofu theme — warm card border + clay ordinals ── */
+[data-theme="tofu"] .ptool-turn { border-color: rgba(196,149,106,0.28); background: #FFFDF9; }
+[data-theme="tofu"] .ptool-turn:not([data-batch-size="1"]) > .ptool-turn-head { border-bottom-color: rgba(196,149,106,0.22); }
+/* Solid mid-clay ordinal: legible warm digit on the cream card (AA). */
+[data-theme="tofu"] .ptool-turn-rno { color: #836636; }
+[data-theme="tofu"] .ptool-turn-head { color: rgba(138,109,59,0.72); }
+[data-theme="tofu"] .ptool-turn-head:hover,
+[data-theme="tofu"] .ptool-turn-head:hover .ptool-turn-rno { color: #A67B52; }
+[data-theme="tofu"] .ptool-turn-chev { color: rgba(138,109,59,0.5); }
+
+/* ═══════════════════════════════════════════
+   ★ Interleaved SEGMENT TIMELINE — narration/thinking styling
+   (epic pt_8b406df8fbe24ae5). The interleaved renderer (default ON) walks a
+   finished turn's segments and emits, per LLM round, the model's PRECEDING
+   thinking + narration prose ADJACENT to the tools it ran — inside the same
+   .ptool-panel-body. As of 2026-07-08 the tools are discrete quiet CARDS
+   (.ptool-turn) rather than a spine/gutter timeline, so the connective prose
+   flows as ORDINARY message body between the cards (flush left, x=0) — the
+   mainstream layout. See the alignment note below.
+   ═══════════════════════════════════════════ */
+/* ── Alignment (chrome-less card model, 2026-07-08) ──
+   The spine/ordinal-gutter grid was retired: each round is now a discrete
+   .ptool-turn CARD with 0 left offset (no 28px gutter). So the connective
+   prose no longer has a tool-content column to track — it reads as ORDINARY
+   message body flush to the message's left edge (x=0), with the round cards
+   as separated blocks between paragraphs. This is the mainstream layout the
+   owner asked for: narration is normal text, tools are quiet cards. The old
+   44px/28px values pushed prose into the (now-gone) tool column and were the
+   source of the "trapped in the panel" look. */
+.seg-timeline .seg-narration {
+  margin: 2px 0 8px 0;
+  padding: 0;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+.seg-timeline .seg-narration:first-child { margin-top: 2px; }
+/* Tighten the markdown paragraph rhythm so narration doesn't tower over the
+   compact tool cards it introduces. */
+.seg-timeline .seg-narration > :first-child { margin-top: 0; }
+.seg-timeline .seg-narration > :last-child { margin-bottom: 0; }
+.seg-timeline .seg-narration p { margin: 6px 0; }
+/* Per-batch thinking — a QUIET inline disclosure, NOT the full bordered
+   thinking-block card. Per-round reasoning is rarely opened, so in the
+   interleaved timeline it must read as a slim muted one-liner (collapsed)
+   that doesn't tower over the compact tool cards it sits between — stacking
+   12 full cards was the "too huge" look. Strip the card chrome
+   (border/bg/shadow/radius); shrink + mute the header; expanded text gets a
+   subtle left-rule indent. Flush left (margin-left 0) — the timeline
+   alignment invariant (guarded by test_frontend_segment_timeline.py). */
+.seg-timeline .seg-thinking {
+  margin: 2px 0 8px 0;
+  border: none;
+  background: none;
+  border-radius: 0;
+  box-shadow: none;
+  overflow: visible;
+}
+.seg-timeline .seg-thinking .thinking-header {
+  padding: 3px 0;
+  gap: 5px;
+  opacity: 0.55;
+  transition: opacity var(--transition);
+}
+.seg-timeline .seg-thinking .thinking-header:hover {
+  background: none;
+  opacity: 1;
+}
+.seg-timeline .seg-thinking .thinking-label {
+  font-size: 11px;
+  font-weight: 500;
+}
+.seg-timeline .seg-thinking .thinking-toggle { font-size: 9px; }
+.seg-timeline .seg-thinking .thinking-text {
+  padding: 2px 0 2px 11px;
+  margin-left: 1px;
+  border-left: 2px solid var(--thinking-border);
+  font-size: 12px;
+  opacity: 0.9;
+}
+/* Prose sits directly above the card it introduces — its own bottom margin
+   already provides separation, so don't double it with the card's top margin. */
+.seg-timeline .seg-narration + .ptool-turn,
+.seg-timeline .seg-thinking + .ptool-turn { margin-top: 0; }
+
+/* ★ Per-round streaming translation (interleave): the incremental translator
+   routes each closed round's Chinese into a sibling block in the panel body,
+   directly BEFORE its .ptool-turn card (NOT nested inside it). Since
+   RENDER_CONTRACT Phase 3.5 step 2 the live zh node carries the SETTLED class
+   list (`.seg-narration`, byte-identical to the cold render) — it is styled by
+   the `.seg-timeline .seg-narration` rules above (the panel carries
+   `seg-timeline`), and the former `.stream-seg-narration` block here was
+   deleted as inert. */
+
+/* ★ Per-round ENGLISH narration (segment-timeline streaming interleave, step
+   5b): rendered inside each live .ptool-turn by _renderStreamRoundProse, above
+   the tool slots — reuses the settled `.seg-narration` look verbatim (the panel
+   carries `seg-timeline`). When auto-translate is LIVE, the incremental
+   translator paints the Chinese equivalent into a settled-class `.seg-narration`
+   twin (found by exclusion from this English node), so the English copy is
+   hidden to avoid a bilingual double.
+   ★ The hide is gated PER ROUND on the `.xlate-hidden` class (toggled by JS
+   only for a round whose Chinese twin actually exists) — NOT on a global
+   `data-xlate` body flag. The old body-level rule hid EVERY round's English
+   the instant the FIRST round's Chinese arrived, so an intermediate round whose
+   translation was still pending / failed / never ran showed NOTHING (English
+   hidden, Chinese absent) — the reported "intermediate-round content lost with
+   auto-translate on" bug. The English stays visible as the fallback whenever a
+   round's Chinese hasn't landed. */
+.ptool-panel-body > .stream-seg-en-narration.xlate-hidden { display: none; }
+
+/* ★ Truncated tool calls "show more" bar */
+.ptool-truncated {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 6px 12px;
+  margin: 2px 12px 4px;
+  font-size: 11px; font-weight: 500;
+  font-family: 'JetBrains Mono', monospace;
+  color: rgba(234,179,8,0.65);
+  background: rgba(234,179,8,0.05);
+  border: 1px dashed rgba(234,179,8,0.18);
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  transition: all .2s ease;
+}
+.ptool-truncated:hover {
+  color: rgba(234,179,8,0.9);
+  background: rgba(234,179,8,0.1);
+  border-color: rgba(234,179,8,0.35);
+}
+.ptool-truncated svg {
+  flex-shrink: 0;
+  transition: transform .2s ease;
+}
+[data-theme="light"] .ptool-truncated {
+  color: rgba(140,100,0,0.6);
+  background: rgba(180,140,0,0.04);
+  border-color: rgba(180,140,0,0.15);
+}
+[data-theme="light"] .ptool-truncated:hover {
+  color: rgba(140,100,0,0.85);
+  background: rgba(180,140,0,0.08);
+  border-color: rgba(180,140,0,0.3);
+}
+
+.ptool-line {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 12px 5px 16px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: background .15s;
+  min-height: 28px;
+}
+.ptool-line:hover { background: rgba(234,179,8,0.05); }
+.ptool-line.ptool-active { color: var(--text-primary); }
+.ptool-icon {
+  flex-shrink: 0; display: flex; align-items: center;
+  color: rgba(234,179,8,0.7); width: 16px; justify-content: center;
+}
+.ptool-line.ptool-active .ptool-icon { color: #f59e0b; }
+
+/* ── Multi-root: workspace-root pill on filesystem tool lines ──
+ *    Only emitted on tool calls in workspaces with > 1 root.
+ *    Mirrors .fc-root from the file-changes bar so the two surfaces
+ *    look consistent. */
+.ptool-root {
+  display: inline-block;
+  flex-shrink: 0;
+  padding: 0 4px;
+  margin-right: 4px;
+  border-radius: 3px;
+  background: rgba(96,165,250,0.15);
+  color: #60a5fa;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  font-size: 10.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.ptool-cmd-header .ptool-root { margin-left: 2px; }
+.ptool-text {
+  flex: 1; min-width: 0;
+  font-family: 'JetBrains Mono', monospace; font-size: 11.5px; line-height: 1.4;
+  word-break: break-word;
+}
+/* Clickable MCP resource link (e.g. an Overleaf project name/id on a
+ * tool-call line). Inherits the monospace line; underlined on hover so
+ * it reads as a link without shouting on every row. */
+.ptool-mcp-link {
+  color: var(--accent, #818cf8);
+  text-decoration: none;
+  border-bottom: 1px dotted currentColor;
+}
+.ptool-mcp-link:hover { text-decoration: none; border-bottom-style: solid; }
+.ptool-badge {
+  flex-shrink: 0;
+  font-size: 10px; font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  padding: 1px 7px; border-radius: 8px;
+  white-space: nowrap;
+}
+.ptool-badge-info { color: rgba(234,179,8,0.7); background: rgba(234,179,8,0.1); }
+.ptool-badge-ok { color: #34d399; background: rgba(52,211,153,0.12); }
+.ptool-badge-err { color: var(--error-text); background: var(--error-bg); }
+/* Batch per-item progress ("2/3") on an in-flight batch search/fetch row.
+ * A batch call is ONE tool round, so without this the row shows a spinner and
+ * nothing else until every item returns — one slow query is indistinguishable
+ * from all of them being slow. Monospace + tabular-nums so the digits do not
+ * reflow the row as the counter advances. */
+.ptool-batch-progress {
+  flex-shrink: 0;
+  font-size: 10px; font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 7px; border-radius: 8px;
+  white-space: nowrap;
+  color: var(--text-secondary, #94a3b8);
+  background: rgba(148, 163, 184, 0.14);
+}
+.ptool-batch-failed { margin-left: 4px; color: var(--error-text); }
+/* ───────────────────────────────────────────────────────────────
+ * COMPACTED tool-row label  (per UX directive: solid colors, no opacity)
+ *
+ * When a tool result has been replaced by a server-side compaction
+ * placeholder, the row gets a SOLID-color pill on the LEFT (right
+ * after the icon) that says exactly what happened. The pill is
+ * placed inline so the user can't miss it; the pill carries the
+ * layer name and a from→to token reduction so the user knows both
+ * that compaction happened and how much was saved.
+ *
+ * Layers:
+ *   L0 (born too big — model never saw full text)  — pink/red palette
+ *   L1 (aged out of hot tail — replaced on next call) — purple palette
+ *   L3 (LLM summary in transcript archive)         — amber palette
+ *
+ * Compacted rows themselves stay at full text opacity — the LABEL
+ * carries the signal, not a faded row.
+ *
+ * Anti-flicker: pure static styling, no transitions, no animations.
+ * ─────────────────────────────────────────────────────────────── */
+.ptool-compaction-label{
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  flex-shrink:0;
+  height:18px;
+  padding:0 7px 0 6px;
+  margin-right:6px;
+  border-radius:4px;
+  font-family:'JetBrains Mono', ui-monospace, monospace;
+  font-size:10px;
+  font-weight:700;
+  line-height:1;
+  letter-spacing:.04em;
+  cursor:help;
+  user-select:none;
+  /* Solid base — colors set per-layer below. No opacity on the row,
+   * no transparency on the label background. */
+  color:#ffffff;
+  background:#a78bfa;
+}
+.ptool-compaction-text{
+  /* The "COMPACTED L1" portion — kept tight and uppercase. */
+  letter-spacing:.06em;
+}
+.ptool-compaction-delta{
+  /* Token reduction pill ("280k→2k") sits in a darker inset block so
+   * the layer name and the savings number are readable as two pieces
+   * of information rather than one long string. */
+  padding:0 5px;
+  height:14px;
+  display:inline-flex;
+  align-items:center;
+  border-radius:3px;
+  font-weight:600;
+  letter-spacing:0;
+  /* Per-layer fill set below; the inner block uses a slightly darker
+   * shade of the layer color so it reads as solid even on top of the
+   * already-solid label. */
+}
+
+/* L0 — result was born too big and persisted to disk before the model
+ * ever saw the full text.  Strongest demotion → hot pink palette. */
+.ptool-compaction-l0{
+  background:#ec4899;
+  color:#ffffff;
+}
+.ptool-compaction-l0 .ptool-compaction-delta{
+  background:#be185d;
+  color:#ffffff;
+}
+
+/* L1 — was visible once, then aged out of the hot tail. Purple. */
+.ptool-compaction-l1{
+  background:#8b5cf6;
+  color:#ffffff;
+}
+.ptool-compaction-l1 .ptool-compaction-delta{
+  background:#6d28d9;
+  color:#ffffff;
+}
+
+/* L3 — replaced by an LLM-generated summary in the transcript
+ * archive (the most lossy form). Amber so the user can tell at a
+ * glance "this was rewritten, not just truncated". */
+.ptool-compaction-l3{
+  background:#f59e0b;
+  color:#1f1300;
+}
+.ptool-compaction-l3 .ptool-compaction-delta{
+  background:#b45309;
+  color:#ffffff;
+}
+
+/* The tool name on a compacted row stays at full color so the user
+ * can still read what was called.  No more dotted underline / opacity
+ * fade — the LABEL carries the signal. */
+.ptool-line .ptool-compaction-label + .ptool-text,
+.ptool-line .ptool-compaction-label ~ .ptool-text{
+  /* No-op rule, intentionally — kept as documentation that we leave
+   * the text alone on compacted rows. */
+}
+
+/* ★ Search diagnostic detail (shown when 0 results) */
+.ptool-line-with-diag { flex-wrap: wrap; }
+.ptool-search-diag {
+  width: 100%;
+  margin: 3px 0 1px 22px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: rgba(255,255,255,0.5);
+  font-style: italic;
+}
+[data-theme="light"] .ptool-search-diag { color: rgba(0,0,0,0.45); }
+
+/* ★ Local Tool Search: expose the actual matched native tools instead of a
+ * generic gateway result row. Cards are always visible because the result set
+ * is already bounded (eight by default) and is itself the useful activity. */
+.ptool-tool-search-block {
+  margin: 3px 8px 7px;
+  overflow: hidden;
+  border: 1px solid rgba(129,140,248,0.2);
+  border-radius: 8px;
+  background: rgba(99,102,241,0.045);
+}
+.ptool-tool-search-header {
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(129,140,248,0.13);
+}
+.ptool-tool-search-header .ptool-icon { color: #818cf8; }
+.ptool-tool-search-count,
+.ptool-tool-search-more {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.ptool-tool-search-count {
+  color: #a5b4fc;
+  background: rgba(99,102,241,0.14);
+}
+.ptool-tool-search-more { color: var(--text-tertiary); }
+.ptool-tool-search-results {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 7px;
+}
+.ptool-tool-search-card {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid rgba(148,163,184,0.14);
+  border-radius: 6px;
+  background: rgba(15,23,42,0.18);
+}
+.ptool-tool-search-card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.ptool-tool-search-name {
+  min-width: 0;
+  overflow: hidden;
+  color: #c7d2fe;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ptool-tool-search-namespace {
+  margin-left: auto;
+  flex-shrink: 0;
+  max-width: 42%;
+  overflow: hidden;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--text-tertiary);
+  background: rgba(148,163,184,0.1);
+  font: 9px/1.45 'JetBrains Mono', monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ptool-tool-search-desc {
+  margin-top: 5px;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.ptool-tool-search-args {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 7px;
+}
+.ptool-tool-arg {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  padding: 1px 5px;
+  border: 1px solid rgba(148,163,184,0.13);
+  border-radius: 4px;
+  color: var(--text-tertiary);
+  font-size: 8.5px;
+  line-height: 1.45;
+}
+.ptool-tool-arg code { color: var(--text-secondary); font-size: 9px; }
+.ptool-tool-arg-required { color: #f59e0b; font-weight: 800; }
+.ptool-tool-search-empty {
+  grid-column: 1 / -1;
+  padding: 12px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  text-align: center;
+}
+[data-theme="light"] .ptool-tool-search-block {
+  border-color: rgba(79,70,229,0.16);
+  background: rgba(99,102,241,0.035);
+}
+[data-theme="light"] .ptool-tool-search-card {
+  border-color: rgba(100,116,139,0.13);
+  background: rgba(255,255,255,0.7);
+}
+[data-theme="light"] .ptool-tool-search-name { color: #4338ca; }
+@media (max-width: 680px) {
+  .ptool-tool-search-results { grid-template-columns: minmax(0, 1fr); }
+  .ptool-tool-search-more { display: none; }
+}
+
+/* ★ Expandable search results inside unified tool panel.
+ *   COLLAPSED: render flush + chromeless so the header row aligns with its
+ *   sibling tool rows (read_files, grep, …) — the ▼ chevron is the only
+ *   "this expands" affordance. EXPANDED: promote into a bordered, tinted
+ *   card that visually brackets the result list. Side margins stay 0 in
+ *   both states so the header never shifts horizontally on toggle; only the
+ *   border/background fade in (plus a little vertical breathing room). */
+.ptool-results-block {
+  margin: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  overflow: hidden;
+  background: none;
+  transition: background .25s ease, border-color .25s ease, margin .25s ease;
+}
+.ptool-results-block.expanded {
+  margin: 4px 0;
+  border-color: rgba(234,179,8,0.18);
+  background: rgba(0,0,0,0.12);
+}
+.ptool-results-header {
+  cursor: pointer;
+}
+.ptool-results-header:hover {
+  background: rgba(234,179,8,0.05);
+}
+.ptool-results-toggle {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  opacity: 0.6;
+  transition: transform .3s ease;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+.ptool-results-block.expanded .ptool-results-toggle {
+  transform: rotate(180deg);
+}
+.ptool-results-content {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height .4s ease;
+}
+.ptool-results-block.expanded .ptool-results-content {
+  max-height: none;
+  border-top: 1px solid rgba(234,179,8,0.1);
+}
+.ptool-results-content .search-result-item {
+  padding: 8px 12px;
+  border-top: 1px solid rgba(234,179,8,0.06);
+}
+.ptool-results-content .search-result-item:hover {
+  background: rgba(234,179,8,0.04);
+}
+/* ★ Per-query grouping for batch web_search results — a subheader before
+ *   each query's result block so users can attribute results to the term
+ *   that produced them. */
+.search-query-group + .search-query-group { margin-top: 2px; }
+.search-query-group-header {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 12px 5px;
+  background: rgba(234,179,8,0.06);
+  border-top: 1px solid rgba(234,179,8,0.12);
+  font-family: 'JetBrains Mono', monospace;
+}
+.search-query-group-icon { font-size: 11px; flex-shrink: 0; opacity: 0.8; }
+.search-query-group-q {
+  flex: 1; min-width: 0;
+  font-size: 11.5px; font-weight: 600; color: #f59e0b;
+  word-break: break-word; line-height: 1.35;
+}
+.search-query-group-count {
+  flex-shrink: 0;
+  font-size: 10px; font-weight: 600;
+  color: rgba(234,179,8,0.8); background: rgba(234,179,8,0.12);
+  padding: 1px 7px; border-radius: 8px;
+}
+[data-theme="light"] .search-query-group-header { background: rgba(64,104,184,0.05); border-top-color: rgba(64,104,184,0.12); }
+[data-theme="light"] .search-query-group-q { color: #2563eb; }
+[data-theme="light"] .search-query-group-count { color: #2563eb; background: rgba(64,104,184,0.1); }
+/* ★ Search orbit animation shrunk for inline ptool-line */
+.ptool-search-line .search-orbit-container { display: inline-flex; vertical-align: middle; }
+.ptool-panel .search-orbit-center { background: #f59e0b; }
+.ptool-panel .search-orbit-dot:nth-child(2) { background: #fbbf24; }
+.ptool-panel .search-orbit-dot:nth-child(3) { background: #f59e0b; }
+.ptool-panel .search-orbit-dot:nth-child(4) { background: #d97706; }
+.ptool-spinner {
+  width: 12px; height: 12px;
+  border: 2px solid rgba(234,179,8,0.2);
+  border-top-color: #f59e0b;
+  border-radius: 50%;
+  animation: ptoolSpin 0.6s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes ptoolSpin { to { transform: rotate(360deg); } }
+
+/* ═══════════════════════════════════════════
+   ★ Timer Watcher block
+   ═══════════════════════════════════════════ */
+.timer-watcher-block {
+  margin: 8px 8px 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(234,179,8,0.24);
+  background: rgba(234,179,8,0.045);
+  overflow: hidden;
+}
+.timer-watcher-active { border-color: rgba(245,158,11,0.4); border-style: solid; background: rgba(245,158,11,0.06); }
+.timer-watcher-triggered { border-color: rgba(34,197,94,0.35); border-style: solid; background: rgba(34,197,94,0.05); }
+
+.timer-watcher-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 13px;
+  border-bottom: 1px solid rgba(234,179,8,0.12);
+  cursor: pointer; user-select: none;
+  font-size: 12px; font-weight: 600;
+  color: rgba(234,179,8,0.88);
+}
+.timer-watcher-header:hover { background: rgba(234,179,8,0.06); }
+.timer-watcher-label { flex: 1; }
+.timer-toggle { font-size: 11px; color: rgba(234,179,8,0.4); flex-shrink: 0; }
+
+.timer-watcher-body {
+  display: none; padding: 4px 0;
+}
+.timer-watcher-body.expanded { display: block; }
+
+.timer-poll-line {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 3px 12px 3px 16px;
+  font-size: 11.5px; line-height: 1.5;
+  color: var(--text-secondary);
+}
+.timer-poll-line:hover { background: rgba(234,179,8,0.04); }
+.timer-poll-icon { flex-shrink: 0; font-size: 12px; }
+.timer-poll-num { flex-shrink: 0; min-width: 22px; font-weight: 600; color: rgba(234,179,8,0.45); font-size: 10.5px; }
+.timer-poll-reason { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timer-poll-meta { flex-shrink: 0; font-size: 10px; color: var(--text-tertiary); margin-left: auto; }
+
+.timer-poll-ready .timer-poll-reason { color: rgba(34,197,94,0.9); font-weight: 600; }
+.timer-poll-error .timer-poll-reason { color: rgba(239,68,68,0.8); }
+.timer-poll-started .timer-poll-reason { color: rgba(234,179,8,0.7); font-style: italic; }
+/* ★ Skipped polls: output-unchanged heartbeat — subdued so it doesn't dominate the log */
+.timer-poll-skipped { opacity: 0.55; border-top: 1px dashed rgba(234,179,8,0.15); margin-top: 2px; padding-top: 4px; }
+.timer-poll-skipped .timer-poll-reason { color: var(--text-tertiary); font-style: italic; }
+.timer-poll-skipped .timer-poll-icon { filter: grayscale(0.3); }
+
+.timer-poll-hidden {
+  padding: 3px 16px; font-size: 10.5px; color: var(--text-tertiary); font-style: italic;
+}
+
+/* ★ Verification metadata — what the timer is checking + how often */
+.timer-watcher-meta {
+  margin: 6px 12px 8px 14px; padding: 8px 12px;
+  border-left: 2px solid rgba(234,179,8,0.35);
+  background: rgba(234,179,8,0.035); border-radius: 0 6px 6px 0;
+  font-size: 11px; line-height: 1.5;
+}
+.timer-meta-row { display: flex; gap: 10px; align-items: center; margin: 4px 0; }
+/* The Verifying instruction is a (possibly multi-line) Markdown block, so its
+   label pins to the FIRST line rather than centering against the whole block. */
+.timer-meta-row-instr { align-items: flex-start; }
+.timer-meta-label {
+  flex-shrink: 0; min-width: 62px; font-weight: 700; font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.04em; color: rgba(234,179,8,0.72);
+  line-height: 1.85;
+}
+.timer-meta-val { flex: 1; min-width: 0; color: var(--text-secondary); }
+
+/* ★ Expandable "Verifying" instruction — the model writes it in Markdown, so
+   the body is rendered via renderMarkdown (.timer-meta-md.md-content). Collapse
+   with a max-height clamp (line-clamp doesn't work across the block children
+   Markdown emits), reveal the FULL text on click. Font is normalized to the
+   panel's compact scale by the higher-specificity rule below. */
+.timer-meta-row-instr { cursor: pointer; }
+/* Force the Verifying markdown to the panel's compact scale. Without a
+   higher-specificity selector, the theme-level `[data-theme] .md-content`
+   rule (15px, serif line-height, 72ch clamp) wins and the instruction balloons
+   to reading-mode type while everything around it stays ~11px. Explicit values
+   keep it uniform across dark / light / tofu. */
+.timer-watcher-meta .timer-meta-md.md-content {
+  font-family: var(--md-sans);
+  font-size: 12px; line-height: 1.55; letter-spacing: normal;
+  font-weight: 400; max-width: none; color: var(--text-secondary);
+}
+/* Markdown emits <p>/<ul>/<pre> with default margins; tame them so the
+   Verifying block reads as one tight paragraph, not a spaced-out document. */
+.timer-watcher-meta .timer-meta-md.md-content > :first-child { margin-top: 0; }
+.timer-watcher-meta .timer-meta-md.md-content > :last-child { margin-bottom: 0; }
+.timer-watcher-meta .timer-meta-md.md-content p { margin: 3px 0; }
+.timer-watcher-meta .timer-meta-md.md-content ul,
+.timer-watcher-meta .timer-meta-md.md-content ol { margin: 3px 0; padding-left: 18px; }
+.timer-watcher-meta .timer-meta-md.md-content li { margin-bottom: 2px; line-height: 1.55; }
+.timer-watcher-meta .timer-meta-md.md-content code { font-size: 0.92em; }
+.timer-meta-clamp {
+  max-height: 4.6em; overflow: hidden; white-space: normal; word-break: break-word;
+  -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+          mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+}
+.timer-meta-clamp.expanded {
+  max-height: none; overflow: visible;
+  -webkit-mask-image: none; mask-image: none;
+}
+
+/* ★ Timer header leading icon — replaces the old inline "⏱ " glyph baked into
+   the label text, so the icon sits on the flex baseline correctly. */
+.timer-watcher-icon { flex-shrink: 0; color: rgba(234,179,8,0.75); }
+.timer-watcher-icon > svg { width: 13px; height: 13px; }
+
+/* ★ Copyable timer-id chip — the full timer id extracted out of the label into
+   one prominent, one-click-to-copy token. */
+.timer-id-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  flex-shrink: 0; cursor: pointer;
+  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.01em;
+  padding: 1px 7px; border-radius: 6px;
+  color: rgba(234,179,8,0.95);
+  background: rgba(234,179,8,0.1);
+  border: 1px solid rgba(234,179,8,0.28);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.timer-id-chip:hover { background: rgba(234,179,8,0.18); border-color: rgba(234,179,8,0.45); }
+.timer-id-chip > svg { width: 10px; height: 10px; opacity: 0.7; }
+.timer-id-chip.copied {
+  color: #22c55e; background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.35);
+}
+[data-theme="light"] .timer-watcher-icon,
+[data-theme="tofu"]  .timer-watcher-icon { color: #a07d2a; }
+[data-theme="light"] .timer-id-chip,
+[data-theme="tofu"]  .timer-id-chip {
+  color: #8a6516; background: rgba(168,130,30,0.1); border-color: rgba(168,130,30,0.28);
+}
+[data-theme="light"] .timer-id-chip:hover,
+[data-theme="tofu"]  .timer-id-chip:hover { background: rgba(168,130,30,0.18); border-color: rgba(168,130,30,0.45); }
+
+/* ★ Timer identity chip — distinguishes a pure command-based (zero-LLM) timer
+   from a hybrid one, right in the header. */
+.timer-kind-badge {
+  flex-shrink: 0; font-size: 9.5px; font-weight: 600; border-radius: 6px;
+  padding: 1px 7px; text-transform: uppercase; letter-spacing: 0.03em;
+  cursor: help;
+}
+.timer-kind-code {
+  color: #34d399; background: rgba(52,211,153,0.12); border: 1px solid rgba(52,211,153,0.28);
+}
+.timer-kind-hybrid {
+  color: #60a5fa; background: rgba(96,165,250,0.12); border: 1px solid rgba(96,165,250,0.28);
+}
+[data-theme="light"] .timer-kind-code,
+[data-theme="tofu"]  .timer-kind-code { color: #0f766e; }
+[data-theme="light"] .timer-kind-hybrid,
+[data-theme="tofu"]  .timer-kind-hybrid { color: #1d4ed8; }
+.timer-meta-more {
+  flex-shrink: 0; align-self: flex-end; font-size: 9.5px; font-weight: 600;
+  color: rgba(234,179,8,0.75); text-transform: uppercase; letter-spacing: 0.03em;
+  cursor: pointer; white-space: nowrap;
+}
+.timer-meta-row-instr:hover .timer-meta-more { color: rgba(234,179,8,0.95); }
+/* ★ Resolved-model chip — who actually performs the verification */
+.timer-meta-model {
+  font-family: var(--font-mono, monospace); font-size: 10px; font-weight: 500;
+  color: #a78bfa; background: rgba(167,139,250,0.12);
+  border: 1px solid rgba(167,139,250,0.24); border-radius: 6px; padding: 0 6px;
+}
+.timer-poll-model {
+  flex-shrink: 0; font-family: var(--font-mono, monospace); font-size: 9.5px;
+  color: #a78bfa; background: rgba(167,139,250,0.10);
+  border: 1px solid rgba(167,139,250,0.20); border-radius: 5px; padding: 0 5px;
+  max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.timer-poll-toolcount {
+  flex-shrink: 0; font-size: 9.5px; font-weight: 600; color: rgba(234,179,8,0.7);
+  background: rgba(234,179,8,0.08); border-radius: 5px; padding: 0 5px;
+}
+/* ★ Per-poll tool-call timeline — reuses the swarm panel .sw-tl-* rules; this
+   only tweaks spacing inside the timer detail block. */
+.timer-poll-trace { margin: 4px 0 6px; }
+
+[data-theme="light"] .timer-meta-model,
+[data-theme="light"] .timer-poll-model { color: #6d28d9; }
+.timer-meta-cmd {
+  flex: 1; min-width: 0; font-family: var(--font-mono, monospace); font-size: 11px;
+  line-height: 1.5; color: var(--text-primary); background: rgba(0,0,0,0.24);
+  padding: 6px 9px; border-radius: 6px; white-space: pre-wrap; word-break: break-all;
+}
+
+/* ★ "Next check in Ns" hint */
+.timer-next-poll {
+  padding: 4px 16px; font-size: 10.5px; color: rgba(234,179,8,0.65); font-style: italic;
+}
+
+/* ★ parse_error — LLM responded but produced no usable decision */
+.timer-poll-parse-err .timer-poll-reason { color: rgba(245,158,11,0.95); font-weight: 600; }
+.timer-watcher-warn { border-color: rgba(245,158,11,0.55) !important; }
+
+/* ★ Stable per-poll id chip (e.g. tmr_84bd4fb3.p36) — monospace so it reads as
+   an identifier and is greppable against app.log / the DB poll_log row. */
+.timer-poll-id {
+  flex-shrink: 0; font-family: var(--font-mono, monospace); font-size: 9.5px;
+  color: var(--text-tertiary); background: rgba(255,255,255,0.05);
+  border-radius: 4px; padding: 0 5px; letter-spacing: -0.01em; cursor: help;
+}
+[data-theme="light"] .timer-poll-id { background: rgba(0,0,0,0.05); }
+
+/* ★ Raw LLM output (only present on a parse failure) — give it an amber tint so
+   it visually reads as "this is the unparseable evidence", distinct from the
+   neutral check_command output block above it. */
+.timer-poll-raw {
+  border-left: 2px solid rgba(245,158,11,0.5);
+  background: rgba(245,158,11,0.06);
+}
+[data-theme="light"] .timer-poll-raw { background: rgba(245,158,11,0.08); }
+
+/* ★ Expandable per-poll detail (full reason + check_command output) */
+.timer-poll-caret, .timer-poll-caret-spacer {
+  flex-shrink: 0; width: 10px; font-size: 9px; color: rgba(234,179,8,0.5);
+  transition: transform 0.12s ease;
+}
+.timer-poll-has-detail { cursor: pointer; }
+.timer-poll-has-detail.expanded .timer-poll-caret { transform: rotate(90deg); }
+.timer-poll-has-detail .timer-poll-reason { white-space: normal; }
+.timer-poll-detail {
+  display: none; margin: 0 12px 6px 38px; padding: 6px 10px;
+  background: rgba(0,0,0,0.16); border-radius: 4px; font-size: 11px;
+}
+.timer-poll-detail.expanded { display: block; }
+.timer-poll-detail-reason { color: var(--text-secondary); line-height: 1.5; margin-bottom: 6px; white-space: pre-wrap; }
+.timer-poll-detail-label { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-tertiary); margin-bottom: 3px; }
+.timer-poll-detail-output {
+  margin: 0; max-height: 240px; overflow: auto;
+  font-family: var(--font-mono, monospace); font-size: 10.5px; line-height: 1.45;
+  color: var(--text-secondary); white-space: pre-wrap; word-break: break-word;
+}
+
+[data-theme="light"] .timer-meta-cmd {
+  background: rgba(0,0,0,0.04); color: #2a2820;
+  border: 1px solid rgba(0,0,0,0.08);
+}
+/* Tofu paper: match the run_command code-tray look — recessed, warm ink, readable. */
+[data-theme="tofu"] .timer-meta-cmd {
+  background: rgba(0,0,0,0.03); color: #4A4233;
+  border: 1px solid rgba(178,163,140,0.32);
+  box-shadow: inset 0 1px 3px rgba(138,122,86,0.06);
+}
+[data-theme="light"] .timer-poll-detail { background: rgba(0,0,0,0.04); }
+[data-theme="light"] .timer-poll-parse-err .timer-poll-reason { color: #b45309; }
+
+/* ★ Light & Tofu themes: the block's hardcoded pale-amber text/borders are
+   tuned for the dark background and wash out on the cream background. Replace
+   with solid, contrast-safe dark amber (#8a6516 ≈ 4.6:1 on cream). */
+[data-theme="light"] .timer-watcher-block,
+[data-theme="tofu"]  .timer-watcher-block {
+  border-color: rgba(168,130,30,0.45); background: rgba(168,130,30,0.06);
+}
+[data-theme="light"] .timer-watcher-active,
+[data-theme="tofu"]  .timer-watcher-active {
+  border-color: rgba(168,130,30,0.6); background: rgba(168,130,30,0.09);
+}
+[data-theme="light"] .timer-watcher-triggered,
+[data-theme="tofu"]  .timer-watcher-triggered {
+  border-color: rgba(21,128,61,0.5); background: rgba(21,128,61,0.08);
+}
+[data-theme="light"] .timer-watcher-header,
+[data-theme="tofu"]  .timer-watcher-header {
+  color: #8a6516; border-bottom-color: rgba(168,130,30,0.22);
+}
+[data-theme="light"] .timer-watcher-header:hover,
+[data-theme="tofu"]  .timer-watcher-header:hover { background: rgba(168,130,30,0.08); }
+[data-theme="light"] .timer-toggle,
+[data-theme="tofu"]  .timer-toggle { color: #a07d2a; }
+[data-theme="light"] .timer-poll-num,
+[data-theme="tofu"]  .timer-poll-num { color: #8a6516; }
+[data-theme="light"] .timer-poll-line:hover,
+[data-theme="tofu"]  .timer-poll-line:hover { background: rgba(168,130,30,0.07); }
+[data-theme="light"] .timer-poll-started .timer-poll-reason,
+[data-theme="tofu"]  .timer-poll-started .timer-poll-reason { color: #8a6516; }
+[data-theme="light"] .timer-poll-ready .timer-poll-reason,
+[data-theme="tofu"]  .timer-poll-ready .timer-poll-reason { color: #15803d; }
+[data-theme="light"] .timer-poll-error .timer-poll-reason,
+[data-theme="tofu"]  .timer-poll-error .timer-poll-reason { color: #dc2626; }
+[data-theme="light"] .timer-watcher-meta,
+[data-theme="tofu"]  .timer-watcher-meta {
+  border-left-color: rgba(168,130,30,0.55); background: rgba(168,130,30,0.05);
+}
+[data-theme="light"] .timer-meta-label,
+[data-theme="tofu"]  .timer-meta-label { color: #8a6516; }
+[data-theme="light"] .timer-meta-more,
+[data-theme="tofu"]  .timer-meta-more { color: #8a6516; }
+[data-theme="light"] .timer-meta-row-instr:hover .timer-meta-more,
+[data-theme="tofu"]  .timer-meta-row-instr:hover .timer-meta-more { color: #6b4e11; }
+[data-theme="light"] .timer-next-poll,
+[data-theme="tofu"]  .timer-next-poll { color: #8a6516; }
+[data-theme="light"] .timer-poll-toolcount,
+[data-theme="tofu"]  .timer-poll-toolcount { color: #8a6516; background: rgba(168,130,30,0.12); }
+/* Tofu: purple model chip is too light on cream — match the tofu vertical-row purple. */
+[data-theme="tofu"] .timer-meta-model,
+[data-theme="tofu"] .timer-poll-model {
+  color: #5E4670; background: rgba(150,120,170,0.14); border-color: rgba(150,120,170,0.35);
+}
+

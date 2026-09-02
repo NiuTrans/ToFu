@@ -14,17 +14,13 @@ logger = get_logger('server.lifecycle')
 
 
 async def method_override() -> None:
-    """Apply the legacy query override and unwrap proxy-double-encoded JSON."""
-    inbound_method = request.method
-    override = request.args.get('_method')
-    if override:
-        method = override.upper()
-        request.scope['method'] = method
-        # Quart/Werkzeug copies the ASGI method onto the Request object during
-        # construction. Keep the established downstream-visible override, not
-        # merely the already-consumed scope field.
-        request.method = method
+    """Unwrap proxy-double-encoded JSON bodies.
 
+    The legacy ``?_method=`` query override is retired: in-tree callers send
+    real HTTP verbs through the shared transport. The hook name remains part
+    of the application-assembly lifecycle contract.
+    """
+    inbound_method = request.method
     content_type = request.content_type or ''
     if inbound_method not in ('POST', 'PUT') or 'json' not in content_type:
         return

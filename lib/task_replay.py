@@ -11,15 +11,10 @@ from __future__ import annotations
 import copy
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterable
-
-if TYPE_CHECKING:
-    # Runtime access stays lazy through __getattr__ so importing replay helpers
-    # does not initialize the orchestration package.  This declaration makes
-    # the public re-export explicit to static analyzers as well.
-    from lib.orchestration.wire_formats import TASK_REPLAY_FORMAT
+from typing import Any, Iterable
 
 from lib.log import get_logger
+from lib.orchestration.wire_formats import TASK_REPLAY_FORMAT
 logger = get_logger(__name__)
 TASK_REPLAY_NOT_FOUND = 'not_found'
 TASK_REPLAY_EVENT_TYPE_FIELD = 'type'
@@ -51,19 +46,6 @@ TASK_REPLAY_PAGE_FIELDS = (
     TASK_REPLAY_TERMINAL_FIELD,
     TASK_REPLAY_CURSOR_FIELD,
 )
-
-
-def _task_replay_format() -> str:
-    """Resolve the shared identifier without initializing orchestration early."""
-    from lib.orchestration.wire_formats import TASK_REPLAY_FORMAT
-
-    return TASK_REPLAY_FORMAT
-
-
-def __getattr__(name: str):
-    if name == 'TASK_REPLAY_FORMAT':
-        return _task_replay_format()
-    raise AttributeError(name)
 
 
 def safe_replay_cursor(value: Any) -> int:
@@ -120,7 +102,7 @@ class TaskReplayPage:
 
     def payload(self, extras: dict | None = None) -> dict:
         payload = {
-            'format': _task_replay_format(),
+            'format': TASK_REPLAY_FORMAT,
             'ok': bool(self.ok),
             TASK_REPLAY_EVENTS_FIELD: self.events,
             TASK_REPLAY_NEXT_CURSOR_FIELD: max(0, int(self.next_cursor)),
@@ -297,7 +279,7 @@ def task_terminal_event_type(status: Any) -> str:
 
 def task_replay_contract() -> dict:
     return {
-        'format': _task_replay_format(),
+        'format': TASK_REPLAY_FORMAT,
         'httpStatuses': {
             'success': 200,
             'notFound': 404,

@@ -27,7 +27,7 @@ import pytest
 
 def test_conv_message_builder_sanitizes_malformed_args():
     """When stored toolArgs isn't valid JSON, replay must use ``'{}'``."""
-    from lib.tasks_pkg.conv_message_builder import _reconstruct_tool_call_messages
+    from lib.tasks_pkg.conv_message_builder._toolcalls import _reconstruct_tool_call_messages
 
     bad_args = r'{"path": "f.py", "search": "r\d+"}'  # \d not escaped
     with pytest.raises(json.JSONDecodeError):
@@ -64,7 +64,7 @@ def test_conv_message_builder_sanitizes_malformed_args():
 
 def test_conv_message_builder_preserves_valid_args():
     """Valid JSON args must NOT be touched."""
-    from lib.tasks_pkg.conv_message_builder import _reconstruct_tool_call_messages
+    from lib.tasks_pkg.conv_message_builder._toolcalls import _reconstruct_tool_call_messages
 
     good_args = '{"path": "x.py", "search": "foo", "replace": "bar"}'
     rounds = [{

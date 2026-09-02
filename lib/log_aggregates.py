@@ -1,16 +1,18 @@
-"""lib/log_aggregates.py — error.log 指纹聚合层(epic pt_71eaaa8d5b8243e9,2026-08-06).
+"""lib/log_aggregates.py — error.log 指纹聚合层(,2026-08-06).
 
-三层架构(文本日志永远是唯一权威源,本层只是其上的"频率榜单"):
+三层架构(文本日志保留人类证据,本层只是其上的频率加速视图):
 
-  ① 文本日志(现状)     — 全量原文,轮转保留;本层任何故障都不影响它。
+  ① error.log + incident.jsonl — 重复洪峰以 delta checkpoint 保真计数、
+    轮转保留；CRITICAL 不合并。聚合层任何故障都不影响这两份磁盘证据。
   ② 本模块             — ``FingerprintHandler`` 挂在 QueueListener 线程上
     (server.py ``_real_log_handlers``,与 error.log 同一个
     ``_BizAndServerOnly`` 过滤器),把每条 WARNING+ 记录归一成
     ``(level, logger, 消息模板, 异常签名)`` 指纹,内存计数;后台 daemon
-    flusher 每 ``TOFU_LOG_AGG_FLUSH_SEC`` 秒(默认 15)批量 upsert 进
-    ``log_aggregates`` 表。DB 写失败只丢聚合、fail-open——绝不反噬业务
-    路径。TTL(``TOFU_LOG_AGG_TTL_DAYS``,默认 30 天,对齐 app.log 保留
-    期)由同一个 flusher 每小时清扫。``TOFU_LOG_AGGREGATES=0`` 全关。
+    flusher 在有积压时每 ``TOFU_LOG_AGG_FLUSH_SEC`` 秒(默认 15)批量 upsert
+    进 ``log_aggregates`` 表,空闲时只为 TTL 每小时唤醒一次。新积压会立即
+    唤醒 deadline 计算但仍保留批处理窗口。DB 写失败只丢聚合、fail-open
+    ——绝不反噬业务路径。TTL(``TOFU_LOG_AGG_TTL_DAYS``,默认 30 天,对齐
+    app.log 保留期)由同一 worker 清扫。``TOFU_LOG_AGGREGATES=0`` 全关。
   ③ 只读视图           — ``GET /api/v1/logs/aggregates``(routes/api_v1/logs.py)
     调 ``query_aggregates``。
 
@@ -80,6 +82,7 @@ _STORE_CAP = 20000
 _TEMPLATE_MAX = 200
 _SAMPLE_MAX = 2000
 _TTL_SWEEP_INTERVAL_SEC = 3600
+_FLUSH_BACKOFF_MAX_SEC = 300.0
 
 # ═══════════════════════════════════════════════════════════════════════
 #  指纹归一化
@@ -92,6 +95,12 @@ _PATH_RE = re.compile(r'(?:/[\w.\-]+){2,}')
 _HEX_RE = re.compile(r'\b[0-9a-fA-F]{6,}(?:-\d+)*\b')
 _NUM_RE = re.compile(r'\d+')
 _WS_RE = re.compile(r'\s+')
+_COALESCE_PREFIX_RE = re.compile(
+    r'^\[coalesced \d+ identical occurrences; window_total=\d+\]\s*')
+# User/prompt excerpts occasionally appeared inside warning messages and split
+# one bug into hundreds of fingerprints while copying private conversation text
+# into the aggregate table.  Long quoted values are payload, not identity.
+_LONG_QUOTED_RE = re.compile(r'''(["'])[\s\S]{80,}?\1''')
 
 # 日志头行(server.py ``_LOG_FMT``):
 #   2026-08-06 13:37:15 [ERROR] tofu_search.fetch.core [Thread-3]: message
@@ -108,7 +117,9 @@ _EXC_SUFFIXES = ('Error', 'Exception', 'Warning', 'Exit', 'Interrupt',
 
 def _normalize_template(first_line: str) -> str:
     """把一条消息的首行归一成模板:URL/绝对路径/hex id/数字全部占位化。"""
-    t = _URL_RE.sub('<url>', first_line)
+    t = _COALESCE_PREFIX_RE.sub('', first_line)
+    t = _LONG_QUOTED_RE.sub("'<payload>'", t)
+    t = _URL_RE.sub('<url>', t)
     t = _PATH_RE.sub('<path>', t)
     t = _HEX_RE.sub('<hex>', t)
     t = _NUM_RE.sub('<n>', t)
@@ -179,8 +190,11 @@ class AggregateStore:
         self._rows = {}
 
     def add(self, fp: str, *, level: str, logger_name: str,
-            template: str, sample: str, ts_ms: int) -> None:
+            template: str, sample: str, ts_ms: int,
+            occurrences: int = 1) -> bool:
+        occurrences = max(1, min(1_000_000_000, int(occurrences or 1)))
         with self._lock:
+            became_nonempty = not self._rows
             row = self._rows.get(fp)
             if row is None and len(self._rows) >= self._cap:
                 fp = self.OVERFLOW_FP
@@ -194,16 +208,17 @@ class AggregateStore:
                     'logger': logger_name,
                     'template': template,
                     'sample': sample[:_SAMPLE_MAX],
-                    'count': 1,
+                    'count': occurrences,
                     'first_seen': ts_ms,
                     'last_seen': ts_ms,
                 }
             else:
-                row['count'] += 1
+                row['count'] += occurrences
                 row['last_seen'] = max(row['last_seen'], ts_ms)
                 row['first_seen'] = min(row['first_seen'], ts_ms)
                 # 样例跟最新——排障时最近的上下文最有用。
                 row['sample'] = sample[:_SAMPLE_MAX]
+            return became_nonempty
 
     def snapshot(self) -> list:
         """换出当前所有行(返回 list,存储重置为空)。"""
@@ -258,18 +273,28 @@ class FingerprintHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
+            from lib.log_redaction import redact_text
+
             text = record.getMessage()
             if record.exc_info:
                 # 只有同步路径会走到这:listener 路径 traceback 已内联进
                 # msg 且 exc_info 已清空,再渲染会重复。
                 text = '%s\n%s' % (
                     text, logging.Formatter().formatException(record.exc_info))
-            fp, template = fingerprint_text(
-                record.levelname, record.name, text)
-            self.store.add(
+            text = redact_text(text, max_chars=_SAMPLE_MAX)
+            fp = str(getattr(record, 'tofu_fingerprint', '') or '')
+            template = str(getattr(record, 'tofu_template', '') or '')
+            if not fp or not template:
+                fp, template = fingerprint_text(
+                    record.levelname, record.name, text)
+            became_nonempty = self.store.add(
                 fp, level=record.levelname, logger_name=record.name,
                 template=template, sample=text,
-                ts_ms=int(record.created * 1000))
+                ts_ms=int(record.created * 1000),
+                occurrences=max(1, int(getattr(
+                    record, 'tofu_occurrence_delta', 1) or 1)))
+            if self.store is _default_store and became_nonempty:
+                _wake_flusher()
         except Exception:
             self.handleError(record)
 
@@ -285,6 +310,27 @@ _last_fail_log_at = 0.0
 def _storage(*, write: bool = False):
     from lib.storage import get_storage_client
     return get_storage_client(write=write)
+
+
+def _sanitize_storage_row(row: dict) -> dict:
+    """Project one in-memory row onto the Sidecar's exact validation bounds.
+
+    Logging names are application-controlled but not globally length-bounded.
+    One overlong logger used to poison the whole 500-row batch forever: every
+    failed flush requeued it, so no aggregate could make progress.  The text
+    log remains authoritative; this best-effort frequency index may safely
+    clamp display fields and counters to its declared storage contract.
+    """
+    return {
+        'fingerprint': str(row.get('fingerprint') or 'overflow')[:64],
+        'level': str(row.get('level') or 'WARNING')[:32],
+        'logger': str(row.get('logger') or '')[:256],
+        'template': str(row.get('template') or '')[:_TEMPLATE_MAX],
+        'sample': str(row.get('sample') or '')[:_SAMPLE_MAX],
+        'count': max(1, min(1_000_000_000, int(row.get('count') or 1))),
+        'first_seen': max(0, int(row.get('first_seen') or 0)),
+        'last_seen': max(0, int(row.get('last_seen') or 0)),
+    }
 
 
 def flush_once(store: AggregateStore = None, now_ms: int = None) -> dict:
@@ -306,16 +352,25 @@ def flush_once(store: AggregateStore = None, now_ms: int = None) -> dict:
     now_mono = time.monotonic()
     did_sweep = now_mono - _last_sweep_at >= _TTL_SWEEP_INTERVAL_SEC
     try:
-        chunks = [rows[index:index + 500] for index in range(0, len(rows), 500)]
-        if not chunks and did_sweep:
-            chunks = [[]]
-        for index, chunk in enumerate(chunks):
-            payload = {'rows': chunk}
-            if did_sweep and index == len(chunks) - 1:
-                payload['cutoff_ms'] = now_ms - _ttl_days() * 86400_000
+        storage_rows = [_sanitize_storage_row(row) for row in rows]
+        chunks = [storage_rows[index:index + 500]
+                  for index in range(0, len(storage_rows), 500)]
+        for chunk in chunks:
             result = _storage(write=True).command(
-                'log_aggregate.flush', payload, None, priority='event')
+                'log_aggregate.flush', {'rows': chunk}, None,
+                priority='event')
             flushed += int(result.get('flushed') or 0)
+        if did_sweep:
+            # TTL is reconstructible maintenance, not part of persisting the
+            # new counts.  Keeping it in the final UPSERT transaction meant a
+            # slow old-row scan rolled back an otherwise healthy batch and
+            # immediately requeued all observability writes behind the sole
+            # SQLite writer.  Run one separately bounded delete instead.
+            result = _storage(write=True).command(
+                'log_aggregate.flush', {
+                    'rows': [],
+                    'cutoff_ms': now_ms - _ttl_days() * 86400_000,
+                }, None, priority='maintenance')
             swept += int(result.get('swept') or 0)
         if did_sweep:
             _last_sweep_at = now_mono
@@ -324,14 +379,18 @@ def flush_once(store: AggregateStore = None, now_ms: int = None) -> dict:
         remaining = rows[flushed:]
         if remaining:
             store.requeue(remaining)
+        code = getattr(e, 'code', type(e).__name__)
+        retryable = bool(getattr(e, 'retryable', False))
+        message = str(getattr(e, 'message', '') or str(e) or type(e).__name__)
         logger.debug(
-            '[LogAgg] Sidecar flush failed (fail-open, rows requeued): %s',
-            type(e).__name__)
+            '[LogAgg] Sidecar flush failed (fail-open, rows requeued): '
+            'code=%s retryable=%s detail=%s', code, retryable, message[:200])
         if time.monotonic() - _last_fail_log_at >= 600:
             _last_fail_log_at = time.monotonic()
             logger.warning(
                 '[LogAgg] aggregate flush failing (counts retained in '
-                'memory, text logs unaffected): %s', type(e).__name__)
+                'memory, text logs unaffected): code=%s retryable=%s detail=%s',
+                code, retryable, message[:200])
         return {'ok': False, 'flushed': flushed, 'swept': 0}
 
 
@@ -341,25 +400,91 @@ def flush_once(store: AggregateStore = None, now_ms: int = None) -> dict:
 
 _flusher_thread = None
 _flusher_stop = threading.Event()
+_flusher_wake = threading.Event()
 _flusher_lock = threading.Lock()
 
 
+def _next_flush_delay(current: float, result: dict | None) -> float:
+    """Back off retryable observability writes without dropping their counts."""
+    base = _flush_interval_sec()
+    if isinstance(result, dict) and result.get('ok') is True:
+        return base
+    return min(max(base, current * 2.0), max(base, _FLUSH_BACKOFF_MAX_SEC))
+
+
+def _idle_flush_delay(*, now: float | None = None) -> float:
+    """Sleep to the next TTL boundary instead of polling an empty store."""
+    current = time.monotonic() if now is None else float(now)
+    base = _flush_interval_sec()
+    if _last_sweep_at <= 0:
+        # Preserve the historical startup pass after storage recovery.
+        return base
+    remaining = _TTL_SWEEP_INTERVAL_SEC - max(0.0, current - _last_sweep_at)
+    return max(base, remaining)
+
+
+def _wake_flusher() -> None:
+    """Wake the worker's deadline calculation without doing storage I/O."""
+    _flusher_wake.set()
+
+
 def _flusher_loop() -> None:
-    while not _flusher_stop.wait(_flush_interval_sec()):
-        flush_once()
+    base = _flush_interval_sec()
+    retry_delay = base
+    data_due_at: float | None = None
+    retry_due_at: float | None = None
+    while not _flusher_stop.is_set():
+        # Clear before observing the store. A listener racing after this point
+        # either appears in len(_default_store) or leaves the event signalled.
+        _flusher_wake.clear()
+        now = time.monotonic()
+        if retry_due_at is not None:
+            deadline = retry_due_at
+        elif len(_default_store):
+            if data_due_at is None:
+                data_due_at = now + base
+            deadline = data_due_at
+        else:
+            data_due_at = None
+            deadline = now + _idle_flush_delay(now=now)
+
+        _flusher_wake.wait(max(0.0, deadline - time.monotonic()))
+        if _flusher_stop.is_set():
+            break
+        if time.monotonic() < deadline:
+            # A new row woke an idle worker. Recompute one fixed batching
+            # deadline; later rows do not extend it indefinitely.
+            continue
+
+        result = flush_once()
+        now = time.monotonic()
+        if isinstance(result, dict) and result.get('ok') is True:
+            retry_delay = base
+            retry_due_at = None
+            data_due_at = now + base if len(_default_store) else None
+        else:
+            retry_delay = _next_flush_delay(retry_delay, result)
+            retry_due_at = now + retry_delay
+            data_due_at = None
 
 
 def start_flusher() -> bool:
-    """启动(幂等)周期 flush daemon。返回是否真正新启动。"""
+    """启动(幂等)自适应 flush daemon。返回是否真正新启动。"""
     global _flusher_thread
     with _flusher_lock:
         if _flusher_thread is not None and _flusher_thread.is_alive():
             return False
         _flusher_stop.clear()
+        _flusher_wake.clear()
         t = threading.Thread(target=_flusher_loop, name='tofu-log-agg',
                              daemon=True)
-        t.start()
         _flusher_thread = t
+        try:
+            t.start()
+        except Exception:
+            if _flusher_thread is t:
+                _flusher_thread = None
+            raise
     logger.info('[LogAgg] flusher started (interval=%.0fs, ttl=%dd)',
                 _flush_interval_sec(), _ttl_days())
     return True
@@ -374,6 +499,7 @@ def stop_flusher(final_flush: bool = True, timeout: float = 5.0) -> bool:
     if t is None:
         return True
     _flusher_stop.set()
+    _flusher_wake.set()
     try:
         wait_seconds = max(0.0, float(timeout))
     except (TypeError, ValueError, OverflowError) as exc:

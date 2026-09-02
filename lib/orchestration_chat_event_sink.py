@@ -1,6 +1,6 @@
 """Project Flow-backed chat events onto the live task state.
 
-The endpoint event adapter owns engine-event → chat-wire translation. This
+The flow event adapter owns engine-event → chat-wire translation. This
 sink owns the next boundary: applying those wire events to the in-memory task
 snapshot used by reconnect/poll paths, then forwarding the unchanged event to
 the task event log. Execution and persistence orchestration stay outside.
@@ -20,8 +20,8 @@ _TURN_META_KEYS = (
     'autopilotRunId',
 )
 _FINAL_TURN_EVENTS = frozenset({
-    'endpoint_planner_done',
-    'endpoint_critic_msg',
+    'flow_planner_done',
+    'flow_critic_msg',
 })
 
 
@@ -73,11 +73,11 @@ class OrchestrationChatTaskEventSink:
 
     def __call__(self, event: dict) -> None:
         event_type = str(event.get('type') or '')
-        if event_type == 'endpoint_iteration':
-            self._task['_endpoint_phase'] = (
+        if event_type == 'flow_iteration':
+            self._task['_flow_phase'] = (
                 event.get('phase')
-                or self._task.get('_endpoint_phase', 'working'))
-            self._task['_endpoint_iteration'] = event.get('iteration', 0)
+                or self._task.get('_flow_phase', 'working'))
+            self._task['_flow_iteration'] = event.get('iteration', 0)
             self._task['_flow_current_turn'] = {
                 key: event[key]
                 for key in _TURN_META_KEYS

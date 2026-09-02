@@ -22,7 +22,7 @@ subtler version of the same lie in place:
 
      ★ The UNIT is itself a pinned contract. The task dict holds float
      SECONDS (``created_at``); the wire speaks camelCase MILLISECONDS
-     (``createdAt``), matching the shipped chat surface. Handing seconds to
+     (``createdAt``), matching the frontend task contract. Handing seconds to
      the frontend seam fails SILENTLY — the min-guard accepts it and the UI
      renders a ~50-year elapsed, which is worse than the 0:00 it replaced.
      ``test_poll_clocks_are_milliseconds_not_seconds`` is that guard.
@@ -59,7 +59,7 @@ def _runtime(**kw):
 def test_poll_reports_created_at_for_running_task():
     """A client re-attaching mid-flight learns the job's TRUE start."""
     rt = _runtime()
-    task = rt.create()
+    task = rt.create(user_id=1)
     resp = rt.poll(task['id'])
     assert 'createdAt' in resp, \
         'poll() must surface createdAt — without it a refreshed client has ' \
@@ -82,7 +82,7 @@ _MS_FLOOR = 1e12  # any epoch-ms after 2001-09; epoch-SECONDS is ~1.7e9
 def test_poll_clocks_are_milliseconds_not_seconds(field):
     """Clock fields MUST be the same magnitude as JS ``Date.now()``."""
     rt = _runtime()
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.append_event(task['id'], {'type': 'phase', 'phase': 'render'})
     value = rt.poll(task['id'])[field]
     assert value > _MS_FLOOR, (
@@ -95,21 +95,15 @@ def test_poll_clocks_are_milliseconds_not_seconds(field):
 def test_poll_terminal_clock_is_milliseconds():
     """The terminal clock shares the same unit contract."""
     rt = _runtime()
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.finish(task['id'], result={'ok': True})
     assert rt.poll(task['id'])['finishedAt'] > _MS_FLOOR
 
 
-def test_poll_clock_unit_matches_chat_contract():
-    """Cross-check against the ALREADY-SHIPPED chat surface.
-
-    ``lib/chat_dispatch.py`` / ``routes/chat_poll_abort.py`` emit
-    ``int(task['created_at'] * 1000)``. Pinning both against the same
-    conversion keeps the two transports from drifting apart — a client must
-    be able to feed either into the same seed function.
-    """
+def test_poll_clock_unit_matches_frontend_contract():
+    """The wire clock uses the same epoch-millisecond unit as Date.now()."""
     rt = _runtime()
-    task = rt.create()
+    task = rt.create(user_id=1)
     chat_style_ms = int(task['created_at'] * 1000)
     assert rt.poll(task['id'])['createdAt'] == chat_style_ms
 
@@ -117,7 +111,7 @@ def test_poll_clock_unit_matches_chat_contract():
 def test_poll_created_at_is_stable_across_polls():
     """The start clock is a fact about the job, not about the poll."""
     rt = _runtime()
-    task = rt.create()
+    task = rt.create(user_id=1)
     first = rt.poll(task['id'])['createdAt']
     rt.append_event(task['id'], {'type': 'phase', 'phase': 'render'})
     second = rt.poll(task['id'])['createdAt']
@@ -128,7 +122,7 @@ def test_poll_reports_updated_at_as_liveness_clock():
     """``updated_at`` is the authoritative 'last activity' — the signal a
     client must NOT re-mint locally, or a stalled job renders as healthy."""
     rt = _runtime()
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.append_event(task['id'], {'type': 'phase', 'phase': 'narrate'})
     resp = rt.poll(task['id'])
     assert 'updatedAt' in resp, \
@@ -144,7 +138,7 @@ def test_poll_updated_at_present_before_any_event():
     wash-the-stall-away behaviour this contract removes.
     """
     rt = _runtime()
-    task = rt.create()
+    task = rt.create(user_id=1)
     resp = rt.poll(task['id'])
     assert resp.get('updatedAt') is not None, \
         'a task with no events yet must still report updatedAt'
@@ -153,7 +147,7 @@ def test_poll_updated_at_present_before_any_event():
 def test_poll_updated_at_advances_with_events_created_at_does_not():
     """The two clocks are different quantities and must not be conflated."""
     rt = _runtime()
-    task = rt.create()
+    task = rt.create(user_id=1)
     before = rt.poll(task['id'])
     time.sleep(0.02)
     rt.append_event(task['id'], {'type': 'progress', 'done': 1, 'total': 9})
@@ -167,7 +161,7 @@ def test_poll_updated_at_advances_with_events_created_at_does_not():
 def test_poll_reports_finished_at_on_terminal_task():
     """A late poller can render the true total duration, not 0:00."""
     rt = _runtime()
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.finish(task['id'], result={'ok': True})
     resp = rt.poll(task['id'])
     assert resp['done'] is True
@@ -191,7 +185,7 @@ def test_poll_not_found_shape_unchanged():
 def test_poll_preserves_existing_contract_fields():
     """Regression guard: adding clocks must not disturb the replay contract."""
     rt = _runtime()
-    task = rt.create()
+    task = rt.create(user_id=1)
     rt.append_event(task['id'], {'type': 'phase', 'phase': 'a'})
     rt.append_event(task['id'], {'type': 'phase', 'phase': 'b'})
     resp = rt.poll(task['id'], cursor=1)
@@ -268,7 +262,7 @@ def test_respawned_motion_task_keeps_original_created_at():
     original_start = time.time() - 900.0
     tid = 'motion_resume_probe'
     try:
-        task = _new_motion_task(tid, srt_path='', workdir='/tmp/none',
+        task = _new_motion_task(tid, srt_path='', workdir='/tmp/none', user_id=1,
                                 voice='', speed=None, alignment='loose',
                                 narration=False, quality='standard',
                                 parallel=1, width=1080, height=1440)

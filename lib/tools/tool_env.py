@@ -49,7 +49,6 @@ __all__ = [
     'count_tool_envs',
     'request_client_tool_result',
     'resolve_client_tool_result',
-    'cancel_client_tool_result',
 ]
 
 # ── Namespace contract ──────────────────────────────────────────────
@@ -116,10 +115,19 @@ def request_client_tool_result(call_id: str, *, task: dict | None = None,
     Returns ``(content, is_error)``. On timeout or abort, ``is_error`` is True
     and ``content`` explains why — surfaced to the LLM as the tool result.
     """
+    task_id = str((task or {}).get('id') or '')
+    try:
+        owner_user_id = int((task or {}).get('_userId') or 0)
+    except (TypeError, ValueError):
+        owner_user_id = 0
+    if not task_id or owner_user_id < 1:
+        raise ValueError(
+            'Client tool handoff requires an owned task with a stable id')
     evt = threading.Event()
     with _client_results_lock:
         _client_results[call_id] = {'event': evt, 'content': None,
-                                    'is_error': False}
+                                    'is_error': False, 'task_id': task_id,
+                                    'user_id': owner_user_id}
     logger.info('[CustomTool] client handoff %s waiting (timeout=%.0fs)',
                 call_id, timeout)
     deadline = time.time() + max(1.0, timeout)
@@ -143,32 +151,32 @@ def request_client_tool_result(call_id: str, *, task: dict | None = None,
                     True)
 
 
-def resolve_client_tool_result(call_id: str, content: str,
-                               is_error: bool = False) -> bool:
-    """Called by the result-callback route to unblock a pending handoff."""
+def resolve_client_tool_result(
+    call_id: str,
+    content: str,
+    *,
+    task_id: str,
+    user_id: int,
+    is_error: bool = False,
+) -> bool:
+    """Resolve only a handoff owned by the authenticated task principal."""
     with _client_results_lock:
         entry = _client_results.get(call_id)
         if not entry:
             logger.warning('[CustomTool] resolve for unknown call_id=%s '
                            '(expired or already resolved)', call_id)
             return False
+        if (entry.get('task_id') != task_id
+                or int(entry.get('user_id') or 0) != int(user_id)):
+            logger.warning(
+                '[CustomTool] rejected foreign resolve call_id=%s task=%s',
+                call_id, task_id[:8])
+            return False
         entry['content'] = content
         entry['is_error'] = is_error
         entry['event'].set()
     logger.info('[CustomTool] client resolved %s (is_error=%s, len=%d)',
                 call_id, is_error, len(content or ''))
-    return True
-
-
-def cancel_client_tool_result(call_id: str) -> bool:
-    """Unblock a pending handoff with an abort result (task cleanup)."""
-    with _client_results_lock:
-        entry = _client_results.get(call_id)
-        if not entry:
-            return False
-        entry['content'] = 'Custom tool call cancelled.'
-        entry['is_error'] = True
-        entry['event'].set()
     return True
 
 

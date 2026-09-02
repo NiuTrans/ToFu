@@ -1,33 +1,21 @@
-"""Regression: `ConvCache.put()` must RESOLVE on a transaction abort
-(QuotaExceededError) — otherwise the durable poor-network send-rescue hangs.
+"""The metadata-only ``ConvCache.put()`` resolves on transaction abort.
 
 WHY
 ---
-`static/js/idb-cache.js` `put()` is the durable local write behind the
-poor-network send-rescue (`markConvPendingSync` → `await ConvCache.put(conv)`).
-The write transaction wired `tx.oncomplete` and `tx.onerror` but NO
-`tx.onabort`. A `QuotaExceededError` (storage pressure) ABORTS the transaction
-WITHOUT bubbling as a request `onerror` — only `onabort` fires. Without that
-handler:
-  1. the `await ConvCache.put(conv)` promise NEVER resolves → the rescue caller
-     hangs (the message is neither on the server nor confirmed-durable), and
-  2. no reactive `evict()` runs, so the NEXT write hits the same full quota.
+A `QuotaExceededError` can abort the IndexedDB transaction without bubbling as
+a request `onerror`. The catalog cache is optional, so this failure must settle
+the promise and leave TurnStore/server authority untouched.
 
 THE FIX
 -------
-`put()` now:
-  • wires `tx.onabort` → logs, fires a reactive `evict()`, and resolves;
-  • routes `oncomplete` / `onerror` / `onabort` through a single-resolve latch
-    (`_done`) so a request-error that bubbles to `onerror` AND then aborts the
-    tx resolves the promise exactly once.
+`put()` wires both `tx.onerror` and `tx.onabort` to a best-effort resolution.
 
 CHECKS (drive the REAL shipped idb-cache.js under node against a fake IDB)
 --------------------------------------------------------------------------
 (A) A `put()` whose transaction ABORTS (QuotaExceeded) RESOLVES within a hard
     deadline — the load-bearing fix (before it: the promise hangs forever).
-(B) The abort triggers a reactive evict() (a second transaction is opened after
-    the aborted one).
-(C) A normal `put()` still resolves via oncomplete (no regression).
+(B) The attempted row contains only the declared metadata shape.
+(C) A normal `put()` still resolves via oncomplete.
 
 DOUBLE-NEUTER: strip the `tx.onabort` handler on a COPY of idb-cache.js → (A)
 times out (promise never resolves) → the harness reports the hang. Shipped file
@@ -72,6 +60,7 @@ function soon(fn) { Promise.resolve().then(fn); }
 
 let _abortNextRW = false;    // when true, the next readwrite tx aborts
 let _rwTxCount = 0;          // number of readwrite transactions opened
+let _lastPutValue = null;
 
 function FakeRequest() { this.onsuccess = null; this.onerror = null; this.result = undefined; }
 
@@ -81,7 +70,10 @@ FakeStore.prototype.get = function () {
   soon(() => { req.result = undefined; if (req.onsuccess) req.onsuccess(); });
   return req;
 };
-FakeStore.prototype.put = function () { return new FakeRequest(); };
+FakeStore.prototype.put = function (value) {
+  _lastPutValue = value;
+  return new FakeRequest();
+};
 FakeStore.prototype.delete = function () { return new FakeRequest(); };
 FakeStore.prototype.clear = function () { return new FakeRequest(); };
 FakeStore.prototype.count = function () {
@@ -146,8 +138,8 @@ function withDeadline(promise, ms, label) {
 
 const conv = {
   id: 'c-quota',
-  title: 'poor network',
-  messages: [{ role: 'user', content: 'durable rescue', _msgId: 'u1' }],
+  title: 'metadata row',
+  _serverTurnCount: 1,
   updatedAt: 1700000000000,
 };
 
@@ -166,10 +158,9 @@ const conv = {
   const r1 = await withDeadline(ConvCache.put(conv), 2000, 'put_hang');
   check('put_resolves_on_abort', r1.ok === true);
 
-  // (B) The abort must have triggered a reactive evict() → at least one more
-  //     readwrite transaction opened after the aborted put's own tx.
-  await new Promise((r) => setTimeout(r, 30));
-  check('reactive_evict_fired', _rwTxCount > rwBefore + 1);
+  // (B) Even the attempted write is catalog metadata only.
+  check('metadata_row_shape', JSON.stringify(Object.keys(_lastPutValue).sort()) ===
+    JSON.stringify(['cachedAt','id','msgCount','settings','title','updatedAt']));
 
   // (C) A normal put() still resolves via oncomplete (no regression).
   const r2 = await withDeadline(ConvCache.put(conv), 2000, 'put_hang_normal');
@@ -198,7 +189,7 @@ def _run_harness(idb_js_path: str) -> subprocess.CompletedProcess:
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_put_resolves_and_evicts_on_quota_abort():
+def test_metadata_put_resolves_on_quota_abort():
     idb_js = os.path.join(JS_DIR, 'idb-cache.js')
     proc = _run_harness(idb_js)
     output = proc.stdout.strip()
@@ -217,11 +208,9 @@ def test_put_onabort_double_neuter(tmp_path):
     with open(idb_js, encoding='utf-8') as f:
         src = f.read()
 
-    marker = '            tx.onabort = function () {'
-    start = src.index(marker)
-    end = src.index('            };', start) + len('            };\n')
-    assert start > 0 and end > start, 'tx.onabort block not found — anchor drifted'
-    neutered = src[:start] + src[end:]
+    marker = '          tx.onerror = tx.onabort = function () {'
+    assert marker in src, 'combined error/abort handler not found — anchor drifted'
+    neutered = src.replace(marker, '          tx.onerror = function () {', 1)
     assert marker not in neutered, 'neuter failed to remove the tx.onabort handler'
 
     copy = tmp_path / 'idb_neutered.js'

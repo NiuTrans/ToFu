@@ -719,6 +719,219 @@ def test_both_macos_dmgs_are_rendered_with_a_reason():
         f"avoid. html={out['html']!r}")
 
 
+def test_a_mac_visitor_is_never_offered_the_windows_agent_exe():
+    """THE REGRESSION GUARD for the Mac-gets-an-.exe defect.
+
+    The personalized one-file installer is a Windows NSIS .exe by
+    construction, so `agent_installer_ready` means "the WINDOWS installer
+    is ready" — and the renderer used to take that as licence to offer the
+    .exe to EVERY visitor. A Mac client's primary button therefore
+    downloaded TofuAgent-Setup-*-win64.exe, a package it cannot run. A
+    macOS visitor must get the mirrored agent DMGs from `agent_downloads`
+    instead, with the .exe button nowhere on the surface.
+    """
+    out = _run_lc_desktop(
+        "{setup_state:'remote', visitor_os:'macos', agent_installer_ready:true,"
+        " download_url:'https://example.invalid/releases/latest',"
+        " server_url:'https://tofu.invalid',"
+        " agent_downloads:[{os:'macos',arch:'arm64',"
+        " label:'macOS agent arm64 DMG',"
+        " filename:'TofuAgent-0.16.0-macos-arm64.dmg',"
+        " url:'https://example.invalid/d/TofuAgent-0.16.0-macos-arm64.dmg'},"
+        " {os:'macos',arch:'x86_64',label:'macOS agent x86_64 DMG',"
+        " filename:'TofuAgent-0.16.0-macos-x86_64.dmg',"
+        " url:'https://example.invalid/d/TofuAgent-0.16.0-macos-x86_64.dmg'}],"
+        " downloads:[]}")
+    hrefs = [l["href"] for l in out["links"]]
+    assert not any('agent-installer' in (h or '') for h in hrefs), (
+        f"a macOS visitor was still offered the Windows-only personalized "
+        f".exe: {hrefs!r}")
+    assert "lcAgentInstallerBtn" not in out["html"], (
+        "the .exe button must not even render for a macOS visitor")
+    direct = [l for l in out["links"]
+              if "lc-dl-direct" in (l["cls"] or "")
+              and "TofuAgent" in (l["href"] or "")]
+    assert len(direct) == 2, (
+        f"expected BOTH mirrored agent DMGs as the primary offer (arch "
+        f"unknowable ⇒ offer both, never guess): {out['links']!r}")
+    assert any("arm64" in (l["text"] or "") for l in direct), direct
+    assert any("x86_64" in (l["text"] or "") for l in direct), direct
+
+
+def test_a_mac_visitor_with_no_agent_asset_gets_an_honest_wait_not_an_exe():
+    """Mirror still fetching (or no GitHub route): the macOS visitor waits
+    for the DMG with the releases page as escape hatch — the .exe is never
+    the stand-in."""
+    out = _run_lc_desktop(
+        "{setup_state:'remote', visitor_os:'macos', agent_installer_ready:true,"
+        " download_url:'https://example.invalid/releases/latest',"
+        " server_url:'https://tofu.invalid', agent_downloads:[], downloads:[]}")
+    hrefs = [l["href"] for l in out["links"]]
+    assert not any('agent-installer' in (h or '') for h in hrefs), hrefs
+    assert "lcAgentInstallerBtn" not in out["html"]
+    assert 'https://example.invalid/releases/latest' in hrefs, (
+        f"the releases-page escape hatch vanished: {hrefs!r}")
+
+
+def test_a_windows_visitor_keeps_the_personalized_agent_installer():
+    """The platform gate must not hide the zero-config flow from its one
+    supported platform: Windows + ready ⇒ the personalized .exe button."""
+    out = _run_lc_desktop(
+        "{setup_state:'remote', visitor_os:'windows', agent_installer_ready:true,"
+        " download_url:'https://example.invalid/releases/latest',"
+        " server_url:'https://tofu.invalid',"
+        " agent_downloads:[{os:'windows',arch:'x86_64',"
+        " label:'Windows agent installer',"
+        " filename:'TofuAgent-Setup-0.16.0-win64.exe',"
+        " url:'https://example.invalid/d/TofuAgent-Setup-0.16.0-win64.exe'}],"
+        " downloads:[]}")
+    assert "lcAgentInstallerBtn" in out["html"], (
+        f"the personalized installer button vanished for the one platform "
+        f"it exists for: {out['html']!r}")
+    assert any('/api/v1/desktop/agent-installer' in (l["href"] or "")
+               for l in out["links"]), out["links"]
+
+
+# ══════════════════════════════════════════════════════════════════
+#  The browser-pushed zero-config attach (macOS/Linux parity)
+# ══════════════════════════════════════════════════════════════════
+#
+# The mirrored DMG/tarball carries no credential — the signed-in page
+# pushes it to the freshly installed agent's loopback broker instead.
+# These drive the SHIPPED watch/push flow end to end against a fake
+# broker: discovery → push → the broker's `transport` answer picks the
+# continuation (direct ⇒ the watch's job is done; browser ⇒ keep
+# relaying for the SSO case).
+
+_LC_PUSH_PRELUDE = textwrap.dedent("""
+    const { JSDOM } = require('jsdom');
+    const dom = new JSDOM('<!DOCTYPE html><body></body>');
+    global.document = dom.window.document;
+    global.window = dom.window;
+    global.navigator = dom.window.navigator;
+    global.t = (k) => k;
+    global.escapeHtml = (s) => String(s == null ? '' : s);
+    global.showToast = () => {};
+    window.t = global.t;
+    window.escapeHtml = global.escapeHtml;
+    window.showToast = global.showToast;
+
+    const posted = [];
+    const calls = { status: 0, take: 0 };
+    global.fetch = function (url, opts) {
+      if (url.endsWith('/v1/status')) {
+        calls.status++;
+        return Promise.resolve({ ok: true, status: 200,
+          json: () => Promise.resolve(__STATUS__) });
+      }
+      if (url.endsWith('/v1/attach')) {
+        posted.push(JSON.parse(opts.body));
+        return Promise.resolve({ ok: __OK__, status: __CODE__,
+          json: () => Promise.resolve(__BODY__) });
+      }
+      if (url.endsWith('/v1/take')) {
+        calls.take++;
+        return new Promise(() => {});   // a live long-poll, never answered
+      }
+      return Promise.reject(new Error('unexpected fetch ' + url));
+    };
+    global.Api = { desktop: {
+      mintAttachBundle: (base) => Promise.resolve({ v: 1,
+        token: 'tofu_live_T', candidates: ['http://10.9.8.7:15000'],
+        fallback_candidates: ['https://tofu.example'] }),
+    } };
+
+""")
+
+_LC_PUSH_DRIVE = textwrap.dedent("""
+
+    _lcAgentRelay.watchUntil = Date.now() + 60000;
+    _lcRelayWatchBeat();
+    setTimeout(function () {
+      console.log(JSON.stringify({
+        posted: posted, state: _lcAgentRelay.state,
+        running: _lcAgentRelay.running, takeCalls: calls.take,
+        watchUntil: _lcAgentRelay.watchUntil,
+        attachDone: _lcAgentRelay.attachDone }));
+      process.exit(0);
+    }, 200);
+""")
+
+
+def _run_lc_push(status_json: str, ok: str, code: str, body_json: str) -> dict:
+    if not _has_jsdom():
+        pytest.skip("jsdom not available")
+    src = (_LC_PUSH_PRELUDE
+           .replace('__STATUS__', status_json)
+           .replace('__OK__', ok)
+           .replace('__CODE__', code)
+           .replace('__BODY__', body_json)
+           + LC_JS.read_text(encoding="utf-8")
+           + _LC_PUSH_DRIVE)
+    proc = subprocess.run([_node(), "-e", src], cwd=ROOT,
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, (
+        f"harness exited {proc.returncode}\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_an_unattached_agent_gets_its_bundle_pushed_then_watch_stops():
+    """THE PARITY FLOW: discovery finds a bootstrap broker, the page pushes
+    the minted bundle, and a 'direct' answer ends the watch — the agent
+    polls its own LAN route, and a lingering page must not make it prefer
+    the browser transport."""
+    out = _run_lc_push(
+        "{ kind: 'tofu-agent-browser-relay', attached: false }",
+        "true", "200",
+        "{ accepted: true, reason: 'attached', transport: 'direct',"
+        "  url: 'http://10.9.8.7:15000' }")
+    assert len(out["posted"]) == 1, f"no bundle was pushed: {out!r}"
+    assert out["posted"][0]["token"] == "tofu_live_T"
+    assert out["state"] == "attached"
+    assert out["attachDone"] is True
+    assert out["watchUntil"] == 0, 'a direct attach ends the broker watch'
+    assert out["running"] is False and out["takeCalls"] == 0, (
+        'a direct attach must NOT enter the relay loop')
+
+
+def test_an_sso_attach_keeps_the_page_relaying():
+    """transport 'browser' (nothing answered a cookieless probe) ⇒ the
+    page enters the relay loop — the agent's only route to Tofu rides
+    this tab."""
+    out = _run_lc_push(
+        "{ kind: 'tofu-agent-browser-relay', attached: false }",
+        "true", "200",
+        "{ accepted: true, reason: 'attached_optimistic',"
+        "  transport: 'browser', url: 'https://tofu.example' }")
+    assert len(out["posted"]) == 1
+    assert out["attachDone"] is True
+    assert out["running"] is True and out["takeCalls"] >= 1, (
+        f"the relay loop did not start after an SSO attach: {out!r}")
+
+
+def test_an_already_attached_agent_enters_the_relay_without_pushing():
+    """A 409 means another page (or a previous install) got there first —
+    the relay flow takes over and the push is never retried."""
+    out = _run_lc_push(
+        "{ kind: 'tofu-agent-browser-relay', attached: false }",
+        "false", "409", "{ accepted: false, reason: 'already_attached' }")
+    assert len(out["posted"]) == 1
+    assert out["attachDone"] is True
+    assert out["running"] is True and out["takeCalls"] >= 1
+
+
+def test_a_legacy_agent_without_the_attach_field_goes_straight_to_relay():
+    """Agents built before the field existed report NO `attached` flag —
+    they must read as attached (relay-only), never pushed a bundle they
+    cannot understand."""
+    out = _run_lc_push(
+        "{ kind: 'tofu-agent-browser-relay' }",
+        "true", "200", "{ accepted: true, transport: 'direct' }")
+    assert out["posted"] == [], 'a legacy broker was pushed an attach'
+    assert out["running"] is True and out["takeCalls"] >= 1
+
+
 def test_the_releases_page_link_survives_as_a_fallback():
     """An unrecognised platform (empty `downloads`) must still get somewhere.
 

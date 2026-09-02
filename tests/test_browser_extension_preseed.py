@@ -12,12 +12,14 @@ Covers, without a running server:
     through lib.bridge_auth (the same chain the poll gate consumes);
   * each download mints a DISTINCT key (secrets are hash-stored, so a key
     can never be re-materialised for a later package);
-  * mint failure degrades to a zip WITHOUT the preseed (fail-open, logged),
-    never to a failed download;
+  * mint failure returns 503 rather than distributing a package known to be
+    unable to connect;
   * background.js adopts the preseed only into empty slots, before server
     detection, and tolerates an absent preseed file;
   * the popup no longer presents the secret as user-required.
 """
+
+pytest_plugins = ('tests._credential_sidecar',)
 
 import io
 import json
@@ -27,7 +29,7 @@ from unittest.mock import patch
 
 import pytest
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.auth_mode('open')]
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -39,19 +41,12 @@ def _src(rel):
 
 @pytest.fixture()
 def _isolated_key_store(tmp_path):
-    """Point lib.api_keys at a temp store so the production file is untouched."""
-    with patch('lib.api_keys._STORE_PATH',
-               os.path.join(str(tmp_path), 'api_keys.json')):
-        from lib import api_keys
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
-        yield
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
+    """Credential authority is isolated by the module Sidecar fixture."""
+    yield
 
 
 def _get_zip(path='/api/browser/download', headers=None):
-    """Run the real download handler in a bare Quart app (no auth gate).
+    """Run the real download handler with the production auth boundary.
 
     Returns ``(status_code, body_bytes)`` — Quart's test client defers the
     body behind an awaitable, so it is materialised here.
@@ -61,6 +56,8 @@ def _get_zip(path='/api/browser/download', headers=None):
     from routes.browser import browser_bp
 
     app = Quart(__name__)
+    from routes.api_v1.auth import bearer_auth_before_request
+    app.before_request(bearer_auth_before_request)
     app.register_blueprint(browser_bp)
 
     async def _get():
@@ -88,8 +85,9 @@ class TestDownloadPreseed:
         assert pre['serverUrl'].startswith('http')
         # The baked credential must pass the SAME chain the poll gate uses.
         from lib.bridge_auth import resolve_bridge_credential
-        ok, _uid, key_id = resolve_bridge_credential(pre['bridgeSecret'])
-        assert ok and key_id, 'baked key must resolve through bridge_auth'
+        context = resolve_bridge_credential(pre['bridgeSecret'])
+        assert context is not None and context.key_id, (
+            'baked key must resolve through bridge_auth')
         # The regular payload is untouched.
         assert 'browser_extension/background.js' in names
         assert 'browser_extension/manifest.json' in names
@@ -103,15 +101,12 @@ class TestDownloadPreseed:
                           .read('browser_extension/bridge_preseed.json'))
         assert pre1['bridgeSecret'] != pre2['bridgeSecret']
 
-    def test_mint_failure_degrades_to_plain_zip(self, _isolated_key_store):
+    def test_mint_failure_refuses_an_unpaired_package(self, _isolated_key_store):
         with patch('lib.api_keys.create_key',
                    side_effect=RuntimeError('store down')):
             status, body = _get_zip()
-        assert status == 200
-        zf = zipfile.ZipFile(io.BytesIO(body))
-        assert 'browser_extension/bridge_preseed.json' not in zf.namelist()
-        # The extension itself is still fully served.
-        assert 'browser_extension/background.js' in zf.namelist()
+        assert status == 503
+        assert b'browser_extension_credential_unavailable' in body
 
 
 class TestExternalBaseUrl:

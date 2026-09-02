@@ -1,4 +1,4 @@
-"""Backend half of pt_18ebee9c9ea64cf3: the swarm/endpoint dispatch-retry HUD
+"""Backend half of pt_18ebee9c9ea64cf3: the swarm/flow dispatch-retry HUD
 ships structured i18n fields (detailKey/detailArgs + typed reasonKey) instead
 of leaking raw dispatcher log tokens ("Retrying… Endpoint unreachable
 (attempt 1)") onto the worker bubble.
@@ -10,7 +10,7 @@ Covers the four backend surfaces of the fix:
   2. lib/swarm/agent._build_dispatch_retry_phase — the module-level seam the
      ``_on_dispatch_retry`` closure delegates to; asserts BYTE-PARITY of the
      legacy detail string (headless clients must see no change).
-  3. lib/orchestration_endpoint_adapter._on_step_phase — forwards
+  3. lib/orchestration_chat_flow_adapter._on_step_phase — forwards
      detailKey/detailArgs onto the wire ``phase`` event (and still skips
      verifier-side producers).
   4. lib/orchestration_engine — the ``step_phase`` ``**meta`` passthrough
@@ -72,6 +72,19 @@ class TestSharedRetryPhaseFields(unittest.TestCase):
         self.assertEqual(f['detailKey'], 'stream.phase.retryReason')
         self.assertEqual(f['detailArgs']['reason'], 'HTTP 503')
         self.assertNotIn('reasonKey', f['detailArgs'])
+
+    def test_cooldown_poll_does_not_claim_twenty_request_attempts(self):
+        f = self._fields(
+            model='kimi-k3', attempt=20,
+            reason='Waiting for model (retry backoff)', status_code=0,
+            legacy_detail='X')
+        self.assertEqual(f['detailKey'], 'stream.phase.retryCooldownWait')
+        self.assertEqual(f['detailArgs'], {
+            'reason': 'Waiting for model (retry backoff)',
+            'reasonKey': 'stream.retryReason.waitingBackoff',
+            'model': 'kimi-k3',
+        })
+        self.assertEqual(f['detail'], 'X')
 
     def test_gateway_prefix_stripped_in_label(self):
         f = self._fields(model='aws.claude-opus-4.8', attempt=1,
@@ -155,14 +168,14 @@ class TestSwarmEmitterSeam(unittest.TestCase):
         self.assertIn("self._emit_stream_phase(Phase.RETRYING, _d, **_meta)", src)
 
 
-class TestEndpointAdapterForwarding(unittest.TestCase):
-    """orchestration_endpoint_adapter._on_step_phase must forward the
+class TestFlowAdapterForwarding(unittest.TestCase):
+    """The flow adapter must forward the
     structured i18n fields onto the wire ``phase`` event."""
 
     def _drive(self, ev):
-        from lib.orchestration_endpoint_adapter import EndpointEventAdapter
+        from lib.orchestration_chat_flow_adapter import FlowEventAdapter
         streamed = []
-        adapter = EndpointEventAdapter(on_stream=streamed.append)
+        adapter = FlowEventAdapter(on_stream=streamed.append)
         adapter.on_event(ev)
         return streamed
 

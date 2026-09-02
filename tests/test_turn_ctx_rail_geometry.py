@@ -189,7 +189,7 @@ _PLANT = """() => {
     document.querySelectorAll('.message.__probe').forEach(n => n.remove());
     const parts = renderTurnCtxNote(%s);
     if (!parts) return 'renderer returned empty';
-    /* Two surfaces, two DOM homes — the SAME structure chat_render.js
+    /* Two surfaces, two DOM homes — the same structure ConversationSurface
      * assembles: the fold INSIDE .message-content between header and body,
      * the rail as a direct .message child (its grid track). Splicing the
      * fold as a direct child is the zero-width bug this sweep must never
@@ -211,12 +211,33 @@ _PLANT = """() => {
      * empties itself below two turns). */
     if (typeof updateContextBar === 'function') updateContextBar();
     if (typeof buildTurnNav === 'function') {
-        const __msgs = [];
+        const __turns = [];
         for (let __t = 1; __t <= 5; __t++) {
-            __msgs.push({role:'user', content:'probe turn ' + __t + ' — geometry sweep seed'});
-            __msgs.push({role:'assistant', content:'probe answer ' + __t});
+            __turns.push({
+                turnId:'probe-human-' + __t,
+                conversationId:'__probe_conv',
+                actor:'human', kind:'input', laneId:'main', ordinal:(__t * 2) - 1,
+                status:'completed', projectionRevision:1,
+                projection:{content:'probe turn ' + __t + ' — geometry sweep seed'},
+            });
+            __turns.push({
+                turnId:'probe-assistant-' + __t,
+                conversationId:'__probe_conv',
+                actor:'assistant', kind:'reply', laneId:'main', ordinal:__t * 2,
+                status:'completed', projectionRevision:1,
+                projection:{content:'probe answer ' + __t},
+            });
         }
-        buildTurnNav({id:'__probe_conv', messages:__msgs});
+        const __store = window.ConversationTurnStore.ensureRuntimeStore('__probe_conv');
+        __store._snapshotLoaded = true;
+        __store.dispatch({
+            type:'snapshot',
+            snapshot:{
+                conversationId:'__probe_conv', conversationRevision:1,
+                turns:__turns, attempts:[], queueItems:[],
+            },
+        });
+        buildTurnNav({id:'__probe_conv'});
     }
     return 'ok';
 }""" % (_FAT_SNAPSHOT, repr(_PROSE))

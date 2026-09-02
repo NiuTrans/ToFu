@@ -75,12 +75,13 @@ def test_sse_limiter_release_frees_exactly_that_slot():
     assert lim.active('ip:a') == 0
 
 
-def test_sse_limiter_cap_zero_disables():
+def test_sse_limiter_explicit_zero_cannot_disable_resident_resource_bound():
     _reset_state_store()
     from lib.agent_core.sse_limit import SSELimiter
     lim = SSELimiter(cap=0)
-    for _ in range(1000):
-        assert lim.try_acquire('ip:x') is not None  # token even when disabled
+    assert lim.cap == 1
+    assert lim.try_acquire('ip:x') is not None
+    assert lim.try_acquire('ip:x') is None
 
 
 def test_NC_sse_slot_leak_defeats_the_cap():
@@ -117,6 +118,19 @@ def test_env_default_cap_is_positive():
         if old is not None:
             os.environ['TOFU_MAX_SSE_PER_PRINCIPAL'] = old
         importlib.reload(m)
+
+
+def test_env_sse_cap_and_refresh_interval_remain_bounded(monkeypatch):
+    from lib.agent_core.sse_limit import SSELimiter
+
+    monkeypatch.setenv('TOFU_MAX_SSE_PER_PRINCIPAL', '999999')
+    monkeypatch.setenv('TOFU_SSE_SLOT_TTL', '9')
+    limiter = SSELimiter()
+    assert limiter.cap == 128
+    assert limiter.refresh_interval_seconds == 15
+
+    monkeypatch.setenv('TOFU_MAX_SSE_PER_PRINCIPAL', '0')
+    assert 1 <= SSELimiter().cap <= 128
 
 
 def test_sse_cap_never_overshoots_under_concurrency():
@@ -262,7 +276,6 @@ def test_open_mode_ctx_routed_through_ip_throttle():
         _reset_rate_store()
 
         class _Ctx:
-            via_tunnel_token = False
             via_open_mode = True
             key_id = ''
             rate_limit_rpm = 0
@@ -372,73 +385,132 @@ def test_NC_open_mode_rpm_zero_is_unthrottled():
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  WIRING — the three caps are actually integrated into the routes,
-#  not just present as unused library primitives.
+#  WIRING — drive the actual route/generator boundaries. These assertions
+#  deliberately avoid shipped-source anchors: a renamed helper is harmless
+#  when the externally visible cap, heartbeat and release behavior survives.
 # ══════════════════════════════════════════════════════════════════════
-import ast
-
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_CHAT_PY = os.path.join(_ROOT, 'routes', 'chat.py')
-_RL_PY = os.path.join(_ROOT, 'lib', 'rate_limit_api.py')
 
 
-def _find_func(tree, name):
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            return node
-    return None
+@pytest.mark.anyio
+async def test_chat_sse_slot_is_keyed_by_owner_and_refusal_has_retry_after(
+        flask_app, monkeypatch):
+    from types import SimpleNamespace
+
+    import routes.api_v1.chat as chat
+
+    principals = []
+    monkeypatch.setattr(
+        chat.sse_limiter,
+        'try_acquire',
+        lambda principal: principals.append(principal) or None,
+    )
+    auth = SimpleNamespace(owner_user_id=47, key_id='rotatable-key')
+    async with flask_app.app_context():
+        token, rejection = chat._try_acquire_sse_slot(auth)
+
+    assert token is None
+    assert principals == ['owner:47']
+    response, status = rejection
+    assert status == 429
+    assert response.headers['Retry-After'] == '5'
 
 
-def test_wiring_chat_stream_acquires_and_releases_sse_slot():
-    src = open(_CHAT_PY, encoding='utf-8').read()
-    tree = ast.parse(src)
-    fn = _find_func(tree, 'chat_stream')
-    assert fn is not None
-    scoped = ast.get_source_segment(src, fn)
-    # Acquire keyed by the resolved principal, and a 429 refusal path.
-    assert '_sse_limiter.try_acquire(' in scoped, 'chat_stream must acquire an SSE slot'
-    assert 'principal_key(' in scoped, 'SSE slot must be keyed by principal'
-    assert '429' in scoped, 'over-cap SSE must return 429'
-    # Release must live in a finally (leak-proof on drop/abort).
-    assert '_sse_limiter.release(' in scoped, 'chat_stream must release the SSE slot'
-    assert 'finally:' in scoped
+@pytest.mark.anyio
+async def test_chat_stream_heartbeat_refreshes_and_close_releases_slot(
+        monkeypatch):
+    from types import SimpleNamespace
+
+    import lib.task_replay as replay
+    import routes.api_v1.chat as chat
+
+    monkeypatch.setattr(
+        replay,
+        'task_memory_replay_page',
+        lambda _task, _cursor: SimpleNamespace(events=[], next_cursor=0),
+    )
+
+    async def idle_wait(_task_id, *, timeout):
+        assert timeout == 15.0
+        return False
+
+    refreshed = []
+    released = []
+    unregistered = []
+    monkeypatch.setattr(chat, 'wait_for_event', idle_wait)
+    monkeypatch.setattr(chat.sse_limiter, 'refresh', refreshed.append)
+    monkeypatch.setattr(chat.sse_limiter, 'release', released.append)
+    monkeypatch.setattr(chat, 'unregister_waiter', unregistered.append)
+
+    stream = chat._stream_generator(
+        {'id': 'stream-task', 'status': 'running'},
+        'test-model',
+        'completion-id',
+        sse_slot_token='owner-slot',
+    )
+    assert await anext(stream) == ': heartbeat\n\n'
+    assert refreshed == ['owner-slot']
+    await stream.aclose()
+    assert released == ['owner-slot']
+    assert unregistered == ['stream-task']
 
 
-def test_wiring_chat_start_has_admission_gate():
-    src = open(_CHAT_PY, encoding='utf-8').read()
-    tree = ast.parse(src)
-    fn = _find_func(tree, 'chat_start')
-    assert fn is not None
-    scoped = ast.get_source_segment(src, fn)
-    assert '_admission.try_acquire()' in scoped, 'UI /chat/start must gate on admission'
-    assert '503' in scoped, 'over-capacity UI start must return 503'
-    # Slot released via on_terminal AND on the spawn-failure path (no leak).
-    assert 'on_terminal(' in scoped, 'admission slot must release via on_terminal'
-    assert scoped.count('_admission.release()') >= 1, (
-        'spawn-failure path must release the admission slot (terminal never fires)')
+@pytest.mark.anyio
+async def test_chat_completion_admission_refusal_releases_stream_slot(
+        flask_app, monkeypatch):
+    import lib.tasks_pkg.manager as task_manager
+    import routes.api_v1.chat as chat
+
+    monkeypatch.setattr(
+        task_manager,
+        'create_task',
+        lambda *_args, **_kwargs: {'id': 'refused-task', 'status': 'running'},
+    )
+    monkeypatch.setattr(chat.controller, 'try_acquire', lambda: False)
+    monkeypatch.setattr(chat.sse_limiter, 'try_acquire', lambda _key: 'slot')
+    released = []
+    monkeypatch.setattr(chat.sse_limiter, 'release', released.append)
+
+    response = await flask_app.test_client().post(
+        '/api/v1/chat/completions',
+        json={
+            'messages': [{'role': 'user', 'content': 'bounded'}],
+            'stream': True,
+        },
+    )
+    assert response.status_code == 503
+    assert released == ['slot']
 
 
-def test_wiring_check_request_routes_open_mode_to_ip_throttle():
-    src = open(_RL_PY, encoding='utf-8').read()
-    tree = ast.parse(src)
-    fn = _find_func(tree, 'check_request')
-    assert fn is not None
-    scoped = ast.get_source_segment(src, fn)
-    # The via_open_mode branch must call the IP throttle, not just return allowed.
-    assert 'via_open_mode' in scoped
-    assert 'check_open_mode_request(' in scoped, (
-        'open-mode ctx must route through the per-IP throttle, not bypass')
-    # And the throttle itself must delegate to the SHARED store (replica-correct
-    # under the db backend), not a fresh in-process dict.
-    omr = _find_func(tree, 'check_open_mode_request')
-    assert omr is not None
-    omr_src = ast.get_source_segment(src, omr)
-    assert 'rate_limit_store' in omr_src and 'record_and_check' in omr_src, (
-        'check_open_mode_request must delegate to lib.rate_limit_store '
-        '(shared/pluggable), not a per-process counter dict')
-    assert '_ip_state' not in src, (
-        'the duplicate in-process _ip_state dict must be gone (replaced by the '
-        'shared store)')
+@pytest.mark.anyio
+async def test_direct_chat_stream_releases_admission_and_sse_slots(
+        flask_app, monkeypatch):
+    import routes.api_v1.chat as chat
+    import routes.api_v1.chat_direct as direct
+
+    async def frames():
+        yield 'data: [DONE]\n\n'
+
+    monkeypatch.setattr(direct, 'run_direct_stream',
+                        lambda *_args, **_kwargs: frames())
+    monkeypatch.setattr(direct.controller, 'try_acquire', lambda: True)
+    admission_releases = []
+    monkeypatch.setattr(direct.controller, 'release',
+                        lambda: admission_releases.append(True))
+    monkeypatch.setattr(chat.sse_limiter, 'try_acquire', lambda _key: 'slot')
+    refreshed = []
+    released = []
+    monkeypatch.setattr(chat.sse_limiter, 'refresh', refreshed.append)
+    monkeypatch.setattr(chat.sse_limiter, 'release', released.append)
+
+    response = await flask_app.test_client().post(
+        '/api/v1/chat/stream-direct',
+        json={'messages': [{'role': 'user', 'content': 'bounded'}]},
+    )
+    assert response.status_code == 200
+    assert await response.get_data(as_text=True) == 'data: [DONE]\n\n'
+    assert refreshed == ['slot']
+    assert released == ['slot']
+    assert admission_releases == [True]
 
 
 if __name__ == '__main__':

@@ -29,7 +29,34 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault('TRADING_ENABLED', '0')
 
-import lib.paper.insight_engine as ie  # noqa: E402
+import lib.paper.insight_engine._anchors as anchors_mod  # noqa: E402
+import lib.paper.insight_engine._config as config_mod  # noqa: E402
+import lib.paper.insight_engine._grounding as grounding_mod  # noqa: E402
+import lib.paper.insight_engine._run as ie  # noqa: E402
+import lib.paper.insight_engine._rubric as rubric_mod  # noqa: E402
+import lib.paper.insight_engine._synthesize as synth_mod  # noqa: E402
+import lib.paper.insight_prompts as insight_prompts  # noqa: E402
+
+TEST_OWNER_USER_ID = 1
+
+_PATCH_OWNERS = {
+    'dispatch_stream': synth_mod,
+    'execute_paper_tool': synth_mod,
+    'search_arxiv': grounding_mod,
+    'fetch_arxiv_title': grounding_mod,
+    '_build_reader_context': ie,
+    'score_report_rubric': ie,
+    '_persist_insight': ie,
+    '_self_identity': ie,
+}
+
+
+def _get_patch(name):
+    return getattr(_PATCH_OWNERS[name], name)
+
+
+def _set_patch(name, value):
+    setattr(_PATCH_OWNERS[name], name, value)
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -96,9 +123,9 @@ class _Patched:
         self.systems_seen = []
 
     def __enter__(self):
-        for name in ('dispatch_stream', '_execute_report_tool', 'search_arxiv',
+        for name in ('dispatch_stream', 'execute_paper_tool', 'search_arxiv',
                      'fetch_arxiv_title', '_build_reader_context'):
-            self._orig[name] = getattr(ie, name)
+            self._orig[name] = _get_patch(name)
         rec = self
 
         def _fake_dispatch_stream(messages, *, on_content=None, tools=None, **kw):
@@ -120,22 +147,22 @@ class _Patched:
             return ({'role': 'assistant', 'content': body, 'tool_calls': None},
                     'stop', {'prompt_tokens': 1, 'completion_tokens': 1})
 
-        def _fake_execute_report_tool(name, args_str, user_question='', abort=None):
+        def _fakeexecute_paper_tool(name, args_str, user_question='', abort=None):
             rec.executed_tools.append(name)
             return ('RESULT: the current frontier is long-context attention.',
                     [{'title': 'x'}], None, None, None)
 
-        ie.dispatch_stream = _fake_dispatch_stream
-        ie._execute_report_tool = _fake_execute_report_tool
-        ie.search_arxiv = _fake_search
-        ie.fetch_arxiv_title = lambda _id: ''
+        synth_mod.dispatch_stream = _fake_dispatch_stream
+        synth_mod.execute_paper_tool = _fakeexecute_paper_tool
+        grounding_mod.search_arxiv = _fake_search
+        grounding_mod.fetch_arxiv_title = lambda _id: ''
         # No live library/memory in the test — inject a fixed context string.
         ie._build_reader_context = lambda *a, **k: '## READER CONTEXT\n- Some prior paper'
         return self
 
     def __exit__(self, *exc):
         for k, v in self._orig.items():
-            setattr(ie, k, v)
+            _set_patch(k, v)
         return False
 
 
@@ -151,7 +178,8 @@ _PAPER = 'dUltra accelerates diffusion decoding. ' * 20
 def test_synthesis_actually_researches():
     """The loop executes the model's web_search call BEFORE emitting insight JSON."""
     with _Patched() as p:
-        out = ie.generate_insight(_PAPER, _REPORT, 'en', phash='abc123')
+        out = ie.generate_insight(
+            _PAPER, _REPORT, 'en', phash='abc123', user_id=TEST_OWNER_USER_ID)
     assert 'web_search' in p.executed_tools, \
         f'web_search never executed — not agentic: {p.executed_tools}'
     assert len(p.dispatched_rounds) >= 2, f'expected >=2 rounds: {p.dispatched_rounds}'
@@ -165,7 +193,8 @@ def test_system_prompt_is_date_anchored():
     """Every dispatch carries today's date — no stale-clock frontier guessing."""
     import re as _re
     with _Patched() as p:
-        ie.generate_insight(_PAPER, _REPORT, 'en', phash='abc123')
+        ie.generate_insight(
+            _PAPER, _REPORT, 'en', phash='abc123', user_id=TEST_OWNER_USER_ID)
     assert p.systems_seen, 'no dispatch happened'
     assert _re.search(r"[Tt]oday'?s? date is \d{4}-\d{2}-\d{2}", p.systems_seen[0]), \
         f'insight system prompt is not date-anchored: {p.systems_seen[0][:200]!r}'
@@ -176,7 +205,8 @@ def test_grounding_gate_drops_hallucinated_paper():
     """A name-dropped paper that does NOT resolve on arXiv is stripped to null
     (prose survives); the REAL one is kept and rendered as an arXiv link."""
     with _Patched():
-        out = ie.generate_insight(_PAPER, _REPORT, 'en', phash='abc123')
+        out = ie.generate_insight(
+            _PAPER, _REPORT, 'en', phash='abc123', user_id=TEST_OWNER_USER_ID)
     insight = out['insight']
     conns = insight['connections']
     # Connection 0 cited the real Transformer paper → grounded card kept.
@@ -208,7 +238,7 @@ def test_rubric_parses_clamps_and_recomputes():
         'one_line_verdict': 'Leaves the reader with a real idea.',
     }
 
-    orig = ie.dispatch_stream
+    orig = rubric_mod.dispatch_stream
     try:
         def _fake(messages, *, on_content=None, **kw):
             body = json.dumps(rubric_json)
@@ -216,14 +246,14 @@ def test_rubric_parses_clamps_and_recomputes():
                 on_content(body)
             return ({'role': 'assistant', 'content': body}, 'stop',
                     {'prompt_tokens': 1, 'completion_tokens': 1})
-        ie.dispatch_stream = _fake
+        rubric_mod.dispatch_stream = _fake
         v = ie.score_report_rubric('# Some report body long enough to score.')
     finally:
-        ie.dispatch_stream = orig
+        rubric_mod.dispatch_stream = orig
 
     assert v is not None, 'rubric returned None on a valid reply'
     assert v['scores']['novelty_of_idea'] == 5, f'score not clamped to 5: {v["scores"]}'
-    assert set(v['scores']) == set(ie.RUBRIC_AXES), f'axis set drift: {v["scores"].keys()}'
+    assert set(v['scores']) == set(insight_prompts.RUBRIC_AXES), f'axis set drift: {v["scores"].keys()}'
     assert abs(v['overall'] - 4.25) < 1e-6, \
         f"overall not self-recomputed (got {v['overall']}, model lied 1.0)"
     _ok('rubric critic: scores clamped to 1-5 and overall recomputed (model arithmetic ignored)')
@@ -233,11 +263,13 @@ def test_neuter_confirms_agentic_loop_is_load_bearing():
     """NEUTER: with the loop broken (model answers immediately, tools ignored),
     the research tool is NEVER executed — proving the loop drives the tool use."""
     with _Patched() as p:
-        ie.generate_insight(_PAPER, _REPORT, 'en', phash='abc123')
+        ie.generate_insight(
+            _PAPER, _REPORT, 'en', phash='abc123', user_id=TEST_OWNER_USER_ID)
     assert 'web_search' in p.executed_tools, 'precondition failed: real loop did not research'
 
     with _Patched(break_loop=True) as p:
-        out = ie.generate_insight(_PAPER, _REPORT, 'en', phash='abc123')
+        out = ie.generate_insight(
+            _PAPER, _REPORT, 'en', phash='abc123', user_id=TEST_OWNER_USER_ID)
     assert 'web_search' not in p.executed_tools, \
         'NEUTER did not break the invariant — research tool ran with the loop broken ' \
         '(false-confidence test).'
@@ -262,9 +294,9 @@ class _RepairPatched:
         self.saw_repair_reask = False
 
     def __enter__(self):
-        for name in ('dispatch_stream', '_execute_report_tool', 'search_arxiv',
+        for name in ('dispatch_stream', 'execute_paper_tool', 'search_arxiv',
                      'fetch_arxiv_title', '_build_reader_context'):
-            self._orig[name] = getattr(ie, name)
+            self._orig[name] = _get_patch(name)
         rec = self
 
         # A reply that is NOT parseable JSON: prose, then a truncated object.
@@ -275,7 +307,7 @@ class _RepairPatched:
         def _fake_dispatch_stream(messages, *, on_content=None, tools=None, **kw):
             last = messages[-1] if messages else {}
             is_repair = (last.get('role') == 'user'
-                         and ie._REPAIR_INSTRUCTION[:40] in (last.get('content') or ''))
+                         and synth_mod._REPAIR_INSTRUCTION[:40] in (last.get('content') or ''))
             if is_repair:
                 rec.saw_repair_reask = True
                 if rec.break_repair:
@@ -293,16 +325,16 @@ class _RepairPatched:
             return ({'role': 'assistant', 'content': garbage, 'tool_calls': None},
                     'stop', {'prompt_tokens': 1, 'completion_tokens': 1})
 
-        ie.dispatch_stream = _fake_dispatch_stream
-        ie._execute_report_tool = lambda *a, **k: ('', [], None, None, None)
-        ie.search_arxiv = _fake_search
-        ie.fetch_arxiv_title = lambda _id: ''
+        synth_mod.dispatch_stream = _fake_dispatch_stream
+        synth_mod.execute_paper_tool = lambda *a, **k: ('', [], None, None, None)
+        grounding_mod.search_arxiv = _fake_search
+        grounding_mod.fetch_arxiv_title = lambda _id: ''
         ie._build_reader_context = lambda *a, **k: '## READER CONTEXT\n- Some prior paper'
         return self
 
     def __exit__(self, *exc):
         for k, v in self._orig.items():
-            setattr(ie, k, v)
+            _set_patch(k, v)
         return False
 
 
@@ -310,7 +342,8 @@ def test_repair_reask_recovers_unparseable_json():
     """A prose-wrapped / truncated synthesis reply is recovered by the one-shot
     repair re-ask — the feature does NOT silently no-op on a parse failure."""
     with _RepairPatched() as p:
-        out = ie.generate_insight(_PAPER, _REPORT, 'en', phash='abc123')
+        out = ie.generate_insight(
+            _PAPER, _REPORT, 'en', phash='abc123', user_id=TEST_OWNER_USER_ID)
     assert p.saw_repair_reask, 'repair re-ask was never issued on unparseable JSON'
     assert out['insight'] is not None, \
         'repair did not recover the insight — feature silently no-opped'
@@ -324,7 +357,8 @@ def test_neuter_repair_is_load_bearing():
     """NEUTER: if the repair re-ask ALSO returns garbage, the feature yields
     nothing — proving the repair step (not some other path) is what recovers it."""
     with _RepairPatched(break_repair=True) as p:
-        out = ie.generate_insight(_PAPER, _REPORT, 'en', phash='abc123')
+        out = ie.generate_insight(
+            _PAPER, _REPORT, 'en', phash='abc123', user_id=TEST_OWNER_USER_ID)
     assert p.saw_repair_reask, 'precondition: repair re-ask must have been attempted'
     assert out['insight'] is None, \
         'NEUTER failed — insight recovered even though BOTH synthesis and repair ' \
@@ -366,9 +400,9 @@ class _SelfRefPatched:
         self._orig = {}
 
     def __enter__(self):
-        for name in ('dispatch_stream', '_execute_report_tool', 'search_arxiv',
+        for name in ('dispatch_stream', 'execute_paper_tool', 'search_arxiv',
                      'fetch_arxiv_title', '_build_reader_context'):
-            self._orig[name] = getattr(ie, name)
+            self._orig[name] = _get_patch(name)
 
         def _fake_dispatch(messages, *, on_content=None, tools=None, **kw):
             body = json.dumps(_SELFREF_INSIGHT)
@@ -386,16 +420,16 @@ class _SelfRefPatched:
                          'abs_url': 'https://arxiv.org/abs/2605.03871'}]
             return []
 
-        ie.dispatch_stream = _fake_dispatch
-        ie._execute_report_tool = lambda *a, **k: ('', [], None, None, None)
-        ie.search_arxiv = _fake_search
-        ie.fetch_arxiv_title = lambda _id: ''
+        synth_mod.dispatch_stream = _fake_dispatch
+        synth_mod.execute_paper_tool = lambda *a, **k: ('', [], None, None, None)
+        grounding_mod.search_arxiv = _fake_search
+        grounding_mod.fetch_arxiv_title = lambda _id: ''
         ie._build_reader_context = lambda *a, **k: '## READER CONTEXT\n- prior'
         return self
 
     def __exit__(self, *exc):
         for k, v in self._orig.items():
-            setattr(ie, k, v)
+            _set_patch(k, v)
         return False
 
 
@@ -410,7 +444,8 @@ def test_selfref_connections_dropped_legit_survives():
     with _SelfRefPatched():
         out = ie.generate_insight(
             'paper text', _SELFREF_REPORT, 'en', phash='selfref1',
-            self_arxiv_id='1706.03762', self_title='Attention Is All You Need')
+            self_arxiv_id='1706.03762', self_title='Attention Is All You Need',
+            user_id=TEST_OWNER_USER_ID)
     conns = out['insight']['connections']
     titles = [(c.get('paper') or {}).get('title') if c.get('paper') else None for c in conns]
     texts = ' || '.join(c['text'] for c in conns)
@@ -430,7 +465,7 @@ def test_neuter_selfref_guard_is_load_bearing():
     with _SelfRefPatched():
         out = ie.generate_insight(
             'paper text', 'no title here', 'en', phash='',
-            self_arxiv_id=None, self_title=None)
+            self_arxiv_id=None, self_title=None, user_id=TEST_OWNER_USER_ID)
     conns = out['insight']['connections']
     assert len(conns) == 3, \
         f'guard fired without identity — should keep all 3, got {len(conns)}'
@@ -441,12 +476,12 @@ def test_neuter_selfref_guard_is_load_bearing():
 def test_headroom_gate_threshold():
     """The a-priori headroom gate fires only when the report's own insight
     baseline is at/below threshold (4.0); fails OPEN on a None baseline."""
-    assert ie.insight_gate_fires(3.5) is True
-    assert ie.insight_gate_fires(4.0) is True
-    assert ie.insight_gate_fires(4.01) is False
-    assert ie.insight_gate_fires(4.75) is False
-    assert ie.insight_gate_fires(None) is True, 'gate must fail OPEN on scoring failure'
-    assert ie.INSIGHT_GATE_THRESHOLD == 4.0
+    assert config_mod.insight_gate_fires(3.5) is True
+    assert config_mod.insight_gate_fires(4.0) is True
+    assert config_mod.insight_gate_fires(4.01) is False
+    assert config_mod.insight_gate_fires(4.75) is False
+    assert config_mod.insight_gate_fires(None) is True, 'gate must fail OPEN on scoring failure'
+    assert config_mod.INSIGHT_GATE_THRESHOLD == 4.0
     _ok('headroom gate: fires at baseline<=4.0, withholds above, fails open on None')
 
 
@@ -465,10 +500,10 @@ class _ReportInsightPatched:
         self.persisted = None   # {'lang':..., 'report':...} or None
 
     def __enter__(self):
-        for name in ('dispatch_stream', '_execute_report_tool', 'search_arxiv',
+        for name in ('dispatch_stream', 'execute_paper_tool', 'search_arxiv',
                      'fetch_arxiv_title', '_build_reader_context',
                      'score_report_rubric', '_persist_insight', '_self_identity'):
-            self._orig[name] = getattr(ie, name)
+            self._orig[name] = _get_patch(name)
         rec = self
 
         def _fake_dispatch(messages, *, on_content=None, tools=None, **kw):
@@ -483,14 +518,14 @@ class _ReportInsightPatched:
             return '## READER CONTEXT\n- Some prior paper the operator read'
 
         def _fake_persist(phash, ui_lang, markdown, model, **kw):
-            rec.persisted = {'lang': ie.insight_lang_key(ui_lang),
+            rec.persisted = {'lang': config_mod.insight_lang_key(ui_lang),
                              'report': markdown, 'phash': phash, 'kw': kw}
             return True
 
-        ie.dispatch_stream = _fake_dispatch
-        ie._execute_report_tool = lambda *a, **k: ('', [], None, None, None)
-        ie.search_arxiv = _fake_search
-        ie.fetch_arxiv_title = lambda _id: ''
+        synth_mod.dispatch_stream = _fake_dispatch
+        synth_mod.execute_paper_tool = lambda *a, **k: ('', [], None, None, None)
+        grounding_mod.search_arxiv = _fake_search
+        grounding_mod.fetch_arxiv_title = lambda _id: ''
         ie._build_reader_context = _fake_reader_ctx
         # Fake the rubric: return the desired baseline (or None to test fail-open).
         ie.score_report_rubric = lambda *a, **k: (
@@ -503,7 +538,7 @@ class _ReportInsightPatched:
 
     def __exit__(self, *exc):
         for k, v in self._orig.items():
-            setattr(ie, k, v)
+            _set_patch(k, v)
         return False
 
 
@@ -512,7 +547,8 @@ def test_report_insight_low_baseline_fires_generates_persists():
     the ``insight:<ui>`` key + markdown returned for the reader."""
     with _ReportInsightPatched(baseline=3.2) as p:
         out = ie.run_report_insight(_PAPER, _REPORT, 'en', phash='rpt1',
-                                    allow_personal_context=True)
+                                    allow_personal_context=True,
+                                    user_id=TEST_OWNER_USER_ID)
     assert out['fired'] is True, f'gate should fire at baseline 3.2: {out}'
     assert out['insight'] is not None and out['markdown'], 'no insight produced'
     assert p.persisted is not None, 'insight was not persisted'
@@ -527,7 +563,8 @@ def test_report_insight_high_baseline_withheld():
     """Flag-on + HIGH baseline → gate WITHHELD: no generation, no persistence."""
     with _ReportInsightPatched(baseline=4.75) as p:
         out = ie.run_report_insight(_PAPER, _REPORT, 'en', phash='rpt2',
-                                    allow_personal_context=True)
+                                    allow_personal_context=True,
+                                    user_id=TEST_OWNER_USER_ID)
     assert out['fired'] is False, f'gate should withhold at baseline 4.75: {out}'
     assert out['insight'] is None, 'insight generated despite gate withholding'
     assert out['markdown'] == '', 'markdown produced despite gate withholding'
@@ -542,7 +579,8 @@ def test_report_insight_headless_suppresses_personal_context():
     proving the personal_scope fail-closed gate is honoured end-to-end."""
     with _ReportInsightPatched(baseline=3.2) as p:
         out = ie.run_report_insight(_PAPER, _REPORT, 'en', phash='rpt3',
-                                    allow_personal_context=False)
+                                    allow_personal_context=False,
+                                    user_id=TEST_OWNER_USER_ID)
     assert out['fired'] is True, 'gate should still fire on headless (low baseline)'
     assert out['insight'] is not None, 'insight should still be produced headless'
     assert p.reader_context_called is False, \
@@ -558,7 +596,8 @@ def test_neuter_gate_wiring_is_load_bearing():
     # would withhold. Proves insight_gate_fires is the actual lever.
     with _ReportInsightPatched(baseline=None) as p:
         out = ie.run_report_insight(_PAPER, _REPORT, 'en', phash='rpt4',
-                                    allow_personal_context=True)
+                                    allow_personal_context=True,
+                                    user_id=TEST_OWNER_USER_ID)
     assert out['fired'] is True, 'None baseline must fail OPEN (fire)'
     assert p.persisted is not None, 'fail-open path should generate + persist'
     # And the control: a high baseline withholds (already covered above), so the
@@ -572,20 +611,20 @@ def test_enable_chain_default_on_with_overrides():
     always wins. Direction-aligned rewrite of the old default-OFF flag test."""
     import lib as _lib
     os.environ.pop('TOFU_PAPER_INSIGHT', None)
-    assert ie.insight_enabled() is True, 'interactive default must be ON'
+    assert config_mod.insight_enabled() is True, 'interactive default must be ON'
     # env seed still honoured as a fleet kill switch / back-compat opt-in.
     os.environ['TOFU_PAPER_INSIGHT'] = '0'
     try:
-        assert ie.insight_enabled() is False, 'TOFU_PAPER_INSIGHT=0 must disable'
+        assert config_mod.insight_enabled() is False, 'TOFU_PAPER_INSIGHT=0 must disable'
         # per-request cfg stamp beats the env seed (headless fail-closed).
-        assert ie.insight_enabled({'paperInsightEnabled': True}) is True, \
+        assert config_mod.insight_enabled({'paperInsightEnabled': True}) is True, \
             'explicit cfg opt-in must beat env=0'
     finally:
         os.environ.pop('TOFU_PAPER_INSIGHT', None)
     os.environ['TOFU_PAPER_INSIGHT'] = '1'
     try:
-        assert ie.insight_enabled() is True, 'TOFU_PAPER_INSIGHT=1 did not enable'
-        assert ie.insight_enabled({'paperInsightEnabled': False}) is False, \
+        assert config_mod.insight_enabled() is True, 'TOFU_PAPER_INSIGHT=1 did not enable'
+        assert config_mod.insight_enabled({'paperInsightEnabled': False}) is False, \
             'headless cfg stamp False must beat env=1'
     finally:
         os.environ.pop('TOFU_PAPER_INSIGHT', None)

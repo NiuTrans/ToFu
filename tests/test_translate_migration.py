@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Migration tests for routes/translate.py after TaskRuntime adoption.
+"""Translation TaskRuntime lifecycle and HTTP polling contracts.
 
-Verifies the legacy poll response shape is preserved end-to-end so the
-frontend (translation.js, paper-reader.js) continues to work unchanged.
+Verifies that translation state changes only through TaskRuntime and that the
+frontend polling projection exposes the canonical task fields end to end.
 
 Specifically:
   - taskId, status, translated, model, error, progress, statusMessage, partial
@@ -14,7 +14,12 @@ import os
 import sys
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+pytestmark = pytest.mark.unit
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
 def _ok(msg): print(' ', _color('✓', '32'), msg)
@@ -22,63 +27,52 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 
 
 def test_runtime_created():
-    from routes.translate import _translate_runtime, _translate_tasks
+    from lib.translate import _translate_runtime
     assert _translate_runtime is not None
-    # _translate_tasks must point at the runtime's internal dict (compatibility)
-    assert _translate_tasks is _translate_runtime._tasks
-    _ok('_translate_runtime created; _translate_tasks shim points at internal dict')
+    assert _translate_runtime.kind == 'translate'
+    assert _translate_runtime.push_channel == 'translate'
+    _ok('translation runtime owns lifecycle and push authority')
 
 
 def test_create_task_via_runtime():
-    from routes.translate import _translate_runtime
-    task = _translate_runtime.create(
+    from lib.translate import _translate_runtime
+    task = _translate_runtime.create(user_id=1,
         meta={'convId': 'c1', 'msgIdx': 0, 'targetLang': 'English', 'textLen': 100},
     )
-    task.update({
-        'status': 'running', 'result': None, 'error': None,
-        'model': None, 'progress': None,
-        'convId': 'c1', 'msgIdx': 0, 'msgId': None, 'field': 'translatedContent',
-        'targetLang': 'English', 'textLen': 100,
-        'completed_at': None,
-    })
+    assert _translate_runtime.mark_running(
+        task['id'], fields={'model': None, 'progress': None})
     found = _translate_runtime.get(task['id'])
     assert found is task
     assert found['status'] == 'running'
-    assert found['convId'] == 'c1'
-    _ok('runtime.create() + custom fields preserved')
+    assert found['meta']['convId'] == 'c1'
+    _ok('runtime creation metadata and running transition are canonical')
 
 
 def test_partial_and_status_fields_writable():
     """Verify the mutable fields that translation.js polls for still work."""
-    from routes.translate import _translate_runtime
-    task = _translate_runtime.create()
-    task['status'] = 'running'
-    task['progress'] = '3/5'
-    task['statusMessage'] = '⏳ Retrying due to 429…'
-    task['statusKind'] = 'rate_limit'
-    task['partial'] = '部分翻译...'
-    task['partialUpdatedAt'] = time.time()
-
-    # Write through the events_lock (mirrors what _do_translate does)
-    with task['events_lock']:
-        task['progress'] = '4/5'
+    from lib.translate import _translate_runtime
+    task = _translate_runtime.create(user_id=1)
+    _translate_runtime.mark_running(task['id'])
+    assert _translate_runtime.update_fields(task['id'], fields={
+        'progress': '4/5',
+        'statusMessage': '⏳ Retrying due to 429…',
+        'statusKind': 'rate_limit',
+        'partial': '部分翻译...',
+        'partialUpdatedAt': time.time(),
+    }, only_if_status='running')
 
     assert task['progress'] == '4/5'
     assert task['statusMessage'] == '⏳ Retrying due to 429…'
     assert task['partial'] == '部分翻译...'
-    _ok('mutable fields (progress, statusMessage, partial) writable via events_lock')
+    _ok('translation presentation fields update atomically through TaskRuntime')
 
 
 def test_done_state_with_result():
-    from routes.translate import _translate_runtime
-    task = _translate_runtime.create()
-    task.update({'status': 'running', 'result': None, 'completed_at': None})
-
-    with task['events_lock']:
-        task['status'] = 'done'
-        task['result'] = 'Hello world'
-        task['model'] = 'gpt-4o'
-        task['completed_at'] = time.time()
+    from lib.translate import _translate_runtime
+    task = _translate_runtime.create(user_id=1)
+    _translate_runtime.mark_running(task['id'])
+    _translate_runtime.update_fields(task['id'], fields={'model': 'gpt-4o'})
+    assert _translate_runtime.finish(task['id'], result='Hello world')
 
     found = _translate_runtime.get(task['id'])
     assert found['status'] == 'done'
@@ -89,17 +83,15 @@ def test_done_state_with_result():
 
 def test_error_state_with_envelope():
     """Translation uses a typed envelope dict for errors (per recent migration)."""
-    from routes.translate import _translate_runtime
+    from lib.translate import _translate_runtime
     from lib.error_envelope import make_envelope as _make_env
-    task = _translate_runtime.create()
-    task.update({'status': 'running', 'error': None, 'completed_at': None})
+    task = _translate_runtime.create(user_id=1)
+    _translate_runtime.mark_running(task['id'])
 
     envelope = _make_env('generic', detail='boom', context='translate',
                           source='routes.translate', raw='boom')
-    with task['events_lock']:
-        task['status'] = 'error'
-        task['error'] = envelope
-        task['completed_at'] = time.time()
+    assert _translate_runtime.finish(
+        task['id'], error=envelope, error_context='translate')
 
     assert task['status'] == 'error'
     assert isinstance(task['error'], dict)
@@ -109,13 +101,13 @@ def test_error_state_with_envelope():
 
 def test_cleanup_removes_finished_only():
     """cleanup_translate_tasks should drop done/error past TTL but keep running."""
-    from routes.translate import _translate_runtime, _cleanup_translate_tasks
+    from lib.translate import _translate_runtime, _cleanup_translate_tasks
     # Use a tiny TTL for this test
     _translate_runtime.ttl = 0.05
     try:
-        t1 = _translate_runtime.create()
-        t1['status'] = 'running'
-        t2 = _translate_runtime.create()
+        t1 = _translate_runtime.create(user_id=1)
+        _translate_runtime.mark_running(t1['id'])
+        t2 = _translate_runtime.create(user_id=1)
         # Mark t2 as terminal via the runtime (so finished_at is set)
         _translate_runtime.finish(t2['id'], result='ok')
         time.sleep(0.1)
@@ -133,7 +125,7 @@ def test_cleanup_removes_finished_only():
 
 
 def test_poll_endpoint_done_shape():
-    """HTTP /api/translate/poll/<id> returns legacy shape on done."""
+    """HTTP translation polling projects a completed runtime task."""
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         'server', os.path.join(os.path.dirname(os.path.dirname(__file__)),
@@ -144,17 +136,13 @@ def test_poll_endpoint_done_shape():
     app = mod.app
 
     import asyncio
-    from routes.translate import _translate_runtime
+    from lib.translate import _translate_runtime
 
     async def _t():
-        task = _translate_runtime.create()
-        task.update({'status': 'running', 'result': None, 'error': None,
-                      'completed_at': None, 'model': None, 'progress': None})
-        with task['events_lock']:
-            task['status'] = 'done'
-            task['result'] = 'translated text'
-            task['model'] = 'gpt-4o'
-            task['completed_at'] = time.time()
+        task = _translate_runtime.create(user_id=1)
+        _translate_runtime.mark_running(task['id'])
+        _translate_runtime.update_fields(task['id'], fields={'model': 'gpt-4o'})
+        _translate_runtime.finish(task['id'], result='translated text')
 
         async with app.test_client() as client:
             r = await client.get(f'/api/v1/translate/poll/{task["id"]}')
@@ -180,15 +168,13 @@ def test_poll_endpoint_running_with_partial():
     app = mod.app
 
     import asyncio
-    from routes.translate import _translate_runtime
+    from lib.translate import _translate_runtime
 
     async def _t():
-        task = _translate_runtime.create()
-        task.update({
-            'status': 'running', 'result': None, 'error': None,
+        task = _translate_runtime.create(user_id=1)
+        _translate_runtime.mark_running(task['id'], fields={
             'progress': '2/5', 'statusMessage': 'retry 1', 'statusKind': 'rate_limit',
-            'partial': '中间结果...',
-            'completed_at': None, 'model': None,
+            'partial': '中间结果...', 'model': None,
         })
 
         async with app.test_client() as client:
@@ -241,20 +227,18 @@ def test_poll_batch_shape():
     app = mod.app
 
     import asyncio
-    from routes.translate import _translate_runtime
+    from lib.translate import _translate_runtime
 
     async def _t():
         # Two tasks — one done, one running
-        t1 = _translate_runtime.create()
-        t1.update({'status': 'running', 'result': None})
-        with t1['events_lock']:
-            t1['status'] = 'done'
-            t1['result'] = 'first result'
-            t1['model'] = 'm1'
-            t1['completed_at'] = time.time()
+        t1 = _translate_runtime.create(user_id=1)
+        _translate_runtime.mark_running(t1['id'])
+        _translate_runtime.update_fields(t1['id'], fields={'model': 'm1'})
+        _translate_runtime.finish(t1['id'], result='first result')
 
-        t2 = _translate_runtime.create()
-        t2.update({'status': 'running', 'progress': '1/3', 'partial': 'part'})
+        t2 = _translate_runtime.create(user_id=1)
+        _translate_runtime.mark_running(
+            t2['id'], fields={'progress': '1/3', 'partial': 'part'})
 
         async with app.test_client() as client:
             r = await client.post('/api/v1/translate/poll-batch',
@@ -283,10 +267,10 @@ def test_poll_batch_shape():
 
 def main():
     print()
-    print(_color('═══ translate.py Migration Tests ═══', '36'))
+    print(_color('═══ Translation Runtime Contract Tests ═══', '36'))
     print()
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_translate_migration.__main__')
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_translate_migration.__main__')
 
     tests = [
         test_runtime_created,
@@ -311,7 +295,7 @@ def main():
             _fail(f'{fn.__name__}: unexpected {type(e).__name__}: {e}')
 
     print()
-    print(_color(f'═══ ALL {len(tests)} MIGRATION TESTS PASSED ═══', '32'))
+    print(_color(f'═══ ALL {len(tests)} CONTRACT TESTS PASSED ═══', '32'))
     print()
 
 

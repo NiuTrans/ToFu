@@ -8,7 +8,6 @@ both ``_cache_states`` and the TTL-latch table.
 
 from __future__ import annotations
 
-import sys as _sys
 import time
 from typing import Any
 
@@ -23,24 +22,6 @@ from lib.tasks_pkg.cache_tracking._detect import EDITABLE_TAIL_COUNT
 from lib.tasks_pkg.cache_tracking._ttl import _ttl_latch
 
 logger = get_logger(__name__)
-
-
-def _resolve_prefix_count(conv_id: str) -> int:
-    """Return the cache-prefix boundary, resolving ``get_cache_prefix_count``
-    through the package facade at CALL time.
-
-    Both this and ``get_cache_prefix_count`` live in ``_prefix``, so a bare
-    call would bind the submodule-local function and a facade patch of
-    ``lib.tasks_pkg.cache_tracking.get_cache_prefix_count`` (how callers and
-    tests stub the boundary) could not intercept it — the same facade-vs-local
-    drift fixed for ``_roi._audit_log``. Resolving through the facade keeps the
-    boundary honestly interceptable (falls back to the local binding if the
-    facade isn't importable).
-    """
-    fac = _sys.modules.get('lib.tasks_pkg.cache_tracking')
-    fn = getattr(fac, 'get_cache_prefix_count', get_cache_prefix_count) if fac \
-        else get_cache_prefix_count
-    return fn(conv_id)
 
 
 def sort_tool_results(messages: list, conv_id: str = '') -> None:
@@ -59,7 +40,7 @@ def sort_tool_results(messages: list, conv_id: str = '') -> None:
     them by tool_call_id.  It's called before build_body to ensure
     deterministic ordering.
 
-    ★ CACHE-CRITICAL: reordering messages inside the prompt-cache PREFIX
+    CACHE-CRITICAL: reordering messages inside the prompt-cache PREFIX
     rewrites the cached prefix bytes and forces a full re-cache — the exact
     silent cache-killer this module otherwise hunts. So the sort is gated to
     indices at/after ``get_cache_prefix_count(conv_id)``: a run that begins
@@ -80,7 +61,7 @@ def sort_tool_results(messages: list, conv_id: str = '') -> None:
     _prefix_count = 0
     if conv_id:
         try:
-            _prefix_count = _resolve_prefix_count(conv_id)
+            _prefix_count = get_cache_prefix_count(conv_id)
         except Exception as e:
             logger.debug('[CacheTrack] sort_tool_results prefix lookup failed: %s', e)
 
@@ -106,7 +87,9 @@ def sort_tool_results(messages: list, conv_id: str = '') -> None:
             i += 1
 
 
-def get_cache_prefix_count(conv_id: str, current_msg_count: int | None = None) -> int:
+def get_cache_prefix_count(
+    conv_id: str, current_msg_count: int | None = None, *, user_id: int,
+) -> int:
     """Get the number of messages in the cache prefix for this conversation.
 
     Microcompact should skip editing messages[0:N] where N is this count,
@@ -117,7 +100,7 @@ def get_cache_prefix_count(conv_id: str, current_msg_count: int | None = None) -
     For Anthropic (explicit breakpoints), this is less critical since
     add_cache_breakpoints places markers at the conversation tail.
 
-    ★ CLAMP TO THE CURRENT PREFIX (the history-shrink guard). The boundary
+    CLAMP TO THE CURRENT PREFIX (the history-shrink guard). The boundary
     sources below (in-memory sibling / durable HWM) are MONOTONIC high-water
     marks — they only ever rise. But the conversation history can legitimately
     SHRINK within the same conv_id: an L2/L3 macro-compaction rewrites/truncates
@@ -134,7 +117,7 @@ def get_cache_prefix_count(conv_id: str, current_msg_count: int | None = None) -
     When ``current_msg_count`` is None (e.g. sort_tool_results, diagnostics) the
     raw boundary is returned unchanged (back-compat).
 
-    ★ CROSS-THREAD (per-conversation) boundary — the turn-boundary cache-kill
+    CROSS-THREAD (per-conversation) boundary — the turn-boundary cache-kill
     fix. ``_state_key`` scopes CacheState per ``(conv_id, thread_id)`` so
     concurrent agents under one conv don't clobber each other's baseline. But
     a plain SEQUENTIAL new user turn runs on a NEW ``run_task`` worker thread,
@@ -181,7 +164,8 @@ def get_cache_prefix_count(conv_id: str, current_msg_count: int | None = None) -
         return min(boundary, max(0, current_msg_count - EDITABLE_TAIL_COUNT))
 
     with _cache_lock:
-        own = _boundary(_cache_states.get(_state_key(conv_id)))
+        own = _boundary(_cache_states.get(
+            _state_key(conv_id, user_id=user_id)))
         if own > 0:
             return _clamp(own)
         # Current thread has no warm state (typically a new user turn on a
@@ -190,7 +174,7 @@ def get_cache_prefix_count(conv_id: str, current_msg_count: int | None = None) -
         # thread whose prefix the gateway is still caching.
         best = 0
         for _key, _st in _cache_states.items():
-            if _key[0] != conv_id:
+            if _key[0] != user_id or _key[1] != conv_id:
                 continue
             b = _boundary(_st)
             if b > best:
@@ -204,7 +188,7 @@ def get_cache_prefix_count(conv_id: str, current_msg_count: int | None = None) -
     # itself cause a miss. Read OUTSIDE the _cache_lock (own DB/TTL lock).
     try:
         from lib.tasks_pkg.cache_tracking._persist import read_persisted_boundary
-        persisted = read_persisted_boundary(conv_id)
+        persisted = read_persisted_boundary(conv_id, user_id=user_id)
         if persisted > best:
             best = persisted
     except Exception as e:
@@ -227,7 +211,7 @@ def get_cache_diagnostics() -> dict[str, Any]:
         total_reads = 0
         total_writes = 0
         for key, state in _cache_states.items():
-            cid = key[0]
+            cid = key[1]
             age = now - state.last_update_time if state.last_update_time else 0
             convs.append({
                 'conv_id': cid[:8],

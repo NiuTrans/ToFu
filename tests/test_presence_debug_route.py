@@ -25,7 +25,7 @@ pytestmark = [pytest.mark.api, pytest.mark.auth_mode("open")]
 def test_debug_route_disabled_by_default(flask_client, monkeypatch):
     """Without TOFU_PRESENCE_DEBUG the route refuses with 403 and emits nothing."""
     monkeypatch.delenv('TOFU_PRESENCE_DEBUG', raising=False)
-    from lib.push import hub
+    from lib.agent_core.push import hub
     captured = []
     listener = lambda ch, tid, payload: captured.append(payload)  # noqa: E731
     hub.add_listener(listener)
@@ -44,7 +44,7 @@ def test_debug_route_enabled_emits_presence_frames(flask_client, monkeypatch,
     """With the flag set, the route fires the scenario and broadcasts frames."""
     monkeypatch.setenv('TOFU_PRESENCE_DEBUG', '1')
     root = str(tmp_path / 'presence-enabled')
-    from lib.push import hub
+    from lib.agent_core.push import hub
     captured = []
     listener = lambda ch, tid, payload: captured.append({'ch': ch, **payload})  # noqa: E731
     hub.add_listener(listener)
@@ -64,8 +64,8 @@ def test_debug_route_enabled_emits_presence_frames(flask_client, monkeypatch,
     finally:
         hub.remove_listener(listener)
         from lib import presence
-        presence.depart(root, 'dbg-peer-1')
-        presence.depart(root, 'dbg-peer-2')
+        presence.depart(root, 'dbg-peer-1', user_id=1)
+        presence.depart(root, 'dbg-peer-2', user_id=1)
 
 
 def test_debug_route_subagents_emits_within_conv_conflict(flask_client,
@@ -74,7 +74,7 @@ def test_debug_route_subagents_emits_within_conv_conflict(flask_client,
     """The 'subagents' action fires a within-conversation conflict + nested peers."""
     monkeypatch.setenv('TOFU_PRESENCE_DEBUG', '1')
     root = str(tmp_path / 'presence-subagents')
-    from lib.push import hub
+    from lib.agent_core.push import hub
     captured = []
     listener = lambda ch, tid, payload: captured.append({'ch': ch, **payload})  # noqa: E731
     hub.add_listener(listener)
@@ -93,9 +93,11 @@ def test_debug_route_subagents_emits_within_conv_conflict(flask_client,
     finally:
         hub.remove_listener(listener)
         from lib import presence
-        presence.depart(root, 'dbg-swarm', agent_id='agent-coder-1')
-        presence.depart(root, 'dbg-swarm', agent_id='agent-coder-2')
-        presence.depart(root, 'dbg-swarm')
+        presence.depart(
+            root, 'dbg-swarm', user_id=1, agent_id='agent-coder-1')
+        presence.depart(
+            root, 'dbg-swarm', user_id=1, agent_id='agent-coder-2')
+        presence.depart(root, 'dbg-swarm', user_id=1)
 
 
 if __name__ == '__main__':

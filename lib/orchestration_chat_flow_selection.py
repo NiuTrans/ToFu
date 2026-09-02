@@ -2,15 +2,15 @@
 
 This module is the single backend owner of the configuration seam between the
 conversation toolbar and orchestration chat execution.  It deliberately knows
-nothing about threads, tasks, ``FlowExecutor`` or endpoint event translation.
+nothing about threads, tasks, ``FlowExecutor`` or event translation.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from typing import Final
 
-from lib.env_compat import getenv_compat
 from lib.log import get_logger
 from lib.orchestration.errors import DefinitionServiceError
 
@@ -19,23 +19,17 @@ logger = get_logger(__name__)
 
 
 CHAT_FLOW_ENTRY_SELECTED: Final = 'selected'
-CHAT_FLOW_ENTRY_ENDPOINT: Final = 'endpoint'
 CHAT_FLOW_ENTRY_AUTOPILOT: Final = 'autopilot'
 CHAT_FLOW_ENTRY_NONE: Final = ''
 
 # These are the canonical flows exposed by the conversation toolbar.  The
 # authoring catalogue contains additional templates which are not chat modes.
-CHAT_FLOW_BUILTINS: Final = frozenset({'endpoint', 'autopilot'})
+CHAT_FLOW_BUILTINS: Final = frozenset({'autopilot'})
 
 
 def _flag_on(name: str) -> bool:
-    value = getenv_compat(name, default='0').strip().lower()
+    value = os.environ.get(name, '0').strip().lower()
     return value in ('1', 'true', 'yes', 'on')
-
-
-def endpoint_via_flow_enabled() -> bool:
-    """Return whether the endpoint-mode toggle uses the Flow engine."""
-    return _flag_on('TOFU_ENDPOINT_VIA_FLOW')
 
 
 def autopilot_via_flow_enabled() -> bool:
@@ -46,20 +40,17 @@ def autopilot_via_flow_enabled() -> bool:
 def select_chat_flow_entry(
     config: dict | None,
     *,
-    endpoint_enabled: bool | Callable[[], bool],
     autopilot_enabled: bool | Callable[[], bool],
 ) -> str:
     """Project chat configuration into one engine entry kind.
 
-    Explicit selections always win and are their own opt-in.  Mode toggles use
-    the Flow engine only when their corresponding rollout flag is enabled.
+    Explicit selections always win and are their own opt-in.  The goal-mode
+    toggle uses the Flow engine only when its rollout flag is enabled.
     """
     config = config or {}
     if (config.get('flowDefinition') or config.get('flowBuiltin')
             or config.get('flowId')):
         return CHAT_FLOW_ENTRY_SELECTED
-    if config.get('endpointMode') and _enabled(endpoint_enabled):
-        return CHAT_FLOW_ENTRY_ENDPOINT
     if config.get('autopilot') and _enabled(autopilot_enabled):
         return CHAT_FLOW_ENTRY_AUTOPILOT
     return CHAT_FLOW_ENTRY_NONE
@@ -109,11 +100,9 @@ def resolve_chat_flow_definition(
 __all__ = [
     'CHAT_FLOW_BUILTINS',
     'CHAT_FLOW_ENTRY_AUTOPILOT',
-    'CHAT_FLOW_ENTRY_ENDPOINT',
     'CHAT_FLOW_ENTRY_NONE',
     'CHAT_FLOW_ENTRY_SELECTED',
     'autopilot_via_flow_enabled',
-    'endpoint_via_flow_enabled',
     'resolve_chat_flow_definition',
     'select_chat_flow_entry',
 ]

@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import ast
 import inspect
 from pathlib import Path
 
 import pytest
 
-import lib.orchestration.application_ports as application_ports
-import lib.orchestration.application_provider_ports as provider_ports
-import lib.orchestration.application_result_ports as result_ports
-import lib.orchestration.application_service_ports as service_ports
-import routes.api_v1.orchestration_route_ports as compatibility_ports
-from lib.orchestration.application_ports import (
-    DefinitionServicePort,
+from lib.orchestration.application_result_ports import (
     OrchestrationMutationResultPort,
+)
+from lib.orchestration.application_service_ports import (
+    DefinitionServicePort,
     RunServicePort,
 )
 from lib.orchestration.runtime_ports import (
@@ -26,34 +22,6 @@ from lib.orchestration.runtime_ports import (
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_application_port_facade_preserves_focused_owner_identity():
-    source = (ROOT / 'lib/orchestration/application_ports.py').read_text()
-    tree = ast.parse(source)
-
-    owners = (result_ports, service_ports, provider_ports)
-    for name in application_ports.__all__:
-        owner = next(module for module in owners if hasattr(module, name))
-        assert getattr(application_ports, name) is getattr(owner, name)
-    assert not any(isinstance(node, (ast.ClassDef, ast.FunctionDef,
-                                     ast.AsyncFunctionDef))
-                   for node in ast.walk(tree))
-    assert len(source.splitlines()) < 70
-
-
-def test_route_port_facade_reexports_canonical_objects_without_implementations():
-    source = (ROOT / 'routes/api_v1/orchestration_route_ports.py').read_text()
-    tree = ast.parse(source)
-
-    assert compatibility_ports.__all__ == application_ports.__all__
-    for name in application_ports.__all__:
-        assert getattr(compatibility_ports, name) is getattr(
-            application_ports, name)
-    assert not any(isinstance(node, (ast.ClassDef, ast.FunctionDef,
-                                     ast.AsyncFunctionDef))
-                   for node in ast.walk(tree))
-    assert len(source.splitlines()) < 60
 
 
 def test_application_run_ports_extend_runtime_capabilities_once():
@@ -108,8 +76,6 @@ def test_production_http_adapters_import_focused_application_ports():
         assert 'orchestration_route_ports' not in source
 
     for path in route_dir.glob('orchestration_*.py'):
-        if path.name == 'orchestration_route_ports.py':
-            continue
         source = path.read_text()
         assert 'orchestration_route_ports' not in source, path.name
         assert 'from lib.orchestration.application_ports import' not in source

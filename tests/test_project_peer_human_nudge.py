@@ -29,16 +29,17 @@ Two MANDATORY byte-reverting negative controls:
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 pytestmark = pytest.mark.unit
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
-_PEER_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_peer.py')
-_MQ_SRC = os.path.join(ROOT, 'lib', 'message_queue.py')
+TEST_OWNER_USER_ID = 1
+
+
+def _resolve_synthetic_target(target, *, user_id):
+    """Resolve synthetic ids while proving the owner crosses the test seam."""
+    assert user_id == TEST_OWNER_USER_ID
+    return (target or '').strip(), ''
 
 
 @pytest.fixture(autouse=True)
@@ -57,7 +58,10 @@ def _stub_io(monkeypatch):
     then DB-free. Returns {'enqueue': [...], 'feed': [...]}."""
     calls = {'enqueue': [], 'feed': []}
 
-    def _fake_enqueue(conv_id, message_data, config, kind='real'):
+    def _fake_enqueue(
+        conv_id, message_data, config, kind='real', *, user_id,
+    ):
+        assert user_id == TEST_OWNER_USER_ID
         calls['enqueue'].append({'conv_id': conv_id, 'kind': kind,
                                  'payload': message_data, 'config': config})
         return {'queueId': 'q_' + conv_id[:6], 'position': 1, 'kind': kind}
@@ -75,7 +79,7 @@ def _stub_io(monkeypatch):
     # Identity target-id resolution so these DB-free tests use synthetic ids
     # (cOP/cB) without a conversations table.
     monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
-                        lambda t: ((t or '').strip(), ''))
+                        _resolve_synthetic_target)
     return calls
 
 
@@ -87,7 +91,7 @@ def test_human_nudge_stamps_peer_human_and_operator_feed(_stub_io):
     from lib.conversations.project_peer import send_peer_message
     from lib.message_queue import KIND_PEER_MSG
     res = send_peer_message('/proj', 'cOP', 'cB', 'please focus on the parser',
-                            human=True)
+                            human=True, user_id=TEST_OWNER_USER_ID)
     assert res['ok'] and res['queueId']
     assert len(_stub_io['enqueue']) == 1
     call = _stub_io['enqueue'][0]
@@ -112,7 +116,7 @@ def test_agent_note_stays_advisory_no_peer_human(_stub_io):
     """The default (human=False) agent path is unchanged: no _peerHuman, and the
     feed row keeps its agent kind label — the human flag is strictly additive."""
     from lib.conversations.project_peer import send_peer_message
-    send_peer_message('/proj', 'cA', 'cB', 'heads up on lex.py')
+    send_peer_message('/proj', 'cA', 'cB', 'heads up on lex.py', user_id=TEST_OWNER_USER_ID)
     pl = _stub_io['enqueue'][0]['payload']
     assert pl.get('_peerHuman') is None, 'agent peer note must NOT be _peerHuman'
     assert 'advisory' in pl['text'].lower()
@@ -125,13 +129,13 @@ def test_human_nudge_still_refuses_self_and_rate_limits(_stub_io):
     from lib.conversations.project_peer import (
         _PEER_MSG_MAX_PER_WINDOW, send_peer_message,
     )
-    assert send_peer_message('/proj', 'cOP', 'cOP', 'x', human=True)['error'] \
+    assert send_peer_message('/proj', 'cOP', 'cOP', 'x', human=True, user_id=TEST_OWNER_USER_ID)['error'] \
         == 'cannot_message_self'
     assert _PEER_MSG_MAX_PER_WINDOW == 3
-    oks = [send_peer_message('/proj', 'cOP', 'cB', f'm{i}', human=True)['ok']
+    oks = [send_peer_message('/proj', 'cOP', 'cB', f'm{i}', human=True, user_id=TEST_OWNER_USER_ID)['ok']
            for i in range(3)]
     assert all(oks)
-    blocked = send_peer_message('/proj', 'cOP', 'cB', 'm4 (storm)', human=True)
+    blocked = send_peer_message('/proj', 'cOP', 'cB', 'm4 (storm)', human=True, user_id=TEST_OWNER_USER_ID)
     assert blocked['ok'] is False and blocked['error'] == 'rate_limited'
     # Only 3 reached the queue (self-send never enqueued either).
     assert len(_stub_io['enqueue']) == 3
@@ -141,113 +145,21 @@ def test_human_nudge_still_refuses_self_and_rate_limits(_stub_io):
 #  dispatch_next_queued — the _peerHuman marker survives onto the turn
 # ════════════════════════════════════════════════════════════════════
 
-class _HybridRow:
-    _D = {'messages': '[]', 'updated_at': 0, 'settings': '{}'}
+def test_operator_peer_payload_stamps_operator_initiator():
+    from lib.message_queue import _stamp_queued_turn_initiator
 
-    def keys(self):
-        return self._D.keys()
-
-    def __getitem__(self, k):
-        if isinstance(k, int):
-            if k == 0:
-                return self._D['messages']
-            raise IndexError(k)
-        return self._D.get(k, None)
+    message = {}
+    _stamp_queued_turn_initiator(message, {
+        '_peerMessage': True, '_fromConv': 'cOP', '_peerHuman': True,
+    })
+    assert message['_initiator'] == 'operator'
 
 
-class _FakeDB:
-    def execute(self, sql, params=()):
-        class _Cur:
-            def fetchone(self_inner):
-                return _HybridRow()
-        return _Cur()
+def test_agent_peer_payload_stamps_peer_initiator():
+    from lib.message_queue import _stamp_queued_turn_initiator
 
-    def commit(self):
-        pass
-
-
-def _drive_dispatch(monkeypatch, payload):
-    import lib.message_queue as mq
-    captured = {}
-    monkeypatch.setattr(mq, 'dequeue_next', lambda c: {
-        'queueId': 'q1', 'config': {}, 'payload': payload})
-    monkeypatch.setattr(mq, 'get_thread_db', lambda *a, **k: _FakeDB())
-    monkeypatch.setattr(mq, 'db_execute_with_retry', lambda *a, **k: None)
-    monkeypatch.setattr(
-        mq, '_append_user_msg_with_cas',
-        lambda _db, _conv_id, msg: captured.setdefault('msg', msg) is not None)
-    monkeypatch.setattr('lib.database.json_dumps_pg', lambda x: '[]')
-    monkeypatch.setattr(
-        'lib.tasks_pkg.conv_message_builder.build_api_messages_from_db',
-        lambda *a, **k: [])
-    mq.dispatch_next_queued('cTARGET')
-    return captured.get('msg')
-
-
-def test_peer_human_marker_survives_dispatch(monkeypatch):
-    m = _drive_dispatch(monkeypatch, {
-        'text': 'operator: focus on the parser',
-        '_peerMessage': True, '_fromConv': 'cOP', '_peerHuman': True})
-    assert m is not None
-    assert m.get('_peerMessage') is True
-    assert m.get('_fromConv') == 'cOP'
-    assert m.get('_peerHuman') is True, \
-        'the operator marker MUST propagate onto the persisted turn'
-
-
-def test_agent_peer_dispatch_has_no_human_marker(monkeypatch):
-    """A non-human peer note must NOT gain a _peerHuman marker in dispatch."""
-    m = _drive_dispatch(monkeypatch, {
-        'text': 'heads up', '_peerMessage': True, '_fromConv': 'cA'})
-    assert m.get('_peerMessage') is True and m.get('_peerHuman') is None
-
-
-# ════════════════════════════════════════════════════════════════════
-#  Byte-reverting NEGATIVE CONTROLS
-# ════════════════════════════════════════════════════════════════════
-
-from tests._nc_harness import patch_restore as _patch_restore  # noqa: E402
-
-
-def test_NC_send_drops_peer_human_stamp(_stub_io):
-    """NC-HUMAN-PAYLOAD: remove the _peerHuman payload stamp in
-    send_peer_message → the enqueued payload no longer carries _peerHuman →
-    the human-attribution invariant no longer holds (proving the stamp is what
-    makes the operator arrival distinguishable)."""
-    def run():
-        import lib.conversations.project_peer as pp
-        pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
-        pp.send_peer_message('/proj', 'cOP', 'cB', 'focus', human=True)
-        pl = _stub_io['enqueue'][-1]['payload']
-        assert pl.get('_peerHuman') is None, \
-            'NC-HUMAN-PAYLOAD: with the stamp removed _peerHuman must be ABSENT'
-
-    _patch_restore(
-        _PEER_SRC,
-        "    payload = {'text': body, '_peerMessage': True, '_fromConv': from_conv_id}\n"
-        "    if human:\n"
-        "        payload['_peerHuman'] = True",
-        "    payload = {'text': body, '_peerMessage': True, '_fromConv': from_conv_id}\n"
-        "    # NC-HUMAN-PAYLOAD (stamp disabled)",
-        run,
-    )
-
-
-def test_NC_dispatch_drops_peer_human_marker(monkeypatch):
-    """NC-DISPATCH-HUMAN: no-op the _peerHuman propagation in
-    dispatch_next_queued → the persisted operator turn loses its marker →
-    the propagation test FAILS."""
-    def run():
-        m = _drive_dispatch(monkeypatch, {
-            'text': 'op', '_peerMessage': True,
-            '_fromConv': 'cOP', '_peerHuman': True})
-        assert (m or {}).get('_peerHuman') is None, \
-            'NC-DISPATCH-HUMAN: with propagation disabled the marker is ABSENT'
-
-    _patch_restore(
-        _MQ_SRC,
-        "            if payload.get('_peerMessage') and payload.get('_peerHuman'):\n"
-        "                user_msg['_peerHuman'] = True",
-        "            pass  # NC-DISPATCH-HUMAN (human marker propagation disabled)",
-        run,
-    )
+    message = {}
+    _stamp_queued_turn_initiator(message, {
+        '_peerMessage': True, '_fromConv': 'cA',
+    })
+    assert message['_initiator'] == 'peer'

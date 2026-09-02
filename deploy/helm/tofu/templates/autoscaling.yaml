@@ -1,0 +1,28 @@
+{{- $root := . -}}
+{{- range $role := list "api" "worker" -}}
+{{- $autoscaling := index $root.Values.autoscaling $role -}}
+{{- $roleValues := index $root.Values.roles $role -}}
+{{- if and $roleValues.enabled $autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "tofu.fullname" $root }}-{{ $role }}
+  labels:
+{{ include "tofu.labels" $root | indent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "tofu.fullname" $root }}-{{ $role }}
+  minReplicas: {{ $autoscaling.minReplicas }}
+  maxReplicas: {{ $autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $autoscaling.targetCPUUtilizationPercentage }}
+---
+{{- end }}
+{{- end }}

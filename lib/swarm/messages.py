@@ -23,15 +23,12 @@ class AgentMessage:
     and for sub-agents to report back.  Also usable as a lightweight
     chat-style message with ``role`` + ``content``.
 
-    Supports both old-style (from_agent/to_agent) and new-style
-    (sender_id/receiver_id) field names for backward compatibility.
+    Sender and receiver identities use one canonical field pair.
     """
     content: str = ''
     role: str = ''                               # 'user', 'assistant', 'system'
     sender_id: str = ''
     receiver_id: str = ''
-    from_agent: str = ''                         # Alias for sender_id (backward compat)
-    to_agent: str = ''                           # Alias for receiver_id (backward compat)
     msg_type: str = 'text'                       # 'text', 'tool_result', 'status', 'result', 'instruction', 'query'
     metadata: dict = field(default_factory=dict)
     artifacts: list = field(default_factory=list)  # File paths, data blobs, etc.

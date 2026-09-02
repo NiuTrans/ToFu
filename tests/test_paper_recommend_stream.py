@@ -32,12 +32,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault('TRADING_ENABLED', '0')
 
-import lib.paper.recommend_engine as re_mod  # noqa: E402
+import lib.paper.recommend_engine._events as re_mod  # noqa: E402
+import lib.paper.recommend_engine._ground as ground_mod  # noqa: E402
+import lib.paper.recommend_engine._research as research_mod  # noqa: E402
 import lib.paper.recommend_task as task_mod  # noqa: E402
 from lib.paper.recommend_runtime import (  # noqa: E402
     _new_recommend_task,
     _recommend_runtime,
 )
+
+TEST_OWNER_USER_ID = 1
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -86,9 +90,9 @@ class _Patched:
         self._orig = {}
 
     def __enter__(self):
-        self._orig['dispatch_stream'] = re_mod.dispatch_stream
-        self._orig['search_arxiv'] = re_mod.search_arxiv
-        self._orig['fetch_arxiv_title'] = re_mod.fetch_arxiv_title
+        self._orig['dispatch_stream'] = research_mod.dispatch_stream
+        self._orig['search_arxiv'] = ground_mod.search_arxiv
+        self._orig['fetch_arxiv_title'] = ground_mod.fetch_arxiv_title
         reply = self.llm_reply
         delay = self.ground_delay
 
@@ -107,14 +111,19 @@ class _Patched:
         def _fake_fetch(arxiv_id):
             return ''
 
-        re_mod.dispatch_stream = _fake_dispatch_stream
-        re_mod.search_arxiv = _fake_search
-        re_mod.fetch_arxiv_title = _fake_fetch
+        research_mod.dispatch_stream = _fake_dispatch_stream
+        ground_mod.search_arxiv = _fake_search
+        ground_mod.fetch_arxiv_title = _fake_fetch
         return self
 
     def __exit__(self, *exc):
+        owners = {
+            'dispatch_stream': research_mod,
+            'search_arxiv': ground_mod,
+            'fetch_arxiv_title': ground_mod,
+        }
         for k, v in self._orig.items():
-            setattr(re_mod, k, v)
+            setattr(owners[k], k, v)
         return False
 
 
@@ -185,7 +194,7 @@ def _run_task_and_snapshot_midstream(reply, ground_delay=0.25):
     Returns (saw_candidate_before_done, final_types).
     """
     task_id = f'rectest_{int(time.time() * 1000)}'
-    task = _new_recommend_task(task_id, 'diffusion LM award papers', 6)
+    task = _new_recommend_task(task_id, 'diffusion LM award papers', 6, user_id=TEST_OWNER_USER_ID)
     saw_candidate_before_done = {'v': None}
 
     def _poll():
@@ -243,9 +252,13 @@ def test_neuter_confirms_streaming_is_load_bearing():
     #    until the very end (lumped just before done) — a fake "stream".
     orig_iter = re_mod.iter_recommend_events
 
-    def _non_streaming_iter(description, max_results=6, *, abort=None, on_tool_event=None):
+    def _non_streaming_iter(description, max_results=6, *, abort=None,
+                            on_tool_event=None, user_id=None):
+        assert user_id == TEST_OWNER_USER_ID
         buffered = []
-        for ev in orig_iter(description, max_results, abort=abort, on_tool_event=on_tool_event):
+        for ev in orig_iter(
+                description, max_results, abort=abort,
+                on_tool_event=on_tool_event, user_id=user_id):
             if ev['type'] == 'candidate':
                 buffered.append(ev)          # withhold — do NOT yield yet
                 continue

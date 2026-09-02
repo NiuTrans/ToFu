@@ -31,7 +31,9 @@ from lib.tasks_pkg.handlers._write_freshness_gate import (
     record_read_paths,
 )
 from lib.desktop.remote import remote_worktree_binding
-from lib.tools import PROJECT_TOOL_NAMES, build_project_tool_meta
+from lib.tools.meta import build_project_tool_meta
+from lib.tools.project import PROJECT_TOOL_NAMES
+from lib.tools.result_projection import TOOL_RESULT_PROJECTION_ITEMS_KEY
 
 logger = get_logger(__name__)
 
@@ -72,6 +74,21 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
     command = fn_args.get('command', '')
     round_entry.setdefault('toolCallId', tc_id)
     round_entry.setdefault('toolName', 'run_command')
+
+    def _finish(text, extra=None, badge=''):
+        meta = {
+            'toolName': 'run_command',
+            'command': command,
+            'output': (text or ''),
+            'source': f'Remote:{remote["agent_id"][:8]}',
+            'remoteRoot': remote['root'],
+        }
+        if badge:
+            meta['badge'] = badge
+        meta.update(extra or {})
+        _finalize_tool_round(task, rn, round_entry, [meta])
+        return tc_id, text, False
+
     if 'credentials' in fn_args:
         text = ('Error: server vault credentials are unavailable for remote '
                 'worktree commands; configure credentials on the desktop '
@@ -84,6 +101,97 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
         }
         _finalize_tool_round(task, rn, round_entry, [meta])
         return tc_id, text, False
+
+
+    from lib.project_mod.run_command import (
+        parse_safe_directory_listing_command,
+        parse_safe_file_find_command,
+    )
+    import posixpath
+
+    working_dir = str(fn_args.get('working_dir') or '').strip()
+
+    def _within_working_dir(path):
+        if not working_dir:
+            return path
+        return posixpath.normpath(posixpath.join(
+            working_dir, '' if path == '.' else path))
+
+    directory_listing = (
+        parse_safe_directory_listing_command(command)
+        if os.environ.get('TOFU_RUN_LS_FASTPATH', '1') != '0' else None)
+    if directory_listing is not None:
+        listing_path = _within_working_dir(directory_listing['path'])
+        params = {
+            'root': remote['root'],
+            'path': listing_path,
+            'show_hidden': directory_listing['show_hidden'],
+            'shell_compatible': True,
+        }
+        logger.info(
+            '[Remote] run_command routed plain ls → project_list_dir @%s:%s',
+            remote['agent_id'][:8], remote['root'])
+        result, error = send_desktop_command(
+            'project_list_dir', params, timeout=60,
+            target_agent_id=remote['agent_id'],
+            user_id=task.get('_userId', '') or '')
+        if error:
+            return _finish(
+                f'Error: remote worktree {remote["root"]}: {error}',
+                {'exitCode': 'error', 'routedAs': 'project_list_dir'},
+                badge='remote error')
+        if isinstance(result, dict) and result.get('error'):
+            logger.info(
+                '[Remote] bounded ls declined operand; retaining shell: %s',
+                result['error'])
+        else:
+            text = format_desktop_result(
+                'project_list_dir', result if isinstance(result, dict) else {})
+            return _finish(
+                text,
+                {'exitCode': 0, 'routedAs': 'project_list_dir'},
+                badge='directory')
+
+    file_find = (
+        parse_safe_file_find_command(command)
+        if os.environ.get('TOFU_RUN_FIND_FASTPATH', '1') != '0' else None)
+    if file_find is not None:
+        find_path = _within_working_dir(file_find['path'])
+        params = {
+            'root': remote['root'],
+            'path': find_path,
+            'pattern': file_find['pattern'],
+            'max_results': file_find['max_results'],
+            'case_sensitive': file_find['case_sensitive'],
+            'shell_output': True,
+            'respect_project_ignores': False,
+        }
+        logger.info(
+            '[Remote] run_command routed bounded find → project_find_files '
+            '@%s:%s', remote['agent_id'][:8], remote['root'])
+        result, error = send_desktop_command(
+            'project_find_files', params, timeout=60,
+            target_agent_id=remote['agent_id'],
+            user_id=task.get('_userId', '') or '')
+        if error:
+            return _finish(
+                f'Error: remote worktree {remote["root"]}: {error}',
+                {'exitCode': 'error', 'routedAs': 'project_find_files'},
+                badge='remote error')
+        if isinstance(result, dict) and result.get('error'):
+            logger.info(
+                '[Remote] bounded find declined operand; retaining shell: %s',
+                result['error'])
+        else:
+            text = (
+                str(result.get('files') or '')
+                if isinstance(result, dict) else format_desktop_result(
+                    'project_find_files', result))
+            return _finish(
+                text,
+                {'exitCode': 0, 'routedAs': 'project_find_files'},
+                badge='files')
+
     cmd_id = _uuid.uuid4().hex
     try:
         bridge_timeout = min(
@@ -92,7 +200,7 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
         logger.debug('execute remote run command: unexpected type/unparseable (%s)', _e)
         bridge_timeout = 330.0
 
-    # ★ No `deadlineTs` on the REMOTE path — deliberately (pt_1a82ffb3 follow-up).
+    # No `deadlineTs` on the REMOTE path — deliberately ( follow-up).
     #   ``bridge_timeout`` bounds how long THIS server waits for a result
     #   (send_desktop_command's event.wait); the subprocess itself runs on the
     #   user's machine and the server has NO kill handle on it — timing out the
@@ -143,20 +251,6 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
     watcher.join(timeout=5)
     _drain_once()          # 尾帧:wait 返回后可能还有最后一批
     progress_cb.flush()
-
-    def _finish(text, extra=None, badge=''):
-        meta = {
-            'toolName': 'run_command',
-            'command': command,
-            'output': (text or ''),
-            'source': f'Remote:{remote["agent_id"][:8]}',
-            'remoteRoot': remote['root'],
-        }
-        if badge:
-            meta['badge'] = badge
-        meta.update(extra or {})
-        _finalize_tool_round(task, rn, round_entry, [meta])
-        return tc_id, text, False
 
     if error:
         return _finish(f'Error: remote worktree {remote["root"]}: {error}',
@@ -424,10 +518,40 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     # ── RWA remote-worktree routing (P3) ──
     # 远程绑定的会话在此分流:同名工具 → 桥命令寻址入队。服务器 FS 门
     # (下方 ReadGate/FreshGate/abs_path_guard)不适用 —— agent 自守。
+    _result_projection_items = [] if fn_name == 'read_files' else None
     _remote = remote_worktree_binding(cfg)
     if _remote:
         return _execute_remote_project_tool(
             task, fn_name, tc_id, fn_args, rn, round_entry, _remote)
+
+    # A model occasionally tries to export browser cookies and replay them in
+    # curl/wget for a file download. Detect that narrow shape before any shell
+    # process exists and route it through the canonical browser→server staging
+    # service. Ordinary curl/API inspection and every non-matching command keep
+    # their exact shell semantics.
+    if fn_name == 'run_command':
+        from lib.tasks_pkg.handlers.authenticated_download import (
+            maybe_redirect_authenticated_download,
+        )
+        redirected = maybe_redirect_authenticated_download(
+            task=task,
+            cfg=cfg,
+            command=str((fn_args or {}).get('command') or ''),
+        )
+        if redirected is not None:
+            safe_args = dict(fn_args or {})
+            safe_args['command'] = redirected.display_command
+            round_entry['authenticatedDownloadRedirected'] = True
+            meta = build_project_tool_meta(
+                fn_name, safe_args, redirected.tool_content)
+            meta['badge'] = redirected.badge
+            meta['authenticatedDownloadRedirected'] = True
+            if redirected.receipt:
+                meta['serverStagingReceipt'] = redirected.receipt
+            _finalize_tool_round(
+                task, rn, round_entry, [meta],
+                status='done' if redirected.ok else 'error')
+            return tc_id, redirected.tool_content, False
 
     # ── Read-before-edit gate ──
     # apply_diff / insert_content built from guessed content are the dominant
@@ -556,7 +680,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     # root. Cookie-auth UI and the local CLI are unaffected (task_is_remote
     # is False for them). See lib/project_mod/abs_path_guard.py.
     _abs_token = set_restricted(task_is_remote(task))
-    # ★ Workspace-root resolution conv-id. Roots are REGISTERED under
+    # Workspace-root resolution conv-id. Roots are REGISTERED under
     #   ``convId or id`` (orchestrator.ensure_project_state) and read back the
     #   same way by the streaming executor. The bare ``task['convId']`` used
     #   here historically was the odd one out: a sub-task with convId=''
@@ -576,11 +700,15 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             # inspect_image needs the task so an /api/images/ or att_txt_ ref can
             # be resolved (text refs scan task['messages']).
             _no_proj_kw = {'task': task} if fn_name == 'inspect_image' else {}
+            if fn_name == 'read_files':
+                _no_proj_kw['result_projection_items'] = _result_projection_items
             tool_content = execute_tool(fn_name, fn_args, '.', conv_id=_root_conv_id,
                                         task_id=task['id'], **_no_proj_kw)
         else:
             _progress_cb = None
             _extra_kw = {}
+            if fn_name == 'read_files':
+                _extra_kw['result_projection_items'] = _result_projection_items
             if fn_name == 'inspect_image':
                 _extra_kw = {'task': task}
             if fn_name == 'run_command':
@@ -590,7 +718,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 _extra_kw = {
                     'stdin_callback': _stdin_cb,
                     'on_chunk': _progress_cb,
-                    # ★ The spawn clock (pt_1a82ffb3). Without this the project
+                    # The spawn clock (). Without this the project
                     # mode — the COMMON case — published no deadlineTs and
                     # forced no checkpoint, so the countdown silently never
                     # appeared exactly where it mattered most. The same factory
@@ -795,4 +923,11 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         tool_content = f'{_gate_skip_note}\n\n{tool_content}'
 
     _finalize_tool_round(task, rn, round_entry, [meta])
+    if (fn_name == 'read_files' and isinstance(tool_content, str)
+            and _result_projection_items and isinstance(round_entry, dict)):
+        # Ephemeral producer metadata: settlement pops this immediately after
+        # projecting the V2 envelope, so raw per-file previews never become a
+        # second persisted tool-result representation.
+        round_entry[TOOL_RESULT_PROJECTION_ITEMS_KEY] = \
+            _result_projection_items
     return tc_id, tool_content, False

@@ -11,41 +11,33 @@ docstring promised) behaves correctly:
 
 from __future__ import annotations
 
-import os
-import tempfile
 import time
 import unittest
+from unittest.mock import patch
+
+
+pytest_plugins = ('tests._billing_user_sidecar',)
 
 
 def _backdate_reserve(user_id: str, ref_id: str, seconds_ago: int) -> None:
-    """Push the ``reserve`` ledger row for this ref into the past so the
-    sweep's TTL cutoff sees it as orphaned. Mutates ts directly — the only
-    place in the suite we touch the append-only ledger, and only to simulate
-    the passage of time a real crash-then-wait would produce."""
-    from lib.database import DOMAIN_SYSTEM, get_thread_db
-    db = get_thread_db(DOMAIN_SYSTEM)
-    db.execute(
-        "UPDATE billing_ledger SET ts = ? "
-        " WHERE user_id = ? AND ref_id = ? AND kind = 'reserve'",
-        (int(time.time()) - seconds_ago, user_id, ref_id))
-    db.commit()
+    """Seed an old hold without mutating the append-only ledger."""
+    # The production ledger is append-only; tests seed an old reservation via
+    # the semantic command instead of mutating its timestamp after the fact.
+    # Callers invoke this helper before reserve() and it creates that hold.
+    from lib.storage import get_storage_client
+    from lib.billing.wallet import _stable_id
+    get_storage_client(write=True).command(
+        'billing.wallet.apply', {
+            'user_id': user_id, 'amount_micro': -1500, 'kind': 'reserve',
+            'ref_type': 'reserve', 'ref_id': ref_id, 'note': 'crash fixture',
+            'allow_negative': False,
+            'ledger_id': _stable_id('led_', user_id, 'reserve', ref_id),
+            'occurred_at': int(time.time()) - seconds_ago,
+        }, f'test:old-reserve:{user_id}:{ref_id}', deadline=5.0)
 
 
 class _JanitorTestBase(unittest.TestCase):
-    """Isolated fresh SQLite DB per class (mirrors test_billing.py)."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls._tmp = tempfile.TemporaryDirectory()
-        from lib.database import reset_sqlite_for_tests
-        cls._db_snapshot = reset_sqlite_for_tests(
-            os.path.join(cls._tmp.name, 'tofu.db'))
-
-    @classmethod
-    def tearDownClass(cls):
-        from lib.database import restore_db_state
-        restore_db_state(getattr(cls, '_db_snapshot', None))
-        cls._tmp.cleanup()
+    """Runs against the module-scoped billing Sidecar."""
 
 
 class StaleReserveSweepTest(_JanitorTestBase):
@@ -55,11 +47,12 @@ class StaleReserveSweepTest(_JanitorTestBase):
         from lib.billing.wallet_janitor import sweep_stale_reserves
         uid = 'usr_jan_stale'
         deposit(uid, 10000, kind='topup', ref_id='boot_stale')
-        reserve(uid, 1500, ref_id='crashed_task')
+        # Seed the hold at its original time; append-only ledgers are never
+        # backdated with UPDATE.
+        _backdate_reserve(uid, 'crashed_task', 3600)
         # Hold subtracts from usable balance.
         self.assertEqual(get_balance(uid), 8500)
         # Simulate the request having crashed 1h ago (well past the 30m TTL).
-        _backdate_reserve(uid, 'crashed_task', 3600)
 
         summary = sweep_stale_reserves()
         self.assertTrue(summary['ok'])
@@ -89,11 +82,10 @@ class StaleReserveSweepTest(_JanitorTestBase):
         from lib.billing.wallet_janitor import sweep_stale_reserves
         uid = 'usr_jan_settled'
         deposit(uid, 10000, kind='topup', ref_id='boot_settled')
-        reserve(uid, 1500, ref_id='done_task')
+        _backdate_reserve(uid, 'done_task', 3600)
         settle(uid, reserved_micro=1500, actual_micro=900, ref_id='done_task')
         self.assertEqual(get_balance(uid), 9100)
         # Even though the reserve row is old, settle already released it.
-        _backdate_reserve(uid, 'done_task', 3600)
 
         summary = sweep_stale_reserves()
         self.assertTrue(summary['ok'])
@@ -106,7 +98,6 @@ class StaleReserveSweepTest(_JanitorTestBase):
         from lib.billing.wallet_janitor import sweep_stale_reserves
         uid = 'usr_jan_double'
         deposit(uid, 10000, kind='topup', ref_id='boot_double')
-        reserve(uid, 1500, ref_id='crashed_twice')
         _backdate_reserve(uid, 'crashed_twice', 3600)
 
         first = sweep_stale_reserves()
@@ -125,8 +116,16 @@ class StaleReserveSweepTest(_JanitorTestBase):
         from lib.billing.wallet_janitor import sweep_stale_reserves
         uid = 'usr_jan_ttl'
         deposit(uid, 10000, kind='topup', ref_id='boot_ttl')
-        reserve(uid, 1000, ref_id='aged_task')
-        _backdate_reserve(uid, 'aged_task', 120)  # 2 minutes old
+        from lib.storage import get_storage_client
+        from lib.billing.wallet import _stable_id
+        get_storage_client(write=True).command(
+            'billing.wallet.apply', {
+                'user_id': uid, 'amount_micro': -1000, 'kind': 'reserve',
+                'ref_type': 'reserve', 'ref_id': 'aged_task',
+                'note': 'aged fixture', 'allow_negative': False,
+                'ledger_id': _stable_id('led_', uid, 'reserve', 'aged_task'),
+                'occurred_at': int(time.time()) - 120,
+            }, f'test:old-reserve:{uid}:aged_task', deadline=5.0)
 
         # 30m default would skip it; a 60s TTL reclaims it.
         skipped = sweep_stale_reserves(ttl_seconds=1800)
@@ -136,6 +135,43 @@ class StaleReserveSweepTest(_JanitorTestBase):
         reclaimed = sweep_stale_reserves(ttl_seconds=60)
         self.assertEqual(reclaimed['reclaimed'], 1)
         self.assertEqual(get_balance(uid), 10000)
+
+    def test_stale_reserve_for_running_task_is_not_reclaimed(self):
+        from lib.billing import deposit, get_balance
+        from lib.billing.wallet_janitor import sweep_stale_reserves
+        uid = 'usr_jan_running'
+        deposit(uid, 10000, kind='topup', ref_id='boot_running')
+        _backdate_reserve(uid, 'long_task', 3600)
+
+        with patch(
+                'lib.billing.wallet_janitor._is_task_still_running',
+                return_value=True):
+            summary = sweep_stale_reserves()
+
+        self.assertEqual(summary['reclaimed'], 0)
+        self.assertEqual(summary['skipped_running'], 1)
+        self.assertEqual(get_balance(uid), 8500)
+
+
+class ReserveReclaimPolicyTest(unittest.TestCase):
+
+    def test_only_active_multi_user_billing_enables_periodic_reclaim(self):
+        from lib.billing.wallet_janitor import reserve_reclaim_enabled
+
+        with patch('lib.auth_mode.is_multi_user', return_value=True), \
+             patch('lib.relay_config.billing_enabled', return_value=True), \
+             patch.dict('os.environ', {'TOFU_BILLING_JANITOR': '1'}):
+            self.assertTrue(reserve_reclaim_enabled())
+        with patch('lib.auth_mode.is_multi_user', return_value=False), \
+             patch('lib.relay_config.billing_enabled', return_value=True):
+            self.assertFalse(reserve_reclaim_enabled())
+        with patch('lib.auth_mode.is_multi_user', return_value=True), \
+             patch('lib.relay_config.billing_enabled', return_value=False):
+            self.assertFalse(reserve_reclaim_enabled())
+        with patch('lib.auth_mode.is_multi_user', return_value=True), \
+             patch('lib.relay_config.billing_enabled', return_value=True), \
+             patch.dict('os.environ', {'TOFU_BILLING_JANITOR': '0'}):
+            self.assertFalse(reserve_reclaim_enabled())
 
 
 if __name__ == '__main__':

@@ -336,12 +336,13 @@ def translate_user_text_to_english(text, config):
     return translated, text, usage, None
 
 
-def build_user_msg_from_payload(payload, config, conv_id=None):
+def build_user_msg_from_payload(payload, config, *, user_id, conv_id=None):
     """Build a user message dict from frontend payload + optional auto-translate.
 
     Args:
         payload: dict with text, images, pdfTexts, replyQuotes, convRefs, convRefTexts, timestamp
         config: task config dict (reads autoTranslate)
+        user_id: authenticated owner used for referenced-conversation reads.
         conv_id: optional — when provided, transient translate retry
             statuses are exposed via /api/chat/translate-status/<conv_id>
             so the frontend can display retry reasons under the "Translating…"
@@ -361,7 +362,7 @@ def build_user_msg_from_payload(payload, config, conv_id=None):
         'content': translated_text,
         'timestamp': timestamp,
     }
-    # ★ Carry the client-generated stable _msgId through verbatim. The frontend
+    # Carry the client-generated stable _msgId through verbatim. The frontend
     #   assigns _msgId to the optimistic user message BEFORE the send POST, and
     #   its persistence layer dedups on _msgId (rescue-PUT rebase
     #   _rebaseUnackedTail; PATCH /messages/by-id). If we dropped it here,
@@ -401,7 +402,8 @@ def build_user_msg_from_payload(payload, config, conv_id=None):
     # Resolve convRefTexts server-side from convRefs if not already provided
     conv_ref_texts = payload.get('convRefTexts')
     if not conv_ref_texts and payload.get('convRefs'):
-        conv_ref_texts = resolve_conv_refs(payload['convRefs'])
+        conv_ref_texts = resolve_conv_refs(
+            payload['convRefs'], user_id=user_id)
     if conv_ref_texts:
         user_msg['convRefTexts'] = conv_ref_texts
 

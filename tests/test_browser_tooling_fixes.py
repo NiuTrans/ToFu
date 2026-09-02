@@ -10,8 +10,8 @@ that the guard bites on regression:
   2. browser_fill_form uses type_text (clears the field first) not
      keyboard_input (appends), so changing origin A→B replaces cleanly; plus
      description hard-steers to it for 2+ fields, with reverse pointers on
-     browser_click / browser_keyboard.
-  3. browser_create_tab / browser_navigate tell the model to web_search for the
+     browser_click / browser_press_key.
+  3. browser_navigate tells the model to web_search for the
      real URL when unsure instead of guessing a domain.
 
 JS cannot run under pytest here, so the screenshot fix is verified by
@@ -68,23 +68,24 @@ def test_screenshot_forces_viewport_override_before_capture():
     assert 'mobile: false' in body
 
 
-def test_screenshot_always_clears_override_in_finally_before_detach():
+def test_screenshot_always_clears_override_before_releasing_cdp_lease():
     src = _src('browser_extension/background.js')
     body = _extract_fn_body(src, 'async function _screenshotFullPageCDP(')
 
     # The clear must live in the finally block, guarded by `overridden`, and
-    # must run BEFORE detach (clear needs the live debugger session). Key on
-    # the actual sendCommand CALL — the string also appears in a comment and a
-    # catch-log, which must not satisfy the guard.
+    # must finish before _cdpRun releases the shared lease (clear needs the
+    # live debugger session). Key on the actual sendCommand CALL — the string
+    # also appears in a comment and a catch-log, which must not satisfy the guard.
     i_finally = body.rindex('} finally {')
     m_clear = re.search(
         r"sendCommand\(\s*target\s*,\s*'Emulation\.clearDeviceMetricsOverride'\s*\)",
         body)
     assert m_clear is not None, 'must actually call clearDeviceMetricsOverride'
     i_clear = m_clear.start()
-    i_detach = body.index('chrome.debugger.detach')
-    assert i_finally < i_clear < i_detach, (
-        'the clearDeviceMetricsOverride CALL must be in finally and precede detach')
+    assert i_finally < i_clear, (
+        'the clearDeviceMetricsOverride CALL must be in the callback finally')
+    assert '_cdpRun' in body and 'chrome.debugger.detach' not in body, (
+        'screenshots must use the shared lease broker, not detach another holder')
     assert 'if (overridden)' in body, (
         'clear must be guarded so we only clear when we actually overrode')
 
@@ -153,9 +154,8 @@ def test_fill_form_description_steers_multi_field():
     assert 'CLEARED' in desc or 'cleared' in desc
 
 
-def test_click_and_keyboard_point_back_to_fill_form():
-    # v2 (pt_869e5648403e4745): browser_keyboard split into browser_type +
-    # browser_press_key; the reverse-pointer contract moved with it.
+def test_click_and_press_key_point_back_to_fill_form():
+    # Both action descriptions direct multi-field work to one form call.
     from lib.tools.browser import BROWSER_TOOL_CLICK, BROWSER_TOOL_PRESS_KEY
     click_desc = BROWSER_TOOL_CLICK['function']['description']
     key_desc = BROWSER_TOOL_PRESS_KEY['function']['description']
@@ -192,14 +192,13 @@ def test_content_stability_polls_size_and_readystate():
 
 # ── 2c. fill_form select failure surfaces (not silent) ──────────────
 
-def _install_fake_bc(monkeypatch, script):
-    """Install a fake send_browser_command driven by a per-command script.
+def _fake_sender(script):
+    """Build an injected browser sender driven by a per-command script.
 
     `script` maps command name -> (result, error). get_interactive_elements
     may map to a callable returning (result, error) so tests control options.
     Records every call for assertions.
     """
-    import lib.browser.advanced as adv
     calls = []
 
     def fake(cmd, params, timeout=None):
@@ -209,8 +208,7 @@ def _install_fake_bc(monkeypatch, script):
             return entry(params)
         return entry
 
-    monkeypatch.setattr(adv, 'send_browser_command', fake)
-    return calls
+    return fake, calls
 
 
 def test_fill_form_select_no_match_reports_failure_with_candidates(monkeypatch):
@@ -219,7 +217,7 @@ def test_fill_form_select_no_match_reports_failure_with_candidates(monkeypatch):
         {'text': 'Economy', 'selector': '#opt1'},
         {'text': 'Business', 'selector': '#opt2'},
     ]}
-    calls = _install_fake_bc(monkeypatch, {
+    send, calls = _fake_sender({
         'get_interactive_elements': (options, None),
         'click_element': ({'clicked': True}, None),
         'type_text': ({'typed': True}, None),
@@ -227,7 +225,7 @@ def test_fill_form_select_no_match_reports_failure_with_candidates(monkeypatch):
     out = fill_form_sequential(1, [
         {'selector': '#from', 'value': 'PEK', 'type': 'type'},
         {'selector': '#cabin', 'value': 'First Class', 'type': 'select'},  # no match
-    ], field_delay=0)
+    ], field_delay=0, send=send)
 
     assert out['success'] is False, 'a missing select option must fail the whole call'
     assert out['fields_filled'] == 1
@@ -243,14 +241,14 @@ def test_fill_form_select_no_match_reports_failure_with_candidates(monkeypatch):
 def test_fill_form_select_match_succeeds(monkeypatch):
     from lib.browser.advanced import fill_form_sequential
     options = {'elements': [{'text': 'Business', 'selector': '#opt2'}]}
-    _install_fake_bc(monkeypatch, {
+    send, _calls = _fake_sender({
         'get_interactive_elements': (options, None),
         'click_element': ({'clicked': True}, None),
         'type_text': ({'typed': True}, None),
     })
     out = fill_form_sequential(1, [
         {'selector': '#cabin', 'value': 'business', 'type': 'select'},
-    ], field_delay=0)
+    ], field_delay=0, send=send)
     assert out['success'] is True
     assert out['fields_failed'] == 0
     sel = out['field_results'][0]
@@ -259,14 +257,14 @@ def test_fill_form_select_match_succeeds(monkeypatch):
 
 def test_fill_form_skips_submit_when_a_field_failed(monkeypatch):
     from lib.browser.advanced import fill_form_sequential
-    calls = _install_fake_bc(monkeypatch, {
+    send, calls = _fake_sender({
         'get_interactive_elements': ({'elements': []}, None),  # select finds nothing
         'click_element': ({'clicked': True}, None),
         'type_text': ({'typed': True}, None),
     })
     out = fill_form_sequential(1, [
         {'selector': '#cabin', 'value': 'X', 'type': 'select'},  # will fail
-    ], submit_selector='#go', field_delay=0)
+    ], submit_selector='#go', field_delay=0, send=send)
     assert out['success'] is False
     assert out['submitted'] is False, 'must not submit a half-filled form'
     submit_clicks = [p for c, p in calls if c == 'click_element' and p.get('selector') == '#go']
@@ -279,7 +277,7 @@ def test_fill_form_select_silent_success_neuter_bites(monkeypatch):
     # would flip. Here we assert the CURRENT code makes success depend on
     # fields_failed == 0 by checking a mixed batch.
     from lib.browser.advanced import fill_form_sequential
-    _install_fake_bc(monkeypatch, {
+    send, _calls = _fake_sender({
         'get_interactive_elements': ({'elements': [{'text': 'Y', 'selector': '#y'}]}, None),
         'click_element': ({'clicked': True}, None),
         'type_text': ({'typed': True}, None),
@@ -287,17 +285,15 @@ def test_fill_form_select_silent_success_neuter_bites(monkeypatch):
     out = fill_form_sequential(1, [
         {'selector': '#a', 'value': 'ok', 'type': 'type'},
         {'selector': '#b', 'value': 'ZZZ', 'type': 'select'},  # no match
-    ], field_delay=0)
+    ], field_delay=0, send=send)
     assert out['success'] is False and out['fields_filled'] == 1, (
         'overall success must be gated on every field succeeding')
 
 
 # ── 3. search-first URL guidance ────────────────────────────────────
 
-def test_create_tab_and_navigate_tell_model_to_search_first():
-    # v2 (pt_869e5648403e4745): browser_create_tab was absorbed into
-    # browser_navigate(new_tab=true) — the search-first contract now lives
-    # on navigate alone, and the new_tab param must exist as the merge point.
+def test_navigate_tells_model_to_search_first():
+    # New-tab navigation follows the same search-first URL contract.
     from lib.tools.browser import BROWSER_TOOL_NAVIGATE
     tool = BROWSER_TOOL_NAVIGATE
     desc = tool['function']['description']

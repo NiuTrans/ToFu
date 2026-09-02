@@ -29,12 +29,13 @@ def _classify_exception(exc: BaseException) -> str:
             PermissionError_ as _Perm,
             PromptTooLongError as _Plong,
             RateLimitError as _RL,
+            RequestScopedError as _Req,
             RetryableAPIError as _Retry,
             StreamOnlyError as _SO,
         )
     except Exception as _imp_err:
         logger.debug('lib.llm import failed in error classifier: %s', _imp_err)
-        _Abort = _BR = _CF = _Img = _Mlim = _Perm = _Plong = _RL = _Retry = _SO = _Unreach = None  # type: ignore
+        _Abort = _BR = _CF = _Img = _Mlim = _Perm = _Plong = _RL = _Req = _Retry = _SO = _Unreach = None  # type: ignore
 
     if _Abort is not None and isinstance(exc, _Abort):
         return 'aborted'
@@ -55,7 +56,8 @@ def _classify_exception(exc: BaseException) -> str:
     # 5xx-after-retries: same vendor-outage truth as the gateway RL above.
     if _Retry is not None and isinstance(exc, _Retry):
         return 'upstream_error'
-    if _BR is not None and isinstance(exc, _BR):
+    if (_BR is not None and isinstance(exc, _BR)) or \
+            (_Req is not None and isinstance(exc, _Req)):
         return 'bad_request'
     if _Perm is not None and isinstance(exc, _Perm):
         return 'permission'
@@ -70,39 +72,47 @@ def _classify_exception(exc: BaseException) -> str:
     if _Mlim is not None and isinstance(exc, _Mlim):
         return 'model_limit'
 
+    # Python programming-error builtins are OUR OWN code bugs (e.g. a
+    # ``TypeError: __new__() missing 1 required positional argument`` from a
+    # str-subclass deepcopy, conv mrova3t92jffm7). This type identity outranks
+    # incidental words in the exception message: ``ValueError('HTTP 429')`` is
+    # still a programming defect, not a provider throttle. ``RuntimeError`` /
+    # bare ``Exception`` remain deliberately excluded because the dispatch
+    # layer uses those for legacy string-shaped upstream failures.
+    if isinstance(exc, (TypeError, AttributeError, KeyError, IndexError,
+                        NameError, UnboundLocalError, ValueError,
+                        AssertionError, ZeroDivisionError)):
+        return 'internal'
+
     msg = str(exc).lower()
     tn = type(exc).__name__.lower()
 
+    # Local request-memory admission is temporary server capacity pressure,
+    # not an upstream model/key failure. Keep this import-free to avoid making
+    # the error-envelope package depend on the cgroup implementation.
+    if 'memorypressureerror' in tn:
+        return 'server_busy'
     if 'all ' in msg and 'dispatch' in msg and 'attempts failed' in msg:
         return 'dispatch_exhausted'
     if 'no slot' in msg or 'no_slot' in msg:
         return 'no_slot'
     if 'endpointunreachable' in tn or 'endpoint unreachable' in msg or 'are unreachable' in msg:
         return 'endpoint_unreachable'
+    # Billing exhaustion often arrives with HTTP 429 (and occasionally 403).
+    # Strong quota markers must win before the generic status heuristics or the
+    # UI will offer a futile retry instead of the billing/key recovery action.
+    if (('insufficient' in msg and ('quota' in msg or 'balance' in msg))
+            or 'insufficient_quota' in msg
+            or 'credit_balance_too_low' in msg
+            or 'exceeded your current quota' in msg):
+        return 'quota'
     if 'timed out' in msg or 'timeout' in tn or 'timeout' in msg:
         return 'timeout'
     if '429' in msg or 'rate limit' in msg or 'rate-limit' in msg or 'too many requests' in msg:
         return 'ratelimit'
     if '401' in msg or '403' in msg or 'unauthorized' in msg or 'forbidden' in msg:
         return 'permission'
-    if (('insufficient' in msg and ('quota' in msg or 'balance' in msg))
-            or 'credit_balance_too_low' in msg):
-        return 'quota'
     if 'connectionerror' in tn or 'connection reset' in msg or 'connection aborted' in msg:
         return 'network'
-
-    # Python programming-error builtins are OUR OWN code bugs (e.g. a
-    # ``TypeError: __new__() missing 1 required positional argument`` from a
-    # str-subclass deepcopy, conv mrova3t92jffm7) — never a quota / rate-limit
-    # / key problem. Route them to 'internal' so the user-facing hint says
-    # "check the server logs" instead of the misleading generic
-    # Settings→Keys / 429 quota advice. Note: ``RuntimeError`` / bare
-    # ``Exception`` are deliberately EXCLUDED — the dispatch layer raises
-    # those as string-shaped errors that the substring heuristics above are
-    # meant to classify; only leaf builtin defects fall here.
-    if isinstance(exc, (TypeError, AttributeError, KeyError, IndexError,
-                        NameError, UnboundLocalError, ValueError,
-                        AssertionError, ZeroDivisionError)):
-        return 'internal'
 
     return 'generic'

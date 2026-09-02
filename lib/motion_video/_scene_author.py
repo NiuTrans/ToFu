@@ -1,7 +1,7 @@
 """lib/motion_video/_scene_author.py — Per-scene composition author (P5).
 
 The quality jump over the zero-LLM slide template
-(docs/PRODUCTION_PIPELINE_DESIGN.md §2.2 stage 5): each scene gets its OWN
+(docs/modules/production.md): each scene gets its OWN
 agent loop that writes a bespoke ``index.html`` composition, instead
 of every scene rendering as "gradient background + one centred line".
 
@@ -1070,7 +1070,7 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
                 _reply(tc_id, 'Error: query is required')
                 return
             try:
-                from lib.tasks_pkg.handlers.search import _web_search_one
+                from lib.tasks_pkg.handlers.search._core import _web_search_one
                 results, _diag, _eb, _v = _web_search_one(
                     query, str(scene.get('text') or ''), '', vertical='off')
                 from tofu_search.search import format_search_for_tool_response
@@ -1109,7 +1109,7 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
                 _reply(tc_id, 'Error: url is required')
                 return
             try:
-                from lib.tasks_pkg.handlers.search import _fetch_url_one
+                from lib.tasks_pkg.handlers.search._core import _fetch_url_one
                 got = _fetch_url_one(url, str(scene.get('text') or ''),
                                      fetch_reason='scene asset')
                 _reply(tc_id, (got.get('page_content')

@@ -6,8 +6,8 @@ it (steer into the running reply vs queue a fresh turn). A message sent when
 NOTHING is running must send normally — zero extra UI. This suite drives the
 REAL shipped JS under jsdom:
 
-  * ``static/js/core/dialog.js``  — the ``showChoice`` themed chooser.
-  * ``static/js/main/main_send_pipeline.js`` — ``_promptInjectMode``.
+  * ``runtime/sections/core/dialog.js``  — the ``showChoice`` themed chooser.
+  * ``runtime/sections/main/main_send_pipeline.js`` — ``_promptInjectMode``.
 
 Invariants pinned (each with a byte-reverting NEUTER):
   1. showChoice resolves the CHOSEN option's value; a click on 'steer' → 'steer'.

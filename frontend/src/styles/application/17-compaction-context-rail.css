@@ -1,0 +1,1412 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * Compaction Viewer — inline markers + right-side drawer
+ * (see static/js/compaction-viewer.js)
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* Inline chips rendered inside the assistant bubble when a compaction fired */
+.compaction-marker-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 4px;
+  padding: 8px 10px;
+  border-left: 2px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-radius: 3px;
+}
+.compaction-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  color: var(--text-secondary);
+  background: var(--bg-elevated, rgba(255,255,255,0.03));
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  text-align: left;
+  line-height: 1.35;
+}
+.compaction-marker:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle, rgba(255,255,255,0.08)));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--text-primary);
+  transform: translateY(-1px);
+}
+.compaction-marker.is-progress {
+  animation: compactionMarkerPulse 1.6s ease-in-out infinite;
+}
+@keyframes compactionMarkerPulse {
+  0%, 100% { opacity: 0.78; }
+  50%      { opacity: 1; }
+}
+.compaction-marker-icon {
+  display: inline-flex;
+  color: color-mix(in srgb, var(--accent) 75%, var(--text-tertiary));
+}
+.compaction-marker-trigger {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.compaction-marker-trigger svg { width: 12px; height: 12px; vertical-align: -2px; }
+.pdf-attach-icon svg { width: 22px; height: 22px; vertical-align: middle; }
+.compaction-marker-stat {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+.compaction-marker-reason {
+  color: color-mix(in srgb, #f59e0b 70%, var(--text-tertiary));
+  font-size: 10.5px;
+  font-style: italic;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compaction-marker-cta {
+  margin-left: auto;
+  padding: 1px 6px;
+  font-size: 10px;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 3px;
+  opacity: 0.85;
+}
+.compaction-marker:hover .compaction-marker-cta {
+  opacity: 1;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* ── Manual /compact boundary card (chat_render.js _isCompactionSummary) ── */
+.compact-card {
+  margin: 8px 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 12px;
+  background:
+    linear-gradient(105deg,
+      color-mix(in srgb, var(--accent) 8%, var(--bg-primary)) 0%,
+      color-mix(in srgb, var(--accent) 3%, var(--bg-primary)) 58%,
+      var(--bg-primary) 100%);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 62%, transparent);
+  overflow: hidden;
+}
+.compact-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+}
+.compact-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+.compact-card-icon > svg { display: block; width: 16px; height: 16px; }
+.compact-card-title { font-weight: 650; font-size: 13px; letter-spacing: .005em; }
+.compact-card-toggle {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--accent);
+  opacity: 0.85;
+}
+.compact-card-head:hover .compact-card-toggle { opacity: 1; }
+.compact-card-head:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, white);
+  outline-offset: -3px;
+}
+.compact-card-body {
+  padding: 8px 14px 13px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.compact-card[data-collapsed="1"] .compact-card-body { display: none; }
+details.compact-card > summary.compact-card-head { list-style: none; }
+details.compact-card > summary.compact-card-head::-webkit-details-marker { display: none; }
+details.compact-card:not([open]) > .compact-card-body { display: none; }
+.compact-card-view {
+  margin-top: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--accent);
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.compact-card-view:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+.compact-card-view:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, white);
+  outline-offset: 2px;
+}
+
+/* The signature compaction read: two exact accounting stations connected by
+ * one narrowing rail. It says “this context became that context” without
+ * borrowing warning/error chrome. Shared by manual cards and Turn events. */
+.compaction-token-flow {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.compaction-token-stage {
+  display: inline-grid;
+  grid-template-columns: auto;
+  gap: 1px;
+  min-width: 72px;
+  padding: 4px 7px 5px;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-elevated, var(--bg-secondary)) 82%, transparent);
+}
+.compaction-token-stage.is-after {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg-elevated, var(--bg-secondary)));
+}
+.compaction-token-label {
+  color: var(--text-tertiary);
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: .055em;
+}
+.compaction-token-value {
+  color: var(--text-primary, var(--text));
+  font: 650 11px/1.2 var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+  white-space: nowrap;
+}
+.compaction-token-arrow {
+  position: relative;
+  width: 24px;
+  height: 12px;
+  flex: 0 0 24px;
+  overflow: hidden;
+  color: transparent;
+  font-size: 0;
+}
+.compaction-token-arrow::before {
+  content: '';
+  position: absolute;
+  top: 5.5px;
+  left: 1px;
+  right: 5px;
+  height: 1px;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--text-tertiary) 55%, transparent),
+    color-mix(in srgb, var(--accent) 80%, transparent));
+}
+.compaction-token-arrow::after {
+  content: '›';
+  position: absolute;
+  top: -2px;
+  right: 1px;
+  color: color-mix(in srgb, var(--accent) 82%, var(--text-secondary));
+  font: 600 15px/1 var(--font-sans, sans-serif);
+}
+.compaction-token-saved {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: color-mix(in srgb, var(--accent) 75%, var(--text-secondary));
+  font: 650 9.5px/1 var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+  white-space: nowrap;
+}
+.compaction-token-flow.is-pending .compaction-token-stage.is-after {
+  border-style: dashed;
+}
+
+@media (max-width: 640px) {
+  .compact-card-head > .compaction-token-flow {
+    order: 4;
+    width: 100%;
+    padding-left: 26px;
+  }
+  .compaction-token-stage { min-width: 64px; }
+  .compaction-token-saved { padding-inline: 6px; }
+}
+
+/* ── Context-bar "立即压缩" popover (context-bar.js) ── */
+.ctx-bar-popover {
+  z-index: 10000;
+  min-width: 180px;
+  padding: 4px;
+  background: var(--bg-elevated, var(--bg-secondary));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+}
+.ctx-pop-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+}
+.ctx-pop-item:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.ctx-pop-item[disabled] { opacity: 0.5; cursor: not-allowed; }
+.ctx-pop-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+.ctx-pop-icon > svg { display: block; }
+.ctx-pop-compact { color: var(--accent); font-weight: 600; }
+
+/* ── B: live-streaming summary overlay (context-bar.js _openLiveSummaryCard).
+ *    A small anchored panel that "grows" the /compact summary as it streams,
+ *    so the multi-second summary call feels responsive. Dissolves when the
+ *    settled boundary card lands. ── */
+.ctx-live-summary {
+  z-index: 10000;
+  width: 340px;
+  max-width: min(340px, 90vw);
+  padding: 10px 12px;
+  background: var(--bg-elevated, var(--bg-secondary));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+}
+.ctx-live-summary-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+/* A small pulsing dot before the label conveys "streaming" without a glyph. */
+.ctx-live-summary-head::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: ctxLiveSummaryPulse 1s ease-in-out infinite;
+}
+@keyframes ctxLiveSummaryPulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+@media (prefers-reduced-motion: reduce) {
+  .ctx-live-summary-head::before { animation: none; opacity: 0.7; }
+}
+.ctx-live-summary-body {
+  max-height: 240px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary, var(--text));
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Drawer container */
+.compaction-drawer {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 180ms ease;
+}
+.compaction-drawer.is-open {
+  opacity: 1;
+  pointer-events: auto;
+}
+.compaction-drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(1px);
+  cursor: pointer;
+}
+.compaction-drawer-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(780px, 94vw);
+  background: var(--bg-primary, #1a1a1d);
+  border-left: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  box-shadow: -20px 0 60px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  transform: translateX(30px);
+  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.compaction-drawer.is-open .compaction-drawer-panel {
+  transform: translateX(0);
+}
+
+/* Drawer header */
+.compaction-drawer-header {
+  flex: 0 0 auto;
+  padding: 18px 22px 12px;
+  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  background: var(--bg-elevated, rgba(255,255,255,0.02));
+}
+.compaction-drawer-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.compaction-drawer-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.compaction-drawer-close {
+  background: transparent;
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  color: var(--text-secondary);
+  border-radius: 4px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+.compaction-drawer-close:hover {
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle, rgba(255,255,255,0.08)));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.compaction-drawer-subtitle {
+  margin: 8px 0 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.compaction-drawer-subtitle strong { color: var(--text-secondary); font-weight: 600; }
+.compaction-drawer-subtitle em { color: color-mix(in srgb, #f59e0b 65%, var(--text-tertiary)); font-style: normal; }
+
+/* Metadata grid */
+.cd-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 6px 16px;
+  font-size: 11.5px;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  margin-bottom: 10px;
+}
+.cd-meta-row { display: flex; gap: 8px; align-items: baseline; }
+.cd-meta-k {
+  min-width: 68px;
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.cd-meta-v { color: var(--text-secondary); }
+.cd-meta-v em { color: color-mix(in srgb, #22c55e 75%, var(--text-secondary)); font-style: normal; }
+.cd-meta-trigger-reactive { color: #fb923c; font-weight: 600; }
+.cd-meta-trigger-force { color: var(--accent); font-weight: 600; }
+.cd-meta-reason { grid-column: 1 / -1; }
+.cd-meta-reason .cd-meta-v { color: #fbbf24; font-style: italic; }
+
+/* Tabs */
+.compaction-drawer-tabs {
+  display: flex;
+  gap: 2px;
+  margin-top: 8px;
+  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  margin-bottom: -13px;
+}
+.compaction-tab {
+  background: transparent;
+  border: none;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: all 120ms ease;
+}
+.compaction-tab:hover { color: var(--text-secondary); }
+.compaction-tab.is-active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Body */
+.compaction-drawer-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 16px 22px;
+}
+.compaction-drawer-loading {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+.cd-empty { padding: 32px 0; text-align: center; color: var(--text-tertiary); font-size: 12.5px; line-height: 1.6; }
+.cd-empty p { margin: 4px 0; }
+.cd-empty.cd-error { color: #ef4444; }
+
+/* Message list */
+.compaction-msg-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cd-msg {
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-elevated, rgba(255,255,255,0.02)) 80%, transparent);
+  overflow: hidden;
+}
+.cd-msg-system { border-left: 3px solid #64748b; }
+.cd-msg-user   { border-left: 3px solid #3b82f6; }
+.cd-msg-assistant { border-left: 3px solid color-mix(in srgb, var(--accent) 75%, #a855f7); }
+.cd-msg-tool   { border-left: 3px solid #10b981; }
+.cd-msg-function { border-left: 3px solid #10b981; }
+
+.cd-msg-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  font-size: 10.5px;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: color-mix(in srgb, var(--bg-elevated, rgba(255,255,255,0.02)) 120%, transparent);
+  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+}
+.cd-msg-idx  { color: var(--text-tertiary); min-width: 32px; }
+.cd-msg-role { font-weight: 600; color: var(--text-secondary); }
+.cd-msg-meta { margin-left: auto; color: var(--text-tertiary); font-size: 10px; text-transform: none; letter-spacing: 0; }
+.cd-msg-body { padding: 10px 12px; }
+.cd-empty-body { color: var(--text-tertiary); font-size: 11px; }
+
+.cd-content, .cd-toolcall-args, .cd-summary {
+  margin: 4px 0;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 3px;
+  font-size: 11.5px;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow: auto;
+}
+.cd-summary { max-height: none; white-space: pre-wrap; }
+.cd-summary-title {
+  margin: 18px 0 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.cd-receipt {
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border-subtle, rgba(255,255,255,0.08)));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg-elevated, rgba(255,255,255,0.02)));
+}
+.cd-receipt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.cd-receipt-head h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.cd-receipt-status {
+  padding: 2px 7px;
+  border-radius: 999px;
+  font: 10px/1.5 'JetBrains Mono', 'SF Mono', monospace;
+  color: var(--text-tertiary);
+  background: color-mix(in srgb, var(--text-tertiary) 12%, transparent);
+}
+.cd-receipt-status-completed { color: #22c55e; background: color-mix(in srgb, #22c55e 12%, transparent); }
+.cd-receipt-status-failed,
+.cd-receipt-status-aborted { color: #f59e0b; background: color-mix(in srgb, #f59e0b 12%, transparent); }
+.cd-receipt-identity {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+.cd-receipt-identity code { color: color-mix(in srgb, var(--accent) 72%, var(--text-secondary)); }
+.cd-receipt-outcome {
+  margin: 8px 0 0;
+  color: #fbbf24;
+  font: 10.5px/1.5 'JetBrains Mono', 'SF Mono', monospace;
+}
+.cd-receipt-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.cd-receipt-group {
+  padding: 10px;
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.07));
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.12);
+}
+.cd-receipt-group h4 {
+  margin: 0 0 8px;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.cd-receipt-metrics { display: grid; gap: 5px; }
+.cd-receipt-metric {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+.cd-receipt-metric strong {
+  color: var(--text-secondary);
+  font: 500 10.5px/1.4 'JetBrains Mono', 'SF Mono', monospace;
+  text-align: right;
+}
+.cd-receipt-flags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.cd-receipt-flags span {
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: var(--text-tertiary);
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 9.5px;
+}
+.cd-receipt-flags span.is-on { color: #22c55e; background: color-mix(in srgb, #22c55e 10%, transparent); }
+.cd-receipt-files { margin-top: 9px; color: var(--text-tertiary); font-size: 10px; }
+.cd-receipt-files ul { margin: 5px 0 0; padding-left: 18px; }
+.cd-receipt-files li { margin: 3px 0; overflow-wrap: anywhere; }
+.cd-receipt-files code { color: var(--text-secondary); }
+.cd-content-blocks { display: flex; flex-direction: column; gap: 4px; }
+
+.cd-toolcall {
+  margin: 6px 0;
+  padding: 0;
+}
+.cd-toolcall-name {
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: 11px;
+  color: #22d3ee;
+  margin: 4px 0;
+}
+.cd-toolcall-id {
+  margin-left: 8px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.cd-image-block {
+  margin: 4px 0;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px dashed var(--border-subtle, rgba(255,255,255,0.1));
+  border-radius: 4px;
+}
+.cd-image-head {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-bottom: 6px;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+}
+.cd-image-placeholder button {
+  background: transparent;
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.12));
+  color: var(--accent);
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+.cd-image-placeholder button:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--text-primary);
+}
+.cd-image-placeholder img {
+  max-width: 100%;
+  max-height: 360px;
+  border-radius: 3px;
+  display: block;
+}
+
+.cd-thinking {
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.15);
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+  border-radius: 3px;
+}
+.cd-thinking summary {
+  cursor: pointer;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+}
+.cd-thinking pre { margin: 6px 0 0; }
+
+/* History tab */
+.compaction-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cd-history-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  border-radius: 4px;
+  background: var(--bg-elevated, rgba(255,255,255,0.02));
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+.cd-history-item:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle, rgba(255,255,255,0.08)));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.cd-history-item.is-active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.cd-history-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+}
+.cd-history-trigger { font-weight: 600; }
+.cd-history-trigger-reactive { color: #fb923c; }
+.cd-history-trigger-force { color: var(--accent); }
+.cd-history-time { color: var(--text-tertiary); font-size: 10.5px; margin-left: auto; }
+.cd-history-result {
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--text-tertiary);
+  background: color-mix(in srgb, var(--text-tertiary) 10%, transparent);
+  font: 9px/1.5 'JetBrains Mono', 'SF Mono', monospace;
+}
+.cd-history-result.cd-receipt-status-completed { color: #22c55e; }
+.cd-history-result.cd-receipt-status-failed,
+.cd-history-result.cd-receipt-status-aborted { color: #f59e0b; }
+.cd-history-stats {
+  margin-top: 4px;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.cd-history-stats em { color: #22c55e; font-style: normal; }
+.cd-history-reason {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #fbbf24;
+  font-style: italic;
+}
+
+/* Footer */
+.compaction-drawer-footer {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  padding: 12px 22px;
+  border-top: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  background: var(--bg-elevated, rgba(255,255,255,0.02));
+}
+.compaction-drawer-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.1));
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+.compaction-drawer-btn:hover {
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle, rgba(255,255,255,0.1)));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* Small screens — full-width drawer */
+@media (max-width: 720px) {
+  .compaction-drawer-panel {
+    width: 100vw;
+    border-left: none;
+  }
+  .cd-meta-grid { grid-template-columns: 1fr; }
+  .cd-receipt-groups { grid-template-columns: 1fr; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Context indicator — "Liquid Bubble".
+
+   Concept: a 28×28 SOLID circular vessel filled with liquid that
+   rises from the bottom as context grows.  Glass rim stroke + a
+   static upper-left shine sell "vessel"; a thin bright meniscus
+   along the wave top sells "real liquid surface".  The wave geometry
+   is static — only the liquid LEVEL (vertical translate of the wave
+   group) changes on actual percentage updates.
+
+   This explicitly walks back from the prior "halo capsule".  At
+   chip-size, a thin line capsule reads as anonymous; a solid round
+   vessel filled with a substance reads as ownable, alive, and
+   uniquely Tofu.
+
+   Color zones (uniform across themes — only the chrome differs):
+   - ok    (<60 %) : theme-dependent calm tone (indigo / blue / green)
+   - warn  (≥60 %) : amber  #d99e3a
+   - hot   (≥82 %) : orange #d97a3a
+   - crit  (≥95 %) : red    #c44747
+
+   Anti-flicker invariants (mirror context-bar.js header):
+   - The ONLY thing that ever animates is the liquid LEVEL on actual
+     value change, via a CSS transition on the wave group's
+     `transform`.  The wave geometry itself never moves.  Counter
+     "land" cues are one-shot 1.4 s class toggles.
+   ═══════════════════════════════════════════════════════════════════ */
+
+.ctx-health-bar{
+  /* In-flow inside #convStatusStrip (context-bar.js _ensureBar prepends it).
+   * It used to be absolute at left:18px/top:50% of .chat-wrapper — which
+   * genuinely overlapped the message column below a ~1420px pane — so the
+   * anchoring is gone, not re-tuned. */
+  flex:0 0 auto;
+  display:inline-flex;
+  align-items:center;
+  gap:9px;
+  padding:5px 11px 5px 5px;
+  border-radius:999px;
+  user-select:none;
+  cursor:default;
+  --ctx-zone-color:var(--text-tertiary);
+  --ctx-zone-color-warn:#d99e3a;
+  --ctx-zone-color-hot: #d97a3a;
+  --ctx-zone-color-crit:#c44747;
+  /* Subtle one-shot entry. */
+  opacity:0;
+  animation:ctx-fade-in .35s ease-out forwards;
+}
+@keyframes ctx-fade-in{ to{ opacity:1; } }
+.ctx-health-bar[data-zone="warn"]{ --ctx-zone-color:var(--ctx-zone-color-warn); }
+.ctx-health-bar[data-zone="hot"] { --ctx-zone-color:var(--ctx-zone-color-hot);  }
+.ctx-health-bar[data-zone="crit"]{ --ctx-zone-color:var(--ctx-zone-color-crit); }
+
+/* The bubble host — a 28×28 box that just positions the inline SVG
+ * and the counter badge.  No background of its own; the SVG carries
+ * all the visuals. */
+.ctx-bar-bubble{
+  position:relative;
+  width:28px;
+  height:28px;
+  flex:0 0 auto;
+}
+.ctx-bubble-svg{ display:block; }
+
+/* ── In-progress spinner (manual /compact) ──
+ * A CSS-drawn rotating ring overlaid on the bubble while a manual compaction
+ * is running. Keyed on the chip's `data-compacting` attribute (set by
+ * context-bar.js `_setCompacting`). This REPLACES the old optimistic "正在压缩"
+ * toast — progress lives on the chip, so it never stacks with the terminal
+ * toast. No emoji / font glyph (§3.4): the ring is a conic-gradient mask. */
+.ctx-health-bar[data-compacting] .ctx-bar-bubble::after{
+  content:"";
+  position:absolute;
+  inset:-2px;
+  border-radius:50%;
+  background:conic-gradient(var(--accent) 0deg 90deg, transparent 90deg 360deg);
+  -webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+          mask:radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+  animation:ctxCompactSpin 0.8s linear infinite;
+  pointer-events:none;
+  z-index:2;
+}
+@keyframes ctxCompactSpin{ to{ transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce){
+  .ctx-health-bar[data-compacting] .ctx-bar-bubble::after{ animation:none; opacity:0.7; }
+}
+
+/* Empty vessel base — the cream/dark "container color" that shows
+ * through above the liquid line.  Intentionally subtle so the
+ * liquid (.ctx-bubble-wave) carries the visual weight. */
+.ctx-bubble-bg{
+  fill:var(--ctx-vessel-bg, rgba(255,255,255,0.06));
+  stroke:none;
+}
+
+/* The liquid body — filled by an SVG linearGradient defined inline
+ * (id randomized per chip).  The gradient goes from a lighter "near
+ * surface" tint at the top to the saturated zone color at the base —
+ * this depth gradient is what really makes a still liquid look real
+ * (more than any wave geometry would).  The two stop classes below
+ * set the actual stop colors. */
+.ctx-bubble-wave{
+  /* `fill` set inline on the element (`fill="url(#...)"`); the
+   * gradient stops below provide the actual colors. */
+}
+.ctx-bubble-grad-top{
+  /* Brighter near-surface tint — keeps a hint of the zone color so
+   * warn/hot/crit still warm the top, but mixed toward white. */
+  stop-color:color-mix(in srgb, var(--ctx-zone-color) 55%, var(--ctx-liquid-light, #fff));
+}
+.ctx-bubble-grad-bot{
+  /* Deep base color — the zone color slightly darkened.  Gives
+   * "depth" to the liquid the way real liquid bodies look darker
+   * the further you look down through them. */
+  stop-color:color-mix(in srgb, var(--ctx-zone-color) 90%, #000);
+}
+
+/* The wave group — the only thing that ever moves.  Its transform
+ * attribute is set by the JS to translate(0 Y) where Y is the
+ * liquid surface position in viewBox units.  CSS transition on
+ * `transform` smooths the level rise/fall. */
+.ctx-bubble-wave-group{
+  transition:transform .55s cubic-bezier(.2,.85,.25,1.05);
+}
+
+/* Soft meniscus highlight — a thin near-white stroke along the
+ * surface.  Kept very subtle (low opacity, narrow stroke) so it
+ * reads as "light reflecting on the surface" rather than a drawn
+ * line.  No drop-shadow filter — that read as artificial.
+ * The class names ".ctx-bubble-meniscus" and ".ctx-bubble-wave" are
+ * preserved for back-compat; the SHAPE is now a still meniscus, not
+ * a sine wave. */
+.ctx-bubble-meniscus{
+  fill:none;
+  stroke:var(--ctx-meniscus, color-mix(in srgb, #ffffff 80%, var(--ctx-zone-color)));
+  stroke-width:.45;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+  opacity:.85;
+}
+
+/* Inner glass shadow — a soft dark ring just inside the rim,
+ * clipped to the bubble interior.  Provides the cue that the glass
+ * has wall thickness without adding a second outer shadow. */
+.ctx-bubble-inner-shadow{
+  fill:none;
+  stroke:var(--ctx-inner-shadow, rgba(0,0,0,0.18));
+  stroke-width:1.6;
+  /* Hand-tuned: stroke is half-inside, half-outside the radius,
+   * so a slightly smaller r keeps the shadow purely on the inside
+   * edge of the rim.  Set via attribute on the element instead. */
+}
+
+/* Glass rim — drawn on top of the clipped liquid so it always reads
+ * as the bubble outline regardless of fill level. */
+.ctx-bubble-rim{
+  fill:none;
+  stroke:var(--ctx-rim, rgba(0,0,0,0.45));
+  stroke-width:1;
+}
+
+/* Upper-left shine — a single arc that sells "glass vessel".
+ * Static; never animates. */
+.ctx-bubble-shine{
+  fill:none;
+  stroke:var(--ctx-shine, rgba(255,255,255,0.45));
+  stroke-width:1.1;
+  stroke-linecap:round;
+  opacity:.85;
+}
+
+/* Hide every legacy bit we no longer use (kept as a safety net for
+ * any cached HTML / third-party script that still references them). */
+
+/* Text block: % primary, "1M" cap secondary.  Dot separator between. */
+.ctx-bar-pct{
+  font-family:'JetBrains Mono', ui-monospace, monospace;
+  font-size:12px;
+  font-weight:600;
+  color:var(--text-secondary);
+  letter-spacing:0.01em;
+  line-height:1.05;
+  font-variant-numeric:tabular-nums;
+  transition:color .25s ease;
+}
+.ctx-bar-cap{
+  font-family:'JetBrains Mono', ui-monospace, monospace;
+  font-size:9px;
+  color:var(--text-tertiary);
+  line-height:1.05;
+  font-variant-numeric:tabular-nums;
+}
+.ctx-health-bar > .ctx-bar-pct{ margin-left:1px; }
+.ctx-health-bar > .ctx-bar-cap{
+  opacity:0.55;
+  margin-left:6px;
+  position:relative;
+  padding-left:7px;
+  transition:opacity .18s ease;
+}
+.ctx-health-bar > .ctx-bar-cap::before{
+  content:"";
+  position:absolute;
+  left:0; top:50%;
+  width:2px; height:2px;
+  border-radius:50%;
+  background:currentColor;
+  opacity:.55;
+  transform:translateY(-50%);
+}
+.ctx-health-bar:hover > .ctx-bar-cap{ opacity:1; }
+.ctx-health-bar[data-zone="warn"] .ctx-bar-pct,
+.ctx-health-bar[data-zone="hot"]  .ctx-bar-pct,
+.ctx-health-bar[data-zone="crit"] .ctx-bar-pct{ color:var(--ctx-zone-color); }
+
+/* ── Per-theme palettes ─────────────────────────────────────── */
+[data-theme="dark"] .ctx-health-bar,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .ctx-health-bar{
+  background:rgba(20,22,32,0.72);
+  border:1px solid rgba(255,255,255,0.06);
+  -webkit-backdrop-filter:blur(8px);
+  backdrop-filter:blur(8px);
+  box-shadow:0 2px 10px rgba(0,0,0,0.25);
+  --ctx-vessel-bg:rgba(255,255,255,0.06);
+  --ctx-rim:rgba(0,0,0,0.55);
+  --ctx-shine:rgba(255,255,255,0.55);
+}
+[data-theme="dark"] .ctx-health-bar[data-zone="ok"],
+html:not([data-theme="light"]):not([data-theme="tofu"]) .ctx-health-bar[data-zone="ok"]{
+  --ctx-zone-color:#7d6cd0;
+}
+
+[data-theme="light"] .ctx-health-bar{
+  background:#ffffff;
+  border:1px solid #e8e6df;
+  box-shadow:0 1px 2px rgba(20,20,40,0.04);
+  --ctx-vessel-bg:rgba(20,20,40,0.06);
+  --ctx-rim:rgba(20,20,40,0.30);
+  --ctx-shine:rgba(255,255,255,0.85);
+}
+[data-theme="light"] .ctx-health-bar[data-zone="ok"]{
+  --ctx-zone-color:#6366f1;
+}
+[data-theme="light"] .ctx-bar-pct{
+  font-family:'Source Serif Pro', 'JetBrains Mono', ui-monospace, monospace;
+  color:#3a3a48;
+}
+
+[data-theme="tofu"] .ctx-health-bar{
+  background:#fdf8e6;
+  border:1px solid #d8cda8;
+  box-shadow:0 1px 0 #ebdfba, 0 2px 6px rgba(120,100,70,0.08);
+  --ctx-vessel-bg:rgba(80,55,20,0.08);
+  --ctx-rim:rgba(80,55,20,0.40);
+  --ctx-shine:rgba(255,247,223,0.85);
+}
+[data-theme="tofu"] .ctx-health-bar[data-zone="ok"]{
+  --ctx-zone-color:#7ab26b;
+}
+[data-theme="tofu"] .ctx-bar-pct{
+  font-family:var(--sans-body);
+  color:var(--text-secondary);
+  font-weight:600;
+}
+[data-theme="tofu"] .ctx-bar-cap{ color:#8a7a5e; }
+
+/* Hide the floating context sphere EXACTLY where the "···" mobile sheet takes
+ * over as the compaction entry point — never in the gap between them. The old
+ * blanket `max-width:900px` hid the sphere on 769–900px FINE-pointer windows
+ * (a narrowed desktop / small fine-pointer monitor) where the "···" button is
+ * NOT revealed (it needs ≤768px OR pointer:coarse), leaving that band with NO
+ * reachable "compact now" entry. Mirroring the mobile-more-btn reveal
+ * conditions keeps the sphere as the entry on fine-pointer narrow windows
+ * (unchanged from today's 901–1024px fine behaviour) and hands off to the
+ * sheet on phones (≤768) and coarse-pointer tablets (≤1024). KEEP IN SYNC with
+ * the two `.mobile-more-btn{display:flex}` blocks (styles.css ~17287 / ~17542)
+ * — guarded by tests/test_context_entry_no_deadzone.py. */
+@media (max-width: 768px){
+  .ctx-health-bar{ display:none !important; }
+}
+@media (max-width: 1024px) and (pointer:coarse){
+  .ctx-health-bar{ display:none !important; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Per-turn context rail (.turn-ctx) — built by info-rail.js
+   (buildTurnCtxSnapshot / renderTurnCtxNote) and spliced into each USER
+   turn by renderMessage(). A frozen-in-time record of the context the turn
+   ACTUALLY ran with: model + depth + run-mode + the tools that fired +
+   the workspace roots.
+
+   ── Why the WIDTH is a grid track the pane owns ──
+   The first design anchored it at `left:calc(100% + 24px)` off the
+   centered reading column and hid it under `@media (max-width:1280px)`.
+   That predicate asks about the WINDOW, but the space the note lands in is
+   `viewport − sidebar − drawer`: the sidebar has four widths (0/280/332/430)
+   and the request-inspector drawer eats up to another 780px. Measured across
+   all 64 combinations in a real browser, 35 of them clipped the note while
+   the media query said "show it", and NONE were hidden while having room —
+   i.e. no viewport threshold can be correct, because the predicate is blind
+   to two of the three variables. The rail's WIDTH now comes from a real
+   grid track that the pane OWNS (see `.chat-inner`), so horizontal overflow
+   is impossible by construction rather than by tuning.
+
+   ── Why the HEIGHT is OUT OF FLOW (2026-08-05 redesign) ──
+   The rail used to be an in-flow grid item, so a rail taller than its
+   bubble STRETCHED the message row: a one-line user turn with many MCP
+   servers connected showed ~200px of dead space under the bubble before
+   the Agent reply (owner report, conv msftgnt3ezhmtt). The rail is
+   metadata marginalia — it has no business sizing the prose row. It is
+   now `position:absolute` inside `.message` (already `position:relative`):
+   it keeps the track's box (right edge, top aligned) but contributes
+   NOTHING to track sizing, so the row height is `max(avatar, content)`
+   and the bubble-to-bubble rhythm is the content's own. The rail's box
+   is bounded by the message box itself (`max-height:100%` resolves
+   against the abspos containing block) and SCROLLS when the facts
+   outgrow the turn — taller turns simply show more of their rail.
+   Being inside the message box, it can never spill over the NEXT
+   message either, so no paint-containment carve-out is needed.
+
+   ── Why there is no hover overlay ──
+   `.message` carries `content-visibility:auto`, which applies PAINT
+   containment and clips any overflowing descendant. The old design needed
+   `.message:has(> .turn-ctx){contain:none}` to escape it — a real perf
+   carve-out that existed solely to let a hover panel spill out. Keeping the
+   overlay would mean keeping the carve-out, so the overlay is gone: the rail
+   renders its content permanently and inline, and expanding the tool list is
+   a CLICK that changes in-flow height (no escape needed). The carve-out is
+   therefore deleted, NOT weakened.
+
+   ── Drawer open → the rail leaves entirely ──
+   With the inspector open the pane can be as narrow as 74px (has-rail
+   sidebar @1280). Nothing legible fits there, so the rail is not squeezed —
+   the container query simply never grants the track, `.turn-ctx` collapses,
+   and the turn's context survives as the compact `.tctx-fold` summary line
+   under the message header. The information is never silently lost.
+   ═══════════════════════════════════════════════════════════════════ */
+.turn-ctx{
+  /* Out of flow: keeps the third track's BOX (right edge, top-aligned)
+   * but never contributes to the row's height — see the block comment. */
+  position:absolute;
+  top:0;
+  right:0;
+  width:var(--rail-w);
+  max-height:100%;
+  box-sizing:border-box;
+  min-width:0;
+  font-size:10.5px;
+  font-weight:600;
+  line-height:1.5;
+  user-select:none;
+  /* The rail IS hit-testable: the height backstop below SCROLLS (needs the
+   * pointer), paths expose their full path via hover title, and hovering
+   * the rail keeps `.message:hover` true regardless (the rail is a child
+   * of `.message`), so the message's hover action-bar is unaffected. What
+   * the rail must never do is impersonate a message click — the delegated
+   * guard in info-rail.js stopPropagations every click inside it. */
+  pointer-events:auto;
+}
+/* No rail track (narrow pane / drawer open) → the rail folds away. It is a
+ * grid item in a zero-width track, so leaving it visible would smear it. */
+.chat-inner{ --rail-shown:0; }
+.turn-ctx{ display:none; }
+@container chatpane (min-width: 1056px){
+  .turn-ctx{
+    display:flex;
+    flex-direction:column;
+    gap:5px;
+    padding:3px 0 3px 10px;
+    border-radius:0;
+    background:transparent;
+    border:none;
+    /* Reference marginalia, not a card: a single hairline rule separates it
+     * from the prose column. The boxed card (bg + border + radius) was one
+     * more rectangle competing with the message — the rail now whispers. */
+    border-left:1px solid var(--border);
+    /* HEIGHT DISCIPLINE, two layers. (1) CONTENT caps in info-rail.js
+     * decide what renders up-front (≤9 chips / ≤3 paths, the rest behind
+     * the "+N" click) — a typical card renders COMPLETE, which the removed
+     * 132px `overflow:hidden` guillotine never allowed (it clipped ordinary
+     * cards mid-WORKSPACE with no way to reach the facts — the 2026-07-28
+     * complaint). (2) The rail's box is bounded by the MESSAGE's own
+     * height (max-height:100% in the base rule) and SCROLLS, so nothing
+     * is ever unreachable and — unlike the pre-2026-08-05 in-flow rail —
+     * the turn's height is never driven by the rail, expanded or not
+     * (guarded by the no-inflation assertion in
+     * tests/test_turn_ctx_rail_geometry.py). */
+    overflow-x:hidden;
+    overflow-y:auto;
+    overscroll-behavior:contain;
+    scrollbar-width:thin;
+  }
+}
+.turn-ctx .tctx-head{ display:flex; align-items:center; flex-wrap:wrap; gap:4px 6px; }
+.turn-ctx .tctx-logo{ display:inline-flex; flex:0 0 auto; align-items:center; }
+.turn-ctx .tctx-logo .stg-brand-icon svg{ display:block; width:100%; height:100%; fill:currentColor; }
+.turn-ctx .tctx-model{
+  color:var(--text-secondary);
+  flex:1 1 auto;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.turn-ctx .tctx-depth{
+  font-size:8px;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:0.04em;
+  padding:0 4px;
+  border-radius:5px;
+  background:transparent;
+  color:#c4b5fd;
+  border:1px solid color-mix(in srgb, currentColor 42%, transparent);
+  flex:0 0 auto;
+}
+/* Mode badge — Endpoint / Autopilot / Swarm / a named flow. */
+.turn-ctx .tctx-mode-badge{
+  flex:0 0 auto;
+  padding:1px 6px;
+  border-radius:6px;
+  font-size:8.5px;
+  line-height:1.4;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:0.03em;
+  white-space:nowrap;
+  background:transparent;
+  color:#e8b04a;
+  border:1px solid color-mix(in srgb, currentColor 42%, transparent);
+}
+[data-theme="light"] .turn-ctx .tctx-mode-badge{ color:#b45309; }
+[data-theme="tofu"] .turn-ctx .tctx-mode-badge{ color:#8a6a2a; }
+
+.turn-ctx .tctx-row{ display:flex; flex-direction:column; gap:3px; }
+.turn-ctx .tctx-row-h{
+  font-size:8px;
+  font-weight:700;
+  letter-spacing:0.09em;
+  text-transform:uppercase;
+  opacity:0.45;
+}
+.turn-ctx .tctx-chips{ display:flex; flex-wrap:wrap; gap:4px; }
+.turn-ctx .tctx-chip{
+  font-size:10px;
+  font-weight:600;
+  padding:0 6px;
+  border-radius:999px;
+  background:transparent;
+  /* Quiet outline chips: the tone color survives ONLY as the ink, and the
+   * border is the same ink at 40% via currentColor — the six candy-fill
+   * backgrounds were the noisiest element on the whole message row. */
+  border:1px solid color-mix(in srgb, currentColor 38%, transparent);
+  white-space:nowrap;
+  max-width:100%;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.turn-ctx .tctx-tone-mode  { color:#e8b04a; }
+.turn-ctx .tctx-tone-search{ color:#93c5fd; }
+.turn-ctx .tctx-tone-net   { color:#6ee7b7; }
+.turn-ctx .tctx-tone-code  { color:#d8b4fe; }
+.turn-ctx .tctx-tone-ai    { color:#5eead4; }
+.turn-ctx .tctx-tone-mcp   { color:#cbd5e1; }
+/* "+N more" — a CLICK toggle, deliberately not hover. Expanding grows the
+ * rail IN FLOW, which needs no containment escape (see the block comment).
+ * It is the only pointer-reactive thing in the rail. */
+.turn-ctx .tctx-more{
+  pointer-events:auto;
+  cursor:pointer;
+  font-size:9.5px;
+  font-weight:700;
+  padding:1px 7px;
+  border-radius:999px;
+  background:transparent;
+  color:var(--text-tertiary);
+  border:1px dashed rgba(148,163,184,0.45);
+  font-family:inherit;
+}
+.turn-ctx .tctx-more:hover{ color:var(--text-primary); border-color:var(--accent); }
+/* The overflow group must NOT be a flex item of its own: as a single item it
+ * cannot wrap internally, so its nowrap chips run straight off the rail's
+ * right edge (measured +110px past the pane at 1440). `display:contents`
+ * dissolves the wrapper so each chip becomes a direct item of `.tctx-chips`
+ * and wraps exactly like the always-visible ones. */
+.turn-ctx .tctx-overflow{ display:contents; }
+.turn-ctx .tctx-overflow[hidden]{ display:none; }
+.turn-ctx .tctx-paths{ display:flex; flex-direction:column; gap:3px; }
+/* In the paths column the "+N" pill would stretch to the rail's full width
+ * (column flex children stretch); keep it pill-sized like in the chips row. */
+.turn-ctx .tctx-paths .tctx-more{ align-self:flex-start; }
+.turn-ctx .tctx-path{
+  display:flex;
+  align-items:flex-start;
+  gap:4px;
+  font-size:10px;
+  line-height:1.4;
+  color:var(--text-secondary);
+  word-break:break-all;
+}
+.turn-ctx .tctx-path .tctx-lock{ flex:0 0 auto; margin-top:2px; opacity:0.7; }
+
+/* ── Fold: the rail's content as ONE line under the message header ──
+ * Shown exactly when the rail track is absent (narrow pane, or the
+ * inspector drawer is open). Guarantees the turn's context is never lost,
+ * only compacted.
+ * DOM HOME: inside `.message-content`, between header and body — in-flow,
+ * the only place this rule's `margin-bottom` means anything. It used to
+ * ship as a direct `.message` grid child, where it auto-placed into the
+ * ZERO-WIDTH rail track and painted nothing (display:flex, width:0)
+ * whenever the rail was hidden — the exact state it exists for. Guarded by
+ * the width-aware fold assertion in tests/test_turn_ctx_rail_geometry.py. */
+.tctx-fold{
+  display:flex;
+  align-items:center;
+  gap:5px;
+  margin-bottom:6px;
+  font-size:10px;
+  font-weight:600;
+  color:var(--text-tertiary);
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.tctx-fold .tctx-fold-dot{ width:5px; height:5px; border-radius:50%; background:var(--accent); flex:0 0 auto; opacity:.7; }
+@container chatpane (min-width: 1056px){
+  .tctx-fold{ display:none; }
+}
+
+/* ── Per-theme palettes ─────────────── */
+[data-theme="light"] .turn-ctx{ background:transparent; border:none; border-left:1px solid #e8e6df; }
+[data-theme="light"] .turn-ctx .tctx-model,
+[data-theme="light"] .turn-ctx .tctx-path{ color:#4a4a58; }
+[data-theme="light"] .turn-ctx .tctx-tone-mode  { color:#b45309; }
+[data-theme="light"] .turn-ctx .tctx-tone-ai    { color:#0d9488; }
+[data-theme="light"] .turn-ctx .tctx-tone-mcp   { color:#64748b; }
+
+[data-theme="tofu"] .turn-ctx{
+  background:transparent;
+  border:none;
+  box-shadow:none;
+  border-left:1px solid #e2dac8;
+}
+[data-theme="tofu"] .turn-ctx .tctx-model,
+[data-theme="tofu"] .turn-ctx .tctx-path{ color:#6a5a40; }
+[data-theme="tofu"] .turn-ctx .tctx-row-h{ color:#8a7a5e; }
+[data-theme="tofu"] .turn-ctx .tctx-depth{ color:#8a6a2a; }
+[data-theme="tofu"] .turn-ctx .tctx-tone-ai    { color:#2f7268; }
+[data-theme="tofu"] .turn-ctx .tctx-tone-mcp   { color:#7a6a50; }
+[data-theme="tofu"] .turn-ctx .tctx-tone-mode  { color:#8a6a2a; }
+
+/* ── Fallback: browsers without color-mix() get a neutral hairline on the
+ *    quiet outline chips/badges (same fallback family as the meniscus). ── */
+@supports not (color: color-mix(in srgb, red, blue)){
+  .turn-ctx .tctx-chip,
+  .turn-ctx .tctx-mode-badge,
+  .turn-ctx .tctx-depth{ border-color:rgba(148,163,184,0.45); }
+}
+
+/* ── Fallback: browsers without color-mix() drop the meniscus
+ *    blending and use a flat near-white stroke. */
+@supports not (color: color-mix(in srgb, red, blue)){
+  .ctx-bubble-meniscus{ stroke:#ffffff; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Compaction badge — anchored to the top-right of the bubble.
+ * The badge is the ONLY surface for the per-conv compaction count
+ * since the redesign — earlier per-tick / per-seed / per-dot layers
+ * were retired.
+ * ═══════════════════════════════════════════════════════════════════ */
+.ctx-bar-counter{
+  position:absolute;
+  right:-3px;
+  top:-3px;
+  min-width:14px;
+  height:14px;
+  padding:0 3px;
+  border-radius:7px;
+  font-family:'JetBrains Mono', ui-monospace, monospace;
+  font-size:9px;
+  font-weight:700;
+  line-height:14px;
+  text-align:center;
+  color:var(--ctx-counter-fg, #15171f);
+  background:var(--ctx-counter-bg, var(--ctx-zone-color, var(--text-secondary)));
+  box-shadow:0 0 0 1.5px var(--ctx-counter-ring, var(--bg-secondary, #15171f));
+  pointer-events:none;
+  display:none;
+  z-index:4;
+  transition:transform .15s ease;
+}
+.ctx-bar-counter.has-count{ display:block; }
+.ctx-bar-counter.is-landing{
+  animation:ctxBadgeLand 1.4s ease-out forwards;
+}
+@keyframes ctxBadgeLand{
+  0%   { transform:scale(1.5); }
+  35%  { transform:scale(1.2); }
+  100% { transform:scale(1);   }
+}
+
+.ctx-health-bar.is-clickable{ cursor:pointer; }
+.ctx-health-bar.is-clickable:hover{
+  border-color:color-mix(in srgb, var(--ctx-zone-color, var(--accent)) 45%,
+                                   var(--border-subtle, rgba(255,255,255,0.06)));
+}
+
+/* Per-theme counter palettes. */
+[data-theme="dark"] .ctx-health-bar,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .ctx-health-bar{
+  --ctx-counter-fg:#15171f;
+  --ctx-counter-bg:#cdb8ff;
+  --ctx-counter-ring:#15171f;
+}
+[data-theme="light"] .ctx-health-bar{
+  --ctx-counter-fg:#ffffff;
+  --ctx-counter-bg:#6366f1;
+  --ctx-counter-ring:#ffffff;
+}
+[data-theme="tofu"] .ctx-health-bar{
+  --ctx-counter-fg:#5a4a33;
+  --ctx-counter-bg:#ecd5a2;
+  --ctx-counter-ring:#fdf8e6;
+}

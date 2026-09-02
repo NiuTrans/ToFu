@@ -36,6 +36,8 @@ Called from ``server.py`` at startup::
     start_fs_keepalive()
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import threading
@@ -76,7 +78,149 @@ STAT_TIMEOUT_S = 30.0
 _PROBE_PATHS = []
 
 _running = False
-_thread = None
+_thread: threading.Thread | None = None
+_stop_event = threading.Event()
+_lifecycle_lock = threading.Lock()
+
+
+def _probe_path(path: str) -> None:
+    os.stat(path)
+
+
+class _ProbeRuntime:
+    """One bounded daemon that serializes keepalive stats for one mount.
+
+    A FUSE metadata call can enter uninterruptible sleep. Keeping at most one
+    request in flight prevents a stale mount from accumulating a fresh daemon
+    thread every timeout while the coordinator remains able to warn and stop.
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._stop_requested = False
+        self._thread: threading.Thread | None = None
+        self._request_generation = 0
+        self._completed_generation = 0
+        self._paths: tuple[str, ...] = ()
+        self._results: list[tuple[str, bool, float]] = []
+        self._active_path = ''
+
+    def start(self) -> None:
+        with self._condition:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop_requested = False
+            thread = threading.Thread(
+                target=self._loop, daemon=True, name='fs-ka-probe')
+            self._thread = thread
+            try:
+                thread.start()
+            except Exception:
+                if self._thread is thread:
+                    self._thread = None
+                raise
+
+    def is_alive(self) -> bool:
+        with self._condition:
+            return self._thread is not None and self._thread.is_alive()
+
+    def request(self, paths: list[str] | tuple[str, ...]) -> int:
+        """Submit one batch, or return the generation already in flight."""
+        with self._condition:
+            if self._stop_requested:
+                return self._request_generation
+            if self._request_generation <= self._completed_generation:
+                self._request_generation += 1
+                self._paths = tuple(paths)
+                self._results = []
+                self._condition.notify_all()
+            return self._request_generation
+
+    def wait(
+        self, generation: int, timeout: float,
+    ) -> tuple[list[tuple[str, bool, float]] | None, str]:
+        try:
+            wait_seconds = max(0.0, float(timeout))
+        except (TypeError, ValueError, OverflowError):
+            wait_seconds = STAT_TIMEOUT_S
+        deadline = time.monotonic() + wait_seconds
+        with self._condition:
+            while (self._completed_generation < generation
+                   and not self._stop_requested):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._condition.wait(remaining)
+            if self._completed_generation >= generation:
+                return list(self._results), ''
+            return None, self._active_path
+
+    def request_stop(self) -> None:
+        with self._condition:
+            self._stop_requested = True
+            self._condition.notify_all()
+
+    def join(self, timeout: float) -> bool:
+        with self._condition:
+            thread = self._thread
+        if thread is None:
+            return True
+        if thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, timeout))
+        return not thread.is_alive()
+
+    def _loop(self) -> None:
+        current_thread = threading.current_thread()
+        observed_generation = 0
+        try:
+            while True:
+                with self._condition:
+                    while (not self._stop_requested
+                           and self._request_generation <= observed_generation):
+                        self._condition.wait()
+                    if self._stop_requested:
+                        return
+                    generation = self._request_generation
+                    paths = self._paths
+
+                results = []
+                for path in paths:
+                    with self._condition:
+                        if self._stop_requested:
+                            return
+                        self._active_path = path
+                        self._condition.notify_all()
+                    started_at = time.monotonic()
+                    ok = True
+                    try:
+                        _probe_path(path)
+                    except OSError as exc:
+                        # A missing leaf still proves the mount answered.
+                        logger.debug(
+                            '[fs_keepalive] stat(%s) returned %s: %s',
+                            path, type(exc).__name__, exc)
+                    except Exception as exc:
+                        ok = False
+                        logger.warning(
+                            '[FS-Keepalive] unexpected stat(%s) failure: %s',
+                            path, exc, exc_info=True)
+                    results.append((path, ok, time.monotonic() - started_at))
+
+                with self._condition:
+                    self._results = results
+                    self._completed_generation = generation
+                    self._active_path = ''
+                    observed_generation = generation
+                    self._condition.notify_all()
+        finally:
+            with self._condition:
+                self._active_path = ''
+                if self._thread is current_thread:
+                    self._thread = None
+                self._condition.notify_all()
+
+
+_probe_runtime: _ProbeRuntime | None = None
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -90,110 +234,102 @@ def _stat_with_timeout(path, timeout):
         (ok: bool, elapsed: float)
         ok=True if stat completed within timeout, False if it hung.
     """
-    result = [False, 0.0]
-    event = threading.Event()
-
-    def _do_stat():
-        t0 = time.monotonic()
-        try:
-            os.stat(path)
-            result[0] = True
-        except OSError as _e_audit:
-            # Path doesn't exist — that's fine, the mount is still alive
-            logger.debug('[fs_keepalive] _do_stat caught %s: %s', type(_e_audit).__name__, _e_audit)
-            result[0] = True
-        finally:
-            result[1] = time.monotonic() - t0
-            event.set()
-
-    t = threading.Thread(target=_do_stat, daemon=True, name='fs-ka-probe')
-    t.start()
-    completed = event.wait(timeout=timeout)
-
-    if not completed:
-        result[1] = timeout
-        return False, timeout
-
-    return result[0], result[1]
+    runtime = _ProbeRuntime()
+    runtime.start()
+    generation = runtime.request((path,))
+    results, _active_path = runtime.wait(generation, timeout)
+    runtime.request_stop()
+    runtime.join(0.1)
+    if results:
+        _path, ok, elapsed = results[0]
+        return ok, elapsed
+    return False, timeout
 
 
-def _keepalive_loop():
+def _probe_paths_with_timeout(
+    runtime: _ProbeRuntime,
+    paths: list[str],
+    timeout: float,
+) -> list[tuple[str, bool, float]]:
+    generation = runtime.request(paths)
+    results, active_path = runtime.wait(generation, timeout)
+    if results is not None:
+        return results
+    timed_out_path = active_path or (paths[0] if paths else '<unknown>')
+    return [(timed_out_path, False, timeout)]
+
+
+def _keepalive_loop(runtime: _ProbeRuntime):
     """Main loop — runs in a daemon thread."""
-    global _running
-
     logger.info('[FS-Keepalive] Started (interval=%ds, paths=%d)',
                 KEEPALIVE_INTERVAL_S, len(_PROBE_PATHS))
 
     consecutive_failures = 0
     consecutive_slow = 0
 
-    while _running:
-        try:
-            worst_elapsed = 0.0
-            any_failure = False
+    try:
+        while not _stop_event.is_set():
+            try:
+                worst_elapsed = 0.0
+                any_failure = False
+                results = _probe_paths_with_timeout(
+                    runtime, _PROBE_PATHS, STAT_TIMEOUT_S)
+                if _stop_event.is_set():
+                    break
+                for path, ok, elapsed in results:
+                    worst_elapsed = max(worst_elapsed, elapsed)
+                    if not ok:
+                        any_failure = True
+                        logger.error(
+                            '[FS-Keepalive] stat(%s) TIMED OUT after %.1fs — '
+                            'FUSE mount appears stale/frozen!', path, elapsed)
+                    elif elapsed > STAT_WARN_THRESHOLD_S:
+                        logger.warning(
+                            '[FS-Keepalive] stat(%s) slow: %.2fs '
+                            '(threshold=%.1fs)',
+                            path, elapsed, STAT_WARN_THRESHOLD_S)
 
-            for path in _PROBE_PATHS:
-                ok, elapsed = _stat_with_timeout(path, STAT_TIMEOUT_S)
-                worst_elapsed = max(worst_elapsed, elapsed)
-
-                if not ok:
-                    any_failure = True
-                    logger.error(
-                        '[FS-Keepalive] stat(%s) TIMED OUT after %.1fs — '
-                        'FUSE mount appears stale/frozen!', path, elapsed
-                    )
-                elif elapsed > STAT_WARN_THRESHOLD_S:
-                    logger.warning(
-                        '[FS-Keepalive] stat(%s) slow: %.2fs (threshold=%.1fs)',
-                        path, elapsed, STAT_WARN_THRESHOLD_S
-                    )
-
-            if any_failure:
-                consecutive_failures += 1
-                if consecutive_failures == 1:
-                    logger.error(
-                        '[FS-Keepalive] FUSE mount freeze detected! '
-                        'All DolphinFS I/O will block until recovery. '
-                        'consecutive_failures=%d', consecutive_failures
-                    )
-                elif consecutive_failures % 10 == 0:
-                    logger.error(
-                        '[FS-Keepalive] FUSE mount still frozen '
-                        '(%.0f min, consecutive_failures=%d)',
-                        consecutive_failures * KEEPALIVE_INTERVAL_S / 60,
-                        consecutive_failures
-                    )
-            else:
-                if consecutive_failures > 0:
-                    logger.info(
-                        '[FS-Keepalive] FUSE mount recovered after %d failed probes '
-                        '(~%.0f min frozen)',
-                        consecutive_failures,
-                        consecutive_failures * KEEPALIVE_INTERVAL_S / 60
-                    )
-                consecutive_failures = 0
-
-                if worst_elapsed > STAT_WARN_THRESHOLD_S:
-                    consecutive_slow += 1
+                if any_failure:
+                    consecutive_failures += 1
+                    if consecutive_failures == 1:
+                        logger.error(
+                            '[FS-Keepalive] FUSE mount freeze detected! '
+                            'All DolphinFS I/O will block until recovery. '
+                            'consecutive_failures=%d', consecutive_failures)
+                    elif consecutive_failures % 10 == 0:
+                        logger.error(
+                            '[FS-Keepalive] FUSE mount still frozen '
+                            '(%.0f min, consecutive_failures=%d)',
+                            consecutive_failures * KEEPALIVE_INTERVAL_S / 60,
+                            consecutive_failures)
                 else:
-                    if consecutive_slow > 5:
+                    if consecutive_failures > 0:
                         logger.info(
-                            '[FS-Keepalive] Latency normalized after %d slow probes',
-                            consecutive_slow
-                        )
-                    consecutive_slow = 0
+                            '[FS-Keepalive] FUSE mount recovered after %d '
+                            'failed probes (~%.0f min frozen)',
+                            consecutive_failures,
+                            consecutive_failures * KEEPALIVE_INTERVAL_S / 60)
+                    consecutive_failures = 0
 
-        except Exception as e:
-            logger.error('[FS-Keepalive] Unexpected error in keepalive loop: %s',
-                         e, exc_info=True)
+                    if worst_elapsed > STAT_WARN_THRESHOLD_S:
+                        consecutive_slow += 1
+                    else:
+                        if consecutive_slow > 5:
+                            logger.info(
+                                '[FS-Keepalive] Latency normalized after %d '
+                                'slow probes', consecutive_slow)
+                        consecutive_slow = 0
 
-        # Sleep in small increments so we can stop quickly
-        for _ in range(KEEPALIVE_INTERVAL_S * 2):
-            if not _running:
+            except Exception as exc:
+                logger.error(
+                    '[FS-Keepalive] Unexpected error in keepalive loop: %s',
+                    exc, exc_info=True)
+
+            if _stop_event.wait(KEEPALIVE_INTERVAL_S):
                 break
-            time.sleep(0.5)
-
-    logger.info('[FS-Keepalive] Stopped')
+    finally:
+        runtime.request_stop()
+        logger.info('[FS-Keepalive] Stopped')
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -256,11 +392,17 @@ def start_fs_keepalive():
     Only activates on Linux when the project directory is on a FUSE/network
     mount. On macOS and Windows, this is a graceful no-op.
     """
-    global _running, _thread
+    global _running, _thread, _probe_runtime
 
-    if _thread is not None and _thread.is_alive():
-        logger.debug('[FS-Keepalive] Already running, skipping start')
-        return
+    with _lifecycle_lock:
+        if _thread is not None and _thread.is_alive():
+            logger.debug('[FS-Keepalive] Already running, skipping start')
+            return
+        if _probe_runtime is not None and _probe_runtime.is_alive():
+            logger.warning(
+                '[FS-Keepalive] previous filesystem probe is still stopping; '
+                'refusing a duplicate runtime')
+            return
 
     # Non-Linux platforms: graceful skip
     if not _IS_LINUX:
@@ -281,31 +423,72 @@ def start_fs_keepalive():
     logger.info('[FS-Keepalive] Activating on network-mounted data root %s '
                 '(probing: %s)', data_root, ', '.join(_PROBE_PATHS))
 
-    _running = True
-    _thread = threading.Thread(
-        target=_keepalive_loop,
-        daemon=True,
-        name='fs-keepalive'
-    )
-    _thread.start()
+    with _lifecycle_lock:
+        # Resolve/probe-path work happens outside the lifecycle lock. Recheck
+        # after reacquiring it so concurrent startup callers cannot each own a
+        # coordinator generation.
+        if _thread is not None and _thread.is_alive():
+            return
+        if _probe_runtime is not None and _probe_runtime.is_alive():
+            logger.warning(
+                '[FS-Keepalive] previous filesystem probe is still stopping; '
+                'refusing a duplicate runtime')
+            return
+        runtime = _ProbeRuntime()
+        runtime.start()
+        _stop_event.clear()
+        thread = threading.Thread(
+            target=_keepalive_loop,
+            args=(runtime,),
+            daemon=True,
+            name='fs-keepalive'
+        )
+        _probe_runtime = runtime
+        _thread = thread
+        _running = True
+        try:
+            thread.start()
+        except Exception:
+            _running = False
+            _thread = None
+            _probe_runtime = None
+            _stop_event.set()
+            runtime.request_stop()
+            runtime.join(2.0)
+            raise
 
 
 def stop_fs_keepalive(timeout: float = 2.0) -> bool:
     """Stop and bounded-join the keepalive daemon."""
-    global _running, _thread
-    _running = False
-    thread = _thread
-    if thread is None:
-        return True
+    global _running, _thread, _probe_runtime
+    with _lifecycle_lock:
+        _running = False
+        _stop_event.set()
+        thread = _thread
+        runtime = _probe_runtime
+        if runtime is not None:
+            runtime.request_stop()
+        if thread is None and runtime is None:
+            return True
     try:
         wait_seconds = max(0.0, float(timeout))
     except (TypeError, ValueError, OverflowError) as exc:
         logger.debug('[FS-Keepalive] invalid stop timeout; using 2.0: %s', exc)
         wait_seconds = 2.0
-    if thread is not threading.current_thread():
-        thread.join(timeout=wait_seconds)
-    if thread.is_alive():
-        return False
-    if _thread is thread:
-        _thread = None
-    return True
+    deadline = time.monotonic() + wait_seconds
+    if thread is not None and thread is not threading.current_thread():
+        coordinator_budget = (
+            wait_seconds if runtime is None
+            else max(0.0, deadline - time.monotonic()))
+        thread.join(timeout=coordinator_budget)
+    coordinator_stopped = thread is None or not thread.is_alive()
+    probe_stopped = runtime is None or runtime.join(
+        max(0.0, deadline - time.monotonic()))
+    stopped = coordinator_stopped and probe_stopped
+    if stopped:
+        with _lifecycle_lock:
+            if _thread is thread:
+                _thread = None
+            if _probe_runtime is runtime:
+                _probe_runtime = None
+    return stopped

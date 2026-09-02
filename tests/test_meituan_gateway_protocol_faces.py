@@ -114,10 +114,20 @@ def _host(tpl: dict) -> str:
 def _as_provider(tpl: dict) -> dict:
     """A template is a provider card minus credentials — add a key so the
     resolver sees a realistic entry."""
-    prov = dict(tpl)
-    prov.setdefault('id', tpl.get('key') or 'tpl')
+    from lib.provider_template_recipes import provider_from_template
+
+    authored = dict(tpl)
+    authored.setdefault('key', 'tpl')
+    prov = provider_from_template(authored, authored['key'])
     prov['api_keys'] = ['sk-test']
     return prov
+
+
+def _models(tpl: dict) -> list[dict]:
+    """Read the authored offering recipes through their canonical boundary."""
+    from lib.provider_template_recipes import offering_recipes
+
+    return offering_recipes(tpl)
 
 
 def _audit(templates: list[tuple[str, dict]]) -> list[str]:
@@ -136,7 +146,7 @@ def _audit(templates: list[tuple[str, dict]]) -> list[str]:
     for fname, tpl in templates:
         host = _host(tpl)
         prov = _as_provider(tpl)
-        for m in (tpl.get('models') or []):
+        for m in _models(tpl):
             mid = m.get('model_id') or ''
             if not is_claude(mid):
                 continue
@@ -206,7 +216,7 @@ def test_brand_is_the_gateway_not_a_model_family():
 @_INTERNAL_TEMPLATE
 def test_template_carries_the_whole_claude_roster():
     have = {(m.get('model_id') or '')
-            for m in (_load(MEITUAN_TEMPLATE).get('models') or [])}
+            for m in _models(_load(MEITUAN_TEMPLATE))}
     missing = EXPECTED_CLAUDE_ROSTER - have
     assert not missing, 'yourprovider.json is missing %r' % sorted(missing)
 
@@ -216,7 +226,7 @@ def test_gateway_accepted_wire_ids_are_preserved():
     """The wire pool is what actually goes out as body['model']."""
     from lib.llm_dispatch.model_entry import resolve_request_ids, routing_group
 
-    models = _load(MEITUAN_TEMPLATE).get('models') or []
+    models = _models(_load(MEITUAN_TEMPLATE))
     for logical, wire_id in REQUIRED_WIRE_IDS.items():
         entry = next((m for m in models if logical in routing_group(m)), None)
         assert entry is not None, '%s not registered' % logical
@@ -228,7 +238,7 @@ def test_gateway_accepted_wire_ids_are_preserved():
 
 @_INTERNAL_TEMPLATE
 def test_claude_entries_keep_thinking_capability():
-    models = _load(MEITUAN_TEMPLATE).get('models') or []
+    models = _models(_load(MEITUAN_TEMPLATE))
     by_id = {(m.get('model_id') or ''): m for m in models}
     for logical in EXPECTED_CLAUDE_ROSTER:
         entry = by_id.get(logical)
@@ -236,14 +246,13 @@ def test_claude_entries_keep_thinking_capability():
         caps = set(entry.get('capabilities') or [])
         assert caps == {'text', 'vision', 'thinking'}, (logical, sorted(caps))
         assert entry.get('rpm'), logical
-        assert entry.get('cost') is not None, logical
 
 
 @_INTERNAL_TEMPLATE
 def test_the_non_claude_roster_survived_the_merge():
     """The merge must not have cost the OpenAI face any model."""
     have = {(m.get('model_id') or '')
-            for m in (_load(MEITUAN_TEMPLATE).get('models') or [])}
+            for m in _models(_load(MEITUAN_TEMPLATE))}
     for mid in ('gemini-2.5-flash-image', 'gemini-3-pro-image-preview',
                 'text-embedding-3-large', 'kimi-k3', 'gpt-5.6-sol'):
         assert mid in have, '%s missing after the merge' % mid

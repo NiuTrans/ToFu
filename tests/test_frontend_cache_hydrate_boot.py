@@ -1,6 +1,6 @@
 """Frontend boot cache-hydration resilience — double-neuter test.
 
-Verifies `hydrateSidebarFromCache()` (static/js/core/conversations.js) paints the
+Verifies `hydrateConversationCatalogFromCache()` paints the
 sidebar from the IndexedDB `ConvCache` when the server load is unavailable — the
 fix for the "blank/Loading… forever on a flaky tunnel" symptom.
 
@@ -23,14 +23,12 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tests"))
 from _runtime_sections import runtime_section_path  # noqa: E402
 
-# hydrateSidebarFromCache lives in its own leaf as of pt_3879f00e slice 6.
-# Point the fn-body extract at the leaf so the harness stays green post-split.
-HYDRATE_JS = Path(runtime_section_path("core/conv_hydrate_cache.js"))
+HYDRATE_JS = Path(runtime_section_path("core/conversation_catalog.js"))
 
 
 def _extract_fn(src: str, name: str) -> str:
     """Extract a top-level `async function <name>(...) { ... }` by brace matching."""
-    m = re.search(r"async function %s\s*\(" % re.escape(name), src)
+    m = re.search(r"(?:async\s+)?function %s\s*\(" % re.escape(name), src)
     assert m, f"{name} not found in source"
     i = src.index("{", m.start())
     depth = 0
@@ -46,7 +44,7 @@ def _extract_fn(src: str, name: str) -> str:
 
 _HARNESS = r"""
 'use strict';
-// ── Minimal globals the real hydrateSidebarFromCache body references ──
+// ── Minimal globals the real catalog-cache hydrate references ──
 let conversations = [];
 function debugLog() {}
 let _renderCount = 0;
@@ -59,10 +57,8 @@ function _applySettingsToConv(conv, settings) {
   if (!settings) return;
   if (settings.model) conv.model = settings.model;
 }
-// _serverConvCount: the split conversations.js body now derives the shell
-// visibility count via this helper (messageCount|msgCount|msg_count) rather than
-// reading m.msgCount inline. Mirror the real precedence so msgCount>0 -> shell.
-function _serverConvCount(sc) {
+// Shared catalog count normalization.
+function _catalogTurnCount(sc) {
   if (!sc) return 0;
   const v = sc.messageCount != null ? sc.messageCount
     : (sc.msgCount != null ? sc.msgCount : sc.msg_count);
@@ -72,7 +68,7 @@ function _serverConvCount(sc) {
 // _pendingSyncAt (the test metas do not), so stub them to avoid ReferenceError.
 function _startPendingSyncPolling() {}
 function _flushPendingSyncs() {}
-// Fake ConvCache holding two "opened" conversations.
+// Fake ConvCache holding two locally observed catalog rows.
 const ConvCache = {
   isAvailable: () => true,
   getAllMeta: async () => ([
@@ -84,7 +80,7 @@ const ConvCache = {
 __FN__
 
 (async () => {
-  const added = await hydrateSidebarFromCache();
+  const added = await hydrateConversationCatalogFromCache();
   const ids = conversations.map(c => c.id);
   // Emit a machine-parseable result line.
   console.log(JSON.stringify({
@@ -92,8 +88,8 @@ __FN__
     count: conversations.length,
     ids,
     firstIsNewest: ids[0] === 'c-alpha',          // _convSorter applied
-    alphaNeedsLoad: (conversations.find(c => c.id === 'c-alpha') || {})._needsLoad === true,
-    betaNeedsLoad:  (conversations.find(c => c.id === 'c-beta')  || {})._needsLoad === true,
+    alphaNeedsLoad: (conversations.find(c => c.id === 'c-alpha') || {})._turnSnapshotRequired === true,
+    betaNeedsLoad:  (conversations.find(c => c.id === 'c-beta')  || {})._turnSnapshotRequired === true,
     alphaFromCache: (conversations.find(c => c.id === 'c-alpha') || {})._fromCache === true,
   }));
 })();
@@ -112,17 +108,24 @@ def _run(fn_src: str) -> dict:
     return json.loads(last)
 
 
+def _hydrate_source_bundle(source: str) -> str:
+    return "\n".join(_extract_fn(source, name) for name in (
+        "_catalogRevision", "_newCatalogShell",
+        "hydrateConversationCatalogFromCache",
+    ))
+
+
 def test_hydrate_paints_cached_convs():
     """REAL function: cache-only convs are painted as _fromCache shells, sorted."""
     src = HYDRATE_JS.read_text()
-    fn = _extract_fn(src, "hydrateSidebarFromCache")
+    fn = _hydrate_source_bundle(src)
     r = _run(fn)
     assert r["added"] == 2, r
     assert r["count"] == 2, r
     assert set(r["ids"]) == {"c-alpha", "c-beta"}, r
     assert r["firstIsNewest"], "sidebar not sorted newest-first via _convSorter"
-    assert r["alphaNeedsLoad"], "msgCount>0 conv should be _needsLoad shell"
-    assert not r["betaNeedsLoad"], "msgCount==0 conv should NOT be _needsLoad"
+    assert r["alphaNeedsLoad"], "msgCount>0 conv should be _turnSnapshotRequired shell"
+    assert not r["betaNeedsLoad"], "msgCount==0 conv should NOT be _turnSnapshotRequired"
     assert r["alphaFromCache"], "shell must carry _fromCache marker for prune-on-confirm"
 
 
@@ -134,7 +137,7 @@ def test_neuter_hydrate_paints_nothing():
     original 'Loading… forever' bug)."""
     neutered = textwrap.dedent(
         """
-        async function hydrateSidebarFromCache() {
+        async function hydrateConversationCatalogFromCache() {
           return 0;  // NEUTER
         }
         """
@@ -181,11 +184,11 @@ const runtimeScope = window;
 function debugLog(){}
 function renderConversationList(){}
 
-// Controls: how many times loadConversationsFromServer is called, and what
+// Controls: how many times loadConversationCatalog is called, and what
 // serverLoadOk() returns on each call (index-based).
 let _loadCalls = 0;
 let _okSequence = __OK_SEQUENCE__;   // e.g. [false,false,true] or [false,false,false,false,false]
-async function loadConversationsFromServer(){
+async function loadConversationCatalog(){
   _loadCalls++;
   // Simulate the REAL contract: swallows the tunnel error and RESOLVES.
   return undefined;
@@ -325,7 +328,7 @@ def test_all_symbols_land_in_served_bundle_together():
     text = Path(bundle).read_text()
     required = [
         "getAllMeta",              # idb-cache.js — the list primitive
-        "hydrateSidebarFromCache", # conversations.js — cache-first paint
+        "hydrateConversationCatalogFromCache", # metadata-only cache-first paint
         "serverLoadOk",            # conversations.js — observable-outcome flag
         "_bootReconnectStarted",   # main.js — idempotency latch
     ]

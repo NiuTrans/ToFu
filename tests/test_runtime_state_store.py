@@ -6,7 +6,7 @@ Acceptance criteria (owner, 2026-07-02):
      reset_for_test().
   2. inproc backend byte-equivalent to today (in-proc dict + wall-clock TTL,
      no dependency).
-  3. fail-open: redis unreachable → degrade + log, never crash.
+  3. personal fail-open and distributed fail-closed admission are explicit.
   4. redis is an OPTIONAL dep — module imports and inproc works with no redis
      package installed (bare CI); redis path is mock-driven here.
   5. NC-biting tests + the lease-TTL benchmark hook (living lease refreshed
@@ -322,6 +322,19 @@ def test_redis_unreachable_fails_open(monkeypatch):
     s.release_lease('admit', 't1')                          # no crash
     s.heartbeat('admit', ['t1'], ttl=90)                    # no crash
     assert s.live_keys('admit') == []
+
+
+def test_distributed_redis_outage_refuses_new_admission(monkeypatch):
+    """Accepted work may continue, but new slots fail closed for 503 callers."""
+    from lib.runtime_state_store import RedisRuntimeStateStore
+
+    store = RedisRuntimeStateStore(fail_open=False)
+    monkeypatch.setattr(store, '_redis', lambda: None)
+
+    assert store.acquire_lease('admit', 'new-task', ttl=90) is False
+    assert store.acquire_slot(
+        'admit', 'new-slot', limit=10, ttl=90, count_prefix='') is False
+    assert store.health()['admission_failure_policy'] == 'closed'
 
 
 def test_redis_retries_after_initial_connect_failure(monkeypatch):

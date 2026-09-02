@@ -112,6 +112,30 @@ def request_graceful_shutdown(
     return timer
 
 
+async def _stop_storage_boundary_for_shutdown(log: logging.Logger) -> bool:
+    """Release storage and certify that a pending re-exec may proceed.
+
+    Storage remains the last production owner stopped.  A failure is logged and
+    left uncertified: ordinary process exit can still finish, while the re-exec
+    gate fails closed and lets the outer lifecycle manager recover with a new
+    PID instead of carrying a child authority across ``execv``.
+    """
+    try:
+        from lib.storage import stop_storage
+        await asyncio.to_thread(stop_storage, timeout=5.0)
+    except Exception as exc:
+        log.warning('[Server] storage sidecar shutdown failed: %s', exc)
+        return False
+
+    from lib.server_reexec import (
+        confirm_server_reexec_storage_boundary_released,
+    )
+    if confirm_server_reexec_storage_boundary_released():
+        log.info(
+            '[Restart] Storage boundary released; in-place re-exec certified')
+    return True
+
+
 async def shutdown_production_runtime(
     shutdown_requested: Any,
     *,
@@ -121,7 +145,7 @@ async def shutdown_production_runtime(
     """Quiesce tasks and close loop-owned resources before executor teardown."""
     log = logger or logging.getLogger(__name__)
     try:
-        from lib.tasks_pkg import quiesce_running_tasks
+        from lib.tasks_pkg.manager import quiesce_running_tasks
         quiesced = quiesce_running_tasks(reason='server_shutdown')
     except Exception as exc:
         log.warning('[Server] task quiesce failed: %s', exc)
@@ -146,12 +170,12 @@ async def shutdown_production_runtime(
             log.debug('[Server] shutdown console notice failed: %s', exc)
         deadline = time.monotonic() + drain_seconds
         try:
-            from lib.tasks_pkg import tasks, tasks_lock
+            from lib.tasks_pkg.manager.runtime import chat_task_runtime
             while time.monotonic() < deadline:
-                with tasks_lock:
-                    still_running = sum(
-                        1 for task in tasks.values()
-                        if task.get('status') == 'running')
+                still_running = sum(
+                    1 for task in chat_task_runtime.snapshot()
+                    if task.get('status') == 'running'
+                )
                 if still_running == 0:
                     break
                 await asyncio.sleep(0.25)
@@ -161,15 +185,20 @@ async def shutdown_production_runtime(
     # The remaining synchronous close/join operations are bounded, but they
     # still belong off the serving loop so async client pools can close cleanly.
     try:
-        from lib.billing.janitor import stop_janitor
-        await asyncio.to_thread(stop_janitor, timeout=2.5)
+        from lib.swarm.integration import stop_swarm_cleanup_timer
+        await asyncio.to_thread(stop_swarm_cleanup_timer, timeout=2.0)
     except Exception as exc:
-        log.warning('[Server] billing janitor stop failed: %s', exc)
+        log.warning('[Server] swarm cleanup timer stop failed: %s', exc)
     try:
         from lib.netpath import stop_prober
         await asyncio.to_thread(stop_prober)
     except Exception as exc:
         log.warning('[Server] netpath prober stop failed: %s', exc)
+    try:
+        from lib.server_background_services import stop_lan_discovery_responder
+        await asyncio.to_thread(stop_lan_discovery_responder, timeout=2.0)
+    except Exception as exc:
+        log.warning('[Server] LAN discovery responder stop failed: %s', exc)
     try:
         from lib.cgroup_guard import stop_monitor
         await asyncio.to_thread(stop_monitor, timeout=2.0)
@@ -181,11 +210,6 @@ async def shutdown_production_runtime(
     except Exception as exc:
         log.warning('[Server] local-health checker stop failed: %s', exc)
     try:
-        from lib.llm_dispatch.autodiscover_local import stop_local_autodiscovery
-        await asyncio.to_thread(stop_local_autodiscovery, timeout=2.0)
-    except Exception as exc:
-        log.warning('[Server] local autodiscovery stop failed: %s', exc)
-    try:
         from lib.fs_keepalive import stop_fs_keepalive
         await asyncio.to_thread(stop_fs_keepalive, timeout=2.0)
     except Exception as exc:
@@ -195,6 +219,11 @@ async def shutdown_production_runtime(
         await asyncio.to_thread(stop_sweeper, timeout=2.0)
     except Exception as exc:
         log.warning('[Server] presence sweeper stop failed: %s', exc)
+    try:
+        from lib.integration_control import stop_worker as stop_integration_worker
+        await asyncio.to_thread(stop_integration_worker, timeout=2.0)
+    except Exception as exc:
+        log.warning('[Server] integration worker stop failed: %s', exc)
     if app is not None:
         try:
             from routes import stop_registered_background_services
@@ -248,22 +277,18 @@ async def shutdown_production_runtime(
 
     try:
         from lib.tasks_pkg.event_log import (
-            stop_event_writer,
+            stop_sidecar_batcher,
             stop_storage_maintenance,
         )
         await asyncio.to_thread(stop_storage_maintenance, timeout=2.0)
-        await asyncio.to_thread(stop_event_writer, timeout=3.0)
+        await asyncio.to_thread(stop_sidecar_batcher, timeout=3.0)
     except Exception as exc:
         log.warning('[Server] event-storage shutdown failed: %s', exc)
 
     # Stop the storage authority only after every known background producer and
     # event writer has quiesced.  Keeping this last prevents normal shutdown
     # from looking like an unexpected sidecar outage to active writers.
-    try:
-        from lib.storage import stop_storage
-        await asyncio.to_thread(stop_storage, timeout=5.0)
-    except Exception as exc:
-        log.warning('[Server] storage sidecar shutdown failed: %s', exc)
+    await _stop_storage_boundary_for_shutdown(log)
 
 
 __all__ = [

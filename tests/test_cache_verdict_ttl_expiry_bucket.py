@@ -62,7 +62,7 @@ def _cause(**kw) -> str:
     base = dict(client_changes={}, prefix_mutation_break=False,
                 elapsed=_FAST_GAP_S, cache_read=0, prefix_mutated=False,
                 prefix_culprits=[], wire_proven_identical=True,
-                history_rewrite=False, namespace_switch=None,
+                namespace_switch=None,
                 namespace_verified_same=True)
     base.update(kw)
     return _resolve_break_cause(**base)

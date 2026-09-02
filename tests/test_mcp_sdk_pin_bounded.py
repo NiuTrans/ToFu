@@ -19,7 +19,7 @@ revision while a v2 client negotiates down correctly.
 
 So the guard now enforces a SPLIT, not a single range:
 
-  * Tofu client sites (``requirements.txt`` / ``bootstrap.py`` /
+  * Tofu client sites (``requirements.txt`` / ``bootstrap_pkg/install.py`` /
     ``install.sh``) must declare ``mcp>=2,<3`` — the client speaks the v2
     API, and stays major-bounded because the NEXT rework is unknowable.
   * Vendored server sites (``tools/*/pyproject.toml``) must be BOUNDED, but
@@ -57,7 +57,13 @@ _MCP_SPEC_RE = re.compile(
 #: Sites that declare the TOFU CLIENT's own SDK — these must be on the v2
 #: line (the bridge was migrated to the v2 API). Vendored servers pin their
 #: own mcp independently inside their isolated envs.
-_TOFU_CLIENT_SITES = ('requirements.txt', 'bootstrap.py', 'install.sh')
+# ``bootstrap.py`` is a STDLIB-ONLY facade since the 2026-08-21 split
+# (c88a63fe) — the pre-boot install declaration it used to carry moved to
+# ``bootstrap_pkg/install.py`` (``_CONDA_PYTHON_DEPS``). The guard reads the
+# REAL site; the facade itself is covered by a REVERSE pin below (it must
+# never regain a spec).
+_TOFU_CLIENT_SITES = ('requirements.txt', 'bootstrap_pkg/install.py',
+                      'install.sh')
 
 
 def _pin_sites():
@@ -69,7 +75,8 @@ def _pin_sites():
     """
     sites = [
         ('requirements.txt', os.path.join(REPO, 'requirements.txt'), 'shell'),
-        ('bootstrap.py', os.path.join(REPO, 'bootstrap.py'), 'python'),
+        ('bootstrap_pkg/install.py',
+         os.path.join(REPO, 'bootstrap_pkg', 'install.py'), 'python'),
         # install.sh's CONDA_PKGS array is a REAL install spec: it is fed to
         # `conda install -c conda-forge` for a fresh public deploy. Measured
         # 2026-07-31: conda-forge already carries mcp 2.0.0, and this site
@@ -109,7 +116,7 @@ def _has_upper_bound(spec):
 #: under ``tools/`` is a VENDORED SNAPSHOT and ``/tools/`` is gitignored
 #: (.gitignore:38), so those directories are absent on a fresh clone and their
 #: real upstream is the sibling dev checkout (see lib/mcp/vendored.py).
-_ALWAYS_PRESENT = ('requirements.txt', 'bootstrap.py')
+_ALWAYS_PRESENT = ('requirements.txt', 'bootstrap_pkg/install.py')
 
 
 def test_every_mcp_spec_is_discovered():
@@ -146,20 +153,45 @@ def test_every_mcp_spec_is_discovered():
 
 
 def test_bootstrap_site_is_covered():
-    """``bootstrap.py`` MUST be among the scanned sites, with a live spec.
+    """``bootstrap_pkg/install.py`` MUST be among the scanned sites, live spec.
 
-    Called out separately because it is the site that had NO guard: it is the
-    pre-boot installer, so an unbounded spec there breaks Tofu before the app
-    starts, and the existing conda-coverage guard never looked at version
-    bounds.
+    Called out separately because it is the site that had NO guard: it feeds
+    the pre-boot installer, so an unbounded spec there breaks Tofu before the
+    app starts, and the existing conda-coverage guard never looked at version
+    bounds. The site moved in the 2026-08-21 facade-retained split
+    (``bootstrap.py`` → ``bootstrap_pkg/install.py``); asserting on the
+    facade instead goes red on every clean checkout even though the
+    declaration is healthy.
     """
     labels = [label for label, _, _ in _pin_sites()]
-    assert 'bootstrap.py' in labels
-    specs = _specs_in(os.path.join(REPO, 'bootstrap.py'), 'python')
+    assert 'bootstrap_pkg/install.py' in labels
+    specs = _specs_in(os.path.join(REPO, 'bootstrap_pkg', 'install.py'),
+                      'python')
     assert specs, (
-        'bootstrap.py declares no MCP SDK spec. If _CONDA_DEPS legitimately '
-        'dropped mcp, delete this assertion deliberately — do not let the '
-        'scanner go quiet, because a silent miss here is a pre-boot break.'
+        'bootstrap_pkg/install.py declares no MCP SDK spec. If '
+        '_CONDA_PYTHON_DEPS legitimately dropped mcp, delete this assertion '
+        'deliberately — do not let the scanner go quiet, because a silent '
+        'miss here is a pre-boot break.'
+    )
+
+
+def test_bootstrap_facade_stays_stdlib_only():
+    """The ``bootstrap.py`` facade must never REGAIN an MCP SDK spec.
+
+    Reverse pin for the 2026-08-21 facade-retained split (c88a63fe): the
+    facade and the whole ``bootstrap_pkg`` package are stdlib-only by
+    contract — they must run when EVERY pip package is missing (that is the
+    launcher's whole point). The real client pin lives in
+    ``bootstrap_pkg/install.py`` (covered above); a spec re-appearing in the
+    facade means someone re-coupled the pre-boot launcher to a third-party
+    dependency, exactly what the split abolished.
+    """
+    specs = _specs_in(os.path.join(REPO, 'bootstrap.py'), 'python')
+    assert not specs, (
+        'bootstrap.py gained an MCP SDK spec — the facade is stdlib-only by '
+        'contract (it must run when every pip package is missing). The '
+        'declaration belongs in bootstrap_pkg/install.py '
+        '(_CONDA_PYTHON_DEPS).'
     )
 
 

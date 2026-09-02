@@ -27,6 +27,8 @@ Run:  pytest tests/test_send_file_conditional.py -q
 
 from __future__ import annotations
 
+pytest_plugins = ('tests._credential_sidecar',)
+
 import time
 
 import pytest
@@ -53,8 +55,8 @@ def seeded(tmp_path, monkeypatch):
 
 def _bearer():
     from lib.api_keys import create_key
-    _row, token = create_key(name='fs-test', scopes=['chat'],
-                             user_id='u-fs')
+    _row, token = create_key(
+        owner_user_id=1, name='fs-test', scopes=['chat'])
     return {'Authorization': f'Bearer {token}'}
 
 

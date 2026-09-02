@@ -39,8 +39,8 @@ modify skill packages (they are user-managed).
 - You're hitting a tricky bug AND it feels like one you might have logged before.
 
 **When NOT to search memories (use other tools instead):**
-- The user mentions a local file path or directory → use `read_files` / `list_dir` directly. Don't search memory for it.
-- The user asks about an external project, library, product, or service (e.g. claude-code, openclaw, citadel) → use `web_search` and/or read the local copy with `read_files` / `list_dir`. Memory is unlikely to have it.
+- The user mentions a local file path or directory → use `read_files`, `find_files`, or `run_command` with a plain `ls`. Don't search memory for it.
+- The user asks about an external project, library, product, or service (e.g. claude-code, openclaw, citadel) → use `web_search` and/or inspect the local copy with project read/search tools. Memory is unlikely to have it.
 - General coding / API knowledge questions → answer from training, or `web_search` for fresh info.
 - A relevant `<relevant_memories>` block was already prefetched and injected this turn → it's already done; don't re-search the same topic.
 
@@ -80,7 +80,7 @@ Guidelines:
 MEMORY_ACCUMULATION_INSTRUCTIONS_COMPACT = """<memory_accumulation>
 You have memory tools: search_memories (keyword search), create/update/delete/merge_memories.
 Use search_memories when you suspect this project has an established convention or past lesson that applies.
-Don't use it as a generic discovery step: if the user mentions a local path use read_files/list_dir;
+Don't use it as a generic discovery step: if the user mentions a local path use read_files/find_files or run_command with plain ls;
 if they ask about an external project/library use web_search. A `<relevant_memories>` block, when present,
 already surfaces likely-relevant memories — don't re-search the same topic.
 Proactively save a memory only for verified, reusable project conventions,
@@ -113,7 +113,7 @@ def build_memory_context(project_path=None, extra_paths=None):
     if not memories:
         return None
 
-    # ★ CACHE-CRITICAL: this hint is appended to the system message (messages[0])
+    # CACHE-CRITICAL: this hint is appended to the system message (messages[0])
     #   as a cache-stable block. The exact memory COUNT must NOT appear here —
     #   it changes the moment the model calls create/delete/merge_memories
     #   during a turn, which rewrites bytes inside the cached prompt prefix and

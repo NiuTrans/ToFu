@@ -90,9 +90,10 @@ global.addEventListener = () => {};
 global.removeEventListener = () => {};
 global.setTimeout = (fn) => fn();
 
-// getActiveConv + _msgElIndex for the lazy-build lookup.
+// A completed Turn projection plus its stable identity.
 const MSG = {
   role: 'assistant', content: 'answer', timestamp: 1000,
+  _turnStatus: 'completed',
   finishReason: 'stop', model: 'm',
   usage: { prompt_tokens: 100, completion_tokens: 10,
            cache_creation_input_tokens: 50000, cache_read_input_tokens: 40000 },
@@ -101,20 +102,17 @@ const MSG = {
           cacheReadTokens: 40000, cacheWriteTokens: 50000 },
   _taskId: 't1',
 };
-global.getActiveConv = () => ({ id: 'c1', messages: [MSG] });
-global._msgElIndex = () => 0;
-
 eval(fs.readFileSync(process.argv[2], 'utf8'));   // REAL ui/finish_info.js
 // const/let in eval stay in the eval's lexical scope (the real bundle is one
 // concatenated script, so the WeakMap IS shared there) — capture an accessor.
-eval('global.__getCtx = (m) => (typeof _costCtxByMsg !== \'undefined\') ? _costCtxByMsg.get(m) : null;');
+eval('global.__getCtx = (turnId) => (typeof _costCtxByTurnId !== \'undefined\') ? _costCtxByTurnId.get(turnId) : null;');
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 // ── Phase A: DEGRADED (rich module NOT loaded) ──
 let threwA = null, bar = '';
-try { bar = renderFinishInfo(MSG, false); } catch (e) { threwA = e; }
+try { bar = renderFinishInfo(MSG, 'turn-1'); } catch (e) { threwA = e; }
 check('A_never_throws', !threwA);
 if (threwA) out.push('  A error: ' + (threwA && threwA.stack || threwA));
 check('A_bar_has_cost_tag', bar.indexOf('cost-tag-detail') !== -1);
@@ -122,7 +120,7 @@ check('A_placeholder_empty',
   /<span class="cost-popover-data" hidden><\/span>/.test(bar));
 check('A_no_prebuilt_popover', bar.indexOf('cp-rounds') === -1
   && bar.indexOf('cost-popover-inner') === -1);
-const _ctx = global.__getCtx(MSG);
+const _ctx = global.__getCtx('turn-1');
 check('A_ctx_stashed', !!(_ctx && _ctx.costInfo && _ctx.rounds));
 
 // ── Phase B: RICH ──
@@ -135,14 +133,14 @@ eval(_coreSrc + '\n;\n' + fs.readFileSync(process.argv[3], 'utf8'));
 check('B_rich_symbols_present',
   typeof _buildCostPopover === 'function' &&
   typeof _toggleCostPopover === 'function');
-bar = renderFinishInfo(MSG, false);   // restash into this scope's WeakMap
+bar = renderFinishInfo(MSG, 'turn-1');   // restash into this scope's identity map
 
 // Fake tag element wrapping the (empty) placeholder span.
 const placeholder = { _html: '',
   set innerHTML(v) { this._html = v; }, get innerHTML() { return this._html; } };
 const tagEl = {
   querySelector: (sel) => sel === '.cost-popover-data' ? placeholder : null,
-  closest: () => null,
+  closest: () => ({ dataset: { turnId: 'turn-1' } }),
   getBoundingClientRect: () => ({ left: 10, top: 100, bottom: 120 }),
 };
 let threwB = null;
@@ -207,9 +205,13 @@ def test_NC_stash_is_load_bearing(tmp_path):
     rich = os.path.join(JS_DIR, 'ui', 'finish_info_rich.js')
     with open(fi, encoding='utf-8') as f:
         src = f.read()
-    anchor = '_costCtxByMsg.set(msg, {'
+    anchor = 'if (turnId) _rememberCostContext(turnId, {'
     assert anchor in src, 'ctx stash missing — update the neuter target'
-    neutered = src.replace(anchor, '/* NEUTERED */ void 0 && _costCtxByMsg.set(msg, {', 1)
+    neutered = src.replace(
+        anchor,
+        'if (false && turnId) _rememberCostContext(turnId, {',
+        1,
+    )
     assert neutered != src
     copy = tmp_path / 'finish_info_neutered.js'
     copy.write_text(neutered, encoding='utf-8')

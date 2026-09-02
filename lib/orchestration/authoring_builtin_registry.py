@@ -8,13 +8,11 @@ from lib.orchestration._builtin_definitions import (
     build_adversarial_definition,
     build_autopilot_definition,
     build_blank_definition,
-    build_endpoint_definition,
     build_fanout_definition,
 )
 
 
 _BUILTIN_BUILDERS: dict[str, Callable[..., dict]] = {
-    'endpoint': build_endpoint_definition,
     'autopilot': build_autopilot_definition,
     'fanout': build_fanout_definition,
     'adversarial': build_adversarial_definition,

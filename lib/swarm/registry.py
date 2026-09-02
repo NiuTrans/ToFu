@@ -139,8 +139,8 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
             'Use web_search and fetch_url tools effectively. '
             'Cite sources and highlight confidence levels.'
         ),
-        'tools_hint': ['web_search', 'fetch_url', 'browser_read_page',
-                       'browser_list_tabs'],
+        'tools_hint': ['web_search', 'fetch_url', 'browser_research_page',
+                       'browser_read_page', 'browser_list_tabs'],
         'model_hint': 'standard',
     },
 
@@ -157,7 +157,7 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
             'Follow existing code conventions. Test your changes.'
         ),
         'tools_hint': ['read_files', 'write_file', 'edit_file',
-                       'grep_search', 'find_files', 'list_dir', 'run_command'],
+                       'grep_search', 'find_files', 'run_command'],
         'model_hint': 'heavy',      # code generation benefits from strong models
     },
 
@@ -193,7 +193,9 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
             'with shell commands.'
         ),
         'tools_hint': ['browser_list_tabs', 'browser_read_page',
-                       'browser_execute_js', 'browser_screenshot',
+                       'browser_research_page',
+                       'browser_devtools', 'browser_execute_js',
+                       'browser_screenshot',
                        'browser_click', 'browser_type', 'browser_press_key',
                        'browser_menu_click', 'browser_fill_form',
                        'browser_navigate', 'browser_close_tab',
@@ -213,7 +215,7 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
             'code or content for bugs, style issues, security concerns, '
             'and improvement opportunities. Be specific and actionable.'
         ),
-        'tools_hint': ['read_files', 'grep_search', 'find_files', 'list_dir'],
+        'tools_hint': ['read_files', 'grep_search', 'find_files', 'run_command'],
         'model_hint': 'heavy',      # review needs deep understanding
     },
 
@@ -246,14 +248,12 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
         'model_hint': 'standard',
     },
 
-    # ── Endpoint-mode roles (used by the FlowExecutor endpoint path) ──
-    # These mirror lib/tasks_pkg/endpoint's planner/worker/critic prompts so
-    # build_endpoint_definition's role nodes run with the right behavior
-    # instead of silently falling back to 'general'. Empty tools_hint = all
-    # tools (planner/worker/critic all need full tool access in endpoint mode).
+    # ── Flow-only roles ──
+    # Planner/worker/critic nodes need stable role behavior instead of silently
+    # falling back to ``general``. Empty tools_hint means all tools.
     'planner': {
         'when_to_use': (
-            'Endpoint-mode planning step — rewrite the user request into a '
+            'Flow planning step — rewrite the user request into a '
             'structured brief + checklist + acceptance criteria for the worker.'
         ),
         'system_prompt_suffix': (
@@ -268,7 +268,7 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
 
     'worker': {
         'when_to_use': (
-            'Endpoint-mode execution step — carry out the planner\'s checklist '
+            'Flow execution step — carry out the planner\'s checklist '
             'with full tools, accumulating progress across loop iterations.'
         ),
         'system_prompt_suffix': (
@@ -283,7 +283,7 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
 
     'critic': {
         'when_to_use': (
-            'Endpoint-mode review step — verify the worker output against the '
+            'Flow review step — verify the worker output against the '
             'checklist and emit a structured verdict.'
         ),
         'system_prompt_suffix': (
@@ -294,7 +294,7 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
             'going, or [PLAN_DEFECT: <reason>] + [VERDICT: CONTINUE_PLANNER] '
             'only for a genuine structural plan flaw (not worker execution).'
         ),
-        'tools_hint': ['read_files', 'grep_search', 'find_files', 'list_dir'],
+        'tools_hint': ['read_files', 'grep_search', 'find_files', 'run_command'],
         'model_hint': 'heavy',
     },
 
@@ -338,11 +338,11 @@ def get_role_config(role: str) -> dict[str, Any]:
     return AGENT_ROLES.get(role, AGENT_ROLES['general'])
 
 
-# Roles that exist for the endpoint/autopilot FlowExecutor paths but are NOT
+# Roles that exist for FlowExecutor/autopilot paths but are NOT
 # meant to be spawned manually via ``spawn_agents``. They carry prompts that
 # only make sense inside their host loop (a lone ``virtual_user`` or ``critic``
 # sub-agent has nothing to drive). ``get_role_config`` still resolves them for
-# endpoint mode; they are excluded ONLY from the manual-spawn catalogue so the
+# flow runtime; they are excluded ONLY from the manual-spawn catalogue so the
 # ``role`` param and the catalogue advertise the same 7 spawnable roles.
 _CATALOGUE_EXCLUDED_ROLES = frozenset({
     'planner', 'worker', 'critic', 'virtual_user',
@@ -369,7 +369,7 @@ def format_role_catalogue() -> str:
     (:data:`AGENT_ROLES`, ``SUB_AGENT_DENYLIST``, ``ARTIFACT_TOOLS``) —
     never a hand-copied second list.
 
-    Only MANUALLY-SPAWNABLE roles are listed; endpoint/autopilot-internal
+    Only MANUALLY-SPAWNABLE roles are listed; flow/autopilot-internal
     roles (see :data:`_CATALOGUE_EXCLUDED_ROLES`) are omitted so the catalogue
     matches the ``role`` param's advertised set.
     """

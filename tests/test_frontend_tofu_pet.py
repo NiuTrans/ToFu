@@ -1,4 +1,4 @@
-"""Tofu pet mascot (static/js/tofu-pet.js) — behaviour + registration guards.
+"""Tofu pet mascot (frontend/src/runtime/scene/tofu-pet.js) behavior guards.
 
 The pet is the Tofu brand mascot itself — the isometric cream block from
 static/icons/tofu-welcome.svg — mounted into #projectBar. Each expression is an
@@ -23,8 +23,15 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-PET_JS = REPO / "static" / "js" / "tofu-pet.js"
-BUNDLER = REPO / "lib" / "js_bundler.py"
+import sys as _sys
+_sys.path.insert(0, str(REPO))
+from tests._runtime_sections import runtime_section_path
+
+# The classic js tree is gone; sections materialize from the retained
+# runtime (lazy chunks are concatenated back into the virtual view).
+PET_JS = Path(runtime_section_path('tofu-pet.js'))
+APP_RUNTIME = REPO / 'frontend' / 'src' / 'runtime' / 'app-runtime.js'
+VITE_MANIFEST = REPO / 'static' / 'vite' / 'manifest.json'
 INDEX = REPO / "index.html"
 
 
@@ -135,16 +142,14 @@ process.exit(0);   // the pet's setInterval timers keep the event loop alive
 
 
 def _i18n_dict():
-    """Scrape ``static/js/i18n.js`` into ``{key: {zh, en}}`` so the harness's
+    """Load the native locale packs into ``{key: {zh, en}}`` so the harness's
     ``t()`` resolves exactly as production does (a missing key returns the key).
-    """
-    src = (REPO / "static" / "js" / "i18n.js").read_text(encoding="utf-8")
-    pat = re.compile(
-        r"""^[ \t]*'([\w.\-]+)':\s*\{\s*zh:\s*(['"])(.*?)\2\s*,"""
-        r"""\s*en:\s*(['"])(.*?)\4""",
-        re.MULTILINE)
-    return {m.group(1): {'zh': m.group(3), 'en': m.group(5)}
-            for m in pat.finditer(src)}
+    The packs replaced the classic static/js/i18n.js registry in the Vite
+    migration; both are the same canonical key space."""
+    import json as _json
+    zh = _json.loads((REPO / 'frontend/src/i18n/locales/zh.json').read_text(encoding='utf-8'))
+    en = _json.loads((REPO / 'frontend/src/i18n/locales/en.json').read_text(encoding='utf-8'))
+    return {k: {'zh': zh.get(k, k), 'en': en.get(k, k)} for k in en}
 
 
 def _run(hour=14, now=0, patch=None):
@@ -324,7 +329,7 @@ def test_dom_footstep_fx_layer_fully_removed():
                 "_emitAccum", "FX_MAX", "fxCount"):
         assert sym not in src, f"dead footstep-fx symbol {sym!r} still in tofu-pet.js"
     # The canvas wake that SUPERSEDES it must be present in tofu-scene.js.
-    scene = (REPO / "static" / "js" / "tofu-scene.js").read_text()
+    scene = Path(runtime_section_path('tofu-scene.js')).read_text()
     for sym in ("_trackPet", "_paintWake", "_petFootX"):
         assert sym in scene, f"canvas wake {sym!r} missing from tofu-scene.js — nothing supersedes the removed DOM fx"
     # No orphaned CSS: the whole .tofu-fx surface (rules + keyframes + vars).
@@ -1427,8 +1432,14 @@ def test_NEUTER_pet_ignores_light_is_caught():
 
 
 def test_registered_in_bundler_manifest():
-    assert "'tofu-pet.js'" in BUNDLER.read_text(), \
-        "tofu-pet.js missing from _BUNDLE_FILES — it would load as a silent no-op"
+    shell = APP_RUNTIME.read_text(encoding='utf-8')
+    assert "import('./scene/tofu-pet.js')" in shell, \
+        'tofu-pet.js lazy chunk not scheduled — it would load as a silent no-op'
+    import json as _json
+    manifest = _json.loads(VITE_MANIFEST.read_text(encoding='utf-8'))
+    files = {row.get('file', '') for row in manifest.values() if isinstance(row, dict)}
+    assert any(f.startswith('assets/tofu-pet-') for f in files), \
+        'tofu-pet chunk missing from the Vite manifest'
 
 
 def test_not_registered_as_raw_index_script():

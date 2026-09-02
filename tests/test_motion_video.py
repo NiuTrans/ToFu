@@ -1,6 +1,6 @@
 """tests/test_motion_video.py — Motion-video pipeline unit suite.
 
-Covers the zero-LLM machinery of docs/MOTION_VIDEO_DESIGN.md P1:
+Covers the zero-LLM machinery of docs/modules/ingest_media.md P1:
 
   * SRT parsing (ms precision, multiline, malformed-block tolerance)
   * storyboard gates — incl. a NEUTER pair proving the duration-sum gate
@@ -433,14 +433,14 @@ def _ctx(project_enabled: bool):
         cfg={}, task_id='t', project_path='/tmp/x' if project_enabled else '',
         project_enabled=project_enabled, search_mode='off', search_enabled=False,
         fetch_enabled=False, code_exec_enabled=False, browser_enabled=False,
-        desktop_enabled=False, swarm_enabled=False)
+        desktop_enabled=False)
 
 
 def test_motion_tools_registered_with_project():
     from lib.tools.registry import assemble_tool_list
     ctx = _ctx(True)
     assemble_tool_list(ctx)
-    names = {t['function']['name'] for t in ctx.enabled_tool_catalog}
+    names = {t['function']['name'] for t in ctx.executable_tool_catalog}
     from lib.tools.motion_video import MOTION_VIDEO_TOOL_NAMES
     assert MOTION_VIDEO_TOOL_NAMES <= names
 
@@ -730,7 +730,7 @@ def test_motion_tools_include_p2_tools_with_project():
     from lib.tools.registry import assemble_tool_list
     ctx = _ctx(True)
     assemble_tool_list(ctx)
-    names = {t['function']['name'] for t in ctx.enabled_tool_catalog}
+    names = {t['function']['name'] for t in ctx.executable_tool_catalog}
     assert {'motion_video_narrate', 'motion_video_mux'} <= names
 
 

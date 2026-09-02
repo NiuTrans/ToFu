@@ -21,15 +21,15 @@ def test_timer_invalidation_is_identifier_free(monkeypatch):
     import lib.agent_core.push as push
 
     monkeypatch.setattr(push, 'push_event',
-                        lambda channel, task_id, payload: calls.append(
-                            (channel, task_id, payload)))
+                        lambda channel, task_id, payload, *, user_id: calls.append(
+                            (channel, task_id, payload, user_id)))
     from lib.scheduler.timer._notify import notify_timer_changed
 
-    notify_timer_changed('created')
+    notify_timer_changed('created', user_id=42)
     assert calls == [('timer', '*', {
         'type': 'timer_changed',
         'change': 'created',
-    })]
+    }, 42)]
 
 
 def test_timer_invalidation_never_breaks_durable_write(monkeypatch):
@@ -42,7 +42,7 @@ def test_timer_invalidation_never_breaks_durable_write(monkeypatch):
     monkeypatch.setattr(push, 'push_event', broken_push)
     # The notification seam is explicitly best-effort: callers invoke it only
     # after commit, and a transport failure must not change their result.
-    notify_timer_changed('triggered')
+    notify_timer_changed('triggered', user_id=42)
 
 
 def test_timer_frontend_uses_push_first_deduplicated_reconciliation():
@@ -111,14 +111,20 @@ global.Api = { timer: { list(summaryOnly) {
 
 def test_every_timer_projection_writer_emits_after_durable_write():
     cases = [
-        (ROOT / 'lib/scheduler/timer/_crud.py', "notify_timer_changed('created')"),
-        (ROOT / 'lib/scheduler/timer/_crud.py', "notify_timer_changed('cancelled')"),
-        (ROOT / 'lib/scheduler/timer/_poll.py', "notify_timer_changed('progress')"),
-        (ROOT / 'lib/scheduler/timer/_poll.py', "notify_timer_changed('exhausted')"),
-        (ROOT / 'lib/scheduler/timer/_poll.py', "notify_timer_changed('expired')"),
-        (ROOT / 'lib/scheduler/timer/_poll.py', "notify_timer_changed('orphaned')"),
-        (ROOT / 'lib/scheduler/timer/_loop.py', "notify_timer_changed('triggered')"),
-        (ROOT / 'lib/scheduler/executor/_timer.py', "notify_timer_changed('triggered')"),
+        (ROOT / 'lib/scheduler/timer/_crud.py',
+         "notify_timer_changed('created', user_id=user_id)"),
+        (ROOT / 'lib/scheduler/timer/_crud.py',
+         "notify_timer_changed('cancelled', user_id=user_id)"),
+        (ROOT / 'lib/scheduler/timer/_poll.py',
+         "notify_timer_changed('progress', user_id=user_id)"),
+        (ROOT / 'lib/scheduler/timer/_poll.py',
+         "notify_timer_changed('exhausted', user_id=user_id)"),
+        (ROOT / 'lib/scheduler/timer/_poll.py',
+         "notify_timer_changed('expired', user_id=user_id)"),
+        (ROOT / 'lib/scheduler/timer/_loop.py',
+         "notify_timer_changed('failed', user_id=user_id)"),
+        (ROOT / 'lib/scheduler/timer/_loop.py',
+         "notify_timer_changed('triggered', user_id=int(timer['user_id']))"),
     ]
     for path, needle in cases:
         src = path.read_text()
@@ -126,6 +132,7 @@ def test_every_timer_projection_writer_emits_after_durable_write():
         boundary = max(
             src.rfind('db_execute_with_retry(', 0, pos),
             src.rfind('write_transaction(', 0, pos),
+            src.rfind('_timer_client(write=True).command(', 0, pos),
         )
         assert boundary >= 0, (
             f'{path.name}: {needle} must follow a data-layer-owned write')

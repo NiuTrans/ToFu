@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from lib.storage import StorageError, StorageEventBatcher, StorageSupervisor
+from lib.storage_sidecar.durability import write_json_durable
 
 
 def _mount(path: Path) -> dict[str, str]:
@@ -63,7 +64,7 @@ def _latency_summary(values) -> dict[str, float | int]:
 def _run_backend(
     *, project_root: Path, backend: str, duration: float, warmup: float,
     workers: int, write_ratio: float, critical_ratio: float,
-    operation_interval_ms: float,
+    operation_interval_ms: float, checkpoint_seconds: float,
 ) -> dict:
     run_root = project_root / backend
     supervisor = StorageSupervisor(
@@ -94,6 +95,8 @@ def _run_backend(
     started = time.monotonic()
     record_after = started + warmup
     finish_at = record_after + duration
+    checkpoint_path = project_root / 'checkpoint.json'
+    checkpoint_stop = threading.Event()
 
     def record(kind: str, elapsed_ms: float) -> None:
         if time.monotonic() < record_after:
@@ -152,6 +155,41 @@ def _run_backend(
             if remaining > 0:
                 time.sleep(remaining)
 
+    def checkpoint_payload(status: str) -> dict:
+        with lock:
+            operations = dict(counters)
+            current_errors = dict(errors)
+            read_stats = _latency_summary(list(reads))
+            write_stats = _latency_summary(list(critical_writes))
+        return {
+            'storage_protocol': 'storage.v1', 'status': status,
+            'backend': backend, 'workers': workers,
+            'duration_seconds': duration,
+            'elapsed_seconds': round(max(0.0, time.monotonic() - record_after), 3),
+            'operations': operations, 'errors': current_errors,
+            'read_latency': read_stats,
+            'critical_write_latency': write_stats,
+            'event_batcher': dict(batcher.metrics),
+            'sidecar': supervisor.status(),
+            'updated_at_utc': datetime.now(timezone.utc).isoformat(),
+        }
+
+    def write_checkpoint(status: str) -> None:
+        write_json_durable(checkpoint_path, checkpoint_payload(status))
+
+    def checkpoint_loop() -> None:
+        while not checkpoint_stop.wait(checkpoint_seconds):
+            try:
+                write_checkpoint('running')
+            except Exception as exc:
+                with lock:
+                    errors[f'checkpoint:{type(exc).__name__}'] += 1
+
+    checkpoint_thread = threading.Thread(
+        target=checkpoint_loop, name='storage-cert-checkpoint', daemon=True)
+    checkpoint_thread.start()
+    checkpoint_status = 'failed'
+
     try:
         with ThreadPoolExecutor(
                 max_workers=workers, thread_name_prefix='storage-cert') as pool:
@@ -176,7 +214,15 @@ def _run_backend(
         time.sleep(2.0)
         final = client.metrics()
         integrity = client.maintenance('system.integrity_check', deadline=60)
+        checkpoint_status = 'backend_completed'
     finally:
+        checkpoint_stop.set()
+        checkpoint_thread.join(timeout=5)
+        try:
+            write_checkpoint(checkpoint_status)
+        except Exception as exc:
+            with lock:
+                errors[f'checkpoint:{type(exc).__name__}'] += 1
         batcher.close(timeout=5)
         supervisor.stop()
 
@@ -231,6 +277,7 @@ def main(argv=None) -> int:
     parser.add_argument('--write-ratio', type=float, default=0.05)
     parser.add_argument('--critical-ratio', type=float, default=0.001)
     parser.add_argument('--operation-interval-ms', type=float, default=50)
+    parser.add_argument('--checkpoint-seconds', type=float, default=60)
     parser.add_argument('--allow-non-fuse', action='store_true')
     args = parser.parse_args(argv)
     root = args.project_root.resolve()
@@ -248,6 +295,8 @@ def main(argv=None) -> int:
         parser.error('write ratios must be positive and sum to less than 1')
     if args.operation_interval_ms < 0:
         parser.error('--operation-interval-ms must be non-negative')
+    if not 1 <= args.checkpoint_seconds <= 3600:
+        parser.error('--checkpoint-seconds must be between 1 and 3600')
 
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     output_root = root / 'data' / 'storage-certification' / f'load-{stamp}'
@@ -260,16 +309,22 @@ def main(argv=None) -> int:
             duration=args.duration_seconds, warmup=args.warmup_seconds,
             workers=args.workers, write_ratio=args.write_ratio,
             critical_ratio=args.critical_ratio,
-            operation_interval_ms=args.operation_interval_ms))
+            operation_interval_ms=args.operation_interval_ms,
+            checkpoint_seconds=args.checkpoint_seconds))
     summary = {
         'storage_protocol': 'storage.v1', 'mount': mount,
         'fuse_verified': is_fuse, 'started_at_utc': stamp,
         'results': results, 'passed': all(item['passed'] for item in results),
     }
     summary_path = output_root / 'summary.json'
-    summary_path.write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + '\n',
-        encoding='utf-8')
+    write_json_durable(summary_path, summary)
+    checkpoint_path = output_root / 'checkpoint.json'
+    write_json_durable(checkpoint_path, {
+        'storage_protocol': 'storage.v1', 'status': 'completed',
+        'summary': str(summary_path), 'passed': summary['passed'],
+        'backends': [item['backend'] for item in results],
+        'updated_at_utc': datetime.now(timezone.utc).isoformat(),
+    })
     print(json.dumps({
         'summary': str(summary_path), 'passed': summary['passed'],
         'backends': [item['backend'] for item in results],

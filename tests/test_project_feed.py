@@ -5,18 +5,21 @@ and its two task-lifecycle emit seams (``create_task`` → ``started``;
 ``_finalize_and_emit_done`` → ``completed``/``aborted``), plus the
 path-leak channel-key guard.
 
-Two MANDATORY source-level negative controls (the project's "prove the
-load-bearing logic" bar) physically patch the source, assert the guarded test
-FAILS, then restore the file byte-identical:
+One MANDATORY source-level negative control (the project's "prove the
+load-bearing logic" bar):
 
-  • NC-1: replace the per-project ``MAX(seq)+1`` with a constant → the seq
-    monotonicity / PK-isolation test FAILS (collision the logic prevents).
   • NC-2: neuter the ``started`` emit call in ``create_task`` (→ ``pass``) →
     the lifecycle exactly-once test FAILS (the CALL SITE, not just the helper,
     is load-bearing).
 
-Schema is bootstrapped once into the forced test SQLite DB (autouse fixture),
-mirroring tests/test_artifacts_meta_sanitize.py.
+NC-1 (freeze the per-project ``MAX(seq)+1`` to a constant → seq collision) was
+RETIRED in the sidecar conversion: the seq computation now lives in the
+sidecar PROCESS (the ``project.feed.append`` op), which an in-process source
+neuter cannot reach. The invariant it guarded (monotonic per-project seq,
+``(project, seq)`` identity) is covered behaviorally — the ``test_seq_*``
+cases here and the contract suite's
+``test_project_feed_sidecar_append_and_incremental_read`` (1-based seqs,
+exclusive incremental read).
 """
 
 import os
@@ -28,25 +31,18 @@ from tests._nc_harness import patch_restore as _patch_restore
 
 pytestmark = pytest.mark.unit
 
-
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    """Create the SQLite schema (incl. project_events) under app context."""
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
 
 
 @pytest.fixture(autouse=True)
-def _clean_feed(flask_app):
-    """Wipe project_events between tests so seq counters start fresh."""
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_events')
-        db.execute("DELETE FROM scoped_sequences WHERE namespace='project_events'")
-        db.commit()
+def _clean_feed(chat_sidecar):
+    """Wipe feed events between tests so seq counters start fresh (sidecar
+    equivalent of the legacy DELETE FROM project_events + scoped_sequences
+    reset — the sidecar derives seq from MAX(storage_events.sequence), so
+    clearing events resets it)."""
+    import tests._seed as seed
+    seed.clear_events()
     yield
 
 
@@ -55,7 +51,8 @@ def _clean_feed(flask_app):
 def _stub_push(monkeypatch):
     pushed = []
 
-    def _fake(channel, task_id, payload):
+    def _fake(channel, task_id, payload, *, user_id):
+        assert user_id == TEST_OWNER_USER_ID
         pushed.append((channel, task_id, payload))
 
     monkeypatch.setattr('lib.agent_core.push.push_event', _fake)
@@ -70,11 +67,11 @@ def test_seq_monotonic_per_project(flask_app):
     from lib.conversations.project_feed import emit_project_event, read_project_feed
     with flask_app.app_context():
         for i in range(3):
-            emit_project_event('/proj/a', 'cA', 'note', f'a{i}')
+            emit_project_event('/proj/a', 'cA', 'note', f'a{i}', user_id=TEST_OWNER_USER_ID)
         for i in range(2):
-            emit_project_event('/proj/b', 'cB', 'note', f'b{i}')
-        fa = read_project_feed('/proj/a')
-        fb = read_project_feed('/proj/b')
+            emit_project_event('/proj/b', 'cB', 'note', f'b{i}', user_id=TEST_OWNER_USER_ID)
+        fa = read_project_feed('/proj/a', user_id=TEST_OWNER_USER_ID)
+        fb = read_project_feed('/proj/b', user_id=TEST_OWNER_USER_ID)
     assert sorted(e['seq'] for e in fa['events']) == [1, 2, 3]
     assert sorted(e['seq'] for e in fb['events']) == [1, 2]
     assert fa['maxSeq'] == 3 and fb['maxSeq'] == 2
@@ -89,7 +86,7 @@ def test_seq_no_collision_under_concurrency(flask_app):
         try:
             with flask_app.app_context():
                 for _ in range(15):
-                    emit_project_event('/proj/race', 'c', 'note', 'x')
+                    emit_project_event('/proj/race', 'c', 'note', 'x', user_id=TEST_OWNER_USER_ID)
         except Exception as e:  # pragma: no cover - failure path
             errors.append(e)
 
@@ -100,7 +97,7 @@ def test_seq_no_collision_under_concurrency(flask_app):
         t.join()
     assert not errors, f'concurrent emit raised: {errors}'
     with flask_app.app_context():
-        feed = read_project_feed('/proj/race', limit=500)
+        feed = read_project_feed('/proj/race', limit=500, user_id=TEST_OWNER_USER_ID)
     seqs = sorted(e['seq'] for e in feed['events'])
     assert seqs == list(range(1, 31)), 'seqs must be contiguous + unique (no PK collision)'
 
@@ -119,9 +116,9 @@ def test_kind_validation(flask_app):
     assert 'claimed' in VALID_KINDS, 'claimed is produced by the Board claim path'
     assert 'totally_made_up' not in VALID_KINDS
     with flask_app.app_context():
-        emit_project_event('/proj/k', 'c', 'run_concluded', 'ok')
-        emit_project_event('/proj/k', 'c', 'totally_made_up', 'should coerce')
-        feed = read_project_feed('/proj/k')
+        emit_project_event('/proj/k', 'c', 'run_concluded', 'ok', user_id=TEST_OWNER_USER_ID)
+        emit_project_event('/proj/k', 'c', 'totally_made_up', 'should coerce', user_id=TEST_OWNER_USER_ID)
+        feed = read_project_feed('/proj/k', user_id=TEST_OWNER_USER_ID)
     by_summary = {e['summary']: e['kind'] for e in feed['events']}
     assert by_summary['ok'] == 'run_concluded'
     assert by_summary['should coerce'] == 'note', 'unknown kind coerces to note'
@@ -136,8 +133,8 @@ def test_retention_prune(flask_app, monkeypatch):
     monkeypatch.setattr(pf, '_PROJECT_EVENTS_KEEP', 5)
     with flask_app.app_context():
         for i in range(8):
-            pf.emit_project_event('/proj/keep', 'c', 'note', f'n{i}')
-        feed = pf.read_project_feed('/proj/keep', limit=500)
+            pf.emit_project_event('/proj/keep', 'c', 'note', f'n{i}', user_id=TEST_OWNER_USER_ID)
+        feed = pf.read_project_feed('/proj/keep', limit=500, user_id=TEST_OWNER_USER_ID)
     seqs = sorted(e['seq'] for e in feed['events'])
     # 8 emitted, keep window 5 → only the most-recent 5 survive (seq 4..8).
     assert seqs == [4, 5, 6, 7, 8], f'expected pruned tail, got {seqs}'
@@ -160,8 +157,8 @@ def test_long_summary_preserves_full_in_payload(flask_app):
                                       'via a Redis pub/sub substrate ') * 12).strip()
     assert len(long_summary) > _SUMMARY_MAX_CHARS
     with flask_app.app_context():
-        emit_project_event('/proj/full', 'c', 'completed', long_summary)
-        feed = read_project_feed('/proj/full')
+        emit_project_event('/proj/full', 'c', 'completed', long_summary, user_id=TEST_OWNER_USER_ID)
+        feed = read_project_feed('/proj/full', user_id=TEST_OWNER_USER_ID)
     ev = feed['events'][0]
     # Display value is capped …
     assert len(ev['summary']) == _SUMMARY_MAX_CHARS
@@ -177,8 +174,8 @@ def test_short_summary_has_no_redundant_full_copy(flask_app):
     wasted bytes on the common short row."""
     from lib.conversations.project_feed import emit_project_event, read_project_feed
     with flask_app.app_context():
-        emit_project_event('/proj/short', 'c', 'note', 'a short one-line pulse')
-        feed = read_project_feed('/proj/short')
+        emit_project_event('/proj/short', 'c', 'note', 'a short one-line pulse', user_id=TEST_OWNER_USER_ID)
+        feed = read_project_feed('/proj/short', user_id=TEST_OWNER_USER_ID)
     ev = feed['events'][0]
     assert ev['summary'] == 'a short one-line pulse'
     assert 'summary_full' not in ev['payload'], \
@@ -194,8 +191,8 @@ def test_full_summary_does_not_clobber_caller_payload(flask_app):
     long_summary = 'X' * (_SUMMARY_MAX_CHARS + 50)
     with flask_app.app_context():
         emit_project_event('/proj/pl', 'c', 'note', long_summary,
-                           payload={'taskId': 't1', 'summary_full': 'CALLER'})
-        feed = read_project_feed('/proj/pl')
+                           payload={'taskId': 't1', 'summary_full': 'CALLER'}, user_id=TEST_OWNER_USER_ID)
+        feed = read_project_feed('/proj/pl', user_id=TEST_OWNER_USER_ID)
     ev = feed['events'][0]
     assert ev['payload'].get('taskId') == 't1', 'other payload keys preserved'
     assert ev['payload'].get('summary_full') == 'CALLER', \
@@ -222,7 +219,7 @@ def test_channel_key_never_leaks_path():
 def test_push_mirror_routes_by_hashed_key(flask_app, _stub_push):
     from lib.conversations.project_feed import emit_project_event, project_channel_key
     with flask_app.app_context():
-        emit_project_event('/proj/push', 'c', 'note', 'hi')
+        emit_project_event('/proj/push', 'c', 'note', 'hi', user_id=TEST_OWNER_USER_ID)
     assert _stub_push, 'push_event should have been called'
     channel, key, payload = _stub_push[-1]
     assert channel == 'project'
@@ -260,7 +257,7 @@ def test_create_task_emits_started(flask_app, monkeypatch):
     from lib.tasks_pkg import manager
     with flask_app.app_context():
         manager.create_task('conv-x', [{'role': 'user', 'content': 'do a thing'}],
-                            {'projectPath': '/proj/start'})
+                            {'projectPath': '/proj/start'}, user_id=TEST_OWNER_USER_ID)
     started = [c for c in captured if c[2] == 'started']
     assert len(started) == 1, f'expected exactly one started, got {captured}'
     assert started[0][0] == '/proj/start'
@@ -275,7 +272,7 @@ def test_create_task_suppresses_started_for_autopilot(flask_app, monkeypatch):
     from lib.tasks_pkg import manager
     with flask_app.app_context():
         manager.create_task('conv-ap', [{'role': 'user', 'content': 'go'}],
-                            {'projectPath': '/proj/ap', 'autopilotRunId': 'ar-1'})
+                            {'projectPath': '/proj/ap', 'autopilotRunId': 'ar-1'}, user_id=TEST_OWNER_USER_ID)
     assert not captured, 'autopilot follow-up turns must NOT emit a started event'
 
 
@@ -286,7 +283,7 @@ def test_create_task_no_project_no_event(flask_app, monkeypatch):
                         lambda *a, **k: captured.append(a))
     from lib.tasks_pkg import manager
     with flask_app.app_context():
-        manager.create_task('conv-np', [{'role': 'user', 'content': 'hi'}], {})
+        manager.create_task('conv-np', [{'role': 'user', 'content': 'hi'}], {}, user_id=TEST_OWNER_USER_ID)
     assert not captured, 'non-project conversations have no feed'
 
 
@@ -302,7 +299,7 @@ def test_create_task_best_effort_isolation(flask_app, monkeypatch, caplog):
     with flask_app.app_context():
         task = manager.create_task('conv-iso',
                                    [{'role': 'user', 'content': 'hi'}],
-                                   {'projectPath': '/proj/iso'})
+                                   {'projectPath': '/proj/iso'}, user_id=TEST_OWNER_USER_ID)
     assert task and task.get('status') == 'running', 'task must still be created'
 
 
@@ -333,10 +330,10 @@ def test_emit_run_concluded_helper(flask_app, monkeypatch):
     with flask_app.app_context():
         autopilot._emit_run_concluded(
             'conv-rc', 'ar-xyz', 'Run finished: fixed the bug.\nmore detail',
-            {'projectPath': '/proj/rc'})
+            {'projectPath': '/proj/rc'}, user_id=TEST_OWNER_USER_ID)
         # No project → no event.
-        autopilot._emit_run_concluded('conv-rc', 'ar-xyz', 'x', {})
-        autopilot._emit_run_concluded('conv-rc', 'ar-xyz', 'x', None)
+        autopilot._emit_run_concluded('conv-rc', 'ar-xyz', 'x', {}, user_id=TEST_OWNER_USER_ID)
+        autopilot._emit_run_concluded('conv-rc', 'ar-xyz', 'x', None, user_id=TEST_OWNER_USER_ID)
     rc = [c for c in captured if c[2] == 'run_concluded']
     assert len(rc) == 1, f'expected exactly one run_concluded, got {captured}'
     assert rc[0][0] == '/proj/rc'
@@ -354,11 +351,12 @@ def test_auto_path_emits_one_run_concluded(flask_app, monkeypatch):
     # Stub the sidecar store (DB) — we are testing the CALLER wiring. A None
     # record would short-circuit before _emit_run_concluded.
     monkeypatch.setattr('lib.tasks_pkg.autopilot_run_lifecycle._store_run_record',
-                        lambda conv_id, run_id, *, reason='task_done':
+                        lambda conv_id, run_id, *, user_id, reason='task_done':
                         {'runId': run_id, 'status': 'concluded'})
     monkeypatch.setattr('lib.tasks_pkg.manager.append_event', lambda *a, **k: None)
     task = {'id': 'task-auto-1', 'convId': 'conv-auto',
-            'config': {'projectPath': '/proj/auto'}}
+            'config': {'projectPath': '/proj/auto'},
+            '_userId': TEST_OWNER_USER_ID}
     with flask_app.app_context():
         autopilot._emit_run_concluded_event(task, 'conv-auto', 'ar-auto')
     rc = [c for c in captured if c[2] == 'run_concluded']
@@ -378,9 +376,9 @@ def test_autopilot_run_suppression_and_rollup_complementary(flask_app, monkeypat
         # MUST be suppressed at create_task.
         for i in range(3):
             manager.create_task('conv-comp', [{'role': 'user', 'content': f't{i}'}],
-                                {'projectPath': '/proj/comp', 'autopilotRunId': 'ar-c'})
+                                {'projectPath': '/proj/comp', 'autopilotRunId': 'ar-c'}, user_id=TEST_OWNER_USER_ID)
         # Run concludes → one roll-up.
-        autopilot._emit_run_concluded('conv-comp', 'ar-c', 'Done.', {'projectPath': '/proj/comp'})
+        autopilot._emit_run_concluded('conv-comp', 'ar-c', 'Done.', {'projectPath': '/proj/comp'}, user_id=TEST_OWNER_USER_ID)
     started = [c for c in captured if c[2] == 'started']
     completed = [c for c in captured if c[2] in ('completed', 'aborted')]
     rc = [c for c in captured if c[2] == 'run_concluded']
@@ -397,7 +395,7 @@ def test_route_feed_returns_events(flask_app, flask_client):
     from lib.conversations.project_feed import emit_project_event
     with flask_app.app_context():
         for i in range(3):
-            emit_project_event('/proj/route', 'cR', 'note', f'r{i}')
+            emit_project_event('/proj/route', 'cR', 'note', f'r{i}', user_id=TEST_OWNER_USER_ID)
     r = flask_client.get('/api/v1/project/feed?path=/proj/route')
     assert r.status_code == 200, r.get_data(as_text=True)
     import json as _json
@@ -410,7 +408,7 @@ def test_route_feed_since_incremental(flask_app, flask_client):
     from lib.conversations.project_feed import emit_project_event
     with flask_app.app_context():
         for i in range(4):
-            emit_project_event('/proj/inc', 'c', 'note', f'i{i}')
+            emit_project_event('/proj/inc', 'c', 'note', f'i{i}', user_id=TEST_OWNER_USER_ID)
     r = flask_client.get('/api/v1/project/feed?path=/proj/inc&since=2')
     import json as _json
     data = _json.loads(r.get_data(as_text=True))
@@ -431,8 +429,8 @@ def test_route_feed_never_reads_global_state(flask_app, flask_client, monkeypatc
     monkeypatch.setitem(pmc._state, 'path', '/proj/POISONED-GLOBAL')
     from lib.conversations.project_feed import emit_project_event
     with flask_app.app_context():
-        emit_project_event('/proj/explicit', 'c', 'note', 'correct')
-        emit_project_event('/proj/POISONED-GLOBAL', 'c', 'note', 'wrong')
+        emit_project_event('/proj/explicit', 'c', 'note', 'correct', user_id=TEST_OWNER_USER_ID)
+        emit_project_event('/proj/POISONED-GLOBAL', 'c', 'note', 'wrong', user_id=TEST_OWNER_USER_ID)
     r = flask_client.get('/api/v1/project/feed?path=/proj/explicit')
     import json as _json
     data = _json.loads(r.get_data(as_text=True))
@@ -445,41 +443,8 @@ def test_route_feed_never_reads_global_state(flask_app, flask_client, monkeypatc
 #  Source-level NEGATIVE CONTROLS
 # ════════════════════════════════════════════════════════════════════
 
-_FEED_SRC = os.path.join(os.path.dirname(__file__), '..',
-                         'lib', 'conversations', 'project_feed.py')
 _MANAGER_SRC = os.path.join(os.path.dirname(__file__), '..',
                             'lib', 'tasks_pkg', 'manager', '_registry.py')
-
-
-def test_NC1_seq_constant_breaks_monotonicity(flask_app):
-    """NC-1: freeze seq to a constant → concurrent/sequential emits collide."""
-
-    def run():
-        import lib.conversations.project_feed as pf
-        # just drive sequential emits on one project.
-        failed = False
-        with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            get_thread_db(DOMAIN_CHAT).execute("DELETE FROM project_events WHERE project_path='/nc1'")
-            get_thread_db(DOMAIN_CHAT).commit()
-            r1 = pf.emit_project_event('/nc1', 'c', 'note', 'one')
-            r2 = pf.emit_project_event('/nc1', 'c', 'note', 'two')
-        # With seq frozen to 1, the second insert hits the (path, seq) PK and
-        # emit returns None (best-effort swallow). So we never get two rows.
-        feed = None
-        with flask_app.app_context():
-            feed = pf.read_project_feed('/nc1', limit=500)
-        assert r1 is not None
-        # The bug the real logic prevents: second emit can't get a fresh seq.
-        assert r2 is None or len(feed['events']) < 2, \
-            'NC-1 should cause a PK collision (no two distinct rows)'
-
-    _patch_restore(
-        _FEED_SRC,
-        "seq = allocate_scoped_sequence(\n                db, 'project_events', project_path)",
-        "seq = 1  # NC-1",
-        run,
-    )
 
 
 def test_NC2_neutered_started_callsite_breaks_exactly_once(flask_app, monkeypatch):
@@ -498,19 +463,20 @@ def test_NC2_neutered_started_callsite_breaks_exactly_once(flask_app, monkeypatc
                             lambda *a, **k: captured.append((a[2] if len(a) > 2 else None)))
         with flask_app.app_context():
             mod.create_task('conv-nc2', [{'role': 'user', 'content': 'x'}],
-                            {'projectPath': '/nc2'})
+                            {'projectPath': '/nc2'}, user_id=TEST_OWNER_USER_ID)
         started = [k for k in captured if k == 'started']
         assert len(started) == 0, \
             'NC-2: neutered call site must emit NO started event'
 
     _patch_restore(
         _MANAGER_SRC,
-        """            from lib.conversations.project_feed import emit_project_event
-            emit_project_event(
-                _proj, conv_id, 'started',
-                (last_user_query or '').strip() or 'New turn started',
-                task_id=task_id)""",
-        "            pass  # NC-2",
+        """                from lib.conversations.project_feed import emit_project_event
+                emit_project_event(
+                    _proj, conv_id, 'started',
+                    (last_user_query or '').strip() or 'New turn started',
+                    user_id=int(task_user_id(task)),
+                    task_id=task_id)""",
+        "                pass  # NC-2",
         run,
     )
 
@@ -540,10 +506,11 @@ def test_NC3_neutered_run_concluded_callsite_breaks_rollup(flask_app, monkeypatc
         # autopilot); the neutered module resolves its own _store_run_record, so
         # patch the LIVE lifecycle module for the un-neutered path.
         monkeypatch.setattr('lib.tasks_pkg.autopilot_run_lifecycle._store_run_record',
-                            lambda conv_id, run_id, *, reason='task_done':
+                            lambda conv_id, run_id, *, user_id, reason='task_done':
                             {'runId': run_id, 'status': 'concluded'})
         monkeypatch.setattr('lib.tasks_pkg.manager.append_event', lambda *a, **k: None)
-        task = {'id': 't', 'convId': 'c', 'config': {'projectPath': '/nc3'}}
+        task = {'id': 't', 'convId': 'c', 'config': {'projectPath': '/nc3'},
+                '_userId': TEST_OWNER_USER_ID}
         with flask_app.app_context():
             ap._emit_run_concluded_event(task, 'c', 'ar-nc3')
         rc = [k for k in captured if k == 'run_concluded']
@@ -551,7 +518,14 @@ def test_NC3_neutered_run_concluded_callsite_breaks_rollup(flask_app, monkeypatc
 
     _patch_restore(
         _AUTOPILOT_SRC,
-        "    _emit_run_concluded(conv_id, run_id, '', task.get('config'))\n",
+        """    _emit_run_concluded(
+        conv_id,
+        run_id,
+        '',
+        task.get('config'),
+        user_id=owner_user_id,
+    )
+""",
         "    pass  # NC-3\n",
         run,
     )

@@ -8,8 +8,8 @@ Covers the two recovery layers added 2026-06-25:
   (a) throttle the Atom API (raise) and (b) serve a canned abs page → the
   function must recover the title from the abs page.
 
-  Layer 2 — report Paper-Card backfill: ``_extract_title_from_report`` parses
-  the ``| **Title** | … |`` row (EN + ZH), and ``_backfill_library_title``
+  Layer 2 — report Paper-Card backfill: ``extract_title_from_report`` parses
+  the ``| **Title** | … |`` row (EN + ZH), and ``backfill_library_title``
   upserts it into ``paper_library`` ONLY when the stored title is a bare
   ``arXiv:<id>`` placeholder — never clobbering a user-renamed title.
 
@@ -30,10 +30,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # the production data-locality rule instead of escaping to a system temp dir.
 _TMP = (Path(__file__).resolve().parents[1] / 'data' /
         'storage-certification' / f'title-recovery-{os.getpid()}')
-os.environ.setdefault('TOFU_DB_BACKEND', 'sqlite')
-os.environ.setdefault('TRADING_ENABLED', '0')
 _TEST_RUNTIME = None
 pytestmark = pytest.mark.unit
+
+TEST_OWNER_USER_ID = 1
 
 
 def _bootstrap_test_db():
@@ -61,11 +61,20 @@ def _shutdown_test_storage():
 
 @pytest.fixture(scope='module', autouse=True)
 def _storage_sidecar():
-    _bootstrap_test_db()
-    try:
-        yield
-    finally:
-        _shutdown_test_storage()
+    # Deployment/storage authority is explicit at test execution time.  Never
+    # leak a retired backend selector while pytest is still collecting other
+    # modules that import the fail-closed application composition root.
+    with pytest.MonkeyPatch.context() as environment:
+        environment.setenv('TOFU_DEPLOYMENT_MODE', 'personal')
+        environment.setenv('TOFU_PROCESS_ROLE', 'all')
+        environment.setenv('TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE', '1')
+        environment.setenv('TRADING_ENABLED', '0')
+        environment.delenv('TOFU_DB_BACKEND', raising=False)
+        _bootstrap_test_db()
+        try:
+            yield
+        finally:
+            _shutdown_test_storage()
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -189,95 +198,103 @@ def test_fetch_title_all_sources_fail_returns_empty():
 
 # ─── Layer 2a: Paper-Card title extraction ───────────────────────
 
-def test_extract_title_from_report_en():
-    from lib.paper import _extract_title_from_report
+def testextract_title_from_report_en():
+    from lib.paper.images.titles import extract_title_from_report
     report = (
         '# arXiv:1706.03762\n\n## ⚡ TL;DR\nblah\n\n## 📋 Paper Card\n'
         '| Field | Detail |\n|-------|--------|\n'
         '| **Title** | Attention Is All You Need |\n'
         '| **Authors** | Vaswani et al. |\n'
     )
-    assert _extract_title_from_report(report) == 'Attention Is All You Need'
-    _ok('_extract_title_from_report parses the EN Paper Card title row')
+    assert extract_title_from_report(report) == 'Attention Is All You Need'
+    _ok('extract_title_from_report parses the EN Paper Card title row')
 
 
-def test_extract_title_from_report_zh():
-    from lib.paper import _extract_title_from_report
+def testextract_title_from_report_zh():
+    from lib.paper.images.titles import extract_title_from_report
     report = (
         '## ⚡ 一句话总结\n...\n\n## 📋 论文信息卡\n'
         '| 字段 | 内容 |\n|------|------|\n'
         '| **标题** | Attention Is All You Need |\n'
     )
-    assert _extract_title_from_report(report) == 'Attention Is All You Need'
-    _ok('_extract_title_from_report parses the ZH Paper Card (标题) row')
+    assert extract_title_from_report(report) == 'Attention Is All You Need'
+    _ok('extract_title_from_report parses the ZH Paper Card (标题) row')
 
 
 def test_extract_title_rejects_placeholder_and_arxiv():
-    from lib.paper import _extract_title_from_report
+    from lib.paper.images.titles import extract_title_from_report
     # Unfilled prompt placeholder → ''
-    assert _extract_title_from_report(
+    assert extract_title_from_report(
         '## 📋 Paper Card\n| **Title** | (full title) |\n') == ''
     # A title that is itself an arXiv id is no improvement → ''
-    assert _extract_title_from_report(
+    assert extract_title_from_report(
         '## 📋 Paper Card\n| **Title** | arXiv:1706.03762 |\n') == ''
     # Missing row → ''
-    assert _extract_title_from_report('## TL;DR\nno card here') == ''
-    _ok('_extract_title_from_report rejects placeholders / arXiv-id / missing row')
+    assert extract_title_from_report('## TL;DR\nno card here') == ''
+    _ok('extract_title_from_report rejects placeholders / arXiv-id / missing row')
 
 
 def test_extract_title_strips_markdown_link():
-    from lib.paper import _extract_title_from_report
+    from lib.paper.images.titles import extract_title_from_report
     report = '## 📋 Paper Card\n| **Title** | [Real Title](https://x.com) |\n'
-    assert _extract_title_from_report(report) == 'Real Title'
-    _ok('_extract_title_from_report strips a markdown link to its text')
+    assert extract_title_from_report(report) == 'Real Title'
+    _ok('extract_title_from_report strips a markdown link to its text')
 
 
-# ─── Layer 2d: _ensure_title_heading placeholder-H1 repair ───────
+# ─── Layer 2d: ensure_title_heading placeholder-H1 repair ───────
 # (cache / re-render path — the heading that shows arXiv:<id> instead of the
 #  paper title because the model baked a placeholder H1 into the report body)
 
 def test_ensure_heading_repairs_placeholder_h1_from_card():
-    from lib.paper import _ensure_title_heading
+    from lib.paper.images.titles import ensure_title_heading
     # No library row for this hash → repair must come from the Paper Card.
     report = (
         '# arXiv:2601.04171v1\n\n## ⚡ TL;DR\nx\n\n## 📋 Paper Card\n'
         '| Field | Detail |\n|-------|--------|\n'
         '| **Title** | Agentic Rubrics as Contextual Verifiers for SWE Agents |\n'
     )
-    out = _ensure_title_heading(report, 'abcdef0000000000000000000000bb01')
+    out = ensure_title_heading(
+        report, 'abcdef0000000000000000000000bb01',
+        user_id=TEST_OWNER_USER_ID)
     assert out.splitlines()[0] == \
         '# Agentic Rubrics as Contextual Verifiers for SWE Agents', \
         f'placeholder H1 not repaired: {out.splitlines()[0]!r}'
     # Body below the heading is untouched.
     assert '## ⚡ TL;DR' in out and '## 📋 Paper Card' in out
-    _ok('_ensure_title_heading swaps a placeholder # arXiv:<id> H1 for the Card title')
+    _ok('ensure_title_heading swaps a placeholder # arXiv:<id> H1 for the Card title')
 
 
 def test_ensure_heading_leaves_real_h1_untouched():
-    from lib.paper import _ensure_title_heading
+    from lib.paper.images.titles import ensure_title_heading
     report = '# Attention Is All You Need\n\n## TL;DR\nx\n'
-    assert _ensure_title_heading(report, 'abcdef0000000000000000000000bb02') == report
-    _ok('_ensure_title_heading leaves a correct H1 untouched')
+    assert ensure_title_heading(
+        report, 'abcdef0000000000000000000000bb02',
+        user_id=TEST_OWNER_USER_ID) == report
+    _ok('ensure_title_heading leaves a correct H1 untouched')
 
 
 def test_ensure_heading_prepends_when_missing():
-    from lib.paper import _ensure_title_heading
+    from lib.paper.images.titles import ensure_title_heading
     report = (
         '## ⚡ TL;DR\nx\n\n## 📋 Paper Card\n'
         '| **Title** | Some Paper Title |\n'
     )
-    out = _ensure_title_heading(report, 'abcdef0000000000000000000000bb03')
+    out = ensure_title_heading(
+        report, 'abcdef0000000000000000000000bb03',
+        user_id=TEST_OWNER_USER_ID)
     assert out.splitlines()[0] == '# Some Paper Title', out.splitlines()[0]
-    _ok('_ensure_title_heading prepends a title when no H1 is present')
+    _ok('ensure_title_heading prepends a title when no H1 is present')
 
 
 def test_ensure_heading_keeps_placeholder_when_no_better_title():
-    from lib.paper import _ensure_title_heading
+    from lib.paper.images.titles import ensure_title_heading
     # Placeholder H1, no card title, no library row → leave as-is (nothing better).
     report = '# arXiv:2601.04171v1\n\n## TL;DR\nbody\n'
-    out = _ensure_title_heading(report, 'abcdef0000000000000000000000bb04')
+    out = ensure_title_heading(
+        report, 'abcdef0000000000000000000000bb04',
+        user_id=TEST_OWNER_USER_ID)
     assert out.splitlines()[0] == '# arXiv:2601.04171v1', out.splitlines()[0]
-    _ok('_ensure_title_heading keeps placeholder H1 when no better title exists')
+    _ok('ensure_title_heading keeps placeholder H1 when no better title exists')
 
 
 # ─── Layer 2b: library backfill (placeholder-only) ───────────────
@@ -297,42 +314,48 @@ def _read_title(phash, row_id='p1'):
     del row_id  # each test hash is unique; identity returns its newest row
     from lib.storage import get_storage_client
     row = get_storage_client().query(
-        'paper.library.identity', {'paper_hash': phash})
+        'paper.library.identity', {
+            'user_id': TEST_OWNER_USER_ID, 'paper_hash': phash})
     return row['title'] if row else None
 
 
 def test_backfill_heals_arxiv_placeholder():
-    from lib.paper import _backfill_library_title
+    from lib.paper.images.titles import backfill_library_title
     phash = 'abcdef0000000000000000000000000a'
     _seed_library_row(phash, 'arXiv:1706.03762')
-    out = _backfill_library_title(phash, 'Attention Is All You Need')
+    out = backfill_library_title(
+        phash, 'Attention Is All You Need', user_id=TEST_OWNER_USER_ID)
     assert out == 'Attention Is All You Need', f'returned {out!r}'
     assert _read_title(phash) == 'Attention Is All You Need'
     _ok('backfill heals a row whose title is a bare arXiv:<id>')
 
 
 def test_backfill_heals_empty_title():
-    from lib.paper import _backfill_library_title
+    from lib.paper.images.titles import backfill_library_title
     phash = 'abcdef0000000000000000000000000b'
     _seed_library_row(phash, '')
-    _backfill_library_title(phash, 'Some Real Title')
+    backfill_library_title(
+        phash, 'Some Real Title', user_id=TEST_OWNER_USER_ID)
     assert _read_title(phash) == 'Some Real Title'
     _ok('backfill heals a row with an empty title')
 
 
 def test_backfill_respects_user_renamed_title():
-    from lib.paper import _backfill_library_title
+    from lib.paper.images.titles import backfill_library_title
     phash = 'abcdef0000000000000000000000000c'
     _seed_library_row(phash, 'My Custom Name')   # user-renamed → must NOT change
-    out = _backfill_library_title(phash, 'Attention Is All You Need')
+    out = backfill_library_title(
+        phash, 'Attention Is All You Need', user_id=TEST_OWNER_USER_ID)
     assert _read_title(phash) == 'My Custom Name', 'user title was clobbered!'
     assert out == 'My Custom Name', f'returned {out!r}'
     _ok('backfill leaves a user-renamed title untouched (returns existing)')
 
 
 def test_backfill_no_row_returns_new_title():
-    from lib.paper import _backfill_library_title
-    out = _backfill_library_title('abcdef00000000000000000000000099', 'Title X')
+    from lib.paper.images.titles import backfill_library_title
+    out = backfill_library_title(
+        'abcdef00000000000000000000000099', 'Title X',
+        user_id=TEST_OWNER_USER_ID)
     assert out == 'Title X', f'returned {out!r}'
     _ok('backfill with no matching row returns the new title (no crash)')
 
@@ -349,9 +372,9 @@ _MINI_REPORT = (
 
 
 def _run_engine_once(phash, report_body=_MINI_REPORT):
-    """Drive _run_report_task with a one-shot mocked dispatch (no network)."""
-    import lib.paper.report_engine as re_mod
-    from lib.paper import _new_report_task
+    """Drive run_report_task with a one-shot mocked dispatch (no network)."""
+    import lib.paper.report_engine.worker as re_mod
+    from lib.paper.report_runtime import _new_report_task
     orig = re_mod.dispatch_stream
 
     def _fake_dispatch(messages, on_content=None, on_thinking=None, **kw):
@@ -362,7 +385,7 @@ def _run_engine_once(phash, report_body=_MINI_REPORT):
 
     re_mod.dispatch_stream = _fake_dispatch
     try:
-        task = _new_report_task(f'rpt_{phash[:8]}', phash, 'en', None)
+        task = _new_report_task(f'rpt_{phash[:8]}', phash, 'en', None, user_id=TEST_OWNER_USER_ID)
         # This suite owns title extraction/backfill, not the independently
         # tested post-report agents whose interactive defaults are ON.
         task['config'] = {
@@ -370,7 +393,7 @@ def _run_engine_once(phash, report_body=_MINI_REPORT):
             'paperTermfillEnabled': False,
             'paperCheckpointsEnabled': False,
         }
-        re_mod._run_report_task(task, [
+        re_mod.run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper'},
         ], [])
@@ -433,8 +456,8 @@ def main():
         test_fetch_title_recovers_via_abs_page,
         test_fetch_title_api_success_no_fallback,
         test_fetch_title_all_sources_fail_returns_empty,
-        test_extract_title_from_report_en,
-        test_extract_title_from_report_zh,
+        testextract_title_from_report_en,
+        testextract_title_from_report_zh,
         test_extract_title_rejects_placeholder_and_arxiv,
         test_extract_title_strips_markdown_link,
         test_ensure_heading_repairs_placeholder_h1_from_card,

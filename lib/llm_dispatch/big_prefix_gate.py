@@ -201,7 +201,7 @@ def residency_wait_budget_ms() -> float:
     """Max time (ms) a NEW distinct big prefix waits for a resident slot to free
     before proceeding degraded, in residency mode. Default 1500 (1.5s).
 
-    ★ CRITICAL — this is DELIBERATELY SEPARATE from :func:`wait_budget_ms` (the
+    CRITICAL — this is DELIBERATELY SEPARATE from :func:`wait_budget_ms` (the
     stream-concurrency budget, default 45000). Residency lives on the cache-TTL
     timescale (minutes): a resident REFRESHES its TTL to now+TTL every round, so
     on a SATURATED SINGLE POOL the working set never drains and a 3rd distinct
@@ -336,7 +336,7 @@ def _reserve_locked(table: dict[str, float], conv_id: str, until: float,
     """Set/refresh ``conv_id``'s residency to ``until``, then LRU-BOUND the
     table to ``cap`` entries. Caller holds the key's cv.
 
-    ★ THE unbounded-growth fix. A request that proceeds DEGRADED (forced
+    THE unbounded-growth fix. A request that proceeds DEGRADED (forced
     through a saturated working set) STILL wrote its prefix to the key's pool,
     so it IS physically resident — but the pool is a finite LRU cache: writing
     a new prefix EVICTS the least-recently-used one. Modelling that here (evict
@@ -377,7 +377,7 @@ def big_prefix_slot(key_name: str, est_tokens: int, *, conv_id: str = '',
     request is below :func:`threshold_tokens`, ``key_name`` is empty, OR the
     model this request runs on is served by a SINGLE key (``key_count <= 1``).
 
-    ★ SINGLE-KEY NO-OP (2026-07-17): admission gating only pays off with ≥2
+    SINGLE-KEY NO-OP (2026-07-17): admission gating only pays off with ≥2
     keys, where holding a big prefix back lets it route to a DIFFERENT key's
     cache namespace. On a single-key model the gate cannot add capacity — it can
     only SERIALIZE the one shared pool, which just adds latency without

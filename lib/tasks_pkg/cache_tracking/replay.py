@@ -23,7 +23,7 @@ Public API
 ==========
   - ``build_round_usage(body, cache_read, cache_write, routing, capture_routing=True)``
     → the ``usage`` dict, byte-for-byte the keys ``_sse_core`` relays.
-  - ``replay_rounds(rounds, conv_id=..., capture_routing=True)``
+  - ``replay_rounds(rounds, user_id=..., conv_id=..., capture_routing=True)``
     → ``{'rounds': [{round, verdict, bucket}], 'buckets': {bucket: n}}``.
   - ``load_probe_dump_rounds(dump_dir)`` → rounds list from a probe-dump dir
     (best-effort; cache token counts are unknown in a body-only dump so the
@@ -98,23 +98,33 @@ def build_round_usage(body: dict, *, cache_read: int, cache_write: int,
     return usage
 
 
-def replay_rounds(rounds: list[dict], *, conv_id: str = 'replay',
+def replay_rounds(rounds: list[dict], *, user_id: int,
+                  conv_id: str = 'replay',
                   capture_routing: bool = True) -> dict:
     """Drive ``detect_cache_break`` across a sequence of rounds; bucket the
     verdicts.
 
     Each round dict: ``{'body': <post-translation body>, 'cache_read': int,
     'cache_write': int, 'routing': {'key_hash','anthropic_beta','endpoint'}}``.
+    ``source_tools`` may additionally carry the stable pre-projection tool list
+    that the live orchestrator passes to ``detect_cache_break``.  This matters
+    when a last-mile provider projection mutates the wire schema: replay must
+    preserve the live separation between source authority and final wire truth
+    instead of accidentally making the source-tool hash reveal the mutation.
     Uses a FRESH isolated cache-state key (per ``conv_id``) and clears any prior
     state for it first, so replays are deterministic and independent.
 
     Returns ``{'rounds': [{'round', 'verdict', 'bucket'}], 'buckets': {name:n}}``.
     """
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.cache_tracking._state import _state_key
+    from lib.identity import require_user_id
+
+    owner_user_id = require_user_id(user_id, context='cache replay')
 
     # Isolate this replay: drop any residual state for the conv key.
-    _k = _state_key(conv_id)
+    _k = _state_key(conv_id, user_id=owner_user_id)
     _cache_states.pop(_k, None)
 
     out_rounds: list[dict] = []
@@ -126,8 +136,10 @@ def replay_rounds(rounds: list[dict], *, conv_id: str = 'replay',
             cache_write=int(rd.get('cache_write', 0)),
             routing=rd.get('routing'), capture_routing=capture_routing)
         verdict = detect_cache_break(
-            conv_id, body.get('messages') or [], body.get('tools'),
-            body.get('model', 'claude-opus-4'), usage=usage)
+            conv_id, body.get('messages') or [],
+            rd.get('source_tools', body.get('tools')),
+            body.get('model', 'claude-opus-4'), usage=usage,
+            user_id=owner_user_id, durable=False)
         bucket = classify_verdict(verdict)
         # Round 0 establishes the baseline (detector returns None on call 0);
         # only tally rounds that actually produced a classification signal.

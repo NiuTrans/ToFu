@@ -62,8 +62,8 @@ not a security sandbox — a plugin's handler code still lives in-process.
 
 Package layout (FACADE)
 -----------------------
-The former single-file ``lib/tools/registry.py`` was split into cohesive
-sub-modules; this ``__init__`` re-exports EVERY symbol so
+This facade is split into cohesive sub-modules; ``__init__`` re-exports every
+public compatibility symbol so
 ``from lib.tools.registry import X`` (and ``registry.X`` attribute access)
 keeps working byte-identically. The import path is unchanged.
 
@@ -91,12 +91,14 @@ logger = get_logger(__name__)
 from lib.tools.registry._spec import (  # noqa: E402,F401
     ToolContext,
     ToolHandlerFn,
+    ToolResultMetaBuilder,
     ToolSpec,
     _REGISTERED_KEYS,
     _TOOL_SPECS,
     _sync_one,
     all_specs,
     assemble_tool_list,
+    build_tool_result_meta,
     register_tool_spec,
     sync_spec_handlers,
 )
@@ -121,6 +123,7 @@ from lib.tools.registry._build import (  # noqa: E402,F401
     _build_search,
     _build_swarm,
     _build_todo,
+    canonical_human_guidance_schema,
     _register_builtins,
 )
 
@@ -144,10 +147,11 @@ from lib.tools.registry import _spec  # noqa: E402,F401
 
 __all__ = [
     # dataclasses
-    'ToolContext', 'ToolSpec', 'ToolHandlerFn',
+    'ToolContext', 'ToolSpec', 'ToolHandlerFn', 'ToolResultMetaBuilder',
     # registry core
     'register_tool_spec', 'all_specs', 'sync_spec_handlers',
-    'assemble_tool_list',
+    'assemble_tool_list', 'build_tool_result_meta',
+    'canonical_human_guidance_schema',
     # plugin discovery + allow-list
     'discover_plugin_specs', 'available_plugins', 'resolve_enabled_plugins',
 ]

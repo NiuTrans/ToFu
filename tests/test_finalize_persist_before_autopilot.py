@@ -1,30 +1,8 @@
-"""tests/test_finalize_persist_before_autopilot.py — terminal persist must
-not be hostage to the VU sub-task's liveness.
+"""Terminal executor state settles before the Autopilot successor can block.
 
-Measured incident (2026-07-31, task 752273db, epic pt_5f0262fc): the task
-finished at 20:38:27 — message committed fr=stop (pre-emit sync),
-status='done' in memory — but its ``task_results`` row stayed 'running'
-for 2h57m. ``_finalize_and_emit_done`` called ``persist_task_result``
-AFTER ``maybe_run_autopilot``, and the VU sub-task runs INLINE inside
-that hook (``_run_single_turn`` on the finalize thread): it sat in a
-``run_command`` crawling a FUSE parent dir, so the persist (and the queue
-drain riding it) never ran until the zombie was aborted by hand. The
-baton's own comment already assumed the correct order
-("persist_task_result runs _dispatch_queued_message before our hook
-fires") — the code disagreed.
-
-The fix:
-  1. ``persist_task_result(task, _defer_heavy_release=True)`` runs BEFORE
-     the hook — terminal row, conv sync, queue drain, proactive status
-     all land before the VU can hang.
-  2. The heavy-state release is deferred past the hook (the VU inherits
-     ``task['messages']``) and runs right after ``append_event(done_evt)``.
-
-Pinned here: the source ORDER (with an in-test NEUTER proving the ratchet
-is keyed on it), the defer parameter's existence, and the release-split
-behaviour against the REAL ``persist_task_result``.
-
-Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_finalize_persist_before_autopilot.py -v
+Autopilot inherits the parent task's input context. Finalization therefore
+persists executor recovery state first, defers heavy-state release, emits the
+terminal event, runs the successor decision, and releases the context last.
 """
 
 from __future__ import annotations
@@ -123,6 +101,7 @@ def _mk_task(task_id):
     return {
         'id': task_id,
         'convId': '',
+        '_userId': 1,
         'status': 'done',
         'aborted': False,
         'content': 'answer',
@@ -144,36 +123,25 @@ def _mk_task(task_id):
 
 @pytest.fixture()
 def persist_side_effects_off(monkeypatch):
-    """Neutralise persist_task_result's fan-out (sync/queue/proactive/summary)
-    so the behavioural assertions isolate the release split. The row upsert
-    still runs (real DB, cleaned up per test)."""
+    """Replace durable fan-out so the test isolates the release contract."""
+    import lib.tasks_pkg.manager._persist as persist_module
     import lib.tasks_pkg.manager._sync as _sync
-    for name in ('_sync_result_to_conversation', '_update_proactive_execution_status',
-                 '_dispatch_queued_message', '_maybe_refresh_project_summary'):
-        monkeypatch.setattr(_sync, name, lambda *a, **k: None, raising=False)
-
-
-def _cleanup_row(task_id):
-    from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db
-    try:
-        db = get_thread_db(DOMAIN_CHAT)
-        db_execute_with_retry(db, 'DELETE FROM task_results WHERE task_id=?', (task_id,))
-        db.commit()
-    except Exception:
-        pass
+    monkeypatch.setattr(
+        persist_module, '_upsert_task_row', lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        persist_module, '_stamp_conv_provider_id', lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        _sync, '_update_proactive_execution_status', lambda *args, **kwargs: None)
 
 
 def test_defer_release_keeps_messages(persist_side_effects_off):
     from lib.tasks_pkg.manager import persist_task_result
     tid = 'pt5f-defer-%d' % os.getpid()
     task = _mk_task(tid)
-    try:
-        persist_task_result(task, _defer_heavy_release=True)
-        assert task['messages'] is not None, (
-            '_defer_heavy_release must NOT null task[\'messages\'] — the VU '
-            'sub-task inherits it after the early persist returns')
-    finally:
-        _cleanup_row(tid)
+    persist_task_result(task, _defer_heavy_release=True)
+    assert task['messages'] is not None, (
+        '_defer_heavy_release must NOT null task[\'messages\'] — the VU '
+        'sub-task inherits it after the early persist returns')
 
 
 def test_default_call_still_releases(persist_side_effects_off):
@@ -182,13 +150,10 @@ def test_default_call_still_releases(persist_side_effects_off):
     from lib.tasks_pkg.manager import persist_task_result
     tid = 'pt5f-nodefer-%d' % os.getpid()
     task = _mk_task(tid)
-    try:
-        persist_task_result(task)
-        assert task['messages'] is None, (
-            'the default path must still release heavy terminal state '
-            '(RSS bounding contract)')
-    finally:
-        _cleanup_row(tid)
+    persist_task_result(task)
+    assert task['messages'] is None, (
+        'the default path must still release heavy terminal state '
+        '(RSS bounding contract)')
 
 
 if __name__ == '__main__':

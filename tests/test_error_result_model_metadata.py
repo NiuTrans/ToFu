@@ -33,44 +33,31 @@ import sys
 
 import pytest
 
-pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._chat_sidecar',)
+pytestmark = [pytest.mark.unit, pytest.mark.usefixtures('chat_sidecar')]
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-os.environ.setdefault('TOFU_DB_BACKEND', 'sqlite')
-os.environ.setdefault('TOFU_DB_PATH', '/tmp/error_model_meta_unittest.db')
-
-
 def _seed_conv(conv_id):
-    import time as _time
-
-    from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
-    from lib.database._core_schema import CONVERSATIONS, upsert
+    from tests._seed import seed_conversation
     messages = [
         {'role': 'user', 'content': 'hi', 'timestamp': 1},
         {'role': 'assistant', 'content': '', 'thinking': '', 'toolRounds': [],
          'timestamp': 2},
     ]
-    db = get_thread_db(DOMAIN_CHAT)
-    now_ms = int(_time.time() * 1000)
-    upsert(db, CONVERSATIONS, {
-        'id': conv_id, 'user_id': 1, 'title': 'err-model-meta',
-        'messages': json_dumps_pg(messages), 'msg_count': len(messages),
-        'created_at': now_ms, 'updated_at': now_ms,
-    }, insert_cols=['id', 'user_id', 'title', 'messages', 'msg_count',
-                    'created_at', 'updated_at'], retry=True)
-    db.commit()
+    seed_conversation(conv_id, messages=messages, title='err-model-meta')
 
 
 def _cleanup(conv_id, task_id):
-    from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db
+    from lib.storage import get_storage_client
+    from tests._seed import delete_conversation
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        db_execute_with_retry(db, 'DELETE FROM conversations WHERE id=? AND user_id=1', (conv_id,))
-        db_execute_with_retry(db, 'DELETE FROM task_results WHERE task_id=?', (task_id,))
-        db.commit()
+        delete_conversation(conv_id)
+        get_storage_client(write=True).command(
+            'record.delete', {'namespace': 'task_results', 'key': task_id},
+            f'test-delete-task-result:{task_id}')
     except Exception:
         pass
 
@@ -79,9 +66,7 @@ def _run_failing_task(monkeypatch, conv_id):
     """Drive a REAL run_task whose FIRST LLM call dies at dispatch level
     (the revoked-OAuth 401 shape: a non-retryable exception before any token).
     Returns (task, persisted_metadata_dict)."""
-    import lib.tasks_pkg.llm_fallback as llm_fb
-    import lib.tasks_pkg.manager as mgr
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.llm_fallback._call as llm_fb
 
     class _DispatchDead(Exception):
         """Stand-in for the non-retryable dispatch failure (401/all-slots-dead)."""
@@ -89,45 +74,33 @@ def _run_failing_task(monkeypatch, conv_id):
     def _stub_raise(task, body, tag='', on_tool_call_ready=None):
         raise _DispatchDead('OAuth access token has been revoked')
 
-    for mod in (mgr, orch, llm_fb):
-        if hasattr(mod, 'stream_llm_response'):
-            monkeypatch.setattr(mod, 'stream_llm_response', _stub_raise)
+    monkeypatch.setattr(llm_fb, 'stream_llm_response', _stub_raise)
 
     from lib.tasks_pkg.manager import create_task
-    from lib.tasks_pkg.orchestrator import run_task
+    from lib.tasks_pkg.orchestrator.api import run_task
     task = create_task(
         conv_id,
         [{'role': 'user', 'content': 'hi'}],
         {'model': 'yuju-claude-opus-5-evaDaily', 'projectEnabled': False},
+    user_id=1,
     )
     try:
         run_task(task)
     except Exception:
         pass  # run_task's own terminal handling may re-raise; the row is what matters
 
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    db = get_thread_db(DOMAIN_CHAT)
-    row = db.execute(
-        'SELECT status, metadata FROM task_results WHERE task_id=?', (task['id'],)
-    ).fetchone()
+    from lib.storage import get_storage_client
+    row = get_storage_client().query(
+        'record.get', {'namespace': 'task_results', 'key': task['id']})
     assert row, 'no task_results row persisted for the failed task'
-    meta = row[1]
+    value = row['value']
+    meta = value.get('metadata')
     if isinstance(meta, str):
         meta = _json.loads(meta) if meta else {}
-    return task, row[0], (meta or {})
+    return task, value.get('status'), (meta or {})
 
 
-@pytest.fixture()
-def _db():
-    from lib.database import init_db
-    try:
-        init_db()
-    except Exception as e:
-        pytest.skip(f'DB bootstrap unavailable in this env ({type(e).__name__}: {e})')
-    yield
-
-
-def test_dispatch_failure_persists_model_in_metadata(monkeypatch, _db):
+def test_dispatch_failure_persists_model_in_metadata(monkeypatch):
     """GROUND TRUTH: an error row from a first-call dispatch failure MUST
     carry metadata.model — per-model failure stats depend on it."""
     conv_id = 'cv-errmodel-' + os.urandom(4).hex()
@@ -143,33 +116,32 @@ def test_dispatch_failure_persists_model_in_metadata(monkeypatch, _db):
         _cleanup(conv_id, task['id'])
 
 
-def test_successful_round_still_stamps_model(monkeypatch, _db):
+def test_successful_round_still_stamps_model(monkeypatch):
     """Regression: the happy path (round succeeds) keeps recording the model —
     the Section-1 seed must not break the existing post-round stamp."""
-    import lib.tasks_pkg.llm_fallback as llm_fb
-    import lib.tasks_pkg.manager as mgr
-    import lib.tasks_pkg.orchestrator as orch
+    from lib.agent_core.events import EventType, build_event
+    import lib.tasks_pkg.llm_fallback._call as llm_fb
+    from lib.tasks_pkg.manager._events import append_event
 
     def _stub_ok(task, body, tag='', on_tool_call_ready=None):
         with task['content_lock']:
             task['content'] += 'hello'
-        mgr.append_event(task, mgr.build_event(mgr.EventType.DELTA, content='hello'))
+        append_event(task, build_event(EventType.DELTA, content='hello'))
         return ({'role': 'assistant', 'content': 'hello', 'tool_calls': []},
                 'stop',
                 {'prompt_tokens': 5, 'completion_tokens': 1, 'total_tokens': 6})
 
-    for mod in (mgr, orch, llm_fb):
-        if hasattr(mod, 'stream_llm_response'):
-            monkeypatch.setattr(mod, 'stream_llm_response', _stub_ok)
+    monkeypatch.setattr(llm_fb, 'stream_llm_response', _stub_ok)
 
     from lib.tasks_pkg.manager import create_task
-    from lib.tasks_pkg.orchestrator import run_task
+    from lib.tasks_pkg.orchestrator.api import run_task
     conv_id = 'cv-okmodel-' + os.urandom(4).hex()
     _seed_conv(conv_id)
     task = create_task(
         conv_id,
         [{'role': 'user', 'content': 'hi'}],
         {'model': 'kimi-k3', 'projectEnabled': False},
+    user_id=1,
     )
     try:
         run_task(task)

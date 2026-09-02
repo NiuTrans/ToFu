@@ -1,6 +1,6 @@
-"""Intent-stall nudge — the four-criterion classifier (epic pt_33ba079f5cea4841).
+"""Intent-stall nudge — the four-criterion classifier ().
 
-THE SHAPE (measured, docs/INTENT_STALL_MEASUREMENT.md): a tool round is
+THE SHAPE (measured, docs/modules/task_engine.md): a tool round is
 rejected or errors, and the model's NEXT round is plain prose with
 ``finish_reason=stop`` and zero tool calls — text that says it will continue,
 followed by nothing. The task settles normally and the user sees the
@@ -72,7 +72,7 @@ _HUMAN_HANDOFF_TOOLS = frozenset({'ask_user', 'request_human_input'})
 # Rejection classes that can NEVER succeed on retry — the tool is absent from
 # this turn's dispatched toolset, so nudging just re-drives the same dead end.
 # Surfaced to the user as a `tool_not_available` envelope instead
-# (orchestrator/_finalize, epic pt_88791cb08cb2495c).
+# (orchestrator/_finalize, ).
 _NON_RETRYABLE_MARKERS = (
     'is not a real tool',
     'not in the list of tools available',

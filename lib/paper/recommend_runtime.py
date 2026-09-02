@@ -15,10 +15,9 @@ reattach after refresh can find an in-flight run.
 
 import hashlib
 import threading
-import time
 
 from lib.log import get_logger
-from lib.task_runtime import TaskRuntime
+from lib.agent_core.task_runtime import TaskRuntime
 
 logger = get_logger(__name__)
 
@@ -28,8 +27,8 @@ _recommend_runtime = TaskRuntime(
     push_channel='paper',
     error_source='routes.paper:recommend',
 )
-# description-key → most-recent recommend task_id (for reattach after refresh).
-_recommend_latest_index: dict[str, str] = {}
+# (owner, description-key) → most-recent task_id.
+_recommend_latest_index: dict[tuple[int, str], str] = {}
 _recommend_index_lock = threading.Lock()
 _RECOMMEND_TASK_TTL = 1800
 
@@ -39,38 +38,39 @@ def _recommend_key(description: str) -> str:
     return hashlib.sha1((description or '').strip().encode('utf-8')).hexdigest()[:16]
 
 
-def _recommend_latest_for(desc_key: str) -> dict | None:
+def _recommend_latest_for(desc_key: str, *, user_id: int) -> dict | None:
     """Return the most recent recommend task for a description key, or None."""
     with _recommend_index_lock:
-        tid = _recommend_latest_index.get(desc_key)
+        tid = _recommend_latest_index.get((user_id, desc_key))
     if not tid:
         return None
-    return _recommend_runtime.get(tid)
+    return _recommend_runtime.get_owned(tid, user_id=user_id)
 
 
-def _recommend_register_latest(desc_key: str, task_id: str) -> None:
+def _recommend_register_latest(
+    desc_key: str, task_id: str, *, user_id: int,
+) -> None:
     with _recommend_index_lock:
-        _recommend_latest_index[desc_key] = task_id
+        _recommend_latest_index[(user_id, desc_key)] = task_id
 
 
-def _new_recommend_task(task_id, description, max_results):
+def _new_recommend_task(task_id, description, max_results, *, user_id: int):
     """Create a fresh recommend task. Registers it as the description's latest."""
     desc_key = _recommend_key(description)
     task = _recommend_runtime.create(
+        user_id=user_id,
         task_id=task_id,
         meta={'desc_key': desc_key, 'max_results': max_results},
     )
-    task.update({
+    _recommend_runtime.update_fields(task_id, fields={
         'task_id': task_id,
         'description': description,
         'desc_key': desc_key,
         'max_results': max_results,
-        'status': 'pending',
-        'finished_at': None,
         'results': [],          # grounded cards, in emit order
         'correction': None,     # optional false-premise correction block
     })
-    _recommend_register_latest(desc_key, task_id)
+    _recommend_register_latest(desc_key, task_id, user_id=user_id)
     return task
 
 
@@ -81,21 +81,14 @@ def _append_recommend_event(task, event):
 
 def _cleanup_stale_recommend_tasks():
     """Drop finished recommend tasks older than TTL and prune the latest index."""
-    finished_ids: set = set()
-    with _recommend_runtime._lock:
-        for tid, t in _recommend_runtime._tasks.items():
-            if t['status'] in ('done', 'error', 'aborted') and t.get('finished_at'):
-                if time.time() - t['finished_at'] > _RECOMMEND_TASK_TTL:
-                    finished_ids.add(tid)
     n = _recommend_runtime.cleanup_stale()
     if n:
+        live_task_ids = _recommend_runtime.task_ids()
         with _recommend_index_lock:
-            stale = [k for k, tid in _recommend_latest_index.items() if tid in finished_ids]
+            stale = [
+                key for key, task_id in _recommend_latest_index.items()
+                if task_id not in live_task_ids
+            ]
             for k in stale:
                 _recommend_latest_index.pop(k, None)
         logger.debug('[Paper:Recommend] Cleaned %d stale task(s)', n)
-
-
-# Compatibility aliases (tests / introspection).
-_recommend_tasks = _recommend_runtime._tasks       # type: ignore[attr-defined]
-_recommend_tasks_lock = _recommend_runtime._lock   # type: ignore[attr-defined]

@@ -47,25 +47,14 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._chat_sidecar',)
 
 
 @pytest.fixture(autouse=True)
-def _clean(flask_app):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_tasks')
-        db.execute('DELETE FROM project_events')
-        db.execute('DELETE FROM message_queue')
-        db.commit()
-    yield
+def _sidecar_authority(chat_sidecar):
+    """Exercise the production storage authority; paths are unique per case."""
+    return chat_sidecar
 
 
 @pytest.fixture(autouse=True)
@@ -74,15 +63,11 @@ def _stub_push(monkeypatch):
 
 
 def _row(flask_app, project_path, task_id):
-    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib.conversations.project_board import read_board
     with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        r = db.execute(
-            'SELECT blocked_until, block_count, block_reason, block_question, '
-            '       human_answer, status '
-            'FROM project_tasks WHERE id=? AND project_path=?',
-            (task_id, project_path)).fetchone()
-    return dict(r) if r else None
+        tasks = read_board(
+            project_path, user_id=TEST_OWNER_USER_ID)['tasks']
+    return next((task for task in tasks if task['id'] == task_id), None)
 
 
 # The exact prose that caused the measured 19 h silent park.
@@ -100,8 +85,8 @@ def test_reason_claiming_a_question_card_without_one_is_refused(flask_app):
     with no ``question=``, must be REFUSED — never silently accepted."""
     from lib.conversations.project_board import block_task, post_task
     with flask_app.app_context():
-        tid = post_task('/bqc/1', 'cA', 'epic with a lying block reason')['id']
-        res = block_task('/bqc/1', 'cA', tid, _LYING_REASON)
+        tid = post_task('/bqc/1', 'cA', 'epic with a lying block reason', user_id=TEST_OWNER_USER_ID)['id']
+        res = block_task('/bqc/1', 'cA', tid, _LYING_REASON, user_id=TEST_OWNER_USER_ID)
     assert res.get('ok') is False, \
         'a reason claiming a question card must not be accepted without one'
     assert res.get('error') == 'question_required', \
@@ -113,9 +98,9 @@ def test_refusal_happens_before_any_mutation(flask_app):
     no reason written. (The ``summary_required`` precedent: validate first.)"""
     from lib.conversations.project_board import block_task, post_task
     with flask_app.app_context():
-        tid = post_task('/bqc/2', 'cA', 'epic that must stay pristine')['id']
+        tid = post_task('/bqc/2', 'cA', 'epic that must stay pristine', user_id=TEST_OWNER_USER_ID)['id']
         before = _row(flask_app, '/bqc/2', tid)
-        block_task('/bqc/2', 'cA', tid, _LYING_REASON)
+        block_task('/bqc/2', 'cA', tid, _LYING_REASON, user_id=TEST_OWNER_USER_ID)
         after = _row(flask_app, '/bqc/2', tid)
     for field in ('blocked_until', 'block_count', 'block_reason',
                   'block_question', 'status'):
@@ -130,9 +115,9 @@ def test_refused_block_never_produces_a_silent_park(flask_app):
     from lib.conversations.project_attention import build_attention_items
     from lib.conversations.project_board import block_task, post_task
     with flask_app.app_context():
-        tid = post_task('/bqc/3', 'cA', 'epic that must not park silently')['id']
-        block_task('/bqc/3', 'cA', tid, _LYING_REASON)
-        att = build_attention_items('/bqc/3')
+        tid = post_task('/bqc/3', 'cA', 'epic that must not park silently', user_id=TEST_OWNER_USER_ID)['id']
+        block_task('/bqc/3', 'cA', tid, _LYING_REASON, user_id=TEST_OWNER_USER_ID)
+        att = build_attention_items('/bqc/3', user_id=TEST_OWNER_USER_ID)
         row = _row(flask_app, '/bqc/3', tid)
     parked = int(row['blocked_until'] or 0) > 0
     assert not (parked and att['needsYou'] == 0), (
@@ -150,12 +135,12 @@ def test_same_reason_is_accepted_when_the_question_is_registered(flask_app):
     from lib.conversations.project_attention import build_attention_items
     from lib.conversations.project_board import block_task, post_task
     with flask_app.app_context():
-        tid = post_task('/bqc/4', 'cA', 'epic with a real question')['id']
+        tid = post_task('/bqc/4', 'cA', 'epic with a real question', user_id=TEST_OWNER_USER_ID)['id']
         res = block_task('/bqc/4', 'cA', tid, _LYING_REASON,
                          question='Which sub-part should slice 11 advance?',
                          options=[{'label': 'continue sub-part 2'},
-                                  {'label': 'sub-part 1 pack-split'}])
-        att = build_attention_items('/bqc/4')
+                                  {'label': 'sub-part 1 pack-split'}], user_id=TEST_OWNER_USER_ID)
+        att = build_attention_items('/bqc/4', user_id=TEST_OWNER_USER_ID)
     assert res.get('ok') is True, f'structured question rejected: {res!r}'
     row = _row(flask_app, '/bqc/4', tid)
     assert row['block_question'], 'question column must be populated'
@@ -172,9 +157,9 @@ def test_ordinary_human_gated_block_without_a_question_still_allowed(flask_app):
     must still be accepted questionless, or every legitimate block breaks."""
     from lib.conversations.project_board import block_task, post_task
     with flask_app.app_context():
-        tid = post_task('/bqc/5', 'cA', 'ordinary human gate')['id']
+        tid = post_task('/bqc/5', 'cA', 'ordinary human gate', user_id=TEST_OWNER_USER_ID)['id']
         res = block_task('/bqc/5', 'cA', tid,
-                         '[human-gated] needs infra sign-off before rollout')
+                         '[human-gated] needs infra sign-off before rollout', user_id=TEST_OWNER_USER_ID)
     assert res.get('ok') is True, \
         f'a plain [human-gated] block must not be refused: {res!r}'
     assert _row(flask_app, '/bqc/5', tid)['block_count'] == 1
@@ -185,9 +170,9 @@ def test_sibling_block_is_never_refused(flask_app):
     question by construction and must never trip this guard."""
     from lib.conversations.project_board import block_task, post_task
     with flask_app.app_context():
-        tid = post_task('/bqc/6', 'cA', 'sibling-gated epic')['id']
+        tid = post_task('/bqc/6', 'cA', 'sibling-gated epic', user_id=TEST_OWNER_USER_ID)['id']
         res = block_task('/bqc/6', 'cA', tid,
-                         '[sibling] path=lib/x.py awaiting the owner of that file')
+                         '[sibling] path=lib/x.py awaiting the owner of that file', user_id=TEST_OWNER_USER_ID)
     assert res.get('ok') is True, f'[sibling] block must not be refused: {res!r}'
 
 
@@ -205,9 +190,9 @@ def test_oversized_reason_truncation_is_logged(flask_app, caplog):
     )
     long_reason = '[human-gated] ' + ('x' * (_TITLE_MAX_CHARS + 500))
     with flask_app.app_context():
-        tid = post_task('/bqc/7', 'cA', 'epic with an oversized reason')['id']
+        tid = post_task('/bqc/7', 'cA', 'epic with an oversized reason', user_id=TEST_OWNER_USER_ID)['id']
         with caplog.at_level(logging.WARNING, logger='lib.conversations.project_board'):
-            res = block_task('/bqc/7', 'cA', tid, long_reason)
+            res = block_task('/bqc/7', 'cA', tid, long_reason, user_id=TEST_OWNER_USER_ID)
     assert res.get('ok') is True
     row = _row(flask_app, '/bqc/7', tid)
     assert len(row['block_reason']) == _TITLE_MAX_CHARS, 'reason should still be capped'

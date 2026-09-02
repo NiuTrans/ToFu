@@ -1,6 +1,6 @@
 """lib/lifecycle_approval.py — Human-approval gate for server lifecycle actions.
 
-WHY THIS EXISTS (2026-07-28, epic pt_40d00fd526e5479a)
+WHY THIS EXISTS (2026-07-28, )
 ------------------------------------------------------
 Incident: an autopilot conversation (ms4206iqwyb7h4) fired
 ``POST /api/v1/update/restart {"force": true}`` via ``run_command`` TWICE in
@@ -231,7 +231,7 @@ def decide(approval_id: str, approved: bool, *, decided_by: str = 'ui',
     ``decide_ua`` records the decider's user-agent: in open-auth mode a
     forged approval dance is possible in principle, but a curl-flavoured
     decider UA is then a smoking gun sitting in the audit trail —
-    deliberateness is forced into the open (pt_40d00fd526e5479a).
+    deliberateness is forced into the open ().
 
     Returns the updated record, or None when the id is unknown / already
     terminal / expired (fail-closed — a stale pending cannot be approved).

@@ -1,10 +1,11 @@
-# Incident anchor: born in commit 63c1e4a6 — refactor(orchestrator): pt_03f4cdf1 slice 22 — extract per-round tool...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 22 wire-parity: _tool_dispatch_round.py extraction from _run.py."""
 
 import inspect
 
-from lib.tasks_pkg.orchestrator import _tool_dispatch_round
+import pytest
+
+import lib.tasks_pkg.orchestrator._tool_dispatch_round as _tool_dispatch_round
+pytestmark = pytest.mark.unit
 
 
 class TestToolDispatchRoundWireParity:
@@ -56,18 +57,14 @@ class TestToolDispatchRoundWireParity:
         i_exec = src.index("execute_tool_pipeline(")
         assert i_parse < i_sanitize < i_emit < i_exec
 
-    def test_docstring_mentions_extraction(self):
-        assert "pt_03f4cdf1" in (_tool_dispatch_round.__doc__ or "")
-
-
 class TestRunTaskDelegation:
     def test_run_task_delegates_to_helper(self):
-        from lib.tasks_pkg.orchestrator import _run
-        src = inspect.getsource(_run.run_task)
+        import lib.tasks_pkg.orchestrator._root_agent_loop as _root_agent_loop
+        src = inspect.getsource(_root_agent_loop)
         assert "run_tool_dispatch(" in src
 
     def test_run_task_no_longer_carries_cluster_inline(self):
-        from lib.tasks_pkg.orchestrator import _run
+        import lib.tasks_pkg.orchestrator._run as _run
         src = inspect.getsource(_run.run_task)
         assert "parse_tool_calls(" not in src
         assert "execute_tool_pipeline(" not in src

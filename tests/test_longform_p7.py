@@ -22,7 +22,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-from lib.longform import recipe as rec
+import lib.longform.recipe as rec
 from lib.production import stages as st
 
 
@@ -214,8 +214,8 @@ def test_produce_report_tool_is_registered_and_ungated_by_project():
                       project_enabled=False, search_mode='multi',
                       search_enabled=True, fetch_enabled=False,
                       code_exec_enabled=False, browser_enabled=False,
-                      desktop_enabled=False, swarm_enabled=False)
+                      desktop_enabled=False)
     assemble_tool_list(ctx)
-    names = {t['function']['name'] for t in ctx.enabled_tool_catalog}
+    names = {t['function']['name'] for t in ctx.executable_tool_catalog}
     assert 'produce_report' in names
     assert 'produce_video' in names

@@ -19,14 +19,46 @@ import time
 from typing import AsyncGenerator
 
 from lib.compat._common import (
+    CompatTerminalFailure,
     apply_common_cfg,
     apply_thinking_cfg,
     apply_tools_and_personal_defaults,
+    require_deliverable_terminal,
     short_id,
 )
 from lib.log import get_logger
+from lib.turn_verdict import terminal_finish_reason
 
 logger = get_logger(__name__)
+
+
+def _openai_finish_reason(raw_finish: str, *, aborted: bool = False) -> str:
+    """Map one validated Tofu reason to OpenAI's closed finish enum."""
+    if aborted:
+        return 'length'
+    mapping = {
+        'stop': 'stop',
+        'done': 'stop',
+        'completed': 'stop',
+        'end_turn': 'stop',
+        'length': 'length',
+        'max_tokens': 'length',
+        'context_length': 'length',
+        'budget_exceeded': 'length',
+        'incomplete': 'length',
+        'max_turns': 'length',
+        'aborted': 'length',
+        'interrupted': 'length',
+        'tool_calls': 'tool_calls',
+        'tool_use': 'tool_calls',
+        'function_call': 'function_call',
+        'content_filter': 'content_filter',
+    }
+    try:
+        return mapping[raw_finish]
+    except KeyError as exc:
+        raise ValueError(
+            f'unsupported verified finish reason: {raw_finish!r}') from exc
 
 
 # ── Request translation ────────────────────────────────────────────
@@ -77,7 +109,7 @@ def translate_openai_request(body: dict) -> tuple[list[dict], dict, dict]:
 
 def _assistant_message(task: dict) -> dict:
     # Deliverable = narration-free answer from the segment model (epic
-    # pt_cb8f98b0cb9b47fb, step 3). Single source of truth across sync +
+    # , step 3). Single source of truth across sync +
     # streaming so a headless caller never sees inter-round scaffolding prose.
     from lib.tasks_pkg.segments import deliverable_text
     msg: dict = {'role': 'assistant', 'content': deliverable_text(task)}
@@ -92,19 +124,9 @@ def _assistant_message(task: dict) -> dict:
 def build_openai_response(task: dict, model: str,
                             requested_id: str = '') -> dict:
     """Turn a finished task into an OpenAI ``chat.completion`` body."""
-    finish = task.get('finishReason') or 'stop'
-    if task.get('status') == 'error':
-        # 'error' is NOT a valid OpenAI finish_reason enum value
-        # (stop|length|tool_calls|content_filter|function_call). A task that
-        # reached build_openai_response already produced a completion body, so
-        # report the neutral 'stop' — real error surfacing is the route's
-        # api_internal_error path, not a bogus enum an SDK would reject.
-        finish = 'stop'
-    elif task.get('status') == 'aborted':
-        finish = 'length'  # OpenAI doesn't have an 'aborted' code
-    # Normalize our internal 'tool_use' to OpenAI's 'tool_calls' enum too.
-    elif finish == 'tool_use':
-        finish = 'tool_calls'
+    require_deliverable_terminal(task)
+    finish = _openai_finish_reason(
+        terminal_finish_reason(task), aborted=bool(task.get('aborted')))
     usage = task.get('usage') or {}
     return {
         'id': requested_id or short_id('chatcmpl-'),
@@ -157,7 +179,7 @@ async def stream_openai_chunks(task, model: str, requested_id: str = '',
         for ev in new_events:
             etype = ev.get('type', '')
             if etype == 'delta':
-                # ★ Narrator-leak root fix (epic pt_cb8f98b0cb9b47fb, step 3):
+                # Narrator-leak root fix (, step 3):
                 #   a content delta is UNCLASSIFIABLE mid-stream (narration vs
                 #   answer is only known at round close), and a wire client
                 #   cannot retract bytes already sent. So we do NOT forward raw
@@ -179,7 +201,19 @@ async def stream_openai_chunks(task, model: str, requested_id: str = '',
                 chunk['choices'][0]['delta']['reasoning_content'] = ev['thinking']
                 yield f'data: {json.dumps(chunk, ensure_ascii=False)}\n\n'
             elif etype == 'done':
-                # ★ Emit the narration-free deliverable as content NOW, from the
+                try:
+                    require_deliverable_terminal(task, ev)
+                except CompatTerminalFailure as exc:
+                    yield 'data: ' + json.dumps({
+                        'error': {
+                            'message': str(exc),
+                            'type': 'server_error',
+                            'code': exc.verdict.cause,
+                        },
+                    }, ensure_ascii=False) + '\n\n'
+                    yield 'data: [DONE]\n\n'
+                    return
+                # Emit the narration-free deliverable as content NOW, from the
                 #   segment model (falls back to task['content']). One clean
                 #   answer chunk — no inter-round scaffolding prose ever leaked.
                 from lib.tasks_pkg.segments import deliverable_text
@@ -195,7 +229,7 @@ async def stream_openai_chunks(task, model: str, requested_id: str = '',
                         emitted_role = True
                     ans_chunk['choices'][0]['delta']['content'] = answer
                     yield f'data: {json.dumps(ans_chunk, ensure_ascii=False)}\n\n'
-                # ★ Tool-calls parity with the sync path (_assistant_message):
+                # Tool-calls parity with the sync path (_assistant_message):
                 #   the model may have finished on a tool call. The sync
                 #   completion emits message.tool_calls, but the stream `done`
                 #   branch previously emitted only content+finish_reason — so a
@@ -221,8 +255,11 @@ async def stream_openai_chunks(task, model: str, requested_id: str = '',
                     'id': completion_id, 'object': 'chat.completion.chunk',
                     'created': int(time.time()), 'model': model,
                     'choices': [{'index': 0, 'delta': {},
-                                  'finish_reason': ev.get('finishReason') or
-                                                   task.get('finishReason') or 'stop'}],
+                                  'finish_reason': _openai_finish_reason(
+                                      str(ev.get('finishReason') or '')
+                                      if 'finishReason' in ev
+                                      else terminal_finish_reason(task),
+                                      aborted=bool(task.get('aborted')))}],
                 }
                 if ev.get('usage') or task.get('usage'):
                     final['usage'] = ev.get('usage') or task.get('usage')
@@ -242,6 +279,18 @@ async def stream_openai_chunks(task, model: str, requested_id: str = '',
             # Terminal but the `done` event wasn't in the stream (e.g. a late
             # connect after completion) — still emit the deliverable so the
             # client gets the answer, then close.
+            try:
+                require_deliverable_terminal(task)
+            except CompatTerminalFailure as exc:
+                yield 'data: ' + json.dumps({
+                    'error': {
+                        'message': str(exc),
+                        'type': 'server_error',
+                        'code': exc.verdict.cause,
+                    },
+                }, ensure_ascii=False) + '\n\n'
+                yield 'data: [DONE]\n\n'
+                return
             from lib.tasks_pkg.segments import deliverable_text
             answer = deliverable_text(task)
             if answer:
@@ -270,10 +319,12 @@ async def stream_openai_chunks(task, model: str, requested_id: str = '',
 
 # ── /v1/models ─────────────────────────────────────────────────────
 
-def models_payload(*, owner_key_id: str = '') -> dict:
+def models_payload(
+    *, owner_user_id: int | None = None, tenant_id: str | None = None,
+) -> dict:
     """Build the ``/v1/models`` response from the dispatcher's view.
 
-    When ``owner_key_id`` is supplied, the caller's BYO providers
+    When ``owner_user_id`` is supplied, the caller's BYO providers
     (registered via :mod:`lib.byo_providers`) also appear, with each
     served model exposed as ``id="<model>@<prov_id>"`` so OpenAI SDKs
     can pin runs to that endpoint without any custom-client code.
@@ -304,10 +355,11 @@ def models_payload(*, owner_key_id: str = '') -> dict:
                 'capabilities': m.get('capabilities') or [],
             })
     # ── BYO providers owned by THIS caller ────────────────────────
-    if owner_key_id:
+    if owner_user_id is not None:
         try:
             from lib.byo_providers import list_providers
-            for byo in list_providers(owner_key_id):
+            for byo in list_providers(
+                    owner_user_id, tenant_id=tenant_id):
                 if byo.get('disabled'):
                     continue
                 prov_id = byo.get('id') or ''

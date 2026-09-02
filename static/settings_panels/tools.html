@@ -7,12 +7,12 @@
               <span class="stg-badge" id="toolsInvTotalCount">0</span>
             </div>
             <div class="mcp-store-header-spacer"></div>
-            <button class="btn btn-secondary btn-xs" data-tofu-action="_populateToolsTab()" title="重新从服务器拉取实时盘点" data-i18n-title="toolsInv.refreshTitle">
+            <button class="btn btn-secondary btn-xs" data-tofu-action="populateToolsInventory()" title="重新从服务器拉取实时盘点" data-i18n-title="toolsInv.refreshTitle">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-1px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
               <span data-i18n="toolsInv.refresh">刷新</span>
             </button>
             <input type="text" class="mcp-search" id="toolsInvSearch" placeholder="搜索工具…" data-i18n-placeholder="toolsInv.searchPh"
-                   data-tofu-action-input="_toolsInvSearch(this.value)">
+                   data-tofu-action-input="searchToolsInventory(this.value)">
           </div>
 
           <p class="settings-desc" data-i18n="toolsInv.intro">

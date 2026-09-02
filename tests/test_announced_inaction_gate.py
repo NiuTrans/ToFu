@@ -2,7 +2,7 @@
 
 ⚠️  OWNERSHIP: the nudge criterion itself belongs to board epic
     ``pt_33ba079f5cea4841`` (held by conversation ms3ao89ctbsrbc, design in
-    docs/INTENT_STALL_MEASUREMENT.md). A detector was prototyped here and
+    docs/modules/task_engine.md). A detector was prototyped here and
     then DELIBERATELY REVERTED — ``lib/agent_verdict/_announced.py``, its
     facade export and the ``_analyse.py`` call site are all gone. Nothing in
     this file imports production code today, so it is CURRENTLY INERT: it

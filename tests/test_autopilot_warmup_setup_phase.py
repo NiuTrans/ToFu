@@ -36,20 +36,25 @@ from lib.tasks_pkg import autopilot as ap
 
 def _wire(monkeypatch, captured):
     """Patch the collaborators so run_virtual_user is hermetic + fast."""
-    import lib.tasks_pkg as tp
     import lib.tasks_pkg.manager as mgr
-    import lib.tasks_pkg.orchestrator as orch
+    import lib.tasks_pkg.orchestrator._turn as orch
 
     # Capture every event the pre-stream path emits (via the lazy import inside
     # _emit_vu_setup_phase: `from lib.tasks_pkg.manager import append_event`).
     monkeypatch.setattr(mgr, 'append_event', lambda task, event: captured.append(event))
     # No DB read for the objective.
-    monkeypatch.setattr(ap, '_get_or_persist_objective', lambda cid, msgs: '')
+    monkeypatch.setattr(ap, '_get_or_persist_objective', lambda cid, msgs, *, user_id: '')
 
     def _fake_create_task(conv_id, messages, config, **kw):
-        return {'id': 'subtask0', 'toolRounds': [], 'aborted': False}
+        return {
+            'id': 'subtask0',
+            'convId': conv_id,
+            '_userId': kw['user_id'],
+            'toolRounds': [],
+            'aborted': False,
+        }
 
-    monkeypatch.setattr(tp, 'create_task', _fake_create_task)
+    monkeypatch.setattr(mgr, 'create_task', _fake_create_task)
 
     def _fake_turn(sub_task, messages_override=None):
         # Marker so ordering (setup-phases-BEFORE-stream) is verifiable.
@@ -64,6 +69,7 @@ def _make_task():
     return {
         'id': 'parent-abc123',
         'convId': 'conv1',
+        '_userId': 1,
         'messages': [{'role': 'user', 'content': 'hi'},
                      {'role': 'assistant', 'content': 'done'}],
         'config': {},

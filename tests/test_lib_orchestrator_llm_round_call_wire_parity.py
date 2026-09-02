@@ -1,10 +1,11 @@
-# Incident anchor: born in commit 2dfb9943 — refactor(orchestrator): pt_03f4cdf1 slice 26 — extract per-round LLM ...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 26 wire-parity: _llm_round_call.py extraction from _run.py."""
 
 import inspect
 
-from lib.tasks_pkg.orchestrator import _llm_round_call
+import pytest
+
+import lib.tasks_pkg.orchestrator._llm_round_call as _llm_round_call
+pytestmark = pytest.mark.unit
 
 
 class TestLlmRoundCallWireParity:
@@ -62,18 +63,14 @@ class TestLlmRoundCallWireParity:
         src = inspect.getsource(_llm_round_call.run_llm_call_with_fallback)
         assert "raise" in src
 
-    def test_docstring_mentions_extraction(self):
-        assert "pt_03f4cdf1" in (_llm_round_call.__doc__ or "")
-
-
 class TestRunTaskDelegation:
     def test_run_task_delegates_to_helper(self):
-        from lib.tasks_pkg.orchestrator import _run
-        src = inspect.getsource(_run.run_task)
+        import lib.tasks_pkg.orchestrator._root_agent_loop as _root_agent_loop
+        src = inspect.getsource(_root_agent_loop)
         assert "run_llm_call_with_fallback(" in src
 
     def test_run_task_no_longer_carries_block_inline(self):
-        from lib.tasks_pkg.orchestrator import _run
+        import lib.tasks_pkg.orchestrator._run as _run
         src = inspect.getsource(_run.run_task)
         assert "= _llm_call_with_fallback(" not in src
         assert "_loop_action" not in src

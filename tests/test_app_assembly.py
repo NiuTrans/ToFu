@@ -77,9 +77,9 @@ def test_server_factory_does_not_mutate_or_return_assembled_singleton(flask_app)
     )
 
 
-def test_server_production_factory_attaches_lifespan_without_starting_it():
+def test_server_production_factory_attaches_lifespan_without_starting_it(
+        monkeypatch):
     import server
-
     production_app = server.create_production_app({'TESTING': True})
 
     assert production_app is not server.app

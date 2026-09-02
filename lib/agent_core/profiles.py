@@ -1,7 +1,7 @@
 """lib/agent_core/profiles.py — Declarative capability profiles.
 
 A *profile* is a named bundle of agent-run config defaults — which tools are
-on, which model to prefer, whether swarm/endpoint modes are enabled.  It turns
+on, which model to prefer, and which execution capabilities are enabled. It turns
 deployment from "the caller must remember to send the right 12 cfg toggles"
 into "the caller (or operator) picks a profile name".
 
@@ -35,7 +35,7 @@ Design contract
   byte-identical to before this module existed.
 * **Explicit cfg always wins.**  Profiles are defaults, never overrides.
 * **camelCase keys.**  Profile JSON uses the same wire keys as ``cfg`` /
-  ``TofuOptions`` (``searchMode``, ``swarmEnabled``, ``model``, …).
+  ``TofuOptions`` (``searchMode``, ``memoryEnabled``, ``model``, …).
 """
 
 from __future__ import annotations
@@ -64,12 +64,11 @@ _BUILTINS: dict[str, dict[str, Any]] = {
     # The implicit profile when none is selected — changes nothing.
     'default': {},
 
-    # Read-only research assistant: web + memory, no project writes, no swarm.
+    # Read-only research assistant: web + memory, no project writes.
     'research': {
         'searchMode': 'multi',
         'fetchEnabled': True,
         'memoryEnabled': True,
-        'swarmEnabled': False,
         'codeExecEnabled': False,
     },
 
@@ -79,7 +78,6 @@ _BUILTINS: dict[str, dict[str, Any]] = {
         'searchMode': 'off',
         'fetchEnabled': True,
         'memoryEnabled': True,
-        'swarmEnabled': False,
     },
 
     # Minimal: only the always-on read_files + nothing else.  Useful for
@@ -89,7 +87,6 @@ _BUILTINS: dict[str, dict[str, Any]] = {
         'fetchEnabled': False,
         'memoryEnabled': False,
         'mcpEnabled': False,
-        'swarmEnabled': False,
         'codeExecEnabled': False,
     },
 }

@@ -23,9 +23,16 @@ export function createOrchestrationWorkspaceDeleteCommand(
     }
     const session = context.workspaceSession;
     let expectedUpdatedAt = typeof listedUpdatedAt === 'number'
-      && Number.isSafeInteger(listedUpdatedAt) ? listedUpdatedAt : null;
+      && Number.isSafeInteger(listedUpdatedAt) && listedUpdatedAt >= 0
+      ? listedUpdatedAt : null;
     if (expectedUpdatedAt === null && session.currentId() === id) {
       expectedUpdatedAt = session.currentVersion();
+    }
+    if (!Number.isSafeInteger(expectedUpdatedAt)
+        || Number(expectedUpdatedAt) < 0) {
+      context.toast(context.translate('orch.store.deleteConflict'), true);
+      if (context.has('refreshStore')) await context.call('refreshStore');
+      return false;
     }
     const result = await context.definitions.remove(id, expectedUpdatedAt);
     if (result.cause) context.call('onError', 'delete', result.cause);

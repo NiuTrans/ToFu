@@ -67,7 +67,6 @@ win.apiUrl = global.apiUrl = (u) => '/base' + u;
 win.debugLog = global.debugLog = () => {};
 win.t = global.t = (k) => (k === 'upload.processing' ? '处理中…' : k);
 win.config = global.config = {};
-win._editingMsgIdx = global._editingMsgIdx = null;
 win.pendingImages = global.pendingImages = [];
 // URL.createObjectURL / revokeObjectURL don't exist in jsdom → stub.
 let _revoked = [];
@@ -120,9 +119,17 @@ const fakeFile = { type: 'image/png', name: 'photo.png' };
     check('instant_no_base64_yet', !!first && !first.base64);
   }
 
+  let waitSettled = false;
+  const waitForCapture = _waitForImageProcessing().then(() => {
+    waitSettled = true;
+  });
+  await Promise.resolve();
+  if (!NEUTER) check('capture_waits_for_processing', waitSettled === false);
+
   // Now complete compression + let the background finish.
   _resolveCompress({ base64: 'ZZZ', mediaType: 'image/png', preview: 'data:image/png;base64,ZZZ', sizeKB: 42 });
   await p;
+  await waitForCapture;
 
   const done = win.pendingImages[0];
   check('final_has_base64', !!done && done.base64 === 'ZZZ');
@@ -132,6 +139,7 @@ const fakeFile = { type: 'image/png', name: 'photo.png' };
   check('final_preview_is_data_url', !!done && done.preview === 'data:image/png;base64,ZZZ');
   check('final_no_overlay',
         win.document.getElementById('imagePreviews').querySelector('.img-processing-overlay') === null);
+  if (!NEUTER) check('capture_resumes_after_processing', waitSettled === true);
 
   console.log(out.join('\n'));
 })();
@@ -168,7 +176,8 @@ def test_optimistic_preview_lifecycle():
     assert not fails, 'optimistic-preview failures:\n' + output
     for marker in ('PASS instant_chip_rendered', 'PASS instant_status_processing',
                    'PASS instant_has_object_url_preview', 'PASS instant_overlay_painted',
-                   'PASS instant_no_base64_yet', 'PASS final_has_base64',
+                   'PASS instant_no_base64_yet', 'PASS capture_waits_for_processing',
+                   'PASS capture_resumes_after_processing', 'PASS final_has_base64',
                    'PASS final_has_url', 'PASS final_status_cleared',
                    'PASS final_object_url_cleared', 'PASS final_preview_is_data_url',
                    'PASS final_no_overlay'):

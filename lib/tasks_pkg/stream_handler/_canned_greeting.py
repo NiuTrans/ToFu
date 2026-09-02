@@ -55,7 +55,7 @@ _CANNED_GREETING_RE = re.compile(
 # System-injected <system-reminder> blocks are NOT the user's own words:
 # the per-turn context assembly appends them to the LAST user message
 # (date / digest / charter / board — see
-# ``system_context/_reminders._refresh_tail_block``), so the raw flattened
+# the Context Composer's managed tail blocks), so the raw flattened
 # text always exceeds ``_SMALLTALK_MAX_CHARS`` and the complement below
 # could never fire in production (2026-08-02 deepseek-v4-flash incident:
 # a legitimate laconic greeting retried twice and triple-displayed).

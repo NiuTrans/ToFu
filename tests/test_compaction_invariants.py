@@ -47,7 +47,6 @@ import contextlib
 import importlib
 import os
 import sys
-import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -83,36 +82,26 @@ _PUBLIC_CONSTANTS = [
 
 
 @pytest.mark.unit
-class TestConstantsReachableViaFacade:
-    """The hot-reload pattern is ``import lib as _lib;
-    _lib.tasks_pkg.compaction.MICRO_HOT_TAIL`` — values are read at
-    call time so config edits propagate without restart.  After the
-    split, the new package ``__init__.py`` MUST re-export each one of
-    these from its sub-module."""
+class TestConstantsHaveOneOwner:
+    """Compaction defaults live only in the concrete constants module."""
 
     @pytest.mark.parametrize('name', _PUBLIC_CONSTANTS)
     def test_constant_attr_exists(self, name):
-        from lib.tasks_pkg import compaction as _comp
+        import lib.tasks_pkg.compaction._constants as _comp
         assert hasattr(_comp, name), (
-            f'{name} not reachable as lib.tasks_pkg.compaction.{name} — '
-            f'breaks the hot-reload contract documented in CLAUDE.md §10.5'
+            f'{name} is missing from the compaction constants owner'
         )
 
     @pytest.mark.parametrize('name', _PUBLIC_CONSTANTS)
-    def test_constant_reachable_via_lib_namespace(self, name):
-        """The ``import lib as _lib; _lib.tasks_pkg.compaction.X`` access
-        path used by ``system_prompt_cc.py`` and others must work."""
-        import lib as _lib
-        # Drill through the namespace mirroring the call-site pattern.
-        assert hasattr(_lib.tasks_pkg.compaction, name), (
-            f'{name} unreachable through lib.tasks_pkg.compaction namespace'
-        )
+    def test_constant_not_duplicated_on_package_root(self, name):
+        import lib.tasks_pkg.compaction as compaction_namespace
+        assert not hasattr(compaction_namespace, name)
 
     def test_constant_has_a_concrete_value(self):
         """Sanity: at least one of the relaxed-defaults constants has a
         recognisably non-zero value (catches accidental ``= None`` after
         a botched extraction)."""
-        from lib.tasks_pkg import compaction as _comp
+        import lib.tasks_pkg.compaction._constants as _comp
         assert _comp.MICRO_HOT_TAIL > 0
         assert _comp.MICRO_COMPACT_THRESHOLD > 0
         assert 0 < _comp._SUMMARY_TRIGGER_RATIO <= 1.0
@@ -123,56 +112,18 @@ class TestConstantsReachableViaFacade:
 # ═══════════════════════════════════════════════════════════════════════
 
 @pytest.mark.unit
-class TestLazyInitIdempotent:
-    """``_init_tables`` is called from every public entry point.  Under
-    concurrent first-calls, ``_ensure_compaction_tables`` MUST run at
-    most once.  Regression here would create duplicate CREATE-IF-NOT-
-    EXISTS DDL noise and (worse) confuse a future schema migration that
-    relies on the version cache."""
+class TestSidecarSchemaAuthority:
+    """Compaction must not create or migrate storage tables in-process."""
 
-    def test_concurrent_init_runs_create_once(self, monkeypatch):
-        from lib.tasks_pkg import compaction as _comp
-        # The latch lives in ._constants after the split (it always did
-        # logically — the package re-exports it for the hot-reload
-        # contract).  Mutate the source of truth + the package alias so
-        # the double-checked lock starts in the False state.
-        try:
-            from lib.tasks_pkg.compaction import _archive as _arch
-            from lib.tasks_pkg.compaction import _constants as _c
-            monkeypatch.setattr(_c, '_tables_initialized', False, raising=True)
-            monkeypatch.setattr(_comp, '_tables_initialized', False, raising=True)
-            ensure_target = _arch
-        except ImportError:
-            # Pre-split layout: latch lives directly on the package.
-            monkeypatch.setattr(_comp, '_tables_initialized', False, raising=True)
-            ensure_target = _comp
+    def test_archive_delegates_schema_lifecycle_to_repository(self):
+        import inspect
 
-        call_count = {'n': 0}
-        call_lock = threading.Lock()
+        from lib.tasks_pkg.compaction._archive import _archive_transcript
 
-        def _fake_ensure():
-            with call_lock:
-                call_count['n'] += 1
-
-        # Patch _ensure_compaction_tables on whichever module owns it
-        # (the live impl post-split, the package pre-split).
-        monkeypatch.setattr(ensure_target, '_ensure_compaction_tables', _fake_ensure)
-        # Always patch the package re-export too so calls that resolved
-        # through the facade hit the fake.
-        monkeypatch.setattr(_comp, '_ensure_compaction_tables', _fake_ensure)
-
-        # Fire 50 threads against _init_tables simultaneously.
-        threads = [threading.Thread(target=_comp._init_tables) for _ in range(50)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=5.0)
-
-        assert call_count['n'] == 1, (
-            f'_ensure_compaction_tables ran {call_count["n"]}× under '
-            f'concurrent first-call — double-checked lock is broken'
-        )
-        assert _comp._tables_initialized is True
+        source = inspect.getsource(_archive_transcript)
+        assert 'get_conversation_store' in source
+        assert '_ensure_compaction_tables' not in source
+        assert '_init_tables' not in source
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -197,17 +148,15 @@ class TestArchiveIsTheOnlyEventEmitter:
         """
         import inspect
 
-        from lib.tasks_pkg import compaction as _comp
-
-        # Collect source from the package + any extracted sub-modules.
-        sources = [inspect.getsource(_comp)]
-        for sub in ('_archive', '_layer2', '_reactive', '_layer1'):
-            try:
-                _mod = importlib.import_module(f'lib.tasks_pkg.compaction.{sub}')
-                sources.append(inspect.getsource(_mod))
-            except (ImportError, ModuleNotFoundError):
-                # Pre-split or deferred extraction — skip silently.
-                continue
+        module_names = (
+            'lib.tasks_pkg.compaction._archive',
+            'lib.tasks_pkg.compaction._layer2._compact',
+            'lib.tasks_pkg.compaction._reactive',
+        )
+        sources = [
+            inspect.getsource(importlib.import_module(module_name))
+            for module_name in module_names
+        ]
 
         all_src = '\n'.join(sources)
 
@@ -231,27 +180,24 @@ class TestArchiveIsTheOnlyEventEmitter:
     def test_archive_transcript_emits_compaction_event(self):
         """End-to-end: calling ``_archive_transcript`` with a task fires
         exactly one ``compaction`` SSE event via ``append_event``."""
-        from lib.tasks_pkg import compaction as _comp
+        import lib.tasks_pkg.compaction._archive as _comp
 
         events = []
-        fake_db = MagicMock()
-        # Make the SELECT id query return a row with id=42
-        fake_row = MagicMock()
-        fake_row.__getitem__ = lambda _self, _k: 42
-        fake_cur = MagicMock()
-        fake_cur.fetchone.return_value = fake_row
-        fake_db.execute.return_value = fake_cur
+        store = MagicMock()
+        store.archive_transcript.return_value = '42'
 
         # Patch the DB layer + append_event so the test is hermetic.
-        with patch('lib.database.get_thread_db', return_value=fake_db), \
-             patch('lib.database.db_execute_with_retry', return_value=None), \
+        with patch('lib.agent_core.store.get_conversation_store',
+                   return_value=store), \
              patch('lib.tasks_pkg.manager.append_event',
                    side_effect=lambda task, ev: events.append(ev)):
 
-            task = {'id': 'unit-test-task', 'config': {'model': 'mock-model'}}
+            task = {'id': 'unit-test-task', '_userId': 1,
+                    'config': {'model': 'mock-model'}}
             _comp._archive_transcript(
                 conv_id='c1', messages=[{'role': 'user', 'content': 'hi'}],
                 summary='', trigger='force', task=task,
+                user_id=1,
                 round_num=3, tokens_before=1000, tokens_after=200,
                 msgs_before=10, msgs_after=4, reason='test',
                 emit_event=True,
@@ -260,29 +206,30 @@ class TestArchiveIsTheOnlyEventEmitter:
         assert len(events) == 1
         ev = events[0]
         assert ev['type'] == 'compaction'
-        assert ev['archiveId'] == 42
+        assert str(ev['archiveId']) == '42'
         assert ev['trigger'] == 'force'
         assert ev['roundNum'] == 3
         assert ev['tokensBefore'] == 1000
+        assert ev['tokenCountKind'] == 'estimated'
+        assert ev['snapshotKind'] == 'pre_compaction_transcript'
 
     def test_archive_transcript_can_suppress_event(self):
         """The ``emit_event=False`` path must not produce an SSE event —
         this is what the reactive_compact early-snapshot path relies on
         when the inner force_compact would otherwise double-emit."""
-        from lib.tasks_pkg import compaction as _comp
+        import lib.tasks_pkg.compaction._archive as _comp
 
         events = []
-        fake_db = MagicMock()
-        fake_row = MagicMock()
-        fake_row.__getitem__ = lambda _self, _k: 7
-        fake_db.execute.return_value.fetchone.return_value = fake_row
+        store = MagicMock()
+        store.archive_transcript.return_value = '7'
 
-        with patch('lib.database.get_thread_db', return_value=fake_db), \
-             patch('lib.database.db_execute_with_retry', return_value=None), \
+        with patch('lib.agent_core.store.get_conversation_store',
+                   return_value=store), \
              patch('lib.tasks_pkg.manager.append_event',
                    side_effect=lambda task, ev: events.append(ev)):
             _comp._archive_transcript(
-                conv_id='c1', messages=[], task={'id': 't'},
+                conv_id='c1', messages=[], task={'id': 't', '_userId': 1},
+                user_id=1,
                 emit_event=False,
             )
 
@@ -308,12 +255,12 @@ class TestReactiveCompactOrdering:
 
     def test_archive_precedes_image_strip(self):
         """Record the call sequence and assert archive runs first."""
-        from lib.tasks_pkg import compaction as _comp
+        import lib.tasks_pkg.compaction._reactive as _comp
         # Post-split: reactive_compact lives in _reactive.py and looks
         # up its dependencies via direct imports — patch the names in
         # _reactive's namespace so the fakes are seen by the function.
         try:
-            from lib.tasks_pkg.compaction import _reactive
+            import lib.tasks_pkg.compaction._reactive as _reactive
             target = _reactive
         except ImportError:
             target = _comp
@@ -342,7 +289,7 @@ class TestReactiveCompactOrdering:
              patch('lib.agent_core.store.get_conversation_store'), \
              patch('lib.tasks_pkg.manager.append_event'):
 
-            task = {'id': 'r-test', 'convId': 'c1',
+            task = {'id': 'r-test', 'convId': 'c1', '_userId': 1,
                     'config': {'model': 'mock-model'}}
             _comp.reactive_compact(
                 messages=[
@@ -374,9 +321,9 @@ class TestReactiveCompactOrdering:
         """The inner ``force_compact_if_needed`` call MUST carry
         ``_compaction_skip_archive=True`` so the viewer doesn't get a
         duplicate archive row for the same 413."""
-        from lib.tasks_pkg import compaction as _comp
+        import lib.tasks_pkg.compaction._reactive as _comp
         try:
-            from lib.tasks_pkg.compaction import _reactive
+            import lib.tasks_pkg.compaction._reactive as _reactive
             target = _reactive
         except ImportError:
             target = _comp
@@ -397,7 +344,7 @@ class TestReactiveCompactOrdering:
              patch('lib.agent_core.store.get_conversation_store'), \
              patch('lib.tasks_pkg.manager.append_event'):
 
-            task = {'id': 'r-test', 'convId': 'c1',
+            task = {'id': 'r-test', 'convId': 'c1', '_userId': 1,
                     'config': {'model': 'mock-model'}}
             _comp.reactive_compact(
                 messages=[{'role': 'user', 'content': 'hi'}],
@@ -447,9 +394,9 @@ class TestReactiveArchiveBackfill:
     """
 
     def _reactive_target(self):
-        from lib.tasks_pkg import compaction as _comp
+        import lib.tasks_pkg.compaction._reactive as _comp
         try:
-            from lib.tasks_pkg.compaction import _reactive
+            import lib.tasks_pkg.compaction._reactive as _reactive
             return _comp, _reactive
         except ImportError:
             return _comp, _comp
@@ -473,7 +420,7 @@ class TestReactiveArchiveBackfill:
              patch.object(target, '_estimate_total_tokens', return_value=0), \
              patch('lib.agent_core.store.get_conversation_store') as store, \
              patch('lib.tasks_pkg.manager.append_event'):
-            task = {'id': 'r-test', 'convId': 'c1',
+            task = {'id': 'r-test', 'convId': 'c1', '_userId': 1,
                     'config': {'model': 'mock-model'}}
             _comp.reactive_compact(
                 messages=[{'role': 'user', 'content': 'hi'}],
@@ -506,7 +453,7 @@ class TestReactiveArchiveBackfill:
              patch('lib.agent_core.store.get_conversation_store') as store, \
              patch('lib.tasks_pkg.manager.append_event',
                    side_effect=lambda task, ev: events.append(ev)):
-            task = {'id': 'r-test', 'convId': 'c1',
+            task = {'id': 'r-test', 'convId': 'c1', '_userId': 1,
                     'config': {'model': 'mock-model'}}
             msgs = [{'role': 'user', 'content': 'hi'},
                     {'role': 'assistant', 'content': 'hello'}]
@@ -515,15 +462,22 @@ class TestReactiveArchiveBackfill:
             )
 
         upd = store.return_value.update_archive_summary
-        upd.assert_called_once_with(99, '', 1234, len(msgs))
+        upd.assert_called_once()
+        assert upd.call_args.args == (99, '', 1234, len(msgs))
+        assert upd.call_args.kwargs['user_id'] == 1
+        receipt = upd.call_args.kwargs['receipt']
+        assert receipt['schemaVersion'] == 'tofu.compaction-receipt/v1'
+        assert receipt['strategy'] == 'deterministic_recovery'
         done = [e for e in events if e.get('type') == 'compaction_done']
         assert len(done) == 1, (
             f'expected exactly one compaction_done from the fallback, '
             f'got {events}'
         )
-        assert done[0]['archiveId'] == 99
+        assert str(done[0]['archiveId']) == '99'
         assert done[0]['tokensAfter'] == 1234
+        assert done[0]['tokenCountKind'] == 'estimated'
         assert done[0]['msgsAfter'] == len(msgs)
+        assert done[0]['receipt'] == receipt
 
     def test_force_compact_backfills_adopted_archive_row(self):
         """BEHAVIOR CONTRACT (structure-agnostic on purpose): when the caller
@@ -548,25 +502,26 @@ class TestReactiveArchiveBackfill:
              patch.object(_cmod, '_usable_context', return_value=100000), \
              patch.object(_cmod, '_extract_current_query', return_value='q'), \
              patch.object(_cmod, '_find_turn_boundary', return_value=3), \
-             patch.object(_cmod, '_objective_anchor_index_dyn',
+             patch.object(_cmod, '_objective_anchor_index',
                           return_value=None), \
              patch.object(_cmod, '_fold_recent_intra_turn',
-                          side_effect=lambda recent: (list(recent), [])), \
-             patch.object(_cmod, '_generate_query_aware_summary_dyn',
+                          side_effect=lambda recent, **_kwargs:
+                          (list(recent), [])), \
+             patch.object(_cmod, '_generate_query_aware_summary',
                           return_value='SUMMARY'), \
              patch.object(_cmod, '_extract_recently_accessed_files',
                           return_value=[]), \
-             patch.object(_cmod, '_archive_transcript_dyn') as arch, \
+             patch.object(_cmod, '_archive_transcript') as arch, \
              patch('lib.tasks_pkg.compaction._tokens'
                    '._count_tokens_authoritative',
                    return_value=(10, 'mock')), \
              patch('lib.agent_core.store.get_conversation_store') as store, \
-             patch('lib.tasks_pkg.cache_tracking.record_l2_compaction'), \
+             patch('lib.tasks_pkg.cache_tracking._roi.record_l2_compaction'), \
              _optional_patch('lib.context_telemetry',
                              'record_compaction_event'), \
              patch('lib.tasks_pkg.manager.append_event',
                    side_effect=lambda task, ev: events.append(ev)):
-            task = {'id': 'f-test', 'convId': 'c1',
+            task = {'id': 'f-test', 'convId': 'c1', '_userId': 1,
                     'config': {'model': 'mock-model'}}
             ok = _cmod.force_compact_if_needed(
                 messages, task=task, force=True,
@@ -586,8 +541,9 @@ class TestReactiveArchiveBackfill:
             f'back-filled counts must be the real post-compaction values, '
             f'got tokens_after={args[2]} msgs_after={args[3]}'
         )
+        assert upd.call_args.kwargs['receipt']['strategy'] == 'selective_summary'
         done = [e for e in events if e.get('type') == 'compaction_done']
-        assert len(done) == 1 and done[0]['archiveId'] == 99, (
+        assert len(done) == 1 and str(done[0]['archiveId']) == '99', (
             f'expected one compaction_done for archive 99, got {events}'
         )
 
@@ -611,20 +567,21 @@ class TestReactiveArchiveBackfill:
              patch.object(_cmod, '_usable_context', return_value=100000), \
              patch.object(_cmod, '_extract_current_query', return_value='q'), \
              patch.object(_cmod, '_find_turn_boundary', return_value=3), \
-             patch.object(_cmod, '_objective_anchor_index_dyn',
+             patch.object(_cmod, '_objective_anchor_index',
                           return_value=None), \
              patch.object(_cmod, '_fold_recent_intra_turn',
-                          side_effect=lambda recent: (list(recent), [])), \
-             patch.object(_cmod, '_generate_query_aware_summary_dyn',
+                          side_effect=lambda recent, **_kwargs:
+                          (list(recent), [])), \
+             patch.object(_cmod, '_generate_query_aware_summary',
                           return_value='SUMMARY'), \
              patch.object(_cmod, '_extract_recently_accessed_files',
                           return_value=[]), \
-             patch.object(_cmod, '_archive_transcript_dyn') as arch, \
+             patch.object(_cmod, '_archive_transcript') as arch, \
              patch('lib.tasks_pkg.compaction._tokens'
                    '._count_tokens_authoritative',
                    return_value=(10, 'mock')), \
              patch('lib.agent_core.store.get_conversation_store'), \
-             patch('lib.tasks_pkg.cache_tracking.record_l2_compaction'), \
+             patch('lib.tasks_pkg.cache_tracking._roi.record_l2_compaction'), \
              patch('lib.tasks_pkg.manager.append_event'):
             task = {'id': 'e-test', 'convId': 'c1',
                     'config': {'model': 'mock-model'}}
@@ -655,7 +612,7 @@ class TestPhase0ImageStrip:
     keep-tail and produces the expected text placeholder."""
 
     def test_strip_when_count_exceeds_keep_tail(self):
-        from lib.tasks_pkg import compaction as _comp
+        import lib.tasks_pkg.compaction._reactive._strip as _comp
 
         def _img_msg(b64_payload: str):
             return {
@@ -686,7 +643,7 @@ class TestPhase0ImageStrip:
 
     def test_no_strip_when_count_within_keep_tail(self):
         """Below the keep_tail threshold, no images are stripped."""
-        from lib.tasks_pkg import compaction as _comp
+        import lib.tasks_pkg.compaction._reactive._strip as _comp
 
         messages = [{
             'role': 'user',
@@ -719,7 +676,7 @@ class TestMicroCompactDurablePersistence:
     def test_micro_compact_source_contains_db_load_and_update(self):
         import inspect
 
-        from lib.tasks_pkg.compaction import micro_compact
+        from lib.tasks_pkg.compaction.api import micro_compact
 
         src = inspect.getsource(micro_compact)
         # The L1 fix introduced these markers in the function body:
@@ -736,88 +693,65 @@ class TestMicroCompactDurablePersistence:
         # SQL (legacy) or the seam call so the invariant tracks behaviour,
         # not the layer the SQL happens to live in.
         assert ('UPDATE conversations' in src
-                or 'cas_update_conversation_messages' in src), (
-            "micro_compact lost its CAS conversation persist (inline UPDATE "
-            "or store.cas_update_conversation_messages) — placeholders will "
+                or 'cas_update_conversation_messages' in src
+                or 'update_turn_projection' in src), (
+            "micro_compact lost its CAS projection persist (legacy whole-row "
+            "CAS or turn-native update_turn_projection) — placeholders will "
             "not survive next build_api_messages_from_db"
         )
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  7. Facade export-list audit
+#  7. Public API audit
 # ═══════════════════════════════════════════════════════════════════════
 
-# Names imported by the existing test suite + production callers.
-# Every name in this list MUST stay reachable as
-# ``lib.tasks_pkg.compaction.<name>`` post-split.  Drift here means an
-# import in production or in tests/test_compaction_improvements.py
-# breaks silently.
-_REQUIRED_FACADE_NAMES = [
-    # Constants (subset — full list in TestConstantsReachableViaFacade)
-    'MICRO_HOT_TAIL',
-    'MICRO_COMPACT_THRESHOLD',
-    '_THINKING_HOT_TAIL',
-    # Layer 0 — Budget
+# Stable services consumed by application code and experiment extensions.
+_REQUIRED_PUBLIC_API_NAMES = [
+    'advanced_compact',
     'budget_tool_result',
+    'budget_tool_result_v2',
+    'clamp_tool_result_text',
     'enforce_round_aggregate_budget',
+    'enforce_round_aggregate_budget_v2',
     'mark_empty_result',
-    'TOOL_RESULT_MAX_CHARS',
-    'MAX_ROUND_TOOL_RESULTS_CHARS',
-    '_BUDGET_EXEMPT_TOOLS',
-    '_DEFAULT_TOOL_RESULT_MAX',
-    # Persist (Layer 0 splitters)
-    '_persist_to_disk',
-    '_generate_web_search_preview',
-    '_PERSIST_DIR_BASE',
-    '_PERSIST_PREVIEW_CHARS',
-    # Tokens / decision
-    '_get_context_limit',
-    # Layer 1
     'micro_compact',
-    # Layer 2
     'execute_compact_tool',
     'force_compact_if_needed',
-    'smart_summary_compact',
-    '_extract_recently_accessed_files',
-    '_SUMMARY_SYSTEM_PROMPT',
-    # Reactive
     'reactive_compact',
-    '_head_truncate',
-    # Pipeline
     'run_compaction_pipeline',
-    '_reinject_system_contexts_after_compact',
-    # Archive
-    '_archive_transcript',
-    'cleanup_compaction_data',
+    'recompose_context_after_compaction',
+    'build_context_policy',
+    'resolve_model_context_profile',
+    'register_step',
+    'list_steps',
 ]
 
 
 @pytest.mark.unit
-class TestFacadeExportList:
-    """The split installs ``compaction/__init__.py`` as a re-export
-    facade.  Every name the project imports today MUST stay reachable
-    by the same path — no caller change should be needed."""
+class TestPublicApi:
+    """Stable services live in ``compaction.api``; internals do not leak."""
 
-    @pytest.mark.parametrize('name', _REQUIRED_FACADE_NAMES)
-    def test_required_facade_name_reachable(self, name):
-        from lib.tasks_pkg import compaction as _comp
-        assert hasattr(_comp, name), (
-            f'lib.tasks_pkg.compaction.{name} is missing — production '
-            f'callers and existing tests rely on this import path'
-        )
+    @pytest.mark.parametrize('name', _REQUIRED_PUBLIC_API_NAMES)
+    def test_required_public_name_reachable(self, name):
+        import lib.tasks_pkg.compaction.api as compaction_api
+        assert name in compaction_api.__all__
+        assert hasattr(compaction_api, name)
 
-    def test_module_reimport_does_not_break_anything(self):
-        """Defensive: reload the module and re-check the facade.  Catches
-        bugs where the package layout works on first import but fails
-        after a reload (an actual production-deploy concern when
-        Settings UI hot-reloads modules)."""
-        import lib.tasks_pkg.compaction as _comp
-        importlib.reload(_comp)
-        for name in _REQUIRED_FACADE_NAMES:
-            assert hasattr(_comp, name), (
-                f'After reload, {name} no longer reachable — '
-                f'package layout has an import-order bug'
-            )
+    def test_api_exports_no_private_names(self):
+        import lib.tasks_pkg.compaction.api as compaction_api
+        assert all(not name.startswith('_') for name in compaction_api.__all__)
+
+    def test_root_is_a_namespace_not_a_service_facade(self):
+        import lib.tasks_pkg.compaction as compaction_namespace
+        assert compaction_namespace.__all__ == ()
+        for name in _REQUIRED_PUBLIC_API_NAMES:
+            assert not hasattr(compaction_namespace, name)
+
+    def test_api_reload_preserves_contract(self):
+        import lib.tasks_pkg.compaction.api as compaction_api
+        importlib.reload(compaction_api)
+        for name in _REQUIRED_PUBLIC_API_NAMES:
+            assert hasattr(compaction_api, name)
 
 
 

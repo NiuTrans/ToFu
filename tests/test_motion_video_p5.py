@@ -1,6 +1,6 @@
 """tests/test_motion_video_p5.py — Per-scene composition author (P5) suite.
 
-Covers docs/PRODUCTION_PIPELINE_DESIGN.md P5 (board epic pt_d7e1882f8a854276):
+Covers the per-scene authoring contract in docs/modules/production.md:
 each scene gets its own bounded agent loop that authors a bespoke composition,
 with the zero-LLM template as the always-available floor.
 

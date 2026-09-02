@@ -215,12 +215,16 @@ def _call_judge(messages: list[dict], *, model: str, abort,
         buf['content'] += text
 
     try:
-        msg, _finish, usage = dispatch_stream(
+        from lib.llm.stream_result import require_verified_provider_stream_result
+        stream_result = require_verified_provider_stream_result(dispatch_stream(
             messages, on_content=on_content, abort_check=abort,
             prefer_model=model or None, strict_model=bool(model),
             capability='text', max_tokens=_JUDGE_MAX_TOKENS,
             temperature=0.0, thinking_enabled=False,
-            log_prefix='[Research:Evaluate]')
+            log_prefix='[Research:Evaluate]'),
+            context='research evaluation judge')
+        msg = stream_result.message
+        usage = stream_result.usage
     except Exception as exc:
         logger.warning('[Research:Evaluate] judge dispatch failed: %s', exc,
                        exc_info=True)

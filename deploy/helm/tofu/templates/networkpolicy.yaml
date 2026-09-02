@@ -1,0 +1,42 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tofu.fullname" . }}-default-deny-ingress
+  labels:
+{{ include "tofu.labels" . | indent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "tofu.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tofu.fullname" . }}-api-ingress
+  labels:
+{{ include "tofu.labels" . | indent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "tofu.selectorLabels" (dict "root" . "role" "api") | indent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+{{- if .Values.networkPolicy.apiIngressNamespaceSelector }}
+        - namespaceSelector:
+{{ toYaml .Values.networkPolicy.apiIngressNamespaceSelector | indent 12 }}
+          podSelector:
+{{ toYaml .Values.networkPolicy.apiIngressPodSelector | indent 12 }}
+{{- else }}
+        # A peer with only podSelector is scoped to this policy's namespace.
+        # Rendering namespaceSelector: {} here would widen it to every
+        # namespace in the cluster.
+        - podSelector:
+{{ toYaml .Values.networkPolicy.apiIngressPodSelector | indent 12 }}
+{{- end }}
+      ports:
+        - {port: 15000, protocol: TCP}
+{{- end }}

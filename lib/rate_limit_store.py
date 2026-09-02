@@ -28,13 +28,13 @@ See also:
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
 from collections import defaultdict
 from typing import Tuple
 
-from lib.env_compat import getenv_compat
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -165,7 +165,7 @@ def get_store():
     An unrecognised value logs a WARN and falls back to memory.
     """
     global _store, _store_backend
-    desired = (getenv_compat('TOFU_RATE_LIMIT_BACKEND')
+    desired = (os.environ.get('TOFU_RATE_LIMIT_BACKEND')
                or 'memory').strip().lower()
     if desired not in ('memory', 'db'):
         logger.warning(

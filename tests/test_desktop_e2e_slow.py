@@ -4,7 +4,7 @@
 The design-doc §7 acceptance that was never入库: no in-process fakes. A real
 Hypercorn serves the real app (``live_server`` fixture), a real
 ``python -m lib.desktop_agent`` subprocess polls it over real HTTP with a real
-bridge secret, and the test drives the in-process bridge exactly the way the
+owner-scoped bridge credential, and the test drives the in-process bridge exactly the way the
 LLM tool handlers do (``send_desktop_command``). Covered end-to-end:
 
   read → write → snapshot-on-disk → external edit → freshness refusal →
@@ -28,7 +28,6 @@ sys.path.insert(0, _REPO_ROOT)
 
 pytestmark = pytest.mark.slow
 
-_SECRET = 'e2e-bridge-secret-deadbeef'
 _ROOT_NAME = 'e2eapp'
 
 
@@ -52,7 +51,7 @@ def _send(cmd_type, params, agent_id, timeout=30, cmd_id=None):
     from lib.desktop import bridge as db
     result, error = db.send_desktop_command(
         cmd_type, params, timeout=timeout,
-        target_agent_id=agent_id, cmd_id=cmd_id)
+        target_agent_id=agent_id, cmd_id=cmd_id, user_id='1')
     return result, error
 
 
@@ -62,7 +61,12 @@ def test_remote_worktree_full_loop_real_subprocess(
     import requests
     from lib.desktop import bridge as db
 
-    monkeypatch.setenv('TOFU_BRIDGE_SECRET', _SECRET)
+    from lib.api_keys import create_key
+    _credential, bridge_token = create_key(
+        owner_user_id=1,
+        name='desktop-e2e-agent',
+        scopes=['agents:bridge'],
+    )
 
     # ── Local "user machine": a share root with one seed file ──
     root = tmp_path / 'worktree'
@@ -86,7 +90,7 @@ def test_remote_worktree_full_loop_real_subprocess(
         [sys.executable, '-m', 'lib.desktop_agent',
          '--server', live_server,
          '--allow-write', '--allow-exec',
-         '--bridge-secret', _SECRET,
+         '--bridge-token', bridge_token,
          '--poll-interval', '0.5'],
         cwd=_REPO_ROOT, env=env,
         stdout=agent_log, stderr=subprocess.STDOUT)

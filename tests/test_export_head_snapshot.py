@@ -88,6 +88,78 @@ def test_snapshot_contains_committed_not_worktree(repo):
         shutil.rmtree(snap, ignore_errors=True)
 
 
+def test_opted_in_linear_repo_exports_stable_not_development_head(repo):
+    """Linear mode publishes its verified pointer without any merge/copy."""
+    import export as exp
+
+    stable = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    _git(repo, 'update-ref', 'refs/tofu/stable', stable)
+    _git(repo, 'update-ref', 'refs/tofu/workspace-checkpoint-baseline', stable)
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-qm', 'development checkpoint')
+    _git(repo, 'config', 'tofu.linearCheckpoint', 'true')
+
+    snap = exp._stage_head_snapshot(repo)
+    assert snap is not None
+    try:
+        assert (snap / 'lib' / 'core.py').read_text(encoding='utf-8') == \
+            'VALUE = "committed"\n'
+        assert not (snap / 'lib' / 'wip_module.py').exists()
+        assert exp._EXPORT_SOURCE_SHA == stable
+    finally:
+        import shutil
+        shutil.rmtree(snap, ignore_errors=True)
+
+
+def test_unactivated_linear_setting_does_not_export_an_old_stable(repo):
+    """The opt-in bit alone cannot regress export to an isolated-mode ref."""
+    import export as exp
+
+    old_stable = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    _git(repo, 'update-ref', 'refs/tofu/stable', old_stable)
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-qm', 'reviewed newer head')
+    current_head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    _git(repo, 'config', 'tofu.linearCheckpoint', 'true')
+
+    snap = exp._stage_head_snapshot(repo)
+    assert snap is not None
+    try:
+        assert (snap / 'lib' / 'core.py').read_text(encoding='utf-8') == \
+            'VALUE = "wip"\nimport lib.wip_module\n'
+        assert (snap / 'lib' / 'wip_module.py').exists()
+        assert exp._EXPORT_SOURCE_SHA == current_head
+    finally:
+        import shutil
+        shutil.rmtree(snap, ignore_errors=True)
+
+
+def test_invalid_explicit_export_ref_fails_closed(repo, monkeypatch):
+    import export as exp
+
+    monkeypatch.setenv('TOFU_EXPORT_SOURCE_REF', '--upload-pack=evil')
+    monkeypatch.setattr(
+        exp.tempfile, 'mkdtemp',
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError('unsafe source policy must not allocate a temp tree')),
+    )
+    with pytest.raises(exp.ExportIntegrityError,
+                       match='source-ref configuration is unsafe'):
+        exp._stage_head_snapshot(repo)
+
+
+def test_activated_linear_repo_without_stable_fails_closed(repo):
+    import export as exp
+
+    head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    _git(repo, 'update-ref', 'refs/tofu/workspace-checkpoint-baseline', head)
+    _git(repo, 'config', 'tofu.linearCheckpoint', 'true')
+
+    with pytest.raises(exp.ExportIntegrityError,
+                       match='refs/tofu/stable is missing'):
+        exp._stage_head_snapshot(repo)
+
+
 def test_snapshot_pins_the_archived_sha(repo, monkeypatch):
     import export as exp
     monkeypatch.setattr(exp, '_EXPORT_SOURCE_SHA', None)

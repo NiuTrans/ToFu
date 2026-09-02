@@ -1,234 +1,144 @@
-"""Guard harness for the one-click diagnostics collector.
-
-WHY
----
-``static/js/diag_collect.js`` exposes ``window.__tofuCollectDiagnostics()`` — the
-JSON blob the Android WebView's "Copy diagnostics" FAB copies to the clipboard.
-It is the tool we rely on to root-cause the tablet "stuck on Fetching messages"
-bug (issue #1): its live GET probe reports whether the conversation body
-actually arrives over the ``/proxy/…/`` tunnel.
-
-This tool is used PRECISELY when the SPA is wedged — so if it silently rots
-(dropped from the bundle, or the collector starts returning invalid JSON, or the
-tunnel-abort signal breaks), nobody would notice in normal use. This guard locks
-three contracts:
-
-  1. ``diag_collect.js`` stays in ``lib/js_bundler.py``'s ``_BUNDLE_FILES`` AND
-     loads before ``main.js`` (§3.2.1 — a top-level module dropped from the
-     bundle is silently a no-op in production).
-  2. ``window.__tofuCollectDiagnostics()`` returns valid JSON carrying the key
-     fields (liveGetProbe / activeConv / windowConfig / recentLog / userAgent).
-  3. NEUTER: on the tunnel-wedge path (fetch never resolves → 15s abort), the
-     probe reports ``aborted === true`` — the decisive signal for the tunnel
-     hypothesis. If someone breaks the timeout/abort logic the button would give
-     a misleading "success"; this test must catch that.
-
-The JSON-contract + NEUTER checks run the REAL shipped JS under node; they skip
-cleanly when node isn't installed. The bundler-ordering check is pure Python and
-always runs.
-"""
+"""Diagnostics observe Conversation Sync v3 without fetching a transcript."""
 
 from __future__ import annotations
 
-import os
+import json
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
-from tests._runtime_sections import runtime_section_names, runtime_sections_dir
+from tests._runtime_sections import (
+    runtime_section,
+    runtime_section_names,
+    runtime_section_path,
+)
+
 
 pytestmark = pytest.mark.unit
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = runtime_sections_dir()
+ROOT = Path(__file__).resolve().parents[1]
+COLLECTOR = Path(runtime_section_path("diag_collect.js"))
 
 
-def _node_available() -> bool:
-    return shutil.which('node') is not None
-
-
-# ── Contract 1: bundler registration + ordering (pure Python, always runs) ──
-
-def test_diag_collect_in_bundle_before_main():
-    runtime_files = runtime_section_names()
-    assert 'diag_collect.js' in runtime_files, (
-        "diag_collect.js dropped from the Vite runtime — the diagnostics collector "
-        "would silently vanish from the production bundle (§3.2.1). Re-add it.")
-    assert 'main.js' in runtime_files, 'main.js missing from the Vite runtime'
-    assert runtime_files.index('diag_collect.js') < runtime_files.index('main.js'), (
-        "diag_collect.js must load BEFORE main.js so window.__tofuCollectDiagnostics "
-        "is defined by the time the app boots.")
-
-
-# ── Contracts 2 & 3: run the REAL shipped collector under node ──
-
-_HARNESS = r"""
-const fs = require('fs');
-const collectorPath = process.argv[2];
-const mode = process.argv[3];  // 'healthy' | 'wedged' | 'modern' | 'modern-reject'
-
-// Minimal browser-ish globals the collector reads (all guarded in the source,
-// but we supply realistic values so the blob is meaningful).
-global.window = global;
-global.location = { href: 'https://host/proxy/15000/', pathname: '/proxy/15000/' };
-global.navigator = { userAgent: 'Mozilla/5.0 (Linux; Android 10; K) Chrome/150 Safari' };
-global.performance = { now: () => Date.now() };
-global.document = {
-  documentElement: { style: { getPropertyValue: () => '812px' } },
-  getElementById: (id) => id === 'chatInner'
-    ? { textContent: 'Loading conversation… Fetching 1500 messages from server' } : null,
-  querySelector: () => ({ getAttribute: () => 'static/js/bundle-deadbeef.js' }),
-};
-global.activeConvId = 'mrma0rx6djqayp';
-global.conversations = [{
-  id: 'mrma0rx6djqayp', _needsLoad: true, messages: [], _serverMsgCount: 1500, _windowed: false,
-}];
-global.convWindowParam = () => '60';
-global.BASE_PATH = '';
-global.window.TOFU_CONV_WINDOW = undefined;
-global.window.__tofuDiagRing = ['t [warn] SSE failed: network error', 't [warn] Falling back to polling'];
-if (mode === 'modern') {
-  global.window.TofuModules = {
-    collectDiagnostics: () => Promise.resolve(JSON.stringify({ source: 'vite' })),
-  };
-} else if (mode === 'modern-reject') {
-  global.window.TofuModules = {
-    collectDiagnostics: () => Promise.reject(new Error('stale diagnostics chunk')),
-  };
-}
-
-// Real AbortController wired so abort() flips a flag our stub fetch observes.
-global.AbortController = class {
-  constructor() { this.signal = { __aborted: false }; }
-  abort() { this.signal.__aborted = true; }
-};
-
-// Speed up the 15s hard timeout so the wedged test finishes fast, without
-// touching any other timers.
-const realSetTimeout = setTimeout;
-global.setTimeout = (fn, ms) => realSetTimeout(fn, ms === 15000 ? 150 : ms);
-
-// The collector routes the live probe through the UNIFIED API client
-// (window.Api.conversations.getResponse), NOT a hand-built fetch — so the
-// harness stubs that seam. onError:'throw' + timeout:0 are what let the
-// collector's own 15s abort remain the sole deadline.
-if (mode === 'wedged') {
-  // Tunnel that never returns the body → only aborts when the timeout fires.
-  global.Api = { conversations: {
-    getResponse: (id, opts) => new Promise((resolve, reject) => {
-      const sig = opts && opts.signal;
-      const iv = setInterval(() => {
-        if (sig && sig.__aborted) {
-          clearInterval(iv);
-          const e = new Error('aborted'); e.name = 'AbortError'; reject(e);
-        }
-      }, 5);
-    }),
-  } };
-} else {
-  global.Api = { conversations: {
-    getResponse: () => Promise.resolve({
-      status: 200,
-      text: () => Promise.resolve(JSON.stringify({
-        windowed: true, totalCount: 1500, messages: new Array(60).fill({ role: 'user' }),
-      })),
-    }),
-  } };
-}
-
-eval(fs.readFileSync(collectorPath, 'utf8'));
-
-if (typeof window.__tofuCollectDiagnostics !== 'function') {
-  console.log('RESULT ' + JSON.stringify({ error: 'collector not exposed' }));
-  process.exit(0);
-}
-Promise.resolve(window.__tofuCollectDiagnostics()).then((s) => {
-  // Must be a STRING of valid JSON. Re-stringify a marker so the Python side
-  // can assert both that it parsed here AND inspect fields.
-  let parsed;
-  try { parsed = JSON.parse(s); }
-  catch (e) { console.log('RESULT ' + JSON.stringify({ error: 'invalid JSON: ' + e.message })); process.exit(0); }
-  console.log('RESULT ' + JSON.stringify({
-    ok: true,
-    isString: (typeof s === 'string'),
-    keys: Object.keys(parsed),
-    probe: parsed.liveGetProbe,
-    ua: parsed.userAgent,
-    recentLogLen: (parsed.recentLog || []).length,
-    source: parsed.source || null,
-  }));
-}, (e) => {
-  console.log('RESULT ' + JSON.stringify({ error: 'promise rejected: ' + (e && e.message) }));
-});
-"""
+def test_diag_collector_is_ordered_before_application_boot():
+    names = runtime_section_names()
+    assert names.index("diag_collect.js") < names.index("main.js")
 
 
 def _run(mode: str) -> dict:
-    import json
-    harness = os.path.join(HERE, '_diag_collect_harness.js')
-    with open(harness, 'w') as f:
-        f.write(_HARNESS)
-    try:
-        proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'diag_collect.js'), mode],
-            capture_output=True, text=True, timeout=60,
-        )
-    finally:
-        try:
-            os.remove(harness)
-        except OSError:
-            pass
-    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{proc.stdout}'
-    line = next((ln for ln in proc.stdout.splitlines() if ln.startswith('RESULT ')), None)
-    assert line, f'no RESULT line in harness output:\n{proc.stdout}'
-    return json.loads(line[len('RESULT '):])
+    if not shutil.which("node"):
+        pytest.skip("node is required")
+    harness = r"""
+const fs = require('fs');
+const mode = process.argv[2];
+global.window = globalThis;
+global.runtimeScope = globalThis;
+global.location = {href:'https://host/proxy/15000/'};
+global.navigator = {userAgent:'Tofu diagnostics test'};
+global.activeConvId = 'conv-a';
+global.conversations = [{
+  id:'conv-a', _turnSnapshotRequired:false, _serverTurnCount:2,
+}];
+const surface = {
+  dataset:{conversationId:'conv-a', conversationRevision:'12', transport:'live'},
+  querySelectorAll:() => [{}, {}],
+};
+global.document = {
+  documentElement:{style:{getPropertyValue:() => '812px'}},
+  querySelector:(selector) => selector.includes('conversation-surface')
+    ? surface : {getAttribute:() => 'assets/main.js'},
+};
+global.runtimeScope.ConversationTurnRead = {
+  state:() => ({conversationRevision:12, transport:'live',
+    livePhase:{phase:'working'}}),
+  ordered:() => [{turnId:'t1'}, {turnId:'t2'}],
+  activeAttemptIds:() => ['attempt-a'],
+};
+global.runtimeScope.__tofuDiagRing = ['warn-a', 'warn-b'];
+global.Api = new Proxy({}, {
+  get() { throw new Error('diagnostics must not issue an API request'); },
+});
+if (mode === 'modern') {
+  global.TofuModules = {
+    collectDiagnostics:() => Promise.resolve(JSON.stringify({source:'vite'})),
+  };
+} else if (mode === 'reject') {
+  global.TofuModules = {
+    collectDiagnostics:() => Promise.reject(new Error('chunk unavailable')),
+  };
+}
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+Promise.resolve(global.runtimeScope.__tofuCollectDiagnostics()).then((value) => {
+  const parsed = JSON.parse(value);
+  console.log(JSON.stringify({
+    source:parsed.source || null,
+    keys:Object.keys(parsed).sort(),
+    sync:parsed.conversationSync || null,
+    probe:parsed.liveStateProbe || null,
+    active:parsed.activeConv || null,
+    surface:parsed.surface || null,
+    recentLogLength:(parsed.recentLog || []).length,
+  }));
+}).catch((error) => {
+  console.error(error?.stack || error);
+  process.exitCode = 1;
+});
+"""
+    result = subprocess.run(
+        [shutil.which("node"), "-e", harness, str(COLLECTOR), mode],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_collector_returns_valid_json_with_key_fields():
-    res = _run('healthy')
-    assert res.get('ok'), f'collector did not produce valid JSON: {res}'
-    assert res['isString'], 'collector must return a JSON STRING'
-    for field in ('liveGetProbe', 'activeConv', 'windowConfig', 'recentLog', 'userAgent'):
-        assert field in res['keys'], f'diagnostics blob missing key field {field!r}: {res["keys"]}'
-    # Healthy path: probe reports a real body arrived, windowed.
-    probe = res['probe']
-    assert probe.get('httpStatus') == 200, f'expected 200 in healthy probe: {probe}'
-    assert probe.get('serverSaysWindowed') is True, f'expected windowed body: {probe}'
-    assert res['recentLogLen'] >= 2, 'recentLog ring not attached'
+def test_fallback_collector_reports_store_and_surface_state_only():
+    result = _run("fallback")
+    assert result["sync"] == {
+        "protocol": "conversation-sync-v3",
+        "authority": "sidecar-turn-store",
+        "browserTranscriptCache": "none",
+    }
+    assert result["probe"] == {
+        "protocol": "conversation-sync-v3",
+        "conversationId": "conv-a",
+        "revision": 12,
+        "transport": "live",
+        "turnCount": 2,
+        "activeAttemptCount": 1,
+        "livePhase": {"phase": "working"},
+    }
+    assert result["active"]["inMemoryTurnCount"] == 2
+    assert result["active"]["serverTurnCount"] == 2
+    assert result["surface"] == {
+        "conversationId": "conv-a",
+        "revision": 12,
+        "transport": "live",
+        "turnNodeCount": 2,
+    }
+    assert result["recentLogLength"] == 2
+    assert "liveGetProbe" not in result["keys"]
+    assert "windowConfig" not in result["keys"]
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_NEUTER_tunnel_wedge_probe_reports_aborted():
-    """The decisive tunnel-hypothesis signal: when the body never arrives, the
-    probe MUST report aborted=true. If the abort/timeout logic breaks, the FAB
-    would falsely look 'successful' — this test locks that signal."""
-    res = _run('wedged')
-    assert res.get('ok'), f'collector did not produce valid JSON on wedge path: {res}'
-    probe = res['probe']
-    assert probe.get('aborted') is True, (
-        "wedged-tunnel probe must report aborted=true (the core issue-#1 tunnel "
-        f"signal) — got: {probe}")
-    assert probe.get('failed') is True, f'wedged probe should be marked failed: {probe}'
+def test_collector_prefers_typed_chunk_and_falls_back_if_it_rejects():
+    assert _run("modern")["source"] == "vite"
+    fallback = _run("reject")
+    assert fallback["source"] is None
+    assert fallback["probe"]["revision"] == 12
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_collector_delegates_to_vite_chunk_and_rolls_back_on_rejection():
-    modern = _run('modern')
-    assert modern.get('ok') is True
-    assert modern.get('source') == 'vite'
-
-    rollback = _run('modern-reject')
-    assert rollback.get('ok') is True
-    assert rollback.get('source') is None
-    assert rollback['probe'].get('httpStatus') == 200
-
-
-if __name__ == '__main__':
-    test_diag_collect_in_bundle_before_main()
-    if _node_available():
-        test_collector_returns_valid_json_with_key_fields()
-        test_NEUTER_tunnel_wedge_probe_reports_aborted()
-    print('PASS')
+def test_diagnostics_sources_cannot_reintroduce_message_window_probe():
+    retained = runtime_section("diag_collect.js")
+    typed = (ROOT / "frontend/src/features/diagnostics.ts").read_text(
+        encoding="utf-8",
+    )
+    for retired in (
+        "convWindowParam", "liveGetProbe", "windowConfig",
+        "messagesReturned", "parsed.messages", "getResponse(",
+    ):
+        assert retired not in retained
+        assert retired not in typed

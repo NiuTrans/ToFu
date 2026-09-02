@@ -9,7 +9,7 @@ are "active" — that is driven entirely by the Settings UI providers
 
 This package is a facade split across cohesive sub-modules::
 
-    _pricing.py  — PRICING_TIERS / MANAGED_TIER_TAGS / CHEAP_* thresholds +
+    _pricing.py  — PRICING_TIERS / MANAGED_TIER_TAGS +
                    get_pricing_tiers / is_model_cheap / reevaluate_pricing_tags
     _slots.py    — DEFAULT_SLOT_CONFIGS reference table
     _aliases.py  — MODEL_ALIAS_GROUPS + MODEL_ALIASES lookup map
@@ -28,9 +28,6 @@ logger = get_logger(__name__)
 from lib.llm_dispatch.config._pricing import (  # noqa: F401
     PRICING_TIERS,
     MANAGED_TIER_TAGS,
-    CHEAP_INPUT_THRESHOLD,
-    CHEAP_OUTPUT_THRESHOLD,
-    CHEAP_BLENDED_THRESHOLD,
     _NON_CHAT_CAPS,
     _resolve_prices,
     _tier_matches,
@@ -59,9 +56,6 @@ __all__ = [
     'MODEL_ALIAS_GROUPS',
     'PRICING_TIERS',
     'MANAGED_TIER_TAGS',
-    'CHEAP_INPUT_THRESHOLD',
-    'CHEAP_OUTPUT_THRESHOLD',
-    'CHEAP_BLENDED_THRESHOLD',
     'is_model_cheap',
     'get_pricing_tiers',
     'reevaluate_pricing_tags',

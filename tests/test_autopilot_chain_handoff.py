@@ -1,55 +1,4 @@
-"""tests/test_autopilot_chain_handoff.py — TARGET contract for epic
-pt_8dc030176bad450b (Autopilot VU as an independent stream).
-
-STATUS: SKIPPED (the whole module) until the cutover commit. This suite is the
-migration-test plan the owner named as the precondition for touching the
-exactly-once handoff ("先写迁移测试再动"). It codifies the TARGET behavior so that
-when the cutover happens these tests are the acceptance gate — and it lives
-in-tree NOW (skipped) so the design intent is reviewable and the collection gate
-stays green.
-
-See docs/EPIC_AUTOPILOT_INDEPENDENT_STREAM_DESIGN.md for the full rationale.
-
-THE PURE MECHANISM (why there is no new baton / enum / descriptor)
-------------------------------------------------------------------
-The whole hand-carried baton — `autopilotNextTaskId`/`autopilotVuMessage` on the
-`done` event, its `/api/v1/chat/poll` mirror, and the `_apply_autopilot_baton`
-cold-replay synthesis — exists for ONE reason: the VU sub-task deliberately runs
-with `convId=''` "to stay out of the latest-task registry" (autopilot.py). Being
-invisible to the server's conv→latest-task index, the successor id has to be
-hand-delivered on the terminal event of the turn before it, and the parent `done`
-has to be WITHHELD (via `task['_autopilot_deciding']`) until that id exists.
-
-But that index ALREADY EXISTS and is already the right primitive:
-`_record_latest_task(conv_id, task_id)` / `_latest_task_for_conv(conv_id)`
-(lib/tasks_pkg/manager/_state.py) — a process-wide, cross-replica pointer to a
-conversation's newest task; `routes/conversations.py:_conv_has_live_task` already
-reduces `_latest_task_for_conv(conv) is pending/running` to "is this conv live?".
-
-TARGET: STOP opting out. Each turn of an autopilot chain (parent → VU →
-follow-up) is a normal task registered under the REAL convId. The frontend gets
-ONE transport-agnostic reducer: after any turn's `done`, if the conv's
-server-authoritative latest task is a DIFFERENT pending/running task, attach to
-it (idempotently — dedup by task id). That single rule covers parent→VU,
-VU→follow-up, and VU-emitted-TASK_DONE (no newer task ⇒ chain ends), with NO
-enum, NO per-transition state, NO vu_msg on the wire, NO withhold, NO
-_VUEventForwarder, NO cold-replay synthesis special-case. The VU message is
-already persisted to conversations.messages (_isVirtualUser) before its task
-starts, so the client loads it from the authoritative record on attach.
-
-This suite therefore asserts the INDEX ADVANCE + the DELETIONS, not a descriptor.
-Keep test_autopilot_poll_handoff.py green until the cutover commit, which DELETES
-it (its 4 guards describe the baton world that no longer exists) and un-skips
-this suite in the same commit — the two mechanisms are mutually exclusive.
-
-THE LOAD-BEARING GUARD (design §4.1, HB-1): removing the withhold is only safe if
-the backend advances the supersede index to the VU successor STRICTLY BEFORE it
-emits the parent `done`. `test_index_advances_before_parent_done` pins that
-happens-before by reading the index at the done-emit seam; without it, a client
-reacting to end-of-turn could read the index, see only the parent, declare the
-conv idle, and strand the VU bubble — the mirror of the visible "autopilot bubble
-suddenly disappears" symptom.
-"""
+"""Autopilot successors use the conversation latest-task index.\n\nThe index must advance before the predecessor emits done. No terminal\ntransport carries a handoff baton; warm and cold clients discover the same\nsuccessor from the authoritative index.\n"""
 
 import pytest
 
@@ -72,7 +21,7 @@ _VU_MSG = {
 @pytest.fixture()
 def put_task():
     """Insert a synthetic task into the in-memory registry; auto-cleanup."""
-    from lib.tasks_pkg import tasks, tasks_lock
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
     added = []
 
     def _put(task):
@@ -91,7 +40,7 @@ def put_task():
 @pytest.fixture()
 def reset_index():
     """Clear the conv→latest-task supersede index around each test."""
-    from lib.tasks_pkg import manager as m
+    import lib.tasks_pkg.manager.runtime as m
     with m._conv_latest_task_lock:
         m._conv_latest_task.clear()
     yield m
@@ -99,21 +48,16 @@ def reset_index():
         m._conv_latest_task.clear()
 
 
-def _poll(client, task_id):
-    resp = client.get(f'/api/v1/chat/poll/{task_id}')
-    return resp.status_code, resp.get_json()
-
-
 def _make_full_task(task_id, conv_id, **overrides):
     from lib.tasks_pkg.manager import create_task
-    task = create_task(conv_id, [{'role': 'user', 'content': 'q'}], {})
+    task = create_task(conv_id, [{'role': 'user', 'content': 'q'}], {}, user_id=1)
     task['id'] = task_id
     task.update(overrides)
     return task
 
 
 def _sse_collect(client, task_id, max_chars=20000):
-    resp = client.get(f'/api/chat/stream/{task_id}')
+    resp = client.get(f'/api/v1/tasks/{task_id}/stream')
     return resp.get_data(as_text=True)[:max_chars]
 
 
@@ -227,16 +171,10 @@ def test_parent_done_fires_immediately_no_withhold(flask_client, put_task, reset
 
 @pytest.mark.api
 def test_done_carries_no_baton_fields(flask_client, put_task, reset_index):
-    """Neither the SSE done nor the poll body carries the retired baton keys —
-    the fields are GONE, not merely empty. The successor is discovered from the
-    supersede index instead."""
+    """The terminal stream carries no retired baton fields."""
     task = _make_full_task('chain-nobaton-1', 'conv-chain-3',
                            status='done', content='ok', finishReason='stop')
     put_task(task)
-    status, body = _poll(flask_client, 'chain-nobaton-1')
-    assert status == 200, body
-    assert 'autopilotNextTaskId' not in body
-    assert 'autopilotVuMessage' not in body
     sse = _sse_collect(flask_client, 'chain-nobaton-1')
     assert 'autopilotNextTaskId' not in sse
     assert 'autopilotVuMessage' not in sse
@@ -254,10 +192,10 @@ def test_conv_live_task_points_at_running_vu(put_task, reset_index):
     vu = _make_full_task('vu-running-1', conv, status='running')
     put_task(vu)
     m._record_latest_task(conv, 'vu-running-1')
-    assert _conv_has_live_task(conv) is True
+    assert _conv_has_live_task(conv, user_id=1) is True
     # VU finishes with no successor → index still points at it but it's done.
     vu['status'] = 'done'
-    assert _conv_has_live_task(conv) is False
+    assert _conv_has_live_task(conv, user_id=1) is False
 
 
 # ── Plain non-autopilot done still finalizes (supersedes 2 tests) ──
@@ -273,7 +211,6 @@ def test_plain_done_no_successor(flask_client, put_task, reset_index):
     put_task(task)
     m._record_latest_task(conv, 'plain-done-1')
     assert m._latest_task_for_conv(conv) == 'plain-done-1'
-    status, body = _poll(flask_client, 'plain-done-1')
-    assert status == 200, body
-    assert body['status'] == 'done'
-    assert 'autopilotNextTaskId' not in body
+    sse = _sse_collect(flask_client, 'plain-done-1')
+    assert '"type": "done"' in sse or '"type":"done"' in sse
+    assert 'autopilotNextTaskId' not in sse

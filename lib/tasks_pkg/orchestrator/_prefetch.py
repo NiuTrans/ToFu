@@ -1,6 +1,6 @@
 """orchestrator/_prefetch.py — background prefetch pool (run_task slice 3).
 
-**Extraction context** (board epic ``pt_03f4cdf1``, slice 3):
+**Extraction context** (board epic ```, slice 3):
 
 The project-context prefetch block that used to live inline in
 ``run_task`` (line 342-391 of the pre-slice ``_run.py``). It:
@@ -80,7 +80,7 @@ def start_prefetches(
 
     Returns:
         The ``ThreadPoolExecutor`` the caller owns. Caller MUST call
-        ``.shutdown(wait=False)`` on it after ``_inject_system_contexts``
+        ``.shutdown(wait=False)`` on it after ``compose_task_context``
         has consumed the futures.
     """
     del cfg, memory_enabled
@@ -98,7 +98,7 @@ def start_prefetches(
 
         _prefetch_project_future = _prefetch_executor.submit(_prefetch_project)
 
-    # Store prefetch futures on the task for _inject_system_contexts to use
+    # Store prefetch futures on the task for the Context Composer to use
     task['_prefetch_project'] = _prefetch_project_future
 
     return _prefetch_executor

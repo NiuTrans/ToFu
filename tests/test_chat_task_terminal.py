@@ -18,8 +18,8 @@ def test_error_terminal_updates_state_event_persistence_and_busy_projection():
     task = {
         'id': 'terminal-task-0001',
         'status': 'running',
-        'endpoint_mode': True,
-        '_endpoint_phase': 'working',
+        'flow_mode': True,
+        '_flow_phase': 'working',
         'model': 'test-model',
     }
     envelope = {'kind': 'bad_request', 'message': 'missing flow'}
@@ -27,7 +27,7 @@ def test_error_terminal_updates_state_event_persistence_and_busy_projection():
     event = finalize_chat_task_error(
         task,
         envelope,
-        endpoint_reason='definition_unavailable',
+        flow_reason='definition_unavailable',
         append_event_fn=lambda owner, item: events.append((owner, item)),
         persist_task_result_fn=lambda owner: persisted.append(owner),
         notify_terminal_fn=lambda owner: notified.append(owner),
@@ -35,8 +35,8 @@ def test_error_terminal_updates_state_event_persistence_and_busy_projection():
 
     assert task['status'] == 'error'
     assert task['finishReason'] == 'error'
-    assert task['_endpoint_phase'] == 'done'
-    assert task['_endpoint_stop_reason'] == 'definition_unavailable'
+    assert task['_flow_phase'] == 'done'
+    assert task['_flow_stop_reason'] == 'definition_unavailable'
     assert task['finished_at'] > 0
     assert event['type'] == 'done'
     assert event['finishReason'] == 'error'
@@ -70,20 +70,20 @@ def test_terminal_stamp_is_idempotent_and_rejects_outcome_rewrites():
 
     assert stamp_chat_task_terminal(
         task, status='done', finish_reason='stop',
-        endpoint_reason='verified_complete',
+        flow_reason='verified_complete',
     ) is True
     finished_at = task['finished_at']
     assert stamp_chat_task_terminal(
         task, status='done', finish_reason='stop',
-        endpoint_reason='verified_complete',
+        flow_reason='verified_complete',
     ) is False
     assert stamp_chat_task_terminal(
-        task, status='error', finish_reason='error', endpoint_reason='fatal',
+        task, status='error', finish_reason='error', flow_reason='fatal',
     ) is False
 
     assert task['status'] == 'done'
     assert task['finishReason'] == 'stop'
-    assert task['_endpoint_stop_reason'] == 'verified_complete'
+    assert task['_flow_stop_reason'] == 'verified_complete'
     assert task['finished_at'] == finished_at
 
 

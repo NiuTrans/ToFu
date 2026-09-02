@@ -45,7 +45,7 @@ credentials without ever seeing them):
                          entries on one run_command invocation
   build_vault_index()  → the ``<credential_vault>`` system-prompt block
                          (NAMES + env vars + notes ONLY — never values),
-                         spliced by system_context/_inject.py so the model
+                         spliced by the Context Composer so the model
                          always knows which credentials exist
 """
 
@@ -148,6 +148,7 @@ def _load_fernet():
                 raise
         else:
             key = Fernet.generate_key()
+            _KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(str(_KEY_PATH), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:
                 os.write(fd, key)

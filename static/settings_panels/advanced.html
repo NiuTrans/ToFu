@@ -1,6 +1,6 @@
         <div class="settings-tab-panel" id="settingsTab_advanced">
-          <div class="settings-section-title" data-i18n="settings.responsesExperiments">工具发现与 Responses 能力</div>
-          <p class="settings-desc" data-i18n="settings.responsesExperimentsDesc">Tool Search 适用于所有 Provider；工具是否发送 schema 与是否允许执行彼此独立。</p>
+          <div class="settings-section-title" data-i18n="settings.responsesExperiments">工具发现与编排</div>
+          <p class="settings-desc" data-i18n="settings.responsesExperimentsDesc">PTC 和 multi-agent 编排适用于所有支持工具的模型；已验证的 Provider 原生能力只负责加速，同一语义始终有本地兜底。</p>
           <div class="tool-discovery-card" aria-labelledby="toolDiscoveryPolicyTitle">
             <div class="tool-discovery-head">
               <span class="tool-discovery-icon" aria-hidden="true">⌘</span>
@@ -24,7 +24,7 @@
           </div>
           <div class="settings-group">
             <div class="settings-row two-col">
-              <div class="settings-field"><label for="settingProgrammaticCalling" data-i18n="settings.responsesPtc">Programmatic Tool Calling</label><select id="settingProgrammaticCalling"><option value="auto">auto</option><option value="off">off</option></select></div>
+              <div class="settings-field"><label for="settingProgrammaticCalling" data-i18n="settings.responsesPtc">Programmatic Tool Calling</label><select id="settingProgrammaticCalling"><option value="on">on</option><option value="auto">auto</option><option value="off">off</option></select></div>
               <div class="settings-field"><label for="settingResponsesPromptProfile">GPT-5.6 提示词档位</label><select id="settingResponsesPromptProfile"><option value="auto">auto</option><option value="lean">lean</option><option value="full">full</option></select></div>
             </div>
             <div class="settings-row two-col">
@@ -36,65 +36,15 @@
               <div class="settings-field"><label for="settingResponsesImageDetail" data-i18n="settings.responsesImageDetail">图像细节</label><select id="settingResponsesImageDetail"><option value="auto">auto</option><option value="original">original</option></select></div>
             </div>
             <div class="settings-row two-col">
-              <div class="settings-field"><label for="settingResponsesMultiAgent" data-i18n="settings.responsesMultiAgent">原生 Multi-agent</label><select id="settingResponsesMultiAgent" data-tofu-action-change="_syncResponsesExperimentUi()"><option value="auto">auto</option><option value="off">off</option><option value="read_only">read_only</option></select></div>
+              <div class="settings-field"><label for="settingResponsesMultiAgent" data-i18n="settings.responsesMultiAgent">Multi-agent 编排</label><select id="settingResponsesMultiAgent" data-tofu-action-change="_syncResponsesExperimentUi()"><option value="auto">auto</option><option value="off">off</option><option value="read_only">read_only</option></select></div>
               <div class="settings-field"><label for="settingResponsesMaxSubagents" data-i18n="settings.responsesMaxSubagents">最大并发子代理</label><input type="number" id="settingResponsesMaxSubagents" min="1" max="8" value="3"></div>
             </div>
           </div>
-          <p class="settings-desc" data-i18n="settings.responsesExperimentsSafety">Tool Search 只改变模型可见 schema，不改变任务允许执行的工具；Multi-agent 的 auto 仅对适合拆分的复杂任务开启，并始终限制为只读分析。</p>
+          <p class="settings-desc" data-i18n="settings.responsesExperimentsSafety">PTC 负责单个工作流内的有界读取归并，multi-agent 负责拆分独立工作流；两者可以同时运行。本地与 Provider 原生路径共享同一套只读、租户、连接和环境权限边界。</p>
 
-          <details class="settings-disclosure">
-            <summary><strong data-i18n="settings.costExperiment">成本优化 A/B 实验</strong></summary>
-            <div class="settings-disclosure-body">
-          <p class="settings-desc" data-i18n="settings.costExperimentDesc">按对话稳定分流，对比兼容基线与当前优化策略。默认 enabled=false；关闭时不改变任何请求。</p>
-          <div class="settings-group cost-exp-controls">
-            <div class="settings-toggle-row">
-              <div>
-                <span class="settings-toggle-label" data-i18n="settings.costExperimentEnable">启用实验分流</span>
-                <div class="settings-toggle-desc" data-i18n="settings.costExperimentEnableDesc">只作用于新发起的轮次；同一对话始终留在同一组，显式请求参数不会被覆盖。</div>
-              </div>
-              <label class="stg-toggle">
-                <input type="checkbox" id="settingCostExperimentEnabled" data-tofu-action-change="_syncCostExperimentUi()">
-                <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
-              </label>
-            </div>
-            <div class="settings-row two-col cost-exp-fields">
-              <div class="settings-field">
-                <label for="settingCostExperimentId" data-i18n="settings.costExperimentId">实验 ID</label>
-                <input type="text" id="settingCostExperimentId" value="context-cost-v1" maxlength="80">
-              </div>
-              <div class="settings-field">
-                <label for="settingCostExperimentMinSample" data-i18n="settings.costExperimentMinSample">每组最小对话数</label>
-                <input type="number" id="settingCostExperimentMinSample" min="1" max="10000" value="20">
-              </div>
-            </div>
-            <div class="settings-row two-col cost-exp-fields">
-              <div class="settings-field">
-                <label for="settingCostExperimentTraffic" data-i18n="settings.costExperimentTraffic">纳入流量</label>
-                <div class="range-row"><input type="range" id="settingCostExperimentTraffic" min="0" max="100" step="1" value="10" data-tofu-action-input="_syncRangeOutput(this,'costExperimentTrafficVal','%')"><span class="range-value" id="costExperimentTrafficVal">10%</span></div>
-              </div>
-              <div class="settings-field">
-                <label for="settingCostExperimentTreatment" data-i18n="settings.costExperimentTreatment">纳入流量中的优化组</label>
-                <div class="range-row"><input type="range" id="settingCostExperimentTreatment" min="0" max="100" step="1" value="50" data-tofu-action-input="_syncRangeOutput(this,'costExperimentTreatmentVal','%')"><span class="range-value" id="costExperimentTreatmentVal">50%</span></div>
-              </div>
-            </div>
-          </div>
-          <div class="cost-exp-arms" aria-label="A/B arm definitions">
-            <div class="cost-exp-arm"><strong>Control</strong><span data-i18n="settings.costExperimentControl">完整内联 MCP 工具定义 · 仅按上下文窗口压缩</span></div>
-            <div class="cost-exp-arm optimized"><strong>Optimized</strong><span data-i18n="settings.costExperimentOptimized">按需披露 MCP 工具 · 128K 经济工作集</span></div>
-          </div>
-          <p class="settings-desc" data-i18n="settings.costExperimentVersioning">已保存的实验如需调整流量或组间比例，请先更换实验 ID；服务端会拒绝可能让旧对话换组的修改。</p>
-          <div class="cost-exp-report-head">
-            <div>
-              <strong data-i18n="settings.costExperimentReport">最近 14 天真实成本报表</strong>
-              <div class="settings-toggle-desc" data-i18n="settings.costExperimentMethod">提供商 usage × 当轮价格快照；无定价轮次单列，不按 0 计算。成功率仅为无错误结束代理指标。</div>
-            </div>
-            <button type="button" class="btn btn-secondary btn-sm" data-tofu-action="_refreshCostExperimentReport()" data-i18n="settings.costExperimentRefresh">刷新</button>
-          </div>
-          <div id="costExperimentReport" class="cost-exp-report" aria-live="polite">
-            <div class="cost-exp-empty" data-i18n="settings.costExperimentLoading">正在读取实验数据…</div>
-          </div>
-            </div>
-          </details>
+          <!-- 成本优化 A/B 实验 moved to the maintainer-only Experiments tab
+               (static/settings_panels/experiments.html) — see
+               lib/settings_panels.MAINTAINER_ONLY_TABS. -->
 
           <details class="settings-disclosure">
             <summary><strong data-i18n="settings.importExport">导入 / 导出</strong></summary>

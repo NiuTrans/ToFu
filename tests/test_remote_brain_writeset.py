@@ -1,6 +1,6 @@
 """tests/test_remote_brain_writeset.py — RWA P5:Project Brain write_set 集成.
 
-docs/REMOTE_WORKTREE_DESIGN.md §5 P5:远程根纳入 write_set 声明 ——
+docs/modules/remote_execution.md:远程根纳入 write_set 声明 ——
   * post/claim 时,若会话的项目是伪路径绑定(``remote:<agent>:<root>``),
     该 token 自动并入 epic 的 write_set(幂等去重);
   * 伪路径经既有 ``_paths_intersect`` 语义:同 token 冲突、不同根/不同
@@ -17,54 +17,52 @@ _AUDIT_SYNTHETIC_REPO_PATHS = {
     'lib/q.py', 'lib/x.py', 'lib/y.py', 'lib/z.py',
 }
 
-import json
 import os
 
 import pytest
 
-pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._chat_sidecar',)
+pytestmark = [pytest.mark.unit, pytest.mark.usefixtures('chat_sidecar')]
 
-
-@pytest.fixture(scope='module', autouse=True)
-def _ensure_schema(flask_app):
-    from lib.database import init_db
-    with flask_app.app_context():
-        init_db()
-    yield
+TEST_OWNER_USER_ID = 1
 
 
 @pytest.fixture(autouse=True)
-def _clean(flask_app):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM project_tasks')
-        db.execute('DELETE FROM project_events')
-        db.commit()
-    yield
+def _clean():
+    from tests._seed import clear_board, clear_events
+    clear_board(_PROJ, user_id=TEST_OWNER_USER_ID)
+    clear_events()
+    try:
+        yield
+    finally:
+        clear_board(_PROJ, user_id=TEST_OWNER_USER_ID)
+        clear_events()
 
 
 def _mk_conv(flask_app, conv_id, project_path=''):
-    """Insert a conversations row whose settings carry projectPath."""
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        db.execute('DELETE FROM conversations WHERE id=?', (conv_id,))
-        db.execute(
-            'INSERT INTO conversations (id, user_id, title, messages, settings, '
-            'created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (conv_id, 1, conv_id, '[]',
-             json.dumps({'projectPath': project_path}), 1, 1))
-        db.commit()
+    """Create a canonical conversation carrying the requested project path."""
+    del flask_app
+    from tests._seed import delete_conversation, seed_conversation
+    delete_conversation(conv_id, user_id=TEST_OWNER_USER_ID)
+    seed_conversation(
+        conv_id,
+        user_id=TEST_OWNER_USER_ID,
+        title=conv_id,
+        settings={'projectPath': project_path},
+        created_at=1,
+        updated_at=1,
+    )
 
 
 def _ws_of(flask_app, task_id):
-    from lib.database import DOMAIN_CHAT, get_thread_db
-    with flask_app.app_context():
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute('SELECT write_set FROM project_tasks WHERE id=?',
-                         (task_id,)).fetchone()
-    return json.loads(row['write_set'] or '[]')
+    del flask_app
+    from lib.conversations.project_board import read_board
+    row = next(
+        task for task in read_board(
+            _PROJ, user_id=TEST_OWNER_USER_ID)['tasks']
+        if task['id'] == task_id
+    )
+    return list(row.get('write_set') or [])
 
 
 _PROJ = os.path.abspath('/tmp/rwa-brain-p5')
@@ -79,7 +77,10 @@ def test_post_merges_remote_token(flask_app):
     from lib.conversations.project_board import post_task
     _mk_conv(flask_app, 'convR', TOKEN)
     with flask_app.app_context():
-        tid = post_task(_PROJ, 'convR', 'refactor the thing')['id']
+        tid = post_task(
+            _PROJ, 'convR', 'refactor the thing',
+            user_id=TEST_OWNER_USER_ID,
+        )['id']
     assert TOKEN in _ws_of(flask_app, tid)
 
 
@@ -88,6 +89,7 @@ def test_post_local_conv_unchanged(flask_app):
     _mk_conv(flask_app, 'convL', '/srv/code/app')
     with flask_app.app_context():
         tid = post_task(_PROJ, 'convL', 'local work',
+                        user_id=TEST_OWNER_USER_ID,
                         write_set=['lib/x.py'])['id']
     assert _ws_of(flask_app, tid) == ['lib/x.py']
 
@@ -97,6 +99,7 @@ def test_post_dedups_explicit_token(flask_app):
     _mk_conv(flask_app, 'convR2', TOKEN)
     with flask_app.app_context():
         tid = post_task(_PROJ, 'convR2', 'already declared',
+                        user_id=TEST_OWNER_USER_ID,
                         write_set=['lib/y.py', TOKEN])['id']
     assert _ws_of(flask_app, tid) == ['lib/y.py', TOKEN]
 
@@ -104,7 +107,10 @@ def test_post_dedups_explicit_token(flask_app):
 def test_post_missing_conv_no_crash(flask_app):
     from lib.conversations.project_board import post_task
     with flask_app.app_context():
-        tid = post_task(_PROJ, 'ghost-conv', 'no conv row')['id']
+        tid = post_task(
+            _PROJ, 'ghost-conv', 'no conv row',
+            user_id=TEST_OWNER_USER_ID,
+        )['id']
     assert _ws_of(flask_app, tid) == []
 
 
@@ -129,8 +135,11 @@ def test_claim_merges_remote_token(flask_app, _no_post_dispatch):
     _mk_conv(flask_app, 'convClaimer', TOKEN)
     with flask_app.app_context():
         tid = post_task(_PROJ, 'convPoster', 'clean epic',
+                        user_id=TEST_OWNER_USER_ID,
                         write_set=['lib/z.py'])['id']
-        r = claim_task(_PROJ, 'convClaimer', tid)
+        r = claim_task(
+            _PROJ, 'convClaimer', tid, user_id=TEST_OWNER_USER_ID,
+        )
     assert r['ok'], f'claim_task failed: {r}'
     ws = _ws_of(flask_app, tid)
     assert 'lib/z.py' in ws and TOKEN in ws
@@ -141,8 +150,11 @@ def test_claim_local_conv_unchanged(flask_app, _no_post_dispatch):
     _mk_conv(flask_app, 'convP2', '')
     _mk_conv(flask_app, 'convL2', '/srv/code')
     with flask_app.app_context():
-        tid = post_task(_PROJ, 'convP2', 'clean2', write_set=['a.py'])['id']
-        r = claim_task(_PROJ, 'convL2', tid)
+        tid = post_task(
+            _PROJ, 'convP2', 'clean2', user_id=TEST_OWNER_USER_ID,
+            write_set=['a.py'],
+        )['id']
+        r = claim_task(_PROJ, 'convL2', tid, user_id=TEST_OWNER_USER_ID)
     assert r['ok'], f'claim_task failed: {r}'
     assert _ws_of(flask_app, tid) == ['a.py']
 
@@ -175,8 +187,13 @@ def _setup_claimed_remote(flask_app):
     from lib.conversations.project_board import claim_task, post_task
     _mk_conv(flask_app, 'convX', TOKEN)
     with flask_app.app_context():
-        e1 = post_task(_PROJ, 'convX', 'E1 claimed by remote conv')['id']
-        assert claim_task(_PROJ, 'convX', e1)['ok']
+        e1 = post_task(
+            _PROJ, 'convX', 'E1 claimed by remote conv',
+            user_id=TEST_OWNER_USER_ID,
+        )['id']
+        assert claim_task(
+            _PROJ, 'convX', e1, user_id=TEST_OWNER_USER_ID,
+        )['ok']
     return e1
 
 
@@ -186,38 +203,18 @@ def test_dispatch_demotes_same_root_not_others(flask_app):
     _setup_claimed_remote(flask_app)
     with flask_app.app_context():
         e_same = post_task(_PROJ, 'convP', 'same-root work',
+                           user_id=TEST_OWNER_USER_ID,
                            write_set=[TOKEN])['id']
         e_other = post_task(_PROJ, 'convP', 'other-root work',
+                            user_id=TEST_OWNER_USER_ID,
                             write_set=['remote:agent-A:other'])['id']
         e_local = post_task(_PROJ, 'convP', 'local work',
+                            user_id=TEST_OWNER_USER_ID,
                             write_set=['lib/q.py'])['id']
-        picks = select_dispatchable(_PROJ)
+        picks = select_dispatchable(_PROJ, user_id=TEST_OWNER_USER_ID)
     ids = [t['id'] for t in picks]
     # 同根 epic 降级到最后,但仍然可 dispatch(软语义)
     assert ids[-1] == e_same
     assert set(ids) == {e_same, e_other, e_local}
     assert ids.index(e_other) < ids.index(e_same)
     assert ids.index(e_local) < ids.index(e_same)
-
-
-def test_NEUTER_claim_merge_is_load_bearing(flask_app, monkeypatch):
-    """NEUTER:摘掉 claim 的 token 合并 → 同根 epic 不再被降级 =
-    合并是降级链的承重环(没有它,write_set 里永远没有远程 token)."""
-    import lib.conversations.project_board as pb
-    from lib.conversations.project_board import post_task
-    from lib.conversations.project_dispatch import select_dispatchable
-    monkeypatch.setattr(pb, '_conv_remote_token', lambda _db, _cid: '')
-    _mk_conv(flask_app, 'convX', TOKEN)
-    with flask_app.app_context():
-        e1 = post_task(_PROJ, 'convX', 'E1')['id']
-        from lib.conversations.project_board import claim_task
-        assert claim_task(_PROJ, 'convX', e1)['ok']
-        e_same = post_task(_PROJ, 'convP', 'same-root',
-                           write_set=[TOKEN])['id']
-        e_other = post_task(_PROJ, 'convP', 'other',
-                            write_set=['remote:agent-A:other'])['id']
-        picks = select_dispatchable(_PROJ)
-    ids = [t['id'] for t in picks]
-    # 坏结果:同根 epic 不再降级(按创建序排在 other 前)
-    assert ids.index(e_same) < ids.index(e_other), (
-        'NEUTER 未咬:摘掉合并后同根 epic 仍被降级?')

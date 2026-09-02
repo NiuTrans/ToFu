@@ -1,5 +1,6 @@
 import { featureRegistry } from '../../feature-registry';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
+import type { I18nKey } from '../../i18n';
 
 interface ShareRoot {
   name?: string;
@@ -55,7 +56,7 @@ function desktopApi(): DesktopApi {
   return api;
 }
 
-function translate(key: string): string {
+function translate(key: I18nKey): string {
   return globals().t?.(key) || key;
 }
 
@@ -130,7 +131,7 @@ export function renderDeviceAgents(agents: readonly DesktopAgent[]): void {
   for (const key of [
     'devices.colDevice', 'devices.colPlatform',
     'devices.colRoots', 'devices.colStatus',
-  ]) headerRow.append(element('th', '', translate(key)));
+  ] satisfies readonly I18nKey[]) headerRow.append(element('th', '', translate(key)));
   header.append(headerRow);
 
   const body = document.createElement('tbody');

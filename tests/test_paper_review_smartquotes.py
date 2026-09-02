@@ -26,6 +26,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
+
+TEST_OWNER_USER_ID = 1
 sys.modules.setdefault('flask', _quart)
 
 LSQUO, RSQUO = '\u2018', '\u2019'
@@ -40,7 +42,7 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 # ─── Pure educator ───────────────────────────────────────────────
 
 def test_prose_quotes_are_curled():
-    from lib.paper import smarten_quotes
+    from lib.paper.review import smarten_quotes
     assert smarten_quotes('He said "hi".') == f'He said {LDQUO}hi{RDQUO}.'
     assert smarten_quotes("it's the authors' work") == f'it{RSQUO}s the authors{RSQUO} work'
     assert smarten_quotes("the '90s") == f'the {RSQUO}90s'
@@ -50,7 +52,7 @@ def test_prose_quotes_are_curled():
 
 
 def test_math_code_urls_preserved():
-    from lib.paper import smarten_quotes
+    from lib.paper.review import smarten_quotes
     # Math primes / double-primes must survive untouched.
     assert smarten_quotes("Math: $f'(x)$ and $g''(y)$.") == "Math: $f'(x)$ and $g''(y)$."
     assert smarten_quotes('Display $$a="b"$$ end.') == 'Display $$a="b"$$ end.'
@@ -67,7 +69,7 @@ def test_math_code_urls_preserved():
 
 
 def test_idempotent_and_noop():
-    from lib.paper import smarten_quotes
+    from lib.paper.review import smarten_quotes
     once = smarten_quotes('He said "hi" to \'them\'.')
     assert smarten_quotes(once) == once, 'not idempotent'
     assert smarten_quotes('no quotes here') == 'no quotes here'
@@ -78,7 +80,7 @@ def test_idempotent_and_noop():
 # ─── Engine wiring: review curls, plain report does not ──────────
 
 def _patch_dispatch(body):
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
 
     def _fake(messages, on_content=None, on_thinking=None, **kw):
         if on_content:
@@ -96,8 +98,8 @@ REVIEW_BODY = ('# Review\n\n## Summary\nThe authors\' method is "novel" per §3.
 
 
 def _run(lang_key, ui_lang, phash):
-    import lib.paper.report_engine as re_mod
-    from lib.paper import _new_report_task
+    import lib.paper.report_engine.worker as re_mod
+    from lib.paper.report_runtime import _new_report_task
     re_mod2, orig = _patch_dispatch(REVIEW_BODY)
     try:
         task = _new_report_task('t_' + phash[:6], phash, lang_key, None,
@@ -105,8 +107,8 @@ def _run(lang_key, ui_lang, phash):
                                 config={
                                     'paperInsightEnabled': False,
                                     'paperCheckpointsEnabled': False,
-                                })
-        re_mod2._run_report_task(task, [
+                                }, user_id=TEST_OWNER_USER_ID)
+        re_mod2.run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper'},
         ], [])
@@ -116,7 +118,7 @@ def _run(lang_key, ui_lang, phash):
 
 
 def test_engine_review_curls_quotes():
-    from lib.paper import make_review_lang
+    from lib.paper.review import make_review_lang
     task = _run(make_review_lang('neurips', 'en'), 'en',
                'phashsq0000000000000000000000rev1')
     assert task['status'] == 'done', task.get('error')
@@ -144,11 +146,11 @@ def test_engine_plain_report_left_straight():
 def test_negative_control_educator_is_loadbearing():
     """Neuter smarten_quotes to a pass-through → the engine review body keeps
     straight quotes and the positive assertion FAILS. Restore → passes."""
-    import lib.paper.review as rv
-    from lib.paper import make_review_lang
-    saved = rv.smarten_quotes
+    import lib.paper.report_engine.worker as report_worker
+    from lib.paper.review import make_review_lang
+    saved = report_worker.smarten_quotes
 
-    rv.smarten_quotes = lambda text: text or ''  # pass-through
+    report_worker.smarten_quotes = lambda text: text or ''  # pass-through
     try:
         task = _run(make_review_lang('neurips', 'en'), 'en',
                    'phashsq0000000000000000000000nc01')
@@ -156,7 +158,7 @@ def test_negative_control_educator_is_loadbearing():
         assert '"novel"' in broken and LDQUO not in broken, \
             'with the educator neutered, the review must keep STRAIGHT quotes'
     finally:
-        rv.smarten_quotes = saved
+        report_worker.smarten_quotes = saved
 
     # Restore proven: re-run and the quotes are curled again.
     task2 = _run(make_review_lang('neurips', 'en'), 'en',

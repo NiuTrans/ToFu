@@ -3,28 +3,6 @@
 import copy
 import os
 
-PROJECT_TOOL_LIST_DIR = {
-    "type": "function",
-    "function": {
-        "name": "list_dir",
-        "description": (
-            "List contents of a directory in the project. Shows files with line counts "
-            "and sizes, and subdirectories with item counts.\n\n"
-            "Flags data/binary files and notes size + line count per entry; use this "
-            "before reading to avoid pulling a 20 MB file into context.\n\n"
-            "Typical workflow: start a new task with list_dir('.') to map the project, "
-            "then narrow with find_files / grep_search before reading specific files."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Relative path from project root. Use '.' for root."}
-            },
-            "required": ["path"]
-        }
-    }
-}
-
 PROJECT_TOOL_GREP = {
     "type": "function",
     "function": {
@@ -33,10 +11,12 @@ PROJECT_TOOL_GREP = {
             "Search for a pattern across project files. Returns matching lines with file "
             "paths and line numbers. Very useful for finding function definitions, imports, "
             "usages, etc.\n\n"
-            "**Prefer this over ``run_command grep/rg``** — grep_search uses ripgrep "
-            "internally (5x faster than grep), auto-skips ignored dirs, and is "
-            "case-insensitive by default. Supports ``max_results`` (like head -n) and "
-            "``count_only`` (like grep -c).\n\n"
+            "**Prefer this over ``run_command grep/rg``** — grep_search is backed by a "
+            "persistent project file index (no directory re-walk per query) with ripgrep "
+            "over the exact candidate set — it stays fast even on huge or network-mounted "
+            "(FUSE/cross-DC) trees where a recursive walk alone can exceed a minute. "
+            "Auto-skips ignored dirs, case-insensitive by default. Supports ``max_results`` "
+            "(like head -n) and ``count_only`` (like grep -c).\n\n"
             "Use simple, short patterns for best results — e.g. 'handleRequest' instead "
             "of 'def handle_.*request'. If unsure of naming, search for a core keyword "
             "substring.\n\n"
@@ -87,8 +67,10 @@ PROJECT_TOOL_FIND = {
         "description": (
             "Find files by name pattern (glob) in the project. Useful for discovering "
             "test files, configs, etc.\n\n"
-            "**Prefer this over ``run_command find``** — find_files supports "
-            "``max_results`` and auto-filters ignored dirs (node_modules, .venv, etc.).\n\n"
+            "**Prefer this over ``run_command find``** — find_files is served from a "
+            "persistent project file index (near-instant even on huge or network-mounted "
+            "trees), supports ``max_results``, and auto-filters ignored dirs "
+            "(node_modules, .venv, etc.).\n\n"
             "For MULTIPLE searches, provide a 'searches' array — each entry has the same "
             "fields as the top-level parameters. Batch mode cuts round trips."
         ),
@@ -133,7 +115,7 @@ PROJECT_TOOL_WRITE_FILE = {
             "**Paths:** a relative path resolves under the current project. An "
             "ABSOLUTE path (e.g. '/home/user/other-repo/src/main.py') also works "
             "directly — its containing directory is auto-registered as a workspace "
-            "root on first write, so you do NOT need create_project first. Only "
+            "root on first write, so no separate scaffold step is needed. Only "
             "genuine system paths (/etc, /usr, $HOME itself, …) are refused. The "
             "same applies to edit_file."
         ),
@@ -347,7 +329,11 @@ PROJECT_TOOL_EDIT_FILE = {
             "unchanged; choose replace only when the anchor itself must be "
             "changed or removed. For example, to add B between existing A and "
             "C, use anchor A + content B + operation insert_after (or anchor C "
-            "+ content B + insert_before). Do not repeat A/C in content. A "
+            "+ content B + insert_before). Do not repeat A/C in content: the "
+            "anchor and the lines next to the insertion point stay in the "
+            "file automatically — echoing them in content is auto-stripped "
+            "when provably safe and rejected when the whole content is "
+            "such an echo. A "
             "replace whose content repeats the anchor verbatim at either end "
             "is REJECTED as a pure insertion — re-issue it as "
             "insert_after/insert_before carrying only the new text.\n\n"
@@ -396,12 +382,17 @@ PROJECT_TOOL_EDIT_FILE = {
                                 "type": "string",
                                 "description": (
                                     "Only the new text to insert, or the replacement text. "
-                                    "Never repeat the anchor for insert operations."
+                                    "Never repeat the anchor for insert operations, "
+                                    "nor the file lines already next to the insertion "
+                                    "point."
                                 ),
                             },
                             "replace_all": {
                                 "type": "boolean",
-                                "description": "Replace every anchor match; valid only for operation=replace",
+                                "description": (
+                                    "For replace, replace every anchor match. Ignored for "
+                                    "insert operations, whose anchor must still match exactly once."
+                                ),
                             },
                         },
                         "required": ["path", "operation", "anchor", "content"],
@@ -421,6 +412,11 @@ PROJECT_TOOL_RUN_COMMAND = {
             "Execute a shell command in the project directory and return its output "
             "(stdout + stderr). Use this for running tests, linting, building, checking "
             "git status, installing packages — anything that needs a real shell.\n\n"
+            "**Never use a shell no-op as a placeholder.** Do not call "
+            "`true`, `:`, or `exit 0` merely to obtain another model round. "
+            "Continue reasoning in the current response, then call the real "
+            "tool needed for the next action or finish and state the blocker. "
+            "The harness treats repeated placeholder commands as a tool loop.\n\n"
             "The command runs with the project root as working directory. There is "
             "NO default timeout — a build, test suite or install runs to completion "
             "however long it takes, and the user ends it with Stop if they don't want "
@@ -445,6 +441,12 @@ PROJECT_TOOL_RUN_COMMAND = {
             "  • Finding files by name → use **find_files** (max_results, ignored-dir filter)\n"
             "  • Editing existing files → use **edit_file**; creating or fully "
             "rewriting files → use **write_file**\n"
+            "  • Downloading a remote URL onto the Tofu server → use "
+            "**download_url_to_server**. It automatically uses the selected "
+            "logged-in browser when server HTTP cannot authenticate/reach the "
+            "site. Never export browser cookies into curl/wget; a narrow "
+            "cookie-bearing file-download command is intercepted before shell "
+            "spawn and redirected to server staging.\n"
             "Reaching for `cat` / `grep` / `find` / `sed` / `awk` is almost always a smell — there is a dedicated tool that's faster, safer, and easier for the user to review.\n"
             "**Pipelines do NOT excuse this** — `grep -rn 'foo' lib/ | head -20` is the WORST case: on a FUSE-mounted or large tree, the recursive `grep -rn` walks every untracked dir (caches, .project_sessions, vendor) and can take >120s, while `grep_search(pattern='foo', path='lib', max_results=20)` finishes in <1s. Use grep_search and pass `max_results` instead of piping to `head`.\n\n"
             "**Enforced:** a `grep`/`egrep`/`fgrep` reading the filesystem "
@@ -457,7 +459,19 @@ PROJECT_TOOL_RUN_COMMAND = {
             "part of the same command) are refused, with the reason and the "
             "grep_search translation. Grepping another command's STREAM was "
             "never intercepted (`make 2>&1 | grep error`, `ps aux | grep "
-            "python`)."
+            "python`).\n\n"
+            "**Modern text tools are installed in the Tofu env and always on PATH:**\n"
+            "  • `sd` — find-and-replace, prefer over `sed` for substitutions: "
+            "`sd 'old' 'new' file` (modern regex, no BRE/ERE guessing) or "
+            "`sd -s 'old' 'new' file` (literal strings, zero escaping). It is "
+            "NOT a full sed — addresses (`1,5s/...`), multi-command scripts and "
+            "hold-space programs still require GNU sed.\n"
+            "  • `mlr` (Miller) — CSV/TSV/JSON column work by field NAME "
+            "(cut/sort/join/stats); prefer over hand-rolled `awk` on "
+            "structured data.\n"
+            "  • `goawk` — POSIX awk with a native CSV mode (`goawk -i csv`).\n"
+            "On a host that lacks them (e.g. some remote desktop agents), fall "
+            "back to GNU sed/awk."
         ),
         "parameters": {
             "type": "object",
@@ -490,62 +504,7 @@ PROJECT_TOOL_RUN_COMMAND = {
     }
 }
 
-PROJECT_TOOL_CREATE_PROJECT = {
-    "type": "function",
-    "function": {
-        "name": "create_project",
-        "description": (
-            "create_project: Create a new, initially-empty project directory at the given path and register it "
-            "as an EXTRA workspace root, and (optionally) give it a short root name.\n\n"
-            "NOTE: You usually do NOT need this just to write files outside the current "
-            "project — write_file / edit_file already accept absolute "
-            "paths and auto-register the target directory on first write. Use "
-            "create_project only when you want to (a) pre-create an empty directory "
-            "before writing into it, or (b) assign an explicit short 'name:' prefix for "
-            "a non-primary root. Example: 'scaffold a project under ~/projects/foo'.\n\n"
-            "After this call, address files in the new project either as:\n"
-            "  • an absolute path under the new directory (simplest), or\n"
-            "  • the '<rootName>:<rel/path>' prefix shorthand\n\n"
-            "The currently-open project is NOT replaced — it remains the primary root and can "
-            "still be read for reference. System paths (e.g. /etc, /usr, /bin, $HOME itself) "
-            "are rejected for safety."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": (
-                        "Absolute or ~-prefixed directory path where the new project will live. "
-                        "Parent directories are created as needed. Examples: "
-                        "'~/projects/my-new-repo', '/home/user/workspace/tool-X'."
-                    )
-                },
-                "name": {
-                    "type": "string",
-                    "description": (
-                        "Optional short root name used as the 'name:' prefix in subsequent tool calls. "
-                        "Defaults to the directory basename. If the name collides with an existing "
-                        "root, a numeric suffix is appended."
-                    )
-                },
-                "overwrite": {
-                    "type": "boolean",
-                    "description": (
-                        "If true, allow registering a directory that already exists AND is not empty. "
-                        "Existing files are NOT deleted — this flag only bypasses the non-empty guard "
-                        "so the directory can still be registered as a workspace root. "
-                        "Default: false (non-empty existing directories are rejected)."
-                    )
-                }
-            },
-            "required": ["path"]
-        }
-    }
-}
-
-
-# ★ NOTE: read_files is NOT a project-scoped tool — it's registered globally
+# NOTE: read_files is NOT a project-scoped tool — it's registered globally
 #   in lib/tasks_pkg/model_config.py (and timer.py) so the model can read
 #   absolute local paths (images, PDFs, Office docs, text files) even when no
 #   project is attached. Its handler is registered independently via
@@ -626,7 +585,7 @@ READ_FILES_TOOL = {
     }
 }
 
-# ★ read_files is intentionally NOT in PROJECT_TOOLS / PROJECT_TOOL_NAMES
+# read_files is intentionally NOT in PROJECT_TOOLS / PROJECT_TOOL_NAMES
 #   — it's a global tool registered unconditionally by the orchestrator
 #   so absolute-path file reads work regardless of project mode.
 #   See READ_FILES_TOOL above.
@@ -727,18 +686,16 @@ def with_remote_hint(tools):
 
 
 PROJECT_TOOLS_UNIFIED = [
-    PROJECT_TOOL_LIST_DIR,
     PROJECT_TOOL_GREP, PROJECT_TOOL_FIND,
     PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_EDIT_FILE,
-    PROJECT_TOOL_CREATE_PROJECT, PROJECT_TOOL_RUN_COMMAND,
+    PROJECT_TOOL_RUN_COMMAND,
 ]
 
 PROJECT_TOOLS_LEGACY = [
-    PROJECT_TOOL_LIST_DIR,
     PROJECT_TOOL_GREP, PROJECT_TOOL_FIND,
     PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_APPLY_DIFF, PROJECT_TOOL_APPLY_DIFFS,
     PROJECT_TOOL_INSERT_CONTENT, PROJECT_TOOL_INSERT_CONTENTS,
-    PROJECT_TOOL_CREATE_PROJECT, PROJECT_TOOL_RUN_COMMAND,
+    PROJECT_TOOL_RUN_COMMAND,
 ]
 
 
@@ -757,20 +714,27 @@ def project_tools_for_runtime():
 # Default/static export used by schema introspection. Runtime assembly calls
 # ``project_tools_for_runtime`` so operators retain the rollback switch.
 PROJECT_TOOLS = PROJECT_TOOLS_UNIFIED
+# Handler-registration names for the LIVE project tool surface. Historical
+# create_project rounds still render in the UI, but the name is deliberately
+# absent here so any new/latched call is refused as an unknown tool instead of
+# executing a retired scaffold action.
 PROJECT_TOOL_NAMES = {
+    # ``list_dir`` remains dispatchable only for conversation-latched legacy
+    # schemas. New tool epochs omit it and route simple ``run_command`` ls
+    # requests through the same bounded directory reader instead.
     'list_dir', 'grep_search', 'find_files',
     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
-    'create_project', 'run_command',
+    'run_command',
 }
 
 __all__ = [
-    'PROJECT_TOOL_LIST_DIR', 'READ_FILES_TOOL',
+    'READ_FILES_TOOL',
     'PROJECT_TOOL_GREP', 'PROJECT_TOOL_FIND',
     'PROJECT_TOOL_WRITE_FILE', 'PROJECT_TOOL_EDIT_FILE',
     'PROJECT_TOOL_APPLY_DIFF', 'PROJECT_TOOL_APPLY_DIFFS',
     'PROJECT_TOOL_INSERT_CONTENT', 'PROJECT_TOOL_INSERT_CONTENTS',
-    'PROJECT_TOOL_CREATE_PROJECT', 'PROJECT_TOOL_RUN_COMMAND',
+    'PROJECT_TOOL_RUN_COMMAND',
     'PROJECT_TOOLS', 'PROJECT_TOOLS_UNIFIED', 'PROJECT_TOOLS_LEGACY',
     'PROJECT_TOOL_NAMES', 'project_tools_for_runtime', 'with_multiroot_hint',
     'with_remote_hint',

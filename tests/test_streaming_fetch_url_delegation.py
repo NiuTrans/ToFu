@@ -1,5 +1,5 @@
 """Regression: streaming pre-exec ``fetch_url`` delegates to the authoritative
-``handlers.search._fetch_url_one`` — so binary file assets and text assets are
+``handlers.search._core._fetch_url_one`` — so binary file assets and text assets are
 handled IDENTICALLY to the serial pipeline.
 
 Background
@@ -58,7 +58,7 @@ class TestStreamingFetchUrlDelegation:
         acc = StreamingToolAccumulator(_make_task(), project_path='/tmp')
 
         url = 'https://example.com/diagram.png'
-        with patch('lib.tasks_pkg.handlers.search._fetch_url_one',
+        with patch('lib.tasks_pkg.handlers.search._core._fetch_url_one',
                    return_value=_asset_item(url)) as m:
             out = acc._execute_one('fetch_url', {'url': url, 'reason': 'see the diagram'})
 
@@ -82,7 +82,7 @@ class TestStreamingFetchUrlDelegation:
             'error_msg': 'Rejected: ftp:// scheme',
             'saved_path': None, 'is_asset': False,
         }
-        with patch('lib.tasks_pkg.handlers.search._fetch_url_one', return_value=fail):
+        with patch('lib.tasks_pkg.handlers.search._core._fetch_url_one', return_value=fail):
             out = acc._execute_one('fetch_url', {'url': 'ftp://nope'})
         assert out.startswith('Failed to fetch ftp://nope.')
         assert 'Rejected: ftp:// scheme' in out
@@ -107,7 +107,7 @@ class TestStreamingFetchUrlDelegation:
                 'saved_path': None, 'is_asset': False,
             }
 
-        with patch('lib.tasks_pkg.handlers.search._fetch_url_one', side_effect=fake) as m:
+        with patch('lib.tasks_pkg.handlers.search._core._fetch_url_one', side_effect=fake) as m:
             out = acc._execute_one('fetch_url', {'urls': urls, 'reason': 'ignored-in-batch'})
 
         assert m.call_count == 2
@@ -131,7 +131,7 @@ class TestStreamingFetchUrlDelegation:
             'raw_chars': 0, 'filtered_chars': 0, 'error_msg': None,
             'saved_path': None, 'is_asset': False,
         }
-        with patch('lib.tasks_pkg.handlers.search._fetch_url_one', return_value=neutered):
+        with patch('lib.tasks_pkg.handlers.search._core._fetch_url_one', return_value=neutered):
             out = acc._execute_one('fetch_url', {'url': url})
         assert 'file asset' not in out
         assert out.startswith('Failed to fetch')

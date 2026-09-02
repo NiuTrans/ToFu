@@ -40,7 +40,7 @@ pytestmark = pytest.mark.unit
 #     binding cleanup_old_tasks resolves at call time — and count invocations.
 # ─────────────────────────────────────────────────────────────────────────
 def test_cleanup_old_tasks_triggers_reaper(monkeypatch):
-    from lib.tasks_pkg.manager import _maintenance
+    import lib.tasks_pkg.manager._maintenance as _maintenance
 
     calls = {'n': 0}
 
@@ -64,7 +64,7 @@ def test_cleanup_old_tasks_triggers_reaper(monkeypatch):
 #     backstop). Guards the try/except around the call.
 # ─────────────────────────────────────────────────────────────────────────
 def test_reaper_failure_does_not_break_cleanup(monkeypatch):
-    from lib.tasks_pkg.manager import _maintenance
+    import lib.tasks_pkg.manager._maintenance as _maintenance
 
     def _boom():
         raise RuntimeError('reaper blew up')
@@ -93,7 +93,7 @@ def _calls_reaper(fn) -> bool:
 
 
 def test_reaper_wired_into_cleanup_not_shed():
-    from lib.tasks_pkg.manager import _maintenance
+    import lib.tasks_pkg.manager._maintenance as _maintenance
 
     assert _calls_reaper(_maintenance.cleanup_old_tasks), \
         'reap_stuck_running_tasks() must be called from cleanup_old_tasks'
@@ -109,8 +109,8 @@ def test_reaper_wired_into_cleanup_not_shed():
 #     effects) so this stays a pure in-memory unit test.
 # ─────────────────────────────────────────────────────────────────────────
 def test_wedged_task_reaped_by_cleanup_tick(monkeypatch):
-    from lib.tasks_pkg import tasks, tasks_lock
-    from lib.tasks_pkg.manager import _maintenance
+    from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+    import lib.tasks_pkg.manager._maintenance as _maintenance
 
     monkeypatch.setenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', '300')
     # Keep it in-memory: the reaper sets the terminal transition BEFORE the

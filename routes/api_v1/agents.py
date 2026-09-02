@@ -47,9 +47,9 @@ from lib.request_parser import (
     BadRequest, optional_bool, optional_int, optional_list, optional_str,
     parse_body, require_str,
 )
-from lib.task_runtime import TaskRuntime
+from lib.agent_core.task_runtime import TaskRuntime
 
-from .auth import require_scope
+from .auth import request_user_id, require_scope
 
 logger = get_logger(__name__)
 
@@ -71,7 +71,7 @@ _search_runtime = TaskRuntime('search', ttl=1800, push_channel='search',
           scope='agents:paper')
 def paper_report_start():
     try:
-        from routes.paper import start_report_task
+        from routes.paper_pkg._report import start_report_task
     except ImportError as e:
         return api_internal_error(e, context='Paper module unavailable',
                                   source='api_v1.agents.paper_report_start')
@@ -91,7 +91,7 @@ def paper_report_start():
           scope='agents:paper')
 def paper_translate_start():
     try:
-        from routes.paper import start_translate_task
+        from routes.paper_pkg._qa_translate import start_translate_task
     except ImportError as e:
         return api_internal_error(e, context='Paper module unavailable',
                                   source='api_v1.agents.paper_translate_start')
@@ -200,7 +200,7 @@ def translate_poll_batch_v1():
 )
 def paper_report_poll_v1():
     try:
-        from routes.paper import poll_report_task
+        from routes.paper_pkg._report import poll_report_task
     except ImportError as e:
         return api_internal_error(e, context='Paper module unavailable',
                                   source='api_v1.agents.paper_report_poll_v1')
@@ -222,7 +222,7 @@ def paper_report_poll_v1():
 )
 def paper_translate_poll_v1():
     try:
-        from routes.paper import poll_translate_task
+        from routes.paper_pkg._qa_translate import poll_translate_task
     except ImportError as e:
         return api_internal_error(e, context='Paper module unavailable',
                                   source='api_v1.agents.paper_translate_poll_v1')
@@ -255,7 +255,7 @@ def memory_search():
     if not query:
         return api_bad_request('query is required', field='query')
     try:
-        from lib.memory import search_memories
+        from lib.memory.relevance import search_memories
     except ImportError as e:
         return api_internal_error(e, context='Memory unavailable',
                                   source='api_v1.agents.memory_search')
@@ -323,7 +323,8 @@ def _run_search(query: str, *, max_results: int, freshness: str,
     Pure function; no Flask dependencies, so the same body powers both
     the sync route and the async worker.
     """
-    from tofu_search import perform_web_search
+    from lib.search_runtime import ensure_search_runtime
+    perform_web_search = ensure_search_runtime().perform_web_search
 
     t0 = time.time()
     with log_context('api_v1.search.perform', logger=logger):
@@ -429,7 +430,7 @@ def search_run_async():
         params = _parse_search_body()
     except BadRequest as e:
         return api_bad_request(str(e), field=e.field)
-    task = _search_runtime.create(meta={
+    task = _search_runtime.create(user_id=int(request_user_id()), meta={
         'query': params['query'][:200],
         'fetch_pages': params['fetch_pages'],
         'filter_pages': params['filter_pages'],
@@ -478,8 +479,9 @@ def browser_fetch():
     except BadRequest as e:
         return api_bad_request(str(e), field=e.field or 'url')
     try:
-        from tofu_search import fetch_page_content
-    except ImportError as e:
+        from lib.search_runtime import ensure_search_runtime
+        fetch_page_content = ensure_search_runtime().fetch_page_content
+    except Exception as e:
         return api_internal_error(e, context='Fetch pipeline unavailable',
                                   source='api_v1.agents.browser_fetch')
     try:
@@ -538,8 +540,8 @@ def image_gen():
 
 
 # ── Swarm ──────────────────────────────────────────────────────────
-# Swarm runs as a sub-orchestration within a chat task (set
-# `config.swarmEnabled=true` on POST /api/v1/chat/completions).  The
+# Swarm runs as a sub-orchestration within a chat task (the swarm tools
+# are default tools — the model calls spawn_agents on any turn).  The
 # routes below only expose status/abort, mirroring the legacy
 # /api/swarm/* surface.
 
@@ -554,9 +556,14 @@ def swarm_status(task_id):
     except ImportError as e:
         return api_internal_error(e, context='Swarm unavailable',
                                   source='api_v1.agents.swarm_status')
-    status = get_swarm_status(task_id)
+    status = get_swarm_status(
+        task_id,
+        user_id=int(request_user_id()),
+    )
     if status is None:
-        return api_ok({'active': False})
+        # Three-state contract (see routes/api_v1/swarm.py): None here means
+        # "no record anywhere", which is ambiguous — never a settle signal.
+        return api_ok({'active': None, 'known': False})
     return api_ok(status)
 
 
@@ -571,13 +578,19 @@ def swarm_abort(task_id):
         return api_internal_error(e, context='Swarm unavailable',
                                   source='api_v1.agents.swarm_abort')
     try:
-        abort_swarm(task_id)
+        result = abort_swarm(
+            task_id,
+            user_id=int(request_user_id()),
+        )
     except Exception as e:
         logger.warning('[api_v1.swarm] abort failed task=%s: %s',
                        task_id, e, exc_info=True)
         return api_internal_error(e, context='Swarm abort failed',
                                   source='api_v1.agents.swarm_abort',
                                   log_traceback=False)
+    if not result.get('success'):
+        from lib.api_response import api_not_found
+        return api_not_found('Swarm not found')
     return api_ok({'aborted': task_id})
 
 

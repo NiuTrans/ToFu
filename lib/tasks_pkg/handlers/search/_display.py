@@ -39,12 +39,18 @@ def _format_fetch_display(item, _short_url) -> dict:
             'fetched': False, 'fetchedChars': 0,
         }
     if item.get('is_asset'):
+        authenticated = item.get('transport') == 'browser_authenticated'
         return {
             'title': f'File: {_short_url(target_url)}',
-            'snippet': (f'Saved {raw_chars:,} bytes → staging (read via read_files)'
+            'snippet': ((
+                f'Transferred {raw_chars:,} bytes via authenticated browser '
+                '→ server staging (read via read_files)'
+            ) if authenticated else (
+                f'Saved {raw_chars:,} bytes → server staging (read via read_files)'
+            )
                         if page_content else 'Failed'),
             'url': target_url,
-            'source': 'File Asset',
+            'source': ('Browser → Server' if authenticated else 'File Asset'),
             'fetched': bool(page_content),
             'fetchedChars': filtered_chars,
         }

@@ -7,7 +7,7 @@ Tofu's toolbar collapses to ONE user-facing dial with two tiers:
     │            tool set: web search + fetch + read + code execution +  │
     │            memory + todo + scheduler.                              │
     │  studio  — a project/repo is attached; the project tool family     │
-    │            (list_dir/grep/write/apply_diff/run_command/…) replaces │
+    │            (grep/find/read/edit/run_command/…) replaces            │
     │            the standalone code_exec tool, plus coordination tools. │
     └─────────────────────────────────────────────────────────────────┘
 

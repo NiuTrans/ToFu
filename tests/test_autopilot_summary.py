@@ -48,32 +48,9 @@ def test_autopilot_run_concluded_event_registered():
 # ── _store_run_record: the concluded (fold) fact, no report content ────
 
 def _fake_settings_db(monkeypatch, state):
-    """Wire a monkeypatched DB whose only column is settings JSON.
-
-    ``_store_run_record`` / ``conclude_run`` route settings writes through
-    ``lib.conversations.settings_store.update_conversation_settings``, which
-    binds ``get_thread_db`` / ``db_execute_with_retry`` in the settings_store
-    namespace at import — so those are the names that must be patched. We patch
-    BOTH namespaces so the message-list path and the settings path both hit the
-    fake.
-    """
-    class _FakeDB:
-        def execute(self, sql, params=None):
-            class _R:
-                def fetchone(_self):
-                    return (state['settings'],)
-            return _R()
-
-    def _fake_retry(db, sql, params):
-        if 'SET settings' in sql or 'settings=' in sql:
-            state['settings'] = params[0]
-
-    import lib.conversations.settings_store as _ss
-    import lib.database as _db
-    monkeypatch.setattr(_db, 'get_thread_db', lambda domain: _FakeDB())
-    monkeypatch.setattr(_db, 'db_execute_with_retry', _fake_retry)
-    monkeypatch.setattr(_ss, 'get_thread_db', lambda domain: _FakeDB())
-    monkeypatch.setattr(_ss, 'db_execute_with_retry', _fake_retry)
+    """Back settings reads and writes with the domain authority seam."""
+    from tests._conversation_authority import install_conversation_state
+    install_conversation_state(monkeypatch, state)
 
 
 def test_store_run_record_manual_stop_is_concluded_without_report(monkeypatch):
@@ -87,7 +64,7 @@ def test_store_run_record_manual_stop_is_concluded_without_report(monkeypatch):
     state = {'settings': '{}'}
     _fake_settings_db(monkeypatch, state)
 
-    rec = ap._store_run_record('conv-z', 'ar-stop', reason='stopped')
+    rec = ap._store_run_record('conv-z', 'ar-stop', reason='stopped', user_id=1)
     assert rec is not None
     assert rec['status'] == 'concluded'
     assert rec['reason'] == 'stopped'
@@ -107,9 +84,9 @@ def test_store_run_record_task_done_reason_is_sticky(monkeypatch):
     state = {'settings': '{}'}
     _fake_settings_db(monkeypatch, state)
 
-    ap._store_run_record('conv-race', 'ar-r', reason='stopped')
-    ap._store_run_record('conv-race', 'ar-r', reason='task_done')
-    ap._store_run_record('conv-race', 'ar-r', reason='stopped')  # racing stop
+    ap._store_run_record('conv-race', 'ar-r', reason='stopped', user_id=1)
+    ap._store_run_record('conv-race', 'ar-r', reason='task_done', user_id=1)
+    ap._store_run_record('conv-race', 'ar-r', reason='stopped', user_id=1)  # racing stop
 
     rec = json.loads(state['settings'])['autopilotSummaries']['ar-r']
     assert rec['reason'] == 'task_done'       # never downgraded
@@ -129,35 +106,13 @@ def test_conclude_run_writes_authoritative_stopped_record(monkeypatch):
                  {'role': 'user', 'content': 'vu', '_isVirtualUser': True,
                   '_autopilotRunId': 'ar-live'}])}
 
-    class _FakeDB:
-        def execute(self, sql, params=None):
-            class _R:
-                def __init__(self, row):
-                    self._row = row
-                def fetchone(self):
-                    return self._row
-            if 'SELECT settings, messages' in sql:
-                return _R((state['settings'], state['messages']))
-            if 'SELECT settings' in sql:
-                return _R((state['settings'],))
-            return _R(None)
-
-    def _fake_retry(db, sql, params):
-        if 'SET settings' in sql:
-            state['settings'] = params[0]
-
-    import lib.conversations.settings_store as _ss
-    import lib.database as _db
-    monkeypatch.setattr(_db, 'get_thread_db', lambda domain: _FakeDB())
-    monkeypatch.setattr(_db, 'db_execute_with_retry', _fake_retry)
-    monkeypatch.setattr(_ss, 'get_thread_db', lambda domain: _FakeDB())
-    monkeypatch.setattr(_ss, 'db_execute_with_retry', _fake_retry)
+    _fake_settings_db(monkeypatch, state)
     # Isolate the repository-backed resolver; its behavior is covered by the
     # focused resolver tests, while this test owns close-out persistence.
     monkeypatch.setattr(lifecycle, '_resolve_recent_run_id',
-                        lambda conv_id: 'ar-live')
+                        lambda conv_id, *, user_id: 'ar-live')
 
-    rec = ap.conclude_run('conv-live', reason='stopped')
+    rec = ap.conclude_run('conv-live', reason='stopped', user_id=1)
     assert rec is not None
     assert rec['runId'] == 'ar-live'
     assert rec['status'] == 'concluded'
@@ -187,23 +142,28 @@ def test_emit_run_concluded_event_stores_and_emits(monkeypatch):
 
     stored = {}
     monkeypatch.setattr(apl, '_store_run_record',
-                        lambda conv_id, run_id, *, reason='task_done':
-                        stored.update(conv_id=conv_id, run_id=run_id, reason=reason)
+                        lambda conv_id, run_id, *, user_id, reason='task_done':
+                        stored.update(conv_id=conv_id, run_id=run_id,
+                                      user_id=user_id, reason=reason)
                         or {'runId': run_id, 'status': 'concluded', 'reason': reason})
     concluded = []
     monkeypatch.setattr(apl, '_emit_run_concluded',
-                        lambda conv_id, run_id, text, cfg: concluded.append(text))
+                        lambda conv_id, run_id, text, cfg, *, user_id:
+                        concluded.append((text, user_id)))
     events = []
     monkeypatch.setattr('lib.tasks_pkg.manager.append_event',
                         lambda task, ev: events.append(ev))
 
-    task = {'id': 'task-rc-1', 'convId': 'conv-rc', 'config': {}}
+    task = {'id': 'task-rc-1', 'convId': 'conv-rc', 'config': {}, '_userId': 1}
     rec = ap._emit_run_concluded_event(task, 'conv-rc', 'ar-rc', reason='task_done')
 
     assert rec is not None and rec['status'] == 'concluded'
-    assert stored == {'conv_id': 'conv-rc', 'run_id': 'ar-rc', 'reason': 'task_done'}
+    assert stored == {
+        'conv_id': 'conv-rc', 'run_id': 'ar-rc', 'user_id': 1,
+        'reason': 'task_done',
+    }
     # Feed pulse fired with EMPTY report text (report layer removed).
-    assert concluded == ['']
+    assert concluded == [('', 1)]
     # The SSE run-concluded event was emitted with the record.
     assert any(ev.get('type') == 'autopilot_run_concluded'
                and ev.get('runId') == 'ar-rc' for ev in events)
@@ -220,7 +180,7 @@ def test_emit_run_concluded_event_none_record_short_circuits(monkeypatch):
                         lambda *a, **k: fired.append('pulse'))
     monkeypatch.setattr('lib.tasks_pkg.manager.append_event',
                         lambda task, ev: fired.append('sse'))
-    task = {'id': 't', 'convId': 'c', 'config': {}}
+    task = {'id': 't', 'convId': 'c', 'config': {}, '_userId': 1}
     assert ap._emit_run_concluded_event(task, 'c', 'ar-x') is None
     assert fired == []
 
@@ -234,6 +194,7 @@ def _task_done_task():
     return {
         'id': 'task-done-0001',
         'convId': 'conv-td',
+        '_userId': 1,
         'config': {'model': 'm', 'autopilot': True},
         'messages': [
             {'role': 'user', 'content': 'Ship it.'},
@@ -253,8 +214,12 @@ def test_task_done_concludes_report_free_and_settles(monkeypatch):
     seen = {'thread': None, 'run_id': None, 'reason': None}
 
     monkeypatch.setattr(ap, 'is_autopilot_enabled', lambda task: True)
-    monkeypatch.setattr(ap, '_get_or_persist_run_id', lambda conv_id: 'ar-td')
-    monkeypatch.setattr(ap, '_has_pending_real_message', lambda conv_id: False)
+    monkeypatch.setattr(
+        ap, '_get_or_persist_run_id',
+        lambda conv_id, *, user_id: 'ar-td')
+    monkeypatch.setattr(
+        ap, '_has_pending_real_message',
+        lambda conv_id, *, user_id: False)
     monkeypatch.setattr(ap, '_successor_already_running',
                         lambda task, conv_id: False)
 
@@ -271,9 +236,11 @@ def test_task_done_concludes_report_free_and_settles(monkeypatch):
     cleared = {'marker': [], 'run_pin': []}
     import lib.message_queue as _mq
     monkeypatch.setattr(_mq, 'clear_autopilot_marker',
-                        lambda cid: cleared['marker'].append(cid))
+                        lambda cid, *, user_id:
+                        cleared['marker'].append((cid, user_id)))
     monkeypatch.setattr(ap, '_clear_run_id',
-                        lambda cid: cleared['run_pin'].append(cid))
+                        lambda cid, *, user_id:
+                        cleared['run_pin'].append((cid, user_id)))
     events = []
     monkeypatch.setattr('lib.tasks_pkg.manager.append_event',
                         lambda task, ev: events.append(ev))
@@ -286,8 +253,8 @@ def test_task_done_concludes_report_free_and_settles(monkeypatch):
     assert seen['run_id'] == 'ar-td'
     assert seen['reason'] == 'task_done'
     # The turn settled: marker + run pin cleared, vu_cancel emitted.
-    assert cleared['marker'] == ['conv-td']
-    assert cleared['run_pin'] == ['conv-td']
+    assert cleared['marker'] == [('conv-td', 1)]
+    assert cleared['run_pin'] == [('conv-td', 1)]
     assert any(ev.get('type') == 'autopilot_vu_cancel' for ev in events)
 
 

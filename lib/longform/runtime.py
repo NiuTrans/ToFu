@@ -3,7 +3,7 @@
 Rides :class:`lib.production.runtime.ProductionRuntime` — the dedup index,
 create-with-field-shape, append+touch, stale sweep and id minting that used to
 be hand-rolled here now live in the substrate (P6, driven by the P7
-measurement in docs/PRODUCTION_PIPELINE_DESIGN.md §9).
+shared lifecycle contract in docs/modules/production.md).
 
 Events: ``stage`` (from the stage graph) / ``phase`` / ``final`` / ``done`` /
 ``error``.
@@ -21,12 +21,8 @@ _production = ProductionRuntime(
     push_channel='longform', error_source='lib.longform.engine',
     log_label='Longform')
 
-#: The underlying TaskRuntime — what ``routes/api_v1/tasks.py::_registries()``
-#: discovers, and what legacy call sites expect from this name.
+#: The underlying TaskRuntime discovered by the generic task API.
 _longform_runtime = _production.runtime
-_longform_tasks = _production.tasks
-_longform_tasks_lock = _production.lock
-_longform_dedup_index = _production.dedup_index
 
 
 def _longform_index_get(key: tuple):
@@ -38,10 +34,11 @@ def _longform_index_register(key: tuple, task_id: str) -> None:
 
 
 def _new_longform_task(task_id: str, *, topic: str, workdir: str, lang: str,
-                       depth: str, conv_id: str = ''):
+                       depth: str, user_id: int, conv_id: str = ''):
     """Create + register a pending long-form task with the engine's shape."""
     return _production.create_task(
         task_id,
+        user_id=user_id,
         meta={'topic': topic, 'lang': lang, 'depth': depth},
         fields={'topic': topic, 'workdir': workdir, 'lang': lang,
                 'depth': depth, 'conv_id': conv_id})
@@ -60,8 +57,7 @@ def _longform_task_id():
 
 
 __all__ = [
-    '_production', '_longform_runtime', '_longform_tasks',
-    '_longform_tasks_lock', '_longform_dedup_index', '_longform_index_get',
+    '_production', '_longform_runtime', '_longform_index_get',
     '_longform_index_register', '_new_longform_task',
     '_append_longform_event', '_cleanup_stale_longform_tasks',
     '_longform_task_id',

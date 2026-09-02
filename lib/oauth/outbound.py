@@ -628,7 +628,7 @@ _MANAGED_SPECS = {
         'name': 'ChatGPT (Codex subscription)',
         'base_url': 'https://chatgpt.com/backend-api/codex',
         # The Codex backend speaks ONLY the Responses API — a fact of the
-        # backend, not a user setting (epic pt_b7a29ea7: the wire gate in
+        # backend, not a user setting (: the wire gate in
         # lib/llm/_sse_core.py is api_protocol alone).
         'protocol': 'responses',
         # Models are resolved per plan tier at provision time

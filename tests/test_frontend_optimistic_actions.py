@@ -1,37 +1,9 @@
-"""Regression suite: EVERY click handler takes visible effect in the same
-task as the click (owner directive 2026-07-31, epic pt_77ba3f17dedf4b65) —
-the systematic follow-up to the delete-family fixes (pt_0b444c0be11a4048).
+"""Click-task feedback contracts for translation, folders, and skills.
 
-The survey classified every chat/sidebar/settings action button by "what does
-the user see before the first network await". Most were already instant
-(stop-generation, continue shell, regen/edit truncation, memory toggle/delete,
-skill install, folder create dialog, conv rename, move-to-folder). FIVE were
-await-first with ZERO deterministic feedback for a whole RTT — this suite pins
-their fixed, optimistic shape:
-
-1. ``translateMessage`` first click (ui/message_actions.js): sets
-   ``_translateDone=false`` synchronously but nothing RE-RENDERED until the
-   pipeline started AFTER ``await _isAlreadyChinese`` (a server RTT). The
-   click frame must paint the "翻译中…" indicator (ConvView.apply with
-   ``_translateDone===false``) BEFORE that await.
-2. ``updateFolder`` (core/folders.js): awaited the PATCH before applying
-   locally — the rename dialog stayed open / the tab kept its old name for a
-   whole RTT. Now applies locally FIRST, PATCHes in the background, rolls
-   back + toasts on failure.
-3. ``deleteFolder`` (core/folders.js): awaited the DELETE before filtering
-   ``_folders`` / unassigning conversations. Now removes locally FIRST
-   (folder tab + assignments gone on the click), DELETEs in the background,
-   rolls back on failure.
-4. ``_skillsUninstall`` (skills.js): awaited the DELETE then a FULL tab
-   repopulate — the card sat static for two serial RTTs. Now removes the card
-   from the local model + re-renders immediately after the confirm, DELETEs
-   in the background, rolls back on failure.
-5. ``_skillsToggleEnabled`` (skills.js): same await-first-then-repopulate
-   shape. Now flips in place immediately (mirroring toggleMemoryEnabled),
-   reconciles in the background, rolls back on failure.
-
-Drives the REAL shipped files under node with controllable server promises.
-Skips cleanly when node isn't installed.
+The Turn-native translation adapter must publish typed presentation state
+before its language probe. Folder and skill mutations apply locally before
+their request, then reconcile or roll back. Harnesses drive retained owners
+with controllable promises and skip when Node is unavailable.
 """
 
 from __future__ import annotations
@@ -80,78 +52,76 @@ def _run_harness(name: str, harness_src: str, js_rel: str, scenario: str,
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Harness T — translateMessage first click paints the indicator on the
-# click frame (BEFORE the _isAlreadyChinese RTT).
+# Harness T — the Turn-native translation adapter publishes pending state
+# synchronously and converts a failed language probe into visible failure.
 # ═══════════════════════════════════════════════════════════════════
 _HARNESS_TRANSLATE = r"""
 const fs = require('fs');
 global.window = global;
+global.runtimeScope = global;
+global.conversations = [];
 
-const conv = {
-  id: 'conv-1', title: 'T',
-  messages: [{ role: 'assistant', content: 'Hello world', timestamp: 1, _msgId: 'm1' }],
-};
-global.conversations = [conv];
-global.activeConvId = 'conv-1';
-global.getActiveConv = () => conversations.find(c => c.id === activeConvId);
-global.activeStreams = new Map();
-
-const calls = { apply: [], pipeline: 0 };
-let _langResolve;
-global._isAlreadyChinese = () => new Promise(res => { _langResolve = res; });
-global._runTranslationPipeline = () => { calls.pipeline++; };
-global.window.ConvView = {
-  apply(convId, idx, msg) { calls.apply.push({ idx, doneAtPaint: msg._translateDone }); },
-  replaceAll() {},
-};
-global.saveConversations = () => {};
-global._patchMessageOnServer = () => {};
-global.escapeHtml = (s) => String(s == null ? '' : s);
-global.t = (k) => k;
-global.showToast = () => {};
-global.document = {
-  addEventListener() {},
-  getElementById(id) { return id === 'msg-0' ? { _stub: true } : null; },
-  createElement() {
-    return { className: '', style: {}, set innerHTML(v) {}, get innerHTML() { return ''; },
-             classList: { add() {} }, remove() {}, querySelector() { return { style: {} }; },
-             addEventListener() {} };
+const activity = [];
+const toasts = [];
+let rejectProbe;
+global.ConversationSurfacePresentation = {
+  setTranslationActivity(convId, turnId, value) {
+    activity.push({ convId, turnId, value });
   },
 };
+global.Api = {
+  text: {
+    detectLanguage() {
+      return new Promise((_resolve, reject) => { rejectProbe = reject; });
+    },
+  },
+};
+global.showToast = (message, level) => toasts.push({ message, level });
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // ui/message_actions.js
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // translation.js
 
 const out = [];
-function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+function check(name, condition) {
+  out.push((condition ? 'PASS ' : 'FAIL ') + name);
+}
 
 (async () => {
-  if (typeof translateMessage !== 'function') { console.log('FAIL fn_missing'); return; }
-  check('fn_exposed', true);
+  const promise = _runManualTurnTranslation(
+    { id: 'conv-1' }, 'turn-1', 'Hello world',
+  );
+  check('pending_published_in_click_task',
+    activity.length === 1 && activity[0].value.status === 'pending');
+  check('probe_is_still_pending', typeof rejectProbe === 'function');
+  check('no_early_error_toast', toasts.length === 0);
 
-  const p = translateMessage(0);
+  rejectProbe(new Error('language probe unavailable'));
+  await promise;
+  check('probe_failure_is_visible',
+    activity.at(-1).value.status === 'failed'
+      && activity.at(-1).value.error === 'language probe unavailable');
+  check('probe_failure_is_toasted',
+    toasts.length === 1 && toasts[0].level === 'error');
 
-  // ★ INSTANT-UI: the "翻译中…" indicator must be painted on the CLICK FRAME —
-  //   ConvView.apply called with _translateDone===false BEFORE the language
-  //   probe resolves. (Old code: nothing re-rendered until after the RTT.)
-  check('indicator_painted_on_click_frame',
-        calls.apply.length === 1 && calls.apply[0].idx === 0 && calls.apply[0].doneAtPaint === false);
-  check('no_pipeline_before_probe', calls.pipeline === 0);
-
-  _langResolve(false);   // server probe answers: not Chinese → target Chinese
-  await p;
-  check('pipeline_started_after_probe', calls.pipeline === 1);
-
-  console.log(out.join('\n'));
+  console.log(out.join('\\n'));
 })();
 """
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_translate_first_click_paints_indicator_immediately():
-    _run_harness('translate', _HARNESS_TRANSLATE,
-                 os.path.join('ui', 'message_actions.js'), 'instant', 4)
-
-
+    _run_harness(
+        'translate',
+        _HARNESS_TRANSLATE,
+        'translation.js',
+        'instant',
+        5,
+    )
+    adapter = open(
+        os.path.join(JS_DIR, 'main', 'conversation_turn_store.js'),
+        encoding='utf-8',
+    ).read()
+    assert 'void _runManualTurnTranslation(' in adapter
+    assert '_isAlreadyChinese(source).then' not in adapter
 # ═══════════════════════════════════════════════════════════════════
 # Harness F — updateFolder / deleteFolder are optimistic (local apply on the
 # click, network in the background, rollback + toast on failure).
@@ -168,8 +138,8 @@ global._folders = [
 ];
 global._foldersLoaded = true;
 global.conversations = [
-  { id: 'c1', title: 'A', messages: [], folderId: 'f1' },
-  { id: 'c2', title: 'B', messages: [], folderId: null },
+  { id: 'c1', title: 'A', folderId: 'f1' },
+  { id: 'c2', title: 'B', folderId: null },
 ];
 
 const calls = { render: 0, syncConv: [], cachePut: 0, server: [] };
@@ -184,7 +154,7 @@ global.Api = {
   },
 };
 global.ConvCache = { put() { calls.cachePut++; }, remove() {} };
-global.syncConversationToServer = (c) => { calls.syncConv.push(c.id); return Promise.resolve(true); };
+global.persistConversationSettings = (c) => { calls.syncConv.push(c.id); return Promise.resolve(true); };
 global.renderConversationList = () => { calls.render++; };
 global.showToast = (...a) => toasts.push(a);
 global.t = (k) => k;

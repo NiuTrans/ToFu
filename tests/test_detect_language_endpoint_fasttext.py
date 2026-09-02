@@ -17,6 +17,8 @@ Skipped when ``fast_langdetect`` is unavailable (guarded-optional dep) so the
 suite stays green on a vanilla box.
 """
 
+pytest_plugins = ('tests._credential_sidecar',)
+
 import asyncio
 import os
 import unittest
@@ -60,10 +62,6 @@ class DetectLanguageForceFasttextTest(unittest.TestCase):
         import tempfile
         cls._tmp = tempfile.TemporaryDirectory()
         from lib import api_keys
-        cls._orig_store = api_keys._STORE_PATH
-        api_keys._STORE_PATH = os.path.join(cls._tmp.name, 'api_keys.json')
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
 
         from quart import Quart
         cls.app = Quart(__name__, static_folder=None)
@@ -78,14 +76,11 @@ class DetectLanguageForceFasttextTest(unittest.TestCase):
         cls.app.register_blueprint(api_v1_logs_bp)
 
         from lib.api_keys import create_key
-        _row, cls.token = create_key(name='detect-bot', scopes=['chat'])
+        _row, cls.token = create_key(owner_user_id=1, name='detect-bot', scopes=['chat'])
 
     @classmethod
     def tearDownClass(cls):
         from lib import api_keys
-        api_keys._STORE_PATH = cls._orig_store
-        api_keys._cache.clear()
-        api_keys._cache_loaded = False
         cls._tmp.cleanup()
         if cls._prev_backend is None:
             os.environ.pop('TOFU_LANGDETECT_BACKEND', None)

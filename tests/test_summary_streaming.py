@@ -58,6 +58,38 @@ def test_summary_on_delta_streams_and_accumulates(monkeypatch):
     assert result == 'Hello streamed summary.'
 
 
+def test_unverified_stream_prefix_never_becomes_durable_summary(monkeypatch):
+    import lib.llm_dispatch as dispatch
+    import lib.tasks_pkg.compaction._layer2._summary as summ
+    from lib.llm.stream_result import ProviderStreamResult, ProviderStreamState
+
+    calls = []
+
+    def malformed_stream(_messages, *, on_content=None, **_kwargs):
+        calls.append(1)
+        if on_content:
+            on_content('unsafe half-summary')
+        return ProviderStreamResult(
+            message={'role': 'assistant', 'content': 'unsafe half-summary'},
+            compatibility_finish_reason='stop',
+            usage={},
+            state=ProviderStreamState.MALFORMED_STREAM,
+            malformed_frame_count=1,
+        )
+
+    monkeypatch.setattr(dispatch, 'dispatch_stream', malformed_stream)
+
+    result = summ._generate_query_aware_summary(
+        [{'role': 'user', 'content': 'q'}],
+        'q',
+        conv_id='cut-summary',
+        on_delta=lambda _text: None,
+    )
+
+    assert result is None
+    assert len(calls) == 2  # cheap tier, then the existing text-tier fallback
+
+
 def test_summary_no_on_delta_uses_nonstreaming(monkeypatch):
     """Back-compat: without on_delta, the non-streaming dispatch_chat path is
     used and no streaming occurs."""
@@ -150,19 +182,82 @@ def test_non_codex_provider_pin_is_never_overridden(monkeypatch):
     assert seen['pin'] == 'ephemeral:user-owned'
 
 
+def test_recovered_task_infers_unique_codex_provider_from_live_slots(
+        monkeypatch):
+    """No task provider/sticky key after restart must not force non-stream IO."""
+    import lib.llm_dispatch as ld
+    import lib.tasks_pkg.compaction._layer2._summary as summ
+    from lib.llm_dispatch.provider_pin import (
+        clear_pinned_provider, get_pinned_provider)
+    from lib.llm_dispatch.slot import Slot
+
+    slot = Slot(
+        key_name='oauth-key', api_key='managed', model='gpt-wire',
+        logical_model='gpt-logical', capabilities={'text'},
+        base_url='https://example.invalid/codex',
+        provider_id='oauth_codex', oauth='codex', stream_only=True,
+    )
+
+    class _Dispatcher:
+        slots = [slot]
+
+        @staticmethod
+        def initialize():
+            return None
+
+    monkeypatch.setattr(ld, 'get_dispatcher', lambda: _Dispatcher())
+    monkeypatch.setattr(
+        'lib.llm_dispatch.conv_affinity.get_preferred_key', lambda _cid: None)
+    monkeypatch.setattr(
+        ld, 'dispatch_chat',
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError('recovered Codex task used non-stream chat')))
+    seen = {'pin': None}
+
+    def _stream(*_args, **_kwargs):
+        seen['pin'] = get_pinned_provider()
+        return ({'role': 'assistant', 'content': 'RECOVERED SUMMARY'},
+                'stop', {'prompt_tokens': 3, 'completion_tokens': 2})
+
+    monkeypatch.setattr(ld, 'dispatch_stream', _stream)
+    clear_pinned_provider()
+    try:
+        result = summ._generate_query_aware_summary(
+            [{'role': 'user', 'content': 'q'}], 'q',
+            conv_id='recovered-codex',
+            task={'convId': 'recovered-codex',
+                  'config': {'model': 'gpt-logical'}})
+    finally:
+        clear_pinned_provider()
+
+    assert result == 'RECOVERED SUMMARY'
+    assert seen['pin'] == 'oauth_codex'
+
+
 # ── (3) compact_conversation_now pushes start/delta/done on 'compaction' ──
 
 class _Store:
     def __init__(self, msgs):
-        self.messages = list(msgs)
+        self.messages = []
+        for index, message in enumerate(msgs):
+            projected = dict(message)
+            projected.update({
+                '_turnId': f'turn-{index}',
+                '_projectionRevision': 1,
+                '_turnActor': ('human' if message.get('role') == 'user'
+                               else 'assistant'),
+            })
+            self.messages.append(projected)
         self.updated_at = 1000
         self.rev = 0
-    def load_conversation_messages(self, cid):
+    def load_transcript(self, cid, *, user_id):
         return (list(self.messages), self.updated_at, self.rev)
-    def cas_sync_conversation_with_search(self, cid, m, expected_rev):
+    def compact_turn_transcript(
+            self, cid, current, compacted, expected_rev, *, command_id,
+            user_id):
         if expected_rev != self.rev:
             return 0
-        self.messages = list(m); self.rev += 1; return 1
+        self.messages = list(compacted); self.rev += 1; return 1
     def update_archive_summary(self, *a, **k): pass
     def notify_conversation_changed(self, *a, **k): pass
 
@@ -184,7 +279,7 @@ def test_compact_pushes_streaming_events(monkeypatch):
 
     store = _Store(_long_conv())
     monkeypatch.setattr(man, 'get_conversation_store', lambda: store)
-    monkeypatch.setattr(man, '_archive_transcript', lambda *a, **k: 7)
+    monkeypatch.setattr(man, '_archive_transcript', lambda *a, **k: '7')
     monkeypatch.setattr(man, '_extract_recently_accessed_files', lambda m: [])
 
     # streaming summary: emit two deltas via the on_delta the engine passes in
@@ -197,25 +292,28 @@ def test_compact_pushes_streaming_events(monkeypatch):
 
     events = []
     monkeypatch.setattr(man, 'push_event',
-                        lambda channel, task_id, payload: events.append(
-                            (channel, task_id, payload.get('type'), payload)))
+                        lambda channel, task_id, payload, *, user_id:
+                        events.append((channel, task_id, payload.get('type'),
+                                       payload, user_id)))
 
-    res = man.compact_conversation_now('convX', config={}, task={'convId': 'convX'})
+    res = man.compact_conversation_now('convX', user_id=1, config={}, task={'convId': 'convX'})
     assert res['ok'] is True
 
     # all pushes on the 'compaction' channel keyed by conv id
     assert events, 'no push events emitted'
-    assert all(ch == 'compaction' and tid == 'convX' for ch, tid, _t, _p in events), events
-    types = [t for _c, _t2, t, _p in events]
+    assert all(ch == 'compaction' and tid == 'convX' and uid == 1
+               for ch, tid, _t, _p, uid in events), events
+    types = [t for _c, _t2, t, _p, _uid in events]
     assert types[0] == 'summary_start', types
     assert 'summary_delta' in types, types
     assert types[-1] == 'summary_done', types
 
     # deltas carry the streamed text; done carries the final stats
-    deltas = [p['text'] for _c, _t, t, p in events if t == 'summary_delta']
+    deltas = [p['text'] for _c, _t, t, p, _uid in events
+              if t == 'summary_delta']
     assert deltas == ['partial one ', 'partial two'], deltas
-    done = [p for _c, _t, t, p in events if t == 'summary_done'][0]
-    assert done.get('archiveId') == 7
+    done = [p for _c, _t, t, p, _uid in events if t == 'summary_done'][0]
+    assert done.get('archiveId') == '7'
     assert done.get('tokensAfter') == res['tokensAfter']
 
 
@@ -225,7 +323,7 @@ def test_compact_push_failure_never_breaks_compaction(monkeypatch):
     import lib.tasks_pkg.compaction._manual as man
     store = _Store(_long_conv())
     monkeypatch.setattr(man, 'get_conversation_store', lambda: store)
-    monkeypatch.setattr(man, '_archive_transcript', lambda *a, **k: 7)
+    monkeypatch.setattr(man, '_archive_transcript', lambda *a, **k: '7')
     monkeypatch.setattr(man, '_extract_recently_accessed_files', lambda m: [])
     monkeypatch.setattr(man, '_generate_query_aware_summary',
                         lambda *a, on_delta=None, **k: (on_delta and on_delta('x')) or 'SUM')
@@ -234,5 +332,5 @@ def test_compact_push_failure_never_breaks_compaction(monkeypatch):
         raise RuntimeError('hub exploded')
     monkeypatch.setattr(man, 'push_event', boom)
 
-    res = man.compact_conversation_now('convX', config={}, task={'convId': 'convX'})
+    res = man.compact_conversation_now('convX', user_id=1, config={}, task={'convId': 'convX'})
     assert res['ok'] is True, 'push failure must not break the compaction'

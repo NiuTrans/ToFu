@@ -8,9 +8,8 @@ WHY
 more right after the VU LLM call returns. But between that post-VU check and
 the actual follow-up spawn it does real, wall-clock-consuming work:
 
-    _presync_parent_reply            # DB write
-    _append_vu_message_to_conv       # DB write
-    _maybe_auto_translate_vu         # a translate LLM call
+    _append_conversation_autopilot_turns  # atomic durable turn-pair write
+    terminal bookkeeping
     _record_vu_turn_and_check_budget # settings bookkeeping
 
 A user action that SUPERSEDES this run — a concurrent regenerate / edit /
@@ -52,7 +51,8 @@ def _wire(monkeypatch, *, flip=None, successor_flag=None):
     side-effecting hop so it reaches the final recheck deterministically.
 
     ``flip`` — optional 0-arg callback invoked from inside
-    ``_append_vu_message_to_conv`` (i.e. AFTER the post-VU abort check, INSIDE
+    ``_append_conversation_autopilot_turns`` (after the post-VU abort check,
+    inside
     the vulnerable window) to simulate a concurrent supersede landing there.
     ``successor_flag`` — a mutable {'v': bool} read by the stubbed
     ``_successor_already_running`` so the top gauntlet can pass (False) while
@@ -65,8 +65,8 @@ def _wire(monkeypatch, *, flip=None, successor_flag=None):
                         lambda task, event: events.append(event))
 
     monkeypatch.setattr(ap, 'is_autopilot_enabled', lambda task: True)
-    monkeypatch.setattr(ap, '_get_or_persist_run_id', lambda cid: 'ar-rc')
-    monkeypatch.setattr(ap, '_has_pending_real_message', lambda cid: False)
+    monkeypatch.setattr(ap, '_get_or_persist_run_id', lambda cid, *, user_id: 'ar-rc')
+    monkeypatch.setattr(ap, '_has_pending_real_message', lambda cid, *, user_id: False)
 
     if successor_flag is not None:
         monkeypatch.setattr(ap, '_successor_already_running',
@@ -80,23 +80,19 @@ def _wire(monkeypatch, *, flip=None, successor_flag=None):
                         lambda task, vu_msg_id=None: {
                             'text': 'keep going', 'rounds': [], 'segments': []})
 
-    # Idempotent parent pre-sync — no-op.
-    monkeypatch.setattr(ap, '_presync_parent_reply', lambda task: None)
-
     # The VU commit hop: fire the injected supersede here (inside the window),
     # then return a persisted-looking vu_msg so the flow continues to the gate.
-    def _fake_append(conv_id, vu_msg_id, text, rounds=None, run_id='',
+    def _fake_append(task, conv_id, vu_msg_id, text, rounds=None, run_id='',
                      segments=None):
         if flip is not None:
             flip()
         return {'role': 'user', '_isVirtualUser': True, '_msgId': vu_msg_id,
                 'content': text, '_autopilotRunId': run_id}
-    monkeypatch.setattr(ap, '_append_vu_message_to_conv', _fake_append)
+    monkeypatch.setattr(
+        ap, '_append_conversation_autopilot_turns', _fake_append)
 
-    monkeypatch.setattr(ap, '_maybe_auto_translate_vu',
-                        lambda conv_id, vu_msg_id, text: None)
     monkeypatch.setattr(ap, '_record_vu_turn_and_check_budget',
-                        lambda conv_id, vu_text, targets=None: {'stop': False})
+                        lambda conv_id, vu_text, targets=None, *, user_id: {'stop': False})
 
     spawned: list = []
     monkeypatch.setattr(ap, '_start_followup_task',
@@ -109,6 +105,7 @@ def _make_task():
     return {
         'id': 'parent-rc-1',
         'convId': 'conv-rc',
+        '_userId': 1,
         'config': {'model': 'm', 'autopilot': True},
         'messages': [
             {'role': 'user', 'content': 'go'},
@@ -126,7 +123,7 @@ def test_aborted_during_window_stands_down(monkeypatch):
     abort_running_tasks_for_conv) DURING the commit window → the final recheck
     must stand down: no follow-up spawn, returns None."""
     task = _make_task()
-    # Flip abort ON from inside _append_vu_message_to_conv — i.e. strictly
+    # Flip abort ON from inside the atomic turn-pair append — strictly
     # AFTER the post-VU abort check, inside the vulnerable window.
     events, spawned = _wire(monkeypatch,
                             flip=lambda: task.__setitem__('aborted', True))

@@ -1,9 +1,9 @@
 """Conservative request-local routing for the native tool catalog.
 
-``tools.nativeExposure=full`` is the default and bypasses this module.  The
-``routed`` experiment arm selects tool families from the latest user request
-and explicit feature toggles.  Safety-critical/custom and progressive MCP
-surfaces are never hidden by the router.
+``tools.nativeExposure=routed`` is the shipped default; ``full`` bypasses
+this module.  The routed arm selects tool families from the latest user
+request and explicit feature toggles.  Safety-critical/custom and
+progressive MCP surfaces are never hidden by the router.
 """
 
 from __future__ import annotations
@@ -12,8 +12,10 @@ import re
 from typing import Any
 
 
+# ``swarm`` rides _ALWAYS: the parallel sub-agent tools are default tools
+# (no user-facing switch), so the router must never hide them.
 _ALWAYS = frozenset({'read_files', 'inspect_image', 'knowledge', 'skills',
-                     'todo', 'mcp', 'custom'})
+                     'todo', 'mcp', 'custom', 'swarm'})
 
 _KEYWORDS: dict[str, tuple[str, ...]] = {
     'search': ('search', 'research', 'browse', 'online', 'latest', 'news',
@@ -77,8 +79,6 @@ def routed_native_spec_keys(ctx: Any) -> set[str]:
         selected.add('human_guidance')
     if getattr(ctx, 'scheduler_enabled', False):
         selected.add('scheduler')
-    if getattr(ctx, 'swarm_enabled', False):
-        selected.add('swarm')
     cfg = getattr(ctx, 'cfg', {}) or {}
     if cfg.get('memoryEnabled', True):
         selected.add('memory')
@@ -90,6 +90,16 @@ def routed_native_spec_keys(ctx: Any) -> set[str]:
             or _matches(text, 'project')):
         selected.add('project')
         selected.add('page_preview')
+    if getattr(ctx, 'project_enabled', False):
+        # The project brain read surface is eager by design — it must ride
+        # every plain project turn, not wait for a keyword the model has no
+        # reason to type. conv_ref joins it: the sibling digest names
+        # list_conversations/get_conversation on every project turn. The
+        # advisory-write half stays searchable but rides the same project gate
+        # so native/full exposure paths can defer it provider-side instead of
+        # dropping it. create_project is no longer a model-facing tool at all
+        # (the absolute-path-write auto-register covers the useful case).
+        selected.update({'conv_ref', 'project_brain', 'project_brain_write'})
     if _matches(text, 'search'):
         selected.update({'search', 'fetch', 'search_settings'})
     if _matches(text, 'browser'):
@@ -104,7 +114,10 @@ def routed_native_spec_keys(ctx: Any) -> set[str]:
             isinstance(message, dict)
             and (message.get('convRefs') or message.get('convRefTexts'))
             for message in (getattr(ctx, 'messages', None) or [])):
-        selected.add('conv_ref')
+        # A conversation/coordination mention wants the whole family visible:
+        # open-a-sibling (conv_ref) AND the brain write surface (claim an
+        # epic, message a peer) — the read half already rides project mode.
+        selected.update({'conv_ref', 'project_brain', 'project_brain_write'})
     if _matches(text, 'memory'):
         selected.add('memory')
     if _matches(text, 'scheduler'):

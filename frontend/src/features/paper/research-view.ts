@@ -26,6 +26,7 @@ type ResearchViewWindow = Window & {
   _researchToolsHtml?: typeof researchToolsHtml;
   _renderRecentResearch?: typeof renderRecentResearch;
   _paintResearch?: typeof paintResearch;
+  _showResearchLanding?: typeof showResearchLanding;
 };
 
 const RESEARCH_PHASES = ['harvest', 'survey', 'ideate', 'evaluate'] as const;
@@ -322,10 +323,38 @@ export async function renderRecentResearch(): Promise<void> {
     + '<div class="pm-recent-list">' + rows + '</div>';
 }
 
+export function showResearchLanding(): void {
+  const host = document.getElementById('researchViewer');
+  if (!host) return;
+  const t = translator();
+  host.innerHTML = '<div class="research-landing">'
+    + '<div class="research-landing-icon">'
+    + '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></svg>'
+    + '</div>'
+    + '<h3>' + escapeHtml(t('paper.research.entryTitle')) + '</h3>'
+    + '<p>' + escapeHtml(t('paper.research.subtitle')) + '</p>'
+    + '<div class="research-landing-row">'
+    + '<input type="text" id="paperResearchInput" class="research-landing-input" placeholder="'
+    + escapeHtml(t('paper.research.entryPlaceholder')) + '"'
+    + ' data-tofu-action-keydown="if(event.key===\'Enter\')_submitResearchDirection()">'
+    + '<button class="research-landing-btn" data-tofu-action="_submitResearchDirection()">'
+    + '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>'
+    + ' ' + escapeHtml(t('paper.research.startBtn')) + '</button>'
+    + '</div>'
+    // Past-run index is the ONLY way back to a finished run whose exact
+    // wording the user no longer remembers (the direction hash is one-way).
+    // Stays EMPTY when nothing was ever researched — no blank box.
+    + '<div id="paperRecentResearch" class="pm-recent"></div>'
+    + '</div>';
+  renderRecentResearch().catch((error: unknown) => {
+    console.debug('[Research] recent research render failed:', error);
+  });
+}
+
 export function paintResearch(): void {
   const stream = globals()._researchStream;
   if (!stream) return;
-  const viewer = document.getElementById('paperPdfViewer');
+  const viewer = document.getElementById('researchViewer');
   if (!viewer) return;
   const t = translator();
   const running = researchIsRunning(stream);
@@ -391,6 +420,7 @@ export function installResearchViewGlobals(): void {
   target._researchToolsHtml = researchToolsHtml;
   target._renderRecentResearch = renderRecentResearch;
   target._paintResearch = paintResearch;
+  target._showResearchLanding = showResearchLanding;
 }
 
 installResearchViewGlobals();

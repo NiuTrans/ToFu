@@ -5,8 +5,8 @@ Provides two tool implementations:
   - get_conversation: retrieve full conversation content by ID
 
 This package is a pure re-export facade — all implementations live in the
-sub-modules (``_query``, ``_detail``, ``_tool``).  The module is STATELESS
-(it only reads the DB), so the split preserves behaviour exactly.
+sub-modules (``_query``, ``_detail``, ``_tool``). The package is stateless and
+reads only through the owner-scoped conversation repository.
 """
 
 from lib.log import get_logger
@@ -16,9 +16,6 @@ logger = get_logger(__name__)
 
 # ── Search/list surface (._query) ───────────────────────────────────────────
 from lib.conv_ref._query import (  # noqa: E402,F401
-    DEFAULT_USER_ID,
-    _get_db,
-    _keyword_clause,
     list_conversations,
 )
 
@@ -37,9 +34,6 @@ from lib.conv_ref._tool import execute_conv_ref_tool, raw_requested  # noqa: E40
 
 
 __all__ = [
-    'DEFAULT_USER_ID',
-    '_get_db',
-    '_keyword_clause',
     'list_conversations',
     'get_conversation',
     'build_conversation_digest',

@@ -9,6 +9,8 @@ from typing import Any
 
 from hypercorn.config import Config
 
+from lib.storage.startup_budget import lifespan_startup_timeout
+
 
 def build_hypercorn_config(
     host: str,
@@ -28,6 +30,15 @@ def build_hypercorn_config(
     config.accesslog = logging.getLogger('hypercorn.access')
     config.errorlog = logging.getLogger('hypercorn.error')
     config.keep_alive_timeout = float(keep_alive_timeout)
+    # Hypercorn otherwise cancels Quart's entire startup lifespan at 60s.
+    # Initial fastpath activation is a bounded, capacity-checked migration and
+    # owns a longer sidecar budget; preserve that budget plus time for the
+    # remaining required phases instead of killing and restarting the copy.
+    config.startup_timeout = lifespan_startup_timeout(env)
+    # /api/push accepts only tiny subscription/control frames and 16 KiB
+    # control-RPC requests. Reject oversized WebSocket messages in Hypercorn
+    # before Quart allocates/parses a 16 MiB default frame.
+    config.websocket_max_message_size = 64 * 1024
     try:
         config.graceful_timeout = float(
             env.get('TOFU_GRACEFUL_TIMEOUT', '') or '3')

@@ -28,6 +28,7 @@ reject. So these tests additionally assert the schema/param repair (previously
 MISSING on the direct paths) and the swarm rejection of an invented name.
 """
 
+import json
 import uuid
 
 import pytest
@@ -60,7 +61,7 @@ def test_timer_poll_aliases_webfetch_to_fetch_url(monkeypatch):
 
     timer_mod._execute_poll_tool(
         _tc('WebFetch', '{"url": "https://arxiv.org/abs/2605.12882"}'),
-        'tmr_' + uuid.uuid4().hex[:8], project_path='')
+        'tmr_' + uuid.uuid4().hex[:8], project_path='', owner_user_id=1)
 
     assert captured['fn_name'] == 'fetch_url', (
         'timer poll must alias the Claude-Code WebFetch name to fetch_url '
@@ -86,7 +87,7 @@ def test_timer_poll_aliases_common_claude_code_names(monkeypatch, wrong, canonic
     monkeypatch.setattr(_ex, '_execute_tool_one', _spy, raising=True)
 
     timer_mod._execute_poll_tool(_tc(wrong), 'tmr_' + uuid.uuid4().hex[:8],
-                                 project_path='')
+                                 project_path='', owner_user_id=1)
     assert captured['fn_name'] == canonical
 
 
@@ -105,7 +106,8 @@ def test_timer_poll_unknown_tool_passes_through_unchanged(monkeypatch):
     monkeypatch.setattr(_ex, '_execute_tool_one', _spy, raising=True)
 
     timer_mod._execute_poll_tool(_tc('totally_made_up_xyz'),
-                                 'tmr_' + uuid.uuid4().hex[:8], project_path='')
+                                 'tmr_' + uuid.uuid4().hex[:8], project_path='',
+                                 owner_user_id=1)
     assert captured['fn_name'] == 'totally_made_up_xyz'
 
 
@@ -193,6 +195,44 @@ def test_swarm_agent_known_name_not_aliased(monkeypatch):
 
     agent._execute_single_tool(_tc('fetch_url', '{"url": "https://x.com"}'), 1)
     assert captured['fn_name'] == 'fetch_url'
+
+
+def test_swarm_agent_contract_rejection_never_dispatches(monkeypatch):
+    """Role-local direct execution uses the same final v2 schema boundary."""
+    from lib.swarm.agent import SubAgent
+    from lib.swarm.protocol import SubTaskSpec
+
+    tools = [{
+        'type': 'function',
+        'function': {
+            'name': 'fetch_url', 'description': 'Fetch a URL.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'url': {'type': 'string', 'minLength': 10},
+                },
+                'required': ['url'], 'additionalProperties': False,
+            },
+        },
+    }]
+    agent = SubAgent(
+        SubTaskSpec(role='researcher', objective='inspect files'),
+        parent_task={'id': 't1', 'convId': 'c1'}, all_tools=tools,
+        thinking_enabled=False)
+    captured = {}
+
+    def _spy(*_args, **_kwargs):
+        captured['called'] = True
+        return ('id', 'ok', False)
+
+    import lib.tasks_pkg.executor as _ex
+    monkeypatch.setattr(_ex, '_execute_tool_one', _spy, raising=True)
+
+    result = agent._execute_single_tool(
+        _tc('fetch_url', json.dumps({'url': 'x'})), 1)
+
+    assert captured == {}
+    assert '[invalid_argument_length]' in result
 
 
 def test_swarm_agent_schema_repair_applies_on_direct_path(monkeypatch):

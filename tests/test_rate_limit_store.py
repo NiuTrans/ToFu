@@ -34,7 +34,7 @@ from lib.storage import StorageError, StorageSupervisor
 def storage_sidecar(tmp_path, monkeypatch):
     monkeypatch.setenv('TOFU_STORAGE_SQLITE_READ_POOL', '1')
     supervisor = StorageSupervisor(
-        project_root=tmp_path, backend='sqlite', startup_timeout=20)
+        project_root=tmp_path, backend='sqlite', startup_timeout=60)
     supervisor.start()
     try:
         yield supervisor

@@ -2,10 +2,8 @@
 # Prefer logger.debug() over logger.info().
 """Prompt-cache ``write`` decomposition for the per-round cost panel.
 
-Extracted from ``orchestrator.py`` (2026-06) — a self-contained PURE
-computation with no I/O, no event emission, and no shared run-loop state.
-``orchestrator`` re-exports ``_compute_write_breakdown`` for backward
-compatibility, so no caller changed.
+This is the sole owner of a self-contained pure computation with no I/O,
+event emission, or shared run-loop state.
 
 The single public entry point ``_compute_write_breakdown(task, api_rounds,
 round_num)`` decomposes a round's ``cache_write_tokens`` into exact sub-items

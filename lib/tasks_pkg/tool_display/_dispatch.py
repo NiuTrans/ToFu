@@ -12,26 +12,27 @@ logger = get_logger(__name__)
 
 from lib.browser.advanced import ADVANCED_BROWSER_TOOL_NAMES
 from lib.desktop_tools import DESKTOP_TOOL_NAMES
-from lib.scheduler import SCHEDULER_TOOL_NAMES
-from lib.memory import MEMORY_TOOL_NAMES
+from lib.scheduler.tool_defs import SCHEDULER_TOOL_NAMES
+from lib.memory.tools import MEMORY_TOOL_NAMES
 from lib.skills import SKILL_TOOL_NAMES
 from lib.tasks_pkg.executor import SWARM_TOOL_NAMES
-from lib.tools import (
+from lib.tools.browser import BROWSER_TOOL_NAMES, PAGE_PREVIEW_TOOL_NAMES
+from lib.tools.code_exec import CODE_EXEC_TOOL_NAMES
+from lib.tools.conversation import (
     BOARD_TOOL_NAMES,
-    BROWSER_TOOL_NAMES,
     CHARTER_TOOL_NAMES,
-    CODE_EXEC_TOOL_NAMES,
     CONV_REF_TOOL_NAMES,
-    IMAGE_EDIT_TOOL_NAMES,
-    IMAGE_GEN_TOOL_NAMES,
-    LEGACY_BROWSER_TOOL_NAMES,
-    PAGE_PREVIEW_TOOL_NAMES,
+    INTEGRATION_TOOL_NAMES,
     PEER_TOOL_NAMES,
-    PROJECT_TOOL_NAMES,
 )
+from lib.tools.image_edit import IMAGE_EDIT_TOOL_NAMES
+from lib.tools.image_gen import IMAGE_GEN_TOOL_NAMES
+from lib.tools.project import PROJECT_TOOL_NAMES
 
+from lib.tools.tool_result_artifacts import TOOL_RESULT_ARTIFACT_NAMES
 from lib.tasks_pkg.tool_display._renderers import (
     _tool_display_brain,
+    _tool_display_artifact,
     _tool_display_browser,
     _tool_display_code_exec,
     _tool_display_compact,
@@ -100,16 +101,13 @@ def _build_display_dispatch_table():
     for name in PROJECT_TOOL_NAMES:
         table.setdefault(name, _tool_display_project)
 
-    # ★ read_files — global tool (not in PROJECT_TOOL_NAMES), uses same
+    # read_files — global tool (not in PROJECT_TOOL_NAMES), uses same
     #   project-style display rendering (path + line ranges; icon is the
     #   frontend SVG, no emoji prefix).
     table.setdefault('read_files', _tool_display_project)
 
-    # Browser tools (basic + advanced). LEGACY_BROWSER_TOOL_NAMES keeps the
-    # names retired by the v2 consolidation (pt_869e5648403e4745) on the
-    # browser-family renderer — old conversations must keep rendering their
-    # tool cards with hostname labels, not the generic fallback.
-    for name in BROWSER_TOOL_NAMES | LEGACY_BROWSER_TOOL_NAMES:
+    # Browser tools (basic + advanced).
+    for name in BROWSER_TOOL_NAMES:
         table[name] = _tool_display_browser
     for name in ADVANCED_BROWSER_TOOL_NAMES:
         table[name] = _tool_display_browser
@@ -136,8 +134,12 @@ def _build_display_dispatch_table():
 
     # Project-brain tools (board / charter / peer / feed) — friendly collapsed
     # label + no spurious "unregistered tool" WARNING on every call.
-    for name in (BOARD_TOOL_NAMES | CHARTER_TOOL_NAMES | PEER_TOOL_NAMES):
+    for name in (BOARD_TOOL_NAMES | CHARTER_TOOL_NAMES | PEER_TOOL_NAMES
+                 | INTEGRATION_TOOL_NAMES):
         table[name] = _tool_display_brain
+
+    for name in TOOL_RESULT_ARTIFACT_NAMES:
+        table[name] = _tool_display_artifact
 
     # Scheduler tools
     for name in SCHEDULER_TOOL_NAMES:
@@ -217,7 +219,7 @@ def tool_round_label(fn_name, fn_args):
 
 
 def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num,
-                             project_enabled, conv_id=None):
+                             project_enabled, conv_id=None, task=None):
     """Build a tool-round entry and tool_start event payload for a tool call.
 
     Uses a module-level dispatch table (``_TOOL_DISPLAY_DISPATCH``) instead of
@@ -245,10 +247,31 @@ def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num
         display_query = fn_name
         extra = {'toolName': fn_name}
 
+
+    # Continuation tools (read/search_tool_artifact) label their target as
+    # "tool-result:<hash>" — a content digest that answers none of the
+    # user's questions. When the spill site registered the artifact's origin
+    # on this task, relabel the row with the SOURCE round + tool display
+    # BEFORE the round is ever announced, so the live row, the persisted
+    # round, and every replay are all born with the readable label.
+    if task is not None and fn_name in TOOL_RESULT_ARTIFACT_NAMES:
+        try:
+            from lib.tool_result_artifacts import (
+                artifact_provenance, continuation_display_label)
+            _origin = artifact_provenance(
+                task, str((fn_args or {}).get('artifact_ref') or ''))
+            if _origin:
+                display_query = continuation_display_label(
+                    fn_name,
+                    fn_args if isinstance(fn_args, dict) else {},
+                    _origin)
+        except Exception as _origin_err:
+            logger.debug('[ToolDisplay] artifact origin relabel failed for '
+                         '%s: %s', fn_name, _origin_err)
     tool_round_num += 1
     rn = tool_round_num
 
-    # ★ Start clock (pt_67ffc2b7). Stamped HERE — the instant the round is
+    # Start clock (). Stamped HERE — the instant the round is
     #   announced — so a still-running tool can render a truthful "running for
     #   38s" from a SERVER clock. A client-side stopwatch cannot: it re-mints on
     #   every paint and on every reconnect, washing a long call into looking

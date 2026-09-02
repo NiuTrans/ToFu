@@ -13,12 +13,14 @@ chatui's implementations so the migrated search/fetch pipeline behaves
   * **Browser fallback** → ``lib.browser`` extension (fetch + DDG-HTML search).
   * **Authenticated fetch** → ``lib.auth_sources`` (cookies/proxy lookup).
 
-Call :func:`install_search_bridge` once at startup (after config load). It is
-idempotent and degrades gracefully if any sub-system is unavailable.
+Call :func:`install_search_bridge` at the first real search/fetch use. It is
+idempotent and concurrency-safe; settings reloads call
+:func:`sync_search_config` directly after activation.
 """
 
 import os
 import re
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -26,13 +28,26 @@ from urllib.parse import urlparse
 
 import lib as _lib
 
+# ``search_runtime.ensure_search_runtime`` normally installs this policy first,
+# but config/acceptance callers may import the bridge directly. Keep that path
+# bounded too without creating a circular import back through search_runtime.
+try:
+    from runtime_guards import install_pymupdf_classic_policy
+    install_pymupdf_classic_policy()
+except Exception:
+    pass
+
 import tofu_search
+from lib.browser.log_safety import text_for_log, url_for_log
 from lib.log import get_logger
 
 logger = get_logger(__name__)
 
 __all__ = [
-    'bind_search_browser', 'install_search_bridge', 'sync_search_config',
+    'BrowserFileHandoffReady', 'bind_search_browser',
+    'browser_file_handoff_boundary', 'claim_bound_browser_file',
+    'fetch_bound_browser_file', 'require_bound_browser_file',
+    'install_search_bridge', 'sync_search_config',
 ]
 
 # Module-level filter knobs mirror the old lib/fetch/content_filter.py.
@@ -40,7 +55,71 @@ _FILTER_MODEL = os.environ.get('FETCH_FILTER_MODEL', '')   # empty ⇒ dispatche
 _IRRELEVANT_STOP = '§§IRRELEVANT§§'
 
 _installed = False
+_install_lock = threading.RLock()
 _search_browser_binding = ContextVar('tofu_search_browser_binding', default=None)
+_search_browser_file_handoffs = ContextVar(
+    'tofu_search_browser_file_handoffs', default=None)
+_search_browser_current_file = ContextVar(
+    'tofu_search_browser_current_file', default=None)
+_browser_file_handoff_escape_enabled = ContextVar(
+    'tofu_browser_file_handoff_escape_enabled', default=False)
+_MAX_TASK_FILE_HANDOFFS = 16
+
+
+class BrowserFileHandoffReady(BaseException):
+    """Non-error escape from tofu-search's legacy text-only provider seam.
+
+    ``tofu-search`` intentionally catches every ordinary provider ``Exception``
+    and then tries another transport. A completed one-time file response is
+    not a provider failure, so continuing would issue a second GET. This
+    ``BaseException`` subclass crosses that legacy catch only while
+    :func:`browser_file_handoff_boundary` is active; the owning fetch handler
+    catches it immediately and claims the exact transfer ID.
+    """
+
+    def __init__(self, source_url: str, transfer_id: str):
+        self.source_url = str(source_url or '')
+        self.transfer_id = str(transfer_id or '')
+        super().__init__('Authenticated browser file response is ready')
+
+
+@contextmanager
+def browser_file_handoff_boundary():
+    """Allow a completed browser file to stop the legacy text fallback chain."""
+    token = _browser_file_handoff_escape_enabled.set(True)
+    try:
+        yield
+    finally:
+        _browser_file_handoff_escape_enabled.reset(token)
+
+
+class _TaskFileHandoffs:
+    """Small thread-safe transfer-ID registry shared across task fan-out."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._transfer_ids: dict[str, None] = {}
+
+    def remember(self, transfer_id: str) -> tuple[str, ...]:
+        evicted = []
+        with self._lock:
+            self._transfer_ids.pop(transfer_id, None)
+            while len(self._transfer_ids) >= _MAX_TASK_FILE_HANDOFFS:
+                oldest = next(iter(self._transfer_ids))
+                self._transfer_ids.pop(oldest, None)
+                evicted.append(oldest)
+            self._transfer_ids[transfer_id] = None
+        return tuple(evicted)
+
+    def discard(self, transfer_id: str) -> None:
+        with self._lock:
+            self._transfer_ids.pop(transfer_id, None)
+
+    def drain(self) -> tuple[str, ...]:
+        with self._lock:
+            transfer_ids = tuple(self._transfer_ids)
+            self._transfer_ids.clear()
+        return transfer_ids
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -131,7 +210,8 @@ def _chatui_llm(messages, **kwargs):
             if hit:
                 url = hit.group(1)
                 break
-        logger.info('[ContentFilter] SKIP (content policy 450) url=%s — placeholder returned', url[:100])
+        logger.info('[ContentFilter] SKIP (content policy 450) url=%s — '
+                    'placeholder returned', url_for_log(url))
         return (f'[Page content from {url} was filtered by content policy. '
                 f'The page could not be processed by the LLM content filter.]')
 
@@ -163,36 +243,69 @@ def _is_browser_unrenderable(url: str) -> bool:
 
     Opening such a URL in a browser tab downloads it to the user's machine
     (Chrome's download manager) and returns no text, so these URLs must never
-    reach the browser fallback — they're fetched/parsed server-side instead.
+    reach the browser *text/tab* fallback. They use server HTTP or the separate
+    browser-response → server-staging byte transport instead.
     """
     try:
         path = urlparse(url).path.lower().rstrip('/')
     except Exception as e:
-        logger.debug('[Bridge] unrenderable-URL parse failed for %s: %s', url[:80], e)
+        logger.debug('[Bridge] unrenderable-URL parse failed for %s: %s',
+                     url_for_log(url), text_for_log(e))
         return False
     return path.endswith(_BROWSER_UNRENDERABLE_EXTS)
 
 
 @contextmanager
-def bind_search_browser(*, user_id='', client_id=''):
-    """Bind one task's user/browser identity across tofu-search executors."""
+def bind_search_browser(
+    *,
+    user_id='',
+    client_id='',
+    required_capabilities=(),
+):
+    """Bind one task's exact browser identity across tofu-search executors.
+
+    An explicit client remains authoritative and will surface an upgrade error
+    if it lacks a capability. Without an explicit selection, prefer the
+    freshest compatible owned device; if none is compatible, retain the
+    freshest owned device so the strict caller can distinguish upgrade from
+    offline instead of silently borrowing another owner's/global device.
+    """
     uid = str(user_id or '')
     try:
-        from lib.browser import get_connected_clients
-        clients = get_connected_clients(user_id=uid)
+        from lib.browser.queue import get_connected_clients
+        clients = get_connected_clients(owner_user_id=uid)
         by_id = {str(row.get('client_id') or ''): row for row in clients}
-        selected = by_id.get(str(client_id or '')) if client_id else (
-            max(clients, key=lambda row: row.get('last_poll', 0))
-            if clients else None)
+        if client_id:
+            selected = by_id.get(str(client_id or ''))
+        else:
+            required = {str(value) for value in required_capabilities if value}
+            compatible = [
+                row for row in clients
+                if required <= set(row.get('capabilities') or ())
+            ]
+            candidates = compatible or clients
+            selected = (
+                max(candidates, key=lambda row: row.get('last_poll', 0))
+                if candidates else None)
         binding = (uid, str((selected or {}).get('client_id') or ''),
                    str((selected or {}).get('profile') or ''))
     except Exception as exc:
         logger.debug('[Bridge] task browser binding failed: %s', exc)
         binding = (uid, '', '')
     token = _search_browser_binding.set(binding)
+    handoff_registry = _TaskFileHandoffs()
+    handoff_token = _search_browser_file_handoffs.set(handoff_registry)
+    current_file_token = _search_browser_current_file.set(None)
     try:
         yield binding
     finally:
+        # A completed response that the task never claimed has no remaining
+        # user-visible value. Reclaim it at the task boundary instead of
+        # relying on the registry TTL.
+        for transfer_id in handoff_registry.drain():
+            _abort_bound_browser_file(transfer_id, binding=binding)
+        _search_browser_current_file.reset(current_file_token)
+        _search_browser_file_handoffs.reset(handoff_token)
         _search_browser_binding.reset(token)
 
 
@@ -204,13 +317,13 @@ def _bind_browser_identity() -> tuple[str, str, str]:
     try:
         from routes.api_v1.auth import current_auth
         ctx = current_auth()
-        user_id = str(getattr(ctx, 'user_id', '') or '')
+        user_id = str(getattr(ctx, 'owner_user_id', '') or '')
     except Exception as exc:
         logger.debug('[Bridge] request identity lookup failed: %s', exc)
         user_id = ''
     try:
-        from lib.browser import get_connected_clients
-        clients = get_connected_clients(user_id=user_id)
+        from lib.browser.queue import get_connected_clients
+        clients = get_connected_clients(owner_user_id=user_id)
         client = max(clients, key=lambda row: row.get('last_poll', 0)) \
             if clients else {}
         return (user_id, str(client.get('client_id') or ''),
@@ -218,6 +331,134 @@ def _bind_browser_identity() -> tuple[str, str, str]:
     except Exception as exc:
         logger.debug('[Bridge] browser identity binding failed: %s', exc)
         return user_id, '', ''
+
+
+def _abort_bound_browser_file(transfer_id: str, *, binding=None) -> None:
+    user_id, client_id, _profile = binding or (
+        _search_browser_binding.get() or ('', '', ''))
+    if not user_id or not client_id or not transfer_id:
+        return
+    try:
+        from lib.browser.file_transfer import file_transfer_store
+        file_transfer_store.abort(
+            transfer_id,
+            owner_user_id=user_id,
+            client_id=client_id,
+            internal=True,
+        )
+    except Exception as exc:
+        logger.debug('[Bridge] browser file handoff cleanup failed: %s', exc)
+
+
+def _remember_bound_browser_file(url: str, transfer_id: str) -> bool:
+    """Bind an exact completed transfer to this task's fetch invocation."""
+    binding = _search_browser_binding.get()
+    handoffs = _search_browser_file_handoffs.get()
+    if binding is None or handoffs is None:
+        return False
+    user_id, client_id, _profile = binding
+    transfer_id = str(transfer_id or '').strip()
+    source = str(url or '')
+    if not user_id or not client_id or not source or not transfer_id:
+        return False
+
+    previous = _search_browser_current_file.get()
+    if previous and previous[1] != transfer_id:
+        handoffs.discard(previous[1])
+        _abort_bound_browser_file(previous[1], binding=binding)
+    for evicted in handoffs.remember(transfer_id):
+        _abort_bound_browser_file(evicted, binding=binding)
+    _search_browser_current_file.set((source, transfer_id))
+    return True
+
+
+def claim_bound_browser_file(url: str):
+    """Claim this task's exact completed file-transfer ID."""
+    binding = _search_browser_binding.get()
+    handoffs = _search_browser_file_handoffs.get()
+    if binding is None or handoffs is None:
+        return None
+    user_id, client_id, _profile = binding
+    if not user_id or not client_id:
+        return None
+    current = _search_browser_current_file.get()
+    if not current or current[0] != str(url or ''):
+        return None
+    transfer_id = current[1]
+    _search_browser_current_file.set(None)
+    handoffs.discard(transfer_id)
+    try:
+        from lib.browser.file_transfer import file_transfer_store
+        return file_transfer_store.consume_completed(
+            transfer_id,
+            owner_user_id=user_id,
+            client_id=client_id,
+        )
+    except Exception as exc:
+        _abort_bound_browser_file(transfer_id, binding=binding)
+        logger.info('[Bridge] could not claim completed browser file for %s: %s',
+                    url_for_log(url), text_for_log(exc))
+        return None
+
+
+def require_bound_browser_file(url: str, *, max_bytes: int, timeout: int):
+    """Stage response bytes through this task's exact browser or raise.
+
+    The explicit server-download tool uses this strict form so an offline,
+    outdated, denied, or failed browser is visible as its typed recovery
+    reason.  It never selects a process-global or merely recent device.
+    """
+    from lib.browser.file_transfer import (
+        BrowserFileTransferError,
+        fetch_file_via_browser,
+    )
+
+    binding = _search_browser_binding.get()
+    if binding is None:
+        raise BrowserFileTransferError(
+            'browser_file_transfer_unbound',
+            'No request-scoped browser identity is bound to this download',
+            status=503,
+        )
+    user_id, client_id, _profile = binding
+    if not user_id or not client_id:
+        raise BrowserFileTransferError(
+            'browser_file_transfer_offline',
+            'No compatible browser extension is connected for this user',
+            status=503,
+        )
+    existing = claim_bound_browser_file(url)
+    if existing:
+        return existing
+    return fetch_file_via_browser(
+        url,
+        max_bytes=max_bytes,
+        timeout=timeout,
+        client_id=client_id,
+        owner_user_id=user_id,
+    )
+
+
+def fetch_bound_browser_file(url: str, *, max_bytes: int, timeout: int):
+    """Best-effort browser staging for the legacy text-fetch fallback.
+
+    This is a host-only extension of tofu-search's provider seam: tofu-search
+    continues to own server HTTP, while authenticated binary acquisition is
+    routed through chatui's owner/device authority.  An unbound worker is
+    inert and can never fall back to a globally recent browser.
+    """
+    try:
+        return require_bound_browser_file(
+            url, max_bytes=max_bytes, timeout=timeout)
+    except Exception as exc:
+        binding = _search_browser_binding.get() or ('', '', '')
+        user_id, client_id, _profile = binding
+        logger.info(
+            '[Bridge] authenticated browser file transfer failed for %s '
+            '(owner=%s client=%s): %s',
+            url_for_log(url), user_id, client_id[:12], text_for_log(exc),
+        )
+        return None
 
 
 class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
@@ -237,37 +478,63 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
                           profile=profile, bound=True)
 
     def _route(self) -> dict:
-        return {'client_id': self.client_id} \
-            if self._bound and self.client_id else {}
+        return {
+            'client_id': self.client_id,
+            'owner_user_id': self.user_id,
+        } if self._bound and self.client_id and self.user_id else {}
 
     def is_connected(self) -> bool:
         try:
-            from lib.browser import is_extension_connected
+            from lib.browser.queue import is_extension_connected
             # Global providers are templates, not authority. Public tofu-search
             # entry points call bind() before use; direct/unbound probes must be
             # inert instead of observing another request's freshest browser.
             if not self._bound or not self.client_id:
                 return False
-            return bool(is_extension_connected(self.client_id))
+            return bool(is_extension_connected(
+                self.client_id, owner_user_id=self.user_id))
         except Exception as e:
             logger.debug('[Bridge] is_extension_connected failed: %s', e)
             return False
 
     def fetch_url(self, url, *, max_chars=None, timeout=15):
         # A PDF/binary URL opened in a real Chrome tab downloads to the user's
-        # machine and yields no text — refuse it so the fetch is reported as a
-        # plain failure (PDFs are parsed server-side, not via the extension).
+        # machine and yields no text — refuse the tab path. If server HTTP also
+        # fails, _stage_binary_asset uses the separate file_export transport.
         if _is_browser_unrenderable(url):
-            logger.info('[Bridge] browser fetch_url SKIP (binary/PDF, would download to client) — %s', url[:100])
+            logger.info('[Bridge] browser fetch_url SKIP (binary/PDF, would '
+                        'download to client) — %s', url_for_log(url))
             return None
         if not self.is_connected():
             return None
         try:
-            from lib.browser import fetch_url_via_browser
-            return fetch_url_via_browser(url, max_chars=max_chars or 50000,
-                                         timeout=max(timeout, 25), **self._route())
+            from lib.browser.fetch import fetch_url_via_browser
+            accepted_handoff = []
+            handoff_enabled = bool(
+                _browser_file_handoff_escape_enabled.get())
+
+            def remember_file(source_url, transfer_id):
+                accepted = _remember_bound_browser_file(
+                    source_url, transfer_id)
+                if accepted:
+                    accepted_handoff.append((source_url, transfer_id))
+                return accepted
+
+            result = fetch_url_via_browser(
+                url,
+                max_chars=max_chars or 50000,
+                max_bytes=_lib.FETCH_MAX_BYTES,
+                timeout=max(timeout, 35),
+                on_file_transfer=remember_file if handoff_enabled else None,
+                **self._route(),
+            )
+            if accepted_handoff and handoff_enabled:
+                source_url, transfer_id = accepted_handoff[-1]
+                raise BrowserFileHandoffReady(source_url, transfer_id)
+            return result
         except Exception as e:
-            logger.warning('[Bridge] browser fetch_url failed for %s: %s', url[:80], e)
+            logger.warning('[Bridge] browser fetch_url failed for %s: %s',
+                           url_for_log(url), text_for_log(e))
             return None
 
     def fetch_html(self, url, *, timeout=20):
@@ -279,18 +546,25 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
         parsing lives in the library, not duplicated here.
         """
         if _is_browser_unrenderable(url):
-            logger.info('[Bridge] browser fetch_html SKIP (binary/PDF, would download to client) — %s', url[:100])
+            logger.info('[Bridge] browser fetch_html SKIP (binary/PDF, would '
+                        'download to client) — %s', url_for_log(url))
             return None
         try:
-            from lib.browser import send_browser_command
+            from lib.browser.queue import send_browser_command
         except Exception as e:
             logger.debug('[Bridge] browser fetch_html import failed: %s', e)
             return None
         if not self.is_connected():
             return None
         try:
+            from lib.browser.protocol import (
+                BrowserCapability,
+                require_capabilities,
+            )
+            require_capabilities(
+                self.client_id, [BrowserCapability.FILE_EXPORT])
             if self._bound:
-                from lib.browser import require_access
+                from lib.browser.access import require_access
                 require_access(self.user_id, url, access='read',
                                client_id=self.client_id, profile=self.profile)
             result, error = send_browser_command('fetch_url', {
@@ -299,23 +573,25 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
             }, timeout=max(timeout, 25), **self._route())
             if error or not isinstance(result, dict):
                 logger.warning('[Bridge] browser fetch_html failed for %s: %s',
-                               url[:80], str(error)[:200])
+                               url_for_log(url),
+                               text_for_log(error, max_chars=200))
                 return None
             final_url = str(result.get('url') or url)
             if self._bound:
-                from lib.browser import require_access
+                from lib.browser.access import require_access
                 require_access(self.user_id, final_url, access='read',
                                client_id=self.client_id, profile=self.profile)
             html = result.get('html', '') or result.get('text', '')
             if not html or len(html) < 100:
                 logger.info('[Bridge] browser fetch_html got %d chars (too short) for %s',
-                            len(html or ''), url[:80])
+                            len(html or ''), url_for_log(url))
                 return None
             logger.info('[Bridge] browser fetch_html got %d HTML chars for %s',
-                        len(html), url[:80])
+                        len(html), url_for_log(url))
             return html
         except Exception as e:
-            logger.error('[Bridge] browser fetch_html failed: %s', e, exc_info=True)
+            logger.error('[Bridge] browser fetch_html failed: %s',
+                         text_for_log(e))
             return None
 
 
@@ -334,10 +610,10 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
         """
         if _is_browser_unrenderable(url):
             logger.info('[Bridge] browser scrape SKIP (binary/PDF, would download to client) — %s',
-                        url[:100])
+                        url_for_log(url))
             return None
         try:
-            from lib.browser import send_browser_command
+            from lib.browser.queue import send_browser_command
         except Exception as e:
             logger.debug('[Bridge] browser scrape import failed: %s', e)
             return None
@@ -346,7 +622,7 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
         tab_id = None
         try:
             if self._bound:
-                from lib.browser import require_access
+                from lib.browser.access import require_access
                 require_access(self.user_id, url, access='read',
                                client_id=self.client_id, profile=self.profile)
             res, err = send_browser_command(
@@ -354,7 +630,8 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
                 timeout=max(timeout, 25), **self._route())
             if err or not isinstance(res, dict) or res.get('id') is None:
                 logger.warning('[Bridge] scrape create_tab failed for %s: %s',
-                               url[:80], str(err)[:200])
+                               url_for_log(url),
+                               text_for_log(err, max_chars=200))
                 return None
             tab_id = res['id']
             if wait_selector:
@@ -366,7 +643,8 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
                 if werr or not (isinstance(wres, dict) and wres.get('found')):
                     # Slow/partial renders may still carry the data — extract anyway.
                     logger.info('[Bridge] scrape selector %r not confirmed for %s — '
-                                'extracting anyway', wait_selector, url[:80])
+                                'extracting anyway', wait_selector,
+                                url_for_log(url))
             if self._bound:
                 tabs, terr = send_browser_command(
                     'list_tabs', {}, timeout=8, **self._route())
@@ -375,9 +653,9 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
                     if not terr and isinstance(tabs, list) else None
                 if current is None:
                     logger.warning('[Bridge] scrape cannot verify final tab URL for %s',
-                                   url[:80])
+                                   url_for_log(url))
                     return None
-                from lib.browser import require_access
+                from lib.browser.access import require_access
                 require_access(
                     self.user_id, current.get('url') or '', access='read',
                     client_id=self.client_id, profile=self.profile)
@@ -392,18 +670,20 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
                 timeout=max(timeout, 15), **self._route())
             if err:
                 logger.warning('[Bridge] scrape execute_js failed for %s: %s',
-                               url[:80], str(err)[:200])
+                               url_for_log(url),
+                               text_for_log(err, max_chars=200))
                 return None
             if isinstance(res, dict) and res.get('__error'):
                 logger.warning('[Bridge] scrape extractor raised in-page for %s: %s',
-                               url[:80], str(res.get('message'))[:200])
+                               url_for_log(url),
+                               text_for_log(res.get('message'), max_chars=200))
                 return None
-            logger.info('[Bridge] scrape OK for %s (%s)', url[:80],
+            logger.info('[Bridge] scrape OK for %s (%s)', url_for_log(url),
                         '%d items' % len(res) if isinstance(res, list)
                         else type(res).__name__)
             return res
         except Exception as e:
-            logger.error('[Bridge] browser scrape failed: %s', e, exc_info=True)
+            logger.error('[Bridge] browser scrape failed: %s', text_for_log(e))
             return None
         finally:
             if tab_id is not None:
@@ -412,7 +692,7 @@ class _ChatuiBrowserProvider(tofu_search.BrowserProvider):
                                          timeout=5, **self._route())
                 except Exception as e:
                     logger.debug('[Bridge] scrape close_tab failed (tab %s may leak): %s',
-                                 tab_id, e)
+                                 tab_id, text_for_log(e))
 
 
 _SiteSearchBase = getattr(tofu_search, 'SiteSearchProvider', object)
@@ -436,7 +716,7 @@ class _ChatuiSiteSearchProvider(_SiteSearchBase):
 
     def list_sources(self):
         try:
-            from lib.browser import adapter_health, list_adapters
+            from lib.browser.adapters import adapter_health, list_adapters
             # Site adapters execute inside one user's live browser.  Never let
             # an unbound library call fall back to the globally freshest
             # extension: that would make availability order-dependent and,
@@ -470,7 +750,7 @@ class _ChatuiSiteSearchProvider(_SiteSearchBase):
 
     def search(self, source_id, query, *, max_results=10, freshness=''):
         try:
-            from lib.browser import get_adapter, invoke_adapter
+            from lib.browser.adapters import get_adapter, invoke_adapter
             if not self._bound or not self.client_id:
                 return None
             adapter = get_adapter(source_id)
@@ -479,7 +759,7 @@ class _ChatuiSiteSearchProvider(_SiteSearchBase):
             result = invoke_adapter(
                 adapter.id, 'search',
                 {'query': query, 'limit': max_results, 'pages': 1},
-                user_id=self.user_id, client_id=self.client_id)
+                owner_user_id=self.user_id, client_id=self.client_id)
             return result.get('result') if result.get('ok') else None
         except Exception as exc:
             logger.warning('[Bridge] site-search %s failed: %s', source_id, exc)
@@ -498,7 +778,8 @@ class _ChatuiAuthSourceProvider(tofu_search.AuthSourceProvider):
             from lib.auth_sources import match_source
             return match_source(url)
         except Exception as e:
-            logger.debug('[Bridge] auth match_source failed for %s: %s', url[:80], e)
+            logger.debug('[Bridge] auth match_source failed for %s: %s',
+                         url_for_log(url), text_for_log(e))
             return None
 
     def get_source(self, domain):
@@ -543,12 +824,34 @@ class _ChatuiSiteKnowledgeProvider(_SiteKnowledgeBase):
 def _resolve_proxy_url() -> str:
     """Return chatui's effective HTTPS/HTTP proxy URL, or '' when none.
 
-    Prefers the proxy pool's first healthy GLOBAL entry (2026-08-07 pool
-    feature), then the Settings-resolved legacy value from ``lib.proxy``
-    (which also mirrors the env vars) so tofu-search's adaptive
-    dual-attempt tries the SAME proxy chatui itself uses, independent of
-    env-var casing quirks.
+    Prefers the proxy pool's first VERIFIABLY-ALIVE GLOBAL entry, then the
+    Settings-resolved legacy value from ``lib.proxy`` (which also mirrors
+    the env vars) so tofu-search's adaptive dual-attempt tries the SAME
+    proxy chatui itself uses, independent of env-var casing quirks.
+
+    Why ``first_reachable_global_proxy_url`` (TCP + real-HTTPS probe, 60s
+    positive cache) and not ``first_global_proxy_url``: pool health is fed
+    by real app traffic only, and tofu-search never reports outcomes back
+    to the pool — so a DEAD first entry (hk-gw outage, 2026-08-20: every
+    engine ProxyError → direct fallback → no direct egress → 0 results
+    misreported as "no matches") kept being handed out forever. The probe
+    walks the pool in failover order and skips entries that refuse
+    connections RIGHT NOW, landing on the next alive one (legacy proxy).
+    Blocking cost: at most one ~3s probe per endpoint per 60s window.
     """
+    try:
+        from lib.proxy import first_reachable_global_proxy_url
+        pooled = first_reachable_global_proxy_url()
+        if pooled:
+            return pooled
+    except Exception as e:
+        logger.debug('[Bridge] reachable pool proxy resolve failed: %s', e)
+    # Every probe failed. That USUALLY means the pool is down — but a
+    # blocked canary URL would look identical while the proxies themselves
+    # still work, so fall back to the health-trusting pick as a last
+    # resort. A genuinely-dead entry handed out here fails fast per engine
+    # (ProxyError) and is now correctly DIAGNOSED as a network error
+    # (tofu-search engine-failure classification), never as "no matches".
     try:
         from lib.proxy import first_global_proxy_url
         pooled = first_global_proxy_url()
@@ -569,6 +872,15 @@ def sync_search_config():
     """Push chatui's live FETCH_* settings into tofu-search's global config."""
     filter_enabled = getattr(_lib, 'LLM_CONTENT_FILTER_ENABLED', True)
     proxy_url = _resolve_proxy_url()
+    # The FULL global-pool failover chain behind the primary: a primary that
+    # dies mid-run (hk-gw tunnel-403, 2026-08-20) no longer empties search —
+    # tofu-search races the remaining entries + the direct path in parallel.
+    proxy_failover = []
+    try:
+        from lib.proxy import global_proxy_failover_urls
+        proxy_failover = [u for u in global_proxy_failover_urls() if u != proxy_url]
+    except Exception as e:
+        logger.debug('[Bridge] proxy failover list resolve failed: %s', e)
 
     # ── Pre-fetch relevance gate (tofu-search >=0.3.2) ──
     # These three knobs have NO env-var fallback inside tofu_search.configure(),
@@ -654,13 +966,22 @@ def sync_search_config():
     # here, fall back to the environment".
     if proxy_url:
         _cfg['proxy_url'] = proxy_url
+    # Multi-proxy failover chain + parallel racing (tofu-search >=0.10.0).
+    # SOFT floor: introspect the INSTALLED library — an older tofu-search
+    # simply doesn't receive these kwargs (feature inert, nothing crashes),
+    # mirroring the min_request_interval_ms precedent.
+    _ts_fields = getattr(tofu_search.SearchConfig, '__dataclass_fields__', {})
+    if proxy_failover and 'proxy_fallback_urls' in _ts_fields:
+        _cfg['proxy_fallback_urls'] = proxy_failover
+    if 'proxy_race' in _ts_fields:
+        _cfg['proxy_race'] = _env_bool('TOFU_SEARCH_PROXY_RACE', True)
     if searxng_instances:
         _cfg['searxng_instances'] = searxng_instances
 
     tofu_search.configure(**_cfg)
     logger.info('[Bridge] tofu-search config synced: top_n=%d timeout=%ds '
                 'deadline(call=%ds url=%ds) '
-                'max_chars(search=%d direct=%d pdf=%d) filter=%s model=%r proxy=%s '
+                'max_chars(search=%d direct=%d pdf=%d) filter=%s model=%r proxy=%s failover=%d '
                 'dual_attempt=%s prefetch_gate=%s(terms>=%d,floor=%d) '
                 'ssrf_guard=%s allow_private_hosts=%s insecure_ssl=%s '
                 'throttle=%dms searxng=%s',
@@ -671,6 +992,7 @@ def sync_search_config():
                 'on' if filter_enabled else 'off',
                 _FILTER_MODEL or 'dispatch-default',
                 'set' if proxy_url else 'env/none',
+                len(proxy_failover),
                 'on' if proxy_dual_attempt else 'off',
                 'on' if prefetch_gate_enabled else 'off',
                 prefetch_gate_min_query_terms, prefetch_gate_min_fetch,
@@ -684,11 +1006,17 @@ def sync_search_config():
 def install_search_bridge():
     """Install chatui's LLM + provider implementations into tofu-search.
 
-    Idempotent — safe to call multiple times (e.g. on config reload).
+    Idempotent and concurrency-safe. Configuration reload has a separate
+    explicit sync path, so repeat capability calls return without re-reading
+    settings or mutating provider globals.
     """
     global _installed
-    sync_search_config()
-    if not _installed:
+    if _installed:
+        return
+    with _install_lock:
+        if _installed:
+            return
+        sync_search_config()
         tofu_search.register_browser_provider(_ChatuiBrowserProvider())
         if hasattr(tofu_search, 'register_site_search_provider'):
             tofu_search.register_site_search_provider(_ChatuiSiteSearchProvider())
@@ -707,5 +1035,3 @@ def install_search_bridge():
         logger.info('[Bridge] tofu-search bridge installed '
                     '(LLM=dispatch_chat, browser=extension, sites=adapters, '
                     'auth=auth_sources)')
-    else:
-        logger.debug('[Bridge] tofu-search config re-synced')

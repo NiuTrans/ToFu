@@ -8,7 +8,10 @@ import threading
 
 import pytest
 
-from lib.server_shutdown import shutdown_production_runtime
+from lib.server_shutdown import (
+    _stop_storage_boundary_for_shutdown,
+    shutdown_production_runtime,
+)
 
 
 pytestmark = pytest.mark.unit
@@ -41,11 +44,10 @@ def _run_async(awaitable):
 def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch):
     import lib.agent_core.admission as admission
     import lib.agent_core.push as push
-    import lib.billing.janitor as billing_janitor
     import lib.cgroup_guard as cgroup_guard
     import lib.fs_keepalive as fs_keepalive
     import lib.http_client as http_client
-    import lib.llm_dispatch.autodiscover_local as autodiscover_local
+    import lib.integration_control as integration_control
     import lib.llm_dispatch.health_local as health_local
     import lib.mcp.client as mcp_client
     import lib.mcp.startup as mcp_startup
@@ -53,8 +55,10 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch)
     import lib.presence as presence
     import lib.pricing as pricing
     import lib.runtime_state_store as runtime_state_store
+    import lib.server_background_services as background_services
     import lib.storage as storage
-    import lib.tasks_pkg as tasks_pkg
+    import lib.swarm.integration as swarm_integration
+    import lib.tasks_pkg.manager as task_manager
     import lib.tasks_pkg.event_log as event_log
     import routes
 
@@ -75,18 +79,23 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch)
     class Bridge:
         disconnect_all = sync_call('mcp')
 
-    monkeypatch.setattr(tasks_pkg, 'quiesce_running_tasks', lambda **_kwargs: 0)
-    monkeypatch.setattr(billing_janitor, 'stop_janitor', sync_call('janitor'))
+    monkeypatch.setattr(
+        task_manager, 'quiesce_running_tasks', lambda **_kwargs: 0)
+    monkeypatch.setattr(
+        swarm_integration, 'stop_swarm_cleanup_timer',
+        sync_call('swarm-cleanup'))
     monkeypatch.setattr(netpath, 'stop_prober', sync_call('netpath'))
+    monkeypatch.setattr(
+        background_services, 'stop_lan_discovery_responder',
+        sync_call('lan-discovery'))
     monkeypatch.setattr(cgroup_guard, 'stop_monitor', sync_call('cgroup'))
     monkeypatch.setattr(
         health_local, 'stop_local_health_checker', sync_call('local-health'))
     monkeypatch.setattr(
-        autodiscover_local, 'stop_local_autodiscovery',
-        sync_call('local-autodiscovery'))
-    monkeypatch.setattr(
         fs_keepalive, 'stop_fs_keepalive', sync_call('fs-keepalive'))
     monkeypatch.setattr(presence, 'stop_sweeper', sync_call('presence'))
+    monkeypatch.setattr(
+        integration_control, 'stop_worker', sync_call('integration'))
     monkeypatch.setattr(
         pricing, 'stop_pricing_refresh', sync_call('pricing-refresh'))
     monkeypatch.setattr(
@@ -101,7 +110,8 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch)
     monkeypatch.setattr(runtime_state_store, 'get_store', lambda: Store())
     monkeypatch.setattr(
         event_log, 'stop_storage_maintenance', sync_call('event-maintenance'))
-    monkeypatch.setattr(event_log, 'stop_event_writer', sync_call('event-writer'))
+    monkeypatch.setattr(event_log, 'stop_sidecar_batcher',
+                        sync_call('event-batcher'))
     monkeypatch.setattr(storage, 'stop_storage', sync_call('storage'))
 
     stopped = threading.Event()
@@ -116,10 +126,10 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch)
     loop_thread = serving_loop_threads[0]
 
     assert [name for name, _, _ in calls] == [
-        'janitor', 'netpath', 'cgroup', 'local-health',
-        'local-autodiscovery', 'fs-keepalive', 'presence', 'route-services',
-        'pricing-refresh', 'mcp-startup', 'mcp', 'admission', 'push', 'http', 'runtime',
-        'event-maintenance', 'event-writer', 'storage',
+        'swarm-cleanup', 'netpath', 'lan-discovery', 'cgroup', 'local-health',
+        'fs-keepalive', 'presence', 'integration', 'route-services', 'pricing-refresh',
+        'mcp-startup', 'mcp', 'admission', 'push', 'http', 'runtime',
+        'event-maintenance', 'event-batcher', 'storage',
     ]
     assert next(thread for name, thread, _ in calls if name == 'http') == loop_thread
     for name, thread, _ in calls:
@@ -128,50 +138,103 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch)
     assert calls[-3][2] == {'timeout': 2.0}
     assert calls[-1][2] == {'timeout': 5.0}
     assert calls[-2][2] == {'timeout': 3.0}
-    assert calls[0][2] == {'timeout': 2.5}
-    assert all(kwargs == {'timeout': 2.0} for _, _, kwargs in calls[2:6])
-    assert calls[6][2] == {'timeout': 2.0}
-    assert calls[7][2] == {'timeout': 2.0}
-    assert calls[8][2] == {'timeout': 2.0}
+    assert calls[0][2] == {'timeout': 2.0}
+    assert calls[1][2] == {}
+    assert all(kwargs == {'timeout': 2.0} for _, _, kwargs in calls[2:7])
+    assert all(kwargs == {'timeout': 2.0} for _, _, kwargs in calls[7:11])
 
 
-def test_billing_janitor_stop_is_bounded_and_releases_thread_owner(monkeypatch):
+def test_storage_shutdown_certifies_reexec_only_after_release(monkeypatch):
+    import lib.server_reexec as server_reexec
+    import lib.storage as storage
+
+    calls = []
+
+    def stop_storage(*, timeout):
+        calls.append(('stop', timeout))
+
+    def certify():
+        calls.append(('certify', None))
+        return True
+
+    class Log:
+        def info(self, *_args):
+            calls.append(('log', None))
+
+        def warning(self, *_args):
+            raise AssertionError('successful release must not warn')
+
+    monkeypatch.setattr(storage, 'stop_storage', stop_storage)
+    monkeypatch.setattr(
+        server_reexec,
+        'confirm_server_reexec_storage_boundary_released',
+        certify,
+    )
+
+    assert _run_async(_stop_storage_boundary_for_shutdown(Log())) is True
+    assert calls[:2] == [('stop', 5.0), ('certify', None)]
+
+
+def test_storage_shutdown_failure_cannot_certify_reexec(monkeypatch):
+    import lib.server_reexec as server_reexec
+    import lib.storage as storage
+
+    certified = []
+    warnings = []
+
+    def fail_stop(*, timeout):
+        raise RuntimeError(f'still alive after {timeout}s')
+
+    class Log:
+        def info(self, *_args):
+            raise AssertionError('failed release must not report success')
+
+        def warning(self, *args):
+            warnings.append(args)
+
+    monkeypatch.setattr(storage, 'stop_storage', fail_stop)
+    monkeypatch.setattr(
+        server_reexec,
+        'confirm_server_reexec_storage_boundary_released',
+        lambda: certified.append(True) or True,
+    )
+
+    assert _run_async(_stop_storage_boundary_for_shutdown(Log())) is False
+    assert certified == []
+    assert warnings
+
+
+def test_legacy_billing_janitor_facade_is_thread_free():
     import lib.billing.janitor as janitor
 
-    class Thread:
-        alive = True
-        joined = []
-
-        def is_alive(self):
-            return self.alive
-
-        def join(self, timeout):
-            self.joined.append(timeout)
-            self.alive = False
-
-    thread = Thread()
-    monkeypatch.setattr(janitor, '_thread', thread)
-    janitor._stop.clear()
-
+    assert janitor.start_janitor() is False
     assert janitor.stop_janitor(timeout=0.25) is True
-    assert janitor._stop.is_set()
-    assert thread.joined == [0.25]
-    assert janitor._thread is None
+
+
+def test_legacy_daily_report_scheduler_facade_is_thread_free(monkeypatch):
+    import lib.daily_report.scheduler as scheduler
+    import lib.scheduler.manager as manager
+    from lib.identity import PrincipalContext
+
+    monkeypatch.setattr(
+        manager, 'ensure_daily_report_schedule', lambda **_kwargs: False)
+    principal = PrincipalContext.system(
+        subject_id='daily-report-test',
+        owner_user_id=1,
+        scopes={'reports:maintain'},
+    )
+    assert scheduler.start_report_scheduler(principal=principal) is False
+    assert scheduler.stop_report_scheduler(timeout=0.25) is True
+    assert not hasattr(scheduler, '_scheduler_thread')
 
 
 @pytest.mark.parametrize(('module_name', 'thread_name', 'event_names', 'stop_name'), [
     ('lib.cgroup_guard', '_monitor_thread', ('_monitor_stop',), 'stop_monitor'),
-    ('lib.daily_report.scheduler', '_scheduler_thread', ('_scheduler_stop',),
-     'stop_report_scheduler'),
-    ('lib.fs_keepalive', '_thread', (), 'stop_fs_keepalive'),
-    ('lib.llm_dispatch.autodiscover_local', '_thread', ('_stop_event',),
-     'stop_local_autodiscovery'),
-    ('lib.llm_dispatch.health_local', '_thread', ('_stop_event',),
+    ('lib.fs_keepalive', '_thread', ('_stop_event',), 'stop_fs_keepalive'),
+    ('lib.llm_dispatch.health_local', '_thread', ('_stop_event', '_wake_event'),
      'stop_local_health_checker'),
     ('lib.llm_dispatch.model_catalog_sync', '_thread',
      ('_stop_event', '_wake_event'), 'stop_model_catalog_sync'),
-    ('lib.knowledge.enrichment', '_worker', ('_worker_stop',),
-     'stop_visual_enrichment'),
     ('lib.oauth.codex_catalog', '_worker_thread',
      ('_worker_stop', '_refresh_wake'), 'stop_codex_catalog_refresher'),
     ('lib.presence.registry', '_sweeper_thread', ('_sweeper_stop',),
@@ -201,6 +264,7 @@ def test_worker_stop_contract_releases_only_a_stopped_owner(
         monkeypatch.setattr(module, event_name, event)
     if module_name == 'lib.fs_keepalive':
         monkeypatch.setattr(module, '_running', True)
+        monkeypatch.setattr(module, '_probe_runtime', None)
     if module_name == 'lib.oauth.codex_catalog':
         monkeypatch.setattr(module, '_worker_started', True)
     if module_name == 'lib.presence.registry':
@@ -216,6 +280,39 @@ def test_worker_stop_contract_releases_only_a_stopped_owner(
         assert module._worker_started is False
     if module_name == 'lib.presence.registry':
         assert module._sweeper_started is False
+
+
+def test_visual_enrichment_stop_contract_releases_each_owner(monkeypatch):
+    """The knowledge worker registry is partitioned by explicit owner."""
+    from lib.knowledge import enrichment
+
+    class Thread:
+        alive = True
+
+        def __init__(self):
+            self.joined = []
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout):
+            self.joined.append(timeout)
+            self.alive = False
+
+    first = Thread()
+    second = Thread()
+    first_stop = threading.Event()
+    second_stop = threading.Event()
+    monkeypatch.setattr(enrichment, '_workers', {7: first, 9: second})
+    monkeypatch.setattr(
+        enrichment, '_worker_stops', {7: first_stop, 9: second_stop})
+
+    assert enrichment.stop_visual_enrichment(timeout=0.125) is True
+    assert first.joined == [0.0625]
+    assert second.joined == [0.0625]
+    assert first_stop.is_set() and second_stop.is_set()
+    assert enrichment._workers == {}
+    assert enrichment._worker_stops == {}
 
 
 def test_scheduler_manager_stop_interrupts_wait_and_releases_owner():

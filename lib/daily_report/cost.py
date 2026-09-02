@@ -1,6 +1,6 @@
 """Server-side cost calculation for the daily-report calendar.
 
-Strategy: past days come from ``daily_cost_cache`` (DB); current day is
+Strategy: past days come from the durable daily-cost cache; current day is
 always live-computed; the calendar endpoint wraps the whole thing in a
 30-second in-process TTL cache to absorb burst-polling.
 """
@@ -11,10 +11,11 @@ import time
 import uuid
 
 from lib.cost import normalize_usage
+from lib.identity import require_user_id
 from lib.log import get_logger
+from lib.utils import safe_json
 
-from .storage import DEFAULT_USER_ID
-
+from .conversations import _safe_int_ts
 logger = get_logger(__name__)
 
 
@@ -22,7 +23,8 @@ logger = get_logger(__name__)
 # Shared with storage._save_report / invalidate_day_cost_cache /
 # routes.daily_report.get_calendar_month — they all pop / clear the
 # entry for a month when a report is saved or cost data invalidated.
-_calendar_cache: dict = {}     # (year, month) → {'data': dict, 'ts': monotonic, ...}
+_calendar_cache: dict = {}
+# (owner_user_id, year, month) → {'data': dict, 'ts': monotonic, ...}
 _CALENDAR_CACHE_TTL = 30  # seconds
 
 
@@ -144,53 +146,12 @@ def _calc_msg_cost_cny(usage, model_or_preset='', provider_id='', at=None):
     return round(cost_usd * rate, 4)
 
 
-def _normalized_usage_projection_sql(backend, id_count):
-    """Project billing fields from verified per-message light rows."""
-    placeholders = ','.join('?' for _ in range(id_count))
-    if backend == 'pg':
-        return (
-            'SELECT conv_id, seq AS msg_index, billing_meta->\'usage\' AS usage, '
-            "COALESCE(CAST(message_ts AS TEXT), billing_meta->>'timestamp') "
-            'AS msg_timestamp, '
-            "COALESCE(billing_meta->>'model', billing_meta->>'preset', "
-            "billing_meta->>'effort', '') AS msg_model, "
-            "COALESCE(billing_meta->>'provider_id', "
-            "billing_meta->>'providerId', '') AS msg_provider "
-            'FROM conversation_messages '
-            f'WHERE conv_id IN ({placeholders}) '
-            "AND jsonb_typeof(billing_meta->'usage')='object' "
-            'ORDER BY conv_id, seq')
-    return (
-        'SELECT conv_id, seq AS msg_index, '
-        "json_extract(billing_meta,'$.usage') AS usage, "
-        "COALESCE(CAST(message_ts AS TEXT), "
-        "json_extract(billing_meta,'$.timestamp')) AS msg_timestamp, "
-        "COALESCE(json_extract(billing_meta,'$.model'), "
-        "json_extract(billing_meta,'$.preset'), "
-        "json_extract(billing_meta,'$.effort'), '') AS msg_model, "
-        "COALESCE(json_extract(billing_meta,'$.provider_id'), "
-        "json_extract(billing_meta,'$.providerId'), '') AS msg_provider "
-        'FROM conversation_messages '
-        f'WHERE conv_id IN ({placeholders}) '
-        "AND json_type(billing_meta,'$.usage')='object' "
-        'ORDER BY conv_id, seq')
 
 
-def _first_content_projection_sql(backend, id_count):
-    """Return the legacy title fallback without reading full transcripts."""
-    placeholders = ','.join('?' for _ in range(id_count))
-    content = ('left(content, 30)' if backend == 'pg'
-               else 'substr(content,1,30)')
-    return (
-        f'SELECT conv_id, {content} AS first_content '
-        'FROM conversation_messages WHERE seq=0 '
-        f'AND conv_id IN ({placeholders})')
 
 
 def _usage_rows_from_snapshots(snapshots):
     """Build billing projections from authority-aware repository snapshots."""
-    from lib.utils import safe_json
-
     projected = []
     for snapshot in snapshots:
         raw_settings = snapshot.get('settings') or {}
@@ -225,118 +186,13 @@ def _usage_rows_from_snapshots(snapshots):
     return projected
 
 
-def _normalized_usage_rows(db, candidates, ms_start, ms_end, backend):
-    """Return exact billing projections from current row mirrors.
-
-    Every conversation is gated on authority/mirror revision, exact row count,
-    and complete ``meta_light`` coverage. Exceptional stale conversations use
-    the old server-side JSON projection individually; a failure returns None
-    so the caller can fail open to the fleet-wide authority query.
-    """
-    from lib.daily_report.conversations import (
-        _chunks,
-        _row_value,
-        _verified_normalized_candidates,
-    )
-    from lib.utils import safe_json
-
-    try:
-        verified = _verified_normalized_candidates(db, candidates)
-        if verified is None:
-            return None
-        by_id, eligible = verified
-        if not by_id:
-            return []
-
-        # ``billing_meta=NULL`` is the rolling-upgrade marker. A legitimate
-        # message with no usage stores ``{}``, so COUNT(billing_meta) is an
-        # exact completeness test without conflating "not billable" with
-        # "not backfilled".
-        billing_eligible = []
-        billing_eligible.extend(
-            cid for cid in eligible
-            if int(_row_value(by_id[cid], 'msg_count', 5, 0) or 0) == 0)
-        for ids in _chunks(eligible):
-            ph = ','.join('?' for _ in ids)
-            readiness = db.execute(
-                'SELECT conv_id, COUNT(*) AS row_count, '
-                'COUNT(billing_meta) AS billing_count '
-                'FROM conversation_messages '
-                f'WHERE conv_id IN ({ph}) GROUP BY conv_id',
-                tuple(ids)).fetchall()
-            for row in readiness:
-                cid = str(_row_value(row, 'conv_id', 0, '') or '')
-                candidate = by_id.get(cid)
-                expected = int(
-                    _row_value(candidate, 'msg_count', 5, 0) or 0
-                ) if candidate is not None else -1
-                row_count = int(_row_value(row, 'row_count', 1, 0) or 0)
-                billing_count = int(
-                    _row_value(row, 'billing_count', 2, 0) or 0)
-                if row_count == expected and billing_count == expected:
-                    billing_eligible.append(cid)
-
-        first_content = {}
-        for ids in _chunks(billing_eligible):
-            for row in db.execute(
-                    _first_content_projection_sql(backend, len(ids)),
-                    tuple(ids)).fetchall():
-                first_content[str(_row_value(row, 'conv_id', 0, '') or '')] = (
-                    _row_value(row, 'first_content', 1, '') or '')
-
-        projected = []
-        for ids in _chunks(billing_eligible):
-            rows = db.execute(
-                _normalized_usage_projection_sql(backend, len(ids)),
-                tuple(ids)).fetchall()
-            for row in rows:
-                cid = str(_row_value(row, 'conv_id', 0, '') or '')
-                candidate = by_id.get(cid)
-                if candidate is None:
-                    continue
-                raw_settings = _row_value(candidate, 'settings', 4, {})
-                settings = (safe_json(raw_settings, default={},
-                                      label='cost-conv-settings')
-                            if isinstance(raw_settings, str)
-                            else raw_settings)
-                settings = settings if isinstance(settings, dict) else {}
-                projected.append({
-                    'id': cid,
-                    'title': _row_value(candidate, 'title', 1, '') or '',
-                    'created_at': _row_value(candidate, 'created_at', 2, 0),
-                    'updated_at': _row_value(candidate, 'updated_at', 3, 0),
-                    'conv_model': (settings.get('model')
-                                   or settings.get('preset')
-                                   or settings.get('effort') or ''),
-                    'first_content': first_content.get(cid, ''),
-                    'msg_index': _row_value(row, 'msg_index', 1, 0),
-                    'total_msgs': _row_value(candidate, 'msg_count', 5, 0),
-                    'usage': _row_value(row, 'usage', 2, {}),
-                    'msg_timestamp': _row_value(row, 'msg_timestamp', 3, 0),
-                    'msg_model': _row_value(row, 'msg_model', 4, '') or '',
-                    'msg_provider': _row_value(row, 'msg_provider', 5, '') or '',
-                })
-
-        eligible_set = set(billing_eligible)
-        stale = [cid for cid in by_id if cid not in eligible_set]
-        for ids in _chunks(stale):
-            from lib.database.conversation_repository import (
-                list_conversation_snapshots,
-            )
-            snapshots = list_conversation_snapshots(
-                db, user_id=DEFAULT_USER_ID, ids=ids,
-                metadata_columns=(
-                    'title', 'created_at', 'updated_at', 'settings'))
-            projected.extend(_usage_rows_from_snapshots(snapshots))
-        return projected
-    except Exception as e:
-        logger.warning('[DailyReport] normalized cost read failed; falling '
-                       'back to repository snapshots: %s', e)
-        return None
 
 
-def _scan_costs_in_range(ms_start, ms_end, year=None, month=None):
-    """Scan the conversations table and build per-day cost breakdowns in a range.
+
+
+def _scan_costs_in_range(
+        ms_start, ms_end, year=None, month=None, *, owner_user_id):
+    """Scan conversation snapshots and build per-day costs for a range.
 
     Args:
         ms_start: Inclusive lower bound (epoch-ms).
@@ -349,46 +205,20 @@ def _scan_costs_in_range(ms_start, ms_end, year=None, month=None):
         dict mapping day-of-month (int) → {'cost': float,
             'conversations': {conv_id: {'name', 'cost', 'tokens'}}}.
     """
-    from lib.database import DOMAIN_CHAT, _BACKEND, get_thread_db
-    from lib.utils import safe_json
-
-    # _safe_int_ts lives in conversations.py to keep it close to its
-    # transcript callers; import lazily to avoid the circular import that
-    # would otherwise form (cost ↔ conversations).
-    from .conversations import _safe_int_ts
-
+    owner_id = require_user_id(
+        owner_user_id, context='daily report cost scan')
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        from lib.database.messages_rows import rows_read_enabled
-
-        rows = None
-        if rows_read_enabled():
-            # Metadata first, then exact per-conversation mirror gates. On the
-            # normal personal-server path PostgreSQL never expands the giant
-            # conversations.messages JSONB merely to recover a few usage keys.
-            candidates = db.execute(
-                'SELECT id, title, created_at, updated_at, settings, msg_count '
-                'FROM conversations WHERE user_id=? AND updated_at >= ? '
-                'AND created_at < ? ORDER BY updated_at DESC',
-                (DEFAULT_USER_ID, ms_start, ms_end)).fetchall()
-            rows = _normalized_usage_rows(
-                db, candidates, ms_start, ms_end, _BACKEND)
-        if rows is None:
-            # Kill-switch / rolling-upgrade / verification failure still goes
-            # through the repository's authority decision. In rows-authority
-            # mode an incomplete transcript fails loud; the retired archive is
-            # never resurrected merely to keep a report endpoint alive.
-            from lib.database.conversation_repository import (
-                list_conversation_snapshots,
-            )
-            snapshots = list_conversation_snapshots(
-                db, user_id=DEFAULT_USER_ID, updated_at_gte=ms_start,
-                created_at_lt=ms_end,
-                metadata_columns=(
-                    'title', 'created_at', 'updated_at', 'settings'))
-            rows = _usage_rows_from_snapshots(snapshots)
+        from lib.conversations.repository import scan_conversations_bounded
+        _candidate_count, snapshots = scan_conversations_bounded(
+            user_id=owner_id,
+            updated_at_gte=ms_start,
+            created_at_lt=ms_end,
+            limit=10_000,
+            settings_keys=['model', 'preset', 'effort'],
+        )
+        rows = _usage_rows_from_snapshots(snapshots)
     except Exception as e:
-        logger.error('[DailyReport] Cost DB query failed range=[%d,%d): %s',
+        logger.error('[DailyReport] Cost authority read failed range=[%d,%d): %s',
                      ms_start, ms_end, e, exc_info=True)
         return {}
 
@@ -460,17 +290,19 @@ def _scan_costs_in_range(ms_start, ms_end, year=None, month=None):
     return days
 
 
-def _load_cached_day_costs(year, month):
+def _load_cached_day_costs(year, month, *, owner_user_id):
     """Load persisted per-day costs for a given month from daily_cost_cache.
 
     Returns:
         dict mapping day-of-month (int) → {'cost': float, 'conversations': {...}}
         for days that have cached entries.  Days without entries are absent.
     """
+    owner_id = require_user_id(
+        owner_user_id, context='daily report cached costs')
     try:
         from lib.storage import get_storage_client
         rows = get_storage_client().query('daily_cost.month', {
-            'user_id': DEFAULT_USER_ID, 'year': year, 'month': month,
+            'user_id': owner_id, 'year': year, 'month': month,
         })
     except Exception as e:
         logger.warning('[DailyReport] Load cached costs %d-%02d failed: %s',
@@ -494,17 +326,19 @@ def _load_cached_day_costs(year, month):
     return out
 
 
-def _persist_day_cost(date_str, day_data):
+def _persist_day_cost(date_str, day_data, *, owner_user_id):
     """Write a single day's cost aggregate to daily_cost_cache.
 
     Args:
         date_str: 'YYYY-MM-DD'.
         day_data: {'cost': float, 'conversations': {conv_id: {...}}}.
     """
+    owner_id = require_user_id(
+        owner_user_id, context='daily report cost persistence')
     try:
         from lib.storage import get_storage_client
         get_storage_client(write=True).command('daily_cost.upsert', {
-            'user_id': DEFAULT_USER_ID,
+            'user_id': owner_id,
             'date': date_str,
             'cost': float(day_data.get('cost', 0.0)),
             'conversations': day_data.get('conversations', {}),
@@ -515,16 +349,18 @@ def _persist_day_cost(date_str, day_data):
                        date_str, e)
 
 
-def invalidate_day_cost_cache(date_str=None):
+def invalidate_day_cost_cache(date_str=None, *, owner_user_id):
     """Invalidate persisted per-day cost cache entries.
 
     Args:
         date_str: If given, remove only that day ('YYYY-MM-DD').
                   If None, clear all entries (e.g. on bulk delete).
     """
+    owner_id = require_user_id(
+        owner_user_id, context='daily report cost invalidation')
     try:
         from lib.storage import get_storage_client
-        payload = {'user_id': DEFAULT_USER_ID}
+        payload = {'user_id': owner_id}
         if date_str is not None:
             payload['date'] = date_str
         get_storage_client(write=True).command(
@@ -536,7 +372,9 @@ def invalidate_day_cost_cache(date_str=None):
             logger.info('[DailyReport] Invalidated ALL day-cost cache entries')
         # Also drop the in-process calendar TTL cache so the next request
         # picks up the change.
-        _calendar_cache.clear()
+        for key in list(_calendar_cache):
+            if key[0] == owner_id:
+                _calendar_cache.pop(key, None)
     except Exception as e:
         logger.warning('[DailyReport] invalidate_day_cost_cache(%s) failed: %s',
                        date_str, e)
@@ -579,7 +417,7 @@ def _cost_days_for_messages(messages, conv_start=0, conv_end=0):
     return days
 
 
-def _persisted_cost_dates(date_strs):
+def _persisted_cost_dates(date_strs, *, owner_user_id):
     """Return the subset of ``date_strs`` that already have a persisted row.
 
     A ``daily_cost_cache`` row for a past day is a *settled snapshot* — the
@@ -593,13 +431,15 @@ def _persisted_cost_dates(date_strs):
     Returns:
         set[str] of the day strings that have a persisted cache row.
     """
+    owner_id = require_user_id(
+        owner_user_id, context='daily report persisted costs')
     dates = [d for d in date_strs if d]
     if not dates:
         return set()
     try:
         from lib.storage import get_storage_client
         result = get_storage_client().query('daily_cost.persisted_dates', {
-            'user_id': DEFAULT_USER_ID, 'dates': dates,
+            'user_id': owner_id, 'dates': dates,
         })
     except Exception as e:
         logger.warning('[DailyReport] Persisted-date lookup failed: %s', e)
@@ -624,7 +464,8 @@ def _should_pin_day(date_str, today_str, persisted_dates):
     return bool(date_str) and date_str < today_str and date_str in persisted_dates
 
 
-def invalidate_cost_cache_for_messages(messages, conv_start=0, conv_end=0):
+def invalidate_cost_cache_for_messages(
+        messages, conv_start=0, conv_end=0, *, owner_user_id):
     """Scoped cost-cache invalidation for a delete/edit of specific messages.
 
     Removes ONLY the persisted per-day entries the given messages touch,
@@ -651,6 +492,8 @@ def invalidate_cost_cache_for_messages(messages, conv_start=0, conv_end=0):
         set[str] of the day strings that were actually invalidated (pinned
         settled days are excluded).
     """
+    owner_id = require_user_id(
+        owner_user_id, context='daily report scoped cost invalidation')
     day_strs = _cost_days_for_messages(messages, conv_start, conv_end)
     if not day_strs:
         return set()
@@ -658,12 +501,15 @@ def invalidate_cost_cache_for_messages(messages, conv_start=0, conv_end=0):
     today_str = _dt.date.today().isoformat()
     # Only past days can possibly be pinned; look those up in one query.
     past_days = {d for d in day_strs if d < today_str}
-    persisted = _persisted_cost_dates(past_days) if past_days else set()
+    persisted = (
+        _persisted_cost_dates(past_days, owner_user_id=owner_id)
+        if past_days else set()
+    )
     pinned = {d for d in day_strs if _should_pin_day(d, today_str, persisted)}
 
     to_invalidate = day_strs - pinned
     for date_str in to_invalidate:
-        invalidate_day_cost_cache(date_str)
+        invalidate_day_cost_cache(date_str, owner_user_id=owner_id)
     if pinned:
         logger.debug('[DailyReport] Pinned %d settled day(s) (not invalidated): %s',
                      len(pinned), sorted(pinned))
@@ -673,7 +519,7 @@ def invalidate_cost_cache_for_messages(messages, conv_start=0, conv_end=0):
     return to_invalidate
 
 
-def _get_monthly_costs(year, month):
+def _get_monthly_costs(year, month, *, owner_user_id):
     """Return per-day cost breakdown for a month, using persistent cache.
 
     Strategy:
@@ -693,6 +539,8 @@ def _get_monthly_costs(year, month):
         dict mapping day-of-month (int) → {'cost': float,
             'conversations': {conv_id: {'name': str, 'cost': float, 'tokens': int}}}.
     """
+    owner_id = require_user_id(
+        owner_user_id, context='daily report monthly costs')
     t0 = time.monotonic()
     today = _dt.date.today()
 
@@ -715,7 +563,8 @@ def _get_monthly_costs(year, month):
     #    including zero-cost days — we need those to know they've been
     #    scanned already (so we don't rescan them), but we filter them out
     #    of the final response below to match legacy behavior.
-    cached_days = _load_cached_day_costs(year, month)
+    cached_days = _load_cached_day_costs(
+        year, month, owner_user_id=owner_id)
     cached_hits = len(cached_days)
     days = {}  # response payload — only non-zero days
 
@@ -739,7 +588,9 @@ def _get_monthly_costs(year, month):
         range_end = missing_past_days[-1] + _dt.timedelta(days=1)
         ms_range_start = int(_dt.datetime.combine(range_start, _dt.time.min).timestamp() * 1000)
         ms_range_end = int(_dt.datetime.combine(range_end, _dt.time.min).timestamp() * 1000)
-        scanned = _scan_costs_in_range(ms_range_start, ms_range_end, year, month)
+        scanned = _scan_costs_in_range(
+            ms_range_start, ms_range_end, year, month,
+            owner_user_id=owner_id)
 
         for d_obj in missing_past_days:
             day_num = d_obj.day
@@ -747,7 +598,7 @@ def _get_monthly_costs(year, month):
             date_str = f'{year:04d}-{month:02d}-{day_num:02d}'
             # Persist EVERY past day we've checked (including zero-cost) so
             # future calendar renders skip the scan entirely.
-            _persist_day_cost(date_str, day_data)
+            _persist_day_cost(date_str, day_data, owner_user_id=owner_id)
             cached_days[day_num] = day_data
 
     # Copy non-zero cached/backfilled days into the response.
@@ -762,8 +613,9 @@ def _get_monthly_costs(year, month):
         day_end = day_start + _dt.timedelta(days=1)
         ms_today_start = int(day_start.timestamp() * 1000)
         ms_today_end = int(day_end.timestamp() * 1000)
-        scanned_today = _scan_costs_in_range(ms_today_start, ms_today_end,
-                                             year, month)
+        scanned_today = _scan_costs_in_range(
+            ms_today_start, ms_today_end, year, month,
+            owner_user_id=owner_id)
         today_day_data = scanned_today.get(today.day,
                                            {'cost': 0.0, 'conversations': {}})
         if today_day_data['cost'] > 0:

@@ -8,12 +8,13 @@ Two independent guards:
     (``DIMINISHING_*`` constants / ``autopilot_progress_window`` /
     ``detect_diminishing_returns``).
 
-Pure logic — imports only ``lib.log`` and ``lib.env_compat``.
+Pure logic — imports only the standard library and ``lib.log``.
 """
 
 from __future__ import annotations
 
-from lib.env_compat import getenv_compat
+import os
+
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -46,10 +47,9 @@ def detect_stuck(feedback_history, *, threshold: float = STUCK_JACCARD,
     adjacent pair in that window exceeds ``threshold`` — i.e. the verifier
     emitted ``window`` near-identical messages in a row.
 
-    ``window`` defaults to 2, which is BYTE-IDENTICAL to the original
-    behaviour (compare the last two feedbacks, True iff their overlap exceeds
-    ``threshold``) — endpoint keeps calling it with the default so its
-    semantics are unchanged.  Autopilot passes ``window=3`` (see
+    ``window`` defaults to 2: compare the last two feedbacks and return True
+    when their overlap exceeds ``threshold``. Flow loops use that default;
+    Autopilot passes ``window=3`` (see
     :data:`AUTOPILOT_STUCK_WINDOW`): two near-identical VU nudges can be a
     legitimate "you didn't do it, try again", but three in a row is a genuine
     non-converging loop.
@@ -98,7 +98,7 @@ def autopilot_progress_window() -> int:
     DISABLED (the guard never fires), garbage→default.  A window < 2 is
     meaningless (need at least two turns to see churn) so it disables.
     """
-    raw = getenv_compat('TOFU_AUTOPILOT_PROGRESS_WINDOW', default='').strip()
+    raw = os.environ.get('TOFU_AUTOPILOT_PROGRESS_WINDOW', '').strip()
     if not raw:
         return DIMINISHING_WINDOW
     try:

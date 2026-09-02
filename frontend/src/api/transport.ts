@@ -1,6 +1,12 @@
-import { isErrorEnvelope, type ErrorEnvelope } from './errors';
+import {
+  normalizeApiProblemDetails,
+  normalizeErrorEnvelope,
+  type ApiProblemDetails,
+  type ErrorEnvelope,
+} from './errors';
 
 export type ParseMode = 'json' | 'text' | 'blob' | 'response' | 'none';
+export type RequestPriority = 'foreground' | 'normal' | 'background';
 
 export interface RequestOptions {
   method?: string;
@@ -14,34 +20,45 @@ export interface RequestOptions {
   keepalive?: boolean;
   credentials?: RequestCredentials;
   onError?: 'throw' | 'null';
+  priority?: RequestPriority;
+  /** Explicitly merge identical, safe GETs while they are in flight. */
+  coalesce?: boolean;
+  /** Explicitly include a semantically-read POST in the constrained lane. */
+  govern?: boolean;
   taskId?: string;
   convId?: string;
   taskAffinityKey?: string;
   rememberTaskAffinity?: boolean;
   rememberActiveAffinities?: boolean;
+  /** Explicit allowlisted JSON-RPC method for constrained-proxy reads. */
+  rpcMethod?: string;
+  /** Params owned by that RPC method; never interpreted as an HTTP target. */
+  rpcParams?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
 export interface ApiErrorOptions {
   status?: number;
-  code?: unknown;
+  code?: string | number | null;
   body?: unknown;
   url?: string | null;
   requestId?: string | null;
   clientRequestId?: string | null;
   serverRequestId?: string | null;
   envelope?: ErrorEnvelope | null;
+  problem?: ApiProblemDetails | null;
 }
 
 export class ApiError extends Error {
   status: number;
-  code: unknown;
+  code: string | number | null;
   body: unknown;
   url: string | null;
   requestId: string | null;
   clientRequestId: string | null;
   serverRequestId: string | null;
   envelope: ErrorEnvelope | null;
+  problem: ApiProblemDetails | null;
 
   constructor(message: string, options: ApiErrorOptions = {}) {
     super(message);
@@ -54,6 +71,7 @@ export class ApiError extends Error {
     this.clientRequestId = options.clientRequestId || null;
     this.serverRequestId = options.serverRequestId || null;
     this.envelope = options.envelope || null;
+    this.problem = options.problem || null;
   }
 }
 
@@ -65,6 +83,11 @@ type ApiGlobals = Window & typeof globalThis & {
   apiUrl?: (path: string) => string;
   Api?: Record<string, unknown>;
   ApiError?: typeof ApiError;
+  pushRpcRequest?: <T = unknown>(
+    method: string,
+    params: Record<string, unknown>,
+    options: { timeout?: number; signal?: AbortSignal },
+  ) => Promise<T>;
 };
 
 declare global {
@@ -88,6 +111,41 @@ const taskAffinity = new Map<string, string>();
 const conversationAffinity = new Map<string, string>();
 let requestSequence = 0;
 
+const PROXY_READ_CONCURRENCY = 6;
+const PROXY_QUEUE_MAX = 256;
+const COALESCED_GET_MAX = 128;
+const STATUS_ERROR_CODES: Readonly<Record<number, string>> = {
+  400: 'bad_request',
+  401: 'unauthorized',
+  402: 'payment_required',
+  403: 'forbidden',
+  404: 'not_found',
+  405: 'method_not_allowed',
+  409: 'conflict',
+  413: 'payload_too_large',
+  422: 'unprocessable_content',
+  426: 'api_version_upgrade_required',
+  429: 'rate_limited',
+  500: 'internal_error',
+  502: 'bad_gateway',
+  503: 'service_unavailable',
+  504: 'gateway_timeout',
+};
+const proxyQueue: ProxyQueueEntry[] = [];
+const coalescedGets = new Map<string, Promise<unknown>>();
+let proxyActiveReads = 0;
+let proxyQueueSequence = 0;
+
+type ProxyQueueEntry = {
+  priority: number;
+  sequence: number;
+  signal?: AbortSignal;
+  resolve: (release: () => void) => void;
+  reject: (error: unknown) => void;
+  abortListener: (() => void) | null;
+  timeoutId: number | null;
+};
+
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -101,6 +159,227 @@ function errorDetails(error: unknown): { name: string; message: string } {
     name: typeof value?.name === 'string' ? value.name : '',
     message: typeof value?.message === 'string' ? value.message : String(error || ''),
   };
+}
+
+function jsonMediaType(contentType: string): string {
+  return contentType.split(';', 1)[0].trim().toLowerCase();
+}
+
+function isJsonMediaType(contentType: string): boolean {
+  const mediaType = jsonMediaType(contentType);
+  return mediaType === 'application/json' || mediaType.endsWith('+json');
+}
+
+function explicitErrorCode(value: unknown): string | number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  return null;
+}
+
+function legacyMachineErrorCode(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const candidate = value.trim();
+  return /^[a-z][a-z0-9_]*(?:[.:-][a-z0-9_]+)*$/.test(candidate)
+    ? candidate : null;
+}
+
+function statusErrorCode(status: number): string {
+  return STATUS_ERROR_CODES[status] || 'http_error';
+}
+
+function httpFailureCode(
+  status: number,
+  body: Record<string, unknown> | null,
+  envelope: ErrorEnvelope | null,
+  problem: ApiProblemDetails | null,
+): string | number {
+  const explicitCandidates = [
+    problem?.code,
+    body?.error_code,
+    body?.error_kind,
+    body?.code,
+  ];
+  for (const candidate of explicitCandidates) {
+    const code = explicitErrorCode(candidate);
+    if (code !== null) return code;
+  }
+  return legacyMachineErrorCode(body?.error)
+    || envelope?.kind
+    || statusErrorCode(status);
+}
+
+function httpFailureMessage(
+  status: number,
+  method: string,
+  url: string,
+  body: Record<string, unknown> | null,
+  envelope: ErrorEnvelope | null,
+  problem: ApiProblemDetails | null,
+): string {
+  const candidates = [
+    problem?.detail,
+    body?.message,
+    envelope?.message,
+    typeof body?.error === 'string' ? body.error : null,
+    body?.detail,
+    body?.title,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  return `HTTP ${status} on ${method} ${url}`;
+}
+
+function bodyRequestId(
+  body: Record<string, unknown> | null,
+  problem: ApiProblemDetails | null,
+): string | null {
+  const candidate = problem?.requestId ?? body?.request_id ?? body?.requestId;
+  return typeof candidate === 'string' && candidate ? candidate : null;
+}
+
+function bootTransportProfile(): string {
+  try {
+    const raw = globals.document?.getElementById('tofu-boot-config')?.textContent;
+    const config = raw ? JSON.parse(raw) as { transportProfile?: unknown } : null;
+    return typeof config?.transportProfile === 'string'
+      ? config.transportProfile
+      : '';
+  } catch {
+    return '';
+  }
+}
+
+function detectConstrainedProxy(): boolean {
+  const profile = bootTransportProfile();
+  if (profile === 'constrained-proxy') return true;
+  if (profile === 'direct') return false;
+  const pathname = globals.location?.pathname || '';
+  return /\/(?:proxy|absproxy)\/\d+(?:\/|$)/.test(pathname);
+}
+
+const CONSTRAINED_PROXY = detectConstrainedProxy();
+
+function priorityRank(priority: RequestPriority | undefined): number {
+  if (priority === 'foreground') return 0;
+  if (priority === 'background') return 2;
+  return 1;
+}
+
+function abortReason(signal?: AbortSignal): unknown {
+  return signal?.reason || new ApiError('aborted', { code: 'aborted' });
+}
+
+function clearProxyQueueEntry(entry: ProxyQueueEntry): void {
+  if (entry.timeoutId !== null) globalThis.clearTimeout(entry.timeoutId);
+  if (entry.signal && entry.abortListener) {
+    entry.signal.removeEventListener('abort', entry.abortListener);
+  }
+}
+
+function drainProxyQueue(): void {
+  proxyQueue.sort((left, right) => (
+    left.priority - right.priority || left.sequence - right.sequence
+  ));
+  while (proxyActiveReads < PROXY_READ_CONCURRENCY && proxyQueue.length) {
+    const entry = proxyQueue.shift() as ProxyQueueEntry;
+    if (entry.signal?.aborted) {
+      clearProxyQueueEntry(entry);
+      entry.reject(abortReason(entry.signal));
+      continue;
+    }
+    clearProxyQueueEntry(entry);
+    proxyActiveReads += 1;
+    let released = false;
+    entry.resolve(() => {
+      if (released) return;
+      released = true;
+      proxyActiveReads = Math.max(0, proxyActiveReads - 1);
+      drainProxyQueue();
+    });
+  }
+}
+
+function acquireProxyReadSlot(options: RequestOptions): Promise<() => void> {
+  if (options.signal?.aborted) {
+    return Promise.reject(abortReason(options.signal));
+  }
+  if (proxyActiveReads < PROXY_READ_CONCURRENCY && proxyQueue.length === 0) {
+    proxyActiveReads += 1;
+    let released = false;
+    return Promise.resolve(() => {
+      if (released) return;
+      released = true;
+      proxyActiveReads = Math.max(0, proxyActiveReads - 1);
+      drainProxyQueue();
+    });
+  }
+  if (proxyQueue.length >= PROXY_QUEUE_MAX) {
+    return Promise.reject(new ApiError(
+      'client request queue is full', { code: 'client_queue_full' }));
+  }
+  return new Promise((resolve, reject) => {
+    const entry: ProxyQueueEntry = {
+      priority: priorityRank(options.priority),
+      sequence: ++proxyQueueSequence,
+      signal: options.signal,
+      resolve,
+      reject,
+      abortListener: null,
+      timeoutId: null,
+    };
+    const removeAndReject = (error: unknown) => {
+      const index = proxyQueue.indexOf(entry);
+      if (index < 0) return;
+      proxyQueue.splice(index, 1);
+      clearProxyQueueEntry(entry);
+      reject(error);
+    };
+    if (options.signal) {
+      entry.abortListener = () => removeAndReject(abortReason(options.signal));
+      options.signal.addEventListener('abort', entry.abortListener, { once: true });
+    }
+    if ((options.timeout || 0) > 0) {
+      entry.timeoutId = globalThis.setTimeout(() => {
+        removeAndReject(new ApiError('timeout', { code: 'timeout' }));
+      }, options.timeout) as unknown as number;
+    }
+    proxyQueue.push(entry);
+    drainProxyQueue();
+  });
+}
+
+function shouldGovern(method: string, options: RequestOptions): boolean {
+  if (!CONSTRAINED_PROXY || options.govern === false) return false;
+  if (options.govern === true) return options.parse !== 'response';
+  return method === 'GET' && options.parse !== 'response';
+}
+
+function coalescingKey(path: string, options: RequestOptions): string | null {
+  if (!CONSTRAINED_PROXY || options.coalesce !== true) return null;
+  const method = (options.method || 'GET').toUpperCase();
+  if (
+    method !== 'GET'
+    || options.signal
+    || options.body !== undefined
+    || options.json !== undefined
+    || options.parse === 'response'
+  ) return null;
+  const headers = Object.entries(options.headers || {})
+    .map(([key, value]) => [key.toLowerCase(), value] as const)
+    .sort(([left], [right]) => left.localeCompare(right));
+  if (headers.some(([key]) => [
+    'authorization', 'x-bridge-secret', 'x-request-id', 'idempotency-key',
+  ].includes(key))) return null;
+  return JSON.stringify([
+    resolvePath(path) + queryString(options.query),
+    options.parse || 'json',
+    options.onError || 'throw',
+    options.credentials || '',
+    options.priority || 'normal',
+    affinityFor(options),
+    headers,
+  ]);
 }
 
 function createPageId(): string {
@@ -202,7 +481,13 @@ function conversationAffinityKey(convId: unknown): string {
     : '';
 }
 
-function newTaskAffinityKey(): string {
+/** Mint one page-scoped idempotency key for a logical write operation.
+ *
+ * Endpoint registries may reuse this owner for retry-safe state writes. The
+ * key must be created once before retrying so every attempt names the same
+ * logical operation; callers must not rebuild it per attempt.
+ */
+export function newIdempotencyKey(): string {
   try {
     if (typeof globals.crypto?.randomUUID === 'function') {
       return globals.crypto.randomUUID();
@@ -293,7 +578,7 @@ function clearRequestLifetime(
   if (signal && abortForwarder) signal.removeEventListener('abort', abortForwarder);
 }
 
-export async function request<T = unknown>(
+async function requestDirect<T = unknown>(
   path: string,
   options: RequestOptions = {},
 ): Promise<T> {
@@ -321,11 +606,18 @@ export async function request<T = unknown>(
   const timeout = options.timeout || 0;
   let timeoutId: number | null = null;
   let abortForwarder: (() => void) | null = null;
+  let timeoutTriggered = false;
   if (timeout > 0 && typeof AbortController !== 'undefined') {
     const controller = new AbortController();
     init.signal = controller.signal;
     timeoutId = globalThis.setTimeout(() => {
-      controller.abort(new ApiError('timeout', { url, code: 'timeout' }));
+      timeoutTriggered = true;
+      controller.abort(new ApiError('timeout', {
+        url,
+        code: 'timeout',
+        clientRequestId: requestId,
+        requestId,
+      }));
     }, timeout);
     if (userSignal) {
       abortForwarder = () => controller.abort(userSignal.reason);
@@ -341,21 +633,49 @@ export async function request<T = unknown>(
     response = await fetch(url, init);
   } catch (error) {
     clearRequestLifetime(timeoutId, userSignal, abortForwarder);
+    const details = errorDetails(error);
+    const signalReason = init.signal?.aborted ? init.signal.reason : null;
+    const reasonDetails = errorDetails(signalReason);
+    const reasonIsTimeout = signalReason instanceof ApiError
+      ? signalReason.code === 'timeout'
+      : reasonDetails.name === 'TimeoutError';
+    let failure: ApiError;
+    if (timeoutTriggered || reasonIsTimeout || details.name === 'TimeoutError') {
+      failure = signalReason instanceof ApiError && signalReason.code === 'timeout'
+        ? signalReason
+        : new ApiError(reasonDetails.message || details.message || 'timeout', {
+          url,
+          code: 'timeout',
+          clientRequestId: requestId,
+          requestId,
+        });
+    } else if (userSignal?.aborted || details.name === 'AbortError') {
+      failure = new ApiError(reasonDetails.message || details.message || 'aborted', {
+        url,
+        code: 'aborted',
+        clientRequestId: requestId,
+        requestId,
+      });
+    } else if (error instanceof ApiError) {
+      failure = error;
+      failure.url ||= url;
+      failure.clientRequestId ||= requestId;
+      failure.requestId ||= requestId;
+    } else {
+      failure = new ApiError(details.message || 'network error', {
+        url,
+        code: 'network',
+        clientRequestId: requestId,
+        requestId,
+      });
+    }
     if (options.onError === 'null') {
       console.warn(
         '[Api] %s %s failed: %s [rid=%s]',
-        method, url, errorDetails(error).message, requestId,
+        method, url, failure.message, failure.requestId,
       );
       return null as T;
     }
-    const details = errorDetails(error);
-    if (details.name === 'AbortError' || details.name === 'TimeoutError') throw error;
-    const failure = new ApiError(details.message || 'network error', {
-      url,
-      code: 'network',
-      clientRequestId: requestId,
-      requestId,
-    });
     throw failure;
   }
   clearRequestLifetime(timeoutId, userSignal, abortForwarder);
@@ -372,36 +692,50 @@ export async function request<T = unknown>(
 
   if (!response.ok) {
     let bodyData: unknown = null;
+    let bodyParseFailed = false;
+    const contentType = response.headers.get('content-type') || '';
     try {
-      const contentType = response.headers.get('content-type') || '';
-      bodyData = contentType.includes('application/json')
+      bodyData = isJsonMediaType(contentType)
         ? await response.json()
         : await response.text();
     } catch (error) {
+      bodyParseFailed = true;
       console.warn(
         '[Api] failed to parse error body for %s %s (HTTP %s): %s',
         method, url, response.status, errorDetails(error).message,
       );
     }
     const bodyRecord = record(bodyData);
-    const code = bodyRecord?.error ?? null;
-    const envelope = isErrorEnvelope(code) ? code : null;
+    const declaredProblem = jsonMediaType(contentType) === 'application/problem+json';
+    const parsedProblem = normalizeApiProblemDetails(bodyData);
+    const problem = declaredProblem && parsedProblem?.status === response.status
+      ? parsedProblem : null;
+    const rawError = bodyRecord?.error ?? null;
+    const envelope = problem ? null : normalizeErrorEnvelope(rawError);
+    const code = bodyParseFailed ? 'invalid_error_body'
+      : declaredProblem && !problem ? 'invalid_problem'
+        : httpFailureCode(response.status, bodyRecord, envelope, problem);
+    const serverRequestId = response.headers.get('X-Request-ID');
     const failure = new ApiError(
-      envelope?.message || `HTTP ${response.status} on ${method} ${url}`,
+      bodyParseFailed
+        ? `Could not parse HTTP ${response.status} error response`
+        : declaredProblem && !problem
+          ? `Invalid API problem response for HTTP ${response.status}`
+          : httpFailureMessage(
+            response.status, method, url, bodyRecord, envelope, problem,
+          ),
       {
         status: response.status,
         code,
         body: bodyData,
         url,
         envelope,
+        problem,
         clientRequestId: requestId,
+        serverRequestId,
+        requestId: bodyRequestId(bodyRecord, problem) || serverRequestId || requestId,
       },
     );
-    const serverRequestId = response.headers.get('X-Request-ID');
-    failure.serverRequestId = serverRequestId || null;
-    failure.requestId = typeof bodyRecord?.request_id === 'string' && bodyRecord.request_id
-      ? bodyRecord.request_id
-      : serverRequestId || requestId;
     if (options.onError === 'null') {
       console.warn('[Api] %s [rid=%s]', failure.message, failure.requestId);
       return null as T;
@@ -412,7 +746,20 @@ export async function request<T = unknown>(
   if (parse === 'none') return null as T;
   if (parse === 'text') return await response.text() as T;
   if (parse === 'blob') return await response.blob() as T;
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (error) {
+    const serverRequestId = response.headers.get('X-Request-ID');
+    throw new ApiError(errorDetails(error).message || 'response body read failed', {
+      status: response.status,
+      code: 'network',
+      url,
+      clientRequestId: requestId,
+      serverRequestId,
+      requestId: serverRequestId || requestId,
+    });
+  }
   if (!text) return null as T;
   try {
     const value = JSON.parse(text) as unknown;
@@ -427,8 +774,116 @@ export async function request<T = unknown>(
       console.warn('[Api] %s %s returned non-JSON', method, url);
       return null as T;
     }
-    throw new ApiError('invalid JSON response', { url, code: 'parse', body: text });
+    const serverRequestId = response.headers.get('X-Request-ID');
+    throw new ApiError('invalid JSON response', {
+      status: response.status,
+      url,
+      code: 'parse',
+      body: text,
+      clientRequestId: requestId,
+      serverRequestId,
+      requestId: serverRequestId || requestId,
+    });
   }
+}
+
+async function governedRequest<T>(
+  path: string,
+  options: RequestOptions,
+): Promise<T> {
+  let effectiveOptions = options;
+  const rpcStartedAt = Date.now();
+  if (CONSTRAINED_PROXY && options.rpcMethod) {
+    const rpc = globals.pushRpcRequest;
+    if (typeof rpc === 'function') {
+      try {
+        return await rpc<T>(
+          options.rpcMethod,
+          options.rpcParams || record(options.json) || {},
+          { timeout: options.timeout, signal: options.signal },
+        );
+      } catch (error) {
+        if (options.signal?.aborted) throw abortReason(options.signal);
+        const failure = record(error);
+        const code = failure?.code;
+        const mayFallback = code === 'rpc_unavailable'
+          || code === 'rpc_disconnected'
+          || code === -32601;
+        if (!mayFallback) {
+          if (options.onError === 'null') return null as T;
+          const status = code === -32001 || code === 'rpc_overloaded' ? 503
+            : code === -32002 || code === 'rpc_timeout' ? 504
+              : code === -32602 || code === -32010 ? 400
+                : code === -32800 ? 499 : 500;
+          throw new ApiError(
+            typeof failure?.message === 'string'
+              ? failure.message : 'Control RPC failed',
+            {
+              status,
+              code: explicitErrorCode(code) ?? 'rpc_error',
+              body: failure?.data,
+              url: resolvePath(path),
+            },
+          );
+        }
+        effectiveOptions = { ...options, rpcMethod: undefined };
+        if ((options.timeout || 0) > 0) {
+          const remaining = Number(options.timeout)
+            - (Date.now() - rpcStartedAt);
+          if (remaining <= 0) {
+            if (options.onError === 'null') return null as T;
+            throw new ApiError('timeout', {
+              code: 'timeout', url: resolvePath(path),
+            });
+          }
+          effectiveOptions.timeout = remaining;
+        }
+      }
+    }
+  }
+
+  const method = (effectiveOptions.method || 'GET').toUpperCase();
+  if (!shouldGovern(method, effectiveOptions)) {
+    return requestDirect<T>(path, effectiveOptions);
+  }
+  const queuedAt = Date.now();
+  let release: (() => void) | null = null;
+  try {
+    release = await acquireProxyReadSlot(effectiveOptions);
+  } catch (error) {
+    if (effectiveOptions.onError === 'null') return null as T;
+    throw error;
+  }
+  const forwarded = { ...effectiveOptions };
+  if ((effectiveOptions.timeout || 0) > 0) {
+    forwarded.timeout = Math.max(
+      1,
+      Number(effectiveOptions.timeout) - (Date.now() - queuedAt),
+    );
+  }
+  try {
+    return await requestDirect<T>(path, forwarded);
+  } finally {
+    release();
+  }
+}
+
+export function request<T = unknown>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<T> {
+  const key = coalescingKey(path, options);
+  if (!key) return governedRequest<T>(path, options);
+  const existing = coalescedGets.get(key);
+  if (existing) return existing as Promise<T>;
+  const promise = governedRequest<T>(path, options);
+  if (coalescedGets.size >= COALESCED_GET_MAX) return promise;
+  coalescedGets.set(key, promise);
+  const clear = () => {
+    if (coalescedGets.get(key) === promise) coalescedGets.delete(key);
+  };
+  promise.then(clear, clear);
+  return promise;
 }
 
 export function taskStartAffinityOptions(
@@ -440,7 +895,7 @@ export function taskStartAffinityOptions(
   const key = options.taskAffinityKey
     || (convId ? conversationAffinity.get(convId) : '')
     || conversationAffinityKey(convId)
-    || newTaskAffinityKey();
+    || newIdempotencyKey();
   return { taskAffinityKey: key, rememberTaskAffinity: true, convId };
 }
 
@@ -449,17 +904,21 @@ loadAffinities();
 export interface ApiTransport {
   ApiError: typeof ApiError;
   request: typeof request;
+  resolvePath: typeof resolvePath;
   pageRequestId: typeof pageRequestId;
   bindTaskAffinity: typeof bindTaskAffinity;
   taskStartAffinityOptions: typeof taskStartAffinityOptions;
+  newIdempotencyKey: typeof newIdempotencyKey;
 }
 
 export const apiTransport: ApiTransport = Object.freeze({
   ApiError,
   request,
+  resolvePath,
   pageRequestId,
   bindTaskAffinity,
   taskStartAffinityOptions,
+  newIdempotencyKey,
 });
 
 /** Keep ``instanceof ApiError`` stable while classic domains use this owner. */

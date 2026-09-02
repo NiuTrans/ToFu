@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from lib.provider_template_recipes import offering_recipes
+
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,24 +17,21 @@ EXPECTED_CAPS = {'text', 'thinking'}
 
 
 def test_glm53_is_in_official_and_meituan_templates():
-    source = (ROOT / 'frontend/src/runtime/app-runtime.js').read_text(
-        encoding='utf-8')
-    assert 'migrated source: settings/provider_templates.js' in source
-    assert "model_id: 'glm-5.3'" in source
-
-    template = json.loads(
-        (ROOT / 'static/provider_templates/meituan.json').read_text(
-            encoding='utf-8'))
-    entry = next(
-        (row for row in template['models'] if row.get('model_id') == MODEL),
-        None)
-    assert entry is not None
-    assert set(entry['capabilities']) == EXPECTED_CAPS
-    assert entry['rpm'] == 60
-    assert entry['context_window'] == 1_000_000
-    assert entry['pricing']['input'] == pytest.approx(3.45)
-    assert entry['pricing']['output'] == pytest.approx(13.81)
-    assert 'cost' not in entry
+    for filename in ('glm.json', 'meituan.json'):
+        template = json.loads(
+            (ROOT / 'static/provider_templates' / filename).read_text(
+                encoding='utf-8'))
+        entry = next(
+            (row for row in offering_recipes(template, allow_legacy=False)
+             if row.get('model_id') == MODEL),
+            None)
+        assert entry is not None, filename
+        assert set(entry['capabilities']) == EXPECTED_CAPS
+        assert entry['rpm'] == 60
+        assert entry['context_window'] == 1_000_000
+        assert entry['pricing']['input'] == pytest.approx(3.45)
+        assert entry['pricing']['output'] == pytest.approx(13.81)
+        assert 'cost' not in entry
 
 
 def test_glm53_has_dispatch_defaults_and_family_wire_shape():

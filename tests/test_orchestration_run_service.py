@@ -16,9 +16,6 @@ from lib.orchestration.run_service import (
     OrchestrationRunService,
     RunServiceError,
 )
-from lib.orchestration.sidecar_run_store import (
-    SidecarOrchestrationRunStore,
-)
 from lib.orchestration.run_store_port import (
     ORCHESTRATION_RUN_EVENT_PAGE_LIMIT,
     OrchestrationRunStorePort,
@@ -153,7 +150,8 @@ def test_service_source_consumes_one_explicit_persistence_interface():
         ROOT, 'lib/orchestration/run_mutation_service.py'),
         encoding='utf-8').read()
 
-    assert 'persistence: OrchestrationRunStorePort | None = None' in source
+    assert 'persistence: OrchestrationRunStorePort,' in source
+    assert 'OrchestrationRunStorePort | None' not in source
     assert 'bind_orchestration_run_store(persistence)' in source
     assert "hasattr(self._persistence, 'get_event_page')" not in source
     assert 'self._persistence.get_events(' not in source
@@ -189,24 +187,15 @@ def test_service_source_consumes_one_explicit_persistence_interface():
     assert len(policy.splitlines()) < 220
 
 
-def test_default_service_uses_the_composed_sidecar_port_not_module_functions():
-    service = OrchestrationRunService()
-
-    assert isinstance(service._persistence, SidecarOrchestrationRunStore)
-
+def test_service_requires_an_explicit_owner_bound_persistence_port():
+    with pytest.raises(TypeError):
+        OrchestrationRunService()
     source = open(
         os.path.join(ROOT, 'lib/orchestration/run_service.py'),
         encoding='utf-8',
     ).read()
-    facade = open(
-        os.path.join(ROOT, 'lib/orchestration_runs.py'),
-        encoding='utf-8',
-    ).read()
-    assert 'persistence = database_run_store()' in source
-    assert 'SELECT ' not in facade
-    assert 'INSERT ' not in facade
-    assert 'UPDATE ' not in facade
-    assert 'def project_event(' in facade
+    assert 'database_run_store' not in source
+    assert not os.path.exists(os.path.join(ROOT, 'lib/orchestration_runs.py'))
 
 
 def test_create_list_update_and_replay_share_one_interface():
@@ -339,7 +328,7 @@ def test_terminal_replay_publishes_snapshot_on_an_exact_full_final_page():
 
 
 def test_get_and_list_publish_explicit_terminal_outcomes():
-    from lib.orchestration_outcome import classify_terminal_outcome
+    from lib.orchestration.outcome_domain import classify_terminal_outcome
 
     persistence = FakePersistence()
     incomplete = classify_terminal_outcome(
@@ -351,7 +340,7 @@ def test_get_and_list_publish_explicit_terminal_outcomes():
         },
         'incomplete': {
             'id': 'incomplete', 'status': 'error', 'terminal': True,
-            'error': incomplete.durable_error,
+            'error': incomplete.error_envelope,
         },
         'active': {
             'id': 'active', 'status': 'running', 'terminal': False,
@@ -777,7 +766,8 @@ def test_http_adapter_uses_run_service_instead_of_direct_persistence_calls():
     assert 'run_service().replay(run_id, cursor)' in task_routes
     assert 'run_service().abort(run_id)' in mutation_routes
     assert 'runtime.abort' not in mutation_routes
-    assert 'runtime_mutation=_services.runtime_mutations()' in route
+    assert 'runtime_mutation=_services.runtime_mutations(ctx.owner_user_id)' \
+        in route
     assert 'runtime_abort' not in run_service
     assert 'run_service().delete(run_id)' in mutation_routes
     assert 'runs.create_new(' in runtime_start
@@ -791,5 +781,5 @@ def test_http_adapter_uses_run_service_instead_of_direct_persistence_calls():
     assert "@orchestration_route(blueprint, 'task-create')" in task_routes
     assert "@orchestration_route(blueprint, 'task-list')" in task_routes
     assert "'/api/v1/orchestrations/tasks" not in route
-    server = open(os.path.join(ROOT, 'server.py'), encoding='utf-8').read()
-    assert 'OrchestrationRunService().retire_interrupted(' in server
+    server = open(os.path.join(ROOT, 'lib/server_assembly.py'), encoding='utf-8').read()
+    assert 'retire_interrupted_orchestration_runs(' in server

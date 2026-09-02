@@ -16,6 +16,7 @@ second time, and subjected to ``foreign_key_check`` + ``integrity_check``.
 Typical full migration (writes only the NEW file and report)::
 
     python scripts/migrate_pg_to_sqlite.py \
+      --postgres-dsn-file /run/secrets/tofu-postgres-dsn \
       --target data/tofu.db.pg-migration \
       --report data/tofu.db.pg-migration.report.json
 
@@ -31,34 +32,31 @@ import argparse
 import ctypes
 from contextlib import contextmanager
 import datetime as dt
-import getpass
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
 import sys
 import time
 from typing import Iterable, Sequence
+from urllib.parse import parse_qs, urlsplit
 
-try:
-    from scripts._database_leaf import load_database_leaf
-except ModuleNotFoundError as exc:  # direct ``python scripts/...`` execution
-    if exc.name != 'scripts':
-        raise
-    from _database_leaf import load_database_leaf
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-
-_PG_TOOLING = load_database_leaf('pg_tooling')
-_SQLITE_TOOLING = load_database_leaf('sqlite_tooling')
+from lib.storage_sidecar import offline_maintenance as _PG_TOOLING
+from lib.storage_sidecar import offline_maintenance as _SQLITE_TOOLING
 
 
 _MODULUS = 1 << 256
 _DERIVED_PG_TYPES = frozenset({'tsvector'})
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _MALLOC_TRIM_UNSET = object()
 _malloc_trim_fn = _MALLOC_TRIM_UNSET
+_MAX_SECRET_BYTES = 16 * 1024
 _TYPE_MAP = {
     'int2': 'INTEGER',
     'int4': 'INTEGER',
@@ -219,29 +217,42 @@ class RowDigest:
         return self.count, self.xor256, self.sum256
 
 
-def _read_project_env(project_root: Path) -> dict[str, str]:
-    """Read only non-secret connection defaults from .env.
+def _dsn_uses_verified_tls(dsn: str) -> bool:
+    if dsn.startswith(('postgres://', 'postgresql://')):
+        values = parse_qs(urlsplit(dsn).query).get('sslmode', ())
+        return bool(values and values[-1].lower() == 'verify-full')
+    match = re.search(
+        r'(?:^|\s)sslmode\s*=\s*["\']?([^\s"\']+)',
+        dsn,
+        flags=re.IGNORECASE,
+    )
+    return bool(match and match.group(1).lower() == 'verify-full')
 
-    Password is accepted for connecting but is never emitted in a report or
-    log.  Existing process environment wins, mirroring normal launchers.
-    """
-    values: dict[str, str] = {}
-    path = project_root / '.env'
-    if path.exists():
-        for raw in path.read_text(encoding='utf-8', errors='replace').splitlines():
-            line = raw.strip()
-            if not line or line.startswith('#') or '=' not in line:
-                continue
-            key, _, value = line.partition('=')
-            key = key.strip()
-            if key.startswith('TOFU_PG_'):
-                values[key] = value.strip().strip('"').strip("'")
-    for key in list(values) + [
-            'TOFU_PG_HOST', 'TOFU_PG_PORT', 'TOFU_PG_DBNAME',
-            'TOFU_PG_USER', 'TOFU_PG_PASSWORD']:
-        if key in os.environ:
-            values[key] = os.environ[key]
-    return values
+
+def _read_dsn_secret(path: str | os.PathLike[str]) -> str:
+    """Read the external PostgreSQL authority from one bounded secret file."""
+    secret_path = Path(path)
+    if not secret_path.is_absolute():
+        raise RuntimeError(
+            'PostgreSQL DSN secret file must be an absolute path')
+    try:
+        metadata = secret_path.stat()
+    except OSError as exc:
+        raise RuntimeError('PostgreSQL DSN secret file is unreadable') from exc
+    if not secret_path.is_file() or not 0 < metadata.st_size <= _MAX_SECRET_BYTES:
+        raise RuntimeError(
+            'PostgreSQL DSN secret file must contain 1..16384 bytes')
+    try:
+        value = secret_path.read_text(encoding='utf-8').strip()
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError(
+            'PostgreSQL DSN secret file is not readable UTF-8') from exc
+    if not value or '\x00' in value:
+        raise RuntimeError('PostgreSQL DSN secret file is invalid')
+    if not _dsn_uses_verified_tls(value):
+        raise RuntimeError(
+            'external PostgreSQL DSN requires sslmode=verify-full')
+    return value
 
 
 def _source_quiescence_state(conn, *, exclude_pids=()) -> dict:
@@ -299,7 +310,7 @@ def _release_source_snapshot(conn) -> str:
         return 'already_closed'
     outcome = 'rolled_back'
     try:
-        conn.rollback()
+        _PG_TOOLING.release_postgres_tool_snapshot(conn)
     except Exception as exc:
         outcome = f'already_disconnected:{type(exc).__name__}'
     try:
@@ -331,27 +342,15 @@ def _probe_source_quiescence_at_end(dsn: str, *, exclude_pids=(),
         }
 
 
-def _connect_source(args, project_root: Path):
+def _connect_source(args, dsn: str):
     from psycopg2 import extras
 
-    if args.source_dsn:
-        conn = _PG_TOOLING.open_postgres_tool_connection(
-            args.source_dsn, connect_timeout=args.connect_timeout,
-                                application_name='tofu-pg-to-sqlite')
-        source_label = {'dsn': '[redacted]'}
-    else:
-        env = _read_project_env(project_root)
-        params = {
-            'host': env.get('TOFU_PG_HOST', '127.0.0.1'),
-            'port': int(env.get('TOFU_PG_PORT', '15432')),
-            'dbname': env.get('TOFU_PG_DBNAME', 'tofu'),
-            'user': env.get('TOFU_PG_USER', getpass.getuser()),
-            'password': env.get('TOFU_PG_PASSWORD', ''),
-            'connect_timeout': args.connect_timeout,
-            'application_name': 'tofu-pg-to-sqlite',
-        }
-        conn = _PG_TOOLING.open_postgres_tool_connection(**params)
-        source_label = {k: params[k] for k in ('host', 'port', 'dbname', 'user')}
+    conn = _PG_TOOLING.open_postgres_tool_connection(
+        dsn,
+        connect_timeout=args.connect_timeout,
+        application_name='tofu-pg-to-sqlite',
+    )
+    source_label = {'dsn': '[redacted]'}
 
     # Observe the policy before set_session(readonly=True) changes this
     # connection. A read-only migration connection does not prove the serving
@@ -407,26 +406,29 @@ def _migration_verdict(*, is_full: bool, source_quiesced: bool,
 
 
 def _initialize_target(target: Path) -> None:
-    """Create current SQLite + plugin schemas in a disposable child process.
+    """Create the current Sidecar SQLite schema in a disposable child.
 
-    Schema-plugin discovery may import PyTorch/ONNX/numerical runtimes. Keeping
-    those modules in the multi-hour copier retained 12–14 GiB and 70–130 native
-    threads even though no inference occurs. A short child preserves the exact
-    project ``init_db()`` path, then returns all plugin/native memory to the OS
-    before the parent opens PostgreSQL or copies one row.
+    The Sidecar schema is the storage authority.  Bootstrapping it directly
+    avoids legacy backend discovery and all retired PostgreSQL configuration.
+    The child boundary still returns imported schema/native memory before the
+    parent starts a potentially multi-hour copy.
     """
     if target.exists():
         raise FileExistsError(
             f'target already exists: {target}; choose a new path (never overwrite)')
     target.parent.mkdir(parents=True, exist_ok=True)
     child_env = os.environ.copy()
-    child_env['TOFU_DB_BACKEND'] = 'sqlite'
-    child_env['TOFU_DB_PATH'] = str(target)
-    child_env['TOFU_REQUIRE_PG'] = '0'
-    child_env['TOFU_SERVER_PROCESS'] = '0'
-    # The candidate is disposable and non-canonical; it must not claim the
-    # canonical SQLite authority marker while merely creating a schema.
-    child_env['TOFU_SQLITE_OWNER_GUARD'] = '0'
+    for name in tuple(child_env):
+        if name.startswith(('TOFU_PG_', 'TOFU_DB_', 'CHATUI_DB_')):
+            child_env.pop(name, None)
+    for name in (
+        'TOFU_REQUIRE_PG', 'TOFU_STORAGE_MODE', 'CHATUI_STORAGE_MODE',
+        'TOFU_DISTRIBUTED_PREVIEW_MODE',
+        'TOFU_POSTGRES_DSN_FILE', 'TOFU_REDIS_URL_FILE', 'TOFU_REPLICA_ID',
+    ):
+        child_env.pop(name, None)
+    child_env['TOFU_DEPLOYMENT_MODE'] = 'personal'
+    child_env['TOFU_PROCESS_ROLE'] = 'all'
     # Optional schema plugins can transitively import numerical/ONNX stacks.
     # Their default is one native worker per visible CPU (100+ threads here),
     # even though schema initialization performs no inference or matrix work.
@@ -439,19 +441,29 @@ def _initialize_target(target: Path) -> None:
     child_env['PYTHONPATH'] = str(_PROJECT_ROOT) + (
         os.pathsep + old_pythonpath if old_pythonpath else '')
     child_code = """
-from pathlib import Path
-from lib.onnx_thread_guard import install_onnx_thread_guard
-install_onnx_thread_guard()
-from lib.database import DB_PATH, init_db, shutdown_pool
-expected = Path(__import__('os').environ['TOFU_DB_PATH']).resolve()
-if Path(DB_PATH).resolve() != expected:
-    raise RuntimeError(f'database module bound to {DB_PATH}, expected {expected}')
-init_db()
-shutdown_pool()
+import sqlite3
+import sys
+from lib.storage_sidecar.adapters.sqlite import SQLiteSession
+from lib.storage_sidecar.schema import initialize_schema, validate_schema_version
+
+target = sys.argv[1]
+connection = sqlite3.connect(target, isolation_level=None)
+connection.row_factory = sqlite3.Row
+try:
+    connection.execute('PRAGMA foreign_keys=ON')
+    connection.execute('BEGIN IMMEDIATE')
+    initialize_schema(SQLiteSession(connection))
+    connection.commit()
+    validate_schema_version(SQLiteSession(connection))
+except BaseException:
+    connection.rollback()
+    raise
+finally:
+    connection.close()
 """
     try:
         result = subprocess.run(
-            [sys.executable, '-c', child_code], cwd=str(_PROJECT_ROOT),
+            [sys.executable, '-c', child_code, str(target)], cwd=str(_PROJECT_ROOT),
             env=child_env, capture_output=True, text=True, timeout=600)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError('SQLite schema bootstrap timed out after 600s') from exc
@@ -528,19 +540,13 @@ def _target_columns(db, table: str) -> list[str]:
 
 def _create_archive_table(db, table: str, columns: list[dict]) -> None:
     """Create a compatibility table for retired plugin/PG-only history."""
-    pk = [column['name'] for column in columns if column['pk']]
-    definitions = []
-    for column in columns:
-        if column['udt_name'] in _DERIVED_PG_TYPES:
-            continue
-        part = f'{_quote_ident(column["name"])} {_sqlite_type(column["udt_name"])}'
-        if not column['nullable']:
-            part += ' NOT NULL'
-        definitions.append(part)
-    if pk:
-        definitions.append('PRIMARY KEY (' + ', '.join(_quote_ident(c) for c in pk) + ')')
-    db.execute(
-        f'CREATE TABLE {_quote_ident(table)} (' + ', '.join(definitions) + ')')
+    _SQLITE_TOOLING.create_portable_archive_table(
+        db,
+        table,
+        columns,
+        derived_types=_DERIVED_PG_TYPES,
+        type_map=_TYPE_MAP,
+    )
 
 
 def _ensure_portable_columns(db, table: str, columns: list[dict]) -> list[dict]:
@@ -556,9 +562,8 @@ def _ensure_portable_columns(db, table: str, columns: list[dict]) -> list[dict]:
             # Preserve historical columns removed from the current runtime
             # schema.  Nullable is intentional: this is an archive extension,
             # and current code no longer writes it.
-            db.execute(
-                f'ALTER TABLE {_quote_ident(table)} ADD COLUMN '
-                f'{_quote_ident(column["name"])} {_sqlite_type(column["udt_name"])}')
+            _SQLITE_TOOLING.add_portable_archive_column(
+                db, table, column, type_map=_TYPE_MAP)
             target_columns.add(column['name'])
     return [c for c in columns
             if c['udt_name'] not in _DERIVED_PG_TYPES
@@ -612,8 +617,8 @@ def _copy_table(source, target, table: str, columns: list[dict],
     checkpoints = 0
     checkpoint_at = max(batch_bytes * 4, 64 * 1024 * 1024)
     last_checkpoint_bytes = 0
-    target.execute(f'DELETE FROM {_quote_ident(table)}')
-    target.commit()
+    with _SQLITE_TOOLING.write_transaction(target):
+        target.execute(f'DELETE FROM {_quote_ident(table)}')
 
     cursor_name = 'tofu_migrate_' + hashlib.sha1(table.encode()).hexdigest()[:16]
     with source.cursor(name=cursor_name) as cur:
@@ -636,7 +641,8 @@ def _copy_table(source, target, table: str, columns: list[dict],
                     digest.add(converted)
                     yield converted
 
-            target.executemany(insert_sql, _converted_rows())
+            with _SQLITE_TOOLING.write_transaction(target):
+                target.executemany(insert_sql, _converted_rows())
             # Drop both the raw batch and the closure that captured it before
             # asking libc to return free arenas. Merely calling malloc_trim
             # while ``rows`` is still referenced cannot lower the peak/RSS.
@@ -647,7 +653,6 @@ def _copy_table(source, target, table: str, columns: list[dict],
             # atomicity buys nothing: an interrupted run is discarded.  A
             # commit per bounded batch prevents one 10+ GiB transaction and
             # keeps SQLite's single writer slot short-lived.
-            target.commit()
             commits += 1
             if digest.canonical_bytes - last_checkpoint_bytes >= checkpoint_at:
                 target.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
@@ -748,13 +753,13 @@ def _rebuild_derived(db) -> None:
     tables = {row[0] for row in db.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     if 'conversations_fts' in tables and 'conversations' in tables:
-        db.execute('DELETE FROM conversations_fts')
-        db.execute("""
-            INSERT INTO conversations_fts(rowid, search_text)
-            SELECT rowid, search_text FROM conversations
-             WHERE search_text IS NOT NULL AND search_text <> ''
-        """)
-        db.commit()
+        with _SQLITE_TOOLING.write_transaction(db):
+            db.execute('DELETE FROM conversations_fts')
+            db.execute("""
+                INSERT INTO conversations_fts(rowid, search_text)
+                SELECT rowid, search_text FROM conversations
+                 WHERE search_text IS NOT NULL AND search_text <> ''
+            """)
 
 
 def _verify_reopened_target(target_path: Path,
@@ -802,17 +807,7 @@ def _suspend_nonunique_indexes(db) -> list[tuple[str, str]]:
     online invariant.  Rebuilding ordinary indexes once after loading avoids
     millions of random B-tree updates on the shared project filesystem.
     """
-    indexes = [tuple(row) for row in db.execute("""
-        SELECT name, sql
-          FROM sqlite_master
-         WHERE type='index' AND sql IS NOT NULL
-           AND upper(ltrim(sql)) NOT LIKE 'CREATE UNIQUE INDEX%'
-         ORDER BY name
-    """).fetchall()]
-    for name, _sql in indexes:
-        db.execute(f'DROP INDEX {_quote_ident(name)}')
-    db.commit()
-    return indexes
+    return _SQLITE_TOOLING.suspend_nonunique_indexes(db)
 
 
 def _restore_indexes(db, indexes: list[tuple[str, str]]) -> None:
@@ -827,8 +822,7 @@ def _restore_indexes(db, indexes: list[tuple[str, str]]) -> None:
     total = len(indexes)
     for position, (name, ddl) in enumerate(indexes, start=1):
         started = time.monotonic()
-        db.execute(ddl)
-        db.commit()
+        _SQLITE_TOOLING.restore_index(db, ddl)
         checkpoint = db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
         if checkpoint and int(checkpoint[0]) != 0:
             raise RuntimeError(
@@ -914,7 +908,6 @@ def _remove_closed_sqlite_sidecars(path: Path) -> list[str]:
 
 
 def migrate(args) -> dict:
-    project_root = _PROJECT_ROOT
     target_path = Path(args.target).resolve()
     report_path = Path(args.report or (str(target_path) + '.report.json')).resolve()
     if report_path == target_path:
@@ -928,9 +921,9 @@ def migrate(args) -> dict:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     os.environ['SQLITE_TMPDIR'] = str(target_path.parent)
 
+    dsn = _read_dsn_secret(args.postgres_dsn_file)
     _initialize_target(target_path)
-    source, source_label, source_quiescence_at_start = _connect_source(
-        args, project_root)
+    source, source_label, source_quiescence_at_start = _connect_source(args, dsn)
     source_dsn = source.dsn
     source_read_only_at_start = source_quiescence_at_start[
         'default_transaction_read_only']
@@ -1006,8 +999,9 @@ def migrate(args) -> dict:
         for index, table in enumerate(selected, 1):
             print(f'[{index}/{len(selected)}] copying {table}', flush=True)
             source_columns = _source_columns(source, table)
-            portable = _ensure_portable_columns(target, table, source_columns)
-            target.commit()
+            with _SQLITE_TOOLING.write_transaction(target):
+                portable = _ensure_portable_columns(
+                    target, table, source_columns)
             table_columns[table] = portable
             skipped = [c['name'] for c in source_columns if c not in portable]
             source_digest, metrics = _copy_table(
@@ -1120,8 +1114,11 @@ def _parser() -> argparse.ArgumentParser:
                         help='new SQLite file; must not already exist')
     parser.add_argument('--report', default='',
                         help='JSON verification report (default: TARGET.report.json)')
-    parser.add_argument('--source-dsn', default='',
-                        help='libpq DSN; omitted uses TOFU_PG_* / project .env')
+    parser.add_argument(
+        '--postgres-dsn-file',
+        default=os.environ.get('TOFU_POSTGRES_DSN_FILE', ''),
+        help='absolute TLS-verified external PostgreSQL DSN secret file; '
+             'defaults to TOFU_POSTGRES_DSN_FILE')
     parser.add_argument('--connect-timeout', type=int, default=10)
     parser.add_argument('--batch-rows', type=int, default=10_000)
     parser.add_argument('--batch-bytes-mib', type=int, default=64)
@@ -1139,6 +1136,9 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.batch_rows < 1 or args.batch_bytes_mib < 1:
         raise SystemExit('batch sizes must be positive')
+    if not args.postgres_dsn_file:
+        raise SystemExit(
+            '--postgres-dsn-file or TOFU_POSTGRES_DSN_FILE is required')
     with _migration_lock(args.target):
         report = migrate(args)
     print(json.dumps({

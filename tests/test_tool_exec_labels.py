@@ -20,7 +20,7 @@ which are backend-side:
      the UI language; the poll-lane phase snapshot forwards the same field.
 
 The frontend half (the stale tool_exec phase-row gate + the localized
-rendering) is pinned by tests/test_frontend_streaming_ui.py.
+rendering) is pinned by the ConversationSurface and tool-round suites.
 
 Failing-first (2026-08-03): every check below is RED against the pre-fix
 source (labels carried emoji, "Applying changes", no toolContextTools).
@@ -45,8 +45,8 @@ pytestmark = pytest.mark.unit
 
 
 def _mk_task():
-    from lib.tasks_pkg.manager import _chat_runtime
-    return _chat_runtime.create()
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    return chat_task_runtime.create(user_id=1)
 
 
 @pytest.fixture()
@@ -90,7 +90,7 @@ def test_emit_tool_exec_phase_english_fallback_and_tools(_no_persist):
     """The tool_exec phase event keeps an English ``detail`` fallback for
     headless clients AND ships the structured ``tools`` list the i18n
     client composes its localized label from."""
-    from lib.tasks_pkg.tool_dispatch import emit_tool_exec_phase
+    from lib.tasks_pkg.tool_dispatch._labels import emit_tool_exec_phase
     task = _mk_task()
     parsed = [({'id': 'c1', 'function': {'name': 'apply_diff', 'arguments': '{}'}},
                'apply_diff', 'c1', {}, 1, {'roundNum': 1}, None)]
@@ -108,7 +108,7 @@ def test_round_open_phase_ships_tool_context_tools(_no_persist):
     """FAILING-FIRST: the round-open llm_thinking phase must ship the
     previous round's raw tool NAMES as ``toolContextTools`` (structured,
     localizable) alongside the English ``toolContext`` fallback."""
-    from lib.tasks_pkg import orchestrator as orch
+    import lib.tasks_pkg.orchestrator._finalize as orch
     task = _mk_task()
     am = {'tool_calls': [
         {'function': {'name': 'read_files'}},

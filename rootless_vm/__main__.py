@@ -7,8 +7,10 @@ import json
 import shlex
 from pathlib import Path
 
+from .base_disk import build_base_disk
 from .harbor_runner import HarborRunSpec, harbor_argv, run_harbor
 from .image_cache import PreparedImageCache, PreparedImageSpec
+from .harness_profiles import harness_profile_ids
 from .qemu import QemuRuntime, QemuUnavailableError
 
 
@@ -35,6 +37,20 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--cpus", type=int, default=2)
     prepare.add_argument("--boot-timeout-sec", type=float, default=360.0)
     prepare.add_argument("--json", action="store_true")
+    base = subparsers.add_parser(
+        "build-base",
+        help="build and verify a checksum-locked Alpine qcow2 without root",
+    )
+    base.add_argument("--qemu")
+    base.add_argument("--qemu-img")
+    base.add_argument("--lock", type=Path, required=True)
+    base.add_argument("--output", type=Path, required=True)
+    base.add_argument("--cache-root", type=Path, required=True)
+    base.add_argument("--state-root", type=Path, required=True)
+    base.add_argument("--disk-size-gib", type=int, default=20)
+    base.add_argument("--provision-timeout-sec", type=float, default=1200.0)
+    base.add_argument("--verify-timeout-sec", type=float, default=360.0)
+    base.add_argument("--json", action="store_true")
     run = subparsers.add_parser(
         "run", help="run one Harbor task through the local rootless QEMU harness"
     )
@@ -51,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--jobs-dir", type=Path, required=True)
     run.add_argument("--job-name")
     run.add_argument("--model", default="deepseek-v4-flash-meituan")
+    run.add_argument("--harness", choices=harness_profile_ids(), default="tofu")
+    run.add_argument("--allow-guest-credentials", action="store_true")
     run.add_argument("--oracle", action="store_true")
     run.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -96,6 +114,32 @@ def main(argv: list[str] | None = None) -> int:
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2) if args.json else f"PASS: {payload}")
         return 0
+    if args.command == "build-base":
+        try:
+            result = build_base_disk(
+                lock_path=args.lock,
+                output=args.output,
+                cache_root=args.cache_root,
+                state_root=args.state_root,
+                runtime=QemuRuntime.discover(args.qemu, args.qemu_img),
+                disk_size_gib=args.disk_size_gib,
+                provision_timeout_sec=args.provision_timeout_sec,
+                verify_timeout_sec=args.verify_timeout_sec,
+            )
+        except (OSError, ValueError, RuntimeError, QemuUnavailableError) as exc:
+            payload = {"ok": False, "error": str(exc)}
+            print(json.dumps(payload, ensure_ascii=False) if args.json else f"FAIL: {exc}")
+            return 2
+        payload = {
+            "ok": True,
+            "disk": str(result.disk),
+            "metadata": str(result.metadata),
+            "sha256": result.sha256,
+            "lock_sha256": result.lock_sha256,
+            "verification": result.verification,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2) if args.json else f"PASS: {payload}")
+        return 0
     if args.command == "run":
         spec = HarborRunSpec(
             harbor=args.harbor,
@@ -111,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
             jobs_dir=args.jobs_dir,
             job_name=args.job_name,
             model=args.model,
+            harness=args.harness,
+            allow_guest_credentials=args.allow_guest_credentials,
             oracle=args.oracle,
         )
         try:

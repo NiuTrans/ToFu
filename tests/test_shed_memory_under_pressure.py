@@ -48,7 +48,7 @@ def _fresh_runtime():
 
 
 def _add_terminal(rt, tid, *, status='done', age=0.0):
-    t = rt.create(task_id=tid)
+    t = rt.create(user_id=1, task_id=tid)
     t['status'] = status
     t['finished_at'] = time.time() - age
     return t
@@ -77,7 +77,7 @@ def test_normal_ttl_keeps_fresh_terminal():
 
 def test_running_task_never_evicted():
     rt = _fresh_runtime()
-    t = rt.create(task_id='run1')
+    t = rt.create(user_id=1, task_id='run1')
     t['status'] = 'running'
     n = rt.cleanup_stale(max_age=0)   # even the aggressive path
     assert n == 0, 'a RUNNING task was evicted — must never happen'
@@ -86,15 +86,16 @@ def test_running_task_never_evicted():
 
 
 def test_shed_evicts_terminal_keeps_running():
-    from lib.tasks_pkg.manager import shed_memory_under_pressure, _chat_runtime
-    rt = _chat_runtime
+    from lib.tasks_pkg.manager import shed_memory_under_pressure
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    rt = chat_task_runtime
     tids = ['shed-done-1', 'shed-err-1', 'shed-run-1']
     # clean slate for our ids
     for tid in tids:
         rt._tasks.pop(tid, None)
-    d = rt.create(task_id='shed-done-1'); d['status'] = 'done'; d['finished_at'] = time.time()
-    e = rt.create(task_id='shed-err-1'); e['status'] = 'error'; e['finished_at'] = time.time()
-    r = rt.create(task_id='shed-run-1'); r['status'] = 'running'
+    d = rt.create(user_id=1, task_id='shed-done-1'); d['status'] = 'done'; d['finished_at'] = time.time()
+    e = rt.create(user_id=1, task_id='shed-err-1'); e['status'] = 'error'; e['finished_at'] = time.time()
+    r = rt.create(user_id=1, task_id='shed-run-1'); r['status'] = 'running'
     try:
         res = shed_memory_under_pressure()
         assert isinstance(res, dict) and 'evicted' in res, 'shed returned no diagnostic dict'

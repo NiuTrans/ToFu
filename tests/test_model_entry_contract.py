@@ -31,6 +31,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from lib.provider_template_recipes import offering_recipes
+
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -152,12 +154,84 @@ def test_pool_rotates_across_every_wire_id():
     assert chosen is not None and chosen.model == 'wire-b'
 
 
+def test_strict_model_fails_over_across_provider_offerings_only():
+    """Strict means exact logical model, not exact provider.
+
+    Two providers may implement the same logical model with different wire
+    spellings. Cooling every slot on the first provider must select the second
+    provider while the logical identity remains unchanged; an unrelated model
+    must never enter the candidate set.
+    """
+    import time
+    from lib.llm_dispatch.dispatcher import LLMDispatcher
+
+    dispatcher = LLMDispatcher()
+    dispatcher.slots = []
+    dispatcher._build_slots_from_providers([
+        {
+            'id': 'provider-a', 'base_url': 'https://a.example/v1',
+            'api_keys': ['key-a'], 'enabled': True,
+            'models': [{
+                'model_id': 'shared-logical',
+                'request_ids': ['wire-a'],
+                'capabilities': ['text'],
+            }, {
+                'model_id': 'unrelated',
+                'request_ids': ['wire-other'],
+                'capabilities': ['text'],
+            }],
+        },
+        {
+            'id': 'provider-b', 'base_url': 'https://b.example/v1',
+            'api_keys': ['key-b'], 'enabled': True,
+            'models': [{
+                'model_id': 'shared-logical',
+                'request_ids': ['wire-b'],
+                'capabilities': ['text'],
+            }],
+        },
+    ])
+    dispatcher._initialized = True
+
+    first = dispatcher.pick_slot(
+        prefer_model='shared-logical', strict_model=True)
+    assert first is not None
+    for slot in dispatcher.slots:
+        if slot.provider_id == first.provider_id:
+            slot.cooldown_until = time.time() + 1000
+
+    second = dispatcher.pick_slot(
+        prefer_model='shared-logical', strict_model=True)
+    assert second is not None
+    assert second.provider_id != first.provider_id
+    assert second.logical_model == first.logical_model == 'shared-logical'
+    assert second.model in {'wire-a', 'wire-b'}
+    assert second.model != 'wire-other'
+
+
 def test_legacy_provider_entry_still_serves_root_and_aliases():
     """Regression: pre-contract configs on disk keep every deployment."""
     d = _dispatcher([{'model_id': 'aws.claude-opus-4.6', 'capabilities': ['text'],
                       'aliases': ['vertex.claude-opus-4.6']}])
     assert {s.model for s in d.slots} == {
         'aws.claude-opus-4.6', 'vertex.claude-opus-4.6'}
+
+
+def test_model_entry_stream_only_reaches_every_wire_slot():
+    """Provider-declared protocol capability must survive slot expansion.
+
+    Managed Codex persists ``stream_only`` on each model entry. Losing it in
+    the dispatcher made non-streaming summary calls probe every Codex model,
+    receive HTTP 400, and relearn the same immutable capability each process.
+    """
+    d = _dispatcher([{
+        'model_id': 'logical-stream-model',
+        'capabilities': ['text'],
+        'request_ids': ['wire-stream-a', 'wire-stream-b'],
+        'stream_only': True,
+    }])
+    assert len(d.slots) == 2
+    assert all(slot.stream_only is True for slot in d.slots)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -167,7 +241,7 @@ def test_legacy_provider_entry_still_serves_root_and_aliases():
 def test_shipped_templates_have_no_provider_tainted_model_id():
     bad = []
     for name, tpl in _templates():
-        for m in tpl.get('models') or []:
+        for m in offering_recipes(tpl, allow_legacy=False):
             mid = m.get('model_id') or ''
             if _TAINT.search(mid):
                 bad.append('%s: model_id=%r names a deployment — move it into '
@@ -181,7 +255,7 @@ def test_shipped_templates_declare_a_nonempty_pool():
     from lib.llm_dispatch.model_entry import resolve_request_ids
     bad = []
     for name, tpl in _templates():
-        for m in tpl.get('models') or []:
+        for m in offering_recipes(tpl, allow_legacy=False):
             if not resolve_request_ids(m):
                 bad.append('%s: %r resolves to an EMPTY wire pool'
                            % (name, m.get('model_id')))
@@ -204,7 +278,7 @@ def test_split_identity_entries_price_both_channels():
     from lib.pricing import MODEL_PRICING
     missing = []
     for name, tpl in _templates():
-        for m in tpl.get('models') or []:
+        for m in offering_recipes(tpl, allow_legacy=False):
             if m.get('pricing'):
                 continue          # entry carries its own provider pricing
             logical = m.get('model_id') or ''

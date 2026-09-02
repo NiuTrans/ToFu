@@ -34,7 +34,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault('TRADING_ENABLED', '0')
 
-import lib.paper.recommend_engine as re_mod  # noqa: E402
+import lib.paper.recommend_engine._events as re_mod  # noqa: E402
+import lib.paper.recommend_engine._ground as ground_mod  # noqa: E402
+import lib.paper.recommend_engine._research as research_mod  # noqa: E402
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -109,9 +111,9 @@ class _Patched:
         self._orig = {}
 
     def __enter__(self):
-        self._orig['dispatch_stream'] = re_mod.dispatch_stream
-        self._orig['search_arxiv'] = re_mod.search_arxiv
-        self._orig['fetch_arxiv_title'] = re_mod.fetch_arxiv_title
+        self._orig['dispatch_stream'] = research_mod.dispatch_stream
+        self._orig['search_arxiv'] = ground_mod.search_arxiv
+        self._orig['fetch_arxiv_title'] = ground_mod.fetch_arxiv_title
 
         reply = self.llm_reply
 
@@ -134,14 +136,19 @@ class _Patched:
         def _fake_fetch(arxiv_id):
             return self.fetch_titles.get((arxiv_id or '').split('v')[0], '')
 
-        re_mod.dispatch_stream = _fake_dispatch_stream
-        re_mod.search_arxiv = _fake_search
-        re_mod.fetch_arxiv_title = _fake_fetch
+        research_mod.dispatch_stream = _fake_dispatch_stream
+        ground_mod.search_arxiv = _fake_search
+        ground_mod.fetch_arxiv_title = _fake_fetch
         return self
 
     def __exit__(self, *exc):
+        owners = {
+            'dispatch_stream': research_mod,
+            'search_arxiv': ground_mod,
+            'fetch_arxiv_title': ground_mod,
+        }
         for k, v in self._orig.items():
-            setattr(re_mod, k, v)
+            setattr(owners[k], k, v)
         return False
 
 
@@ -298,7 +305,7 @@ def test_neuter_confirms_gate_is_load_bearing():
         # Mint a UNIQUE id per candidate (id-less candidates otherwise collide
         # on one fallback id and get deduped — which would mask the leak behind
         # dedup instead of exercising the grounding gate we're neutering).
-        rid = re_mod._extract_arxiv_id(cand.get('arxiv_id') or '')
+        rid = ground_mod._extract_arxiv_id(cand.get('arxiv_id') or '')
         if not rid:
             rid = '9999.%05d' % (abs(hash(title)) % 100000)
         return {'arxiv_id': rid, 'title': title, 'authors': [], 'summary': '',

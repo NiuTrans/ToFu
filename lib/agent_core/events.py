@@ -1,9 +1,8 @@
 """lib/agent_core/events.py — The streaming event contract, declared.
 
 This module is the **single source of truth** for the event vocabulary that
-flows from the agent runtime to any frontend — over the SSE chat stream
-(``/api/chat/stream/<id>``, ``/api/v1/tasks/<id>/stream``) and over the unified
-push WebSocket (``/api/push``).
+flows from the agent runtime to any frontend — over the task replay stream
+(``/api/v1/tasks/<id>/stream``) and the unified push WebSocket (``/api/push``).
 
 Why this exists
 ---------------
@@ -73,7 +72,7 @@ class EventCategory:
     TOOL = 'tool'                  # tool-call lifecycle
     CONTEXT = 'context'            # context-window mgmt: compaction, snapshots
     INTERACTION = 'interaction'    # require a client response (approval, stdin)
-    ENDPOINT = 'endpoint'          # Planner→Worker→Critic loop
+    FLOW = 'flow'                  # Flow-engine chat runs (goal-mode graph, Studio flows)
     SWARM = 'swarm'                # multi-agent orchestration
     AUTOPILOT = 'autopilot'        # autonomous-loop value-unit events
     ARTIFACT = 'artifact'          # artifact creation
@@ -174,7 +173,9 @@ class EventType:
     DONE = 'done'
     ERROR = 'error'
     RETRY_RESET = 'retry_reset'
-    MODEL_FALLBACK = 'model_fallback' 
+    MODEL_REQUEST_START = 'model_request_start'
+    MODEL_REQUEST_COMPLETE = 'model_request_complete'
+    MODEL_FALLBACK = 'model_fallback'
     BUDGET_WARNING = 'budget_warning'
     # ── content ──
     DELTA = 'delta'
@@ -184,6 +185,8 @@ class EventType:
     TOOL_PROGRESS = 'tool_progress'
     TOOL_RESULT = 'tool_result'
     TOOL_COMPLETE = 'tool_complete'
+    TOOL_SCHEMA_REJECTED = 'tool_schema_rejected'
+    TOOL_WIRE_PROJECTION = 'tool_wire_projection'
     TOOL_COMPACTED = 'tool_compacted'
     TOOL_CALL_REPLAY = 'tool_call_replay'
     PROGRAM_START = 'program_start'
@@ -206,12 +209,15 @@ class EventType:
     APPROVAL_REQUIRED = 'approval_required'
     STDIN_REQUEST = 'stdin_request'
     STDIN_RESOLVED = 'stdin_resolved'
-    # ── endpoint (Planner→Worker→Critic) ──
-    ENDPOINT_ITERATION = 'endpoint_iteration'
-    ENDPOINT_PLANNER_DONE = 'endpoint_planner_done'
-    ENDPOINT_CRITIC_MSG = 'endpoint_critic_msg'
-    ENDPOINT_NEW_TURN = 'endpoint_new_turn'
-    ENDPOINT_COMPLETE = 'endpoint_complete'
+    # ── flow engine (Planner/Worker/Critic/VU graphs via FlowExecutor) ──
+    # Renamed from endpoint_* when the endpoint chat mode was retired
+    # (2026-08-27). No frontend reads the names; turns are the render
+    # authority, so the rename is server-internal.
+    FLOW_ITERATION = 'flow_iteration'
+    FLOW_PLANNER_DONE = 'flow_planner_done'
+    FLOW_CRITIC_MSG = 'flow_critic_msg'
+    FLOW_NEW_TURN = 'flow_new_turn'
+    FLOW_COMPLETE = 'flow_complete'
     # ── swarm ──
     SWARM_PHASE = 'swarm_phase'
     SWARM_INBOX_INJECT = 'swarm_inbox_inject'
@@ -257,6 +263,7 @@ class Phase:
     TOOL_EXEC = 'tool_exec'
     RETRYING = 'retrying'
     WAITING_MODEL = 'waiting_model'
+    STREAM_STALLED = 'stream_stalled'
     WORKING = 'working'
     COMPACTING = 'compacting'
     TODO_CONTINUATION = 'todo_continuation'
@@ -372,24 +379,20 @@ _SPECS: tuple[EventSpec, ...] = (
               'inferring end-of-round from the next `round_start` or a `done`. '
               'Non-terminal (a `done` still follows on the terminal path).',
               fields={'roundNum': 'the round index this boundary closes',
-                      'reason': 'tools|final|aborted|budget|error|tool_timeout '
-                                '— why the round ended'}),
+                      'reason': 'tools|final|aborted|budget|error|tool_timeout|'
+                                'tool_loop — why the round ended'}),
     EventSpec(EventType.DONE, _C.LIFECYCLE,
               'Terminal event — the turn finished (success or, with `error`, failure).',
               terminal=True,
               fields={'error': 'error envelope if failed (else absent)',
-                      'finishReason': 'stop|error|aborted|max_turns',
-                      'committedMessage': '(optional) the EXACT settled assistant '
-                                          'message dict just written to '
-                                          'conversations.messages — the frontend '
-                                          'projects the terminal bubble from THIS '
-                                          'verbatim, no keep-longer/snapshot '
-                                          'reconstruction. Absent on skip paths '
-                                          '(freshness/inline/CAS-exhaustion), where '
-                                          'the client keeps its transient buffer.'}),
+                      'finishReason': 'provider/normalized terminal reason',
+                      'streamState': 'closed ProviderStreamState evidence; '
+                                     'provider_finished is the only success state'}),
     EventSpec(EventType.ERROR, _C.LIFECYCLE,
-              'Inline error envelope (non-terminal diagnostics; fatal errors '
-              'arrive as a `done` with `error`).',
+              'Legacy terminal error envelope. New fatal paths normally emit '
+              'a `done` with `error`, but Turn authority still settles this '
+              'frame for compatibility.',
+              terminal=True,
               fields={'content': 'error text', 'detail': 'structured detail'}),
     EventSpec(EventType.RETRY_RESET, _C.LIFECYCLE,
               'A transient-error turn is being auto-re-run from scratch. The '
@@ -402,6 +405,34 @@ _SPECS: tuple[EventSpec, ...] = (
                       'max': 'retry budget',
                       'kind': 'error kind that triggered the re-run',
                       'contentEpoch': 'monotonic text generation after this reset'}),
+    EventSpec(EventType.MODEL_REQUEST_START, _C.LIFECYCLE,
+              'A logical model dispatch started. This low-frequency boundary '
+              'opens the durable activity span used to correlate subsequent '
+              'wait/retry frames and the terminal request result.',
+              fields={'spanId': 'task-local stable request span id',
+                      'model': 'requested model id',
+                      'providerId': '(optional) provider id when already known',
+                      'roundNum': '(optional) model round number',
+                      'requestTag': 'task-local request label (R1/FALLBACK/etc.)'}),
+    EventSpec(EventType.MODEL_REQUEST_COMPLETE, _C.LIFECYCLE,
+              'A logical model-dispatch span settled successfully or failed. '
+              'This is diagnostic state only and does not itself settle the Turn.',
+              fields={'spanId': 'matching model_request_start span id',
+                      'model': 'model id',
+                      'providerId': '(optional) provider that served the request',
+                      'status': 'succeeded|failed|aborted',
+                      'finishReason': '(optional) provider finish reason',
+                      'streamState': '(optional) closed ProviderStreamState',
+                      'durationMs': 'wall-clock request duration in milliseconds',
+                      'errorKind': '(failure only) typed exception/error kind',
+                      'errorDetail': '(failure only) bounded safe detail',
+                      'statusCode': '(failure only) HTTP status when known',
+                      'routeId': '(optional) credential-free concrete network route id',
+                      'routeMode': '(optional) direct|proxy|env|desktop|unknown',
+                      'routeDecision': '(optional) why this route was selected',
+                      'failureStage': '(optional) connect/provider_response/midstream/progress stage',
+                      'roundNum': '(optional) model round number',
+                      'requestTag': 'task-local request label'}),
     EventSpec(EventType.MODEL_FALLBACK, _C.LIFECYCLE,
               'The primary model failed and the turn is being re-streamed on '
               'the configured fallback model. Emitted EARLY, at the decision '
@@ -416,9 +447,10 @@ _SPECS: tuple[EventSpec, ...] = (
                       'fallbackReason': 'human-readable reason (kind: detail, '
                                         'capped at 300 chars)'}),
     EventSpec(EventType.BUDGET_WARNING, _C.LIFECYCLE,
-              'A task crossed a configured soft resource budget. Work may '
-              'continue until the corresponding hard limit is reached.',
-              fields={'limit': 'promptTokens|apiRounds|toolOutputBytes|elapsedSeconds',
+              'A task crossed a configured soft threshold or entered its '
+              'model-round finalization reserve. Work may continue until '
+              'the corresponding hard limit is reached.',
+              fields={'limit': 'promptTokens|apiRounds|toolOutputBytes|elapsedSeconds|estimatedCostUsd',
                       'used': 'current measured consumption',
                       'remaining': 'amount remaining before hard termination',
                       'hardLimit': 'configured hard ceiling',
@@ -457,6 +489,9 @@ _SPECS: tuple[EventSpec, ...] = (
                                 'hallucination and never ran',
                       '_rejected': '(optional) {attempted, suggestions} for a '
                                    'rejected hallucinated tool',
+                      '_contractError': '(optional) stable ToolContractV2 '
+                                        'error for a call rejected before '
+                                        'execution',
                       **_TOOL_CLOCK_FIELDS}),
     EventSpec(EventType.TOOL_PROGRESS, _C.TOOL,
               'Streaming progress emitted by a long-running tool.',
@@ -488,7 +523,7 @@ _SPECS: tuple[EventSpec, ...] = (
                       '_selfTick': '(optional) True when this frame is the '
                                    'tool-heartbeat pinging ITSELF (transport '
                                    'keepalive, NOT evidence the tool is alive '
-                                   '— pt_8524e0ec). The reaper ignores it for '
+                                   '— ). The reaper ignores it for '
                                    'liveness; the frontend stalled-card reads '
                                    'it to tell self-ticks from real output',
                       'query': '(optional) REPAIRED display string — present '
@@ -507,17 +542,32 @@ _SPECS: tuple[EventSpec, ...] = (
     EventSpec(EventType.TOOL_RESULT, _C.TOOL,
               'A tool produced a (possibly partial) result payload.',
               fields={'roundNum': 'round index', 'toolCallId': 'tool-call id',
+                      'toolName': 'canonical tool name',
                       'results': 'list of {toolName,title,snippet,source}',
                       'query': 'display string',
-                      'status': "(optional) 'rejected' for a hallucinated tool "
-                                'that was rejected without executing',
+                      'status': "terminal VERDICT, always present on frames "
+                                "emitted via _finalize_tool_round: 'done' on "
+                                "success, else the backend's failure verdict "
+                                "('error' / 'rejected' / 'aborted' / "
+                                "'unanswerable'). The client renders this "
+                                "field as the ONLY truth — it must never "
+                                "infer success from the frame's arrival "
+                                "(older backends omitted it except "
+                                "'rejected'; a missing status on an in-flight "
+                                "round is the only case the client may "
+                                "settle as 'done')",
                       '_rejected': '(optional) {attempted, suggestions} for a '
                                    'rejected hallucinated tool',
+                      '_contractError': '(optional) stable ToolContractV2 '
+                                        'error preserved when validation '
+                                        'rejected the call',
                       **_TOOL_CLOCK_FIELDS, **_TOOL_END_CLOCK_FIELD}),
     EventSpec(EventType.TOOL_COMPLETE, _C.TOOL,
               'A tool call finished; carries the final tool message.',
               fields={'roundNum': 'round index', 'toolCallId': 'tool-call id',
-                      'content': 'final tool result', 'isError': 'bool',
+                      'toolName': 'canonical tool name',
+                      'toolContent': 'final model-visible tool result',
+                      'isError': 'bool',
                       'status': "(optional) terminal NON-SUCCESS verdict — "
                                 "'rejected' / 'aborted' / 'error' (tool raised "
                                 "or pool-timeout-cancelled, 2026-08-06 silent-"
@@ -525,6 +575,35 @@ _SPECS: tuple[EventSpec, ...] = (
                                 "client must never promote a verdict-bearing "
                                 "round to 'done'",
                       **_TOOL_CLOCK_FIELDS, **_TOOL_END_CLOCK_FIELD}),
+    EventSpec(EventType.TOOL_SCHEMA_REJECTED, _C.TOOL,
+              'A malformed provider-visible tool schema was isolated before '
+              'the request left the process. The tool is omitted for this '
+              'request; execution authority and the LLM transcript are unchanged.',
+              fields={'toolName': 'isolated tool name (or unknown tool)',
+                      'stage': 'provider-boundary validation stage',
+                      'reasonCode': 'stable rejection class',
+                      'detail': 'bounded structural validation detail',
+                      'action': 'omitted',
+                      'model': 'request model id',
+                      'parentSpanId': '(optional) owning model request span',
+                      'roundNum': '(optional) model round number'}),
+    EventSpec(EventType.TOOL_WIRE_PROJECTION, _C.TOOL,
+              'Bounded Request Inspector evidence for the final provider tool '
+              'surface. This diagnostic grants no execution authority and '
+              'never enters the LLM transcript.',
+              fields={'roundNum': 'model round number',
+                      'turn': '(optional) Flow node phase',
+                      'model': 'wire model id',
+                      'backend': 'resolved tool discovery backend',
+                      'toolNames': 'ordered bounded final provider tool names',
+                      'toolCount': 'exact final provider tool count',
+                      'schemaTokens': 'model-tokenizer schema estimate',
+                      'schemaFingerprint': 'opaque exact provider-schema digest',
+                      'schemaBudgetTokens': 'explicit cost target, zero=uncapped',
+                      'budgetDroppedNames': 'names omitted by explicit budget',
+                      'compactedNames': 'names annotation-compacted by budget',
+                      'executableToolCount': 'server-authorized catalog size',
+                      'parentSpanId': 'owning model request span'}),
     EventSpec(EventType.TOOL_COMPACTED, _C.TOOL,
               'A prior tool result was compacted out of context to save tokens.',
               fields={'toolCallId': 'tool-call id', 'roundNum': 'round index'}),
@@ -535,7 +614,7 @@ _SPECS: tuple[EventSpec, ...] = (
                       'content': 'replayed settled result',
                       'badge': 'replayed'}),
     EventSpec(EventType.PROGRAM_START, _C.TOOL,
-              'A hosted JavaScript orchestration program started. Its nested '
+              'A native or local orchestration program started. Its nested '
               'function calls remain ordinary tool lifecycle events.',
               fields={'roundNum': 'display-only parent round index',
                       'llmRound': 'model round that authored the program',
@@ -544,14 +623,20 @@ _SPECS: tuple[EventSpec, ...] = (
                       'childCallIds': 'nested function-call ids',
                       'childToolNames': 'nested function names',
                       'limits': 'enforced calls/output/continuation ceilings',
+                      'source': 'openai_ptc or execute_program',
+                      'backend': 'native_openai or local_toolscript',
                       'status': 'running', 'tStart': 'program start epoch ms'}),
     EventSpec(EventType.PROGRAM_OUTPUT, _C.TOOL,
-              'A hosted orchestration program produced its aggregate output.',
+              'A native or local program produced its aggregate output.',
               fields={'roundNum': 'display-only parent round index',
                       'llmRound': 'originating model round',
                       'programCallId': 'program call id',
                       'result': 'program aggregate result',
-                      'status': 'completed or incomplete',
+                      'status': 'completed, incomplete, or error',
+                      'childCallIds': 'final nested function-call ids',
+                      'childToolNames': 'final nested function names',
+                      'source': 'openai_ptc or execute_program',
+                      'backend': 'native_openai or local_toolscript',
                       'tStart': 'program start epoch ms',
                       'tEnd': 'program completion epoch ms'}),
     # ───────────────────────── context ─────────────────────────
@@ -561,17 +646,52 @@ _SPECS: tuple[EventSpec, ...] = (
                       'model': 'model id'}),
     EventSpec(EventType.ROUND_COMMITTED, _C.CONTEXT,
               'A round was persisted server-side (durable checkpoint).',
-              fields={'roundNum': 'round number'}),
+              fields={
+                  'roundNum': 'round number',
+                  'taskId': 'owning task id',
+                  'snapshotId': 'file-history snapshot id when available',
+                  'gitSha': 'legacy alias for snapshotId',
+                  'modifiedFileList': 'task-attributed changed paths',
+                  'modifiedFiles': 'task-attributed changed-path count',
+                  'linearGitCheckpoint': (
+                      'single-checkout checkpoint/stable settlement receipt'),
+              }),
     EventSpec(EventType.MESSAGES_SNAPSHOT, _C.CONTEXT,
               'A point-in-time copy of the message list (fallback/branch sync).',
               fields={'messages': 'message list', 'roundNum': 'round id/label (may be a string label like final/fallback)',
                       'label': 'human label'}),
     EventSpec(EventType.COMPACTION, _C.CONTEXT,
-              'Context-window compaction started.',
-              fields={'detail': 'what is being compacted'}),
+              'A pre-compaction transcript snapshot was archived.',
+              fields={
+                  'archiveId': 'owner-scoped archive id',
+                  'convId': 'conversation id',
+                  'trigger': 'working_set|window|force|reactive|manual',
+                  'roundNum': 'task round number',
+                  'tokensBefore': 'estimated pre-compaction input tokens',
+                  'tokensAfter': 'estimated post tokens; zero until complete',
+                  'tokenCountKind': 'estimated',
+                  'msgsBefore': 'pre-compaction message count',
+                  'msgsAfter': 'post-compaction count; zero until complete',
+                  'model': 'task model id, not summary-model attribution',
+                  'reason': 'bounded trigger explanation',
+                  'snapshotKind': 'pre_compaction_transcript',
+                  'ts': 'epoch seconds',
+              }),
     EventSpec(EventType.COMPACTION_DONE, _C.CONTEXT,
-              'Context-window compaction finished.',
-              fields={'archived': 'count/size archived'}),
+              'A compaction archive received its final estimated counts.',
+              fields={
+                  'archiveId': 'owner-scoped archive id',
+                  'convId': 'conversation id',
+                  'trigger': 'working_set|window|force|reactive|manual',
+                  'tokensBefore': 'estimated pre-compaction input tokens',
+                  'tokensAfter': 'estimated complete post-compaction tokens',
+                  'tokenCountKind': 'estimated',
+                  'msgsBefore': 'pre-compaction message count',
+                  'msgsAfter': 'complete post-compaction message count',
+                  'reductionPct': 'estimated percentage token reduction',
+                  'roundNum': 'task round number',
+                  'receipt': 'bounded tofu.compaction-receipt/v1 result',
+              }),
     EventSpec(EventType.MEMORY_PREFETCH, _C.CONTEXT,
               'Memory-prefetch pipeline stage update.',
               fields={'stage': 'pipeline stage', 'results': 'retrieved notes'}),
@@ -637,21 +757,21 @@ _SPECS: tuple[EventSpec, ...] = (
     EventSpec(EventType.STDIN_RESOLVED, _C.INTERACTION,
               'A pending stdin request was satisfied (clears the prompt UI).',
               fields={'requestId': 'correlation id'}),
-    # ───────────────────────── endpoint ─────────────────────────
-    EventSpec(EventType.ENDPOINT_ITERATION, _C.ENDPOINT,
-              'Endpoint loop entered a new Planner/Worker/Critic iteration.',
+    # ───────────────────────── flow ─────────────────────────
+    EventSpec(EventType.FLOW_ITERATION, _C.FLOW,
+              'Flow loop entered a new Planner/Worker/Critic/VU iteration.',
               fields={'iteration': 'index', 'phase': 'planner|worker|critic'}),
-    EventSpec(EventType.ENDPOINT_PLANNER_DONE, _C.ENDPOINT,
+    EventSpec(EventType.FLOW_PLANNER_DONE, _C.FLOW,
               'Planner produced a plan.', fields={'plan': 'plan content'}),
-    EventSpec(EventType.ENDPOINT_CRITIC_MSG, _C.ENDPOINT,
+    EventSpec(EventType.FLOW_CRITIC_MSG, _C.FLOW,
               'Critic verdict + feedback.',
               fields={'next_phase': 'planner|worker|stop',
                       'should_stop': '(legacy) bool', 'feedback': 'critic text'}),
-    EventSpec(EventType.ENDPOINT_NEW_TURN, _C.ENDPOINT,
+    EventSpec(EventType.FLOW_NEW_TURN, _C.FLOW,
               'A fresh Worker/Planner turn began (new assistant bubble).',
               fields={'phase': 'planner|worker'}),
-    EventSpec(EventType.ENDPOINT_COMPLETE, _C.ENDPOINT,
-              'Endpoint loop terminated (approved or replan-capped).',
+    EventSpec(EventType.FLOW_COMPLETE, _C.FLOW,
+              'Flow loop terminated (approved or replan-capped).',
               fields={'iterations': 'total count'}),
     # ───────────────────────── swarm ─────────────────────────
     EventSpec(EventType.SWARM_PHASE, _C.SWARM,
@@ -680,18 +800,7 @@ _SPECS: tuple[EventSpec, ...] = (
     EventSpec(EventType.AUTOPILOT_VU_START, _C.AUTOPILOT,
               'Autopilot kicked in — create the simulated-user bubble eagerly '
               '(in-memory only; not persisted until autopilot_vu_done).',
-              fields={'vuMsgId': 'stable id for the VU message bubble',
-                      'parentMessage': '(optional) the SETTLED parent worker '
-                                       'assistant dict (== the parent `done` '
-                                       "event's `committedMessage`), delivered "
-                                       'early so the frontend can complete the '
-                                       'parent bubble\'s finish bar (model / '
-                                       'usage / cost / finishReason) at handoff '
-                                       'instead of waiting for the parent `done` '
-                                       '(withheld until the VU stream ends). '
-                                       'Absent on skip paths → keep transient '
-                                       'buffer. Display-only; `done` still ships '
-                                       'the authoritative copy.'}),
+              fields={'vuMsgId': 'stable id for the VU message bubble'}),
     EventSpec(EventType.AUTOPILOT_VU_EVENT, _C.AUTOPILOT,
               'Autopilot value-unit progress event.',
               fields={'detail': 'vu detail'}),
@@ -846,34 +955,42 @@ _PHASE_SPECS: tuple[PhaseSpec, ...] = (
                       'tools': 'raw tool-name list of this dispatch (i18n '
                                'clients compose the localized label)'}),
     PhaseSpec(Phase.RETRYING, (_CHAT,),
-              'Transient retry / wait / self-tuning notice: dispatcher 429/'
-              'cooldown cycles, first-byte and mid-stream stall heartbeats, '
-              'stream-anomaly retries (zero-byte / premature-close / '
-              'empty-stop / canned-greeting), turn-level auto-retry, reactive '
-              'compact, model fallback, pool rescue, auto-learned model/'
-              'context limits.',
+              'A real retry after a failed provider attempt: dispatcher 429/'
+              'transport failover, stream-anomaly retry, turn-level auto-retry, '
+              'reactive compact, model fallback or pool rescue. Waiting '
+              'heartbeats and self-tuning notices use other phases.',
               fields={'detail': 'human-readable fallback (may be zh)',
                       'detailKey': '(optional) i18n key',
                       'detailArgs': '(optional) interpolation args '
-                                    '(model/attempt/elapsed/reason/reasonKey)',
-                      'attempt': '(optional) retry/beat counter — the frontend '
-                                 'keys its repaint on it',
+                                    '(model/attempt/max/elapsed/chars/reason/'
+                                    'reasonKey)',
+                      'attempt': '(optional) real retry counter',
                       'max': '(optional) retry budget',
                       'bucket': '(optional) retry signature bucket '
-                                '(zero_byte|classic|empty_stop|canned_greeting|'
-                                'turn)',
+                                '(zero_byte|classic|partial_stream|empty_stop|'
+                                'canned_greeting|turn)',
                       'backoff_s': '(optional) backoff before the retry',
+                      'errorKind': '(optional) typed transient failure kind',
+                      'continuationMode': '(optional) assistant_prefill or '
+                                          'continuation_nudge',
                       'statusCode': '(optional) HTTP status that triggered the cycle',
                       'model': '(optional) raw model id'}),
     PhaseSpec(Phase.WAITING_MODEL, (_CHAT,),
-              'Request dispatched, first token not yet arrived (the TTFT '
-              'window); cleared by the first delta or a tool_start.',
+              'Request dispatched and awaiting the first semantic provider '
+              'progress; heartbeat frames keep this current.',
               fields={'detail': 'English fallback label',
                       'detailKey': 'i18n key', 'detailArgs': 'model label',
                       'model': 'raw model id'}),
+    PhaseSpec(Phase.STREAM_STALLED, (_CHAT,),
+              'A connected provider stream stopped making reasoning, text, '
+              'or tool progress during the current attempt.',
+              fields={'detail': 'English fallback label',
+                      'detailKey': 'i18n key',
+                      'detailArgs': 'model, total elapsed, semantic idle',
+                      'model': 'raw model id'}),
     PhaseSpec(Phase.WORKING, (_CHAT,),
               'Generic working status: ordinary-turn and VU startup stages, '
-              'endpoint/flow producer step_phase forwards, external CLI '
+              'Flow producer step_phase forwards, external CLI '
               'backends.',
               fields={'detail': 'English fallback status text',
                       'detailKey': '(optional) i18n key',
@@ -966,13 +1083,16 @@ _PHASE_BY_VALUE: dict[str, PhaseSpec] = {s.phase: s for s in _PHASE_SPECS}
 TRANSPORT_TYPES: frozenset[str] = frozenset({EventType.PING, EventType.SSE_TIMEOUT})
 
 #: Event types that get an ``emittedAt`` stamp at construction time.
-#: Deliberately ONLY the tool lifecycle: it is the surface a human debugs when
-#: a turn feels slow, and it is low-frequency. ``delta`` is excluded on purpose
-#: — stamping every token frame would add bytes to the hottest path in the
-#: product for no diagnostic value.
+#: Deliberately only low-frequency activity boundaries: tool execution, model
+#: request spans/switches, and preflight schema isolation. ``delta`` is excluded on
+#: purpose — stamping every token frame would add bytes to the hottest path in
+#: the product for no diagnostic value.
 _CLOCK_STAMPED_TYPES: frozenset[str] = frozenset({
     EventType.TOOL_START, EventType.TOOL_PROGRESS,
     EventType.TOOL_RESULT, EventType.TOOL_COMPLETE,
+    EventType.TOOL_SCHEMA_REJECTED,
+    EventType.MODEL_REQUEST_START, EventType.MODEL_REQUEST_COMPLETE,
+    EventType.MODEL_FALLBACK,
 })
 
 
@@ -1003,15 +1123,16 @@ def build_event(type_: str, **fields: Any) -> dict[str, Any]:
     event whose fields are built up conditionally, call ``build_event(TYPE)``
     and mutate the returned dict exactly as before.
 
-    TOOL events additionally get an ``emittedAt`` stamp here — at the ONE typed
-    construction chokepoint rather than at each call site, so the value always
-    means the same instant ("the backend handed this frame to the stream") and
-    cannot drift between emitters. That is what makes the transport segment
-    (``receivedAt - emittedAt``) comparable across tools. An explicit
-    ``emittedAt=`` kwarg wins, so a replay path can preserve the original.
-    PHASE events intentionally remain unstamped: ``task['phase']`` is an
-    immediate current-state snapshot, not a transport-duration sample, and
-    keeps the byte shape older clients expect.
+    Low-frequency activity boundaries get an ``emittedAt`` stamp here — at the
+    ONE typed construction chokepoint rather than at each call site, so the
+    value always means the same instant ("the backend handed this frame to the
+    stream") and cannot drift between emitters. That is what makes the
+    transport segment (``receivedAt - emittedAt``) comparable across tools and
+    gives model switches an exact durable decision time. An explicit
+    ``emittedAt=`` kwarg wins, so replay can preserve the original. PHASE events
+    intentionally remain unstamped: ``task['phase']`` is an immediate current-
+    state snapshot, not a transport-duration sample, and keeps the byte shape
+    older clients expect.
 
     Unregistered types are allowed (the wire stays forward-compatible) but log
     a debug line — the drift test is what enforces registration at CI time.
@@ -1157,7 +1278,7 @@ def to_capabilities_dict() -> dict[str, Any]:
     return {
         'contract_version': EVENT_CONTRACT_VERSION,
         'transports': {
-            'sse': ['/api/chat/stream/<task_id>', '/api/v1/tasks/<task_id>/stream'],
+            'sse': ['/api/v1/tasks/<task_id>/stream'],
             'websocket': '/api/push',
             'cursor_replay': '/api/v1/tasks/<task_id>/events?cursor=N',
         },

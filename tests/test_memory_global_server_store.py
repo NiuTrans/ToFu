@@ -20,6 +20,10 @@ import os
 import pytest
 
 import lib.memory.storage as storage
+import lib.memory.storage._dirs as storage_dirs
+
+
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture()
@@ -27,9 +31,13 @@ def isolated_store(tmp_path, monkeypatch):
     """Redirect the server data dir to a tmp dir and clear migration state."""
     data_dir = tmp_path / 'data'
     monkeypatch.setenv('TOFU_DATA_DIR', str(data_dir))
-    storage._migrated_roots.clear()
+    monkeypatch.setattr(
+        storage_dirs, '_server_data_dir', lambda: str(data_dir))
+    storage_dirs._migrated_roots.clear()
+    storage_dirs._server_store_migrated = False
     yield tmp_path
-    storage._migrated_roots.clear()
+    storage_dirs._migrated_roots.clear()
+    storage_dirs._server_store_migrated = False
 
 
 def _proj(tmp_path, name):

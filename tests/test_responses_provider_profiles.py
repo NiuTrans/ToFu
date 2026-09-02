@@ -81,7 +81,7 @@ def test_slot_adaptation_stamps_provider_profile_on_every_round():
 def test_dispatch_usage_reports_effective_profile_for_canary_diagnostics():
     from types import SimpleNamespace
 
-    from lib.llm_dispatch.api import _finalize_stream_success
+    from lib.llm_dispatch.api import _settle_stream_result
     from lib.llm_dispatch.slot import Slot
 
     slot = Slot(
@@ -89,7 +89,7 @@ def test_dispatch_usage_reports_effective_profile_for_canary_diagnostics():
         capabilities={'text'}, provider_id='gateway',
         protocol='responses', responses_profile='compatible')
     usage = {'completion_tokens': 1}
-    _finalize_stream_success(
+    _settle_stream_result(
         slot, usage, latency=12, ttft=3,
         state=SimpleNamespace(hard_attempts=0, _429_count=0),
         cache_conv_id='', tag='[test]')

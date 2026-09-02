@@ -25,7 +25,7 @@ import time
 
 import pytest
 
-import lib.tasks_pkg as tp
+import lib.tasks_pkg.spawn as tp
 
 pytestmark = pytest.mark.unit
 
@@ -58,7 +58,7 @@ def test_hop_to_serving_loop_from_loop_less_thread(monkeypatch, clean_spawn_stat
         seen['is_main'] = threading.current_thread() is threading.main_thread()
         ran.set()
 
-    monkeypatch.setattr('lib.tasks_pkg.orchestrator.run_task', _fake_run_task)
+    monkeypatch.setattr('lib.tasks_pkg.orchestrator.api.run_task', _fake_run_task)
 
     from concurrent.futures import ThreadPoolExecutor
     pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='f3-agent')
@@ -100,7 +100,7 @@ def test_daemon_fallback_kept_without_serving_loop(monkeypatch, clean_spawn_stat
             captured['started'] = True
 
     monkeypatch.setattr(tp.threading, 'Thread', _FakeThread)
-    monkeypatch.setattr('lib.tasks_pkg.orchestrator.run_task', lambda t: None)
+    monkeypatch.setattr('lib.tasks_pkg.orchestrator.api.run_task', lambda t: None)
     tp.spawn_task(_fake_task())
     assert captured.get('started') is True
     assert captured.get('daemon') is True
@@ -110,7 +110,7 @@ def test_daemon_fallback_kept_without_serving_loop(monkeypatch, clean_spawn_stat
 def test_in_loop_path_uses_ensure_future(monkeypatch, clean_spawn_state):
     """Caller inside a running loop → existing ensure_future path, no thread."""
     ran = threading.Event()
-    monkeypatch.setattr('lib.tasks_pkg.orchestrator.run_task',
+    monkeypatch.setattr('lib.tasks_pkg.orchestrator.api.run_task',
                         lambda t: ran.set())
 
     async def _driver():

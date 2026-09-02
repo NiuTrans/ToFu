@@ -1,222 +1,309 @@
-# 无本地 Docker 的 Agent Benchmark 评测
+# 无 root、无 Docker、无云沙箱的本地 Agent 评测
 
-这套入口支持 SWE-bench Verified 和 Terminal-Bench 2.1，并替代旧的 udocker/PRoot
-runner。它不自行实现容器或改写测试：
+这套入口统一编排 SWE-bench Verified 和 Terminal-Bench 2.1。当前本地默认后端是
+`rootless-qemu`，不是旧的 udocker/PRoot，也不是 Singularity：每个 trial 都在新的
+QEMU TCG 虚拟机 overlay 中运行，结束后删除写层；宿主项目、`$HOME`、Docker socket、设备和
+凭据都不挂载进 guest。
 
-- agent 评测交给固定版本的 [Harbor](https://github.com/harbor-framework/harbor)。本地默认使用
-  Singularity/Apptainer；每个 `task × model` 都使用只读 SIF 基础镜像和新的 writable tmpfs，
-  trial 结束后删除可写层，只共享不可变镜像缓存。
-- 已有 patch 的最终复核交给固定版本的
-  [SWE-bench 官方 harness](https://github.com/SWE-bench/SWE-bench)。同一文件中的不同模型
-  会先拆成不同 run id 和目录，避免官方 harness 以 `instance_id` 为键时互相覆盖。
-- udocker、PRoot 和 host/local backend 不在支持列表里。缺少真正的隔离能力时预检直接失败，
-  不会静默降级。
-- 产物默认写到仓库外的 `~/.local/state/tofu-evals/agent-benchmarks/`。每一级产物目录都自带
-  `.gitignore` 和 `.ignore`；仓库的 Git、项目扫描器、VS Code watcher/search 和导出器也有
-  独立兜底规则。
+安全边界和结果口径是两件事：这个后端提供强于 host/PRoot 的本地隔离，但纯 TCG 的时钟和性能
+不等同于官方 Docker/KVM/Daytona 环境。因此本地结果适合可复现回归和内部比较，不能冒充官方
+leaderboard 提交。
 
-这里的“无 Docker”是指本机不安装、不启动 Docker daemon，也不依赖云 sandbox。Harbor 直接
-拉取任务已经发布的 OCI 镜像并由 Apptainer 转为本地 SIF。Terminal-Bench 2.1 的 89 个任务都
-提供了固定的预构建镜像，因此本地路径不需要解释或重新执行 Dockerfile。
+## 固定输入
 
-## 安装
+- Harbor 固定到 commit `ea2fee78517f2e591bad69fcf1e6731f9c23ec99`。
+- SWE-bench Verified 固定到 Harbor registry digest
+  `sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341`，恰好 500 题。
+- Terminal-Bench 2.1 固定到 digest
+  `sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a`，恰好 89 题。
+- TB 2.1 正式本地分数要求每题恰好 5 个有效 trial，即 445 个；覆盖不完整时 scorer 不输出
+  final percentage。
+- QEMU、libseccomp、libslirp、`crane`、SWE-bench、`pycdlib` 和 Harbor 都固定版本或 digest。
 
-不要把评测依赖装进 Tofu 的服务环境。建议使用仓库外的专用 venv。Harbor 固定到已审计的
-upstream commit（当前共享机的 Python index 没有 Harbor 0.21 包），安装时需要访问 GitHub：
+## 安装专用评测环境
+
+不要把评测依赖装进 Tofu 服务环境。以下路径必须位于仓库外的私有本地盘：
 
 ```bash
-python3 -m venv ~/.cache/tofu-evals-venv
-uv pip install --python ~/.cache/tofu-evals-venv/bin/python \
+export TOFU_EVAL_VENV=/absolute/private/tofu-eval-venv
+export TOFU_EVAL_ROOT=/absolute/private/tofu-evals
+export TOFU_QEMU_ROOT=/absolute/private/rootless-qemu
+
+uv venv "$TOFU_EVAL_VENV"
+uv pip install --python "$TOFU_EVAL_VENV/bin/python" \
   -r evaluations/swebench/requirements.txt
+
+scripts/bootstrap_rootless_qemu.sh \
+  --prefix "$TOFU_QEMU_ROOT" --jobs 8
+
+export ROOTLESS_VM_QEMU="$TOFU_QEMU_ROOT/runtime/bin/qemu-system-x86_64"
+export ROOTLESS_VM_QEMU_IMG="$TOFU_QEMU_ROOT/runtime/bin/qemu-img"
+export ROOTLESS_VM_EGRESS_BRIDGE="$TOFU_QEMU_ROOT/runtime/bin/rootless-egress-bridge"
 ```
 
-此外需要本地安装 Singularity 或 Apptainer。优先使用系统管理员提供的近期 Apptainer；没有
-root 权限时可按[官方 unprivileged 安装说明](https://apptainer.org/docs/admin/main/installation.html)
-装到用户目录。rootless fakeroot 的完整能力通常还需要管理员配置 `/etc/subuid`、`/etc/subgid`
-以及 `newuidmap/newgidmap`：
+bootstrap 全程不使用 `sudo`、系统包管理器、setuid helper、FUSE 或 Docker daemon，所有下载、
+编译缓存和二进制都留在 mode-0700 的显式 prefix 中。完成前会做真实 QMP、seccomp、user
+namespace 和 `no_new_privs` 探测。
+
+评测还需要一个受信任的 Linux guest qcow2 基础盘，里面只包含 QEMU guest agent、Docker
+导入/构建工具和 runc。仓库已经固定 Alpine 3.24.1 云镜像以及所有 APK 的官方 URL、大小和
+哈希，可由普通用户完整重建；不要使用包含个人账号、SSH key 或云凭据的日常 VM 镜像：
 
 ```bash
-export PATH="$HOME/.local/apptainer/bin:$PATH"
-# 用户目录安装可直接修改自己的配置；系统安装需要管理员执行等价配置。
-apptainer config global --set "sessiondir max size" 10240
-export TOFU_EVAL_BACKEND=singularity
-~/.cache/tofu-evals-venv/bin/python -m evaluations.swebench doctor \
-  --benchmark terminal-bench-2.1 --backend singularity
+mkdir -m 700 "$TOFU_EVAL_ROOT/.base-disk"
+
+"$TOFU_EVAL_VENV/bin/python" -m rootless_vm build-base \
+  --lock rootless_vm/alpine_3_24_x86_64.lock.json \
+  --output "$TOFU_EVAL_ROOT/.base-disk/alpine-docker.qcow2" \
+  --cache-root "$TOFU_EVAL_ROOT/.base-disk/downloads" \
+  --state-root "$TOFU_EVAL_ROOT/.base-disk/state" \
+  --qemu "$ROOTLESS_VM_QEMU" \
+  --qemu-img "$ROOTLESS_VM_QEMU_IMG" \
+  --json
+
+export ROOTLESS_VM_BASE_DISK="$TOFU_EVAL_ROOT/.base-disk/alpine-docker.qcow2"
 ```
 
-`doctor` 会检查 Harbor 兼容版本、Terminal-Bench 固定 digest 的公开元数据、本地 runtime 与
-mount namespace、至少 10 GiB 的 writable-tmpfs 上限、磁盘空间和产物位置。任一安全前提不成立
-都会返回非零状态。模型供应商的 key（例如
-`OPENAI_API_KEY`）在正式运行时另行通过 `--secret-env` 注入。
+APK 安装发生在断网、一次性的隔离 VM 内；输出发布前还会在第二个 VM 内实测 QGA、Docker、
+runc 和 daemon。相邻 JSON 保存输出 SHA-256、完整 lock SHA-256 与 QEMU 版本。
 
-当前这台开发容器本身运行在受限 Kubernetes Pod 中：没有 `/dev/fuse`，且宿主禁止 Apptainer
-所需的 mount propagation，所以它的本地 `doctor` 会失败。这一限制不能由 pip/conda 安装绕过；
-需要在实体 Linux 主机/VM 上运行，或由平台按 Apptainer 官方 nested-container 要求开放相应
-security options 和 `/dev/fuse`。这不影响评测入口在普通本地 Linux 上使用。
+## 准备 SWE-bench Verified
 
-## 先跑交叉污染 smoke
-
-同一个 task 在同一批次跑两个模型，应该生成两个独立 trial（本地后端会依次执行）：
+先下载并校验 500 份轻量任务定义。下载有固定 digest、并发上限、重试和原子 ledger，重复执行
+会直接命中本地缓存：
 
 ```bash
-export OPENAI_API_KEY=...
-~/.cache/tofu-evals-venv/bin/python -m evaluations.swebench run \
+export TOFU_SWEBENCH_DEFS="$TOFU_EVAL_ROOT/.definitions/swebench-verified"
+export TOFU_SWEBENCH_STORE="$TOFU_EVAL_ROOT/.image-store/swebench-verified"
+export TOFU_SWEBENCH_CACHE="$TOFU_EVAL_ROOT/.image-cache/rootless-qemu"
+export ROOTLESS_VM_BASE_DISK=/absolute/private/trusted-rootless-base.qcow2
+
+"$TOFU_EVAL_VENV/bin/python" -m evaluations.swebench prepare-rootless \
   --benchmark swebench-verified \
-  --agent codex \
-  --model openai/model-a \
-  --model openai/model-b \
-  --task django__django-11099 \
-  --backend singularity \
-  --secret-env OPENAI_API_KEY \
-  --run-id smoke-two-models
+  --phase definitions \
+  --definitions-root "$TOFU_SWEBENCH_DEFS" \
+  --output-root "$TOFU_EVAL_ROOT"
 ```
 
-`--secret-env` 只把 `${OPENAI_API_KEY}` 占位符写进 job config；真实值从进程环境解析，
-不会进入 manifest 或命令行。成功后运行：
+建议先做单题。`crane=auto` 会在私有工具缓存下载固定的 v0.21.9 Linux x86-64 release，并在
+解包前校验 SHA-256；ISO 默认由 pinned `pycdlib` 生成，不依赖 `genisoimage`：
 
 ```bash
-~/.cache/tofu-evals-venv/bin/python -m evaluations.swebench audit \
-  ~/.local/state/tofu-evals/agent-benchmarks/smoke-two-models
-```
-
-审计会核对预期 trial 数、完成数、基础设施错误数、唯一模型配置、隔离后端以及
-`environment.delete=true`。默认任何错误都会令审计失败；只有分析已知失败时才使用
-`--allow-errors`，不要用它发布分数。
-
-## 全量 500 题
-
-```bash
-~/.cache/tofu-evals-venv/bin/python -m evaluations.swebench run \
+"$TOFU_EVAL_VENV/bin/python" -m evaluations.swebench prepare-rootless \
   --benchmark swebench-verified \
-  --agent codex \
-  --model openai/model-a \
-  --model openai/model-b \
-  --backend singularity \
-  --secret-env OPENAI_API_KEY \
-  --run-id verified-20260813
+  --phase assets \
+  --task swe-bench/psf__requests-1142 \
+  --definitions-root "$TOFU_SWEBENCH_DEFS" \
+  --rootless-image-store "$TOFU_SWEBENCH_STORE" \
+  --output-root "$TOFU_EVAL_ROOT"
+
+"$TOFU_EVAL_VENV/bin/python" -m evaluations.swebench prepare-rootless \
+  --benchmark swebench-verified \
+  --phase cache \
+  --task swe-bench/psf__requests-1142 \
+  --definitions-root "$TOFU_SWEBENCH_DEFS" \
+  --rootless-image-store "$TOFU_SWEBENCH_STORE" \
+  --rootless-base-disk "$ROOTLESS_VM_BASE_DISK" \
+  --rootless-qemu "$ROOTLESS_VM_QEMU" \
+  --rootless-qemu-img "$ROOTLESS_VM_QEMU_IMG" \
+  --rootless-cache-root "$TOFU_SWEBENCH_CACHE" \
+  --cache-workers 1 \
+  --output-root "$TOFU_EVAL_ROOT"
 ```
 
-默认数据集固定为 Harbor registry 的 `swebench-verified@1.0`（500 题），不是滚动的
-`latest`。基础设施异常最多重试两次；agent timeout、verifier timeout、认证错误、额度错误和
-解析错误不会被伪装成可重试基础设施抖动。
+SWE-bench 的 Harbor 定义使用 Dockerfile。框架只接受单一、字面量 `FROM` 的单阶段文件；拒绝
+变量、多阶段构建、symlink 和超过 1 GiB 的 context。构建在受限 public QEMU guest 中完成，
+网络只有认证、限流、限字节的 HTTP(S) proxy；发布缓存前会清除 Docker/containerd graph、构建
+context 和可能含短期 proxy 凭据的元数据。正式 trial 只从不可变 qcow2 backing 启动新的 overlay。
 
-中断后只恢复未完成 trial：
+去掉 `--task` 即准备全量 500 题。当前缓存格式按任务保存完整导出 rootfs，优先保证隔离和恢复，
+但不具备 Docker content store 的跨镜像 layer 去重；全量前必须按实际样本估算数百 GiB 空间。
+这是下一阶段的主要性能/容量优化点，不应拿官方 Docker 的 120 GiB 建议直接套用。
+
+## 用项目 Meituan/Friday provider 跑单题
+
+`TofuHostAgent` 在宿主进程读取项目已经配置的 provider/key，guest 只收到终端命令和输出，拿不到
+key。若 key 只通过 `LLM_API_KEYS` 环境变量提供，可以额外传
+`--secret-env LLM_API_KEYS`；job config 只持久化 `${LLM_API_KEYS}` 占位符。
 
 ```bash
-~/.cache/tofu-evals-venv/bin/python -m evaluations.swebench resume \
-  ~/.local/state/tofu-evals/agent-benchmarks/verified-20260813
+"$TOFU_EVAL_VENV/bin/python" -m evaluations.swebench doctor \
+  --benchmark swebench-verified \
+  --task swe-bench/psf__requests-1142 \
+  --rootless-base-disk "$ROOTLESS_VM_BASE_DISK" \
+  --rootless-image-store "$TOFU_SWEBENCH_STORE" \
+  --rootless-qemu "$ROOTLESS_VM_QEMU" \
+  --rootless-qemu-img "$ROOTLESS_VM_QEMU_IMG" \
+  --output-root "$TOFU_EVAL_ROOT"
+
+"$TOFU_EVAL_VENV/bin/python" -m evaluations.swebench run \
+  --benchmark swebench-verified \
+  --agent rootless_vm.harbor_tofu_agent:TofuHostAgent \
+  --agent-version 0.8.4 \
+  --reasoning-effort max \
+  --model deepseek-v4-flash-meituan \
+  --task swe-bench/psf__requests-1142 \
+  --backend rootless-qemu \
+  --rootless-base-disk "$ROOTLESS_VM_BASE_DISK" \
+  --rootless-image-store "$TOFU_SWEBENCH_STORE" \
+  --rootless-qemu "$ROOTLESS_VM_QEMU" \
+  --rootless-qemu-img "$ROOTLESS_VM_QEMU_IMG" \
+  --rootless-cache-root "$TOFU_SWEBENCH_CACHE" \
+  --run-id swebench-requests-smoke \
+  --output-root "$TOFU_EVAL_ROOT"
 ```
+
+同一 task 的不同 model 会得到不同 trial 和新的 VM overlay；共享的只有内容寻址的只读镜像与
+prepared cache。中断后使用 `resume RUN_DIR`，完成后使用 `audit RUN_DIR`。预检或审计失败时不
+发布分数。
+
+## 用同一个 Kimi 跑固定版 Codex 基线
+
+正式基线使用 `codex-kimi` profile，而不是 Harbor 自带的 `codex` agent。后者必须把 provider
+credential 放进 guest，不能满足配对实验的凭据边界。`codex-kimi` 固定 Codex CLI 0.149.1 的
+二进制和 SHA-256；launcher 在宿主回环启动独立 Responses→Kimi Chat 代理，再通过 QEMU 的单一
+受限控制端点转发。Kimi URL/key 的值不会进入 Harbor 子进程、job config、命令或 guest。
+
+```bash
+export TOFU_CODEX_01491_BINARY=/absolute/pinned/codex
+export TOFU_CODEX_01491_SHA256=<64-hex-sha256>
+export TOFU_KIMI_PROVIDER_FACE=meituan-chat
+export TOFU_KIMI_SLOT_ID=<non-secret-shared-slot-id>
+export KIMI_CHAT_BASE_URL=<meituan-kimi-chat-base-url>
+export KIMI_API_KEY=<host-only-key>
+
+"$TOFU_EVAL_VENV/bin/python" -m evaluations.swebench run \
+  --benchmark swebench-verified \
+  --agent codex-kimi \
+  --model kimi-k3 \
+  --reasoning-effort high \
+  --max-retries 0 \
+  --task swe-bench/psf__requests-1142 \
+  --backend rootless-qemu \
+  --rootless-base-disk "$ROOTLESS_VM_BASE_DISK" \
+  --rootless-image-store "$TOFU_SWEBENCH_STORE" \
+  --rootless-qemu "$ROOTLESS_VM_QEMU" \
+  --rootless-qemu-img "$ROOTLESS_VM_QEMU_IMG" \
+  --rootless-cache-root "$TOFU_SWEBENCH_CACHE" \
+  --release-run-root /absolute/release-baseline-run \
+  --run-id codex-kimi-requests-smoke \
+  --output-root "$TOFU_EVAL_ROOT"
+```
+
+Codex 强制 `--ignore-user-config --ephemeral --json`、Responses wire API、本地压缩及静态 trial
+header；这些能力与参数见 OpenAI 官方的
+[configuration reference](https://developers.openai.com/codex/config-reference) 和
+[CLI reference](https://developers.openai.com/codex/cli/reference)。每个 trial 保留原始 Codex
+JSONL、带 provider usage 的代理 shard 和 ATIF。`audit` 会重新调和三者，检查唯一 trial token、
+固定二进制哈希、零远程 compact、唯一 guest 控制路由和凭据不落盘。恢复运行时必须重新提供同名
+宿主环境变量；launcher 会在 manifest 固定的宿主端口重启代理，仍不会把值传给 Harbor。
+provider face、非密钥 slot ID、Harbor 可执行文件 SHA-256、固定源码 commit 和 runner revision
+也会进入不可变身份记录；配对 release manifest 必须逐项相同。非 dry-run 在产生任何付费 trial 前
+要求 runner worktree 干净且 revision 可解析，resume 也必须仍是同一干净 revision。可发布运行还
+必须传入已初始化的 `--release-run-root`；launcher 在 Harbor dispatch 前认领精确 task attempts，
+resume 必须再次提供同一路径。未认领的付费 smoke 只能诊断，导出器拒绝接纳。
+
+Harbor 0.21 的内部 retry 会删除失败 attempt 目录，无法证明失败调用成本完整。因此正式
+`codex-kimi` 的 Harbor `--max-retries` 固定为 0，任何内部 retry 都使导出失败。release manifest
+仍可预注册外层基础设施重试；每次外层运行必须先追加不可变 claim，失败 usage、付费工具与
+raw/proxy 证据会进入最终 task 成本和 attempt 账本，因而不能丢弃失败 run 后挑成功样本。审计
+通过后，将某个 SWE/TB slice 写入同一 baseline run store：
+
+```bash
+"$TOFU_EVAL_VENV/bin/python" -m evaluations.long_agent_release \
+  export-codex-harbor \
+  --harbor-run-dir /absolute/harbor-run \
+  --run-root /absolute/release-baseline-run
+```
+
+导出器按 source task 内 Harbor trial name 的字典序确定 `trialIndex`（与 reward/耗时无关）。无
+外层重试时 oracle-ready 墙钟为 `TrialResult.started_at → verifier.finished_at`；有重试时从最早保留
+attempt 的 task start 计时，包含失败与重试间隔。它保存 raw JSONL、proxy metrics 和 ATIF，并
+拒绝 provider/slot/harness/task digest、numeric reward、预认领顺序或生命周期证据漂移。
+
+## 用同一个 Kimi 跑生产 Tofu 候选
+
+正式候选使用 `tofu-kimi`，它调用生产公开 `AgentRuntime`，不是旧 `tofu` 私有 benchmark loop。
+模型和 credential 留在 Harbor 宿主 agent；guest 只暴露独占的 `custom__run_command` 与
+`custom__submit_result`。运行配置必须是非密钥、内容冻结的 JSON，并与候选 release manifest 的
+arm、prompt contract、tool schema、provider/slot、thinking 和 agent revision 完全一致。
+
+```bash
+export TOFU_KIMI_PROVIDER_FACE=meituan-chat
+export TOFU_KIMI_SLOT_ID=<non-secret-shared-slot-id>
+export KIMI_CHAT_BASE_URL=<meituan-kimi-chat-base-url>
+export KIMI_API_KEY=<host-only-key>
+
+"$TOFU_EVAL_VENV/bin/python" -m evaluations.swebench run \
+  --benchmark swebench-verified \
+  --agent tofu-kimi \
+  --model kimi-k3 \
+  --reasoning-effort high \
+  --max-retries 0 \
+  --tofu-runtime-config /absolute/combined-v2-runtime.json \
+  --tofu-experiment-arm combined_v2 \
+  --task swe-bench/psf__requests-1142 \
+  --backend rootless-qemu \
+  --rootless-base-disk "$ROOTLESS_VM_BASE_DISK" \
+  --rootless-image-store "$TOFU_SWEBENCH_STORE" \
+  --rootless-qemu "$ROOTLESS_VM_QEMU" \
+  --rootless-qemu-img "$ROOTLESS_VM_QEMU_IMG" \
+  --rootless-cache-root "$TOFU_SWEBENCH_CACHE" \
+  --release-run-root /absolute/release-candidate-run \
+  --run-id tofu-kimi-requests-smoke \
+  --output-root "$TOFU_EVAL_ROOT"
+```
+
+每题保留 `events.jsonl`、`runtime-evidence.json`、`tool-audit.json` 和 ATIF。`audit` 会逐轮核对
+请求/上下文、模型与压缩 usage、cache、TTFT、prompt adoption、tool schema/call/result、终态与
+输出；任何 fallback、证据错位、密钥落盘或非 verifier 完成都会拒绝。候选的校正墙钟等于原始
+task-start→oracle-ready 墙钟，不扣除 Codex 代理 CPU。审计通过后幂等导入候选 run store：
+
+```bash
+"$TOFU_EVAL_VENV/bin/python" -m evaluations.long_agent_release \
+  export-tofu-harbor \
+  --harbor-run-dir /absolute/harbor-run \
+  --run-root /absolute/release-candidate-run
+```
+
+与基线相同，Harbor 内部 retry 固定为 0；预注册的外层失败 attempt、模型/压缩调用、付费工具和
+等待时间必须留在不可变账本，不能通过丢弃失败目录来挑选成功样本。候选 timeout/cancel 会在
+继续抛错前保存脱敏的 partial `runtime-evidence.json`；关闭 post-dispatch attempt 时必须将它作为
+`failed_attempt_runtime_evidence` artifact 保存，账本会逐项核对主调用及压缩 `modelUsages`。
 
 ## Terminal-Bench 2.1
 
-数据集固定为官方 registry 的
-`terminal-bench/terminal-bench-2-1@sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a`，
-共 89 题。默认每题运行
-5 次，与官方 leaderboard config 的 trial 形状相同，因此一个模型的全量评测是 445 个独立
-trial。先用单题、单次 smoke 验证凭据和 agent 版本：
+TB 的完整本地流程和失败分类见 [Rootless VM sandbox](../../docs/ROOTLESS_VM_SANDBOX.md)。正式
+协议必须是 89 × 5；`scripts/rootless_terminal_bench_21.py score` 只有在以下条件全部成立时才
+输出百分制最终分数：
 
-```bash
-export OPENAI_API_KEY=...
-export CODEX_EVAL_VERSION=0.125.0  # 替换为实际被测版本
+- 任务集合和固定 checkout 完全一致；
+- 每题恰好 5 个有效 trial，没有 surplus；
+- 每个有效 trial 都有 numeric verifier reward；
+- dispatch audit 证明请求只由期望模型服务；
+- 没有 reasoning/key/proxy credential 落盘。
 
-~/.cache/tofu-evals-venv/bin/python -m evaluations.swebench run \
-  --benchmark terminal-bench-2.1 \
-  --agent codex \
-  --agent-version "$CODEX_EVAL_VERSION" \
-  --reasoning-effort xhigh \
-  --model openai/gpt-5.5 \
-  --task terminal-bench/write-compressor \
-  --attempts 1 \
-  --backend singularity \
-  --secret-env OPENAI_API_KEY \
-  --run-id tb21-smoke
-```
+SIGTERM/手动停止得到的 `CancelledError` 归类为 `infrastructure_cancelled`，不计 0 分，也不伪装
+成网络失败。Agent timeout 只有在后续 verifier 给出 numeric reward 时才是可计分模型结果；
+verifier 也无结果时必须重跑。
 
-smoke 通过后，去掉 `--task` 和 `--attempts 1` 即运行固定的 89 × 5 全量协议：
+DeepSeek 公布的 V4 Flash TB 2.1 分数使用 DeepSeek Harness Minimal preset，不是 Tofu harness。
+当前 Tofu 有不同的工具 schema、提交验证、上下文恢复与超时校准；因此本地 Tofu 分数必须明确
+标为 Tofu-harness 结果，不能把两者当作同一实验。模型温度、`top_p` 和 reasoning effort 已按
+官方公开配置对齐，并不消除 harness 差异。
 
-```bash
-~/.cache/tofu-evals-venv/bin/python -m evaluations.swebench run \
-  --benchmark terminal-bench-2.1 \
-  --agent codex \
-  --agent-version "$CODEX_EVAL_VERSION" \
-  --reasoning-effort xhigh \
-  --model openai/gpt-5.5 \
-  --backend singularity \
-  --secret-env OPENAI_API_KEY \
-  --run-id tb21-codex-20260813
+## 产物和搜索隔离
 
-~/.cache/tofu-evals-venv/bin/python -m evaluations.swebench audit \
-  ~/.local/state/tofu-evals/agent-benchmarks/tb21-codex-20260813
-```
+默认产物位于仓库外。每个 root/run 目录都是 mode 0700，并自带拒绝递归的 `.gitignore` 和
+`.ignore`。若显式放进仓库，只允许 `.eval-runs/` 或 `eval-runs/`；普通源码目录会 fail closed。
+仓库自身还在 Git、项目扫描器、VS Code watcher/search、Pylance 和导出器中独立排除了
+`*_workdir`、`evaluation_results`、`sb-cli-reports`、`jobs` 和 `trials`。
 
-审计会核对固定 dataset digest、Harbor 与 benchmark 来源 commit、89 × 模型数 × 5 的基数、
-每个 `model × task` 恰好 5 个 trial、每个 trial 的结果文件，以及所有正奖励 trial 的
-`agent/trajectory.json`。runner 永远不传 Harbor 的 `--upload`，manifest 也固定记录
-`upload_enabled=false`。
+不要把这些防线理解成“日志可以含 key”。运行后仍应扫描 command、manifest、transcript、QEMU
+参数、proxy 日志和 guest 持久盘；任何 credential 命中都使该批结果无效。
 
-这能生成可复现的内部评测结果，但不等于已被官方 leaderboard 接收。Terminal-Bench 2.1
-官方仓库目前关闭社区提交，而且官方发布还包含静态检查与 reward-hacking 人工审核；本地 audit
-不能替代该审核。
+## 官方 patch 复核
 
-## 为什么本地强制串行
-
-Harbor 的 Singularity 后端使用 `--containall --pid --fakeroot --writable-tmpfs` 隔离文件系统和
-进程，但默认共享宿主网络，而且没有严格的单 trial cgroup。runner 因此强制
-`n_concurrent_trials=1`，避免两个任务的 localhost 服务和端口相互污染，并在 manifest 中明确
-记录 `network_namespace_isolation=false`、`strict_cgroup_isolation=false`。本地结果适合开发、
-回归和内部比较；若需要与官方 Daytona 环境完全一致的 leaderboard 口径，仍需使用官方环境。
-
-## 可选云后端
-
-只有确实需要云并发时才安装额外依赖：
-
-```bash
-uv pip install --python ~/.cache/tofu-evals-venv/bin/python \
-  -r evaluations/swebench/requirements-cloud.txt
-```
-
-然后显式选择 `--backend modal` 或 `--backend daytona`；核心本地安装不包含这些 SDK，也不需要
-任何云 sandbox 凭据。
-
-## 用官方 harness 复核 patch
-
-输入可以是 JSON、JSON object map 或 JSONL；每行必须有 `instance_id`、
-`model_name_or_path` 和 `model_patch`：
-
-```bash
-~/.cache/tofu-evals-venv/bin/python -m evaluations.swebench doctor \
-  --official --backend modal
-
-~/.cache/tofu-evals-venv/bin/python -m evaluations.swebench grade \
-  --predictions /absolute/path/predictions.jsonl \
-  --backend modal \
-  --run-id official-verified-20260813
-```
-
-不同 `model_name_or_path` 自动拆分到独立工作目录和独立官方 `run_id`。这样同一个
-`instance_id` 的 A/B patch 不会共享测试输出、完成标记或报告。Docker 可用时也可以指定
-`--backend docker`；预检要求 daemon 可用且至少 120 GiB 空闲空间。
-这一条是 SWE-bench 官方 patch harness 自身的限制，不影响上面的 Harbor + Apptainer agent
-rollout；官方 patch harness 当前不提供 Singularity backend。
-
-## 产物与发布边界
-
-目录结构大致如下：
-
-```text
-TOFU_EVAL_ROOT/
-  .gitignore                 # *，整个根目录拒绝 Git 收集
-  .ignore                    # *，ripgrep/项目搜索拒绝递归
-  <run-id>/
-    manifest.json            # 无密钥的来源、版本、基数和状态
-    job-config.json          # 只有 ${SECRET_NAME} 占位符
-    launcher.log
-    jobs/                    # Harbor trial、轨迹和 verifier 输出
-```
-
-不要把 `TOFU_EVAL_ROOT` 指到任意普通源码目录。若确实必须放进仓库，只允许
-`<repo>/.eval-runs/` 或 `<repo>/eval-runs/`；其他仓库内路径会被 fail-closed 预检拒绝。
-
-Harbor adapter 当前数据定义允许 agent/verifier 公网访问；本 runner 不会暗中改变上游任务
-语义。若实验要求防止联网检索答案，应先发布一份带 Harbor phase network policy 的固定数据集，
-并只允许模型 API 域名。不能把 prompt 中的“不要联网”当作网络隔离证据。
+已有 patch 的最终官方复核仍交给固定版本的 SWE-bench harness。它目前只支持 Docker 或 Modal；
+这条限制与上面的本地 agent rollout 无关。不同 `model_name_or_path` 会拆成独立 run id，避免
+官方 harness 以 `instance_id` 为键时覆盖另一模型的结果。

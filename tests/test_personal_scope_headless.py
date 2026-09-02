@@ -59,13 +59,12 @@ class PersonalScopeRegistryTest(unittest.TestCase):
         from lib.agent_core.personal_scope import resolve_preferences_enabled
         # Explicit flag wins both ways, regardless of memory.
         self.assertTrue(resolve_preferences_enabled(
-            {'preferencesEnabled': True}, memory_enabled=False))
+            {'preferencesEnabled': True}))
         self.assertFalse(resolve_preferences_enabled(
-            {'preferencesEnabled': False}, memory_enabled=True))
+            {'preferencesEnabled': False}))
         # Absent → interactive My Context stays on independently of memory.
-        self.assertTrue(resolve_preferences_enabled({}, memory_enabled=True))
-        self.assertTrue(resolve_preferences_enabled({}, memory_enabled=False))
-        self.assertTrue(resolve_preferences_enabled(None, memory_enabled=False))
+        self.assertTrue(resolve_preferences_enabled({}))
+        self.assertTrue(resolve_preferences_enabled(None))
 
 
 class HeadlessBuildersFailClosedTest(unittest.TestCase):
@@ -135,15 +134,16 @@ class PromptDescribesNoUngivenCapabilityTest(unittest.TestCase):
     did not enable — closing the hallucination half of the contract."""
 
     def _inject(self, cfg_extra: dict) -> list:
-        from lib.tasks_pkg.system_context import _inject_system_contexts
+        from lib.tasks_pkg.context_composer import compose_task_context
         messages = [{'role': 'user', 'content': 'hello'}]
         task = {'id': 't1', 'config': dict(cfg_extra)}
         memory_enabled = bool(cfg_extra.get('memoryEnabled', False))
-        _inject_system_contexts(
+        compose_task_context(
             messages,
+            user_id=1,
             project_path='', project_enabled=False,
             memory_enabled=memory_enabled,
-            search_enabled=False, swarm_enabled=False,
+            search_enabled=False,
             has_real_tools=True,
             conv_id='', task=task, model='m',
         )

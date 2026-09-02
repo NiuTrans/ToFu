@@ -23,15 +23,29 @@ _AUDIT_SYNTHETIC_REPO_PATHS = {'lib/parse.py'}
 import unittest
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
+pytestmark = pytest.mark.unit
 
-from lib.orchestration import (
-    MAX_LIST_ITEM_LEN, MAX_LIST_ITEMS, MAX_OBJECTIVE_LEN,
-    ROLE_PARAM_SCHEMA, VALID_PARAM_KINDS, render_role_brief, role_param_schema,
-    validate_definition, build_endpoint_definition, build_autopilot_definition,
+from lib.orchestration._builtin_definitions import (
+    build_autopilot_definition,
 )
+from lib.orchestration._execution_projection import render_role_brief
+from lib.orchestration._role_specs import (
+    MAX_LIST_ITEM_LEN,
+    MAX_LIST_ITEMS,
+    MAX_OBJECTIVE_LEN,
+    ROLE_PARAM_SCHEMA,
+    role_param_schema,
+)
+from lib.orchestration._validate import validate_definition
+from lib.orchestration.field_spec_contract import VALID_PARAM_KINDS
 from lib.orchestration_engine import FlowExecutor
+from tests.support.orchestration_definitions import (
+    build_verifier_loop_definition,
+)
 
 
 def _wrap(role, params):
@@ -130,7 +144,6 @@ class SchemaWellFormednessTest(unittest.TestCase):
             self.assertIn(key, keys, f'{role} missing {key}')
 
     def test_role_contracts_have_focused_physical_owners(self):
-        facade = (ROOT / 'lib/orchestration/_roles.py').read_text()
         axes = (ROOT / 'lib/orchestration/_role_axes.py').read_text()
         specs = (ROOT / 'lib/orchestration/_role_specs.py').read_text()
         personas = (ROOT / 'lib/orchestration/_role_personas.py').read_text()
@@ -143,10 +156,6 @@ class SchemaWellFormednessTest(unittest.TestCase):
         self.assertIn('get_role_model_hint', personas)
         self.assertNotIn("config.get('model_hint', 'standard')", personas)
         self.assertNotIn('ROLE_PARAM_SCHEMA = {', personas)
-        self.assertIn('from lib.orchestration._role_axes import', facade)
-        self.assertIn('from lib.orchestration._role_specs import', facade)
-        self.assertIn('from lib.orchestration._role_personas import', facade)
-        self.assertLess(facade.count('\n'), 50)
 
 
 class BackCompatTest(unittest.TestCase):
@@ -161,14 +170,17 @@ class BackCompatTest(unittest.TestCase):
         self.assertEqual(render_role_brief({'role': 'worker'}), '')
 
     def test_canonical_builders_still_valid(self):
-        for defn in (build_endpoint_definition(), build_autopilot_definition()):
+        for defn in (
+            build_verifier_loop_definition(),
+            build_autopilot_definition(),
+        ):
             v = validate_definition(defn)
             self.assertTrue(v['ok'], v['errors'])
 
     def test_canonical_builder_briefs_are_plain_objectives(self):
         # The builders set only objective → rendered brief == that objective,
-        # so the cutover changes nothing for endpoint/autopilot.
-        defn = build_endpoint_definition()
+        # so structured params do not change verifier-loop prompt rendering.
+        defn = build_verifier_loop_definition()
         for n in defn['nodes']:
             if n.get('type') == 'role':
                 self.assertEqual(render_role_brief(n),

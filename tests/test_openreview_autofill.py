@@ -47,7 +47,9 @@ class FakeBridge:
         self.tab_id = tab_id
         self.calls = []
 
-    def send_browser_command(self, cmd, params=None, timeout=20, client_id=None):
+    def send_browser_command(
+        self, cmd, params=None, timeout=20, client_id=None, owner_user_id=None,
+    ):
         self.calls.append((cmd, dict(params or {})))
         if cmd == 'list_tabs':
             return [{'id': self.tab_id, 'url': self.tab_url, 'title': 'OpenReview',
@@ -93,7 +95,7 @@ def _nlpcc_form():
 # ─── Submit-control detection ───────────────────────────────────────────
 
 def test_is_submit_control_recognizes_commit_controls():
-    from lib.paper import is_submit_control
+    from lib.paper.openreview_autofill import is_submit_control
     yes = [
         {'tag': 'button', 'text': 'Submit'},
         {'tag': 'button', 'text': 'Post Official Review'},
@@ -119,7 +121,7 @@ def test_is_submit_control_recognizes_commit_controls():
 # ─── Venue-agnostic field mapping ───────────────────────────────────────
 
 def test_classify_maps_fields_across_venue_variants():
-    from lib.paper import classify_review_form
+    from lib.paper.openreview_autofill import classify_review_form
     c1 = classify_review_form(_neurips_form())
     assert set(c1['fields']) == {'title', 'review', 'overall', 'confidence'}, c1['fields']
     assert c1['fields']['review']['selector'] == '#review'
@@ -135,7 +137,7 @@ def test_classify_maps_fields_across_venue_variants():
 
 
 def test_confidence_and_title_beat_generic_review_match():
-    from lib.paper import classify_review_form
+    from lib.paper.openreview_autofill import classify_review_form
     # "Review Title" must go to title, "Confidence" must not collapse to review.
     els = [
         {'tag': 'input', 'type': 'text', 'selector': '#rt', 'ariaLabel': 'Review Title'},
@@ -150,7 +152,7 @@ def test_confidence_and_title_beat_generic_review_match():
 
 
 def test_review_textarea_beats_short_input():
-    from lib.paper import classify_review_form
+    from lib.paper.openreview_autofill import classify_review_form
     # If both an input and a textarea claim "review", the textarea wins.
     els = [
         {'tag': 'input', 'type': 'text', 'selector': '#short', 'ariaLabel': 'Review'},
@@ -164,7 +166,7 @@ def test_review_textarea_beats_short_input():
 # ─── Value extraction from a finished review ────────────────────────────
 
 def test_extract_review_values_splits_prose_and_scores():
-    from lib.paper import extract_review_values
+    from lib.paper.openreview_autofill import extract_review_values
     review = (
         '# Review\n\n## Summary\nGood paper with solid experiments.\n\n'
         '--- FOR THE REVIEW FORM (do not paste into the review text) ---\n\n'
@@ -182,7 +184,7 @@ def test_extract_review_values_splits_prose_and_scores():
 
 
 def test_extract_review_values_skips_scale_range_takes_choice():
-    from lib.paper import extract_review_values
+    from lib.paper.openreview_autofill import extract_review_values
     # A line where the scale range appears BEFORE the chosen value.
     review = (
         'Body.\n\n--- FOR THE REVIEW FORM (do not paste into the review text) ---\n\n'
@@ -199,7 +201,11 @@ def test_extract_review_values_skips_scale_range_takes_choice():
 # ─── Fill-plan is structurally submit-free ──────────────────────────────
 
 def test_fill_plan_excludes_submit_and_has_no_submit_action():
-    from lib.paper import classify_review_form, build_fill_plan, plan_has_submit_action
+    from lib.paper.openreview_autofill import (
+        classify_review_form,
+        build_fill_plan,
+        plan_has_submit_action,
+    )
     c = classify_review_form(_neurips_form())
     plan = build_fill_plan(c, {'title': 'T', 'review': 'R', 'overall': '7', 'confidence': '4'})
     assert not plan_has_submit_action(plan), 'plan must have NO submit action'
@@ -210,7 +216,10 @@ def test_fill_plan_excludes_submit_and_has_no_submit_action():
 
 
 def test_fill_plan_skips_missing_fields_and_empty_values():
-    from lib.paper import classify_review_form, build_fill_plan
+    from lib.paper.openreview_autofill import (
+        classify_review_form,
+        build_fill_plan,
+    )
     # Form with only a review box; OA/confidence absent.
     els = [{'tag': 'textarea', 'selector': '#r', 'ariaLabel': 'Review'},
            {'tag': 'button', 'selector': '#s', 'text': 'Submit'}]
@@ -226,9 +235,11 @@ def test_fill_plan_skips_missing_fields_and_empty_values():
 # ─── End-to-end orchestration (fake bridge) ─────────────────────────────
 
 def test_orchestration_fills_and_never_touches_submit():
-    from lib.paper import autofill_openreview_review
+    from lib.paper.openreview_autofill import autofill_openreview_review
     b = FakeBridge('https://openreview.net/forum?id=ABC', _neurips_form())
-    r = autofill_openreview_review(b, {'title': 'T', 'review': 'R', 'overall': '7', 'confidence': '4'})
+    r = autofill_openreview_review(
+        b, {'title': 'T', 'review': 'R', 'overall': '7', 'confidence': '4'},
+        client_id='test-browser', owner_user_id=1)
     assert r['ok'] and r['stage'] == 'filled', r
     assert r['submit_controls_detected'] == 2
     acted = b.fill_and_click_selectors()
@@ -242,9 +253,11 @@ def test_orchestration_fills_and_never_touches_submit():
 
 
 def test_orchestration_refuses_non_openreview_tab_without_acting():
-    from lib.paper import autofill_openreview_review
+    from lib.paper.openreview_autofill import autofill_openreview_review
     b = FakeBridge('https://example.com/whatever', _neurips_form())
-    r = autofill_openreview_review(b, {'review': 'R', 'overall': '5'})
+    r = autofill_openreview_review(
+        b, {'review': 'R', 'overall': '5'},
+        client_id='test-browser', owner_user_id=1)
     assert not r['ok'] and r['stage'] == 'not_openreview', r
     # It must NOT even scan elements or fill anything on a non-OpenReview page.
     assert not any(c in ('get_interactive_elements', 'type_text', 'click_element')
@@ -254,22 +267,28 @@ def test_orchestration_refuses_non_openreview_tab_without_acting():
 
 
 def test_orchestration_refuses_when_no_form():
-    from lib.paper import autofill_openreview_review
+    from lib.paper.openreview_autofill import autofill_openreview_review
     b = FakeBridge('https://openreview.net/forum?id=Z',
                    [{'tag': 'button', 'selector': '#s', 'text': 'Submit'}])
-    r = autofill_openreview_review(b, {'review': 'R'})
+    r = autofill_openreview_review(
+        b, {'review': 'R'}, client_id='test-browser', owner_user_id=1)
     assert not r['ok'] and r['stage'] == 'no_form', r
     assert not any(c in ('type_text', 'click_element') for c, p in b.calls), b.calls
     _ok('orchestration refuses (no fill) when no review form is present')
 
 
 def test_orchestration_reports_bridge_disconnect():
-    from lib.paper import autofill_openreview_review
+    from lib.paper.openreview_autofill import autofill_openreview_review
 
     class DeadBridge:
-        def send_browser_command(self, cmd, params=None, timeout=20, client_id=None):
+        def send_browser_command(
+            self, cmd, params=None, timeout=20, client_id=None,
+            owner_user_id=None,
+        ):
             return None, 'Browser extension is not connected.'
-    r = autofill_openreview_review(DeadBridge(), {'review': 'R'})
+    r = autofill_openreview_review(
+        DeadBridge(), {'review': 'R'},
+        client_id='test-browser', owner_user_id=1)
     assert not r['ok'] and r['stage'] == 'connect', r
     _ok('orchestration surfaces a bridge-disconnect as a clean failure, not a hang')
 
@@ -291,7 +310,7 @@ def test_negative_control_defense_in_depth_submit_selector_guard():
     the action is skipped; if the collided selector is NOT in submit_controls
     (detection miss), it WOULD be emitted — so submit_controls drives exclusion.
     """
-    from lib.paper import build_fill_plan
+    from lib.paper.openreview_autofill import build_fill_plan
     # A field whose selector collides with a detected submit control.
     classified_guarded = {
         'fields': {'overall': {'selector': '#danger', 'kind': 'text', 'tag': 'input',

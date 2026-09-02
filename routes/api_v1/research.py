@@ -1,6 +1,6 @@
 """routes/api_v1/research.py — durable read path for auto-research artifacts.
 
-WHY THIS BLUEPRINT EXISTS (epic pt_a40dbd9569194b52, second half)
+WHY THIS BLUEPRINT EXISTS (, second half)
 -----------------------------------------------------------------
 Persisting the research artifacts gave them a durable home; this gives them a
 door. Without it the artifacts sat in ``paper_reports`` with no way for the
@@ -32,7 +32,7 @@ from lib.api_response import api_bad_request, api_internal_error, api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
 
-from .auth import require_auth
+from .auth import request_user_id, require_auth
 
 logger = get_logger(__name__)
 
@@ -66,7 +66,8 @@ def research_lookup():
     lang = (request.args.get('lang') or 'en').strip() or 'en'
     try:
         from lib.research.persistence import load_research_artifacts
-        artifacts = load_research_artifacts(direction, lang)
+        artifacts = load_research_artifacts(
+            direction, lang, user_id=int(request_user_id()))
     except Exception as e:
         logger.error('[api_v1.research] lookup failed for %.60s: %s',
                      direction, e, exc_info=True)
@@ -101,7 +102,8 @@ def research_list():
         limit = 50
     try:
         from lib.research.persistence import list_research_directions
-        items = list_research_directions(limit=limit)
+        items = list_research_directions(
+            user_id=int(request_user_id()), limit=limit)
     except Exception as e:
         logger.error('[api_v1.research] list failed: %s', e, exc_info=True)
         return api_internal_error('internal_error')

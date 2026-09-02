@@ -51,7 +51,6 @@ def definition_write_contract() -> dict:
         'conflictReason': 'stale_definition',
         'operations': ['replace', 'delete'],
         'conflictFields': definition_write_conflict_fields(),
-        'legacyUnguarded': True,
     }
 
 

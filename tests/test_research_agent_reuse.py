@@ -16,7 +16,7 @@ pytestmark = pytest.mark.unit
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESEARCH_VIEW_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'research-view.ts')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 @pytest.mark.parametrize('raw,expected', [
@@ -85,7 +85,8 @@ def test_survey_grounds_against_loaded_corpus_not_mutable_folder(monkeypatch):
     # evidence grounded/low-confidence (or stripped) instead of library-grade.
     monkeypatch.setattr(survey, '_library_id_set', lambda *a, **k: set())
 
-    got = survey.build_survey('direction', ['2502.00299'], folder_id='raced-away')
+    got = survey.build_survey(
+        'direction', ['2502.00299'], user_id=1, folder_id='raced-away')
     gap = got['open_gaps']['open_gaps'][0]
     assert gap['evidence_tiers']['2502.00299'] == 'library'
     assert gap['library_evidence_count'] == 1
@@ -95,13 +96,13 @@ def test_survey_grounds_against_loaded_corpus_not_mutable_folder(monkeypatch):
 
 @pytest.mark.skipif(not shutil.which('node') or not os.path.isdir(
     os.path.join(ROOT, 'node_modules', 'jsdom')) or not os.path.isfile(ESBUILD),
-    reason='node/jsdom/esbuild dev-deps not installed')
+    reason='node/jsdom/vite test bundler dev-deps not installed')
 def test_frontend_replays_agent_tools_and_renders_usage_accounting(tmp_path):
     harness = r"""
 const fs = require('fs'), path = require('path');
 const ROOT = process.argv[1];
 const {JSDOM} = require(path.join(ROOT, 'node_modules', 'jsdom'));
-const dom = new JSDOM('<body><div id="paperPdfViewer"></div></body>',
+const dom = new JSDOM('<body><div id="researchViewer"></div></body>',
                       {url:'http://localhost/'});
 global.window=global; global.document=dom.window.document;
 global.escapeHtml=(s)=>String(s == null ? '' : s);
@@ -131,7 +132,7 @@ _researchApplySnapshot(st,{status:'done',result:{accepted:[],rejected:[{}],corpu
   ]});
 _researchStream=st; _paintResearch();
 console.log(JSON.stringify({phase:st.phase,rounds:st.toolRounds,
-  html:document.getElementById('paperPdfViewer').innerHTML}));
+  html:document.getElementById('researchViewer').innerHTML}));
 """
     built = native_module_path('paper/research-view.js', RESEARCH_VIEW_TS)
     proc = subprocess.run(['node', '-e', harness, ROOT, str(built)], capture_output=True,

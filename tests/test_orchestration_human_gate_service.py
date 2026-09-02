@@ -8,7 +8,7 @@ from lib.orchestration.human_gate_service import (
     HumanGateServiceError,
     OrchestrationHumanGateService,
 )
-from lib.orchestration_mutation import (
+from lib.orchestration.mutation_result import (
     MUTATION_ACTION_APPROVE_GATE,
     MUTATION_ACTION_INPUT_GATE,
     MUTATION_NOT_FOUND,

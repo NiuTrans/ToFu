@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
+from typing import Any, Mapping
 
 from lib.agent_loop import AbortSignal, run_agent_loop
 from lib.log import audit_log, get_logger, log_context
@@ -26,6 +27,7 @@ from lib.scheduler._shared import (
 )
 
 from ._state import _active_timers, _cmd_outputs_lock, _last_cmd_outputs, _timers_lock
+from ._crud import _timer_client
 
 logger = get_logger(__name__)
 
@@ -41,7 +43,9 @@ _reconcile_audit: dict[str, dict] = {}
 _reconcile_audit_lock = threading.Lock()
 
 
-def _count_trailing_ambiguous_code_polls(timer_id: str, lookback: int = 20) -> int:
+def _count_trailing_ambiguous_code_polls(
+    timer_id: str, *, user_id: int, lookback: int = 20,
+) -> int:
     """Count consecutive most-recent `code`-tier polls whose predicate was
     ambiguous (predicate_matched=-1), reconstructed from the poll ledger.
 
@@ -49,18 +53,10 @@ def _count_trailing_ambiguous_code_polls(timer_id: str, lookback: int = 20) -> i
     rather than a dedicated column, so it survives a restart with no extra
     state. Any non-ambiguous / non-code row at the tail breaks the run.
     """
-    try:
-        from lib.database import DOMAIN_SYSTEM, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
-        rows = db.execute(
-            'SELECT tier, predicate_matched FROM timer_poll_log '
-            'WHERE timer_id=? ORDER BY id DESC LIMIT ?',
-            [timer_id, lookback]
-        ).fetchall()
-    except Exception as e:
-        logger.warning('[Timer:%s] Failed to reconstruct ambiguity streak: %s',
-                       timer_id, e, exc_info=True)
-        return 0
+    rows = _timer_client().query(
+        'timer.poll.log', {
+            'timer_id': timer_id, 'user_id': int(user_id),
+            'limit': lookback})
     streak = 0
     for r in rows:
         rd = dict(r)
@@ -82,7 +78,9 @@ def _apply_reconcile_poll(timer: dict, predicate_result, llm_ready,
     timer_id = timer['id']
     kind = timer.get('condition_kind', 'llm')
     current_streak = int(timer.get('promotion_streak', 0) or 0)
-    fallback_streak = (_count_trailing_ambiguous_code_polls(timer_id)
+    user_id = int(timer['user_id'])
+    fallback_streak = (_count_trailing_ambiguous_code_polls(
+        timer_id, user_id=user_id)
                        if kind == 'code' else 0)
 
     outcome = reconcile_and_decide(
@@ -95,41 +93,34 @@ def _apply_reconcile_poll(timer: dict, predicate_result, llm_ready,
     )
 
     # Persist promotion-streak / condition_kind transition (authoritative).
-    try:
-        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
-        now = datetime.now().isoformat()
-        if outcome.promoted:
-            db_execute_with_retry(
-                db,
-                "UPDATE timer_watchers SET condition_kind='code', "
-                "promotion_streak=?, promoted_at=?, updated_at=? WHERE id=?",
-                [outcome.new_streak, now, now, timer_id])
-            audit_log('timer_predicate_promoted', timer_id=timer_id,
-                      predicate=timer.get('condition_command', '')[:200],
-                      streak=outcome.new_streak)
-            logger.info('[Timer:%s] ✅ Predicate PROMOTED to code (streak=%d) — '
-                        'LLM drops out of future polls', timer_id, outcome.new_streak)
-        elif outcome.demoted:
-            db_execute_with_retry(
-                db,
-                "UPDATE timer_watchers SET condition_kind='hybrid', "
-                "promotion_streak=0, promoted_at='', updated_at=? WHERE id=?",
-                [now, timer_id])
-            audit_log('timer_predicate_demoted', timer_id=timer_id,
-                      predicate=timer.get('condition_command', '')[:200],
-                      reason=outcome.note[:200])
-            logger.warning('[Timer:%s] ⚠️ Predicate DEMOTED to hybrid — %s',
-                           timer_id, outcome.note)
-        elif outcome.new_streak != current_streak or outcome.new_kind != kind:
-            db_execute_with_retry(
-                db,
-                "UPDATE timer_watchers SET condition_kind=?, promotion_streak=?, "
-                "updated_at=? WHERE id=?",
-                [outcome.new_kind, outcome.new_streak, now, timer_id])
-    except Exception as e:
-        logger.error('[Timer:%s] Failed to persist reconcile transition: %s',
-                     timer_id, e, exc_info=True)
+    now = datetime.now().isoformat()
+    fields = {
+        'timer_id': timer_id, 'user_id': user_id, 'updated_at': now}
+    if outcome.promoted:
+        fields.update({'condition_kind': 'code', 'promotion_streak': outcome.new_streak,
+                       'promoted_at': now})
+    elif outcome.demoted:
+        fields.update({'condition_kind': 'hybrid', 'promotion_streak': 0,
+                       'promoted_at': ''})
+    elif outcome.new_streak != current_streak or outcome.new_kind != kind:
+        fields.update({'condition_kind': outcome.new_kind,
+                       'promotion_streak': outcome.new_streak})
+    if len(fields) > 3:
+        _timer_client(write=True).command(
+            'timer.update', fields,
+            f'timer.reconcile:{timer_id}:{uuid.uuid4().hex}')
+    if outcome.promoted:
+        audit_log('timer_predicate_promoted', timer_id=timer_id,
+                  predicate=timer.get('condition_command', '')[:200],
+                  streak=outcome.new_streak)
+        logger.info('[Timer:%s] ✅ Predicate PROMOTED to code (streak=%d) — '
+                    'LLM drops out of future polls', timer_id, outcome.new_streak)
+    elif outcome.demoted:
+        audit_log('timer_predicate_demoted', timer_id=timer_id,
+                  predicate=timer.get('condition_command', '')[:200],
+                  reason=outcome.note[:200])
+        logger.warning('[Timer:%s] ⚠️ Predicate DEMOTED to hybrid — %s',
+                       timer_id, outcome.note)
 
     with _reconcile_audit_lock:
         _reconcile_audit[timer_id] = {
@@ -181,7 +172,11 @@ def _run_check_command(check_command: str, timer_id: str) -> str:
         return f'(check command error: {e})'
 
 
-def _build_poll_tools(tools_config: dict) -> list | None:
+def _build_poll_tools(
+    tools_config: dict,
+    *,
+    owner_user_id: int,
+) -> list | None:
     """Build a tool list for the timer poll based on the stored tools_config.
 
     Returns a list of tool definitions or None if no tools should be available.
@@ -190,19 +185,15 @@ def _build_poll_tools(tools_config: dict) -> list | None:
     scheduler, swarm, memory).
     """
     try:
-        from lib.tools import (
-            CODE_EXEC_TOOL,
-            PROJECT_TOOLS,
-            READ_FILES_TOOL,
-            build_fetch_url_tool,
-            build_search_tool,
-        )
+        from lib.tools.code_exec import CODE_EXEC_TOOL
+        from lib.tools.project import PROJECT_TOOLS, READ_FILES_TOOL
+        from lib.tools.search import build_fetch_url_tool, build_search_tool
 
         tool_list = []
         project_path = tools_config.get('projectPath', '')
         project_enabled = bool(project_path)
 
-        # ★ Search + Fetch — ONLY when the timer's tools_config EXPLICITLY
+        # Search + Fetch — ONLY when the timer's tools_config EXPLICITLY
         #   enables them. A bare watcher (tools_config={}) must NOT get
         #   web_search: an ungrounded "is X done?" instruction makes cheap
         #   poll models hallucinate a query and surf the web (the 2026-06-26
@@ -214,28 +205,46 @@ def _build_poll_tools(tools_config: dict) -> list | None:
         if tools_config.get('fetchEnabled', False) or search_mode:
             tool_list.append(build_fetch_url_tool())
 
-        # ★ read_files — always on (handles relative + absolute paths)
+        # read_files — always on (handles relative + absolute paths)
         tool_list.append(READ_FILES_TOOL)
 
-        # ★ Project tools (write/grep/list/run) — only when project attached
+        # Project tools (write/grep/list/run) — only when project attached
         if project_enabled:
             tool_list.extend(PROJECT_TOOLS)
         elif tools_config.get('codeExecEnabled', False):
             tool_list.append(CODE_EXEC_TOOL)
 
-        # ★ Browser tools
+        # Browser tools
         if tools_config.get('browserEnabled', False):
             try:
-                from lib.browser import is_extension_connected
-                if is_extension_connected():
+                from lib.browser.queue import get_connected_clients
+                clients = get_connected_clients(
+                    owner_user_id=str(owner_user_id))
+                requested_client = str(
+                    tools_config.get('browserClientId') or '')
+                owned_by_id = {
+                    str(row.get('client_id') or ''): row for row in clients
+                }
+                selected = (
+                    owned_by_id.get(requested_client)
+                    if requested_client
+                    else max(
+                        clients,
+                        key=lambda row: row.get('last_poll', 0),
+                        default=None,
+                    )
+                )
+                if selected:
+                    tools_config['_resolvedBrowserClientId'] = str(
+                        selected.get('client_id') or '')
                     from lib.browser.advanced import ADVANCED_BROWSER_TOOLS
-                    from lib.tools import BROWSER_TOOLS
+                    from lib.tools.browser import BROWSER_TOOLS
                     tool_list.extend(BROWSER_TOOLS)
                     tool_list.extend(ADVANCED_BROWSER_TOOLS)
             except Exception as e:
                 logger.debug('[Timer] Browser tools skipped: %s', e)
 
-        # ★ Image generation
+        # Image generation
         if tools_config.get('imageGenEnabled', False):
             try:
                 from lib.tools.image_gen import GENERATE_IMAGE_TOOL
@@ -250,8 +259,15 @@ def _build_poll_tools(tools_config: dict) -> list | None:
         return None
 
 
-def _execute_poll_tool(tool_call: dict, timer_id: str,
-                       project_path: str) -> str:
+def _execute_poll_tool(
+    tool_call: dict,
+    timer_id: str,
+    project_path: str,
+    *,
+    owner_user_id: int,
+    browser_client_id: str = '',
+    tool_contract_documents_by_name: Mapping[str, Any] | None = None,
+) -> str:
     """Execute a single tool call within a timer poll.
 
     Uses the same _execute_tool_one dispatcher as the main agent and swarm
@@ -277,18 +293,39 @@ def _execute_poll_tool(tool_call: dict, timer_id: str,
     # Timer polls dispatch to the executor DIRECTLY, bypassing the main chat
     # dispatcher's parse_tool_calls — so they funnel through the SAME ingestion
     # seam for name-alias (WebFetch→fetch_url …), JSON decode+repair, and
-    # schema/param repair. Hallucination rejection is DISABLED here: the poll's
-    # live tool set (which may include image-gen tools whose names aren't in the
-    # built-in schema index) isn't passed to this function, so an unknown name
-    # must fall through to the executor's honest error rather than risk
-    # rejecting a legitimate poll tool. Alias resolution uses the built-in
-    # schema index (known=None) — the alias targets are all built-ins.
+    # schema/param repair. A poll created by ``poll_timer`` always supplies the
+    # exact contract map compiled from the schemas sent to the model. That map
+    # is both the live-name oracle and the final argument authority. ``None``
+    # remains an explicit read-compatible adapter for direct legacy callers;
+    # it is deliberately different from an empty v2 map, which rejects all
+    # calls.
     try:
         from lib.tool_input_repair import ingest_tool_call as _ingest
-        _ing = _ingest(tool_call, reject_hallucinated=False)
+        _v2_epoch = tool_contract_documents_by_name is not None
+        _ing = _ingest(
+            tool_call,
+            known_tools=(set(tool_contract_documents_by_name)
+                         if _v2_epoch else None),
+            conv_id=timer_id,
+            reject_hallucinated=_v2_epoch,
+            contract_documents_by_name=tool_contract_documents_by_name,
+        )
     except Exception as _ie:
-        logger.warning('[Timer:%s] tool-call ingestion failed (dispatching raw): %s',
-                        timer_id, _ie)
+        if tool_contract_documents_by_name is not None:
+            logger.error(
+                '[Timer:%s] tool-call ingestion failed inside v2 epoch; '
+                'rejecting without execution: %s', timer_id, _ie,
+                exc_info=True)
+            return (
+                'ERROR: Tool call was NOT executed. '
+                '[tool_contract_ingest_failed] The current execution contract '
+                'could not validate this call. Retry with a currently visible '
+                'tool or report the failure.',
+                time.time() - t0,
+                True,
+            )
+        logger.warning('[Timer:%s] legacy tool-call ingestion failed '
+                       '(dispatching raw): %s', timer_id, _ie)
         _ing = None
 
     if _ing is not None and _ing.dropped:
@@ -320,7 +357,7 @@ def _execute_poll_tool(tool_call: dict, timer_id: str,
         from lib.tasks_pkg.executor import _execute_tool_one
 
         # Build minimal task proxy — no SSE events needed for timer polls.
-        # ★ _suppressEvents: tool handlers call _finalize_tool_round →
+        # _suppressEvents: tool handlers call _finalize_tool_round →
         #   append_event. There is NO SSE consumer for a poll (the UI renders
         #   the per-poll timeline from tool_trace instead), and this proxy is
         #   NOT registered in _chat_runtime, so without suppression every
@@ -341,7 +378,11 @@ def _execute_poll_tool(tool_call: dict, timer_id: str,
             'toolRounds': [],
             'phase': None,
             '_suppressEvents': True,
+            '_userId': int(owner_user_id),
         }
+        if tool_contract_documents_by_name is not None:
+            task_proxy['_toolContractDocumentsByName'] = dict(
+                tool_contract_documents_by_name)
 
         tc_id = tool_call.get('id', uuid.uuid4().hex[:8])
         round_entry = {
@@ -351,7 +392,13 @@ def _execute_poll_tool(tool_call: dict, timer_id: str,
             'status': 'searching',
             'toolName': fn_name,
         }
-        cfg = {'model': '', 'thinking_enabled': False, 'search_mode': 'multi'}
+        cfg = {
+            'model': '',
+            'thinking_enabled': False,
+            'search_mode': 'multi',
+            'userId': int(owner_user_id),
+            'browserClientId': str(browser_client_id or ''),
+        }
         project_enabled = bool(project_path)
 
         _, tool_content, _ = _execute_tool_one(
@@ -375,7 +422,9 @@ def _execute_poll_tool(tool_call: dict, timer_id: str,
         return f'Tool error ({fn_name}): {type(e).__name__}: {e}', elapsed, True
 
 
-def poll_timer(timer_id: str) -> tuple[bool, str, int, bool, bool, str, str, list, str]:
+def poll_timer(
+    timer_id: str, *, user_id: int,
+) -> tuple[bool, str, int, bool, bool, str, str, list, str]:
     """Run a single independent poll for a timer.
 
     The poll runs as a mini-agent loop with tool access:
@@ -419,7 +468,7 @@ def poll_timer(timer_id: str) -> tuple[bool, str, int, bool, bool, str, str, lis
     # lived in one module.
     import lib.scheduler.timer as _timer_pkg
 
-    timer = _timer_pkg._get_timer_row(timer_id)
+    timer = _timer_pkg._get_timer_row(timer_id, user_id=user_id)
     if not timer or timer['status'] != 'active':
         return False, 'Timer no longer active', 0, False, False, '', '', [], ''
 
@@ -461,14 +510,39 @@ def poll_timer(timer_id: str) -> tuple[bool, str, int, bool, bool, str, str, lis
             _last_cmd_outputs[timer_id] = cmd_output
 
     # ── Build tool list from timer's tools_config ────────────────────
+    raw_tools_config = timer.get('tools_config', {})
     try:
-        tools_config = json.loads(timer.get('tools_config', '{}') or '{}')
-    except (json.JSONDecodeError, TypeError) as e:
+        tools_config = (
+            dict(raw_tools_config)
+            if isinstance(raw_tools_config, dict)
+            else json.loads(raw_tools_config or '{}')
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
         logger.debug('[Timer:%s] Failed to parse tools_config: %s', timer_id, e)
         tools_config = {}
 
-    poll_tools = _build_poll_tools(tools_config)
+    poll_tools = _build_poll_tools(
+        tools_config, owner_user_id=int(user_id))
+    # Freeze one exact schema/authority epoch for the whole poll. Compilation
+    # is deterministic and makes no model call. If it ever fails, remove the
+    # tool surface and retain an empty v2 map so a provider-side phantom call
+    # cannot fall through to the executor.
+    try:
+        from lib.tools.contracts import compile_execution_contract_documents
+        poll_tool_contracts = compile_execution_contract_documents(
+            poll_tools or (), namespace='timer')
+    except Exception as e:
+        logger.error(
+            '[Timer:%s] Failed to compile poll ToolContractV2 epoch; '
+            'disabling tools for this poll: %s', timer_id, e, exc_info=True)
+        audit_log(
+            'timer_tool_contract_compile_failed', timer_id=timer_id,
+            owner_user_id=int(user_id), error=type(e).__name__)
+        poll_tools = None
+        poll_tool_contracts = {}
     project_path = tools_config.get('projectPath', '')
+    browser_client_id = str(
+        tools_config.get('_resolvedBrowserClientId') or '')
 
     # ── Build initial messages ───────────────────────────────────────
     user_content_parts = [f'CHECK INSTRUCTION:\n{check_instruction}']
@@ -535,7 +609,14 @@ def poll_timer(timer_id: str) -> tuple[bool, str, int, bool, bool, str, str, lis
     def _poll_execute(rnd, tc):
         tc_id = tc.get('id', uuid.uuid4().hex[:8])
         _fn = tc.get('function', {})
-        result, _elapsed, _is_err = _timer_pkg._execute_poll_tool(tc, timer_id, project_path)
+        result, _elapsed, _is_err = _timer_pkg._execute_poll_tool(
+            tc,
+            timer_id,
+            project_path,
+            owner_user_id=int(user_id),
+            browser_client_id=browser_client_id,
+            tool_contract_documents_by_name=poll_tool_contracts,
+        )
         # Record a timeline entry so the UI can show the poll's tool activity
         # (name + brief args + duration + ok/error), the same shape the swarm
         # panel renders per sub-agent. The brief is name-keyed (path/query/url
@@ -612,7 +693,7 @@ def poll_timer(timer_id: str) -> tuple[bool, str, int, bool, bool, str, str, lis
 def _record_poll(timer_id: str, decision: str, reason: str,
                  tokens_used: int, check_output: str = '',
                  model: str = '', poll_id: str = '',
-                 raw_output: str = '') -> None:
+                 raw_output: str = '', *, user_id: int) -> None:
     """Write a poll decision to the timer_poll_log table.
 
     ``poll_id`` is a stable per-poll identifier (``{timer_id}.p{N}``) so a
@@ -629,63 +710,49 @@ def _record_poll(timer_id: str, decision: str, reason: str,
     _tier = _audit['tier'] if _audit else 'llm'
     _pred_matched = _audit['predicate_matched'] if _audit else -1
     _llm_agreed = _audit['llm_agreed'] if _audit else -1
-    try:
-        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
-        now = datetime.now().isoformat()
-        db_execute_with_retry(
-            db,
-            '''INSERT INTO timer_poll_log
-               (timer_id, poll_time, decision, reason, check_output, tokens_used,
-                model, poll_id, raw_output, tier, predicate_matched, llm_agreed)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            [timer_id, now, decision, reason[:500], check_output[:5000], tokens_used,
-             (model or '')[:120], (poll_id or '')[:80], (raw_output or '')[:5000],
-             _tier, _pred_matched, _llm_agreed]
-        )
-    except Exception as e:
-        logger.warning('[Timer:%s] Failed to record poll: %s', timer_id, e, exc_info=True)
+    result = _timer_client(write=True).command(
+        'timer.poll.commit', {
+            'timer_id': timer_id, 'user_id': int(user_id),
+            'poll_time': datetime.now().isoformat(),
+            'decision': decision, 'reason': reason,
+            'check_output': check_output, 'tokens_used': tokens_used,
+            'model': model, 'poll_id': poll_id, 'raw_output': raw_output,
+            'tier': _tier, 'predicate_matched': _pred_matched,
+            'llm_agreed': _llm_agreed,
+        }, f'timer.poll:{timer_id}:{poll_id or uuid.uuid4().hex}')
+    if result.get('advanced'):
+        from ._notify import notify_timer_changed
+        notify_timer_changed('progress', user_id=user_id)
 
 
-def _increment_poll_count(timer_id: str, decision: str, reason: str) -> None:
+def _increment_poll_count(
+    timer_id: str, decision: str, reason: str, *, user_id: int,
+) -> None:
     """Update the timer's poll count and last-poll fields in DB."""
-    changed = False
-    try:
-        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
-        now = datetime.now().isoformat()
-        cursor = db_execute_with_retry(
-            db,
-            '''UPDATE timer_watchers
-               SET poll_count=poll_count+1, last_poll_at=?, last_poll_decision=?,
-                   last_poll_reason=?, updated_at=?
-               WHERE id=?''',
-            [now, decision, reason[:500], now, timer_id], return_cursor=True,
-        )
-        changed = cursor.rowcount > 0
-    except Exception as e:
-        logger.warning('[Timer:%s] Failed to increment poll count: %s', timer_id, e, exc_info=True)
+    now = datetime.now().isoformat()
+    changed = bool(_timer_client(write=True).command(
+        'timer.progress', {
+            'timer_id': timer_id, 'user_id': int(user_id),
+            'poll_time': now, 'decision': decision, 'reason': reason,
+        }, f'timer.progress:{timer_id}:{uuid.uuid4().hex}').get('changed'))
     if changed:
         from ._notify import notify_timer_changed
-        notify_timer_changed('progress')
+        notify_timer_changed('progress', user_id=user_id)
 
 
-def _mark_exhausted(timer_id: str) -> None:
+def _mark_exhausted(timer_id: str, *, user_id: int) -> bool:
     """Mark a timer as exhausted (max_polls reached)."""
-    changed = False
     try:
-        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
-        now = datetime.now().isoformat()
-        cursor = db_execute_with_retry(
-            db,
-            "UPDATE timer_watchers SET status='exhausted', updated_at=? "
-            "WHERE id=? AND status='active'",
-            [now, timer_id], return_cursor=True,
-        )
-        changed = cursor.rowcount > 0
+        result = _timer_client(write=True).command(
+            'timer.update', {'timer_id': timer_id, 'user_id': int(user_id),
+                             'status': 'exhausted',
+                             'updated_at': datetime.now().isoformat(),
+                             'expected_status': 'active'},
+            f'timer.exhausted:{timer_id}:{uuid.uuid4().hex}')
+        changed = bool(result.get('changed'))
     except Exception as e:
         logger.warning('[Timer:%s] Failed to mark exhausted: %s', timer_id, e, exc_info=True)
+        return False
     with _timers_lock:
         _active_timers.pop(timer_id, None)
     with _cmd_outputs_lock:
@@ -694,25 +761,22 @@ def _mark_exhausted(timer_id: str) -> None:
         _reconcile_audit.pop(timer_id, None)
     if changed:
         from ._notify import notify_timer_changed
-        notify_timer_changed('exhausted')
+        notify_timer_changed('exhausted', user_id=user_id)
+    return changed
 
 
-def _mark_expired(timer_id: str) -> None:
+def _mark_expired(timer_id: str, *, user_id: int) -> bool:
     """Mark a timer as expired (over-age zombie auto-retired on resume)."""
-    changed = False
     try:
-        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
         now = datetime.now().isoformat()
-        cursor = db_execute_with_retry(
-            db,
-            "UPDATE timer_watchers SET status='expired', updated_at=? "
-            "WHERE id=? AND status='active'",
-            [now, timer_id], return_cursor=True,
-        )
-        changed = cursor.rowcount > 0
+        changed = bool(_timer_client(write=True).command(
+            'timer.update', {'timer_id': timer_id, 'user_id': int(user_id),
+                             'status': 'expired',
+                             'updated_at': now, 'expected_status': 'active'},
+            f'timer.expired:{timer_id}:{uuid.uuid4().hex}').get('changed'))
     except Exception as e:
         logger.warning('[Timer:%s] Failed to mark expired: %s', timer_id, e, exc_info=True)
+        return False
     with _timers_lock:
         _active_timers.pop(timer_id, None)
     with _cmd_outputs_lock:
@@ -721,43 +785,5 @@ def _mark_expired(timer_id: str) -> None:
         _reconcile_audit.pop(timer_id, None)
     if changed:
         from ._notify import notify_timer_changed
-        notify_timer_changed('expired')
-
-
-def _mark_orphaned(timer_id: str) -> None:
-    """Retire an orphaned INLINE timer on resume (distinct terminal state).
-
-    An ``origin='inline'`` timer is parent-blocking: its life is bound to the
-    in-memory parent task that created it via ``timer_create``. That task dies
-    with the process, so on the next boot an ``active`` inline row has no live
-    parent — it is an ORPHAN. Retiring it to ``'orphaned'`` (NOT ``'expired'``,
-    which means over-age zombie) stops ``resume_active_timers`` from re-spawning
-    it as a background injector, which is what floated abandoned conversations
-    to the top of the sidebar (via ``_execute_continuation`` →
-    ``notify_conv_changed``). The frontend already renders this via the
-    ``_timerOrphaned`` badge ("task interrupted, timer still active in
-    background") — here we make that the DB truth: the timer is done.
-    """
-    changed = False
-    try:
-        from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
-        db = get_thread_db(DOMAIN_SYSTEM)
-        now = datetime.now().isoformat()
-        cursor = db_execute_with_retry(
-            db,
-            "UPDATE timer_watchers SET status='orphaned', updated_at=? "
-            "WHERE id=? AND status='active'",
-            [now, timer_id], return_cursor=True,
-        )
-        changed = cursor.rowcount > 0
-    except Exception as e:
-        logger.warning('[Timer:%s] Failed to mark orphaned: %s', timer_id, e, exc_info=True)
-    with _timers_lock:
-        _active_timers.pop(timer_id, None)
-    with _cmd_outputs_lock:
-        _last_cmd_outputs.pop(timer_id, None)
-    with _reconcile_audit_lock:
-        _reconcile_audit.pop(timer_id, None)
-    if changed:
-        from ._notify import notify_timer_changed
-        notify_timer_changed('orphaned')
+        notify_timer_changed('expired', user_id=user_id)
+    return changed

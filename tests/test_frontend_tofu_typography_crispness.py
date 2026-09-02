@@ -54,7 +54,7 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 CSS = os.path.join(ROOT, 'static', 'styles.css')
-FONT_CSS = os.path.join(ROOT, 'static', 'vendor', 'google-fonts-local.css')
+FONT_CSS = os.path.join(ROOT, 'frontend', 'src', 'styles', 'fonts.css')
 
 
 def _read(path: str) -> str:
@@ -202,7 +202,7 @@ def test_inter_is_self_hosted():
     assert any('.woff2' in b for b in inter), (
         'Inter @font-face does not reference a self-hosted woff2 file')
     for name in ('Inter-latin.woff2',):
-        assert os.path.exists(os.path.join(ROOT, 'static', 'vendor', 'fonts', name)), (
+        assert os.path.exists(os.path.join(ROOT, 'frontend', 'src', 'styles', 'fonts', name)), (
             f'self-hosted Inter font file missing: {name}')
 
 

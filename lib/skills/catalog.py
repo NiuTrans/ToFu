@@ -9,16 +9,17 @@ fetch it from (``download_url``, a ``.zip`` over HTTPS) plus the metadata
 needed to render and install it. Install flow:
 
 1. User clicks \u201cInstall\u201d on a card.
-2. Backend downloads the zip to memory (bounded by
-   :data:`lib.skills.installer._MAX_BYTES`).
+2. Backend streams the zip into a bounded in-memory buffer.
 3. :func:`lib.skills.installer.install_skill_package` extracts it.
 
-Adding entries: append to :data:`CATALOG` at the bottom of this file. Only
-``id`` / ``name`` / ``description`` / ``download_url`` are required.
+Adding entries requires an immutable HTTPS revision URL plus a canonical
+selected-package SHA-256. Moving branch URLs are rejected at import time.
 """
 
 from __future__ import annotations
 
+import copy
+import re
 from typing import TypedDict
 
 from lib.log import get_logger
@@ -47,6 +48,10 @@ class SkillCatalogEntry(TypedDict, total=False):
                             # archive (e.g. 'skills/pptx'). Without this,
                             # a mono-repo zip installs whichever SKILL.md
                             # the walker reaches first.
+    source_revision: str    # immutable upstream commit/release identifier
+    content_sha256: str     # canonical selected-package digest
+    installable: bool       # false when product resource budgets reject it
+    unavailable_reason: str
 
 
 # \u2500\u2500 Categories \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -65,12 +70,36 @@ CATEGORIES = [
 ]
 
 
+# Immutable archive identities. Keep revisions beside URLs so source review
+# never has to trust an import-time rewrite of a moving branch.
+_ANTHROPIC_REVISION = '3b3fad96af16a10759d930941b4520ba0c40edae'
+_ANTHROPIC_ZIP = (
+    f'https://codeload.github.com/anthropics/skills/zip/{_ANTHROPIC_REVISION}')
+_OPENCLAW_REVISION = '73dab669ba7e293d162fad30620b05393ea9fc06'
+_OPENCLAW_ZIP = (
+    f'https://codeload.github.com/win4r/OpenClaw-Skill/zip/'
+    f'{_OPENCLAW_REVISION}')
+_FLYAI_REVISION = 'f89974d2bd4822e79cf16d1906c9c2a7c900f979'
+_FLYAI_ZIP = (
+    f'https://codeload.github.com/alibaba-flyai/flyai-skill/zip/'
+    f'{_FLYAI_REVISION}')
+_HYPERFRAMES_REVISION = '17ead629d010f7e5495f645d46fafd6876482c32'
+_HYPERFRAMES_ZIP = (
+    f'https://codeload.github.com/vibe-motion/auto-motion/zip/'
+    f'{_HYPERFRAMES_REVISION}')
+_SOURCE_REVISION_BY_URL = {
+    _ANTHROPIC_ZIP: _ANTHROPIC_REVISION,
+    _OPENCLAW_ZIP: _OPENCLAW_REVISION,
+    _FLYAI_ZIP: _FLYAI_REVISION,
+    _HYPERFRAMES_ZIP: _HYPERFRAMES_REVISION,
+}
+
+
 # \u2500\u2500 Curated Catalog \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 #
-# All download URLs should point to a `.zip` that unzips to either
-# `<name>/SKILL.md` or `<name>/<name>/SKILL.md` (both wrappers auto-handled
-# by the installer).  GitHub release assets and `codeload.github.com`
-# refs are both fine.
+# Every download URL resolves to a zip with one unambiguous package root, or
+# an entry supplies an exact ``subdir`` for selective extraction. GitHub
+# codeload commit archives and immutable release assets are both supported.
 
 CATALOG: list[SkillCatalogEntry] = [
 
@@ -82,7 +111,7 @@ CATALOG: list[SkillCatalogEntry] = [
         'description': 'Anthropic\u2019s scaffolding skill \u2014 lets the agent write new SKILL.md packages following best practices.',
         'icon': '\U0001f9ea',
         'category': CAT_CODE,
-        'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
+        'download_url': _ANTHROPIC_ZIP,
         'homepage': 'https://github.com/anthropics/skills/tree/main/skills/skill-creator',
         'subdir': 'skills/skill-creator',
         'author': 'Anthropic',
@@ -94,7 +123,7 @@ CATALOG: list[SkillCatalogEntry] = [
         'description': 'Create, read, and edit Word documents with full formatting \u2014 styles, tables, images.',
         'icon': '\U0001f4dd',
         'category': CAT_DOCS,
-        'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
+        'download_url': _ANTHROPIC_ZIP,
         'homepage': 'https://github.com/anthropics/skills/tree/main/skills/docx',
         'subdir': 'skills/docx',
         'author': 'Anthropic',
@@ -108,7 +137,7 @@ CATALOG: list[SkillCatalogEntry] = [
         'description': 'Read and write Excel workbooks with formulas, charts, and conditional formatting.',
         'icon': '\U0001f4ca',
         'category': CAT_DOCS,
-        'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
+        'download_url': _ANTHROPIC_ZIP,
         'homepage': 'https://github.com/anthropics/skills/tree/main/skills/xlsx',
         'subdir': 'skills/xlsx',
         'author': 'Anthropic',
@@ -122,7 +151,7 @@ CATALOG: list[SkillCatalogEntry] = [
         'description': 'Extract, annotate, and generate PDFs with forms and tables preserved.',
         'icon': '\U0001f4c4',
         'category': CAT_DOCS,
-        'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
+        'download_url': _ANTHROPIC_ZIP,
         'homepage': 'https://github.com/anthropics/skills/tree/main/skills/pdf',
         'subdir': 'skills/pdf',
         'author': 'Anthropic',
@@ -134,7 +163,7 @@ CATALOG: list[SkillCatalogEntry] = [
         'description': 'Build, edit, and read PowerPoint decks \u2014 create from scratch (pptxgenjs) or from a template, with design-quality guidance and visual QA.',
         'icon': '\U0001f3a5',
         'category': CAT_DOCS,
-        'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
+        'download_url': _ANTHROPIC_ZIP,
         'homepage': 'https://github.com/anthropics/skills/tree/main/skills/pptx',
         'subdir': 'skills/pptx',
         'author': 'Anthropic',
@@ -149,7 +178,7 @@ CATALOG: list[SkillCatalogEntry] = [
         'description': 'Build polished Claude artifacts (HTML/React/SVG) with Anthropic\u2019s recommended layout patterns.',
         'icon': '\U0001f3a8',
         'category': CAT_CREATIVE,
-        'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
+        'download_url': _ANTHROPIC_ZIP,
         'homepage': 'https://github.com/anthropics/skills/tree/main/skills/web-artifacts-builder',
         'subdir': 'skills/web-artifacts-builder',
         'author': 'Anthropic',
@@ -161,7 +190,7 @@ CATALOG: list[SkillCatalogEntry] = [
         'description': 'Write end-to-end browser tests with Playwright inside a skill-driven workflow.',
         'icon': '\U0001f9ea',
         'category': CAT_CODE,
-        'download_url': 'https://codeload.github.com/anthropics/skills/zip/refs/heads/main',
+        'download_url': _ANTHROPIC_ZIP,
         'homepage': 'https://github.com/anthropics/skills/tree/main/skills/webapp-testing',
         'subdir': 'skills/webapp-testing',
         'author': 'Anthropic',
@@ -177,7 +206,7 @@ CATALOG: list[SkillCatalogEntry] = [
         'description': 'Reference skill package demonstrating OpenClaw AgentSkills format (metadata gating, installer specs).',
         'icon': '\U0001f43e',
         'category': CAT_CODE,
-        'download_url': 'https://codeload.github.com/win4r/OpenClaw-Skill/zip/refs/heads/main',
+        'download_url': _OPENCLAW_ZIP,
         'homepage': 'https://github.com/win4r/OpenClaw-Skill',
         'author': 'win4r (community)',
         'tags': ['openclaw', 'template', 'agentskills'],
@@ -200,7 +229,7 @@ CATALOG: list[SkillCatalogEntry] = [
 # able to obtain credentials. Fliggy qualifies (self-service key, no company
 # verification); Ctrip and Meituan do not — corporate onboarding only, and the
 # owner decided 2026-07-27 not to pursue it (option C, ticket
-# pt_6dcdc44482de4fe7 CLOSED). The full rationale and the reopen condition live
+#  CLOSED). The full rationale and the reopen condition live
 # next to the MCP-side entries in lib/mcp/registry.py; do not add cards for
 # them here either — test_no_dead_card_for_a_business_gated_vendor scans THIS
 # catalogue too, precisely because a vendor may ship in either shape.
@@ -212,7 +241,7 @@ CATALOG += [
         'description': '阿里飞猪官方出行 skill：机票/火车/酒店/景点/演出的自然语言搜索，直连飞猪实时库存，结果自带可预订链接。零配置可用，填 API Key 后结果更完整。',
         'icon': '🐷',
         'category': CAT_PRODUCTIVITY,
-        'download_url': 'https://codeload.github.com/alibaba-flyai/flyai-skill/zip/refs/heads/main',
+        'download_url': _FLYAI_ZIP,
         'homepage': 'https://github.com/alibaba-flyai/flyai-skill',
         'subdir': 'skills/flyai',
         'author': 'Alibaba Fliggy',
@@ -228,13 +257,12 @@ CATALOG += [
 #
 # The six AgentSkills packs bundled by vibe-motion/auto-motion (the
 # workflow tofu's motion-video pipeline absorbs — see
-# docs/MOTION_VIDEO_DESIGN.md). All install from the same mono-repo zip;
+# docs/modules/ingest_media.md). All install from the same mono-repo zip;
 # ``subdir`` picks the pack. The render toolchain itself (node /
 # hyperframes CLI / ffmpeg / Chrome) is bootstrapped by the
 # ``motion_video_env_check`` tool — these packs are pure KNOWLEDGE
 # (composition contract, motion rules, design presets, workflow agents).
 
-_HYPERFRAMES_ZIP = 'https://codeload.github.com/vibe-motion/auto-motion/zip/refs/heads/main'
 _HYPERFRAMES_SKILLS_PREFIX = 'exampleFolder/.claude/skills'
 
 CATALOG += [
@@ -321,13 +349,71 @@ CATALOG += [
 
 # \u2500\u2500 Lookup helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
-_CATALOG_INDEX: dict[str, SkillCatalogEntry] = {e['id']: e for e in CATALOG}
+_CONTENT_SHA256_BY_ID = {
+    'skill-creator': 'c6ba7c16cc662ffd7cfe81a66079cf7376e88f7f0f51094da214fae30d3af032',
+    'docx-skill': 'b863c828a5272ffd5b2fd9fc6cbd8004217fdc42cb050c5015c0881e9d3023af',
+    'xlsx-skill': '263d3e7635ea8c1b4133acd5fd1add8b9f8897f1f75ea9592953d3fe6045ac37',
+    'pdf-skill': 'd9a070202fe59ea9c65c4ae5a5fc0839028c73bea0dd0826baa5ae570e2fc597',
+    'pptx-skill': '7d0814e808b46791436f59865f4b6fcba044562619e93b71fb2e32618080af8c',
+    'artifacts-builder': 'aba441b53ea102937082c912ef572d4d2a18441d56fdae6fbbcb90a35ef56a3f',
+    'webapp-testing': '33030bf51f9747af04995b9bcc22387b77d229bd341514cd9cfbb91cf1ce64d1',
+    'openclaw-skill-starter': 'b4d0d841ecb1fc559a61eba3c40215a3a38fa98d40ca35416ab96ffb8a5ff09e',
+    'flyai': 'baa0ed6a37044afe73db0466ce18933628a6a581cc1f0cd4384ef86c18f09c9e',
+    'hyperframes': 'b27ac4a7c4ca7aeca6c99c04b1a83d2ef5b458ae3535c76a070834a9aff0784b',
+    'hyperframes-motion': '331b487d39fcbc3de2432b8c5fad780d2abaf2a99b268f0d733bedc47cad7b48',
+    'hyperframes-design': '5bf3229d59cb75df79587d7e6764bd9b953242f962afc5b2cf45a725f35606dc',
+    'motion-graphics': '322d75b3c4336ce232253bb0ab82ab7828466e69ea57bed7a2cd11e509ec9914',
+    'general-video': 'c107cf7cb9d99db68c6cfeeb8be99c335b499a6b00db3077bb0541ce3bcf92ba',
+    'vibe-image-gen': 'e9af29a0a2643d951cb67d32f4fb9a74e6891f917098d54fda6bfe8faae4deba',
+}
+
+
+def _seal_catalog() -> None:
+    """Convert human-authored cards into immutable install identities."""
+    seen: set[str] = set()
+    for entry in CATALOG:
+        skill_id = str(entry.get('id') or '')
+        if not skill_id or skill_id in seen:
+            raise RuntimeError(
+                f'invalid or duplicate skill catalog id: {skill_id!r}')
+        seen.add(skill_id)
+        url = str(entry.get('download_url') or '')
+        revision = _SOURCE_REVISION_BY_URL.get(url, '')
+        digest = _CONTENT_SHA256_BY_ID.get(skill_id, '')
+        if (not re.fullmatch(r'[0-9a-f]{40}', revision)
+                or revision not in url
+                or not re.fullmatch(r'[0-9a-f]{64}', digest)):
+            raise RuntimeError(f'unsealed skill catalog entry: {skill_id}')
+        entry['source_revision'] = revision
+        entry['content_sha256'] = digest
+        entry.setdefault('installable', True)
+
+    # This selected package is about 40 MiB unpacked. Keep the 25 MiB
+    # personal-computer budget instead of silently granting one exception.
+    oversized = next(
+        entry for entry in CATALOG if entry['id'] == 'hyperframes-motion')
+    oversized['installable'] = False
+    oversized['unavailable_reason'] = (
+        'Selected package exceeds the 25 MiB installed-skill budget.')
+
+
+_seal_catalog()
+
+# Runtime installation reads a sealed copy rather than the human-authored
+# module list. Even an accidental in-process mutation of exported ``CATALOG``
+# cannot retarget a catalog id after startup.
+_SEALED_CATALOG: tuple[SkillCatalogEntry, ...] = tuple(
+    copy.deepcopy(entry) for entry in CATALOG)
+_CATALOG_INDEX: dict[str, SkillCatalogEntry] = {
+    entry['id']: copy.deepcopy(entry) for entry in _SEALED_CATALOG
+}
 
 
 def get_catalog() -> list[SkillCatalogEntry]:
-    """Return the full curated catalog."""
-    return list(CATALOG)
+    """Return request-owned values so annotations cannot mutate globals."""
+    return [copy.deepcopy(entry) for entry in _SEALED_CATALOG]
 
 
 def get_catalog_entry(skill_id: str) -> SkillCatalogEntry | None:
-    return _CATALOG_INDEX.get(skill_id)
+    entry = _CATALOG_INDEX.get(skill_id)
+    return copy.deepcopy(entry) if entry is not None else None

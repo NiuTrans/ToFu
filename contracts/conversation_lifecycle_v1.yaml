@@ -1,0 +1,79 @@
+contract: tofu.conversation-lifecycle/v1
+responsibility: >-
+  Owner-scoped header lifecycle outside Conversation Sync v3 turn commands.
+
+identity:
+  owner: positive integer user_id from the authenticated request principal
+  conversation: opaque globally unique string, maximum 256 characters
+
+authorities:
+  active:
+    header: storage_conversations
+    turns: storage_conversation_turns
+    attempts: storage_generation_attempts
+  trash:
+    header: storage_conversation_trash
+    turns: storage_conversation_trash_turns
+    executable: false
+    retentionMs: 2592000000
+
+operations:
+  delete:
+    http: DELETE /api/v1/conversations/{conversationId}
+    storage: conversation.delete
+    transition: active -> trash
+    atomic: true
+    precondition: all in-process work is synchronously marked aborted
+    effects:
+      - active header and turns become unreachable in the committing transaction
+      - pending and running trashed turns settle as interrupted
+      - attempts, attempt events, queues, timers, and sync replay state are removed
+      - scheduled work targeting the conversation is disabled
+      - immutable search fragments and compaction archives remain detached for restore
+  restore:
+    http: POST /api/v1/conversations/{conversationId}/restore
+    storage: conversation.restore
+    transition: trash -> active
+    atomic: true
+    effects:
+      - original header timestamps, settings, turn graph, and compaction history return
+      - runtime task and attempt latches never return
+      - conversation revision advances so stale clients must rehydrate
+  clone:
+    http: POST /api/v1/conversations/{conversationId}/clone
+    storage: conversation.clone
+    transition: active -> new_active
+    atomic: true
+    precondition: every source turn is terminal
+    request:
+      conversationId: client-generated destination identity
+      title: non-empty destination title
+    effects:
+      - the complete turn graph and compaction history are copied server-side
+      - turn, archive, and historical task identities are remapped
+      - attempts, live latches, approvals, and executable run identity are not copied
+      - the browser never uploads a message array
+  purge:
+    http: null
+    storage: conversation.purge
+    transition: active_or_trash -> absent
+    purpose: explicit maintenance and isolated test cleanup only
+  retentionPrune:
+    http: null
+    storage: conversation.trash.prune
+    order: deleted_at_ms ascending
+    boundedBy: max_conversations
+
+client:
+  optimisticDelete: local tab only
+  undoOfferedAfterCommit: true
+  crossTabFrames: post-commit invalidation hints only
+  restoreProjection: authoritative v3 snapshot
+  cloneProjection: authoritative v3 snapshot
+
+forbidden:
+  - hydrating a full browser transcript before delete
+  - restoring by PUT or settings patch from a browser snapshot
+  - cloning with JSON serialization of browser messages
+  - exposing purge through the ordinary conversation HTTP surface
+  - reusing source attempt or task identity in a clone

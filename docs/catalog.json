@@ -1,0 +1,139 @@
+{
+  "version": 1,
+  "policy": {
+    "history": "Git history is the archive; completed plans, incident reports, and point-in-time audits do not remain in docs/.",
+    "authority": "Authority documents describe the running system and are updated in the same change as their contracts.",
+    "reference": "Reference documents may explain one implemented domain but may not redefine a canonical contract.",
+    "generated": "Generated documents are never hand-edited and must name their generator.",
+    "maximum_lines_by_group": {
+      "authority": 1200,
+      "domain_maps": 220,
+      "developer_guides": 450,
+      "operator_guides": 700,
+      "compliance": 180,
+      "generated": 200
+    }
+  },
+  "contracts": [
+    {
+      "path": "contracts/api_v4.yaml",
+      "guard": "tests/test_api_v4_contract.py",
+      "generator": "scripts/gen_api_v4_contract.py"
+    },
+    {
+      "path": "contracts/identity_v1.yaml",
+      "guard": "tests/test_identity_contract.py"
+    },
+    {
+      "path": "contracts/conversation_sync_v3.yaml",
+      "guard": "tests/test_conversation_sync_v3.py",
+      "generator": "scripts/gen_conversation_sync_contract.py"
+    },
+    {
+      "path": "contracts/conversation_lifecycle_v1.yaml",
+      "guard": "tests/test_conversation_lifecycle_contract.py"
+    },
+    {
+      "path": "contracts/control_rpc_v1.yaml",
+      "guard": "tests/test_control_rpc.py"
+    },
+    {
+      "path": "contracts/frontend_conversation_architecture_v1.json",
+      "guard": "tests/test_frontend_budget.py"
+    },
+    {
+      "path": "contracts/experiments_v1.schema.json",
+      "guard": "tests/test_experiment_framework.py"
+    },
+    {
+      "path": "contracts/log_incident_v1.schema.json",
+      "guard": "tests/test_log_diagnostics_pipeline.py"
+    }
+,
+    {
+      "path": "contracts/model_catalog_v1.schema.json",
+      "guard": "tests/test_model_catalog_contract.py"
+    },
+    {
+      "path": "contracts/provider_offering_recipe_v1.schema.json",
+      "guard": "tests/test_provider_template_recipes.py"
+    }
+  ],
+  "authority": [
+    "docs/README.md",
+    "docs/DEVELOPER_RUNTIME.md",
+    "docs/ARCHITECTURE.md",
+    "docs/IDENTITY.md",
+    "docs/API_CONTRACT.md",
+    "docs/EVENTS.md",
+    "docs/HEADLESS_API.md",
+    "docs/STORAGE.md",
+    "docs/CONVERSATION_SYNC_V3.md",
+    "docs/FRONTEND_ARCHITECTURE.md",
+    "docs/RENDER_CONTRACT.md",
+    "docs/TURN_SETTLEMENT.md",
+    "docs/TESTING_STRATEGY.md",
+    "docs/ENTERPRISE_READINESS_AUDIT.md",
+    "docs/MODEL_REGISTRATION.md",
+    "docs/PROVIDER_TEMPLATE_RECIPES.md",
+    "docs/LOGGING.md"
+  ],
+  "domain_maps": [
+    "docs/modules/auth_providers_billing.md",
+    "docs/modules/browser_automation.md",
+    "docs/modules/context_engineering.md",
+    "docs/modules/conversations_project_brain.md",
+    "docs/modules/data_tier.md",
+    "docs/modules/experiments.md",
+    "docs/modules/infra_runtime.md",
+    "docs/modules/ingest_media.md",
+    "docs/modules/integrations_api.md",
+    "docs/modules/llm_io.md",
+    "docs/modules/orchestration_dag.md",
+    "docs/modules/production.md",
+    "docs/modules/project_integration.md",
+    "docs/modules/remote_execution.md",
+    "docs/modules/scheduling_ops.md",
+    "docs/modules/skills.md",
+    "docs/modules/task_engine.md",
+    "docs/modules/tools_execution.md"
+  ],
+  "developer_guides": [
+    "docs/AGENTS.md",
+    "docs/AGENT_CAPABILITY_GUIDE.md",
+    "docs/api_client.md",
+    "docs/CUSTOM_TOOLS.md",
+    "docs/LLM_COST_OPTIMIZATION.md",
+    "docs/LOCAL_KNOWLEDGE.md",
+    "docs/OPENAI_RESPONSES_FEATURES.md",
+    "docs/TOOL_PLUGINS.md",
+    "docs/TOOL_SEARCH_EXECUTION_GATEWAY.md",
+    "docs/TURN_TRACE_CONTRACT.md"
+  ],
+  "operator_guides": [
+    "docs/INSTALL.md",
+    "docs/RELIABILITY_RUNBOOK.md",
+    "docs/ROOTLESS_VM_SANDBOX.md",
+    "docs/PROXY_RUNTIME.md",
+    "docs/EPIC_D_SCALE_ROLLOUT_RUNBOOK.md",
+    "docs/TRB-fastpath.md",
+    "docs/COMPAT_OPENAI.md",
+    "docs/COMPAT_ANTHROPIC.md"
+  ],
+  "compliance": [
+    "docs/chrome-web-store/README.md",
+    "docs/chrome-web-store/ASSETS_CHECKLIST.md",
+    "docs/chrome-web-store/EDGE_ADDONS.md",
+    "docs/chrome-web-store/LISTING.md",
+    "docs/chrome-web-store/PERMISSIONS_JUSTIFICATION.md",
+    "docs/chrome-web-store/PRIVACY.md",
+    "docs/chrome-web-store/REVIEW_RISKS.md",
+    "docs/chrome-web-store/SUBMISSION_CHECKLIST.md"
+  ],
+  "generated": [
+    {
+      "path": "docs/TOOL_INVENTORY.md",
+      "generator": "scripts/gen_tool_inventory.py"
+    }
+  ]
+}

@@ -166,3 +166,46 @@ class TestRequestScopedDispatch:
                               max_retries=1, log_prefix='[t]')
 
         assert slot.consecutive_errors == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('error_factory', [
+    lambda: __import__('lib.llm_errors', fromlist=['BadRequestError'])
+        .BadRequestError('invalid moonshot tool schema'),
+    lambda: __import__('lib.llm_errors', fromlist=['RequestScopedError'])
+        .RequestScopedError('unprocessable request', status_code=422),
+])
+def test_request_rejection_never_switches_model_or_pool_rescues(
+        monkeypatch, error_factory):
+    import lib.tasks_pkg.llm_fallback._call as fallback
+
+    error = error_factory()
+    stream_calls = []
+    rescue_calls = []
+
+    def reject(_task, body, **_kwargs):
+        stream_calls.append(body.get('model'))
+        raise error
+
+    monkeypatch.setattr(fallback, 'stream_llm_response', reject)
+    monkeypatch.setattr(fallback, '_get_fallback_model',
+                        lambda _task: 'glm-5.3')
+    monkeypatch.setattr(
+        fallback, '_attempt_pool_rescue',
+        lambda *_args, **_kwargs: rescue_calls.append(True))
+    task = {
+        'id': 'request-rejection-task', 'convId': 'request-rejection-conv',
+        'config': {}, 'content': '', 'thinking': '', 'events': [],
+    }
+
+    with pytest.raises(type(error)) as raised:
+        fallback._llm_call_with_fallback(
+            task, {'model': 'kimi-k3'}, 'kimi-k3', 0, 512,
+            False, None, [{'role': 'user', 'content': 'hi'}],
+            'low', False, {}, [])
+
+    assert raised.value is error
+    assert stream_calls == ['kimi-k3']
+    assert rescue_calls == []
+    assert '_fallback_model' not in task
+    assert error._user_message['kind'] == 'bad_request'

@@ -47,12 +47,14 @@ import shutil
 import subprocess
 
 import pytest
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
+PROJECT_ROOT = os.path.dirname(HERE)
 
 
 def _node_deps_available() -> bool:
@@ -107,8 +109,10 @@ global._featureFlags = win._featureFlags = { debug_mode: true };
  *   roundNum 1 (llmRound 0) → produced by request R1
  *   roundNum 2 (llmRound 2) → produced by request R3   <-- NOT R2
  * The divergence between roundNum and llmRound+1 is the whole point. */
-const ROUND_A = { roundNum: 1, llmRound: 0, toolName: 'grep_search', status: 'done' };
-const ROUND_B = { roundNum: 2, llmRound: 2, toolName: 'read_files', status: 'done' };
+const ROUND_A = { roundNum: 1, llmRound: 0, toolName: 'grep_search', status: 'done',
+  _taskId: 'task-T1', _turnId: 'turn-T1' };
+const ROUND_B = { roundNum: 2, llmRound: 2, toolName: 'read_files', status: 'done',
+  _taskId: 'task-T1', _turnId: 'turn-T1' };
 const ORPHAN  = { roundNum: 9, llmRound: 1, toolName: 'web_search', status: 'done' };
 const INJECT  = { roundNum: 9000001, llmRound: 1, _inboxInject: true, status: 'done' };
 /* Autopilot VU bubble (role:'user' + _isVirtualUser) at the TAIL, exactly
@@ -116,17 +120,22 @@ const INJECT  = { roundNum: 9000001, llmRound: 1, _inboxInject: true, status: 'd
  * VU_ROUND is a deliberate numeric TWIN of ROUND_A — the 2026-08-03
  * collision, where a click on the VU's row opened the WORKER task's
  * same-numbered state mirror. */
-const VU_ROUND = { roundNum: 1, llmRound: 0, toolName: 'run_command', status: 'done' };
+const VU_ROUND = { roundNum: 1, llmRound: 0, toolName: 'run_command', status: 'done',
+  _turnId: 'turn-VU' };
 
-global.conversations = win.conversations = [{
-  id: 'conv-1',
-  messages: [
-    { _msgId: 'm1', role: 'assistant', content: 'x', _taskId: 'task-T1',
-      toolRounds: [ROUND_A, ROUND_B, INJECT] },
-    { _msgId: 'vu1', role: 'user', _isVirtualUser: true, _streamingVu: true,
-      content: '', toolRounds: [VU_ROUND] },
-  ],
-}];
+global.conversations = win.conversations = [{ id: 'conv-1', _serverTurnCount: 2 }];
+global.ConversationTurnRead = win.ConversationTurnRead = {
+  state: () => ({
+    turnsById: {
+      'turn-T1': { turnId: 'turn-T1', actor: 'assistant' },
+      'turn-VU': { turnId: 'turn-VU', actor: 'virtual_user' },
+    },
+    attemptsById: {
+      'attempt-T1': { turnId: 'turn-T1', taskId: 'task-T1', createdAt: 1 },
+      'attempt-VU': { turnId: 'turn-VU', taskId: 'task-VU', createdAt: 2 },
+    },
+  }),
+};
 
 const CALLS = { getRequests: 0, payloads: [] };
 win.Api = global.Api = {
@@ -326,22 +335,15 @@ def test_neuter_wrong_round_mapping_flips_red():
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed')
 def test_neuter_vu_role_guard_flips_red():
-    """NC: skip non-assistant messages BEFORE the identity check (the pre-fix
-    behaviour) → a VU-owned round falls through to the numeric fallback and
-    resolves to the WORKER task → `vu_owned_round_renders_no_anchor` MUST
-    flip red. Proves the role-aware identity gate is load-bearing (without
-    it the VU round opens the worker's same-numbered state mirror — the
-    2026-08-03 incident)."""
+    """Removing the typed actor guard exposes a virtual-user task anchor."""
     shipped = os.path.join(JS_DIR, 'core', 'request_inspector.js')
     with open(shipped, encoding='utf-8') as f:
         src = f.read()
-    anchor = ("      if (!m || !Array.isArray(m.toolRounds)) continue;\n"
-              "      if (m.toolRounds.indexOf(round) !== -1) {")
+    anchor = "    if (!turn || turn.actor === 'virtual_user') return '';"
     assert anchor in src, 'NC anchor drifted — update the neuter'
     neutered = src.replace(
         anchor,
-        ("      if (!m || m.role !== 'assistant' || !Array.isArray(m.toolRounds)) continue;\n"
-         "      if (m.toolRounds.indexOf(round) !== -1) {"), 1)
+        "    if (!turn) return '';", 1)
     assert neutered != src
     tmp = os.path.join(HERE, '_request_inspector_p6_vu_neutered.js')
     with open(tmp, 'w', encoding='utf-8') as f:
@@ -380,6 +382,7 @@ def test_anchor_is_wired_at_the_single_render_chokepoint():
         'the anchor must be emitted from _renderToolSlot (the single '
         'chokepoint), not from an individual branch renderer')
     assert '_featureFlags.debug_mode' in src, 'anchor is not debug_mode-gated'
+    assert "'ri.toolAnchorTip'" in src
     css = open(os.path.join(ROOT, 'static', 'styles.css'), encoding='utf-8').read()
     assert '.ri-tool-anchor' in css
     # The drawer's accommodation for the context gauge: pre-4dee9231 the gauge
@@ -397,8 +400,6 @@ def test_anchor_is_wired_at_the_single_render_chokepoint():
     assert ia and strip > ia, (
         '#convStatusStrip must stay INSIDE .input-area so the container-yield '
         'rule covers it (out of flow = needs its own ri-open hack again)')
-    i18n = open(os.path.join(JS_DIR, 'i18n.js'), encoding='utf-8').read()
-    assert "'ri.toolAnchorTip'" in i18n
 
 
 if __name__ == '__main__':

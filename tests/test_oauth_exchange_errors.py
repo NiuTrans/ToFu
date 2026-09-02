@@ -34,6 +34,10 @@ def _seed_flow(provider):
     }
 
 
+def _error_message(value):
+    return value.get('message', '') if isinstance(value, dict) else str(value)
+
+
 class TestClaudeExchangeErrors(unittest.TestCase):
 
     def test_403_is_geo_block_not_expired(self):
@@ -77,7 +81,8 @@ class TestManagerSurfacesRealReason(unittest.TestCase):
              mock.patch('lib.desktop.egress.route_request', return_value='direct'):
             res = mgr.exchange_code('claude', 'code', state='st')
         self.assertEqual(res.get('status_code'), 403)
-        self.assertIn('not an expired code', res['error'])
+        self.assertIn('not an expired code', _error_message(res['error']))
+        self.assertEqual(res['error']['kind'], 'permission')
         self.assertIn('detail', res)
         # The flow status is marked error with the real reason.
         self.assertEqual(mgr._active_flows['claude']['status'], 'error')
@@ -89,7 +94,8 @@ class TestManagerSurfacesRealReason(unittest.TestCase):
              mock.patch('lib.desktop.egress.route_request', return_value='direct'):
             res = mgr.exchange_code('codex', 'code', state='st')
         self.assertEqual(res.get('status_code'), 403)
-        self.assertIn('region block', res['error'])
+        self.assertIn('region block', _error_message(res['error']))
+        self.assertEqual(res['error']['kind'], 'permission')
 
 
 class TestExchangeCsrfStateValidation(unittest.TestCase):
@@ -101,7 +107,7 @@ class TestExchangeCsrfStateValidation(unittest.TestCase):
         with mock.patch('lib.oauth.claude.claude_exchange_code') as ex:
             res = mgr.exchange_code('claude', 'code', state='forged-state')
         self.assertIn('error', res)
-        self.assertIn('CSRF', res['error'])
+        self.assertIn('CSRF', _error_message(res['error']))
         ex.assert_not_called()  # the forged pair must never be exchanged
         self.assertEqual(mgr._active_flows['claude']['status'], 'error')
 

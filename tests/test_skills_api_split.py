@@ -9,7 +9,7 @@ Pins the API contract of the memory/skill decoupling (board epic pt_229606ca):
     DELETE /api/v1/skills/<id>     — package lifecycle on the skills surface
   * DELETE /api/v1/memory/<pkg>    — 400 (package guard surfaces; uninstall
     lives on the skills surface)
-  * POST /api/v1/skills/install    — JSON-path install end to end
+  * POST /api/v1/skills/install    — uploaded zip install end to end
   * lib.skills.uninstall_skill     — refuses unknown / non-package ids
 
 Runs in OPEN auth mode (synthetic principal) with the server data dir
@@ -21,6 +21,7 @@ import io
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 import pytest
@@ -209,16 +210,15 @@ class SkillsApiSplitTest(unittest.TestCase):
 
     # ── install through the skills surface ───────────────────────────
 
-    def test_install_via_json_path(self):
-        zip_path = os.path.join(self._tmp.name, 'pkg.zip')
-        with open(zip_path, 'wb') as f:
-            f.write(_zip_bytes())
-
+    def test_install_via_upload(self):
+        from werkzeug.datastructures import FileStorage
         async def go():
             r = await self.app.test_client().post(
-                '/api/v1/skills/install',
-                json={'path': zip_path, 'scope': 'project',
-                      'project_path': self.proj})
+                '/api/v1/skills/install' + self._q(),
+                form={'scope': 'project'},
+                files={'file': FileStorage(
+                    stream=io.BytesIO(_zip_bytes()), filename='pkg.zip',
+                    content_type='application/zip')})
             self.assertEqual(r.status_code, 201, await r.get_data(as_text=True))
             body = await r.get_json()
             self.assertEqual(body['memory']['scope'], 'project')
@@ -238,6 +238,37 @@ class SkillsApiSplitTest(unittest.TestCase):
             # The seeded package is not a catalog entry; nothing installed
             # flags should be set for it.
             self.assertIn('installed_ids', body)
+        _run(go())
+
+    def test_online_catalog_is_queried_only_by_search_endpoint(self):
+        async def go():
+            with patch(
+                'lib.skills.online_catalog.search_online_skills',
+                return_value={
+                    'catalog': [{
+                        'id': 'clawhub.alice.demo',
+                        'catalog_id': 'clawhub.alice.demo',
+                        'name': 'Demo',
+                        'source_revision': '1.2.3',
+                        'source': 'clawhub',
+                        'verified': True,
+                        'installable': True,
+                    }],
+                    'online': {
+                        'provider': 'clawhub', 'attempted': True,
+                        'ok': True, 'verified_count': 1,
+                    },
+                },
+            ) as search:
+                r = await self.app.test_client().get(
+                    '/api/v1/skills/catalog/search?q=calendar&limit=3'
+                    + self._q().replace('?', '&'))
+            self.assertEqual(r.status_code, 200, await r.get_data(as_text=True))
+            body = await r.get_json()
+            self.assertEqual(
+                body['catalog'][0]['catalog_id'], 'clawhub.alice.demo')
+            self.assertFalse(body['catalog'][0]['installed'])
+            search.assert_called_once_with('calendar', limit=3)
         _run(go())
 
 

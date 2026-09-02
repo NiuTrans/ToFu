@@ -70,10 +70,10 @@ _LAST_TURN_READ_KEY = 'lastTurnCacheRead'
 # Read-cache TTL: the cold-thread fallback reads at most once per this window.
 _HWM_TTL_S = 30.0
 
-# conv_id → (value, expires_at). Guarded by _hwm_lock.
-_hwm_read_cache: dict[str, tuple[int, float]] = {}
-# conv_id → (value, expires_at) for the round-1 read baseline. Guarded by _hwm_lock.
-_last_turn_read_cache: dict[str, tuple[int, float]] = {}
+# (user_id, conv_id) → (value, expires_at). Guarded by _hwm_lock.
+_hwm_read_cache: dict[tuple[int, str], tuple[int, float]] = {}
+# Owner-scoped round-1 read baseline. Guarded by _hwm_lock.
+_last_turn_read_cache: dict[tuple[int, str], tuple[int, float]] = {}
 _hwm_lock = threading.Lock()
 
 # Per-conv throttle for write-failure warnings: the advance path is
@@ -84,20 +84,42 @@ _hwm_lock = threading.Lock()
 # warning) but must not spam error.log on a strained DB — once per conv per
 # window.
 _WARN_THROTTLE_S = 600.0
-_warn_last: dict[str, float] = {}
+_warn_last: dict[tuple[int, str], float] = {}
 
 
-def _warn_throttled(conv_id: str, msg: str, *args) -> None:
+def _owner_key(conv_id: str, user_id: int) -> tuple[int, str]:
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 1:
+        raise ValueError('user_id must be a positive integer')
+    return user_id, conv_id
+
+
+def _conversation_settings(conv_id: str, *, user_id: int) -> dict:
+    """Read one owner's settings from the semantic storage authority."""
+    from lib.storage import get_storage_client
+
+    document = get_storage_client().query(
+        'conversation.get', {
+            'conv_id': conv_id,
+            'user_id': user_id,
+            'derive_messages': False,
+        })
+    return dict((document or {}).get('metadata', {}).get('settings') or {})
+
+
+def _warn_throttled(
+    conv_id: str, user_id: int, msg: str, *args,
+) -> None:
     now = time.time()
+    key = _owner_key(conv_id, user_id)
     with _hwm_lock:
-        last = _warn_last.get(conv_id, 0.0)
+        last = _warn_last.get(key, 0.0)
         if now - last < _WARN_THROTTLE_S:
             return
-        _warn_last[conv_id] = now
+        _warn_last[key] = now
     logger.warning(msg, *args)
 
 
-def read_persisted_boundary(conv_id: str) -> int:
+def read_persisted_boundary(conv_id: str, *, user_id: int) -> int:
     """Return the durable high-water prefix boundary for ``conv_id`` (0 if
     none / unavailable). Cheap: served from a short TTL cache, hitting the DB
     at most once per ``_HWM_TTL_S`` per conv.
@@ -106,39 +128,29 @@ def read_persisted_boundary(conv_id: str) -> int:
     """
     if not conv_id:
         return 0
+    key = _owner_key(conv_id, user_id)
     now = time.time()
     with _hwm_lock:
-        hit = _hwm_read_cache.get(conv_id)
+        hit = _hwm_read_cache.get(key)
         if hit is not None and hit[1] > now:
             return hit[0]
     val = 0
     try:
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        from lib.utils import safe_json
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT settings FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, 1),
-        ).fetchone()
-        if row is not None:
-            try:
-                raw = row['settings']
-            except (TypeError, KeyError, IndexError):
-                raw = row[0] if row else None
-            settings = safe_json(raw, default={}, label='cache_hwm')
-            if isinstance(settings, dict):
-                cand = settings.get(_HWM_KEY)
-                if isinstance(cand, int) and cand > 0:
-                    val = cand
+        settings = _conversation_settings(conv_id, user_id=user_id)
+        cand = settings.get(_HWM_KEY)
+        if isinstance(cand, int) and cand > 0:
+            val = cand
     except Exception as e:
         logger.debug('[CacheHWM] read failed conv=%s: %s', conv_id[:8], e)
         val = 0
     with _hwm_lock:
-        _hwm_read_cache[conv_id] = (val, now + _HWM_TTL_S)
+        _hwm_read_cache[key] = (val, now + _HWM_TTL_S)
     return val
 
 
-def advance_persisted_boundary(conv_id: str, boundary: int) -> None:
+def advance_persisted_boundary(
+    conv_id: str, boundary: int, *, user_id: int,
+) -> None:
     """Monotonically raise the durable high-water boundary to ``boundary``.
 
     Only writes when ``boundary`` strictly exceeds the stored value (so a
@@ -148,10 +160,11 @@ def advance_persisted_boundary(conv_id: str, boundary: int) -> None:
     """
     if not conv_id or boundary <= 0:
         return
+    key = _owner_key(conv_id, user_id)
     # Fast-path skip: if our cached read already covers this boundary, the DB
     # value is >= boundary (monotonic) → nothing to write.
     with _hwm_lock:
-        hit = _hwm_read_cache.get(conv_id)
+        hit = _hwm_read_cache.get(key)
     if hit is not None and hit[0] >= boundary and hit[1] > time.time():
         return
     try:
@@ -169,21 +182,22 @@ def advance_persisted_boundary(conv_id: str, boundary: int) -> None:
         # UI-visible setting — must not push a conv_changed frame or reorder
         # the sidebar.
         res = update_conversation_settings(
-            conv_id, _mutate, notify=False)
+            conv_id, _mutate, user_id=user_id, notify=False)
         if res is not None:
             # Refresh the read cache so the next fallback sees the new floor
             # immediately (and advance() fast-path-skips until TTL).
             with _hwm_lock:
-                _hwm_read_cache[conv_id] = (
-                    max(boundary, (_hwm_read_cache.get(conv_id) or (0, 0))[0]),
+                _hwm_read_cache[key] = (
+                    max(boundary, (_hwm_read_cache.get(key) or (0, 0))[0]),
                     time.time() + _HWM_TTL_S)
     except Exception as e:
-        _warn_throttled(conv_id, '[CacheHWM] advance failed conv=%s: %s — '
+        _warn_throttled(conv_id, user_id,
+                        '[CacheHWM] advance failed conv=%s: %s — '
                         'durable prefix floor not written (in-memory guard '
                         'still active)', conv_id[:8], e)
 
 
-def read_last_turn_cache_read(conv_id: str) -> int:
+def read_last_turn_cache_read(conv_id: str, *, user_id: int) -> int:
     """Return the DURABLE previous-turn final cached-prefix read in tokens
     (0 if none / unavailable).
 
@@ -204,40 +218,29 @@ def read_last_turn_cache_read(conv_id: str) -> int:
     """
     if not conv_id:
         return 0
+    key = _owner_key(conv_id, user_id)
     now = time.time()
     with _hwm_lock:
-        hit = _last_turn_read_cache.get(conv_id)
+        hit = _last_turn_read_cache.get(key)
         if hit is not None and hit[1] > now:
             return hit[0]
     val = 0
     try:
-        from lib.database import DOMAIN_CHAT, get_thread_db
-        from lib.utils import safe_json
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT settings FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, 1),
-        ).fetchone()
-        if row is not None:
-            try:
-                raw = row['settings']
-            except (TypeError, KeyError, IndexError) as _e:
-                logger.debug('read last turn cache read: unexpected type/missing key/short/malformed (%s)', _e)
-                raw = row[0] if row else None
-            settings = safe_json(raw, default={}, label='cache_last_turn_read')
-            if isinstance(settings, dict):
-                cand = settings.get(_LAST_TURN_READ_KEY)
-                if isinstance(cand, int) and cand > 0:
-                    val = cand
+        settings = _conversation_settings(conv_id, user_id=user_id)
+        cand = settings.get(_LAST_TURN_READ_KEY)
+        if isinstance(cand, int) and cand > 0:
+            val = cand
     except Exception as e:
         logger.debug('[CacheLastRead] read failed conv=%s: %s', conv_id[:8], e)
         val = 0
     with _hwm_lock:
-        _last_turn_read_cache[conv_id] = (val, now + _HWM_TTL_S)
+        _last_turn_read_cache[key] = (val, now + _HWM_TTL_S)
     return val
 
 
-def write_last_turn_cache_read(conv_id: str, cache_read: int) -> None:
+def write_last_turn_cache_read(
+    conv_id: str, cache_read: int, *, user_id: int,
+) -> None:
     """Persist the previous-turn final cached-prefix read (tokens).
 
     LAST-WRITER-WINS (NOT monotonic-max): the baseline must track the real
@@ -249,9 +252,10 @@ def write_last_turn_cache_read(conv_id: str, cache_read: int) -> None:
     """
     if not conv_id or not isinstance(cache_read, int) or cache_read <= 0:
         return
+    key = _owner_key(conv_id, user_id)
     # Fast-path skip: our cached read already equals this value → nothing to write.
     with _hwm_lock:
-        hit = _last_turn_read_cache.get(conv_id)
+        hit = _last_turn_read_cache.get(key)
     if hit is not None and hit[0] == cache_read and hit[1] > time.time():
         return
     try:
@@ -267,13 +271,15 @@ def write_last_turn_cache_read(conv_id: str, cache_read: int) -> None:
 
         # notify=False: internal cache-accounting field, NOT a UI-visible
         # setting — must not push a conv_changed frame or reorder the sidebar.
-        res = update_conversation_settings(conv_id, _mutate, notify=False)
+        res = update_conversation_settings(
+            conv_id, _mutate, user_id=user_id, notify=False)
         if res is not None:
             with _hwm_lock:
-                _last_turn_read_cache[conv_id] = (
+                _last_turn_read_cache[key] = (
                     cache_read, time.time() + _HWM_TTL_S)
     except Exception as e:
-        _warn_throttled(conv_id, '[CacheLastRead] write failed conv=%s: %s — '
+        _warn_throttled(conv_id, user_id,
+                        '[CacheLastRead] write failed conv=%s: %s — '
                         'durable round-1 baseline not written',
                         conv_id[:8], e)
 

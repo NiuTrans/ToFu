@@ -18,10 +18,10 @@ logged, controlled degradation. Three defenses, all env-tunable:
   ② start_monitor()       — a low-frequency (>=30s) daemon thread that, when
      usage crosses the relief threshold, drops our own reclaimable caches and
      calls malloc_trim(0) to hand free heap back to the OS, shrinking our RSS.
-  ③ check_request_headroom() — before assembling a LARGE LLM request body,
-     if the cgroup is critically full, trim once and, if still critical, fail
-     fast with a clear log (conv id + body size + usage%) instead of being
-     SIGKILLed mid-assembly.
+  ③ check_request_headroom() — before serialising a LARGE LLM request body,
+     use the pressure percentage only as a trigger, then compare absolute free
+     bytes with a request-sized peak-allocation envelope. Trim once only when
+     that concrete envelope does not fit; refuse only if it still does not fit.
 
 Everything degrades to a NO-OP when the cgroup / /proc is unreadable (bare
 metal, macOS, restricted sandbox): a reader that cannot see ``memory.current``
@@ -41,15 +41,20 @@ Env vars (all optional):
                                                relief (below it, the streak
                                                towards the ineffective-relief
                                                CRITICAL keeps counting)
+  TOFU_CGROUP_RELIEF_COOLDOWN_SEC default 600 — after repeated ineffective
+                                               shared-cgroup relief, keep
+                                               journaling but stop cache churn
   TOFU_CGROUP_JOURNAL            default 1   — rolling pressure journal to
                                                logs/cgroup_pressure.log
-  TOFU_PROCESS_RSS_RELIEF_MB     default min(4096, 50% of cgroup MiB) — also
+  TOFU_PROCESS_RSS_RELIEF_MB     personal default min(2048, 50% of cgroup MiB)
+                                               (distributed: 4096) — also
                                                trim when this process's RSS
                                                alone crosses the ceiling;
                                                0 disables
   TOFU_PROCESS_RSS_COOLDOWN_SEC  default 300 — minimum delay between RSS-only
                                                relief passes
-  TOFU_PROCESS_RSS_RECYCLE_MB    default min(8192, 70% of cgroup MiB) — after
+  TOFU_PROCESS_RSS_RECYCLE_MB    personal default min(3072, 70% of cgroup MiB)
+                                               (distributed: 8192) — after
                                                relief, request one
                                                graceful worker recycle if RSS
                                                is still above this ceiling;
@@ -80,12 +85,36 @@ import threading
 from typing import Optional
 
 from lib.log import audit_log, get_logger
+from runtime_guards import deployment_resource_default
 
 logger = get_logger(__name__)
 
 
 class MemoryPressureError(RuntimeError):
-    """Raised by ③ when a large request is refused because the cgroup is critically full."""
+    """A large request cannot fit its bounded peak-allocation envelope."""
+
+
+# Serialising/translating an outbound body creates temporary copies in JSON,
+# provider adapters and the HTTP stack. Eight times the cheap body estimate is
+# intentionally conservative; 64 MiB covers fixed interpreter/transport
+# overhead for a body near the 2 MB guard floor. Crucially, neither value
+# scales with a *shared* 220 GiB cgroup: a percentage-only rule made a 2.3 MB
+# request fail while 1.4 GiB was still free and Tofu itself used <40 MiB.
+_REQUEST_HEADROOM_FLOOR_BYTES = 64 * 1024 * 1024
+_REQUEST_PEAK_ALLOCATION_MULTIPLIER = 8
+
+
+def _required_request_headroom(approx_bytes: int) -> int:
+    """Return the absolute free-byte envelope needed for one request."""
+    return max(
+        _REQUEST_HEADROOM_FLOOR_BYTES,
+        max(0, int(approx_bytes)) * _REQUEST_PEAK_ALLOCATION_MULTIPLIER,
+    )
+
+
+def _available_headroom(snapshot: dict) -> int:
+    """Return non-negative cgroup bytes available in ``snapshot``."""
+    return max(0, int(snapshot['limit']) - int(snapshot['usage']))
 
 
 # ── stdlib readers — every one returns None on ANY failure (graceful no-op) ──
@@ -317,6 +346,7 @@ def malloc_trim() -> bool:
 # printed usage percentage is not relief.
 _ineffective_reliefs = 0
 _ineffective_escalated = False
+_relief_suppressed_until = 0.0
 _INEFFECTIVE_LIMIT = 5
 
 
@@ -336,6 +366,16 @@ def _material_reclaim_bytes(limit: Optional[int]) -> float:
     return limit * pct / 100.0
 
 
+def _relief_cooldown_seconds() -> float:
+    try:
+        value = float(os.environ.get(
+            'TOFU_CGROUP_RELIEF_COOLDOWN_SEC', '600'))
+    except (ValueError, TypeError) as exc:
+        logger.debug('relief cooldown: unparseable (%s)', exc)
+        value = 600.0
+    return max(30.0, min(3600.0, value))
+
+
 def relieve_memory(reason: str) -> dict:
     """Drop our own reclaimable caches + trim heap. Logs usage% before/after.
 
@@ -351,6 +391,7 @@ def relieve_memory(reason: str) -> dict:
     Returns a small stats dict. Safe to call anywhere; never raises.
     """
     global _ineffective_reliefs, _ineffective_escalated
+    global _relief_suppressed_until
     before = pressure()
     before_pct = before['pct'] if before else None
     dropped = 0
@@ -386,7 +427,8 @@ def relieve_memory(reason: str) -> dict:
                    before_pct if before_pct is not None else -1.0,
                    after_pct if after_pct is not None else -1.0)
 
-    # Escalate a structurally-ineffective relief exactly once.
+    # Escalate a structurally-ineffective relief exactly once, then renew the
+    # cooldown after each later probe until a material reclaim resets it.
     if reclaimed_bytes is not None:
         _material = _material_reclaim_bytes((before or {}).get('limit'))
         if reclaimed_bytes < _material:
@@ -394,23 +436,33 @@ def relieve_memory(reason: str) -> dict:
         else:
             _ineffective_reliefs = 0
             _ineffective_escalated = False
-        if (_ineffective_reliefs >= _INEFFECTIVE_LIMIT
-                and not _ineffective_escalated):
-            _ineffective_escalated = True
-            logger.critical(
-                '[cgroup] RELIEF IS INEFFECTIVE: %d consecutive reliefs reclaimed '
-                '0 bytes while usage sits at %.1f%%. This process cannot relieve '
-                'this pressure — what we can drop (our heap caches + our own log '
-                'page cache) is noise against the total. On a SHARED cgroup the '
-                'usage is dominated by sibling processes and FUSE slab, which we '
-                'structurally cannot reach. Treat this as an unmitigated '
-                'environment squeeze: an OOM SIGKILL is possible at any time and '
-                'no in-process action will prevent it.',
-                _ineffective_reliefs,
-                after_pct if after_pct is not None else -1.0)
-            audit_log('cgroup_relief_ineffective',
-                      consecutive=_ineffective_reliefs,
-                      usage_pct=round(after_pct, 1) if after_pct is not None else None)
+            _relief_suppressed_until = 0.0
+        if _ineffective_reliefs >= _INEFFECTIVE_LIMIT:
+            import time as _time
+            cooldown_seconds = _relief_cooldown_seconds()
+            _relief_suppressed_until = (
+                _time.monotonic() + cooldown_seconds)
+            if not _ineffective_escalated:
+                _ineffective_escalated = True
+                logger.critical(
+                    '[cgroup] RELIEF IS INEFFECTIVE: %d consecutive reliefs '
+                    'reclaimed 0 bytes while usage sits at %.1f%%. This process '
+                    'cannot relieve this pressure — what we can drop (our heap '
+                    'caches + our own log page cache) is noise against the total. '
+                    'On a SHARED cgroup the usage is dominated by sibling '
+                    'processes and FUSE slab, which we structurally cannot reach. '
+                    'Treat this as an unmitigated environment squeeze: an OOM '
+                    'SIGKILL is possible at any time and no in-process action '
+                    'will prevent it. Aggregate relief is cooling down for %.0fs; '
+                    'pressure journaling and process-RSS limits remain active.',
+                    _ineffective_reliefs,
+                    after_pct if after_pct is not None else -1.0,
+                    cooldown_seconds)
+                audit_log(
+                    'cgroup_relief_ineffective',
+                    consecutive=_ineffective_reliefs,
+                    usage_pct=(round(after_pct, 1)
+                               if after_pct is not None else None))
 
     return {'reason': reason, 'dropped': dropped, 'trimmed': trimmed,
             'log_pages_bytes': logs_dropped.get('bytes', 0),
@@ -552,6 +604,8 @@ def write_pressure_journal(snap: dict) -> bool:
             os.makedirs(parent, exist_ok=True)
         line = _json.dumps(rec, separators=(',', ':')) + '\n'
         from lib.json_store import locked_path, write_bytes_atomic
+        from lib.log_policy import LOG_FILE_MODE
+        from lib.log_retention import append_bytes_locked
         # Trimming and appending are one transaction.  Without the stable
         # sidecar lock, two server processes can each replace the journal with
         # an older tail and silently discard the other's newest record.
@@ -570,15 +624,14 @@ def write_pressure_journal(snap: dict) -> bool:
                         boundary = tail.find(b'\n')
                         tail = tail[boundary + 1:] if boundary >= 0 else b''
                     write_bytes_atomic(
-                        _JOURNAL_PATH, tail, fsync=False, mode=0o644)
+                        _JOURNAL_PATH, tail, fsync=False, mode=LOG_FILE_MODE)
             except FileNotFoundError as error:
                 logger.debug('write pressure journal: no prior journal (%s)',
                              error)
                 pass
             except OSError as _e:
                 logger.debug('write pressure journal: unreadable (%s)', _e)
-            with open(_JOURNAL_PATH, 'ab') as f:
-                f.write(line.encode('utf-8'))
+            append_bytes_locked(_JOURNAL_PATH, line.encode('utf-8'))
         return True
     except OSError as e:
         logger.debug('[cgroup] pressure journal write failed: %s', e)
@@ -636,11 +689,15 @@ def _process_rss_relief_limit_bytes() -> Optional[int]:
     a typo cannot turn the 30-second monitor into a permanent cache flusher.
     """
     raw = os.environ.get('TOFU_PROCESS_RSS_RELIEF_MB', '')
+    default_mb = float(deployment_resource_default(
+        'TOFU_PROCESS_RSS_RELIEF_MB', os.environ))
     try:
-        mb = float(raw or '4096')
+        mb = float(raw) if raw else default_mb
     except (ValueError, TypeError) as e:
-        logger.warning('[cgroup] invalid TOFU_PROCESS_RSS_RELIEF_MB; using 4096: %s', e)
-        mb = 4096.0
+        logger.warning(
+            '[cgroup] invalid TOFU_PROCESS_RSS_RELIEF_MB; using %.0f: %s',
+            default_mb, e)
+        mb = default_mb
     if mb <= 0:
         return None
     if not raw:
@@ -653,11 +710,15 @@ def _process_rss_relief_limit_bytes() -> Optional[int]:
 def _process_rss_recycle_limit_bytes() -> Optional[int]:
     """Return the post-relief RSS ceiling that requests a graceful recycle."""
     raw = os.environ.get('TOFU_PROCESS_RSS_RECYCLE_MB', '')
+    default_mb = float(deployment_resource_default(
+        'TOFU_PROCESS_RSS_RECYCLE_MB', os.environ))
     try:
-        mb = float(raw or '8192')
+        mb = float(raw) if raw else default_mb
     except (ValueError, TypeError) as e:
-        logger.warning('[cgroup] invalid TOFU_PROCESS_RSS_RECYCLE_MB; using 8192: %s', e)
-        mb = 8192.0
+        logger.warning(
+            '[cgroup] invalid TOFU_PROCESS_RSS_RECYCLE_MB; using %.0f: %s',
+            default_mb, e)
+        mb = default_mb
     if mb <= 0:
         return None
     if not raw:
@@ -773,6 +834,9 @@ def run_monitor_once(recycle_callback=None) -> Optional[dict]:
         return rss_relief
     relief_pct = _env_pct('TOFU_CGROUP_RELIEF_PCT', 92.0)
     if snap['pct'] >= relief_pct:
+        import time as _time
+        if _time.monotonic() < _relief_suppressed_until:
+            return None
         return relieve_memory('monitor %.1f%% >= %.0f%%' % (snap['pct'], relief_pct))
     return None
 
@@ -839,9 +903,10 @@ def check_request_headroom(ident: str = '', approx_bytes: int = 0) -> tuple[bool
     Returns ``(ok, reason)``:
       - ``(True, None)``  → proceed (headroom fine, body small, or cgroup
         unreadable — the safe default everywhere off-cgroup).
-      - ``(False, reason)`` → the cgroup is critically full even after a trim;
-        the caller should refuse this request rather than risk a mid-assembly
-        SIGKILL. A WARNING with ident + size + usage% is already logged here.
+      - ``(False, reason)`` → pressure is above the trigger and the absolute
+        free bytes still cannot cover this request's bounded peak allocation
+        after a trim. The caller should shrink the derived payload before it
+        gives up. A diagnostic with ident, size and headroom is logged here.
 
     Only bodies >= TOFU_CGROUP_REQUEST_MIN_BYTES are considered; smaller ones
     always pass (cheap to skip the proc read on the hot path for normal calls).
@@ -860,19 +925,33 @@ def check_request_headroom(ident: str = '', approx_bytes: int = 0) -> tuple[bool
     req_pct = _env_pct('TOFU_CGROUP_REQUEST_PCT', 95.0)
     if snap['pct'] < req_pct:
         return True, None
-    # Critical: try to make room once, then re-measure.
+    required = _required_request_headroom(approx_bytes)
+    if _available_headroom(snap) >= required:
+        logger.debug(
+            '[cgroup] pressure trigger reached for %s (%.1f%%), but %.1f MiB '
+            'absolute headroom covers the %.1f MiB request envelope; allowing',
+            ident or '?', snap['pct'], _available_headroom(snap) / (1 << 20),
+            required / (1 << 20))
+        return True, None
+
+    # The concrete request envelope does not fit: trim once, then re-measure.
     relieve_memory('pre-request %s %.1f%%' % (ident or '?', snap['pct']))
     snap2 = pressure()
-    pct2 = snap2['pct'] if snap2 else snap['pct']
-    if pct2 < req_pct:
+    measured = snap2 or snap
+    pct2 = measured['pct']
+    headroom2 = _available_headroom(measured)
+    if pct2 < req_pct or headroom2 >= required:
         return True, None
-    reason = ('cgroup %.1f%% full (%.1f/%.1f GiB) >= %.0f%% after trim — refusing '
-              'large request ident=%s body=%.1fMB to avoid OOM SIGKILL'
-              % (pct2, _gib((snap2 or snap)['usage']), _gib((snap2 or snap)['limit']),
-                 req_pct, ident or '?', approx_bytes / 1e6))
+    reason = ('cgroup %.1f%% full (%.1f/%.1f GiB) after trim; %.1f MiB '
+              'headroom < %.1f MiB request envelope — refusing ident=%s '
+              'body=%.1fMB until the derived payload is reduced'
+              % (pct2, _gib(measured['usage']), _gib(measured['limit']),
+                 headroom2 / (1 << 20), required / (1 << 20),
+                 ident or '?', approx_bytes / 1e6))
     logger.error('[cgroup] %s', reason)
     audit_log('cgroup_request_refused', ident=ident,
-              body_bytes=approx_bytes, usage_pct=round(pct2, 1))
+              body_bytes=approx_bytes, usage_pct=round(pct2, 1),
+              headroom_bytes=headroom2, required_headroom_bytes=required)
     return False, reason
 
 

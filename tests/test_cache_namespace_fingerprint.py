@@ -126,7 +126,8 @@ def test_detector_names_namespace_switch_not_server_side():
     the miss must be NAMED a client cache-namespace switch, returned under
     ``cache_namespace_switch`` (NOT ``server_side``), and must not claim it is
     an upstream/server fault."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
 
     _cache_states.clear()
@@ -140,8 +141,8 @@ def test_detector_names_namespace_switch_not_server_side():
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb, '_wire_routing': r_a}
     u2 = {'cache_read_tokens': 40000, 'cache_creation_input_tokens': 120000,
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb, '_wire_routing': r_b}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None, 'expected a break (read dropped on a re-write)'
     assert 'cache_namespace_switch' in r, (
         f'a body-identical + key-flip miss must be keyed cache_namespace_switch, '
@@ -157,7 +158,8 @@ def test_detector_names_beta_ttl_flip_as_namespace_switch():
     from carrying extended-cache-ttl to not — the one client variable that can
     flip yet was fingerprinted nowhere. Must be named a client namespace switch,
     NOT server-side."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
 
     _cache_states.clear()
@@ -173,8 +175,8 @@ def test_detector_names_beta_ttl_flip_as_namespace_switch():
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb, '_wire_routing': r_with}
     u2 = {'cache_read_tokens': 40000, 'cache_creation_input_tokens': 120000,
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb, '_wire_routing': r_without}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None
     assert 'cache_namespace_switch' in r, (
         f'a beta-header flip on identical body must be named a client namespace '
@@ -189,7 +191,8 @@ def test_detector_upstream_verdict_states_namespace_identical():
     """Body identical AND routing identical → the upstream-miss verdict is
     allowed, but it must EXPLICITLY state key+beta+endpoint all match last
     round (evidence-grade, not an elimination guess)."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
 
     _cache_states.clear()
@@ -201,8 +204,8 @@ def test_detector_upstream_verdict_states_namespace_identical():
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb, '_wire_routing': dict(r_same)}
     u2 = {'cache_read_tokens': 40000, 'cache_creation_input_tokens': 120000,
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb, '_wire_routing': dict(r_same)}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None
     assert 'cache_namespace_switch' not in r, (
         f'routing was identical — must NOT claim a namespace switch: {r}')
@@ -217,7 +220,8 @@ def test_detector_NEUTER_without_routing_launders_beta_flip_to_server_side():
     flip, but with NO ``_wire_routing`` captured (pre-fix behaviour), launders
     back into the byte-identical "upstream cache miss" verdict and NEVER names
     the client namespace switch."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
     _cache_states.clear()
     conv = 'ns-neuter'
@@ -227,8 +231,8 @@ def test_detector_NEUTER_without_routing_launders_beta_flip_to_server_side():
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb}
     u2 = {'cache_read_tokens': 40000, 'cache_creation_input_tokens': 120000,
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None
     assert 'cache_namespace_switch' not in r, (
         f'NEUTER: without _wire_routing the namespace switch MUST NOT be named '
@@ -333,7 +337,8 @@ def test_detector_names_ttl_flip_client_side_on_identical_body():
     bypass). That is a CLIENT-caused cache reset — the whole prefix re-keys — and
     must be NAMED (<ttl-flip>), NOT laundered into a byte-identical server-side
     verdict."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
     _cache_states.clear()
     conv = 'ttl-flip-named'
@@ -345,8 +350,8 @@ def test_detector_names_ttl_flip_client_side_on_identical_body():
     u2 = {'cache_read_tokens': 40000, 'cache_creation_input_tokens': 120000,
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
           '_wire_markers': sig_5m}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None, 'expected a break (read dropped on a re-write)'
     assert 'server_side' not in r, (
         f'a client-caused ttl flip must NOT be attributed server-side: {r}')
@@ -364,7 +369,8 @@ def test_detector_NEUTER_ttl_signature_without_ttl_launders_to_upstream():
     pre-fix marker_signature), leaves the round byte-identical AND marker-count
     identical → the miss launders back into the upstream/byte-identical verdict
     and the <ttl-flip> culprit is never named."""
-    from lib.tasks_pkg.cache_tracking import _cache_states, detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import _cache_states
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
 
     _cache_states.clear()
     conv = 'ttl-flip-neuter'
@@ -381,8 +387,8 @@ def test_detector_NEUTER_ttl_signature_without_ttl_launders_to_upstream():
     u2 = {'cache_read_tokens': 40000, 'cache_creation_input_tokens': 120000,
           '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
           '_wire_markers': _strip_ttl(sig_5m)}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1))
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2))
+    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
+    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
     assert r is not None
     blob = _json.dumps(r).lower()
     # NOTE: assert on the CULPRIT wording, not the bare substring 'ttl' — the

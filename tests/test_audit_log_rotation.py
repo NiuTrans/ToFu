@@ -17,7 +17,7 @@ def test_audit_write_rotates_at_size_limit(tmp_path, monkeypatch):
     monkeypatch.setenv('TOFU_AUDIT_LOG_MAX_BYTES', str(1 << 20))
     monkeypatch.setenv('TOFU_AUDIT_LOG_BACKUPS', '2')
     # The production lower clamp is 1 MiB; make the existing file cross it.
-    audit.write_bytes(b'x' * (1 << 20))
+    audit.write_bytes(b'x' * ((1 << 20) - 1) + b'\n')
 
     log_mod._audit_write_line('new-audit\n')
 
@@ -27,7 +27,7 @@ def test_audit_write_rotates_at_size_limit(tmp_path, monkeypatch):
 
 def test_audit_rotation_prunes_oldest_backup(tmp_path, monkeypatch):
     audit = tmp_path / 'audit.log'
-    audit.write_bytes(b'x' * (1 << 20))
+    audit.write_bytes(b'x' * ((1 << 20) - 1) + b'\n')
     (tmp_path / 'audit.log.1').write_text('one', encoding='utf-8')
     (tmp_path / 'audit.log.2').write_text('two', encoding='utf-8')
     monkeypatch.setattr(log_mod, 'LOG_DIR', str(tmp_path))

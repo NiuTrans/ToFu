@@ -41,7 +41,8 @@ import pytest
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..'))
+from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
+ROOT = _legacy_test_root()
 REDUCER_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'stream_reducer.js')
 
 

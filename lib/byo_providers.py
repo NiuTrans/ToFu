@@ -1,500 +1,468 @@
-"""lib/byo_providers.py — Per-API-key BYO (Bring-Your-Own) provider store.
+"""Owner-scoped BYO model-provider repository.
 
-External callers register their own LLM endpoints — typically internal
-inference servers (vLLM / SGLang / Ollama) or OpenAI-compatible
-proxies — and get back an opaque ``prov_id`` they can use as a model
-suffix (``"deepseek-v4-pro@prov_a3f2"``) to pin runs to that endpoint.
+The Storage Sidecar is the sole provider authority.  Rows are keyed by an
+explicit numeric repository owner plus the tenant evolution seam; bearer-key
+IDs are credentials, never ownership identities.  Upstream API keys are stored
+only as authenticated ciphertext and are decrypted only by :func:`get_provider`
+for an outbound request.
 
-Why a separate store from ``server_config.json``?
-=================================================
-Server-config providers are operator-curated and visible to every
-caller in the process. BYO providers are caller-scoped:
-
-* Created by Bearer-key holders via ``POST /api/v1/providers``.
-* Indexed by the owning ``key_id`` so caller A never sees caller B's
-  endpoint or, more importantly, caller B's secret.
-* The api_key is held in plaintext on disk (it has to be — we proxy
-  requests with it) but the file lives at
-  ``data/config/byo_providers.json`` with the rest of the config and
-  the API never echoes the raw key back. The list endpoint returns a
-  redacted ``key_hint`` only.
-
-Persistence
------------
-``data/config/byo_providers.json`` via :mod:`lib.json_store` (atomic,
-locked)::
-
-    {
-      "version": 1,
-      "providers": [
-        {
-          "id":              "prov_a3f2c1",
-          "owner_key_id":    "k_a3f2",
-          "name":            "deepseek-cluster-A",
-          "base_url":        "http://10.0.0.5:8080/v1",
-          "api_key":         "sk-…",            # plaintext (proxy needs it)
-          "models":          [{"model_id": "deepseek-v4-pro", ...}],
-          "extra_headers":   {},
-          "thinking_format": "chat_template_kwargs",
-          "created_at":      1701000000.0,
-          "last_used_at":    null,
-          "disabled":        false
-        }
-      ]
-    }
-
-Public API
-----------
-  list_providers(key_id)              → list[dict]   (no api_key field)
-  get_provider(prov_id, key_id)       → dict | None  (with api_key)
-  get_public(prov_id, key_id)         → dict | None  (no api_key)
-  create_provider(...)                → dict
-  update_provider(prov_id, key_id, **fields) → bool
-  delete_provider(prov_id, key_id)    → bool
-  touch_provider(prov_id)             → None         (records last_used_at)
-  resolve_model_string(model_string, key_id) → ResolvedModel | None
+Entry points
+------------
+``list_providers`` and ``get_public`` return redacted HTTP-safe documents.
+``get_provider`` returns the internal document with plaintext ``api_key``.
+``create_provider`` / ``update_provider`` / ``delete_provider`` are atomic
+Sidecar commands. ``resolve_model_string`` resolves ``model@prov_id`` within an
+owner boundary.
 """
 
 from __future__ import annotations
 
-import secrets
-import threading
-import time
 from dataclasses import dataclass
+import secrets
+import time
 from typing import Optional
 
-from lib.config_dir import config_path
-from lib.json_store import read_json, update_json_atomic
+from lib.identity import require_user_id
 from lib.log import audit_log, get_logger
+from lib.secret_envelope import open_secret, seal_secret, secret_hint
+from lib.storage.service import get_storage_client
+
 
 logger = get_logger(__name__)
 
 __all__ = [
-    'ResolvedModel',
-    'list_providers',
-    'get_provider',
-    'get_public',
-    'create_provider',
-    'update_provider',
-    'delete_provider',
-    'touch_provider',
-    'resolve_model_string',
-    'redact',
-    'sanitise_extra_headers',
+    "ResolvedModel",
+    "create_provider",
+    "delete_provider",
+    "get_provider",
+    "get_public",
+    "list_providers",
+    "redact",
+    "resolve_model_string",
+    "sanitise_extra_headers",
+    "touch_provider",
+    "update_provider",
 ]
 
-
-# ── extra_headers allowlist (security) ──────────────────────────────
-
-# Headers a caller may NOT supply via ``extra_headers`` on a BYO
-# provider (registered or inline). They'd let a request impersonate
-# Tofu's own outbound auth, leak cookies, or mask the request as a
-# different SDK to upstream rate-limit policies. Compared
-# case-insensitively.
 _FORBIDDEN_EXTRA_HEADERS = frozenset({
-    'authorization',
-    'x-api-key',
-    'cookie',
-    'set-cookie',
-    'host',
-    'content-length',
-    'transfer-encoding',
-    'proxy-authorization',
+    "authorization",
+    "x-api-key",
+    "cookie",
+    "set-cookie",
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "proxy-authorization",
 })
-
 _MAX_EXTRA_HEADERS = 16
 _MAX_HEADER_VALUE_LEN = 2048
+_MAX_MODELS_PER_PROVIDER = 64
+_MAX_API_KEY_BYTES = 8192
+_SECRET_PURPOSE = "byo-provider-api-key"
+_UPDATABLE = frozenset({
+    "name",
+    "base_url",
+    "api_key",
+    "models",
+    "extra_headers",
+    "thinking_format",
+    "disabled",
+})
 
 
-def sanitise_extra_headers(raw) -> tuple[dict, 'Optional[str]']:
-    """Validate and normalise an ``extra_headers`` dict.
+@dataclass(frozen=True, slots=True)
+class ResolvedModel:
+    """A model alias plus its owner-authorized provider, when suffixed."""
 
-    Returns ``(clean_dict, error_message_or_None)``. On error the
-    clean_dict may be partially populated; callers must check the
-    error first.
+    model_id: str
+    provider: Optional[dict]
 
-    Rules:
-      * Must be a dict with string keys and scalar values.
-      * Header name not in :data:`_FORBIDDEN_EXTRA_HEADERS`.
-      * Max :data:`_MAX_EXTRA_HEADERS` entries.
-      * Each value <= :data:`_MAX_HEADER_VALUE_LEN` chars.
-    """
+
+def _boundary(owner_user_id: int, tenant_id: str | None) -> dict[str, object]:
+    return {
+        "owner_user_id": require_user_id(
+            owner_user_id, context="BYO provider owner"),
+        "tenant_id": str(tenant_id or "").strip(),
+    }
+
+
+def sanitise_extra_headers(raw) -> tuple[dict, Optional[str]]:
+    """Validate caller headers before any provider row can be persisted."""
     if raw is None or raw == {}:
         return {}, None
     if not isinstance(raw, dict):
-        return {}, '`extra_headers` must be an object'
+        return {}, "`extra_headers` must be an object"
     if len(raw) > _MAX_EXTRA_HEADERS:
-        return {}, (f'`extra_headers` has too many entries '
-                     f'(max {_MAX_EXTRA_HEADERS})')
-    out: dict = {}
-    for k, v in raw.items():
-        if not isinstance(k, str) or not k.strip():
-            return out, '`extra_headers` keys must be non-empty strings'
-        if k.lower() in _FORBIDDEN_EXTRA_HEADERS:
-            return out, (f'`extra_headers[{k!r}]` is reserved; '
-                          f'forbidden names: '
-                          f'{sorted(_FORBIDDEN_EXTRA_HEADERS)}')
-        if not isinstance(v, (str, int, float, bool)):
-            return out, (f'`extra_headers[{k!r}]` must be a scalar '
-                          f'(string/number/bool)')
-        sv = str(v)
-        if len(sv) > _MAX_HEADER_VALUE_LEN:
-            return out, (f'`extra_headers[{k!r}]` value too long '
-                          f'(max {_MAX_HEADER_VALUE_LEN})')
-        out[k.strip()] = sv
-    return out, None
-
-
-_STORE_PATH = config_path('byo_providers.json')
-_STORE_VERSION = 1
-_MAX_PROVIDERS_PER_KEY = 32
-_MAX_MODELS_PER_PROVIDER = 64
-
-_lock = threading.RLock()
-_cache: list[dict] = []
-_cache_loaded = False
-
-
-@dataclass
-class ResolvedModel:
-    """Output of :func:`resolve_model_string`.
-
-    ``provider`` is None when the model string did not include a
-    ``@prov_…`` suffix — callers fall back to the global slot pool.
-    """
-    model_id: str
-    provider: Optional[dict]  # full row (incl. api_key) or None
-
-
-def _ensure_loaded() -> None:
-    global _cache_loaded
-    if _cache_loaded:
-        return
-    with _lock:
-        if _cache_loaded:
-            return
-        store = read_json(_STORE_PATH, default=None)
-        rows: list[dict] = []
-        if isinstance(store, dict) and isinstance(store.get('providers'), list):
-            rows = [r for r in store['providers'] if isinstance(r, dict)]
-        # Migrate old rows at the read boundary.  This keeps the public API and
-        # dispatcher on the canonical model shape even before the owner next
-        # updates the provider; the following persistence mutation will write
-        # the cleaned shape back to disk.
-        registrations = []
-        from lib.model_registration import normalize_model_entry
-        for row in rows:
-            normalized_models = []
-            for model in row.get('models') or ():
-                if not isinstance(model, dict):
-                    continue
-                try:
-                    normalized_models.append(normalize_model_entry(model))
-                except ValueError as exc:
-                    # Do not let one historical malformed row hide the whole
-                    # provider.  It remains usable, but the obsolete public
-                    # field is still removed.
-                    fallback = dict(model)
-                    fallback.pop('cost', None)
-                    normalized_models.append(fallback)
-                    logger.warning('[BYOProv] model migration skipped: %s', exc)
-            row['models'] = normalized_models
-            registrations.extend((str(row.get('id') or ''), model)
-                                 for model in normalized_models)
-        _cache.clear()
-        _cache.extend(rows)
-        _cache_loaded = True
-        logger.info('[BYOProv] loaded %d row(s) from %s', len(_cache), _STORE_PATH)
-    from lib.model_registration import clear_provider_models, register_model
-    for provider_id in dict.fromkeys(provider_id for provider_id, _ in registrations):
-        clear_provider_models(provider_id)
-    for provider_id, model in registrations:
-        try:
-            register_model(model, provider_id=provider_id)
-        except ValueError as exc:
-            logger.warning('[BYOProv] model registration skipped: %s', exc)
-
-
-def _persist() -> None:
-    payload = {'version': _STORE_VERSION, 'providers': list(_cache)}
-    update_json_atomic(_STORE_PATH, lambda _: payload, default=payload)
-
-
-def redact(row: dict) -> dict:
-    """Return a copy with the secret api_key replaced by a hint."""
-    out = dict(row)
-    raw = out.pop('api_key', '') or ''
-    if raw:
-        out['key_hint'] = (raw[:6] + '…' + raw[-2:]) if len(raw) > 12 else '••••'
-    else:
-        out['key_hint'] = ''
-    return out
-
-
-def list_providers(owner_key_id: str) -> list[dict]:
-    """All providers registered by this Bearer key, newest first."""
-    _ensure_loaded()
-    with _lock:
-        rows = [r for r in _cache if r.get('owner_key_id') == owner_key_id]
-    rows.sort(key=lambda r: r.get('created_at', 0), reverse=True)
-    return [redact(r) for r in rows]
-
-
-def get_provider(prov_id: str, owner_key_id: str) -> Optional[dict]:
-    """Internal lookup — returns the FULL row including api_key.
-
-    Use :func:`get_public` for any response the user sees.
-    """
-    _ensure_loaded()
-    with _lock:
-        for r in _cache:
-            if r.get('id') == prov_id and r.get('owner_key_id') == owner_key_id:
-                return dict(r)
-    return None
-
-
-def get_public(prov_id: str, owner_key_id: str) -> Optional[dict]:
-    """User-facing lookup — api_key replaced with key_hint."""
-    row = get_provider(prov_id, owner_key_id)
-    return redact(row) if row else None
+        return {}, (
+            f"`extra_headers` has too many entries (max {_MAX_EXTRA_HEADERS})")
+    clean: dict[str, str] = {}
+    for name, value in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            return clean, "`extra_headers` keys must be non-empty strings"
+        normalized_name = name.strip()
+        if normalized_name.lower() in _FORBIDDEN_EXTRA_HEADERS:
+            return clean, (
+                f"`extra_headers[{name!r}]` is reserved; forbidden names: "
+                f"{sorted(_FORBIDDEN_EXTRA_HEADERS)}")
+        if not isinstance(value, (str, int, float, bool)):
+            return clean, (
+                f"`extra_headers[{name!r}]` must be a scalar "
+                "(string/number/bool)")
+        normalized_value = str(value)
+        if len(normalized_value) > _MAX_HEADER_VALUE_LEN:
+            return clean, (
+                f"`extra_headers[{name!r}]` value too long "
+                f"(max {_MAX_HEADER_VALUE_LEN})")
+        clean[normalized_name] = normalized_value
+    return clean, None
 
 
 def _validate_models(models) -> list[dict]:
     if not isinstance(models, list):
-        raise ValueError('models must be a list')
+        raise ValueError("models must be a list")
     if len(models) > _MAX_MODELS_PER_PROVIDER:
-        raise ValueError(f'too many models (max {_MAX_MODELS_PER_PROVIDER})')
-    out = []
-    for i, m in enumerate(models):
-        if not isinstance(m, dict):
-            raise ValueError(f'models[{i}] must be an object')
+        raise ValueError(
+            f"too many models (max {_MAX_MODELS_PER_PROVIDER})")
+    from lib.model_registration import normalize_model_entry
+
+    normalized: list[dict] = []
+    for index, model in enumerate(models):
+        if not isinstance(model, dict):
+            raise ValueError(f"models[{index}] must be an object")
         try:
-            from lib.model_registration import normalize_model_entry
-            out.append(normalize_model_entry(m, reject_legacy_cost=True))
-        except ValueError as e:
-            raise ValueError(f'models[{i}]: {e}') from e
-    return out
+            normalized.append(
+                normalize_model_entry(model, reject_legacy_cost=True))
+        except ValueError as exc:
+            raise ValueError(f"models[{index}]: {exc}") from exc
+    return normalized
 
 
-def _validate_base_url(url: str) -> str:
-    url = (url or '').strip().rstrip('/')
+def _validate_base_url(value: str) -> str:
+    url = str(value or "").strip().rstrip("/")
     if not url:
-        raise ValueError('base_url is required')
-    if not (url.startswith('http://') or url.startswith('https://')):
-        raise ValueError('base_url must start with http:// or https://')
-    # SSRF egress guard: reject cloud-metadata / link-local / reserved
-    # targets (and, when the operator opts in, loopback / private). This
-    # is the registration-time check; discovery.py re-checks at use time
-    # because DNS can change between registration and the actual request.
+        raise ValueError("base_url is required")
+    if len(url) > 500:
+        raise ValueError("base_url exceeds 500 characters")
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ValueError("base_url must start with http:// or https://")
     from lib.byo_egress import EgressDenied, validate_egress_url
+
     try:
         validate_egress_url(url)
-    except EgressDenied as e:
-        raise ValueError(str(e)) from e
+    except EgressDenied as exc:
+        raise ValueError(str(exc)) from exc
     return url
 
 
 def _validate_thinking_format(value) -> str:
-    """Normalise + validate a ``thinking_format`` field.
-
-    Accepts None / missing as ''. Anything else MUST be one of the
-    values in :data:`lib.llm_dispatch.slot.THINKING_FORMATS`.
-    """
-    if value is None or value == '':
-        return ''
+    if value is None or value == "":
+        return ""
     if not isinstance(value, str):
-        raise ValueError('thinking_format must be a string')
+        raise ValueError("thinking_format must be a string")
     from lib.llm_dispatch.provider_registry import is_valid_thinking_format
     from lib.llm_dispatch.slot import THINKING_FORMATS
-    norm = value.strip()
-    if not is_valid_thinking_format(norm):
+
+    normalized = value.strip()
+    if not is_valid_thinking_format(normalized):
         raise ValueError(
-            'thinking_format=%r is not one of %s (nor a registered '
-            'tofu.providers plugin dialect)' % (
+            "thinking_format=%r is not one of %s (nor a registered "
+            "tofu.providers plugin dialect)" % (
                 value, sorted(THINKING_FORMATS)))
-    return norm
+    return normalized
 
 
-def create_provider(*, owner_key_id: str, name: str, base_url: str,
-                    api_key: str, models: list,
-                    extra_headers: Optional[dict] = None,
-                    thinking_format: str = '') -> dict:
-    """Register a new provider for this Bearer key.
-
-    Returns the FULL row (callers that want to display it should pass
-    it through :func:`redact`). Raises ``ValueError`` on validation
-    failure and ``RuntimeError`` when the per-key cap is reached.
-
-    ``thinking_format`` pins the body-shape dialect this engine speaks.
-    Empty string (default) means auto-detect from the model name.
-    Operators usually let :func:`probe_provider` populate this from
-    ``/v1/models``'s ``owned_by`` field, so manual config is the
-    exception, not the rule.
-    """
-    if not owner_key_id:
-        raise ValueError('owner_key_id is required')
-    name = (name or '').strip()[:80]
-    if not name:
-        raise ValueError('name is required')
-    base_url = _validate_base_url(base_url)
-    api_key = (api_key or '').strip()
-    models_clean = _validate_models(models)
-    headers_clean = dict(extra_headers or {})
-    thinking_format = _validate_thinking_format(thinking_format)
-
-    _ensure_loaded()
-    with _lock:
-        owned = [r for r in _cache if r.get('owner_key_id') == owner_key_id]
-        if len(owned) >= _MAX_PROVIDERS_PER_KEY:
-            raise RuntimeError(
-                f'provider quota reached '
-                f'({_MAX_PROVIDERS_PER_KEY} per API key)')
-        prov_id = 'prov_' + secrets.token_hex(4)
-        row = {
-            'id': prov_id,
-            'owner_key_id': owner_key_id,
-            'name': name,
-            'base_url': base_url,
-            'api_key': api_key,
-            'models': models_clean,
-            'extra_headers': headers_clean,
-            'thinking_format': thinking_format,
-            'created_at': time.time(),
-            'last_used_at': None,
-            'disabled': False,
-        }
-        _cache.append(row)
-        _persist()
-    from lib.model_registration import register_model
-    for model in models_clean:
-        register_model(model, provider_id=prov_id)
-    audit_log('byo_provider_created', prov_id=prov_id,
-              owner_key_id=owner_key_id, base_url=base_url,
-              n_models=len(models_clean))
-    logger.info('[BYOProv] created %s owner=%s url=%s n_models=%d',
-                prov_id, owner_key_id, base_url, len(models_clean))
-    return dict(row)
+def _validate_api_key(value: str) -> str:
+    normalized = str(value or "").strip()
+    if len(normalized.encode("utf-8")) > _MAX_API_KEY_BYTES:
+        raise ValueError(f"api_key exceeds {_MAX_API_KEY_BYTES} bytes")
+    return normalized
 
 
-_UPDATABLE = frozenset({
-    'name', 'base_url', 'api_key', 'models', 'extra_headers',
-    'thinking_format', 'disabled',
-})
+def _register_models(provider_id: str, models: list[dict]) -> None:
+    from lib.model_registration import clear_provider_models, register_model
+
+    clear_provider_models(provider_id)
+    for model in models:
+        register_model(model, provider_id=provider_id)
 
 
-def update_provider(prov_id: str, owner_key_id: str, **fields) -> bool:
-    """Mutate a provider row. Returns True iff the row exists and is owned.
+def _internal_document(row: dict) -> dict:
+    document = dict(row)
+    ciphertext = str(document.pop("api_key_ciphertext", "") or "")
+    document["api_key"] = (
+        open_secret(
+            ciphertext,
+            purpose=_SECRET_PURPOSE,
+            owner_user_id=int(document["owner_user_id"]),
+            record_id=str(document["id"]),
+        )
+        if ciphertext
+        else ""
+    )
+    return document
 
-    Unknown fields are silently dropped (forward-compat with future
-    columns).
-    """
-    _ensure_loaded()
-    models_to_register = None
-    with _lock:
-        for row in _cache:
-            if (row.get('id') != prov_id
-                    or row.get('owner_key_id') != owner_key_id):
-                continue
-            changed = {}
-            for k, v in fields.items():
-                if k not in _UPDATABLE:
-                    continue
-                if k == 'name':
-                    v = (v or '').strip()[:80]
-                    if not v:
-                        continue
-                elif k == 'base_url':
-                    v = _validate_base_url(v)
-                elif k == 'api_key':
-                    v = (v or '').strip()
-                elif k == 'models':
-                    v = _validate_models(v)
-                elif k == 'extra_headers':
-                    if not isinstance(v, dict):
-                        continue
-                    v = dict(v)
-                elif k == 'thinking_format':
-                    v = _validate_thinking_format(v)
-                elif k == 'disabled':
-                    v = bool(v)
-                if row.get(k) != v:
-                    row[k] = v
-                    changed[k] = (k if k == 'api_key' else v)  # don't audit secrets
-            if changed:
-                _persist()
-                audit_log('byo_provider_updated', prov_id=prov_id,
-                          owner_key_id=owner_key_id,
-                          fields=list(changed.keys()))
-                logger.info('[BYOProv] updated %s fields=%s', prov_id,
-                            list(changed.keys()))
-                if 'models' in changed:
-                    models_to_register = list(row.get('models') or [])
-            break
-        else:
-            return False
-    if models_to_register is not None:
-        from lib.model_registration import clear_provider_models, register_model
-        clear_provider_models(prov_id)
-        for model in models_to_register:
-            register_model(model, provider_id=prov_id)
+
+def redact(row: dict) -> dict:
+    """Return an idempotent, HTTP-safe provider projection."""
+    public = dict(row)
+    raw = str(public.pop("api_key", "") or "")
+    public.pop("api_key_ciphertext", None)
+    public.pop("owner_user_id", None)
+    public.pop("tenant_id", None)
+    if raw:
+        public["key_hint"] = secret_hint(raw)
+    else:
+        public.setdefault("key_hint", "")
+    return public
+
+
+def list_providers(
+    owner_user_id: int, *, tenant_id: str | None = None,
+) -> list[dict]:
+    """Return newest-first redacted providers for one owner boundary."""
+    rows = get_storage_client().query(
+        "provider.list", _boundary(owner_user_id, tenant_id))
+    return [redact(dict(row)) for row in rows]
+
+
+def get_provider(
+    provider_id: str,
+    owner_user_id: int,
+    *,
+    tenant_id: str | None = None,
+) -> Optional[dict]:
+    """Return one internal provider document, including plaintext api_key."""
+    row = get_storage_client().query(
+        "provider.get",
+        {
+            **_boundary(owner_user_id, tenant_id),
+            "provider_id": str(provider_id or "").strip(),
+        },
+    )
+    if row is None:
+        return None
+    document = _internal_document(dict(row))
+    _register_models(document["id"], document.get("models") or [])
+    return document
+
+
+def get_public(
+    provider_id: str,
+    owner_user_id: int,
+    *,
+    tenant_id: str | None = None,
+) -> Optional[dict]:
+    row = get_provider(provider_id, owner_user_id, tenant_id=tenant_id)
+    return None if row is None else redact(row)
+
+
+def create_provider(
+    *,
+    owner_user_id: int,
+    name: str,
+    base_url: str,
+    api_key: str,
+    models: list,
+    extra_headers: Optional[dict] = None,
+    thinking_format: str = "",
+    tenant_id: str | None = None,
+) -> dict:
+    """Validate, encrypt, and atomically register one provider."""
+    boundary = _boundary(owner_user_id, tenant_id)
+    normalized_name = str(name or "").strip()
+    if not normalized_name:
+        raise ValueError("name is required")
+    if len(normalized_name) > 80:
+        raise ValueError("name exceeds 80 characters")
+    normalized_url = _validate_base_url(base_url)
+    normalized_key = _validate_api_key(api_key)
+    normalized_models = _validate_models(models)
+    normalized_headers, header_error = sanitise_extra_headers(extra_headers)
+    if header_error:
+        raise ValueError(header_error)
+    normalized_thinking = _validate_thinking_format(thinking_format)
+    provider_id = "prov_" + secrets.token_hex(8)
+    ciphertext = (
+        seal_secret(
+            normalized_key,
+            purpose=_SECRET_PURPOSE,
+            owner_user_id=int(boundary["owner_user_id"]),
+            record_id=provider_id,
+        )
+        if normalized_key
+        else ""
+    )
+    row = get_storage_client(write=True).command(
+        "provider.create",
+        {
+            **boundary,
+            "provider_id": provider_id,
+            "name": normalized_name,
+            "base_url": normalized_url,
+            "api_key_ciphertext": ciphertext,
+            "key_hint": secret_hint(normalized_key),
+            "models": normalized_models,
+            "extra_headers": normalized_headers,
+            "thinking_format": normalized_thinking,
+            "created_at": time.time(),
+        },
+        f"provider.create:{provider_id}",
+    )
+    if row is None:
+        raise RuntimeError("provider creation did not return a row")
+    document = _internal_document(dict(row))
+    _register_models(provider_id, normalized_models)
+    audit_log(
+        "byo_provider_created",
+        provider_id=provider_id,
+        owner_user_id=boundary["owner_user_id"],
+        tenant_id=boundary["tenant_id"],
+        base_url=normalized_url,
+        model_count=len(normalized_models),
+    )
+    return document
+
+
+def update_provider(
+    provider_id: str,
+    owner_user_id: int,
+    *,
+    tenant_id: str | None = None,
+    **fields,
+) -> bool:
+    """Validate and atomically update an owned provider; reject unknown fields."""
+    unknown = set(fields) - _UPDATABLE
+    if unknown:
+        raise ValueError(
+            f"unknown provider update fields: {', '.join(sorted(unknown))}")
+    boundary = _boundary(owner_user_id, tenant_id)
+    updates: dict[str, object] = {}
+    if "name" in fields:
+        name = str(fields["name"] or "").strip()
+        if not name:
+            raise ValueError("name is required")
+        if len(name) > 80:
+            raise ValueError("name exceeds 80 characters")
+        updates["name"] = name
+    if "base_url" in fields:
+        updates["base_url"] = _validate_base_url(fields["base_url"])
+    if "api_key" in fields:
+        key = _validate_api_key(fields["api_key"])
+        updates["api_key_ciphertext"] = (
+            seal_secret(
+                key,
+                purpose=_SECRET_PURPOSE,
+                owner_user_id=int(boundary["owner_user_id"]),
+                record_id=provider_id,
+            )
+            if key
+            else ""
+        )
+        updates["key_hint"] = secret_hint(key)
+    if "models" in fields:
+        updates["models"] = _validate_models(fields["models"])
+    if "extra_headers" in fields:
+        headers, error = sanitise_extra_headers(fields["extra_headers"])
+        if error:
+            raise ValueError(error)
+        updates["extra_headers"] = headers
+    if "thinking_format" in fields:
+        updates["thinking_format"] = _validate_thinking_format(
+            fields["thinking_format"])
+    if "disabled" in fields:
+        if not isinstance(fields["disabled"], bool):
+            raise ValueError("disabled must be a boolean")
+        updates["disabled"] = fields["disabled"]
+    if not updates:
+        return get_provider(
+            provider_id, owner_user_id, tenant_id=tenant_id) is not None
+    row = get_storage_client(write=True).command(
+        "provider.update",
+        {
+            **boundary,
+            "provider_id": str(provider_id or "").strip(),
+            "updates": updates,
+            "updated_at": time.time(),
+        },
+        f"provider.update:{provider_id}:{secrets.token_hex(8)}",
+    )
+    if row is None:
+        return False
+    if "models" in updates:
+        _register_models(provider_id, updates["models"])
+    audit_log(
+        "byo_provider_updated",
+        provider_id=provider_id,
+        owner_user_id=boundary["owner_user_id"],
+        fields=sorted(fields),
+    )
     return True
 
 
-def delete_provider(prov_id: str, owner_key_id: str) -> bool:
-    """Remove a provider. Idempotent — returns True iff a row was removed."""
-    _ensure_loaded()
-    with _lock:
-        for i, row in enumerate(_cache):
-            if (row.get('id') == prov_id
-                    and row.get('owner_key_id') == owner_key_id):
-                _cache.pop(i)
-                _persist()
-                from lib.model_registration import clear_provider_models
-                clear_provider_models(prov_id)
-                audit_log('byo_provider_deleted', prov_id=prov_id,
-                          owner_key_id=owner_key_id)
-                logger.info('[BYOProv] deleted %s owner=%s', prov_id,
-                            owner_key_id)
-                return True
-    return False
+def delete_provider(
+    provider_id: str,
+    owner_user_id: int,
+    *,
+    tenant_id: str | None = None,
+) -> bool:
+    boundary = _boundary(owner_user_id, tenant_id)
+    result = get_storage_client(write=True).command(
+        "provider.delete",
+        {
+            **boundary,
+            "provider_id": str(provider_id or "").strip(),
+        },
+        f"provider.delete:{provider_id}:{secrets.token_hex(8)}",
+    )
+    deleted = bool(result and result.get("deleted"))
+    if deleted:
+        from lib.model_registration import clear_provider_models
+
+        clear_provider_models(provider_id)
+        audit_log(
+            "byo_provider_deleted",
+            provider_id=provider_id,
+            owner_user_id=boundary["owner_user_id"],
+        )
+    return deleted
 
 
-def touch_provider(prov_id: str) -> None:
-    """Best-effort update of ``last_used_at``. No fsync."""
-    if not prov_id:
+def touch_provider(
+    provider_id: str,
+    owner_user_id: int,
+    *,
+    tenant_id: str | None = None,
+) -> None:
+    if not provider_id:
         return
-    _ensure_loaded()
-    with _lock:
-        for row in _cache:
-            if row.get('id') == prov_id:
-                row['last_used_at'] = time.time()
-                # Persistence happens lazily on the next mutation; the
-                # last_used_at field is for UI display only.
-                return
+    get_storage_client(write=True).command(
+        "provider.touch",
+        {
+            **_boundary(owner_user_id, tenant_id),
+            "provider_id": provider_id,
+            "used_at": time.time(),
+        },
+        None,
+    )
 
 
-def resolve_model_string(model: str, owner_key_id: str) -> Optional[ResolvedModel]:
-    """Parse a model string of the form ``"name"`` or ``"name@prov_xxx"``.
-
-    Returns:
-        :class:`ResolvedModel` with ``provider=None`` for plain
-        ``"name"`` strings (caller falls back to the global slot pool).
-        Returns ``None`` when the ``@prov_xxx`` suffix is present but
-        the provider doesn't exist or isn't owned by ``owner_key_id``
-        — the caller should map this to a 404.
-    """
-    if not model or '@' not in model:
-        return ResolvedModel(model_id=(model or '').strip(), provider=None)
-    name, _, suffix = model.rpartition('@')
+def resolve_model_string(
+    model: str,
+    owner_user_id: int,
+    *,
+    tenant_id: str | None = None,
+) -> Optional[ResolvedModel]:
+    """Resolve ``name@prov_id`` without allowing credential-key ownership."""
+    if not model or "@" not in model:
+        return ResolvedModel(model_id=str(model or "").strip(), provider=None)
+    name, _, suffix = model.rpartition("@")
     name = name.strip()
     suffix = suffix.strip()
-    if not suffix.startswith('prov_'):
-        # ``foo@1.0`` style version tag — not our suffix; pass through
-        # untouched so the dispatcher's own model-aliasing handles it.
+    if not suffix.startswith("prov_"):
         return ResolvedModel(model_id=model.strip(), provider=None)
     if not name:
         return None
-    row = get_provider(suffix, owner_key_id)
-    if row is None or row.get('disabled'):
+    row = get_provider(suffix, owner_user_id, tenant_id=tenant_id)
+    if row is None or row.get("disabled"):
         return None
     return ResolvedModel(model_id=name, provider=row)

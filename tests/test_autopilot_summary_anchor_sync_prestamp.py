@@ -8,7 +8,7 @@ The run-summary REPORT must dock at the END of its own (VU→assistant)×N
 sequence — even if the user starts a NEW round before the (expensive, ~63s)
 reporter LLM turn finishes. Historically the anchor was resolved ONLY inside
 the async summary daemon: by the time it ran, a new round may have appended
-turns, so ``_resolve_run_anchor_msgid`` re-walked to a DRIFTED boundary and the
+turns, so ``_resolve_run_anchor_turn_id`` re-walked to a DRIFTED boundary and the
 report offset to the transcript tail (past the new round).
 
 THE FIX (two parts, both proven load-bearing here)
@@ -16,8 +16,8 @@ THE FIX (two parts, both proven load-bearing here)
   1. **Sync pre-stamp** — on a clean ``[VU: TASK_DONE]``, ``maybe_run_autopilot``
      writes a bare ``_store_run_record(reason='task_done')`` on the CALLING
      thread, BEFORE ``_clear_run_id``, while the run's boundary is stable. That
-     write resolves + persists ``anchorMsgId`` immediately.
-  2. **Sticky anchor** — ``_store_run_record`` keeps a PRIOR ``anchorMsgId`` over
+     write resolves + persists ``anchorTurnId`` immediately.
+  2. **Sticky anchor** — ``_store_run_record`` keeps a PRIOR ``anchorTurnId`` over
      any fresh re-resolution, so the async summary (which only fills the report
      ``content`` a beat later, possibly after a new round started) can NEVER
      move it.
@@ -46,48 +46,26 @@ pytestmark = pytest.mark.unit
 # ── NC-2: the sticky-anchor rule in _store_run_record ──────────────────
 
 def _sticky_db(monkeypatch, state):
-    """Fake DB: SELECT messages → state['messages']; settings read/write via
-    both the lib.database and settings_store namespaces."""
-    class _FakeDB:
-        def execute(self, sql, params=None):
-            class _R:
-                def __init__(self, row):
-                    self._row = row
-                def fetchone(self):
-                    return self._row
-            if 'SELECT messages' in sql:
-                return _R((state['messages'],))
-            if 'SELECT settings' in sql:
-                return _R((state['settings'],))
-            return _R(None)
-
-    def _fake_retry(db, sql, params):
-        if 'SET settings' in sql or 'settings=' in sql:
-            state['settings'] = params[0]
-
-    import lib.conversations.settings_store as _ss
-    import lib.database as _db
-    monkeypatch.setattr(_db, 'get_thread_db', lambda domain: _FakeDB())
-    monkeypatch.setattr(_db, 'db_execute_with_retry', _fake_retry)
-    monkeypatch.setattr(_ss, 'get_thread_db', lambda domain: _FakeDB())
-    monkeypatch.setattr(_ss, 'db_execute_with_retry', _fake_retry)
+    """Back repository reads and settings writes with one domain fake."""
+    from tests._conversation_authority import install_conversation_state
+    install_conversation_state(monkeypatch, state)
 
 
 def _vu(run_id, msg_id):
     return {'role': 'user', '_isVirtualUser': True,
-            '_autopilotRunId': run_id, '_msgId': msg_id, 'content': 'go on'}
+            '_autopilotRunId': run_id, '_turnId': msg_id, 'content': 'go on'}
 
 
 def _agent(msg_id, txt='reply'):
-    return {'role': 'assistant', '_msgId': msg_id, 'content': txt}
+    return {'role': 'assistant', '_turnId': msg_id, 'content': txt}
 
 
 def _human(msg_id, txt='q'):
-    return {'role': 'user', '_msgId': msg_id, 'content': txt}
+    return {'role': 'user', '_turnId': msg_id, 'content': txt}
 
 
 def test_anchor_is_sticky_across_a_later_reresolve(monkeypatch):
-    """A first conclude stamps anchorMsgId; a LATER conclude whose live message
+    """A first conclude stamps anchorTurnId; a LATER conclude whose live message
     tail has drifted (a new round appended) must NOT move the anchor.
 
     This is the sticky rule that makes the sync pre-stamp durable: the async
@@ -103,8 +81,8 @@ def test_anchor_is_sticky_across_a_later_reresolve(monkeypatch):
                                 _vu('R1', 'm-vu1'), _agent('m-a1', 'follow-up')]),
     }
     _sticky_db(monkeypatch, state)
-    rec1 = ap._store_run_record('conv-a', 'R1', reason='task_done')
-    assert rec1['anchorMsgId'] == 'm-a1', 'first conclude stamps the boundary'
+    rec1 = ap._store_run_record('conv-a', 'R1', reason='task_done', user_id=1)
+    assert rec1['anchorTurnId'] == 'm-a1', 'first conclude stamps the boundary'
 
     # A NEW round has since appended turns → if the anchor re-resolved now it
     # would drift forward to m-a2. Simulate by extending the message tail, then
@@ -114,14 +92,14 @@ def test_anchor_is_sticky_across_a_later_reresolve(monkeypatch):
         _vu('R1', 'm-vu1'), _agent('m-a1', 'follow-up'),
         _human('m-h1', 'new round'), _agent('m-a2', 'newer')])
     rec2 = ap._store_run_record('conv-a', 'R1', reason='task_done',
-                                text='Outcome: shipped.')
+                                text='Outcome: shipped.', user_id=1)
 
     # STICKY: the anchor stayed at the ORIGINAL boundary, not the drifted tail.
-    assert rec2['anchorMsgId'] == 'm-a1', \
+    assert rec2['anchorTurnId'] == 'm-a1', \
         'the anchor must be sticky — a later write must not drift it'
     assert rec2['content'] == 'Outcome: shipped.', 'report content still filled'
     stored = json.loads(state['settings'])['autopilotSummaries']['R1']
-    assert stored['anchorMsgId'] == 'm-a1'
+    assert stored['anchorTurnId'] == 'm-a1'
 
 
 def test_nc_non_sticky_anchor_drifts(monkeypatch):
@@ -138,7 +116,7 @@ def test_nc_non_sticky_anchor_drifts(monkeypatch):
     state = {
         'settings': json.dumps({'autopilotSummaries': {
             'R1': {'runId': 'R1', 'status': 'concluded', 'reason': 'task_done',
-                   'anchorMsgId': 'm-a1', 'content': 'Outcome: shipped.'}}}),
+                   'anchorTurnId': 'm-a1', 'content': 'Outcome: shipped.'}}}),
         'messages': json.dumps([
             _human('m-h0', 'obj'),
             _vu('R1', 'm-vu1'), _agent('m-a1', 'follow-up'),
@@ -147,13 +125,13 @@ def test_nc_non_sticky_anchor_drifts(monkeypatch):
     _sticky_db(monkeypatch, state)
 
     # The SHIPPED resolver would return the drifted boundary here…
-    fresh = ap._resolve_run_anchor_msgid('conv-a', 'R1')
+    fresh = ap._resolve_run_anchor_turn_id('conv-a', 'R1', user_id=1)
     assert fresh == 'm-a1', ('boundary walk stops at the real human turn m-h1, '
                              'so it stays m-a1 even with the new round')
     # …and the shipped _store_run_record keeps the prior anchor regardless.
     rec = ap._store_run_record('conv-a', 'R1', reason='task_done',
-                               text='Outcome: shipped again.')
-    assert rec['anchorMsgId'] == 'm-a1'
+                               text='Outcome: shipped again.', user_id=1)
+    assert rec['anchorTurnId'] == 'm-a1'
 
 
 # ── NC-1: TASK_DONE pre-stamps the anchor synchronously, before clearing ──
@@ -162,6 +140,7 @@ def _task_done_task():
     return {
         'id': 'task-done-0001',
         'convId': 'conv-td',
+        '_userId': 1,
         'config': {'model': 'm', 'autopilot': True},
         'messages': [
             {'role': 'user', 'content': 'Ship it.'},
@@ -188,8 +167,11 @@ def test_task_done_prestamps_anchor_before_clearing_run_pin(monkeypatch):
     seen = {'prestamp_thread': None}
 
     monkeypatch.setattr(ap, 'is_autopilot_enabled', lambda task: True)
-    monkeypatch.setattr(ap, '_get_or_persist_run_id', lambda conv_id: 'ar-td')
-    monkeypatch.setattr(ap, '_has_pending_real_message', lambda conv_id: False)
+    monkeypatch.setattr(
+        ap, '_get_or_persist_run_id',
+        lambda conv_id, *, user_id: 'ar-td')
+    monkeypatch.setattr(
+        ap, '_has_pending_real_message', lambda conv_id, **_kwargs: False)
     monkeypatch.setattr(ap, '_successor_already_running',
                         lambda task, conv_id: False)
 
@@ -198,12 +180,12 @@ def test_task_done_prestamps_anchor_before_clearing_run_pin(monkeypatch):
         return None
     monkeypatch.setattr(ap, 'run_virtual_user', _fake_vu)
 
-    def _fake_store(conv_id, run_id, *, reason='task_done', text='',
+    def _fake_store(conv_id, run_id, *, user_id, reason='task_done', text='',
                     translated=''):
         order.append('store_run_record')
         seen['prestamp_thread'] = threading.current_thread()
         return {'runId': run_id, 'status': 'concluded', 'reason': reason,
-                'anchorMsgId': 'm-boundary'}
+                'anchorTurnId': 'm-boundary'}
     # Post-slice-3 (pt_00459503): _emit_run_concluded_event (invoked from
     # maybe_run_autopilot on the TASK_DONE path) lives in the leaf module
     # ``autopilot_run_lifecycle`` and resolves _store_run_record /
@@ -218,9 +200,10 @@ def test_task_done_prestamps_anchor_before_clearing_run_pin(monkeypatch):
     # _clear_run_id is called from maybe_run_autopilot itself (still in
     # autopilot.py's module scope) — patch the facade attr as before.
     monkeypatch.setattr(ap, '_clear_run_id',
-                        lambda cid: order.append('clear_run_id'))
+                        lambda cid, *, user_id: order.append('clear_run_id'))
     import lib.message_queue as _mq
-    monkeypatch.setattr(_mq, 'clear_autopilot_marker', lambda cid: None)
+    monkeypatch.setattr(
+        _mq, 'clear_autopilot_marker', lambda cid, *, user_id: None)
     monkeypatch.setattr('lib.tasks_pkg.manager.append_event',
                         lambda task, ev: None)
 

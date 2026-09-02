@@ -226,46 +226,68 @@ def conv_affinity(conv_id: str | None):
         _state.conv_id = prev
 
 
-# ── Process-global recency map: conv_id → (key_name, timestamp) ──
-_conv_keys: dict[str, tuple[str, float]] = {}
+# ── Process-global recency map ──
+# Scoped entries use ``(conv_id, route_key)``.  A legacy ``conv_id`` string
+# entry is retained as a latest-pick compatibility/diagnostic alias; the
+# dispatcher never uses that alias when it has a model scope.
+# ``route_key`` is normally the requested logical model.  Keeping one key per
+# conversation was insufficient: an auxiliary compaction/translation pick on a
+# different model overwrote the main model's warm key, causing A→B→A namespace
+# churn in the next chat round.
+_conv_keys: dict[object, tuple[str, float]] = {}
 _conv_lock = threading.Lock()
+
+
+def _map_key(conv_id: str, route_key: str = ''):
+    return (conv_id, route_key) if route_key else conv_id
 
 
 def _prune_locked(now: float) -> None:
     """Drop stale entries; if still over the cap, drop the oldest. Caller holds lock."""
     ttl = _ttl_seconds()
-    stale = [cid for cid, (_, ts) in _conv_keys.items() if now - ts > ttl]
-    for cid in stale:
-        del _conv_keys[cid]
+    stale = [key for key, (_, ts) in _conv_keys.items() if now - ts > ttl]
+    for key in stale:
+        del _conv_keys[key]
     if len(_conv_keys) > _MAX_ENTRIES:
         # Drop oldest entries down to the cap.
         ordered = sorted(_conv_keys.items(), key=lambda kv: kv[1][1])
-        for cid, _ in ordered[:len(_conv_keys) - _MAX_ENTRIES]:
-            del _conv_keys[cid]
+        for key, _ in ordered[:len(_conv_keys) - _MAX_ENTRIES]:
+            del _conv_keys[key]
 
 
-def get_preferred_key(conv_id: str) -> str | None:
+def get_preferred_key(conv_id: str, *, route_key: str = '') -> str | None:
     """Return the key_name that last served ``conv_id``, or None if absent/stale."""
     if not conv_id:
         return None
     now = time.time()
     with _conv_lock:
-        entry = _conv_keys.get(conv_id)
+        map_key = _map_key(conv_id, route_key)
+        entry = _conv_keys.get(map_key)
+        # Rolling-deploy compatibility: an affinity recorded before scoped
+        # keys existed is still a valid first preference for any model.  Once
+        # the scoped picker succeeds it seeds the exact entry below.
+        if entry is None and route_key:
+            map_key = conv_id
+            entry = _conv_keys.get(map_key)
         if not entry:
             return None
         key_name, ts = entry
         if now - ts > _ttl_seconds():
-            del _conv_keys[conv_id]
+            del _conv_keys[map_key]
             return None
         return key_name
 
 
-def record_conv_key(conv_id: str, key_name: str) -> None:
+def record_conv_key(conv_id: str, key_name: str, *, route_key: str = '') -> None:
     """Remember that ``key_name`` served ``conv_id`` (updates recency)."""
     if not conv_id or not key_name:
         return
     now = time.time()
     with _conv_lock:
-        _conv_keys[conv_id] = (key_name, now)
+        _conv_keys[_map_key(conv_id, route_key)] = (key_name, now)
+        if route_key:
+            # Preserve the historical unscoped API as "latest key for this
+            # conversation" without letting it drive scoped dispatcher picks.
+            _conv_keys[conv_id] = (key_name, now)
         if len(_conv_keys) > _MAX_ENTRIES:
             _prune_locked(now)

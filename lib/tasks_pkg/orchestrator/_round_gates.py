@@ -1,6 +1,6 @@
 """Per-round financial budget gate and diagnostic logging.
 
-Extracted 2026-07-31 (pt_03f4cdf1 slice 17) from
+Extracted 2026-07-31 ( slice 17) from
 ``lib/tasks_pkg/orchestrator/_run.py`` run_task stream loop.
 
 The budget check is evaluated after the LLM call and before tool dispatch:
@@ -36,6 +36,7 @@ def check_task_resource_budget(
     *,
     round_num: int,
     cfg: dict[str, Any],
+    messages: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Warn once at the soft threshold; terminate before another API call."""
     from lib.task_budget import evaluate_task_budget
@@ -59,6 +60,12 @@ def check_task_resource_budget(
 
     reading = decision.exceeded
     if reading is None:
+        inject_api_round_finalization_reserve(
+            task,
+            decision,
+            messages,
+            round_num=round_num,
+        )
         return False
     rs.last_finish_reason = 'budget_exceeded'
     rs.exit_reason = f'budget_exceeded_{reading.name}_round_{round_num}'
@@ -82,6 +89,76 @@ def check_task_resource_budget(
         'remainingBudget': decision.remaining,
     }
     task['error'] = envelope
+    return True
+
+
+def inject_api_round_finalization_reserve(
+    task: dict[str, Any],
+    decision: Any,
+    messages: list[dict[str, Any]] | None,
+    *,
+    round_num: int,
+) -> bool:
+    """Give the model one visible chance to finish before the hard round cap."""
+    if messages is None or task.get('_apiRoundFinalizationReminder'):
+        return False
+    reading = next(
+        (item for item in decision.readings if item.name == 'apiRounds'),
+        None,
+    )
+    if reading is None:
+        return False
+
+    from lib.task_budget import api_round_finalization_reserve
+    reserve = api_round_finalization_reserve(reading.limit)
+    if reading.remaining <= 0 or reading.remaining > reserve:
+        return False
+
+    warned = task.setdefault('_budgetWarnings', set())
+    if reading.name not in warned:
+        warned.add(reading.name)
+        append_event(task, build_event(
+            EventType.BUDGET_WARNING,
+            limit=reading.name,
+            used=reading.used,
+            remaining=reading.remaining,
+            hardLimit=reading.limit,
+            unit=reading.unit,
+        ))
+
+    used_rounds = int(reading.used)
+    hard_limit = int(reading.limit)
+    remaining_rounds = int(reading.remaining)
+    messages.append({
+        'role': 'user',
+        'content': (
+            '<system-reminder>\n'
+            f'API-round budget: {used_rounds}/{hard_limit} used; '
+            f'{remaining_rounds} remain. These remaining rounds are the '
+            'finalization reserve. Stop broad discovery and repeated '
+            'confirmation. Use known evidence to complete the requested '
+            'implementation, research, or writing; run only decisive '
+            'verification; then provide the final answer. If blocked, report '
+            'the concrete blocker before the hard limit. Do not claim success '
+            'without verification.\n'
+            '</system-reminder>'
+        ),
+        '_isMeta': True,
+    })
+    task['_apiRoundFinalizationReminder'] = {
+        'used': used_rounds,
+        'hardLimit': hard_limit,
+        'remaining': remaining_rounds,
+        'round': round_num,
+    }
+    logger.warning(
+        '[Budget] API-round finalization reserve entered: used=%d limit=%d '
+        'remaining=%d round=%d',
+        used_rounds,
+        hard_limit,
+        remaining_rounds,
+        round_num,
+    )
     return True
 
 

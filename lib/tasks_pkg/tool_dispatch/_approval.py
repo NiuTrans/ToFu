@@ -10,6 +10,8 @@ blocks waiting for the user's decision — it NEVER executes the tool.
 from __future__ import annotations
 
 import json
+import hmac
+import time
 import uuid
 from typing import Any
 
@@ -18,9 +20,38 @@ from lib.log import get_logger
 from lib.tasks_pkg.approval import request_write_approval
 from lib.tasks_pkg.executor import _finalize_tool_round
 from lib.tasks_pkg.manager import append_event
-from lib.tools import build_project_tool_meta
+from lib.tools.registry import build_tool_result_meta
+from lib.tool_rejection import stamp_tool_rejection
 
 logger = get_logger(__name__)
+_TOOL_APPROVAL_RECEIPT_MAX = 64
+_TOOL_APPROVAL_RECEIPT_TTL_SECONDS = 300
+
+
+def consume_approval_receipt(
+    task: dict[str, Any],
+    fn_name: str,
+    tc_id: str,
+    fn_args: dict[str, Any],
+) -> bool:
+    """Consume one approval bound to the exact tool name, call id, and args."""
+    receipts = task.get('_tool_approval_receipts')
+    if not isinstance(receipts, dict):
+        return False
+    received = receipts.pop(str(tc_id or ''), None)
+    if not isinstance(received, dict):
+        return False
+    signature = received.get('signature')
+    try:
+        age = time.time() - float(received.get('minted_at'))
+    except (TypeError, ValueError):
+        return False
+    if (not isinstance(signature, str) or age < 0
+            or age > _TOOL_APPROVAL_RECEIPT_TTL_SECONDS):
+        return False
+    from lib.tasks_pkg.tool_dispatch._flags import _call_id_signature
+    expected = _call_id_signature(fn_name, fn_args)
+    return hmac.compare_digest(signature, expected)
 
 
 # ── Approval metadata enrichers ────────────────────────────────────────
@@ -76,6 +107,34 @@ def _approval_meta_run_command(approval_meta, fn_args):
     approval_meta['command'] = fn_args.get('command', '')
     approval_meta['description'] = fn_args.get('description', '')
     approval_meta['path'] = fn_args.get('working_dir', '') or ''
+
+
+def _approval_meta_request_skill_install(approval_meta, fn_args):
+    """Show the exact curated package and the model's stated need."""
+    catalog_id = str(fn_args.get('catalog_id') or '')
+    scope = str(fn_args.get('scope') or 'global')
+    overwrite = bool(fn_args.get('overwrite', False))
+    try:
+        from lib.skills.catalog import get_catalog_entry
+        entry = get_catalog_entry(catalog_id) or {}
+    except Exception as exc:
+        logger.debug('[Approval] skill catalog lookup failed: %s', exc)
+        entry = {}
+    approval_meta['path'] = catalog_id
+    _risk(
+        approval_meta,
+        ('Catalog skill', catalog_id),
+        ('Package name', entry.get('name')),
+        ('Publisher', entry.get('author')),
+        ('Pinned revision', entry.get('source_revision')),
+        ('Verified content SHA-256', entry.get('content_sha256')),
+        ('Install scope', scope),
+        ('Replace same-id package', 'yes' if overwrite else 'no'),
+        ('Why this task needs it', fn_args.get('reason')),
+        note=(
+            'Download and install a verified instruction package. Bundled '
+            'scripts will be retained but not executed.'),
+    )
 
 
 def _approval_meta_write_file(approval_meta, fn_args):
@@ -210,29 +269,6 @@ def _approval_meta_edit_file(approval_meta, fn_args):
     approval_meta['editSummaries'] = summaries
 
 
-def _approval_meta_create_project(approval_meta, fn_args):
-    """Enrich approval metadata for ``create_project``.
-
-    Registering a workspace root widens where every later write may land, and
-    ``overwrite=true`` accepts a NON-EMPTY existing dir — both belong in the
-    dialog.
-    """
-    target_path = fn_args.get('path', '')
-    root_name = fn_args.get('name', '')
-    overwrite = bool(fn_args.get('overwrite', False))
-    approval_meta['path'] = target_path
-    approval_meta['rootName'] = root_name
-    approval_meta['overwrite'] = overwrite
-    _risk(
-        approval_meta,
-        ('Workspace root path', target_path),
-        ('Root name', root_name),
-        ('overwrite (accept non-empty dir)', 'true' if overwrite else None),
-        note=('Register a new workspace root — later writes may target it'
-              + (' (overwrite=true)' if overwrite else '')),
-    )
-
-
 def _approval_meta_browser_execute_js(approval_meta, fn_args):
     """Enrich approval metadata for ``browser_execute_js``.
 
@@ -255,6 +291,38 @@ def _approval_meta_browser_execute_js(approval_meta, fn_args):
     )
 
 
+def _approval_meta_browser_devtools(approval_meta, fn_args):
+    """Show the exact DevTools action and executable input being approved."""
+    action = str(fn_args.get('action') or 'console_read')
+    expression = str(fn_args.get('expression') or '')
+    source_url = str(
+        fn_args.get('source_url') or fn_args.get('sourceUrl') or '')
+    line = fn_args.get('line_number', fn_args.get('lineNumber'))
+    column = fn_args.get('column_number', fn_args.get('columnNumber'))
+    location = None
+    if source_url or line is not None:
+        location = f'{source_url or "script"}:{line if line is not None else 0}'
+        if column is not None:
+            location += f':{column}'
+    tab = fn_args.get('tab_id', fn_args.get('tabId'))
+    approval_meta['description'] = f'DevTools: {action}'
+    if tab is not None:
+        approval_meta['path'] = f'tab {tab}'
+    _risk(
+        approval_meta,
+        ('DevTools action', action),
+        ('Expression', expression or None),
+        ('Script location', location),
+        ('Breakpoint condition', fn_args.get('condition')),
+        ('Breakpoint', fn_args.get('breakpoint_id')
+         or fn_args.get('breakpointId')),
+        ('Call frame', fn_args.get('call_frame_id')
+         or fn_args.get('callFrameId')),
+        ('Tab', tab),
+        note='Control JavaScript execution in the browser page',
+    )
+
+
 def _approval_meta_browser_navigate(approval_meta, fn_args):
     """Enrich approval metadata for ``browser_navigate`` (destination URL)."""
     url = fn_args.get('url', '') or ''
@@ -262,6 +330,33 @@ def _approval_meta_browser_navigate(approval_meta, fn_args):
     approval_meta['url'] = url
     _risk(approval_meta, ('Destination URL', url),
           note='Navigate the browser to this URL')
+
+
+def _approval_meta_browser_research_page(approval_meta, fn_args):
+    """Describe the bounded temporary-tab traversal used for deep research.
+
+    ``browser_research_page`` is exempt from interactive approval because it is
+    read-only, but it deliberately shares the serial browser-mutation lane with
+    navigation tools.  Keeping complete metadata here preserves the registry
+    invariant and makes the operation intelligible if policy later requires an
+    approval prompt.
+    """
+    url = fn_args.get('url', '') or ''
+    max_scrolls = fn_args.get('max_scrolls', fn_args.get('maxScrolls', 5))
+    max_pages = fn_args.get('max_pages', fn_args.get('maxPages', 3))
+    pagination = fn_args.get('pagination', 'auto') or 'auto'
+    approval_meta['path'] = url
+    approval_meta['url'] = url
+    approval_meta['maxScrolls'] = max_scrolls
+    approval_meta['maxPages'] = max_pages
+    approval_meta['pagination'] = pagination
+    _risk(
+        approval_meta,
+        ('Research URL', url),
+        ('Traversal bounds',
+         f'{max_pages} page(s), {max_scrolls} scroll(s), pagination={pagination}'),
+        note='Read this URL in a bounded temporary browser tab',
+    )
 
 
 def _approval_meta_browser_fill_form(approval_meta, fn_args):
@@ -385,54 +480,6 @@ def _approval_meta_browser_click(approval_meta, fn_args):
     )
 
 
-def _approval_meta_browser_hover_and_click(approval_meta, fn_args):
-    """``browser_hover_and_click`` — hover target THEN click target.
-
-    Two selectors, and the CLICK one is what commits the action; both are
-    shown because a wrong hover target silently changes which menu opens.
-    """
-    click_sel = fn_args.get('click_selector', '') or ''
-    approval_meta['path'] = click_sel
-    _risk(
-        approval_meta,
-        ('Element to click', click_sel),
-        ('Hover first', fn_args.get('hover_selector') or None),
-        ('Tab', fn_args.get('tab_id') or None),
-        note='Hover then click an element in your browser page',
-    )
-
-
-def _approval_meta_browser_right_click_menu(approval_meta, fn_args):
-    """``browser_right_click_menu`` — target + which context-menu item."""
-    item = fn_args.get('menu_item_text', '') or ''
-    target = fn_args.get('target_selector', '') or ''
-    approval_meta['path'] = target
-    _risk(
-        approval_meta,
-        ('Context-menu item to activate', item),
-        ('Target element', target),
-        ('Submenu item', fn_args.get('submenu_item_text') or None),
-        ('Tab', fn_args.get('tab_id') or None),
-        note='Open a context menu and activate an item',
-    )
-
-
-def _approval_meta_browser_keyboard(approval_meta, fn_args):
-    """``browser_keyboard`` — the keystrokes being injected.
-
-    Keys can submit a form (Enter) or trigger a browser/OS shortcut, so the
-    literal key sequence is the risk.
-    """
-    keys = fn_args.get('keys', '') or ''
-    _risk(
-        approval_meta,
-        ('Keys to send', keys),
-        ('Focus element', fn_args.get('selector') or None),
-        ('Tab', fn_args.get('tab_id') or None),
-        note='Send synthetic keystrokes to your browser page',
-    )
-
-
 def _approval_meta_browser_type(approval_meta, fn_args):
     """``browser_type`` — the VALUE typed into the user's page is the risk."""
     target = fn_args.get('text') or fn_args.get('selector', '') or ''
@@ -471,19 +518,6 @@ def _approval_meta_browser_menu_click(approval_meta, fn_args):
         ('Submenu item', fn_args.get('submenu_text') or None),
         ('Tab', fn_args.get('tab_id') or None),
         note='Open a menu and activate an item in your browser',
-    )
-
-
-def _approval_meta_browser_create_tab(approval_meta, fn_args):
-    """``browser_create_tab`` — the URL that will be opened."""
-    url = fn_args.get('url', '') or ''
-    approval_meta['path'] = url
-    approval_meta['url'] = url
-    _risk(
-        approval_meta,
-        ('URL to open in a new tab', url),
-        ('Focus the new tab', 'true' if fn_args.get('active') else None),
-        note='Open a new browser tab',
     )
 
 
@@ -780,18 +814,20 @@ def _approval_meta_call_mcp_write_tool(approval_meta, fn_args):
 # this dict get the base metadata only (path + description).
 _APPROVAL_META_ENRICHERS = {
     'run_command':      _approval_meta_run_command,
+    'request_skill_install': _approval_meta_request_skill_install,
     'write_file':       _approval_meta_write_file,
     'edit_file':        _approval_meta_edit_file,
     'apply_diff':       _approval_meta_apply_diff,
     'apply_diffs':      _approval_meta_apply_diffs,
     'insert_content':   _approval_meta_insert_content,
     'insert_contents':  _approval_meta_insert_contents,
-    'create_project':   _approval_meta_create_project,
     # Newly write-partitioned families. Without an enricher the prompt renders
     # a bare tool name and the user approves blind — false confidence, worse
     # than not prompting at all.
     'browser_execute_js':     _approval_meta_browser_execute_js,
+    'browser_devtools':       _approval_meta_browser_devtools,
     'browser_navigate':       _approval_meta_browser_navigate,
+    'browser_research_page':  _approval_meta_browser_research_page,
     'browser_fill_form':      _approval_meta_browser_fill_form,
     'schedule_create':        _approval_meta_schedule_create,
     'schedule_manage':        _approval_meta_schedule_manage,
@@ -800,12 +836,7 @@ _APPROVAL_META_ENRICHERS = {
     'project_charter_commit': _approval_meta_charter_commit,
     # ── browser interaction: the selector/target is the risk ──
     'browser_click':            _approval_meta_browser_click,
-    'browser_hover_and_click':  _approval_meta_browser_hover_and_click,
-    'browser_right_click_menu': _approval_meta_browser_right_click_menu,
-    'browser_keyboard':         _approval_meta_browser_keyboard,
-    'browser_create_tab':       _approval_meta_browser_create_tab,
     'browser_close_tab':        _approval_meta_browser_close_tab,
-    # ── v2 surface (pt_869e5648403e4745) ──
     'browser_type':             _approval_meta_browser_type,
     'browser_press_key':        _approval_meta_browser_press_key,
     'browser_menu_click':       _approval_meta_browser_menu_click,
@@ -841,6 +872,7 @@ def _handle_approval(
     round_num: int,
     model: str,
     cfg: dict[str, Any] | None = None,
+    mint_receipt: bool = False,
 ) -> tuple[bool, str | None]:
     """Gate a write operation on manual user approval (no execution).
 
@@ -894,7 +926,12 @@ def _handle_approval(
 
     if not approved:
         tool_content = f'⚠️ User rejected this {fn_name} operation on {fn_args.get("path", "")}.'
-        meta = build_project_tool_meta(fn_name, fn_args, tool_content)
+        stamp_tool_rejection(
+            round_entry,
+            {'kind': 'approval_denied', 'tool': fn_name},
+            reason=tool_content, retryable=True,
+        )
+        meta = build_tool_result_meta(fn_name, fn_args, tool_content)
         meta['badge'] = 'rejected'
         meta['writeOk'] = False
         _finalize_tool_round(task, rn, round_entry, [meta])
@@ -916,10 +953,25 @@ def _handle_approval(
         try:
             from lib.browser.access import browser_tool_access
             browser_tool_access(
-                fn_name, fn_args, user_id=str(task.get('_userId') or ''),
+                fn_name, fn_args,
+                owner_user_id=str(task.get('_userId') or ''),
                 client_id=str((cfg or {}).get('browserClientId') or ''),
                 grant_on_success=True)
         except Exception as exc:
             logger.warning('[Task %s] browser domain grant could not be saved: %s',
                            tid, exc)
+    if mint_receipt:
+        from lib.tasks_pkg.tool_dispatch._flags import _call_id_signature
+        tc_id = str(round_entry.get('toolCallId') or '')
+        if not tc_id:
+            logger.error('[Task %s] approved %s has no tool call id',
+                         tid, fn_name)
+            return False, 'Approval could not be bound to this tool call.'
+        receipts = task.setdefault('_tool_approval_receipts', {})
+        while len(receipts) >= _TOOL_APPROVAL_RECEIPT_MAX:
+            receipts.pop(next(iter(receipts)), None)
+        receipts[tc_id] = {
+            'signature': _call_id_signature(fn_name, fn_args),
+            'minted_at': time.time(),
+        }
     return True, None

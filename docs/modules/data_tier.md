@@ -1,7 +1,7 @@
 # Module Design Doc — Data Tier
 
 The authoritative behavioural and operational contract is
-[`docs/STORAGE_REDESIGN.md`](../STORAGE_REDESIGN.md). This module note describes
+[`docs/STORAGE.md`](../STORAGE.md). This module note describes
 code ownership only and must not redefine backend authority.
 
 ## Process ownership
@@ -9,10 +9,16 @@ code ownership only and must not redefine backend authority.
 | Package | Runs in | Responsibility |
 |---|---|---|
 | `lib/storage/` | Web, worker, task, plugin parent | `storage.v1` framing, semantic client, structured errors, supervision, readiness/write fence, declarative manifest validation |
-| `lib/storage_sidecar/` | Dedicated child process | Database paths, project lease, FUSE preflight, drivers, pools, transactions, receipts, semantic operation catalog, backup/restore/handoff |
+| `lib/storage_sidecar/` | Dedicated child process | Personal database paths, project lease, FUSE preflight, drivers, pools, transactions, receipts, semantic operation catalog, SQLite backup/restore/handoff |
 | `lib/storage_sidecar/adapters/sqlite.py` | Sidecar only | One writer connection, fair priority lanes, query-only pool, WAL/full-sync, progress watchdog, result-code retry classification |
-| `lib/storage_sidecar/adapters/postgres.py` | Sidecar only | Project-local cluster lifecycle, checksum/durability verification, isolated read/write pools, 80% connection budget, SQLSTATE retry classification |
-| `lib/database/` | Migration compatibility surface | Existing repositories being moved to named operations; it is not an allowed long-term connection owner |
+| `lib/storage_sidecar/adapters/postgres.py` | Sidecar only | External TLS PostgreSQL connections, durability/schema validation, Psycopg 3 isolated read/write pools, connection budget, SQLSTATE retry classification |
+| `lib/storage_sidecar/fastpath.py`, `shipper.py` | Sidecar only | Opt-in measured-local SQLite write front, deployment lineage, capacity preflight, bounded-RPO durable shadow shipping and recovery |
+| `lib/storage_sidecar/storage_capabilities.py` | Sidecar/control plane | Bounded filesystem capability report and pure, conservative adaptive backend/front policy; never moves authority bytes |
+| `lib/storage_sidecar/turn_search_projection.py` | Sidecar only | Transactional dirty-set consumer; independent local SQLite/shared PostgreSQL conversation-search projection; corruption recovery, generation fencing, bounded backfill |
+| `lib/storage_sidecar/logical_outbox.py`, `logical_shadow.py` | Sidecar only, explicit opt-in | Same-transaction bounded logical outbox; asynchronous backend-neutral publisher; private checksummed filesystem sink; publisher health and backpressure |
+| `lib/storage_sidecar/logical_replay.py` | Offline verifier / future projection worker | Authenticated bounded mutation replay to SQLite/PostgreSQL with an atomic durable checkpoint, ordered projection digests, deterministic canary sampling, explicit fail-closed cutover/rollback evidence |
+| `scripts/storage_deep_clean.py` | Explicit stopped-server window | Lease-owned retention, verified compaction, deferred performance-index installation, integrity/parity gates, atomic publication and rollback retention |
+| `lib/storage_sidecar/migrate.py` | One-shot distributed migration Job | Advisory-lock serialization and forward-only PostgreSQL schema migration; never imported as application startup authority |
 
 ## Dependency direction
 
@@ -38,21 +44,26 @@ naturally deduplicated task events, declarative plugin manifests/rows, health,
 metrics, integrity, and backup operations. Domain repositories add named
 operations; they do not add SQL fields or connection callbacks to the wire.
 
-Every critical write has one transaction and one command receipt. Natural-key
-event writes deliberately bypass the receipt table. Both adapters execute the
-same catalog contract and return the same wire shapes and error codes.
+Every critical write has one transaction. Non-reconstructible effects also
+have one command receipt; natural-key events and version-witnessed snapshot
+checkpoints deliberately bypass the receipt table because the authority row
+itself resolves identical replay and rejects stale divergent replay. Clean
+no-write results are not receipts. Both adapters execute the same catalog
+contract and return the same wire shapes and error codes.
 
-## Migration boundary
+## Schema evolution boundary
 
-`lib/database` still identifies migration work, not a second permanent access
-path. A domain is complete only when its services no longer import
-`get_thread_db`, cursors, driver errors, SQL translation, or transaction
-helpers. Static checks are tightened as each domain lands; production cutover
-is blocked until the legacy allowlist is empty.
+`lib/storage_sidecar/schema.py` is the single schema definition and upgrade
+sequence for both adapters. Application modules never import cursors, driver
+errors, SQL translation, transaction helpers, or migration internals. Offline
+transfer and maintenance commands may open a driver only from their explicit
+CLI boundary; `tests/test_storage_process_boundary.py` keeps that exception
+small and prevents it from becoming a runtime access path.
 
-Plugin migration replaces `tofu.schema` callbacks with manifest discovery.
-The compatibility callback registry must be removed before the production
-gate opens.
+Plugins contribute declarative manifests. They cannot execute schema callbacks
+or receive a connection object. Manifest row writes use version-witnessed
+`put`/`delete` or one bounded same-table `batch`; legacy import can only scan
+the exact identifiers declared in the manifest and remains read-only.
 
 ## Verification
 

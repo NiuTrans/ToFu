@@ -1,10 +1,10 @@
-"""tests/test_no_read_timeout_abort.py — the "no timeouts, I stop it myself" contract.
+"""Socket-read/abort/heartbeat contracts around the semantic idle policy.
 
 WHY
 ---
-Owner ruling (2026-07-29): an LLM request must have NO first-byte timeout and
-NO read timeout. "Unless it crashes, what is there that can't be waited for?
-If I can't wait, I will naturally pause it myself."
+An LLM request has no socket first-byte or read timeout.  Request termination
+is instead owned by the rolling semantic-progress window: normalized reasoning,
+content, and recognized tool progress renew it; raw protocol traffic does not.
 
 Removing those timeouts is only SAFE because of two things that had to be
 built at the same time, and this suite pins both:
@@ -22,12 +22,12 @@ built at the same time, and this suite pins both:
      on the first SSE line (``notify_first_byte``). That was fine while a
      300s read timeout existed, because a mid-stream stall got interrupted
      and retried, which produced events. With no read timeout, a
-     post-first-byte silence is unbounded and emits nothing — so BOTH
+     a post-first-byte silence emits nothing — so BOTH
      reaper liveness clocks (``_t_last_event`` / ``_dispatch_heartbeat``)
      go stale and ``reap_stuck_running_tasks`` force-fails the task at 30
      min with a "terminated as wedged" error bubble. The reaper would have
-     become the new timeout, killing exactly the long waits we just made
-     legal. ``notify_activity`` now RESETS the idle clock instead of
+     become an unrelated timeout whenever the semantic limit is disabled or
+     extended. ``notify_activity`` now RESETS the idle clock instead of
      disarming, and ``_on_waiting`` bumps ``_dispatch_heartbeat``.
 
 The design rule: **aliveness is proven by BEATING, never by not-timing-out.**
@@ -43,6 +43,10 @@ import json
 import os
 import sys
 import threading
+from tests.support.chat_tasks import (
+    chat_task_fixture_guard,
+    chat_task_registry,
+)
 import time
 
 import pytest
@@ -51,12 +55,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# ci_serial: the reaper-clock assertions measure heartbeat vs wall-clock
+# serial: the reaper-clock assertions measure heartbeat vs wall-clock
 # deltas with <5s budgets — under the CI parallel lane's CPU starvation the
 # measured gap blew past 30s (7a4c727 unit leg) while passing everywhere
 # uncontended. The serial lane runs it alone with a 600s timeout.
 # (Module-level mark is additive to the per-class unit marks.)
-pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
+pytestmark = [pytest.mark.unit, pytest.mark.serial]
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -64,7 +68,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
 # ═════════════════════════════════════════════════════════════════════
 
 @pytest.mark.unit
-class TestNoTimeoutsRemain:
+class TestNoSocketReadTimeoutsRemain:
     def test_ttft_timeout_constant_is_gone(self):
         """The first-byte KILL must not exist in any form — not even as a
         disabled-by-default constant someone could re-enable."""
@@ -257,7 +261,7 @@ class _WedgedResp:
 
 class _StallThenFinishResp:
     """Delivers one byte, STALLS, then finishes — the post-first-byte
-    silence that has no read timeout to interrupt it any more."""
+    silence that is governed by semantic progress rather than socket reads."""
 
     def __init__(self, stall=0.6):
         self.headers = {}
@@ -311,9 +315,9 @@ class TestSyncAbortDuringSilence:
             f'Stop was not honored promptly during a zero-byte hang '
             f'({elapsed:.1f}s) — the abort poll is not load-bearing')
 
-    def test_silent_wait_is_NOT_killed_and_keeps_beating(self, monkeypatch):
-        """No abort → the attempt must NOT be ended by any timer, and beats
-        must keep coming so the reaper's clocks stay fresh."""
+    def test_short_stall_stays_inside_semantic_window_and_keeps_beating(
+            self, monkeypatch):
+        """A short stall remains live and emits current-attempt heartbeats."""
         monkeypatch.setattr('lib.llm._transport.IDLE_HEARTBEAT_S', 0.05)
         monkeypatch.setattr('lib.llm._transport.ABORT_POLL_INTERVAL', 0.05)
         resp = _StallThenFinishResp(stall=0.5)
@@ -326,7 +330,7 @@ class TestSyncAbortDuringSilence:
             abort_check=lambda: False,
             on_first_byte_wait=beats.append,
             api_key='sk-x', base_url='http://fake.local/v1', log_prefix='[t]')
-        # The stream completed despite a 0.5s mid-stream stall — nothing killed it.
+        # The stream completed because the stall stayed inside the 300s window.
         assert 'hi' in (msg.get('content') or '')
         # And the stall produced beats AFTER the first byte (the old watchdog
         # disarmed here and would produce none).
@@ -460,25 +464,39 @@ class TestAsyncAbortDuringSilence:
 
 
 # ═════════════════════════════════════════════════════════════════════
-#  E. ★ The reaper must NOT eat a task that is legitimately waiting
-#     (criterion 4 — the load-bearing consequence of removing timeouts)
+#  E. ★ The reaper must NOT eat a task inside a legitimate waiting window
 # ═════════════════════════════════════════════════════════════════════
 
 @pytest.mark.unit
 class TestReaperCannotEatAWaitingTask:
     def _mk_task(self):
-        return {
+        task = {
             'id': 'task-wait-1', 'convId': 'cv-wait-1',
-            'content': '', 'thinking': '', 'config': {'model': 'kimi-k3'},
+            '_userId': 1, 'status': 'running',
+            'content': '', 'thinking': '',
+            'config': {'model': 'kimi-k3', 'userId': 1},
             'events': [], 'toolRounds': [],
             'content_lock': threading.Lock(), 'events_lock': threading.Lock(),
         }
+        from tests.support.chat_tasks import chat_task_fixture_guard as tasks_lock, chat_task_registry as tasks
+        with tasks_lock:
+            tasks[task['id']] = task
+        return task
+
+    @staticmethod
+    def _isolated_reaper_runtime(task):
+        """Own the reaper fixture through TaskRuntime's public boundary."""
+        from lib.agent_core.task_runtime import TaskRuntime
+
+        runtime = TaskRuntime('chat', ttl=3600, push_channel=None)
+        assert runtime.adopt(task)
+        return runtime
 
     def _drive_one_beat(self, task, elapsed):
         """Drive the REAL stream_llm_response, capture its on_waiting, fire
         one beat at *elapsed* seconds of idleness."""
         from types import SimpleNamespace
-        import lib.tasks_pkg.manager as _mgr
+        import lib.tasks_pkg.manager._stream as _mgr
         captured = {}
 
         def _fake_dispatch(body, **kwargs):
@@ -517,7 +535,7 @@ class TestReaperCannotEatAWaitingTask:
         """END-TO-END of criterion 4 against the REAL reaper: a task that has
         been waiting 40 minutes but is still BEATING must survive, while the
         threshold is only 30 minutes."""
-        from lib.tasks_pkg.manager import _maintenance, _registry
+        import lib.tasks_pkg.manager._maintenance as _maintenance
 
         monkeypatch.setattr(_maintenance, '_stuck_task_max_silent_secs',
                             lambda: 1800, raising=True)
@@ -532,11 +550,9 @@ class TestReaperCannotEatAWaitingTask:
         task['_t_last_event'] = now - 2400       # no DELTA for 40 min
         task['_dispatch_heartbeat'] = now - 2400 # stale BEFORE the beat
 
-        fake = {task['id']: task}
-        monkeypatch.setattr(_registry, 'tasks', fake, raising=True)
-        monkeypatch.setattr(_registry, 'tasks_lock', threading.Lock(), raising=True)
-        monkeypatch.setattr(_maintenance, 'tasks', fake, raising=True)
-        monkeypatch.setattr(_maintenance, 'tasks_lock', threading.Lock(), raising=True)
+        runtime = self._isolated_reaper_runtime(task)
+        monkeypatch.setattr(
+            _maintenance, 'chat_task_runtime', runtime, raising=True)
 
         # Precondition: with BOTH clocks stale the reaper WOULD take it.
         assert _maintenance.reap_stuck_running_tasks() == 1, \
@@ -559,7 +575,7 @@ class TestReaperCannotEatAWaitingTask:
         job. A worker that emits nothing at all (thread died) is still
         force-failed — otherwise we'd have traded a false-kill for a
         permanent zombie."""
-        from lib.tasks_pkg.manager import _maintenance, _registry
+        import lib.tasks_pkg.manager._maintenance as _maintenance
 
         monkeypatch.setattr(_maintenance, '_stuck_task_max_silent_secs',
                             lambda: 1800, raising=True)
@@ -571,11 +587,9 @@ class TestReaperCannotEatAWaitingTask:
                      'created_at': now - 2400,
                      '_t_last_event': now - 2400,
                      '_dispatch_heartbeat': now - 2400})
-        fake = {task['id']: task}
-        monkeypatch.setattr(_registry, 'tasks', fake, raising=True)
-        monkeypatch.setattr(_registry, 'tasks_lock', threading.Lock(), raising=True)
-        monkeypatch.setattr(_maintenance, 'tasks', fake, raising=True)
-        monkeypatch.setattr(_maintenance, 'tasks_lock', threading.Lock(), raising=True)
+        runtime = self._isolated_reaper_runtime(task)
+        monkeypatch.setattr(
+            _maintenance, 'chat_task_runtime', runtime, raising=True)
 
         assert _maintenance.reap_stuck_running_tasks() == 1
         assert task['_abort_reason'] == 'stuck_no_progress'
@@ -593,13 +607,16 @@ class TestBeatLabelHonesty:
         """Drive the real _on_waiting with the task's content pre-set to
         *prefill*, and return the emitted phase events."""
         from types import SimpleNamespace
-        import lib.tasks_pkg.manager as _mgr
+        import lib.tasks_pkg.manager._stream as _mgr
 
         task = {'id': 'task-lbl', 'convId': 'cv-lbl',
-                'content': '', 'thinking': '', 'config': {},
+                '_userId': 1, 'status': 'running',
+                'content': '', 'thinking': '', 'config': {'userId': 1},
                 'events': [], 'toolRounds': [],
                 'content_lock': threading.Lock(),
                 'events_lock': threading.Lock()}
+        with chat_task_fixture_guard:
+            chat_task_registry[task['id']] = task
         captured = {}
 
         def _fake_dispatch(body, **kwargs):
@@ -620,29 +637,47 @@ class TestBeatLabelHonesty:
             _mgr.dispatch_stream = _orig
         slot = SimpleNamespace(model='kimi-k3', key_name='k0',
                                cooldown_reason='', cooldown_until=0.0,
-                               last_error_msg='', consecutive_errors=0)
-        captured['on_waiting'](elapsed=60.0, slot=slot)
+                               last_error_msg=(
+                                   'previous attempt [truncation] '
+                                   'elapsed_ms=300999'),
+                               consecutive_errors=1)
+        status_kind = 'stream_stalled' if prefill else 'waiting_headers'
+        captured['on_waiting'](
+            status=SimpleNamespace(
+                kind=status_kind,
+                request_elapsed_s=60.0,
+                semantic_idle_s=23.0 if prefill else 60.0,
+            ),
+            slot=slot,
+        )
         return [e for e in task['events'] if e.get('type') == 'phase'
-                and e.get('phase') == 'retrying']
+                and e.get('phase') in {'waiting_model', 'stream_stalled'}]
 
-    def test_pre_first_byte_says_waiting_first_byte(self):
+    def test_current_attempt_wait_does_not_claim_a_retry(self):
         evs = self._beats_for('')          # nothing streamed
-        assert evs and evs[-1]['detailKey'] == 'stream.phase.waitingFirstByte'
+        assert evs and evs[-1]['phase'] == 'waiting_model'
+        assert evs[-1]['detailKey'] == 'stream.phase.waitingForResponse'
+        assert 'attempt' not in evs[-1]
+        assert '[truncation]' not in evs[-1]['detail']
+        assert '300999' not in evs[-1]['detail']
 
     def test_mid_stream_stall_does_not_claim_no_first_byte(self):
         evs = self._beats_for('partial answer so far')
         assert evs, 'no beat emitted'
         ev = evs[-1]
-        assert ev['detailKey'] == 'stream.phase.stalledMidStream', (
+        assert ev['phase'] == 'stream_stalled'
+        assert ev['detailKey'] == 'stream.phase.streamStalled', (
             'a mid-stream stall still reports the pre-first-byte label — '
             'the user can see text on screen, so that wording is a lie')
         assert 'first byte' not in ev['detail'].lower()
+        assert 'attempt' not in ev
 
     def test_stall_i18n_keys_shipped_zh_and_en(self):
         locale_root = os.path.join(
             ROOT, 'frontend', 'src', 'i18n', 'locales')
-        required = ('stream.phase.stalledMidStream',
-                    'stream.phase.stalledMidStreamReason')
+        required = ('stream.phase.waitingForResponse',
+                    'stream.phase.streamStalled',
+                    'stream.phase.semanticProgressTimeoutRetry')
         retired = 'stream.retryReason.firstByteTimeout'
         for language in ('zh', 'en'):
             with open(os.path.join(locale_root, f'{language}.json'),

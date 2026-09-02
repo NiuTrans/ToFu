@@ -32,6 +32,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import quart as _quart  # noqa: E402
+
+TEST_OWNER_USER_ID = 1
+pytest_plugins = ('tests._artifact_sidecar',)
 sys.modules.setdefault('flask', _quart)
 
 
@@ -54,7 +57,7 @@ REVIEW_BODY_EN = (
 # ─── Compound-key parsing ────────────────────────────────────────
 
 def test_parse_plain_report_keys_untouched():
-    from lib.paper import parse_report_lang
+    from lib.paper.review import parse_report_lang
     assert parse_report_lang('en') == {'kind': 'report', 'venue': None, 'ui_lang': 'en'}
     assert parse_report_lang('zh') == {'kind': 'report', 'venue': None, 'ui_lang': 'zh'}
     # Empty / None defaults to an English report.
@@ -64,7 +67,7 @@ def test_parse_plain_report_keys_untouched():
 
 
 def test_parse_review_key_decodes_venue_and_uilang():
-    from lib.paper import parse_report_lang
+    from lib.paper.review import parse_report_lang
     p = parse_report_lang('review:neurips:en')
     assert p == {'kind': 'review', 'venue': 'neurips', 'ui_lang': 'en'}, p
     pz = parse_report_lang('review:acl:zh')
@@ -73,7 +76,7 @@ def test_parse_review_key_decodes_venue_and_uilang():
 
 
 def test_parse_review_key_falls_back_safely():
-    from lib.paper import parse_report_lang
+    from lib.paper.review import parse_report_lang
     # Unknown venue → generic; non en/zh uilang → en; missing segment → en.
     assert parse_report_lang('review:bogus:en')['venue'] == 'generic'
     assert parse_report_lang('review:cvpr:fr')['ui_lang'] == 'en'
@@ -84,7 +87,7 @@ def test_parse_review_key_falls_back_safely():
 # ─── Prompt + scorecard selection ───────────────────────────────
 
 def test_review_prompt_picks_venue_scorecard():
-    from lib.paper import build_review_prompt
+    from lib.paper.review import build_review_prompt
     p = build_review_prompt('neurips', 'en')
     assert '{paper_text}' in p, 'prompt must keep the paper_text slot for .replace()'
     # NeurIPS-specific scale must be present; ACL-specific must NOT.
@@ -98,7 +101,10 @@ def test_review_prompt_picks_venue_scorecard():
     assert 'Excitement' in pa and 'Reproducibility' in pa
 def test_review_prompt_nlpcc_scorecard():
     """NLPCC: CCF NLP/CC venue, 1-6 overall rating, NLP-family dimensions, not ARR's."""
-    from lib.paper import build_review_prompt, parse_report_lang
+    from lib.paper.review import (
+        build_review_prompt,
+        parse_report_lang,
+    )
     assert parse_report_lang('review:nlpcc:en')['venue'] == 'nlpcc'
     pe = build_review_prompt('nlpcc', 'en')
     assert '{paper_text}' in pe, 'prompt must keep the paper_text slot for .replace()'
@@ -122,7 +128,7 @@ def test_review_prompt_nlpcc_scorecard():
 
 
 def test_review_prompt_ui_language():
-    from lib.paper import build_review_prompt
+    from lib.paper.review import build_review_prompt
     pz = build_review_prompt('iclr', 'zh')
     assert '评审意见' in pz and '量化评分' in pz, 'Chinese review prompt malformed'
     pe = build_review_prompt('iclr', 'en')
@@ -132,7 +138,7 @@ def test_review_prompt_ui_language():
 
 def test_review_prompt_has_anti_slop_constraints():
     """The anti-'AI-slop' rules must be HARD constraints in the prompt, not vibes."""
-    from lib.paper import build_review_prompt
+    from lib.paper.review import build_review_prompt
     p = build_review_prompt('neurips', 'en').lower()
     # Each strength/weakness anchored to concrete evidence.
     assert 'anchored to concrete evidence' in p
@@ -159,7 +165,7 @@ def test_review_prompt_human_reviewer_voice_and_precise_weaknesses():
     """The 2026-07 tuning: Summary/Strengths must be in a human reviewer's
     voice (NOT a forensic per-clause audit), and Weaknesses must be PRECISE
     (a small number of decisive/hidden flaws) rather than a padded quota."""
-    from lib.paper import build_review_prompt
+    from lib.paper.review import build_review_prompt
     p = build_review_prompt('neurips', 'en').lower()
     # Human-reviewer framing exists as an explicit constraint.
     assert 'write like a human reviewer' in p
@@ -184,7 +190,7 @@ def test_review_prompt_per_point_length_ceiling():
     """The 2026-07 verbosity fix: Summary/Strengths/Weaknesses must carry an
     EXPLICIT per-point length ceiling so each bullet is one tight sentence,
     not a long-winded sub-paragraph. Asserted in BOTH languages."""
-    from lib.paper import build_review_prompt
+    from lib.paper.review import build_review_prompt
     pe = build_review_prompt('neurips', 'en').lower()
     # A concrete per-bullet length cap must be present (one to two sentences).
     assert 'one sentence' in pe or 'one to two sentences' in pe, \
@@ -203,7 +209,7 @@ def test_review_prompt_per_point_length_ceiling():
 # ─── Cache-key non-pollution ─────────────────────────────────────
 
 def test_make_review_lang_distinct_from_report_key():
-    from lib.paper import make_review_lang
+    from lib.paper.review import make_review_lang
     k = make_review_lang('neurips', 'en')
     assert k == 'review:neurips:en'
     # Crucially distinct from the plain report key for the SAME paper_hash:
@@ -216,7 +222,7 @@ def test_make_review_lang_distinct_from_report_key():
 # ─── Engine: review task uses real ui_lang for image injection ───
 
 def _patch_dispatch(plan):
-    import lib.paper.report_engine as re_mod
+    import lib.paper.report_engine.worker as re_mod
     seq = list(plan)
     cap = {'msgs': []}
 
@@ -235,11 +241,12 @@ def _patch_dispatch(plan):
 def test_engine_review_injects_with_real_uilang_and_persists_composite_key():
     """A review task: image injection uses ui_lang='zh' (not the composite key),
     and the persisted/enriched body uses the real language appendix."""
-    import lib.paper.report_engine as re_mod
-    from lib.paper import _new_report_task, make_review_lang
+    import lib.paper.report_engine.worker as re_mod
+    from lib.paper.report_runtime import _new_report_task
+    from lib.paper.review import make_review_lang
     orig = re_mod.dispatch_stream
     inj_calls = {'langs': []}
-    orig_inject = re_mod._inject_images_into_report
+    orig_inject = re_mod.inject_images_into_report
 
     def _spy_inject(report_md, images, lang='en', appendix=True, allow_images=True):
         inj_calls['langs'].append(lang)
@@ -249,12 +256,12 @@ def test_engine_review_injects_with_real_uilang_and_persists_composite_key():
                            allow_images=allow_images)
 
     _patch_dispatch([(REVIEW_BODY_EN, [])])
-    re_mod._inject_images_into_report = _spy_inject
+    re_mod.inject_images_into_report = _spy_inject
     try:
         lang_key = make_review_lang('neurips', 'zh')   # review:neurips:zh
         task = _new_report_task('rvw_eng_1', 'phashrvw000000000000000000000001',
-                                lang_key, None, client_title='Paper', ui_lang='zh')
-        re_mod._run_report_task(task, [
+                                lang_key, None, client_title='Paper', ui_lang='zh', user_id=TEST_OWNER_USER_ID)
+        re_mod.run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper'},
         ], [])
@@ -269,7 +276,7 @@ def test_engine_review_injects_with_real_uilang_and_persists_composite_key():
         assert inj_calls.get('appendix') == [False], inj_calls.get('appendix')
         assert inj_calls.get('allow_images') == [False], inj_calls.get('allow_images')
     finally:
-        re_mod._inject_images_into_report = orig_inject
+        re_mod.inject_images_into_report = orig_inject
         re_mod.dispatch_stream = orig
     _ok('engine: review task injects with real ui_lang, composite key, images disallowed')
 
@@ -279,13 +286,13 @@ def test_review_is_text_only_no_images_at_all():
     figure is injected — not the appendix gallery, not an inline-cited figure —
     AND any paper-image embed the model emitted itself is stripped to alt text.
     The explainer report (allow_images=True) is unaffected."""
-    from lib.paper.images import _inject_images_into_report
+    from lib.paper.images.injection import inject_images_into_report
     images = [{'url': '/api/paper/images/ph/fig_01.png', 'caption': 'Figure 1: architecture', 'page': 2}]
 
     # 1) Unreferenced figure: report appends an appendix gallery; review adds nothing.
     body = '# Review\n\n## Summary\nNo figure is cited here.\n'
-    report_out = _inject_images_into_report(body, images, lang='en', appendix=True)
-    review_out = _inject_images_into_report(body, images, lang='en', appendix=False,
+    report_out = inject_images_into_report(body, images, lang='en', appendix=True)
+    review_out = inject_images_into_report(body, images, lang='en', appendix=False,
                                             allow_images=False)
     assert 'Appendix' in report_out and 'fig_01.png' in report_out, 'report should keep appendix'
     assert 'fig_01.png' not in review_out and 'Appendix' not in review_out, \
@@ -293,15 +300,15 @@ def test_review_is_text_only_no_images_at_all():
 
     # 2) Inline-cited figure: report places it; review still places NONE.
     body_cited = '# Review\n\n## Strengths\nAs Figure 1 shows, the design is sound.\n'
-    report_cited = _inject_images_into_report(body_cited, images, lang='en', appendix=True)
-    review_cited = _inject_images_into_report(body_cited, images, lang='en', appendix=False,
+    report_cited = inject_images_into_report(body_cited, images, lang='en', appendix=True)
+    review_cited = inject_images_into_report(body_cited, images, lang='en', appendix=False,
                                               allow_images=False)
     assert 'fig_01.png' in report_cited, 'report should place the cited figure'
     assert 'fig_01.png' not in review_cited, 'review must NOT place even a cited figure'
 
     # 3) A model-emitted paper-image embed is stripped to its alt text in a review.
     body_embed = '# Review\n\n## Strengths\n![Figure 1: arch](/api/paper/images/ph/fig_01.png)\nGood.\n'
-    review_embed = _inject_images_into_report(body_embed, images, lang='en', appendix=False,
+    review_embed = inject_images_into_report(body_embed, images, lang='en', appendix=False,
                                               allow_images=False)
     assert '/api/paper/images/' not in review_embed, 'model-embedded paper image must be stripped'
     assert '*Figure 1: arch*' in review_embed, 'stripped embed should degrade to italic alt text'
@@ -316,7 +323,7 @@ def test_review_is_text_only_no_images_at_all():
         '<img src="https://example.com/x.png" alt="x"> plus '
         '<img src="/api/paper/images/ph/fig_02.png"/> end.\n'
     )
-    review_external = _inject_images_into_report(body_external, images, lang='en',
+    review_external = inject_images_into_report(body_external, images, lang='en',
                                                  appendix=False, allow_images=False)
     assert '![' not in review_external, 'no markdown image embed may survive a review'
     assert '<img' not in review_external.lower(), 'no raw <img> tag may survive a review'
@@ -324,7 +331,7 @@ def test_review_is_text_only_no_images_at_all():
     assert 'data:image' not in review_external, 'data: image embed must be gone'
     assert '*Fig*' in review_external, 'external md embed should degrade to italic alt text'
     # The explainer report keeps a model-embedded external/HTML image untouched.
-    report_external = _inject_images_into_report(body_external, images, lang='en',
+    report_external = inject_images_into_report(body_external, images, lang='en',
                                                  appendix=True, allow_images=True)
     assert 'arxiv.org/abs/1234/fig.png' in report_external, 'report must keep external images'
     assert '<img' in report_external.lower(), 'report must keep raw <img> tags'
@@ -336,14 +343,14 @@ def test_review_is_text_only_no_images_at_all():
         '<picture><source srcset="a.webp" type="image/webp"></picture>\n\n'
         '<figure><img src="b.png"><figcaption>Fig 2 caption</figcaption></figure>\n'
     )
-    review_pic = _inject_images_into_report(body_picture, images, lang='en',
+    review_pic = inject_images_into_report(body_picture, images, lang='en',
                                             appendix=False, allow_images=False)
     assert 'srcset' not in review_pic, '<source srcset> must be gone from a review'
     assert '<picture' not in review_pic.lower() and '<source' not in review_pic.lower()
     assert '<figure' not in review_pic.lower() and '<img' not in review_pic.lower()
     assert 'a.webp' not in review_pic and 'b.png' not in review_pic, 'image URLs must be gone'
     assert 'Fig 2 caption' in review_pic, 'figcaption prose should be kept'
-    report_pic = _inject_images_into_report(body_picture, images, lang='en',
+    report_pic = inject_images_into_report(body_picture, images, lang='en',
                                             appendix=True, allow_images=True)
     assert 'srcset' in report_pic and '<picture' in report_pic.lower(), 'report keeps <picture>'
 
@@ -355,13 +362,13 @@ def test_review_is_text_only_no_images_at_all():
         '[f3]: https://cdn.example.com/fig3.png\n'
         '[paper]: https://arxiv.org/abs/1234\n'
     )
-    review_ref = _inject_images_into_report(body_ref, images, lang='en',
+    review_ref = inject_images_into_report(body_ref, images, lang='en',
                                             appendix=False, allow_images=False)
     assert '![' not in review_ref, 'reference-style image syntax must be gone'
     assert 'fig3.png' not in review_ref, 'orphaned image link-definition must be dropped'
     assert '*Figure 3*' in review_ref, 'ref-image alt should degrade to italic text'
     assert 'arxiv.org/abs/1234' in review_ref, 'a non-image link definition must be kept'
-    report_ref = _inject_images_into_report(body_ref, images, lang='en',
+    report_ref = inject_images_into_report(body_ref, images, lang='en',
                                             appendix=True, allow_images=True)
     assert 'fig3.png' in report_ref, 'report keeps the reference image definition'
 
@@ -371,11 +378,11 @@ def test_review_is_text_only_no_images_at_all():
         '# Review\n\n## Weaknesses\n'
         'Consider <svg width="10" height="10">\n<rect x="0" y="0"/>\n</svg> here.\n'
     )
-    review_svg = _inject_images_into_report(body_svg, images, lang='en',
+    review_svg = inject_images_into_report(body_svg, images, lang='en',
                                             appendix=False, allow_images=False)
     assert '<svg' not in review_svg.lower() and '</svg' not in review_svg.lower()
     assert '<rect' not in review_svg.lower(), 'svg inner drawing must be gone'
-    report_svg = _inject_images_into_report(body_svg, images, lang='en',
+    report_svg = inject_images_into_report(body_svg, images, lang='en',
                                             appendix=True, allow_images=True)
     assert '<svg' in report_svg.lower(), 'report keeps inline <svg>'
 
@@ -385,11 +392,11 @@ def test_review_is_text_only_no_images_at_all():
         '# Review\n\n## Weaknesses\n'
         '<div style="background-image:url(https://cdn.example.com/bg.png)">x</div>\n'
     )
-    review_bg = _inject_images_into_report(body_bg, images, lang='en',
+    review_bg = inject_images_into_report(body_bg, images, lang='en',
                                            appendix=False, allow_images=False)
     assert 'bg.png' not in review_bg and 'url(' not in review_bg.lower(), \
         'background-image url must be neutralized'
-    report_bg = _inject_images_into_report(body_bg, images, lang='en',
+    report_bg = inject_images_into_report(body_bg, images, lang='en',
                                            appendix=True, allow_images=True)
     assert 'bg.png' in report_bg, 'report keeps a background-image url'
 
@@ -404,7 +411,7 @@ def test_review_is_text_only_no_images_at_all():
         '<input type="image" src="btn.png"> but '
         'this literal &lt;img src=q.png&gt; is just text.\n'
     )
-    review_html = _inject_images_into_report(body_html_img, images, lang='en',
+    review_html = inject_images_into_report(body_html_img, images, lang='en',
                                              appendix=False, allow_images=False)
     assert '<object' not in review_html.lower() and '</object' not in review_html.lower()
     assert '<embed' not in review_html.lower(), '<embed> must be gone'
@@ -414,7 +421,7 @@ def test_review_is_text_only_no_images_at_all():
     assert 'fallback caption' in review_html, '<object> inner fallback text should survive'
     # Escaped entity must NOT be touched — it is literal text, not an image.
     assert '&lt;img src=q.png&gt;' in review_html, 'escaped &lt;img&gt; must be left intact'
-    report_html = _inject_images_into_report(body_html_img, images, lang='en',
+    report_html = inject_images_into_report(body_html_img, images, lang='en',
                                              appendix=True, allow_images=True)
     assert 'o.png' in report_html and 'e.svg' in report_html and 'btn.png' in report_html, \
         'report keeps <object>/<embed>/<input type=image>'
@@ -429,14 +436,14 @@ def test_review_is_text_only_no_images_at_all():
         '<iframe src="frame.png"></iframe> and '
         '<table background="bg2.png"><tr><td>cell</td></tr></table> here.\n'
     )
-    review_more = _inject_images_into_report(body_more, images, lang='en',
+    review_more = inject_images_into_report(body_more, images, lang='en',
                                              appendix=False, allow_images=False)
     for tag in ('<image', '<video', '<iframe', '<table', '<tr', '<td'):
         assert tag not in review_more.lower(), f'{tag} tag must be gone from a review'
     for url in ('a.png', 'p.png', 'frame.png', 'bg2.png'):
         assert url not in review_more, f'image URL {url} must be gone'
     assert 'cell' in review_more, 'inner table text should survive tag removal'
-    report_more = _inject_images_into_report(body_more, images, lang='en',
+    report_more = inject_images_into_report(body_more, images, lang='en',
                                              appendix=True, allow_images=True)
     assert 'a.png' in report_more and 'p.png' in report_more and 'frame.png' in report_more, \
         'report keeps raw HTML image vectors'
@@ -448,7 +455,7 @@ def test_review_is_text_only_no_images_at_all():
         'Inline `<img src=x.png>` example, and a block:\n\n'
         '```html\n<img src="y.png">\n```\n'
     )
-    review_code = _inject_images_into_report(body_code, images, lang='en',
+    review_code = inject_images_into_report(body_code, images, lang='en',
                                              appendix=False, allow_images=False)
     assert '`<img src=x.png>`' in review_code, 'inline code must be preserved verbatim'
     assert '<img src="y.png">' in review_code, 'fenced code must be preserved verbatim'
@@ -461,7 +468,7 @@ def test_review_is_text_only_no_images_at_all():
         '<div title="x>y" style="background:url(leak2.png)">cell</div> and '
         '<img data-x="1>2" src="http://e.com/leak3.png"> end.\n'
     )
-    review_gt = _inject_images_into_report(body_gt, images, lang='en',
+    review_gt = inject_images_into_report(body_gt, images, lang='en',
                                            appendix=False, allow_images=False)
     assert '<img' not in review_gt.lower() and '<div' not in review_gt.lower(), \
         'no tag may survive even with > inside a quoted attribute'
@@ -470,7 +477,7 @@ def test_review_is_text_only_no_images_at_all():
     assert 'src=' not in review_gt and 'background:url' not in review_gt, \
         'no attribute fragment may survive'
     assert 'cell' in review_gt and 'end.' in review_gt, 'inner/trailing text should survive'
-    report_gt = _inject_images_into_report(body_gt, images, lang='en',
+    report_gt = inject_images_into_report(body_gt, images, lang='en',
                                            appendix=True, allow_images=True)
     assert 'leak1.png' in report_gt and 'leak2.png' in report_gt and 'leak3.png' in report_gt, \
         'report keeps tags with > in attributes'
@@ -502,7 +509,10 @@ def test_finalize_review_moves_scores_below_separator():
     """The submittable review body must contain NO scorecard: the venue scores
     are relocated below an explicit, obviously-non-submittable separator so the
     reviewer transcribes them into the form's UI fields."""
-    from lib.paper import finalize_review_body, scorecard_separator
+    from lib.paper.review import (
+        finalize_review_body,
+        scorecard_separator,
+    )
     out = finalize_review_body(REVIEW_BODY_WITH_TABLE_EN, 'en')
     sep = scorecard_separator('en')
     assert sep in out, 'a non-submittable separator must be inserted'
@@ -521,7 +531,7 @@ def test_finalize_review_moves_scores_below_separator():
 def test_finalize_review_strips_tables_and_dangling_star():
     """A leaked Markdown/HTML table and dangling ``*`` emphasis (the artifact
     from degraded image captions) must be removed from the review body."""
-    from lib.paper import finalize_review_body
+    from lib.paper.review import finalize_review_body
     out = finalize_review_body(REVIEW_BODY_WITH_TABLE_EN, 'en')
     body = out.split('---', 1)[0] if '---' in out else out
     # (a) No Markdown table pipes / separator row survive.
@@ -544,7 +554,7 @@ def test_finalize_review_idempotent_and_preserves_code():
     """finalize is idempotent (re-running a finalized body is a no-op) and it
     NEVER mangles a table/star shown inside a fenced code block (that is prose,
     not a rendered artifact)."""
-    from lib.paper import finalize_review_body
+    from lib.paper.review import finalize_review_body
     once = finalize_review_body(REVIEW_BODY_WITH_TABLE_EN, 'en')
     twice = finalize_review_body(once, 'en')
     assert once == twice, 'finalize must be idempotent'
@@ -566,7 +576,10 @@ def test_review_prompt_forbids_tables_and_declares_scorecard_separator():
     """The prompt (the 'belt') must forbid tables/charts/scores in the review
     body, require prose result references, and emit the scorecard below the
     explicit separator marker. Asserted in BOTH languages."""
-    from lib.paper import build_review_prompt, scorecard_separator
+    from lib.paper.review import (
+        build_review_prompt,
+        scorecard_separator,
+    )
     pe = build_review_prompt('neurips', 'en')
     lo = pe.lower()
     assert 'no tables' in lo or 'no table' in lo, 'EN prompt must forbid tables'
@@ -585,15 +598,19 @@ def test_engine_review_finalizes_persisted_body():
     """WIRING: a completed review task must persist/emit a FINALIZED body — no
     table, scores below the separator — proving finalize_review_body runs at the
     engine seam, not just as a standalone helper."""
-    import lib.paper.report_engine as re_mod
-    from lib.paper import _new_report_task, make_review_lang, scorecard_separator
+    import lib.paper.report_engine.worker as re_mod
+    from lib.paper.report_runtime import _new_report_task
+    from lib.paper.review import (
+        make_review_lang,
+        scorecard_separator,
+    )
     orig = re_mod.dispatch_stream
     _patch_dispatch([(REVIEW_BODY_WITH_TABLE_EN, [])])
     try:
         task = _new_report_task('rvw_fin_1', 'phashrvwfin0000000000000000000001',
                                 make_review_lang('neurips', 'en'), None,
-                                client_title='Paper', ui_lang='en')
-        re_mod._run_report_task(task, [
+                                client_title='Paper', ui_lang='en', user_id=TEST_OWNER_USER_ID)
+        re_mod.run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper'},
         ], [])
@@ -613,76 +630,62 @@ def test_engine_review_finalizes_persisted_body():
 def test_source_level_negative_control_finalize_table_strip():
     """Prove the table-strip step is load-bearing: monkeypatch it to identity →
     a leaked table survives the finalize pass; restore → it is stripped again."""
-    import lib.paper.review as rv
-    saved = rv._strip_md_tables
+    import lib.paper.review._textproc as textproc
+    saved = textproc._strip_md_tables
     try:
-        rv._strip_md_tables = lambda t: t  # neuter
-        broken = rv.finalize_review_body(REVIEW_BODY_WITH_TABLE_EN, 'en')
+        textproc._strip_md_tables = lambda t: t  # neuter
+        broken = textproc.finalize_review_body(REVIEW_BODY_WITH_TABLE_EN, 'en')
         assert '| BLEU |' in broken, 'neutering the table-strip should let a table survive'
     finally:
-        rv._strip_md_tables = saved
-    fixed = rv.finalize_review_body(REVIEW_BODY_WITH_TABLE_EN, 'en')
+        textproc._strip_md_tables = saved
+    fixed = textproc.finalize_review_body(REVIEW_BODY_WITH_TABLE_EN, 'en')
     assert '| BLEU |' not in fixed, 'restored table-strip must remove the table again'
     _ok('source-level negative control: finalize table-strip is load-bearing (neuter→survives, restore→stripped)')
 
 
 def test_review_and_report_rows_coexist_for_same_paper_hash():
-    """DB-level isolation: persisting a review under review:<venue>:en and a
-    plain report under 'en' for the SAME paper_hash yields TWO distinct rows
-    (composite PK (paper_hash, lang)), neither clobbering the other."""
+    """Owner-scoped report variants coexist under distinct language keys."""
     import time as _time
+    from lib.paper.artifact_repository import (
+        PaperArtifactRepository,
+        PaperReport,
+    )
 
-    from lib.database import get_thread_db
-    from lib.database._core_schema import PAPER_REPORTS, upsert
-
-    # paper_reports is a core table, bootstrapped when the app is constructed.
-    # Load the app first so the table exists regardless of test ordering /
-    # active backend (PG or SQLite).
-    _load_app()
-    db = get_thread_db()
+    repository = PaperArtifactRepository(TEST_OWNER_USER_ID)
     phash = 'phashiso00000000000000000000isolation'[:32]
     now = int(_time.time())
-    upsert(db, PAPER_REPORTS, {
-        'paper_hash': phash, 'lang': 'en', 'report': 'PLAIN REPORT BODY',
-        'model': 'm', 'meta': '{}', 'created_at': now,
-    }, retry=True)
-    upsert(db, PAPER_REPORTS, {
-        'paper_hash': phash, 'lang': 'review:neurips:en', 'report': 'REVIEW BODY',
-        'model': 'm', 'meta': '{}', 'created_at': now,
-    }, retry=True)
-    rep = db.execute('SELECT report FROM paper_reports WHERE paper_hash=? AND lang=?',
-                     (phash, 'en')).fetchone()
-    rev = db.execute('SELECT report FROM paper_reports WHERE paper_hash=? AND lang=?',
-                     (phash, 'review:neurips:en')).fetchone()
-    assert rep and rep['report'] == 'PLAIN REPORT BODY', 'plain report clobbered by review'
-    assert rev and rev['report'] == 'REVIEW BODY', 'review row missing/clobbered'
-    cnt = db.execute('SELECT COUNT(*) AS c FROM paper_reports WHERE paper_hash=?',
-                     (phash,)).fetchone()
-    assert cnt['c'] == 2, f'expected 2 distinct rows, got {cnt["c"]}'
-    # Cleanup.
-    db.execute('DELETE FROM paper_reports WHERE paper_hash=?', (phash,))
-    db.commit()
-    _ok('DB isolation: review row and plain-report row coexist for the same paper_hash')
+    assert repository.put_report(
+        PaperReport(phash, 'en', 'PLAIN REPORT BODY', 'm', {}, now),
+        command_id=f'review-coexist:plain:{phash}',
+    )
+    assert repository.put_report(
+        PaperReport(
+            phash, 'review:neurips:en', 'REVIEW BODY', 'm', {}, now),
+        command_id=f'review-coexist:review:{phash}',
+    )
+    plain = repository.get_report(phash, 'en')
+    review = repository.get_report(phash, 'review:neurips:en')
+    assert plain and plain.report == 'PLAIN REPORT BODY'
+    assert review and review.report == 'REVIEW BODY'
+    _ok('Sidecar isolation: review and plain report variants coexist')
 
 
 # ─── Venues endpoint + route dispatch (real Quart app) ───────────
 
 def _load_app():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        'server', os.path.join(os.path.dirname(os.path.dirname(__file__)), 'server.py'))
-    mod = importlib.util.module_from_spec(spec)
-    mod.__name__ = 'server'
-    spec.loader.exec_module(mod)
-    return mod.app
+    from lib.storage import start_storage
+    import server
+
+    start_storage()
+    return server.app
 
 
 def test_venues_endpoint_and_review_route_dispatch():
     """/review/venues lists the registry; /report/start with a review key feeds
     the REVIEW prompt (not the explainer report prompt) to the engine."""
     import asyncio
-    import lib.paper.report_engine as re_mod
-    from lib.paper import _report_runtime
+    import lib.paper.report_engine.worker as re_mod
+    from lib.paper.report_runtime import _report_runtime
 
     app = _load_app()
     orig = re_mod.dispatch_stream
@@ -780,7 +783,7 @@ def test_nlpcc_scorecard_is_two_scored_fields_only():
     """NLPCC's OpenReview form is 4 columns (title, review, OA, confidence);
     title+review are the prose body, so the scorecard emits ONLY OA + Confidence
     and must NOT carry the ML-family soundness/novelty/clarity/comparison rows."""
-    from lib.paper import build_review_prompt
+    from lib.paper.review import build_review_prompt
     for L in ('en', 'zh'):
         p = build_review_prompt('nlpcc', L)
         assert 'Overall Assessment' in p and 'Confidence' in p, (L, 'OA/Confidence missing')
@@ -794,8 +797,13 @@ def test_nlpcc_scorecard_is_two_scored_fields_only():
 # ─── Rebuttal: lang keys ────────────────────────────────────────
 
 def test_rebuttal_lang_key_roundtrip_and_family():
-    from lib.paper import (make_rebuttal_lang, is_rebuttal_lang, is_review_family,
-                           is_review_lang, parse_report_lang)
+    from lib.paper.review import (
+        make_rebuttal_lang,
+        is_rebuttal_lang,
+        is_review_family,
+        is_review_lang,
+        parse_report_lang,
+    )
     k = make_rebuttal_lang('nlpcc', 'en')
     assert k == 'rebuttal:nlpcc:en', k
     assert parse_report_lang(k) == {'kind': 'rebuttal', 'venue': 'nlpcc', 'ui_lang': 'en'}
@@ -811,7 +819,10 @@ def test_rebuttal_lang_key_roundtrip_and_family():
 # ─── Rebuttal: prompt structure ─────────────────────────────────
 
 def test_rebuttal_prompt_has_slots_decision_and_no_change_discipline():
-    from lib.paper import build_rebuttal_prompt, REBUTTAL_DECISION_MARKER
+    from lib.paper.review import (
+        build_rebuttal_prompt,
+        REBUTTAL_DECISION_MARKER,
+    )
     for L in ('en', 'zh'):
         p = build_rebuttal_prompt('nlpcc', L)
         # all three fill slots survive for the route's .replace()
@@ -845,7 +856,10 @@ def _rebuttal_body(marker, oa_from, oa_to, cf_from, cf_to, changed, reason='Beca
 
 
 def test_rebuttal_decision_parse_changed_and_unchanged():
-    from lib.paper import parse_rebuttal_decision, REBUTTAL_DECISION_MARKER
+    from lib.paper.review import (
+        parse_rebuttal_decision,
+        REBUTTAL_DECISION_MARKER,
+    )
     m = REBUTTAL_DECISION_MARKER
     # changed: OA moved 4→5, confidence steady
     d = parse_rebuttal_decision(_rebuttal_body(m, 4, 5, 4, 4, 'yes'))
@@ -863,7 +877,10 @@ def test_rebuttal_decision_parse_changed_and_unchanged():
 def test_rebuttal_decision_reconciles_flag_against_values():
     """The scores are ground truth: a model that self-reports CHANGED wrong is
     reconciled toward the actual values (both directions)."""
-    from lib.paper import parse_rebuttal_decision, REBUTTAL_DECISION_MARKER
+    from lib.paper.review import (
+        parse_rebuttal_decision,
+        REBUTTAL_DECISION_MARKER,
+    )
     m = REBUTTAL_DECISION_MARKER
     # model says "no" but NEW_OVERALL differs → forced changed=True
     d = parse_rebuttal_decision(_rebuttal_body(m, 4, 5, 4, 4, 'no'))
@@ -880,7 +897,11 @@ def test_rebuttal_decision_reconciles_flag_against_values():
 def test_rebuttal_finalize_keeps_decision_block_verbatim():
     """finalize_rebuttal_body cleans the reply prose but must keep the decision
     block byte-exact (a comma-rewrite there would corrupt a score value)."""
-    from lib.paper import finalize_rebuttal_body, parse_rebuttal_decision, REBUTTAL_DECISION_MARKER
+    from lib.paper.review import (
+        finalize_rebuttal_body,
+        parse_rebuttal_decision,
+        REBUTTAL_DECISION_MARKER,
+    )
     body = _rebuttal_body(REBUTTAL_DECISION_MARKER, 4, 5, 4, 4, 'yes',
                           reason='Table 6 now reports the ablation.')
     out = finalize_rebuttal_body(body, 'en')
@@ -912,8 +933,8 @@ def main():
     print()
     print(_color('═══ Paper Review Mode Tests ═══', '36'))
     print()
-    from tests._standalone_guard import guard_standalone_db
-    guard_standalone_db('test_paper_review_mode.__main__')
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_paper_review_mode.__main__')
     tests = [
         test_parse_plain_report_keys_untouched,
         test_parse_review_key_decodes_venue_and_uilang,

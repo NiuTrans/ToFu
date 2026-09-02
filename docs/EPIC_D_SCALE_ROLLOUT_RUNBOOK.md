@@ -1,167 +1,184 @@
-# Epic D — Scaled-Deployment Rollout Runbook
+# Distributed deployment rollout runbook
 
-> **Audience:** the operator standing up Tofu as a **multi-replica, horizontally
-> scaled** deployment (many app processes behind a load balancer, targeting
-> hundreds-of-thousands concurrent). It is the *operational* companion to the
-> *design* doc [`EPIC_D_DATA_TIER_DESIGN.md`](EPIC_D_DATA_TIER_DESIGN.md).
->
-> **NOT for a single-box / desktop install.** Every flag below defaults OFF so
-> a single box is byte-identical to today. If you run one server on one machine,
-> you do NOT need any of this — the only relevant flag for you is
-> `TOFU_REQUIRE_PG=1` (see §2, D1), and even that is optional.
->
-> **Scope boundary — code vs infra.** The application code for D1/D2/D3 is
-> already merged and green; this runbook does not add code. It provisions the
-> **infrastructure** those flags talk to, then flips the flags. Standing up
-> managed PgBouncer HA, read replicas, and managed Redis is a deployment/ops
-> project with real cost — it is `[human-gated]` (CLAUDE.md §10) and cannot be
-> done from an agent shell. Each activation step ends with an
-> `audit_log('config_change', approved_by='user')` obligation.
+This is the operator companion to
+[`STORAGE.md`](STORAGE.md). It applies only to the
+Kubernetes topology. The standalone installer and Docker Compose remain the
+personal SQLite topology and never provision PostgreSQL or Redis.
 
----
+## Preconditions
 
-## 0. Preconditions
+- One external, highly available PostgreSQL primary with TLS, backups, PITR,
+  monitoring, and credential rotation owned by the platform.
+- One external, highly available Redis service with TLS. Redis is ephemeral
+  coordination only; it is not a task, event, or conversation authority.
+- Absolute secret-file mounts containing a PostgreSQL DSN with
+  `sslmode=verify-full` and a `rediss://` URL.
+- A unique, stable replica ID per Pod.
+- A migration Job built from the same release as the application images.
+- A verified personal SQLite snapshot and a tested restore path before the
+  first data migration.
 
-| Requirement | Why |
+Self-running `initdb`, `pg_ctl`, a project-local `pgdata`, or an unencrypted
+Redis endpoint is outside the supported distributed topology.
+
+## Configuration contract
+
+Every distributed Pod sets:
+
+```text
+TOFU_DEPLOYMENT_MODE=distributed
+TOFU_DISTRIBUTED_PREVIEW_MODE=read-only
+TOFU_PROCESS_ROLE=api|worker|scheduler
+TOFU_POSTGRES_DSN_FILE=/run/secrets/tofu/postgres-dsn
+TOFU_REDIS_URL_FILE=/run/secrets/tofu/redis-url
+TOFU_REPLICA_ID=<stable-pod-id>
+```
+
+The process role maps to owners in `lib/process_roles.py`:
+
+| Role | Owned work |
 |---|---|
-| Multiple app replicas actually running behind a load balancer | The pooler / replicas / Redis do nothing with one replica |
-| A real (not app-owned-local) managed PostgreSQL primary | The `install.sh` local-userspace PG is a dev convenience, not a scale primary |
-| `psycopg2` importable in every replica's env | PG backend selection requires it |
-| Decision recorded that you are moving to scale | Per charter: managed HA only, never self-run single instances |
+| `api` | frontend, request/catalog services, network configuration |
+| `worker` | task recovery and task/background execution |
+| `scheduler` | timed jobs and event retention/reclamation |
+| `all` | transitional single-replica contract testing only |
 
-**Charter constraints you MUST honour (already ratified — do not re-litigate):**
-- Redis and PgBouncer are **MANAGED, HA** (primary + replica + automatic
-  failover). A self-run single instance is a fleet-wide SPOF and is explicitly
-  rejected. Self-run HA (Sentinel/Cluster; PgBouncer HA pair) is the *fallback*,
-  never the target.
-- Every mechanism stays **env-gated OFF by default** so the single-box install
-  is byte-identical. The scaled deployment opts in.
-- Build/rollout order is fixed: **lease-store → Epic A caps re-key → Epic B
-  fan-out → Epic C affinity → D1 → D4 → D2 → D3.** Do not turn on a later stage
-  before the earlier one is green.
+Removed variables `TOFU_DB_BACKEND`, `TOFU_REQUIRE_PG`, and
+`TOFU_REPLICA_RING` are fatal. Direct DSN values and project-local PostgreSQL
+management flags are not part of the public contract.
 
----
+## Preview safety boundary
 
-## 1. The env-flag surface (all confirmed in code)
+The chart currently validates the distributed process, external-service, and
+Storage Sidecar wiring; it is not yet a claim that chat execution can scale
+horizontally. Its defaults are one API, one worker, and one scheduler replica,
+with both API and worker HPAs disabled. Do not override those replica counts or
+enable an HPA until the durable chat worker is registered in the production
+composition root and the Pod-kill takeover, stale-fence rejection, and random
+load-balancing acceptance gates pass. The chart values schema rejects those
+overrides while this preview boundary is active; clearing it requires an
+explicit chart/schema release change, not an operator-side `--set`. A shared
+PostgreSQL database alone does not satisfy that boundary.
 
-| Flag | Stage | Default (OFF) behaviour | Code anchor |
-|---|---|---|---|
-| `TOFU_REQUIRE_PG=1` | D1 | unset → graceful SQLite fallback | `_core.py:_require_pg` (219) |
-| `TOFU_PG_REQUIRE_WAIT_S` | D1 | `60` when require-PG set; `0` otherwise | `_core.py:_pg_require_wait_s` (226) |
-| `TOFU_PG_VIA_POOLER=1` | D2 | unset → direct PG, `SET SESSION` timeouts | `_core.py:_pg_via_pooler` (357) |
-| `TOFU_PG_DIRECT_DSN=...` | D2 | unset → admin lane uses `PG_DSN` | `_core.py:_pg_admin_dsn` (388) |
-| `TOFU_PG_READ_REPLICAS=...` | D3 | unset → `get_read_db()` aliases `get_db()` | `_core.py:get_read_db` (1350) |
-| `TOFU_RUNTIME_STATE_BACKEND=redis` | B/C (+D4) | `inproc` → per-process state | `lib/runtime_state_store.py:468` |
-| `TOFU_REDIS_URL=redis://...` | B/C (+D4) | `redis://127.0.0.1:6379/0` | `lib/runtime_state_store.py:246` |
-| `TOFU_RATE_LIMIT_BACKEND=db` | Epic A | `memory` → per-process cap | `lib/rate_limit_store.py:221` |
+`TOFU_DISTRIBUTED_PREVIEW_MODE=read-only` is a mandatory technical latch, not
+an advisory label. Application startup rejects distributed configuration
+without it; HTTP mutations and WebSocket handshakes are refused before route
+execution; the Sidecar rejects every command; and worker, scheduler, recovery,
+and optional background owners remain stopped. The one-shot migration Job is
+the sole write path because it connects directly under its advisory schema
+lock. Removing this latch requires the durable execution and failure-injection
+acceptance gates in this runbook plus an explicit release change.
 
-> A flag being ON without its infra present is a trap, not a no-op, for D2
-> (the app will try to reach a PgBouncer that isn't there). D3 and Redis
-> fail-open to the primary/inproc, so those two are safe-but-pointless if you
-> set them early. Follow the order below.
+## Rollout sequence
 
----
+1. Render and validate `deploy/helm/tofu` with both image digests. The chart
+   must pass `helm lint` and `scripts/check_helm_render.py`; it deliberately
+   refuses an omitted digest and never creates the external-services Secret.
+2. Build both digest-pinned, non-root image targets. Verify the `api` image has
+   no Playwright, compiler, or PostgreSQL server binaries; verify the `worker`
+   image contains the declared browser runtime.
+3. Run `python -m lib.storage_sidecar.migrate` as the chart's one-shot hook Job. The Job takes
+   the PostgreSQL advisory migration lock and advances the schema. Application
+   Pods only validate the exact schema version and execute no startup DDL.
+4. Start the default one API replica, one worker, and one scheduler with the
+   Service selecting only API Pods. Each Pod must have exactly one local
+   Storage Sidecar and the private memory-backed connection handoff. Require all
+   three fixed probes:
+   `/health/startup`, `/health/ready`, and `/health/live`.
+5. Exercise storage-operation parity and one read-only user journey against
+   PostgreSQL. Confirm Redis loss makes new admission unavailable while
+   accepted PostgreSQL-backed state remains queryable.
+6. During the approved stop-write window, snapshot SQLite, import tables,
+   correct sequences, compare row counts/content checksums, and run a read-only
+   smoke against PostgreSQL. Open writes only after every check passes.
+7. After the preview safety boundary is cleared, scale API replicas behind
+   random load balancing and verify no sticky session is required for queries
+   and durable SSE replay. This is an acceptance gate, not a supported default
+   rollout step while the chart remains in preview.
+8. Scale workers only after the release's durable claim/heartbeat/fencing
+   acceptance suite proves Pod-kill takeover and stale-writer rejection.
+9. Keep the original SQLite database read-only until a full PostgreSQL restore
+   exercise and the post-cutover observation window both succeed.
 
-## 2. Rollout sequence
+## SQLite to PostgreSQL stop-write import
 
-Do these **in order**. After each, confirm green (see §3) before the next.
+The importer is plan-only by default and does not connect to PostgreSQL:
 
-### D1 — Guarantee PostgreSQL (correctness gate; cheapest, highest safety)
-1. Point the replicas at your managed PG primary via `TOFU_PG_HOST` /
-   `TOFU_PG_PORT` / `TOFU_PG_DBNAME` / `TOFU_PG_USER` / `TOFU_PG_PASSWORD`
-   (these build `PG_DSN`, `_core.py:311`).
-2. Set `TOFU_REQUIRE_PG=1` on every replica. Now a PG-unreachable boot
-   **refuses to start** (`_assert_pg_available_or_raise`, 279) instead of
-   silently degrading to write-serializing SQLite.
-3. `audit_log('config_change', param='TOFU_REQUIRE_PG', approved_by='user')`.
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --source data/tofu.db \
+  --postgres-dsn-file /run/secrets/tofu/postgres-dsn \
+  --report data/sqlite-to-postgres.report.json
+```
 
-### Redis (Epic B/C substrate — prerequisite for D4's cross-replica invalidation)
-1. Provision **managed Redis HA** (primary + replica + auto-failover). No
-   AOF/RDB durability requirement — the bus is best-effort; lease/counter keys
-   self-heal from heartbeats within one lease TTL.
-2. Set `TOFU_REDIS_URL=redis://<managed-endpoint>:6379/0` and
-   `TOFU_RUNTIME_STATE_BACKEND=redis` on every replica.
-3. This makes the Epic A caps, the push fan-out (B), and runtime state (C)
-   `N`-invariant across replicas. Confirm B/C are green here — D4's invalidation
-   rides this same bus, no second system.
-4. `audit_log('config_change', param='TOFU_RUNTIME_STATE_BACKEND', approved_by='user')`.
+Run the copy only inside the approved stop-write window, after the Sidecar and
+Web process are stopped:
 
-### D2 — Managed PgBouncer HA pooler (transaction pooling)
-1. Provision a **managed PgBouncer HA tier in transaction-pooling mode** in
-   front of the PG primary.
-2. Repoint the runtime DSN (`TOFU_PG_HOST`/`TOFU_PG_PORT`) at the **bouncer**.
-3. Set `TOFU_PG_DIRECT_DSN` to the **real backend** (bypasses the pooler for
-   DDL migrations + `VACUUM FULL`/`REINDEX`, which are illegal through a
-   transaction pooler — `_pg_admin_dsn`, 388).
-4. Set `TOFU_PG_VIA_POOLER=1`. Connection-scoped timeouts now ship as libpq
-   startup options instead of `SET SESSION` (pooler-safe — no GUC leak across
-   pooled borrowers; `_pg_session_setup_plan`, 366).
-5. The D2 session-state audit is already done in code (zero advisory locks,
-   zero server-side prepared statements; the one runtime hazard is fixed and
-   gated). Nothing to change in app code.
-6. `audit_log('config_change', param='TOFU_PG_VIA_POOLER', approved_by='user')`.
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --source data/tofu.db \
+  --postgres-dsn-file /run/secrets/tofu/postgres-dsn \
+  --report data/sqlite-to-postgres.report.json \
+  --execute --source-quiesced --confirm-empty-target
+```
 
-### D3 — Read replicas (last; depends on a healthy D2 tier)
-1. Provision one or more **read replicas** of the PG primary.
-2. Set `TOFU_PG_READ_REPLICAS=<replica DSNs>`.
-3. **Caveat — seam only today.** `get_read_db()` currently logs and still
-   returns the primary even when this is set (`_core.py:1367-1374`); the actual
-   replica-pool routing is the remaining §10 code follow-up. Setting this flag
-   is safe (fail-open to primary) but delivers no read-spread until that
-   routing lands. Track it as the open D3 code task.
-4. Lag discipline: only lag-tolerant reads (sidebar list, old-conversation
-   load, search) may adopt `get_read_db`; read-your-write-sensitive paths
-   (just-sent message, poll of a fresh result) stay on `get_db` (the primary).
-5. `audit_log('config_change', param='TOFU_PG_READ_REPLICAS', approved_by='user')`.
+The DSN has no command-line/string alternative: it must come from an absolute,
+bounded secret file and must require `sslmode=verify-full`. The importer holds
+the SQLite project lease, opens one query-only transaction, and takes the
+PostgreSQL schema-migration lock followed by its data-import advisory lock. It
+refuses a target whose schema version differs from the release or whose
+business tables contain any row.
 
-### D4 — Sidebar cache user-key + LIMIT + cross-replica invalidation
-- **Coupled to multi-user auth** — do not retire `DEFAULT_USER_ID=1` before the
-  auth model ships, or single-user installs regress. The user-key + `LIMIT`
-  parts land with auth; the cross-replica invalidation rides the Redis bus
-  (already provisioned above). This is a code increment, not a flag flip.
+Full mode dynamically compares the source and target table sets before writing.
+An old SQLite table without a current PostgreSQL schema owner is a hard blocker,
+not silently dropped data. Copying is table-wise and batch-bounded; publication
+requires exact row counts plus the order-independent, duplicate-sensitive
+XOR/SUM SHA-256 digest for every table and correction of every PostgreSQL-owned
+sequence. The final PostgreSQL commit is one transaction, so an interrupted or
+failed import rolls back to the required empty target.
 
----
+`--table NAME` is only a contract/smoke aid. Its report status is always
+`partial_verified`, `cutover_ready` is always false, and that target must be
+discarded before a full run. Only a committed full copy can produce
+`status=verified` and `cutover_ready=true`. Reports are fsynced and atomically
+renamed, contain the secret-file path but never the DSN, and record only an
+exception type on failure because driver messages may contain connection data.
 
-## 3. Verification after each stage
+The repository's default/unit test path uses fake PostgreSQL targets and makes
+no network connection. Before production cutover, the same release still must
+pass the PostgreSQL integration matrix, a read-only application smoke, and the
+restore exercise; the unit-tested CLI contract alone is not a migration drill.
 
-| Stage | Check |
-|---|---|
-| D1 | Kill PG, boot a replica → it must REFUSE (log `TOFU_REQUIRE_PG=1 but PostgreSQL is unavailable`), not serve SQLite. Restore PG → boots. |
-| Redis | `audit.log` shows `db_backend_selected`; two replicas see each other's push events / share the Epic A cap (not a per-process count). |
-| D2 | `SELECT count(*) FROM pg_stat_activity` on the real backend stays a small fixed number under N replicas' load (multiplexing works). DDL migration + a manual `VACUUM` still succeed (admin lane bypasses the pooler). |
-| D3 | Replication-lag metric exported; a lag-tolerant read served by a replica, a lag-sensitive read pinned to primary. |
+## Probe semantics
 
-**Metrics are REQUIRED per §5a.5**, not assumed: pooler PG-backend saturation +
-PgBouncer wait time; replica replication-lag. Reuse whatever the managed tier
-exports; fill gaps with app-side gauges.
+- `/health/live` proves only that the process/event loop can answer. It never
+  probes storage and must not cause dependency failures to restart every Pod.
+- `/health/startup` remains 503 until the lifecycle and Sidecar are ready.
+- `/health/ready` becomes 503 during startup, shutdown, or Sidecar loss so the
+  Service stops routing new traffic.
+- Authenticated diagnostics expose dependency detail; public probes contain
+  only lifecycle state, process role, and a storage-ready boolean.
 
----
+## Failure policy
 
-## 4. Rollback
+- PostgreSQL unavailable or schema-mismatched: startup/readiness fail closed.
+- Redis unavailable: new distributed admission fails with 503 and
+  `Retry-After`; no fallback to per-process caps is allowed.
+- A Redis wake hint may be lost. Consumers recover through PostgreSQL cursors
+  and must never treat Pub/Sub delivery as a commit.
+- A migration-lock conflict leaves the Job unsuccessful; application Pods do
+  not race it by attempting their own DDL.
+- PostgreSQL backups and PITR are platform operations. The application backup
+  operation intentionally refuses that backend.
 
-Every stage is a flag. To roll back a stage, **unset its flag and restart** —
-the code falls back to the byte-identical single-box path (SQLite-capable D1,
-direct-PG D2, primary-only D3, inproc B/C). No schema or data migration is
-involved in any D flag, so rollback is a restart, not a repair.
+## Rollback boundary
 
----
+Before PostgreSQL writes open, rollback means keeping SQLite read-only and
+returning traffic to the verified personal release. Once PostgreSQL accepts
+new writes, SQLite is no longer current: use forward repair or a separately
+verified reverse export. Never point two writable authorities at the same
+release, and never delete the last verified backup to create migration space.
 
-## 5. Why this is NOT baked into `install.sh`
-
-`install.sh` provisions a **single-box, zero-config** install. Making it lay
-down PgBouncer / Redis / replicas by default would:
-- violate the ratified byte-identical-single-box invariant;
-- create self-run single instances (SPOFs) — exactly what the charter's
-  managed-HA decision rejects;
-- add three failure-prone daemons to serve traffic one process already handles.
-
-If you want a **local dev harness** to exercise the D2/D3 code paths before a
-real rollout, that belongs behind an explicit opt-in `install.sh
---with-scale-deps` (default off), clearly labelled non-production — a separate,
-smaller task from this production runbook.
-
----
-
-*Prepared as the operational companion to `EPIC_D_DATA_TIER_DESIGN.md`. The
-infra provisioning + flag activation is human-gated (CLAUDE.md §10); each
-activation step records an `audit_log('config_change', approved_by='user')`.*
+Record image digests, schema version, migration receipt, validation hashes,
+probe results, and the human approval for opening writes in the deployment
+change record.

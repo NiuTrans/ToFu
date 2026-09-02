@@ -3,15 +3,122 @@
 Public surface:
   * ``run_compaction_pipeline``             — called from the orchestrator
     before each LLM API call.
-  * ``_reinject_system_contexts_after_compact`` — re-injects system contexts
+  * ``recompose_context_after_compaction`` — rebuilds managed context
     after L2 compaction drops the system message.
 """
 
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
+from lib.tasks_pkg.compaction._constants import _TOKEN_BUDGET_REMINDER_RATIO
 from lib.tasks_pkg.compaction._layer1 import micro_compact
 from lib.tasks_pkg.compaction._layer2 import force_compact_if_needed
+from lib.tasks_pkg.compaction._tokens import (
+    _estimate_total_tokens,
+    _get_context_limit,
+    _usable_context,
+)
 
 logger = get_logger(__name__)
+
+_CONFIG_AUDIT_LATCH = {'done': False}
+
+
+def _audit_token_budget_constant_once() -> None:
+    """One-time §10.1 audit entry for the reminder hyperparameter."""
+    if _CONFIG_AUDIT_LATCH['done']:
+        return
+    _CONFIG_AUDIT_LATCH['done'] = True
+    try:
+        audit_log('config_change', change='token_budget_reminder',
+                  reminder_ratio=_TOKEN_BUDGET_REMINDER_RATIO,
+                  approved_by='user')
+    except Exception as e:
+        logger.debug('[TokenBudget] config_change audit skipped: %s', e)
+
+
+def _emit_compaction_analytics(task: dict, current_round: int,
+                               tokens_before: int, msgs_before: int,
+                               messages: list, trigger: str) -> int:
+    """Post-compaction observability: audit event + PostCompact hooks.
+
+    Codex-inspired (codex-rs ``compact.rs::CompactionAnalyticsAttempt``):
+    every successful compaction leaves a structured trail — trigger, round,
+    token/message counts before and after — so a production compaction can
+    be diagnosed from the logs alone. Hooks receive a read-only summary
+    dict, never the message list itself.
+    """
+    tokens_after = _estimate_total_tokens(messages)
+    info = {
+        'conv_id': task.get('convId', ''),
+        'round': current_round,
+        'layer': 'L2',
+        'trigger': trigger,
+        'tokens_before': tokens_before,
+        'tokens_after': tokens_after,
+        'token_count_kind': 'estimated',
+        'messages_before': msgs_before,
+        'messages_after': len(messages),
+        'reduction_pct': round(
+            (1 - tokens_after / max(1, tokens_before)) * 100, 1),
+    }
+    try:
+        audit_log('context_compact', **info)
+    except Exception as e:
+        logger.debug('[Compact] audit_log failed: %s', e)
+    try:
+        from lib.tasks_pkg.tool_hooks import run_post_compact_hooks
+        run_post_compact_hooks(info, task)
+    except Exception as e:
+        logger.warning('[Compact] PostCompact hooks failed: %s', e, exc_info=True)
+    return tokens_after
+
+
+def _maybe_inject_token_budget_reminder(
+    messages: list,
+    task: dict | None,
+    *,
+    used_tokens: int | None = None,
+) -> None:
+    """Codex-style budget visibility: tell the model its remaining window.
+
+    Fires at most once per context window (claim flag on the task dict; the
+    pipeline resets it after every successful compaction). The reminder is
+    APPENDED at the end of the message list — the cached prefix is never
+    disturbed — and marked ``_isMeta`` so turn-boundary and query-extraction
+    logic treat it as a synthetic context carrier, not a human turn.
+    """
+    if not task or task.get('_tokenBudgetReminderFired'):
+        return
+    try:
+        used = (int(used_tokens) if used_tokens is not None
+                else _estimate_total_tokens(messages))
+        usable = _usable_context(_get_context_limit(task))
+    except Exception as e:
+        logger.debug('[TokenBudget] estimate failed: %s', e)
+        return
+    if usable <= 0:
+        return
+    remaining = usable - used
+    if remaining <= 0 or used < int(usable * _TOKEN_BUDGET_REMINDER_RATIO):
+        return
+    _audit_token_budget_constant_once()
+    task['_tokenBudgetReminderFired'] = True
+    pct = max(0, round(remaining * 100 / usable))
+    messages.append({
+        'role': 'user',
+        'content': (
+            '<token_budget>\n'
+            f'Context budget notice: about {remaining:,} tokens remain '
+            f'(~{pct}% of the usable window). Compaction will run '
+            'automatically near the limit. Finish the current step before '
+            'starting large new explorations; keep durable findings in '
+            'files or artifacts rather than relying on long in-context '
+            'retention.\n'
+            '</token_budget>'
+        ),
+        '_isMeta': True,
+    })
+    logger.info('[TokenBudget] Reminder injected: %d tokens remaining '
+                '(%d%% of usable)', remaining, pct)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -21,7 +128,7 @@ logger = get_logger(__name__)
 #  the model doesn't lose critical instructions.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _reinject_system_contexts_after_compact(messages: list, task: dict | None = None):
+def recompose_context_after_compaction(messages: list, task: dict | None = None):
     """Recompose all managed context after compaction.
 
     A compactor may retain the static system block while dropping a managed
@@ -40,21 +147,25 @@ def _reinject_system_contexts_after_compact(messages: list, task: dict | None = 
     project_enabled = bool(project_path)
     memory_enabled = cfg.get('memoryEnabled', True)
     search_enabled = cfg.get('searchMode', '') in ('single', 'multi')
-    swarm_enabled = cfg.get('swarmEnabled', False)
 
-    from lib.tasks_pkg.system_context import (
-        _inject_system_contexts, _disabled_prompt_blocks,
+    from lib.tasks_pkg.context_composer import (
+        compose_task_context, disabled_context_blocks,
     )
-    _inject_system_contexts(
-        messages, project_path, project_enabled,
-        memory_enabled, search_enabled, swarm_enabled,
+    from lib.tasks_pkg.manager import task_user_id
+    compose_task_context(
+        messages,
+        user_id=task_user_id(task),
+        project_path=project_path,
+        project_enabled=project_enabled,
+        memory_enabled=memory_enabled,
+        search_enabled=search_enabled,
         has_real_tools=bool(task.get('_contextHasRealTools', True)),
         conv_id=task.get('convId', ''),
         task=task,
         model=cfg.get('model', ''),
         system_prompt_mode=cfg.get('systemPromptMode', 'append'),
         tool_names=set(task.get('_contextToolNames') or ()),
-        disabled_blocks=_disabled_prompt_blocks(cfg),
+        disabled_blocks=disabled_context_blocks(cfg),
     )
     logger.info('[PostCompact] Re-composed managed context after compaction')
 
@@ -63,8 +174,13 @@ def _reinject_system_contexts_after_compact(messages: list, task: dict | None = 
 #  Pipeline entry point
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run_compaction_pipeline(messages: list, current_round: int,
-                            task: dict | None = None):
+def run_compaction_pipeline(
+    messages: list,
+    current_round: int,
+    task: dict | None = None,
+    *,
+    remaining_api_rounds: int | None = None,
+):
     """Run the compaction pipeline.
 
     Called from the orchestrator before each LLM API call.
@@ -165,13 +281,25 @@ def run_compaction_pipeline(messages: list, current_round: int,
     # rejection that would trigger it). Only the PROACTIVE pipeline passes
     # this; reactive_compact keeps its own Phase-4 head-truncate and must NOT
     # double-truncate, so it does not set the flag.
+    _l2_measurement: dict = {}
     compacted = False if _disable_force else force_compact_if_needed(
         messages, task=task, _allow_head_truncate_fallback=True,
-        _compaction_round=current_round)
+        _compaction_round=current_round,
+        _compaction_remaining_api_rounds=remaining_api_rounds,
+        _measurement_out=_l2_measurement)
 
     # Post-compact: re-inject system contexts if compaction dropped them
+    _post_l2_tokens: int | None = None
     if compacted:
-        _reinject_system_contexts_after_compact(messages, task=task)
+        recompose_context_after_compaction(messages, task=task)
+        if task is not None:
+            # A fresh context window earns one fresh budget reminder.
+            task['_tokenBudgetReminderFired'] = False
+            _post_l2_tokens = _emit_compaction_analytics(
+                task, current_round,
+                int(_l2_measurement.get('message_tokens') or 0),
+                int(_l2_measurement.get('message_count') or 0),
+                messages, trigger='auto')
 
     # Stage B — advanced host: structural / LLM-allowed compaction methods.
     # Opt-in via task['config']['compaction']['advanced_steps'] (default
@@ -210,7 +338,7 @@ def run_compaction_pipeline(messages: list, current_round: int,
     # Notify cache tracker ONLY for mutations that actually touch the cached
     # PREFIX, so the expected cache_read drop isn't flagged as a break.
     #
-    # ★ Default L1 (micro_compact, saved>0) is cache-SAFE by construction:
+    # Default L1 (micro_compact, saved>0) is cache-SAFE by construction:
     #   every built-in step gates on ``ctx.is_in_cache_prefix(idx)`` and skips
     #   messages[0:get_cache_prefix_count]. It edits only COLD results that
     #   have NOT yet been cached (or, idempotently, ones already byte-identical
@@ -233,7 +361,22 @@ def run_compaction_pipeline(messages: list, current_round: int,
     _touched_prefix = bool(compacted) or adv_saved > 0 or (saved > 0 and _ignore_prefix)
     if _touched_prefix and conv_id:
         try:
-            from lib.tasks_pkg.cache_tracking import notify_compaction
-            notify_compaction(conv_id)
+            from lib.tasks_pkg.cache_tracking._roi import notify_compaction
+            from lib.tasks_pkg.manager import task_user_id
+            notify_compaction(conv_id, user_id=task_user_id(task))
         except Exception as e:
             logger.debug('[Pipeline] notify_compaction failed: %s', e)
+
+    # Codex-style budget visibility (append-only, cache-prefix safe): one
+    # reminder per context window once usage crosses the threshold. Runs
+    # AFTER every mutation step above so the estimate reflects the final
+    # per-round context, and AFTER a successful compaction resets the claim.
+    if adv_saved > 0:
+        _reminder_tokens = None
+    elif compacted:
+        _reminder_tokens = _post_l2_tokens
+    else:
+        _measured = _l2_measurement.get('message_tokens')
+        _reminder_tokens = int(_measured) if _measured is not None else None
+    _maybe_inject_token_budget_reminder(
+        messages, task, used_tokens=_reminder_tokens)

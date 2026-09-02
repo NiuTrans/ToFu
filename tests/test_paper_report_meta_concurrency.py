@@ -1,103 +1,77 @@
-"""Cross-thread lost-update guard for structured paper report metadata."""
+"""Concurrent paper-report metadata updates are atomic in the Sidecar."""
 
 from __future__ import annotations
 
 import concurrent.futures
-import json
-import threading
 import time
 
 import pytest
 
+from lib.paper.artifact_repository import PaperArtifactRepository, PaperReport
+from lib.storage.errors import StorageError
 
+
+pytest_plugins = ('tests._artifact_sidecar',)
 pytestmark = pytest.mark.unit
+OWNER_USER_ID = 1
 
 
 def test_concurrent_meta_mutations_preserve_every_sibling_update():
-    from lib.database import (
-        DOMAIN_CHAT,
-        db_execute_with_retry,
-        get_thread_db,
-        mutate_paper_report_meta,
-    )
-
+    repository = PaperArtifactRepository(OWNER_USER_ID)
     paper_hash = f'meta-race-{time.time_ns()}'
-    lang = 'en'
-    db = get_thread_db(DOMAIN_CHAT)
-    db_execute_with_retry(
-        db,
-        'INSERT INTO paper_reports '
-        '(paper_hash, lang, report, model, meta, created_at) '
-        'VALUES (?, ?, ?, ?, ?, ?)',
-        (paper_hash, lang, 'body', 'model', '{}', int(time.time())),
+    assert repository.put_report(
+        PaperReport(paper_hash, 'en', 'body', meta={}),
+        command_id=f'meta-race-create:{paper_hash}',
     )
 
     workers = 12
-    barrier = threading.Barrier(workers)
 
-    def _write(index):
-        worker_db = get_thread_db(DOMAIN_CHAT)
-        barrier.wait(timeout=10)
+    def write(index):
+        return PaperArtifactRepository(OWNER_USER_ID).merge_report_second_pass(
+            paper_hash,
+            'en',
+            f'worker-{index}',
+            {'index': index},
+            command_id=f'meta-race-worker:{paper_hash}:{index}',
+        )
 
-        def _mutate(meta):
-            meta.setdefault('workers', {})[str(index)] = index
-            return meta
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(write, range(workers)))
+    assert all(isinstance(result, dict) for result in results)
 
-        return mutate_paper_report_meta(
-            worker_db, paper_hash, lang, _mutate)
-
-    try:
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=workers) as pool:
-            results = list(pool.map(_write, range(workers)))
-        assert all(isinstance(result, dict) for result in results)
-
-        row = db.execute(
-            'SELECT meta FROM paper_reports WHERE paper_hash=? AND lang=?',
-            (paper_hash, lang),
-        ).fetchone()
-        persisted = json.loads(row['meta'])
-        assert persisted['workers'] == {
-            str(index): index for index in range(workers)}
-    finally:
-        db_execute_with_retry(
-            db, 'DELETE FROM paper_reports WHERE paper_hash=? AND lang=?',
-            (paper_hash, lang))
+    report = repository.get_report(paper_hash, 'en')
+    assert report is not None
+    assert report.meta['secondPasses'] == {
+        f'worker-{index}': {'index': index} for index in range(workers)
+    }
 
 
-def test_meta_mutator_exception_rolls_back_json_change():
-    from lib.database import (
-        DOMAIN_CHAT,
-        db_execute_with_retry,
-        get_thread_db,
-        mutate_paper_report_meta,
+def test_conflicting_command_replay_leaves_committed_metadata_unchanged():
+    repository = PaperArtifactRepository(OWNER_USER_ID)
+    paper_hash = f'meta-conflict-{time.time_ns()}'
+    assert repository.put_report(
+        PaperReport(paper_hash, 'en', 'body', meta={'stable': True}),
+        command_id=f'meta-conflict-create:{paper_hash}',
+    )
+    command_id = f'meta-conflict-command:{paper_hash}'
+    repository.merge_report_second_pass(
+        paper_hash,
+        'en',
+        'insight',
+        {'value': 'committed'},
+        command_id=command_id,
     )
 
-    paper_hash = f'meta-rollback-{time.time_ns()}'
-    lang = 'en'
-    db = get_thread_db(DOMAIN_CHAT)
-    db_execute_with_retry(
-        db,
-        'INSERT INTO paper_reports '
-        '(paper_hash, lang, report, model, meta, created_at) '
-        'VALUES (?, ?, ?, ?, ?, ?)',
-        (paper_hash, lang, 'body', 'model', '{"stable": true}',
-         int(time.time())),
-    )
+    with pytest.raises(StorageError):
+        repository.merge_report_second_pass(
+            paper_hash,
+            'en',
+            'insight',
+            {'value': 'must-not-commit'},
+            command_id=command_id,
+        )
 
-    def _fail(meta):
-        meta['stable'] = False
-        raise RuntimeError('stop before update')
-
-    try:
-        with pytest.raises(RuntimeError, match='stop before update'):
-            mutate_paper_report_meta(db, paper_hash, lang, _fail)
-        row = db.execute(
-            'SELECT meta FROM paper_reports WHERE paper_hash=? AND lang=?',
-            (paper_hash, lang),
-        ).fetchone()
-        assert json.loads(row['meta']) == {'stable': True}
-    finally:
-        db_execute_with_retry(
-            db, 'DELETE FROM paper_reports WHERE paper_hash=? AND lang=?',
-            (paper_hash, lang))
+    report = repository.get_report(paper_hash, 'en')
+    assert report is not None
+    assert report.meta['stable'] is True
+    assert report.meta['secondPasses']['insight'] == {'value': 'committed'}

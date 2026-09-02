@@ -3,13 +3,22 @@ data/
 logs/
 uploads/
 *.db
+*.db-wal
+*.db-shm
 
 # ── Development & CI ──
 .git
 .github
+codex/
 .chatui/
 .project_sessions/
 .tofu/
+.venv/
+venv/
+.conda/
+.tofu_env.json
+.migrate_backup/
+.update_backup/
 .coverage
 __pycache__/
 *.pyc
@@ -17,8 +26,9 @@ __pycache__/
 .ruff_cache/
 node_modules/
 node_modules.*/
-tofu.egg-info/
-debug/
+*.egg-info/
+debug/*
+!debug/inspect_conversation.py
 tests/
 benchmarks/
 evaluations/
@@ -27,6 +37,8 @@ swebench_*/
 *.log
 *.tmp
 *.tmp.*
+build/
+dist/
 
 # ── Documentation & meta ──
 CLAUDE.md
@@ -42,6 +54,7 @@ install.ps1
 .env
 .env.*
 !.env.example
+.credentials_vault.key
 
 # ── OS junk ──
 .DS_Store

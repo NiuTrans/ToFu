@@ -1,6 +1,6 @@
 """Desktop Agent — project (share-root) command implementations.
 
-RWA P1 (docs/REMOTE_WORKTREE_DESIGN.md §5 P1, hard constraints ③⑤):
+Remote-project contract (docs/modules/remote_execution.md):
 
 * **Path validation lives on the agent** (constraint ⑤): commands address
   files as ``root`` (a name from the agent's own declared ``share_roots``)
@@ -34,8 +34,6 @@ import time
 from datetime import datetime
 
 from lib.log import get_logger
-from lib.project_mod.config import IGNORE_DIRS
-
 logger = get_logger(__name__)
 
 # Freshness tokens: abspath -> {'mtime_ns', 'size'} for files this agent
@@ -170,25 +168,40 @@ def cmd_project_list_dir(params):
         _, target = _resolve(p.get('root', ''), p.get('path') or '.')
         if not os.path.isdir(target):
             raise ProjectError(f'not a directory: {p.get("path")!r}')
+        from lib.project_mod.read_tools import _scan_directory_entries
+        try:
+            rows, truncated, scanned = _scan_directory_entries(
+                target,
+                show_hidden=bool(p.get('show_hidden')),
+                include_directory_stat=not bool(p.get('shell_compatible')),
+                respect_project_ignores=not bool(
+                    p.get('shell_compatible')),
+                include_non_regular=bool(p.get('shell_compatible')),
+            )
+        except (PermissionError, OSError) as exc:
+            raise ProjectError(
+                f'unable to list directory {p.get("path")!r}: {exc}') from exc
         entries = []
-        with os.scandir(target) as it:
-            for e in it:
-                if e.name in IGNORE_DIRS:
-                    continue
-                try:
-                    st = e.stat(follow_symlinks=False)
-                    is_dir = e.is_dir(follow_symlinks=False)
-                    entries.append({
-                        'name': e.name,
-                        'type': 'dir' if is_dir else 'file',
-                        'size': None if is_dir else st.st_size,
-                        'modified': datetime.fromtimestamp(st.st_mtime)
-                        .isoformat(timespec='seconds'),
-                    })
-                except OSError as err:
-                    logger.debug('[Project] stat failed for %s: %s', e.path, err)
-        entries.sort(key=lambda x: (x['type'] != 'dir', x['name'].lower()))
-        return {'path': p.get('path') or '.', 'entries': entries[:2000]}
+        for row in rows:
+            modified = row.get('modified')
+            entries.append({
+                'name': row['name'],
+                'type': (
+                    'dir' if row['is_dir'] else
+                    'file' if row['is_file'] else
+                    'symlink' if row['is_symlink'] else 'special'),
+                'size': row.get('size'),
+                'modified': (
+                    datetime.fromtimestamp(modified).isoformat(
+                        timespec='seconds')
+                    if modified is not None else None),
+            })
+        return {
+            'path': p.get('path') or '.',
+            'entries': entries,
+            'truncated': truncated,
+            'scanned': scanned,
+        }
     return _guarded(_go, params)
 
 
@@ -299,10 +312,6 @@ def cmd_project_edit_file(params):
                     raise ProjectError('anchor must be a non-empty string')
                 if not isinstance(content, str):
                     raise ProjectError('content must be a string')
-                if operation != 'replace' and 'replace_all' in edit:
-                    raise ProjectError(
-                        'replace_all is valid only for operation=replace')
-
                 root_real, target = _resolve(
                     p.get('root', ''), edit.get('path', ''))
                 if not os.path.isfile(target):
@@ -330,40 +339,51 @@ def cmd_project_edit_file(params):
                 with open(target, 'r', encoding='utf-8', errors='replace') as f:
                     text = f.read()
                 matches = text.count(anchor)
-                replace_all = bool(edit.get('replace_all'))
+                # Match the server backend: ignore replace_all for a unique
+                # insert, while keeping multi-site insertion unavailable.
+                replace_all = (operation == 'replace'
+                               and bool(edit.get('replace_all')))
                 if matches == 0:
                     raise ProjectError('anchor text not found')
-                if matches > 1 and not (operation == 'replace' and replace_all):
+                if matches > 1 and not replace_all:
                     raise ProjectError(
                         f'anchor text matches {matches} locations — narrow it')
 
                 if operation == 'replace':
                     new_text = (text.replace(anchor, content) if replace_all
                                 else text.replace(anchor, content, 1))
+                    # Parity with the server-side .py syntax guard
+                    # (TOFU_EDIT_SYNTAX_GUARD=0 disables both).
+                    from lib.project_mod.write_tools._ops import (
+                        _py_syntax_guard)
+                    _warn = _py_syntax_guard(
+                        edit.get('path', ''), text, new_text)
+                    extra = f' {_warn}' if _warn else ''
                 else:
                     anchor_idx = text.index(anchor)
-                    if operation == 'insert_before':
-                        inserted = content
-                        if not inserted.endswith('\n'):
-                            inserted += '\n'
-                        new_text = text[:anchor_idx] + inserted + text[anchor_idx:]
-                    else:
-                        after_idx = anchor_idx + len(anchor)
-                        inserted = content
-                        if after_idx < len(text) and text[after_idx] != '\n':
-                            inserted = '\n' + inserted
-                        elif after_idx < len(text):
-                            after_idx += 1
-                        if not inserted.endswith('\n'):
-                            inserted += '\n'
-                        new_text = text[:after_idx] + inserted + text[after_idx:]
+                    # Parity with the server-side boundary-echo auto-repair
+                    # (TOFU_EDIT_ECHO_REPAIR=0 disables both): anchor/neighbour
+                    # context echoed inside content is stripped when provably
+                    # safe, and provably-contentless echo edits fail here.
+                    from lib.project_mod.write_tools._ops import (
+                        _finalize_insertion)
+                    fin = _finalize_insertion(
+                        text, anchor_idx, anchor, content,
+                        'before' if operation == 'insert_before' else 'after',
+                        edit.get('path', ''))
+                    if not fin['ok']:
+                        raise ProjectError(fin['error'])
+                    new_text = fin['new_content']
+                    extra = ''.join(f' [{n}]' for n in fin['notes'])
+                    if fin['warning']:
+                        extra += ' ' + fin['warning']
 
                 _snapshot(root_real, target)
                 _atomic_write(target, new_text)
                 _stamp_read(target)
                 ok_count += 1
                 lines.append(
-                    f'[{i}] OK {edit.get("path")} [{operation}]')
+                    f'[{i}] OK {edit.get("path")} [{operation}]{extra}')
             except (ProjectError, OSError, UnicodeError) as exc:
                 fail_count += 1
                 path = edit.get('path', '?') if isinstance(edit, dict) else '?'
@@ -394,11 +414,21 @@ def cmd_project_grep_search(params):
 
 def cmd_project_find_files(params):
     def _go(p):
-        _, target = _resolve(p.get('root', ''), p.get('path') or '.')
+        root_real, target = _resolve(
+            p.get('root', ''), p.get('path') or '.')
         from lib.project_mod.read_tools import tool_find_files
+        shell_output = bool(p.get('shell_output'))
+        if shell_output and not os.path.isdir(target):
+            raise ProjectError(f'not a directory: {p.get("path")!r}')
         return {'files': tool_find_files(
-            target, p.get('pattern') or '*',
+            root_real if shell_output else target,
+            p.get('pattern') or '*',
+            rel_path=(p.get('path') or '.') if shell_output else None,
             max_results=p.get('max_results'),
+            case_sensitive=bool(p.get('case_sensitive')),
+            shell_output=shell_output,
+            respect_project_ignores=bool(
+                p.get('respect_project_ignores', True)),
         )}
     return _guarded(_go, params)
 
@@ -481,7 +511,21 @@ def _validate_project_run(params):
         logger.debug('validate project run: unexpected type/unparseable (%s)', _e)
         timeout = 300.0
     timeout = min(max(timeout, 1.0), 3600.0)
-    return {'command': command, 'cwd': target, 'timeout': timeout}
+    return {
+        'command': command,
+        'cwd': target,
+        'root': root_real,
+        'timeout': timeout,
+    }
+
+
+def _invalidate_project_index_after_command(spec):
+    """Keep indexed reads honest after an opaque shell mutation."""
+    from lib.project_mod.command_analysis import _is_destructive_command
+    if not _is_destructive_command(spec['command']):
+        return
+    from lib.project_mod import tree_index
+    tree_index.invalidate(spec['root'])
 
 
 def cmd_project_run_command(params):
@@ -489,7 +533,10 @@ def cmd_project_run_command(params):
     def _go(p):
         spec = _validate_project_run(p)
         from lib.desktop_agent._exec import cmd_run_local
-        return cmd_run_local(spec)
+        try:
+            return cmd_run_local(spec)
+        finally:
+            _invalidate_project_index_after_command(spec)
     return _guarded(_go, params)
 
 
@@ -506,6 +553,12 @@ def start_project_run(cmd_id, params, on_chunk, on_exit):
         logger.debug('start project run: ProjectError (%s)', e)
         return str(e)
     from lib.desktop_agent._exec import start_streamed_command
+    def _finish(outcome):
+        try:
+            _invalidate_project_index_after_command(spec)
+        finally:
+            on_exit(outcome)
+
     start_streamed_command(spec['command'], spec['cwd'], spec['timeout'],
-                           on_chunk, on_exit)
+                           on_chunk, _finish)
     return None

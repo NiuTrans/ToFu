@@ -12,8 +12,10 @@ from lib.orchestration.definition_selection_contract import (
     definition_selection_contract,
     definition_selection_request_schema,
 )
-from lib.orchestration.definition_wire_contracts import (
+from lib.orchestration.definition_contract_registry import (
     definition_write_contract,
+)
+from lib.orchestration.definition_wire_projection import (
     parse_definition_write_precondition,
 )
 from .orchestration_request_http import OrchestrationHttpPreparation

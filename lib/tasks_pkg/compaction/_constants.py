@@ -85,6 +85,40 @@ _SUMMARY_TRIGGER_RATIO = 0.90
 Layer 2 summary is lossy; delay firing until we're truly close to the wall.
 With 1M context that's still 100k tokens of headroom."""
 
+_TOKEN_BUDGET_REMINDER_RATIO = 0.70
+"""Fraction of usable context at which a ONE-SHOT budget reminder is injected.
+
+Codex-inspired (codex-rs ``token_budget_context.rs``): the model is told its
+remaining token budget BEFORE the wall so it can plan — finish the current
+step, avoid starting large new explorations, and move durable findings into
+files/artifacts. Ours fires once per context window at 0.70 of usable (the
+L2 force trigger is 0.90), appended at the END of the message list as an
+``_isMeta`` user message so the cached prefix is never disturbed and the
+turn-boundary / query-extraction logic treats it as transparent.
+
+Introduced 2026-08-21 (§10.1 sign-off: owner-mandated Codex-infrastructure
+borrowing batch, ). The claim resets after every
+successful compaction (a fresh window gets one fresh reminder)."""
+
+_USER_VERBATIM_BUDGET_TOKENS = 4096
+"""Token budget for VERBATIM user-message retention across an L2 summary.
+
+Codex-inspired (codex-rs ``compact.rs`` keeps user messages intact instead of
+paraphrasing them): the lossy summary must never be the only place the
+user's literal instructions survive. When the old region is summarized, the
+real user messages in it are selected newest-first under this budget (+ the
+count cap below) and re-inserted VERBATIM in one ``_isMeta`` wrapper
+(turn-boundary-transparent). 4096 tokens bounds the retention so a chatty
+history cannot eat the compaction gains.
+
+Introduced 2026-08-21 (§10.1 sign-off: owner-mandated Codex-infrastructure
+borrowing batch, )."""
+
+_USER_VERBATIM_MAX_MESSAGES = 8
+"""Count cap for verbatim user-message retention (see budget constant above).
+Keeps the retained block scannable; the newest N instructions are the ones
+most likely to still bind the current work."""
+
 _DEFAULT_WORKING_SET_TOKENS = 128_000
 """Economic ceiling for the repeatedly replayed prompt working set.
 
@@ -104,8 +138,13 @@ Override per request with ``compaction.workingSetTokens`` or process-wide with
 context-window-only behavior.
 """
 
-_SUMMARY_MAX_TOKENS = 3000
-"""Maximum output tokens for the summary LLM call."""
+_SUMMARY_MAX_TOKENS = 2200
+"""Hard output ceiling for the compact continuation receipt.
+
+The receipt prompt targets 800–1,600 tokens and permits 2,200 only for complex
+state. Keeping the dispatch ceiling aligned prevents a disobedient summary
+model from rebuilding another large context block.
+"""
 
 _AUTO_COMPACT_MIN_PAYBACK_ROUNDS = 1.0
 """Maximum cache-read rounds allowed for proactive L2 to break even.
@@ -198,9 +237,9 @@ that with margin. Left UNBOUNDED, the floor inverts into a systematic
 OVER-count on CJK-heavy content (the heuristic's 1-token-per-CJK-char rule
 plus accumulated reasoning_content), measured 2026-08-01 at ~10x on
 conv=mrxinirv0t6n6v (gate 2,198,193 vs real prompt 215,552 → force-compact
-fired at ~22% real window usage, epic pt_18e9f7a6).
+fired at ~22% real window usage, ).
 
-Introduced 2026-08-01 (epic pt_18e9f7a6, brain-dispatched; owner ratification
+Introduced 2026-08-01 (, brain-dispatched; owner ratification
 noted in JOURNAL). Env-overridable FAIL-OPEN via
 ``TOFU_COMPACT_FLOOR_MAX_RATIO`` (unset/garbage→1.7; clamped [1.0, 5.0] so a
 typo can neither disable the floor nor re-open the unbounded over-count)."""
@@ -243,7 +282,7 @@ The clamp is DOWN-ONLY by design: over-triggering destroys context lossily
 and irreversibly, while under-triggering is bounded by the next round's
 fresh usage recording and the L3 reactive net.
 
-Introduced 2026-08-01 (epic pt_18e9f7a6, brain-dispatched; owner ratification
+Introduced 2026-08-01 (, brain-dispatched; owner ratification
 noted in JOURNAL). Env-overridable FAIL-OPEN via
 ``TOFU_COMPACT_ANCHOR_SLACK`` (unset/garbage→0.5; clamped [0.0, 3.0])."""
 
@@ -512,10 +551,10 @@ TOOL_RESULT_MAX_CHARS: dict[str, int] = {
     'run_command':   40_000,
     'fetch_url':     50_000,
     'web_search':    30_000,
-    'browser_read_tab': 40_000,
-    'browser_get_interactive_elements': 30_000,
+    'browser_read_page': 40_000,
+    'browser_research_page': 80_000,
+    'browser_devtools': 60_000,
     'browser_execute_js': 30_000,
-    'browser_get_app_state': 30_000,
     # conv_ref bounds its OWN output at lib/conv_ref/_detail.MAX_CHARS (80k) by
     # selecting whole messages. Its budget here must sit ABOVE that so L0 never
     # fires on a normal read: previously the default 60k clipped conv_ref's
@@ -579,8 +618,3 @@ _summary_cooldowns: dict[str, float] = {}
 
 _cooldown_lock = threading.Lock()
 """Protects concurrent access to _summary_cooldowns."""
-
-# Lazy DB-table init latch shared by _archive.py.  Lives here so the
-# double-checked lock state survives any module reload pattern.
-_tables_initialized = False
-_tables_lock = threading.Lock()

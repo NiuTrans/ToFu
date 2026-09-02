@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from lib.orchestration.durable_run_wire_contract import (
+from lib.orchestration.durable_run_field_registry import (
     durable_run_contract,
     project_durable_run_snapshot,
 )
 from lib.orchestration.run_status import run_status_contract
-from lib.orchestration.run_store_codec import row_to_run_header
 from lib.task_replay import task_replay_contract
 from routes.api_v1.orchestration_task_openapi import (
     durable_replay_response_schema,
@@ -24,34 +23,31 @@ from routes.api_v1.orchestration_task_openapi import (
 pytestmark = pytest.mark.unit
 
 
-class _Row(dict):
-    pass
-
-
-def _row() -> _Row:
-    return _Row({
+def _run_snapshot() -> dict:
+    return {
         'id': 'run-1',
         'orch_id': 'flow-1',
         'name': 'Flow',
         'status': 'running',
         'final': '',
-        'error': '',
+        'terminal': False,
+        'error': None,
         'created_by': 'key-1',
         'created_at': 1,
         'updated_at': 2,
         'finished_at': 0,
-        'definition': '{"name":"Flow","nodes":[],"edges":[]}',
+        'definition': {'name': 'Flow', 'nodes': [], 'edges': []},
         'input': 'hello',
-    })
+    }
 
 
-def test_durable_run_schema_uses_codec_and_contract_field_registries():
-    import lib.orchestration.durable_run_wire_contract as contract_module
+def test_durable_run_schema_uses_contract_field_registry():
+    import lib.orchestration.durable_run_wire_schema as schema_module
     import routes.api_v1.orchestration_task_openapi as openapi_module
 
     contract = durable_run_contract()
-    listed = row_to_run_header(_row(), include_definition=False)
-    detail = row_to_run_header(_row(), include_definition=True)
+    listed = project_durable_run_snapshot(_run_snapshot(), detail=False)
+    detail = project_durable_run_snapshot(_run_snapshot(), detail=True)
 
     assert list(listed) == contract['listFields']
     assert list(detail) == contract['readFields']
@@ -62,7 +58,7 @@ def test_durable_run_schema_uses_codec_and_contract_field_registries():
         run_status_contract()['statuses']
     assert contract['outcomeField'] in durable_run_schema()['properties']
     assert openapi_module.durable_run_schema is \
-        contract_module.durable_run_schema
+        schema_module.durable_run_schema
     assert 'def durable_run_schema' not in open(
         openapi_module.__file__, encoding='utf-8').read()
 
@@ -84,7 +80,7 @@ def test_durable_projection_rejects_partial_values_and_drops_storage_extras():
 
 
 def test_durable_read_envelopes_reuse_the_same_run_schemas():
-    import lib.orchestration.durable_run_wire_contract as contract_module
+    import lib.orchestration.durable_run_wire_schema as schema_module
     import routes.api_v1.orchestration_task_openapi as openapi_module
 
     listed = durable_run_list_response_schema()
@@ -108,7 +104,7 @@ def test_durable_read_envelopes_reuse_the_same_run_schemas():
         'durable_replay_response_schema',
     ):
         assert getattr(openapi_module, schema_name) is getattr(
-            contract_module, schema_name)
+            schema_module, schema_name)
         assert f'def {schema_name}' not in open(
             openapi_module.__file__, encoding='utf-8').read()
 

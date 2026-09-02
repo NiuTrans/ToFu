@@ -1,5 +1,3 @@
-# Incident anchor: born in commit c4a5e390 — refactor(orchestrator): pt_03f4cdf1 slice 37 — VU phase closure facto...
-# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 37 — replace run_task's
 inline VU-startup attribution + closure adapter with
 lib.tasks_pkg.orchestrator._vu_startup.make_vu_phase().
@@ -23,8 +21,14 @@ guards turn RED until the factory exists and _run.py delegates.
 
 from __future__ import annotations
 
+import ast
 import importlib
 import pathlib
+
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -45,9 +49,18 @@ def test_vu_startup_exposes_factory():
 # 2. _run.py uses the universal localized startup emitter
 # ---------------------------------------------------------------------------
 def test_run_task_uses_shared_startup_phase_emitter():
-    src = RUN_PY.read_text()
-    for stage in ('config', 'tools', 'history', 'context'):
-        assert f"_emit_startup_phase(task, '{stage}')" in src
+    tree = ast.parse(RUN_PY.read_text())
+    stages = {
+        node.args[1].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == '_emit_startup_phase'
+        and len(node.args) == 2
+        and isinstance(node.args[1], ast.Constant)
+        and isinstance(node.args[1].value, str)
+    }
+    assert stages == {'config', 'tools', 'context'}
 
 
 def test_run_py_no_inline_vu_closure():

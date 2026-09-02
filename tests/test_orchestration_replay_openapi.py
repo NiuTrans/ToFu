@@ -81,7 +81,7 @@ def test_live_replay_schema_covers_task_runtime_clocks_and_terminal_extras():
     import routes.api_v1.orchestration_replay_openapi as openapi_module
 
     runtime = TaskRuntime('openapi-sample')
-    task = runtime.create()
+    task = runtime.create(user_id=1)
     running = runtime.poll(task['id'])
     runtime.finish(task['id'], result={'final': 'ready'})
     terminal = runtime.poll(task['id'])

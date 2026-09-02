@@ -3,7 +3,7 @@
 
 Proves the debug panel is FAITHFUL: the COLD path (the ``/debug-messages``
 endpoint, ``build_wire_messages(mode='snapshot')``) and the HOT path (the live
-orchestrator snapshot: ``_transform_messages`` → ``_inject_system_contexts`` →
+orchestrator snapshot: ``_transform_messages`` → ``compose_task_context`` →
 ``apply_wire_sanitize`` AFTER ``sort_tool_results``) produce a BYTE-IDENTICAL
 OpenAI-form message array given the same provider context.
 
@@ -11,7 +11,7 @@ The equality assertion alone is worthless unless it has teeth, so this file is
 driven by ``TOFU_WIRE_REVERT`` to run in three states:
 
   * unset  → both paths correct → byte-identical → PASS
-  * 'inject' → REVERT (i): the cold path skips ``_inject_system_contexts``
+  * 'inject' → REVERT (i): the cold path skips ``compose_task_context``
       (what the old endpoint did) → cold system text drops to 0 chars →
       cold != hot → the equality test FAILS.
   * 'sort'   → REVERT (ii): the hot path emits its snapshot BEFORE
@@ -50,7 +50,7 @@ _REVERT = os.environ.get('TOFU_WIRE_REVERT', '')
 # reorders), and a whitespace-only user turn (so _fix_empty_user_messages
 # visibly rewrites). The trailing consecutive assistants exercise the
 # builder's own merge (a finding: redundant at the wire layer).
-# NOTE: the whitespace turn MUST NOT be the tail — _inject_system_contexts
+# NOTE: the whitespace turn MUST NOT be the tail — compose_task_context
 # splices the Current-date reminder into the TRUE tail (turning its string
 # content into a non-empty block array), which legitimately suppresses the
 # empty-user rewrite there (the 2026-07-25 drift). The trailing
@@ -77,14 +77,14 @@ def _fixture():
     ]
 
 
-# Config: disable project/memory (no FUSE), keep swarm so an injected block
+# Config: disable project/memory (no FUSE), enable multi-agent guidance so a block
 # is present and the cold/hot system text is non-empty + deterministic.
 def _config():
     return {
         'systemPrompt': '',
         'projectEnabled': False,
         'memoryEnabled': False,
-        'swarmEnabled': True,
+        'orchestration': {'multiAgent': 'read_only'},
         'searchEnabled': True,
         'model': 'claude-sonnet-4',
         'systemPromptMode': 'append',
@@ -94,11 +94,11 @@ def _config():
 def _inject_params(config):
     project_path = config.get('projectPath') or ''
     return dict(
+        user_id=0,
         project_path=project_path,
         project_enabled=bool(config.get('projectEnabled', bool(project_path))),
         memory_enabled=bool(config.get('memoryEnabled', False)),
         search_enabled=bool(config.get('searchEnabled', True)),
-        swarm_enabled=bool(config.get('swarmEnabled', False)),
         has_real_tools=True,
         conv_id='',
         task={'config': config},
@@ -111,22 +111,23 @@ def _build_cold(raw, config):
     """Mirror the /debug-messages endpoint (build_wire_messages snapshot)."""
     if _REVERT == 'inject':
         # REVERT (i): the OLD endpoint — transform + sanitize, NO inject.
-        from lib.tasks_pkg.conv_message_builder import _transform_messages
+        from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
         from lib.tasks_pkg.wire_messages import apply_wire_sanitize
         msgs = _transform_messages([dict(m) for m in raw], config)
         return apply_wire_sanitize(msgs, conv_id='')
     from lib.tasks_pkg.wire_messages import build_wire_messages
-    return build_wire_messages(raw, config, mode='snapshot', conv_id='')
+    return build_wire_messages(
+        raw, config, user_id=0, mode='snapshot', conv_id='')
 
 
 def _build_hot(raw, config):
     """Mirror the live orchestrator: transform → inject → (sort) → sanitize."""
-    from lib.tasks_pkg.conv_message_builder import _transform_messages
-    from lib.tasks_pkg.system_context import _inject_system_contexts
+    from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
+    from lib.tasks_pkg.context_composer import compose_task_context
     from lib.tasks_pkg.wire_messages import apply_wire_sanitize
 
     msgs = _transform_messages([dict(m) for m in raw], config)
-    _inject_system_contexts(msgs, **_inject_params(config))
+    compose_task_context(msgs, **_inject_params(config))
 
     if _REVERT == 'sort':
         # REVERT (ii): emit BEFORE sort_tool_results — run the sanitize tail
@@ -219,7 +220,7 @@ def test_provider_symmetry_no_gateway_divergence():
     """provider_id='' (auto-detect) and explicit non-sankuai agree on the
     carrier transforms — proving only _sanitize_messages is provider-gated."""
     from lib.tasks_pkg.wire_messages import apply_wire_sanitize
-    from lib.tasks_pkg.conv_message_builder import _transform_messages
+    from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
     raw, config = _fixture(), _config()
     base = _transform_messages([dict(m) for m in raw], config)
     a = apply_wire_sanitize(base, conv_id='', provider_id='')

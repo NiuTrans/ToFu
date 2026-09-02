@@ -178,7 +178,34 @@ class TestChatResult:
         from lib.tasks_pkg.entry import ChatResult
         assert ChatResult(status='error').ok is False
         assert ChatResult(status='aborted').ok is False
-        assert ChatResult(status='done').ok is True
+        assert ChatResult(status='done').ok is False
+        assert ChatResult(status='done', finish_reason='stop').ok is True
+
+    def test_missing_finish_evidence_fails_closed(self):
+        from lib.tasks_pkg.entry import _assemble_result
+        result = _assemble_result({
+            'id': 'missing-finish',
+            'status': 'done',
+            'content': 'partial answer',
+            'error': None,
+        })
+
+        assert result.finish_reason == 'error'
+        assert result.stream_state is None
+        assert result.ok is False
+
+    def test_failed_stream_state_cannot_report_ok(self):
+        from lib.tasks_pkg.entry import _assemble_result
+        result = _assemble_result({
+            'id': 'malformed-stream',
+            'status': 'done',
+            'content': 'safe prefix',
+            'finishReason': 'stop',
+            'streamState': 'malformed_stream',
+            'error': None,
+        })
+
+        assert result.ok is False
 
 
 @pytest.mark.unit
@@ -205,3 +232,9 @@ class TestTofuFacadeSurface:
         for forbidden in ('reserve', 'settle', 'debit', 'provider',
                           'ephemeral', 'mint_ephemeral_slot'):
             assert forbidden not in names
+
+    def test_capabilities_do_not_require_full_http_routes(self):
+        import tofu
+        capabilities = tofu.capabilities()
+        assert capabilities['runtime'] == 'tofu-agent'
+        assert capabilities['features']['database'] is False

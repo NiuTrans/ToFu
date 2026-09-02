@@ -83,16 +83,7 @@ def project_event_usage_for_storage(event):
     """Strip private wire diagnostics from all durable event usage shapes."""
     if not isinstance(event, dict):
         return event
-    projected = project_usage_container_for_storage(event)
-    for key in ('committedMessage', 'parentMessage'):
-        value = event.get(key)
-        clean_value = project_usage_container_for_storage(value)
-        if clean_value is value:
-            continue
-        if projected is event:
-            projected = dict(event)
-        projected[key] = clean_value
-    return projected
+    return project_usage_container_for_storage(event)
 
 
 def project_task_result_metadata_for_storage(metadata):
@@ -109,9 +100,16 @@ def trim_tool_round_for_persist(round_item):
     """
     if not isinstance(round_item, dict):
         return round_item
-    if round_item.get('status') == 'done' and round_item.get('_partialOutput'):
+    transient_output_fields = (
+        '_partialOutput',
+        '_partialOutputTotalChars',
+        '_partialOutputTruncated',
+    )
+    if (round_item.get('status') == 'done'
+            and any(field in round_item for field in transient_output_fields)):
         round_item = dict(round_item)
-        round_item.pop('_partialOutput', None)
+        for field in transient_output_fields:
+            round_item.pop(field, None)
     return round_item
 
 

@@ -260,14 +260,7 @@ class ConvRegistryAutoRegisterTest(_Base):
 
 
 class RecentProjectPersistenceTest(_Base):
-    """Model-added workspace roots are persisted to the recent-projects list.
-
-    A root the ASSISTANT registers (create_project OR the absolute-path-write
-    auto-register) must land in recent_projects server-side — so it shows up
-    under "recent" even when the emitting conversation is NOT the active one
-    (the frontend workspace_root_added handler only refreshes for the active
-    conv). Temp-dir scratch paths must NOT be saved.
-    """
+    """Model-added roots never mutate an owner's navigation history."""
 
     def setUp(self):
         super().setUp()
@@ -279,7 +272,7 @@ class RecentProjectPersistenceTest(_Base):
         # the config module is what the helper resolves.
         self._saved_paths = []
         self._orig_srp = cfg.save_recent_project
-        cfg.save_recent_project = lambda p: self._saved_paths.append(p)
+        cfg.save_recent_project = lambda p, *, user_id: self._saved_paths.append(p)
 
     def tearDown(self):
         cfg.save_recent_project = self._orig_srp
@@ -291,7 +284,7 @@ class RecentProjectPersistenceTest(_Base):
         # global UI state, and the "background write must never pollute global
         # state" invariant (see NonTempAutoRegisterSignalTest / ConvRegistry*)
         # WINS. The root lands only in the conv-scoped registry; recent-save
-        # stays reserved for the human-driven interactive + create_project
+        # stays reserved for the human-driven interactive / global auto-register
         # paths. (Corrects the earlier expectation that contradicted the
         # no-global-pollution guarantee its sibling tests enforce.)
         target = os.path.join(self._sibling, 'pkg', 'mod.py')
@@ -315,14 +308,13 @@ class RecentProjectPersistenceTest(_Base):
         self.assertEqual(self._saved_paths, [],
                          'a subdir write under an existing root saves nothing new')
 
-    def test_create_project_saves_recent(self):
-        from lib.project_mod.write_tools import tool_create_project
-        new_dir = os.path.join(self._work, 'brand_new')
-        res = tool_create_project(new_dir, conv_id='c1', task_id='t1')
+    def test_global_auto_register_does_not_infer_an_owner(self):
+        # A tool write has no authority to guess whose global navigation
+        # history should change. Explicit project API calls own that mutation.
+        target = os.path.join(self._sibling, 'pkg', 'mod.py')
+        res = tool_write_file(self._proj, target, 'x = 1\n')
         self.assertTrue(res.get('ok'), res)
-        self.assertIn(os.path.abspath(new_dir),
-                      [os.path.abspath(p) for p in self._saved_paths],
-                      'create_project root must be saved to recent projects')
+        self.assertEqual(self._saved_paths, [])
 
 
 class SubdirOfExistingRootTest(_Base):

@@ -3,7 +3,7 @@ the SAME inline tool timeline chatInner uses — not a bespoke one-line counter.
 
 WHY
 The recommend interpretation agent runs the shared tofu tool loop
-(``run_agent_loop`` + ``_execute_report_tool``) and emits chat-compatible
+(``run_agent_loop`` + ``execute_paper_tool``) and emits chat-compatible
 ``tool_start`` / ``tool_done`` events, exactly like the report / review tabs.
 The report tab already accumulates those into ``s.toolRounds`` and renders them
 with ``renderToolRoundsHTML`` (the unified chatInner tool timeline). The
@@ -46,7 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _READER_SRC = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'recommend.ts')
-ESBUILD = os.path.join(ROOT, 'node_modules', '.bin', 'esbuild')
+ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
 
 
 def _node_deps_available():
@@ -131,7 +131,9 @@ const viewer = win.document.getElementById('paperPdfViewer');
 const out = {};
 
 const s = newStream('anthropic global workspace language models');
-win._recStream = s;
+// Register through the feature-registry proxy: its override table shadows
+// plain window writes (the module seeded `_recStream ??= null` at import).
+win.__recFeatureRegistry._recStream = s;
 s.status = 'running';
 
 // ── Research round 1 STARTS: tool_start(web_search) ──
@@ -190,13 +192,32 @@ def _run(reader=_READER_SRC):
             os.path.dirname(_READER_SRC), 'push-transport.ts').replace('\\', '/')
         source = source.replace(
             "from './push-transport';", f'from {json.dumps(dependency)};')
+        registry = os.path.join(
+            ROOT, 'frontend', 'src', 'feature-registry.ts').replace('\\', '/')
+        source = source.replace(
+            "from '../../feature-registry';", f'from {json.dumps(registry)};')
+        # Bridge the module-private feature registry onto the jsdom window,
+        # mirroring how main.ts injects the production service table. Without
+        # the connection the harness cannot see any installed global owner.
+        source += (
+            '\nimport { connectFeatureRuntime as __connectRecTestRuntime,'
+            ' featureRegistry as __recRegistry } from '
+            + json.dumps(registry) + ';\n'
+            '__connectRecTestRuntime('
+            '(name) => (typeof window === "undefined"'
+            ' ? undefined : (window as unknown as Record<string, unknown>)[name]),'
+            '(name, value) => { if (typeof window !== "undefined")'
+            ' (window as unknown as Record<string, unknown>)[name] = value; });\n'
+            'if (typeof window !== "undefined")'
+            ' (window as unknown as Record<string, unknown>).__recFeatureRegistry'
+            ' = __recRegistry;\n')
         compiled = subprocess.run(
             [ESBUILD, '--bundle', '--format=iife', '--platform=browser',
              '--loader=ts', '--sourcefile=recommend.ts',
              f'--outfile={built}'], input=source, capture_output=True,
             text=True, timeout=60)
         if compiled.returncode != 0:
-            raise AssertionError(f'esbuild failed: {compiled.stderr or compiled.stdout}')
+            raise AssertionError(f'vite test bundler failed: {compiled.stderr or compiled.stdout}')
         proc = subprocess.run(
             ['node', '-e', _harness(), built, ROOT],
             capture_output=True, text=True, timeout=60)

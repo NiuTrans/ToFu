@@ -38,6 +38,7 @@ import weakref
 from typing import Optional
 
 from lib.log import get_logger
+from runtime_guards import deployment_resource_default
 
 logger = get_logger(__name__)
 
@@ -51,19 +52,28 @@ _last_pressure_warn = 0.0
 def _default_max_inflight() -> int:
     """Resolve the concurrent-task ceiling from env, with a safe default.
 
-    The personal-server default is 16, leaving headroom in the dedicated
-    agent executor (16 workers by default) for terminalisation and recovery work instead
-    of admitting hundreds of tasks that all retain history/model buffers.
-    Override via
-    ``TOFU_MAX_INFLIGHT_TASKS``; ``0`` disables the ceiling entirely
-    (legacy unbounded behaviour — not recommended).
+    The personal-server default is 4, leaving headroom on an 8 GiB computer
+    for the browser, storage authority, terminalisation and recovery work
+    instead of admitting many tasks that all retain history/model buffers.
+    Override via ``TOFU_MAX_INFLIGHT_TASKS``. Non-positive and malformed
+    values fall back to the profile budget; production admission must never
+    silently become unbounded because of configuration drift.
     """
+    default = deployment_resource_default(
+        'TOFU_MAX_INFLIGHT_TASKS', os.environ)
     try:
-        n = int(os.environ.get('TOFU_MAX_INFLIGHT_TASKS', '') or '16')
+        n = int(os.environ.get('TOFU_MAX_INFLIGHT_TASKS', '') or default)
     except (ValueError, TypeError) as e:
-        logger.debug('[Admission] TOFU_MAX_INFLIGHT_TASKS parse failed, using default: %s', e)
-        n = 16
-    return max(0, n)
+        logger.debug(
+            '[Admission] TOFU_MAX_INFLIGHT_TASKS parse failed, using %d: %s',
+            default, e)
+        n = default
+    if n <= 0:
+        logger.warning(
+            '[Admission] TOFU_MAX_INFLIGHT_TASKS must be positive; using %d',
+            default)
+        n = default
+    return min(256, n)
 
 
 def _memory_pressure_allows_admission() -> bool:

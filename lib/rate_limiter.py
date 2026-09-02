@@ -7,9 +7,15 @@ the actual counter lives in either ``MemoryRateLimitStore`` (default) or
 Multi-worker safety: the DB backend is required when running under
 gunicorn / uWSGI with N>1 workers.  See PR3c notes and
 ``docs/RATE_LIMITING_DOS_AUDIT_REPORT.md``.
+
+Owner kill-switch: ``TOFU_RATE_LIMIT=off`` (also 0/false/no/disable)
+turns every ``@rate_limit`` bucket into a no-op — meant for self-hosted
+single-user installs where the limiter is only a runaway-loop guard and
+its only possible victim is the owner.  Read at call time.
 """
 
 import asyncio
+import os
 from functools import wraps
 
 from quart import request
@@ -18,6 +24,18 @@ from lib.log import audit_log, get_logger
 from lib.rate_limit_store import get_store
 
 logger = get_logger(__name__)
+
+_disabled_logged = False
+
+
+def _limits_disabled() -> bool:
+    global _disabled_logged
+    val = (os.environ.get('TOFU_RATE_LIMIT') or '').strip().lower()
+    off = val in ('off', '0', 'false', 'no', 'disable', 'disabled')
+    if off and not _disabled_logged:
+        _disabled_logged = True
+        logger.info('[RateLimit] TOFU_RATE_LIMIT=%s — all @rate_limit buckets disabled', val)
+    return off
 
 
 def rate_limit(limit=10, per=60):
@@ -37,6 +55,8 @@ def rate_limit(limit=10, per=60):
         def _check():
             """Run the rate-limit check. Returns a 429 response tuple if the
             caller should be rejected, else None (proceed)."""
+            if _limits_disabled():
+                return None
             ip = request.remote_addr or 'unknown'
             endpoint = request.path
             store = get_store()

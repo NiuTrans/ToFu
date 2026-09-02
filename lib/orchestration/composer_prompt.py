@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from lib.orchestration import CONTROL_KINDS, CONTROL_PARAM_SCHEMA
+from lib.orchestration._control_specs import CONTROL_KINDS, CONTROL_PARAM_SCHEMA
 from lib.orchestration._definition_contract import SCHEMA_ID
 from lib.orchestration._role_axes import KNOWN_ROLES
 from lib.orchestration._role_specs import role_param_schema
@@ -89,7 +89,7 @@ def composer_catalogue() -> tuple[str, str]:
 
 
 _SYSTEM = '''You are the Tofu Orchestration Composer. You design agent
-orchestration graphs — endpoint-style loops, fan-out/synthesize flows,
+orchestration graphs — iterative verifier loops, fan-out/synthesize flows,
 adversarial verification, etc. — from a user's natural-language request.
 
 You return STRICT JSON only: no prose, no markdown fences, no commentary
